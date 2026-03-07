@@ -597,7 +597,8 @@ class GEQDSKEquilibrium:
         points without resampling.
     """
 
-    def __init__(self, filename, cocos=1, nlevels=None, resample="theta"):
+    def __init__(self, filename, cocos=1, nlevels=None, resample="theta",
+                 extrapolate_edge=True):
         self._raw = _read_geqdsk(filename)
         self._cocos = _cocos_params(cocos)
         self._nlevels = nlevels if nlevels is not None else int(self._raw["NW"])
@@ -606,10 +607,12 @@ class GEQDSKEquilibrium:
                 f"resample must be 'theta' or 'arc_length', got {resample!r}"
             )
         self._resample_method = resample
+        self._extrapolate_edge = bool(extrapolate_edge)
         self._cache = {}
 
     @classmethod
-    def from_bytes(cls, raw_bytes, cocos=1, nlevels=None, resample="theta"):
+    def from_bytes(cls, raw_bytes, cocos=1, nlevels=None, resample="theta",
+                   extrapolate_edge=True):
         """Construct from in-memory bytes (e.g. from HDF5 storage).
 
         Parameters
@@ -622,12 +625,16 @@ class GEQDSKEquilibrium:
             Number of psi_N levels.
         resample : str
             Contour resampling method (``"theta"`` or ``"arc_length"``).
+        extrapolate_edge : bool
+            If ``True`` (default), extrapolate p' and FF' at the
+            separatrix when the g-file has them forced to zero.
         """
         with tempfile.NamedTemporaryFile(mode="wb", suffix=".geqdsk",
                                          delete=False) as tmp:
             tmp.write(raw_bytes)
             tmp_path = tmp.name
-        return cls(tmp_path, cocos=cocos, nlevels=nlevels, resample=resample)
+        return cls(tmp_path, cocos=cocos, nlevels=nlevels, resample=resample,
+                   extrapolate_edge=extrapolate_edge)
 
     # --- Raw data properties ---
 
@@ -803,8 +810,27 @@ class GEQDSKEquilibrium:
         NW = int(self._raw["NW"])
         psi_N_raw = np.linspace(0, 1, NW)
         F_interp = interpolate.InterpolatedUnivariateSpline(psi_N_raw, self._raw["FPOL"])
-        pprime_interp = interpolate.InterpolatedUnivariateSpline(psi_N_raw, self._raw["PPRIME"])
-        ffprim_interp = interpolate.InterpolatedUnivariateSpline(psi_N_raw, self._raw["FFPRIM"])
+
+        # Many equilibrium solvers (EFIT, TokaMaker) force p' = FF' = 0 at
+        # the last grid point (ψ_N = 1) as a free-boundary condition.  This
+        # creates a discontinuous jump that makes the direct-GS Jt profile
+        # artificially zero at the separatrix.  When extrapolate_edge is
+        # True, detect and undo this: if the last value is zero while the
+        # preceding points have significant magnitude, extrapolate from the
+        # neighbours instead.
+        pprime_raw = self._raw["PPRIME"].copy()
+        ffprim_raw = self._raw["FFPRIM"].copy()
+        if self._extrapolate_edge:
+            for prof in (pprime_raw, ffprim_raw):
+                if (
+                    NW >= 4
+                    and prof[-1] == 0.0
+                    and abs(prof[-2]) > 1e-30
+                ):
+                    # Quadratic extrapolation from last three non-zero points
+                    prof[-1] = 3.0 * prof[-2] - 3.0 * prof[-3] + prof[-4]
+        pprime_interp = interpolate.InterpolatedUnivariateSpline(psi_N_raw, pprime_raw)
+        ffprim_interp = interpolate.InterpolatedUnivariateSpline(psi_N_raw, ffprim_raw)
 
         # Trace contours
         contours = _trace_contours(R, Z, self.psi_RZ, psi_levels)
@@ -1028,11 +1054,14 @@ class GEQDSKEquilibrium:
         # finite-difference noise from double-differentiating ψ is large.
         #
         # <Jt/R> = -(p' + FF'·<1/R²>/μ₀) × (2π)^exp_Bp
+        #
+        # The ``+ 0.0`` prevents IEEE-754 negative zero when p' = FF' = 0
+        # at the separatrix (standard EFIT boundary condition).
         avg["Jt/R"] = (
             -cc["sigma_Bp"]
             * (avg["PPRIME"] + avg["FFPRIM"] * avg["1/R**2"] / constants.mu_0)
             * (2.0 * np.pi) ** cc["exp_Bp"]
-        )
+        ) + 0.0
         # <Jt>  = -(p'·<R> + FF'·<1/R>/μ₀) × (2π)^exp_Bp   (direct average)
         # This differs from the OMFIT convention <Jt/R>/<1/R> by a Jensen
         # inequality term p'·[<R> - 1/<1/R>] which is positive when p' > 0,
@@ -1041,7 +1070,7 @@ class GEQDSKEquilibrium:
             -cc["sigma_Bp"]
             * (avg["PPRIME"] * avg["R"] + avg["FFPRIM"] * avg["1/R"] / constants.mu_0)
             * (2.0 * np.pi) ** cc["exp_Bp"]
-        )
+        ) + 0.0
 
         # Geometry: volume and cross-section area
         psi_arr = psi_N_levels * dpsi + self.psi_axis
@@ -1292,7 +1321,8 @@ class GEQDSKEquilibrium:
 # Convenience function
 # ---------------------------------------------------------------------------
 
-def read_geqdsk(filename, cocos=1, nlevels=None, resample="theta"):
+def read_geqdsk(filename, cocos=1, nlevels=None, resample="theta",
+                extrapolate_edge=True):
     """Read a GEQDSK file and return a GEQDSKEquilibrium object.
 
     Parameters
@@ -1309,11 +1339,18 @@ def read_geqdsk(filename, cocos=1, nlevels=None, resample="theta"):
         angular resampling that preserves the X-point cusp.
         ``"arc_length"`` falls back to raw contourpy points (no
         resampling) for these surfaces.
+    extrapolate_edge : bool
+        If ``True`` (default), extrapolate p' and FF' at the separatrix
+        when the g-file has them forced to zero.  Many solvers (EFIT,
+        TokaMaker) clamp these to zero at ψ_N = 1 as a boundary
+        condition, which makes ``j_tor_averaged_direct`` artificially
+        zero there.  Set to ``False`` to use the raw g-file values.
 
     Returns
     -------
     GEQDSKEquilibrium
     """
     return GEQDSKEquilibrium(
-        filename, cocos=cocos, nlevels=nlevels, resample=resample
+        filename, cocos=cocos, nlevels=nlevels, resample=resample,
+        extrapolate_edge=extrapolate_edge,
     )

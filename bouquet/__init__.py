@@ -5,7 +5,7 @@ from . import utils
 
 # gui is NOT imported eagerly to avoid pulling in matplotlib.pyplot
 # at package load time (breaks headless / server environments).
-# Use:  from perturbed_equilibria import gui
+# Use:  from bouquet import gui
 
 # Public API re-exports
 from .sampling import (

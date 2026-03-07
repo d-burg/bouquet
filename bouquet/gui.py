@@ -7,8 +7,8 @@ Launch from the terminal::
 
 or via module invocation::
 
-    python -m perturbed_equilibria equilibrium_output.h5
-    python -m perturbed_equilibria.gui equilibrium_output.h5
+    python -m bouquet equilibrium_output.h5
+    python -m bouquet.gui equilibrium_output.h5
 """
 
 import argparse
@@ -287,7 +287,7 @@ def _validate_h5(path):
             # Flat layout must have _baseline; hierarchical must have scan/
             if "_baseline" not in hf and "scan" not in hf:
                 raise SystemExit(
-                    f"Error: '{path}' does not look like a perturbed-equilibria "
+                    f"Error: '{path}' does not look like a bouquet "
                     f"HDF5 database (no '_baseline' or 'scan/' group found)."
                 )
     except Exception as exc:

@@ -1,6 +1,6 @@
 # GUI Display Guide
 
-`perturbed-equilibria` provides two ways to visualize equilibrium families:
+`bouquet` provides two ways to visualize equilibrium families:
 
 | Method | Best for | Requires display? |
 |---|---|---|
@@ -170,7 +170,7 @@ or the native macOS backend).
 In a Jupyter notebook, use the Python API directly instead of the CLI:
 
 ```python
-from perturbed_equilibria import plot_family
+from bouquet import plot_family
 
 # Single plot type
 fig, axes = plot_family("equilibria.h5", scan_value=1.0, mode="kinetic")
@@ -219,7 +219,7 @@ UserWarning: Unable to import Axes3D. This may be due to multiple versions
 of Matplotlib being installed ...
 ```
 
-This is harmless.  `perturbed-equilibria` uses only 2D plots.  The warning
+This is harmless.  `bouquet` uses only 2D plots.  The warning
 comes from conflicting matplotlib installations (e.g. system package vs pip).
 You can suppress it or unify your matplotlib install, but it does not affect
 functionality.

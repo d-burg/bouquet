@@ -1,9 +1,9 @@
-# perturbed-equilibria
+# bouquet
 Perturbed equilibria. Plug-in that interfaces with OpenFUSIONToolkit/TokaMaker
 
 ## Usage
 
-`perturbed_equilibria` is designed to be imported after OFT is already
+`bouquet` is designed to be imported after OFT is already
 set up in your script or notebook:
 
 ```python
@@ -17,5 +17,5 @@ from OpenFUSIONToolkit import OFT_env
 from OpenFUSIONToolkit.TokaMaker import TokaMaker
 # ... rest of your OFT imports
 
-# --- Then add perturbed_equilibria ---
-from perturbed_equilibria import uncertainties, sampling, plotting
+# --- Then add bouquet ---
+from bouquet import uncertainties, sampling, plotting

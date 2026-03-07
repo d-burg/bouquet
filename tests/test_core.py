@@ -1,5 +1,5 @@
 """
-Basic test suite for perturbed_equilibria.
+Basic test suite for bouquet.
 
 These tests exercise the pure-Python components (GPR sampling,
 uncertainty envelopes, HDF5 round-trip, CLI validation) without
@@ -12,12 +12,12 @@ import tempfile
 import numpy as np
 import pytest
 
-from perturbed_equilibria.uncertainties import new_uncertainty_profiles
-from perturbed_equilibria.sampling import (
+from bouquet.uncertainties import new_uncertainty_profiles
+from bouquet.sampling import (
     GPRProfilePerturber,
     generate_perturbed_GPR,
 )
-from perturbed_equilibria.utils import (
+from bouquet.utils import (
     initialize_equilibrium_database,
     store_equilibrium,
     load_equilibrium,
@@ -317,12 +317,12 @@ class TestCLIValidation:
     """Test the HDF5 validation in gui._validate_h5."""
 
     def test_missing_file_exits(self):
-        from perturbed_equilibria.gui import _validate_h5
+        from bouquet.gui import _validate_h5
         with pytest.raises(SystemExit, match="file not found"):
             _validate_h5("/nonexistent/path/fake.h5")
 
     def test_invalid_h5_exits(self, tmp_path):
-        from perturbed_equilibria.gui import _validate_h5
+        from bouquet.gui import _validate_h5
         bad = tmp_path / "bad.h5"
         bad.write_text("not an hdf5 file")
         with pytest.raises(SystemExit, match="cannot open"):
@@ -330,7 +330,7 @@ class TestCLIValidation:
 
     def test_missing_groups_exits(self, tmp_path):
         import h5py
-        from perturbed_equilibria.gui import _validate_h5
+        from bouquet.gui import _validate_h5
         empty = tmp_path / "empty.h5"
         with h5py.File(str(empty), "w"):
             pass
@@ -339,7 +339,7 @@ class TestCLIValidation:
 
     def test_valid_flat_layout(self, tmp_path):
         import h5py
-        from perturbed_equilibria.gui import _validate_h5
+        from bouquet.gui import _validate_h5
         good = tmp_path / "good.h5"
         with h5py.File(str(good), "w") as hf:
             hf.create_group("_baseline")
@@ -348,7 +348,7 @@ class TestCLIValidation:
 
     def test_valid_scan_layout(self, tmp_path):
         import h5py
-        from perturbed_equilibria.gui import _validate_h5
+        from bouquet.gui import _validate_h5
         good = tmp_path / "good_scan.h5"
         with h5py.File(str(good), "w") as hf:
             hf.create_group("scan/1.0/_baseline")

@@ -728,19 +728,20 @@ class GEQDSKEquilibrium:
                 avg["R**2"][k] = R0**2
                 continue
 
-            # Resample to equally-spaced arc-length using cubic spline.
-            # Interior surfaces use a periodic spline (smooth and closed by
-            # construction).  The separatrix (psi_N ~ 1) uses a non-periodic
-            # spline so the X-point cusp (derivative discontinuity) is
-            # preserved — matches OMFIT's ``per=per_`` convention.
-            is_separatrix = pn >= 1.0 - 1e-6
-            if len(seg) >= 20:
-                r_s, z_s = _resample_contour(
-                    seg[:, 0], seg[:, 1], npts=257,
-                    periodic=(not is_separatrix),
-                )
+            # Resample to equally-spaced arc-length using periodic cubic
+            # spline.  This smooths contourpy discretisation artefacts and
+            # gives uniform quadrature weights.
+            #
+            # Near the separatrix (psi_N ≳ 0.99) the X-point cusp makes the
+            # contour non-smooth: any cubic spline (periodic or not) would
+            # smooth the cusp, distorting the contour and biasing <Jt> high.
+            # For these outermost surfaces we keep the raw contourpy points.
+            if pn < 0.99 and len(seg) >= 20:
+                r_s, z_s = _resample_contour(seg[:, 0], seg[:, 1], npts=257)
             else:
                 r_s, z_s = seg[:, 0].copy(), seg[:, 1].copy()
+                # Ensure closure for raw contourpy points
+                r_s[-1], z_s[-1] = r_s[0], z_s[0]
             contour_data.append(np.column_stack([r_s, z_s]))
 
             # Arc length — include closing segment (append wraps back to

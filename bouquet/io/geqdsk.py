@@ -383,18 +383,19 @@ class GEQDSKEquilibrium:
         Path to the g-file.
     cocos : int
         COCOS convention index (default 1, standard EFIT).
-    nlevels : int
+    nlevels : int or None
         Number of normalised-psi levels for flux-surface analysis.
+        Defaults to NW from the g-file.
     """
 
-    def __init__(self, filename, cocos=1, nlevels=65):
+    def __init__(self, filename, cocos=1, nlevels=None):
         self._raw = _read_geqdsk(filename)
         self._cocos = _cocos_params(cocos)
-        self._nlevels = nlevels
+        self._nlevels = nlevels if nlevels is not None else int(self._raw["NW"])
         self._cache = {}
 
     @classmethod
-    def from_bytes(cls, raw_bytes, cocos=1, nlevels=65):
+    def from_bytes(cls, raw_bytes, cocos=1, nlevels=None):
         """Construct from in-memory bytes (e.g. from HDF5 storage).
 
         Parameters
@@ -943,7 +944,7 @@ class GEQDSKEquilibrium:
 # Convenience function
 # ---------------------------------------------------------------------------
 
-def read_geqdsk(filename, cocos=1, nlevels=65):
+def read_geqdsk(filename, cocos=1, nlevels=None):
     """Read a GEQDSK file and return a GEQDSKEquilibrium object.
 
     Parameters

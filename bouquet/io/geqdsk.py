@@ -928,7 +928,26 @@ class GEQDSKEquilibrium:
 
     @property
     def j_tor_averaged(self):
-        """Flux-surface-averaged toroidal current density <Jt> [A/m^2]."""
+        """Flux-surface-averaged toroidal current density <Jt> [A/m^2].
+
+        Derived from the analytic Grad-Shafranov relation
+        ``<Jt/R> / <1/R>`` (matching OMFIT convention), which uses the
+        smooth 1-D profile data (p', FF') rather than the double
+        numerical differentiation of ψ on the 2-D grid.
+        """
+        self._trace_surfaces()
+        avg = self._cache["avg"]
+        return avg["Jt/R"] / avg["1/R"]
+
+    @property
+    def j_tor_averaged_numerical(self):
+        """Numerically flux-surface-averaged <Jt> [A/m^2].
+
+        Computed by averaging the 2-D Jt = curl(B)/μ₀ field over each
+        contour.  Less accurate than :attr:`j_tor_averaged` near the
+        edge due to finite-difference noise, but useful as a
+        cross-check.
+        """
         self._trace_surfaces()
         return self._cache["avg"]["Jt"]
 

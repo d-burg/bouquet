@@ -838,10 +838,23 @@ class GEQDSKEquilibrium:
             y = avg["q"][1:3]
             avg["q"][0] = y[0] - (y[1] - y[0]) / (x[1] - x[0]) * x[0]
 
-        # Jt/R from Grad-Shafranov (more accurate than numerical curl)
+        # Analytic Grad-Shafranov current densities — more accurate than
+        # numerically averaging curl(B)/μ₀, especially at the edge where
+        # finite-difference noise from double-differentiating ψ is large.
+        #
+        # <Jt/R> = -(p' + FF'·<1/R²>/μ₀) × (2π)^exp_Bp
         avg["Jt/R"] = (
             -cc["sigma_Bp"]
             * (avg["PPRIME"] + avg["FFPRIM"] * avg["1/R**2"] / constants.mu_0)
+            * (2.0 * np.pi) ** cc["exp_Bp"]
+        )
+        # <Jt>  = -(p'·<R> + FF'·<1/R>/μ₀) × (2π)^exp_Bp   (direct average)
+        # This differs from the OMFIT convention <Jt/R>/<1/R> by a Jensen
+        # inequality term p'·[<R> - 1/<1/R>] which is positive when p' > 0,
+        # making <Jt> larger in the H-mode pedestal region.
+        avg["Jt_GS"] = (
+            -cc["sigma_Bp"]
+            * (avg["PPRIME"] * avg["R"] + avg["FFPRIM"] * avg["1/R"] / constants.mu_0)
             * (2.0 * np.pi) ** cc["exp_Bp"]
         )
 
@@ -928,24 +941,44 @@ class GEQDSKEquilibrium:
 
     @property
     def j_tor_averaged(self):
-        """Flux-surface-averaged toroidal current density <Jt> [A/m^2].
+        r"""Flux-surface-averaged toroidal current density [A/m²].
 
-        Derived from the analytic Grad-Shafranov relation
-        ``<Jt/R> / <1/R>`` (matching OMFIT convention), which uses the
-        smooth 1-D profile data (p', FF') rather than the double
-        numerical differentiation of ψ on the 2-D grid.
+        Standard convention used by OMFIT, TRANSP, and GS solvers:
+
+        .. math::
+            j_\mathrm{tor} = \frac{\langle J_t / R \rangle}{\langle 1/R \rangle}
+
+        where ``<Jt/R>`` is computed analytically from the GS equation
+        using the smooth 1-D profiles p' and FF'.
         """
         self._trace_surfaces()
         avg = self._cache["avg"]
         return avg["Jt/R"] / avg["1/R"]
 
     @property
-    def j_tor_averaged_numerical(self):
-        """Numerically flux-surface-averaged <Jt> [A/m^2].
+    def j_tor_averaged_direct(self):
+        r"""Direct flux-surface average of Jt from GS [A/m²].
 
-        Computed by averaging the 2-D Jt = curl(B)/μ₀ field over each
-        contour.  Less accurate than :attr:`j_tor_averaged` near the
-        edge due to finite-difference noise, but useful as a
+        .. math::
+            \langle J_t \rangle = p' \langle R \rangle
+            + FF' \langle 1/R \rangle / \mu_0
+
+        This is the literal ``<Jt>`` and differs from
+        :attr:`j_tor_averaged` by a Jensen-inequality term
+        ``p' [<R> - 1/<1/R>]``, making it slightly larger when
+        ``p' > 0``.  Not the standard convention but useful for
+        understanding R-weighting effects.
+        """
+        self._trace_surfaces()
+        return self._cache["avg"]["Jt_GS"]
+
+    @property
+    def j_tor_averaged_numerical(self):
+        """Numerically flux-surface-averaged <Jt> [A/m²].
+
+        Computed by averaging the 2-D ``Jt = curl(B)/μ₀`` field over
+        each contour.  Less accurate than :attr:`j_tor_averaged` near
+        the edge due to finite-difference noise, but useful as a
         cross-check.
         """
         self._trace_surfaces()
@@ -953,7 +986,7 @@ class GEQDSKEquilibrium:
 
     @property
     def j_tor_over_R(self):
-        """<Jt/R> from Grad-Shafranov equation [A/m^3]."""
+        """<Jt/R> from Grad-Shafranov equation [A/m³]."""
         self._trace_surfaces()
         return self._cache["avg"]["Jt/R"]
 

@@ -775,13 +775,32 @@ class GEQDSKEquilibrium:
 
         # Internal inductance
         ip = self.Ip
-        vol = geo_arrays["vol"][-1] if geo_arrays["vol"][-1] > 0 else 1.0
         r_0 = self.R_center if self.R_center else R0
-        circum = geo_arrays["perimeter"][-1] if geo_arrays["perimeter"][-1] > 0 else 1.0
-        a = geo_arrays["a"][-1] if geo_arrays["a"][-1] > 0 else 1.0
-        kappa_x = geo_arrays["kappa"][-1] if geo_arrays["kappa"][-1] > 0 else 1.0
-        kappa_a = vol / (2.0 * np.pi * r_0 * np.pi * a * a) if a > 0 else 1.0
-        correction_factor = (1 + kappa_x**2) / (2.0 * kappa_a) if kappa_a > 0 else 1.0
+
+        # Use g-file boundary (RBBBS/ZBBBS) for LCFS geometry in li
+        # calculations.  The g-file boundary is EFIT's own LCFS and gives
+        # circum/vol consistent with EFIT's own li values, whereas our
+        # contourpy-traced contour at psi_N=1 can differ in resolution.
+        Rb = self._raw["RBBBS"]
+        Zb = self._raw["ZBBBS"]
+        if len(Rb) > 3:
+            dRb = np.diff(Rb, append=Rb[0])
+            dZb = np.diff(Zb, append=Zb[0])
+            circum = np.sum(np.sqrt(dRb**2 + dZb**2))
+            # Toroidal volume via Pappus / Green's theorem:
+            # V = pi * |oint R^2 dZ|
+            vol = np.pi * np.abs(np.sum(Rb**2 * dZb))
+            a_bdry = 0.5 * (np.max(Rb) - np.min(Rb))
+            kappa_bdry = 0.5 * (np.max(Zb) - np.min(Zb)) / a_bdry if a_bdry > 0 else 1.0
+        else:
+            # Fallback to traced-contour geometry
+            circum = geo_arrays["perimeter"][-1] if geo_arrays["perimeter"][-1] > 0 else 1.0
+            vol = geo_arrays["vol"][-1] if geo_arrays["vol"][-1] > 0 else 1.0
+            a_bdry = geo_arrays["a"][-1] if geo_arrays["a"][-1] > 0 else 1.0
+            kappa_bdry = geo_arrays["kappa"][-1] if geo_arrays["kappa"][-1] > 0 else 1.0
+
+        kappa_a = vol / (2.0 * np.pi * r_0 * np.pi * a_bdry * a_bdry) if a_bdry > 0 else 1.0
+        correction_factor = (1 + kappa_bdry**2) / (2.0 * kappa_a) if kappa_a > 0 else 1.0
 
         if abs(ip) > 0:
             li_def = Bp2_vol / vol / constants.mu_0**2 / ip**2 * circum**2
@@ -800,7 +819,7 @@ class GEQDSKEquilibrium:
             "li(3)": 2 * Bp2_vol / r_0 / ip**2 / constants.mu_0**2 if abs(ip) > 0 else 0.0,
         }
 
-        # Betas
+        # Betas (use boundary-derived vol, circum, a for consistency)
         betas = {}
         if np.any(self._raw["PRES"]):
             P_interp = interpolate.InterpolatedUnivariateSpline(psi_N_raw, self._raw["PRES"])
@@ -810,7 +829,7 @@ class GEQDSKEquilibrium:
             if vol > 0 and abs(Btvac) > 0:
                 betas["beta_t"] = abs(P_vol[-1] / (Btvac**2 / 2.0 / constants.mu_0) / vol)
                 i_MA = ip / 1e6
-                betas["beta_n"] = betas["beta_t"] / abs(i_MA / a / Btvac) * 100 if abs(i_MA * a * Btvac) > 0 else 0.0
+                betas["beta_n"] = betas["beta_t"] / abs(i_MA / a_bdry / Btvac) * 100 if abs(i_MA * a_bdry * Btvac) > 0 else 0.0
             Bpave = ip * constants.mu_0 / circum if circum > 0 else 1.0
             if vol > 0 and abs(Bpave) > 0:
                 betas["beta_p"] = abs(P_vol[-1] / (Bpave**2 / 2.0 / constants.mu_0) / vol)

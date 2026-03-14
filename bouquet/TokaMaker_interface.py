@@ -13,6 +13,9 @@ Provides:
     via TokaMaker.
   - ``generate_perturbed_equilibria`` – batch driver that archives
     perturbed equilibria to HDF5.
+  - ``reconstruct_equilibrium`` – reconstruct a single equilibrium from
+    a geqdsk reference and kinetic profiles, matching :math:`l_i(1)`
+    via secant iteration.
 """
 
 import os
@@ -837,3 +840,427 @@ def generate_perturbed_equilibria(
         all_diagnostics.append(diagnostics)
 
     return all_diagnostics
+
+
+# ====================================================================
+#  Single-equilibrium reconstruction from geqdsk + kinetic profiles
+# ====================================================================
+def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff, 
+                            isoflux_pts, weights, psi_pad,
+                            guess_jinductive,n_k,psi_bridge,rescale_j_BS,
+                            shelf_psi_N,initialize_psi=True):
+    r"""Reconstruct a single Grad-Shafranov equilibrium from a geqdsk
+    reference and kinetic profiles, matching the EFIT :math:`l_i(1)`.
+
+    The workflow is:
+
+    1. Set isoflux boundary targets from the geqdsk LCFS.
+    2. Compute bootstrap current via ``solve_with_bootstrap``.
+    3. Fit a smooth inductive current profile with
+       :func:`fit_inductive_profile`.
+    4. Iterate on the inductive scale factor (hybrid secant–bisection
+       with step clamping and psi save/restore) until the TokaMaker
+       :math:`l_i(1)` matches the geqdsk value.
+    5. Correct residual Ip drift by iterating on the Ip target passed
+       to ``mygs.set_targets(Ip=...)`` via a secant search.  The
+       :math:`j_\phi` profile shape is preserved; TokaMaker internally
+       enforces the Ip constraint.
+
+    Parameters
+    ----------
+    mygs : TokaMaker
+        Initialised TokaMaker GS solver (mesh, regions, coils already
+        set up).
+    eqdsk : GEQDSKEquilibrium
+        Parsed geqdsk equilibrium object.
+    ne : ndarray
+        Electron density on ``eqdsk.psi_N`` [m\ :sup:`-3`].
+    te : ndarray
+        Electron temperature on ``eqdsk.psi_N`` [eV].
+    ni : ndarray
+        Ion density on ``eqdsk.psi_N`` [m\ :sup:`-3`].
+    ti : ndarray
+        Ion temperature on ``eqdsk.psi_N`` [eV].
+    Zeff : ndarray
+        Effective charge on ``eqdsk.psi_N``.
+    isoflux_pts : ndarray, shape (N, 2)
+        :math:`(R, Z)` coordinates of isoflux constraint points
+        [m].  Passed to ``mygs.set_isoflux``.
+    weights : ndarray, shape (N,)
+        Weights for each isoflux constraint point.
+    psi_pad : float
+        Padding inside the LCFS for :math:`l_i` evaluation.
+    guess_jinductive : ndarray
+        Initial guess for the inductive current-density profile,
+        passed to ``solve_with_bootstrap`` as the starting
+        :math:`j_{\rm inductive}` shape.
+    n_k : int
+        Spline order for :func:`fit_inductive_profile` (``k``
+        parameter).
+    psi_bridge : float
+        :math:`\hat{\psi}` above which edge data are replaced by a
+        zero anchor in :func:`fit_inductive_profile`.
+    rescale_j_BS : bool
+        If ``True``, jointly optimise a bootstrap rescaling factor
+        in :func:`fit_inductive_profile`.
+    shelf_psi_N : float
+        If > 0, apply a flat shelf to :math:`j_{\rm BS}` for
+        :math:`\hat{\psi} <` *shelf_psi_N* in
+        :func:`fit_inductive_profile`.  ``0`` disables the shelf.
+    initialize_psi : bool
+        If ``True`` (default), call ``mygs.init_psi`` using LCFS
+        geometry estimated from the geqdsk boundary.  Set to ``False``
+        to skip initialisation (e.g. when reusing a prior solution).
+
+    Returns
+    -------
+    dict
+        Result dictionary containing reconstructed profiles, fields,
+        and comparison data keyed as documented inline.
+    """
+    from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
+    from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
+
+    if initialize_psi:
+        # Estimate shape parameters from geqdsk LCFS geometry
+        geo = eqdsk.geometry
+        R0 = geo['R'][-1]
+        Z0 = geo['Z'][-1]
+        a = geo['a'][-1]
+        kappa = geo['kappa'][-1]
+        delta = geo['delta'][-1]
+        mygs.init_psi(R0, Z0, a, kappa, delta)
+
+    eqdsk_jtor = abs(eqdsk.j_tor_averaged_direct)
+
+    # ---- 2. Bootstrap current ----
+    results = solve_with_bootstrap(
+        mygs, ne, te, ni, ti, Zeff,
+        abs(eqdsk.Ip), guess_jinductive,
+        scale_jBS=1.0,
+        isolate_edge_jBS=True,
+        diagnostic_plots=False,
+    )
+
+    j_BS_isolated = results['isolated_j_BS']
+
+    # ---- 3. Fit inductive profile ----
+    baseline_li_proxy = calc_cylindrical_li_proxy(mygs, eqdsk_jtor, psi_pad)
+
+    fit_result = fit_inductive_profile(
+        mygs, eqdsk_jtor, j_BS_isolated, eqdsk.psi_N, psi_pad,
+        baseline_li_proxy,
+        k=n_k, psi_bridge=psi_bridge,
+        rescale_j_BS=rescale_j_BS,
+        shelf_psi_N=shelf_psi_N,
+    )
+
+    j_inductive_fit = fit_result['j_inductive_fit']
+    scale_opt = fit_result['ind_scale']
+    bs_scale_opt = fit_result['bs_scale']
+    j_BS_isolated = fit_result['j_BS_used']
+
+    print(f"[fit] ind_scale={scale_opt:.6f}  bs_scale={bs_scale_opt:.6f}  "
+          f"li_proxy={fit_result['fit_li']:.6f}  (target={baseline_li_proxy:.6f})")
+
+    # ---- 4. Pressure and GS profiles ----
+    pres_tmp = 1.6022e-19 * (ne * te + ni * ti)
+    psi_range = mygs.psi_bounds[1] - mygs.psi_bounds[0]
+    pprime_tmp = np.gradient(pres_tmp) / (np.gradient(eqdsk.psi_N) * psi_range)
+    pprime_tmp[-1] = 0.0
+
+    pp_prof = {"type": "linterp", "y": pprime_tmp, "x": eqdsk.psi_N}
+    ffp_prof = {
+        "type": "jphi-linterp",
+        "y": j_inductive_fit + j_BS_isolated,
+        "x": eqdsk.psi_N,
+    }
+
+    mygs.set_profiles(ffp_prof=ffp_prof, pp_prof=pp_prof)
+    mygs.solve()
+
+    # ---- 5. Hybrid secant–bisection iteration to match eqdsk li(1) ----
+    #
+    # Guard-rails that prevent TokaMaker from being given profiles too
+    # far from the last converged state:
+    #   a) The secant step is clamped to ±max_step_frac of the current
+    #      ind_factor so the GS solver always starts close to its
+    #      previous solution.
+    #   b) Once we have a bracket (one point above, one below target)
+    #      bisection is used whenever the (clamped) secant would escape
+    #      the bracket.
+    #   c) The last converged psi is saved with get_psi / set_psi so
+    #      that a non-converged solve does not poison subsequent
+    #      iterations.
+    li_target = eqdsk.li["li(1)_EFIT"]
+    li_tol = 0.001
+    max_li_iters = 20
+    max_step_frac = 0.10  # cap secant steps at ±10 % of current value
+
+    # -- save / restore helpers for the last known-good psi state -----
+    _last_good_psi = mygs.get_psi(False).copy()
+
+    def _save_psi():
+        nonlocal _last_good_psi
+        _last_good_psi = mygs.get_psi(False).copy()
+
+    def _restore_psi():
+        mygs.set_psi(_last_good_psi, update_bounds=True)
+
+    def _solve_and_get_li(ind_factor):
+        """Set profiles with scaled j_inductive, solve, return li(1).
+
+        Saves psi on success; restores the previous good psi on
+        TokaMaker solve failure so the next attempt starts clean.
+        """
+        ffp_tmp = {
+            "type": "jphi-linterp",
+            "y": ind_factor * j_inductive_fit + j_BS_isolated,
+            "x": eqdsk.psi_N,
+        }
+        mygs.set_profiles(ffp_prof=ffp_tmp, pp_prof=pp_prof)
+        try:
+            mygs.solve()
+        except ValueError:
+            print(f"[li match]   solve failed for ind_factor={ind_factor:.6f}, "
+                  "restoring last good psi")
+            _restore_psi()
+            return None  # signal failed solve
+        _save_psi()
+        eq_stats = mygs.get_stats(li_normalization='std', lcfs_pad=psi_pad)
+        return eq_stats['l_i']
+
+    # -- bracket bookkeeping ------------------------------------------
+    # bracket_lo: (ind, li) with li < li_target  (err < 0)
+    # bracket_hi: (ind, li) with li > li_target  (err > 0)
+    bracket_lo = bracket_hi = None
+
+    def _update_bracket(ind, li):
+        nonlocal bracket_lo, bracket_hi
+        if li < li_target:
+            if bracket_lo is None or abs(li - li_target) < abs(bracket_lo[1] - li_target):
+                bracket_lo = (ind, li)
+        else:
+            if bracket_hi is None or abs(li - li_target) < abs(bracket_hi[1] - li_target):
+                bracket_hi = (ind, li)
+
+    # -- initial two evaluations --------------------------------------
+    eq_stats_0 = mygs.get_stats(li_normalization='std', lcfs_pad=psi_pad)
+    ind_0, li_0 = 1.0, eq_stats_0['l_i']
+    _save_psi()
+    _update_bracket(ind_0, li_0)
+
+    ind_1 = 1.05
+    li_1_sec = _solve_and_get_li(ind_1)
+    if li_1_sec is not None:
+        _update_bracket(ind_1, li_1_sec)
+
+    print(f"[li match] target={li_target:.6f}")
+    print(f"[li match] iter 0: ind_factor={ind_0:.6f}  li={li_0:.6f}  err={li_0 - li_target:.6f}")
+    print(f"[li match] iter 1: ind_factor={ind_1:.6f}  li={li_1_sec:.6f}  err={li_1_sec - li_target:.6f}")
+
+    for li_iter in range(2, max_li_iters):
+        err_0 = li_0 - li_target
+        err_1 = li_1_sec - li_target
+
+        if li_1_sec is not None and abs(err_1) < li_tol:
+            print(f"[li match] converged at iter {li_iter}: "
+                  f"ind_factor={ind_1:.6f}  li={li_1_sec:.6f}")
+            break
+
+        # -- propose next ind_factor ----------------------------------
+        use_bisection = False
+
+        if li_1_sec is None:
+            # Previous solve failed — fall back to bisection if we have
+            # a bracket, otherwise halve the step toward last good point
+            use_bisection = True
+        else:
+            denom = err_1 - err_0
+            if abs(denom) < 1e-14:
+                use_bisection = True
+            else:
+                ind_secant = ind_1 - err_1 * (ind_1 - ind_0) / denom
+                ind_secant = max(ind_secant, 0.0)
+
+        if use_bisection and bracket_lo is not None and bracket_hi is not None:
+            ind_new = 0.5 * (bracket_lo[0] + bracket_hi[0])
+            print(f"[li match]   bisection -> {ind_new:.6f}")
+        elif use_bisection:
+            # No bracket yet — retreat halfway toward ind_0
+            ind_new = 0.5 * (ind_0 + ind_1)
+            print(f"[li match]   midpoint fallback -> {ind_new:.6f}")
+        else:
+            # Clamp secant step to ±max_step_frac of current value
+            max_delta = max_step_frac * abs(ind_1)
+            ind_clamped = np.clip(ind_secant,
+                                  ind_1 - max_delta,
+                                  ind_1 + max_delta)
+            if ind_clamped != ind_secant:
+                print(f"[li match]   clamped secant {ind_secant:.6f} "
+                      f"-> {ind_clamped:.6f}")
+
+            # If we have a bracket, ensure we stay inside it
+            if bracket_lo is not None and bracket_hi is not None:
+                blo, bhi = sorted([bracket_lo[0], bracket_hi[0]])
+                if not (blo <= ind_clamped <= bhi):
+                    ind_new = 0.5 * (bracket_lo[0] + bracket_hi[0])
+                    print(f"[li match]   secant escaped bracket, "
+                          f"bisection -> {ind_new:.6f}")
+                else:
+                    ind_new = ind_clamped
+            else:
+                ind_new = ind_clamped
+
+        # -- evaluate ---------------------------------------------------
+        ind_0, li_0 = ind_1, li_1_sec if li_1_sec is not None else li_0
+        ind_1 = ind_new
+        li_1_sec = _solve_and_get_li(ind_1)
+        if li_1_sec is not None:
+            _update_bracket(ind_1, li_1_sec)
+
+        li_disp = f"{li_1_sec:.6f}" if li_1_sec is not None else "FAILED"
+        err_disp = (f"{li_1_sec - li_target:.6f}"
+                    if li_1_sec is not None else "N/A")
+        print(f"[li match] iter {li_iter}: ind_factor={ind_1:.6f}  "
+              f"li={li_disp}  err={err_disp}")
+    else:
+        print(f"[li match] WARNING: did not converge within "
+              f"{max_li_iters} iterations")
+
+    # Ensure the final state is from a converged solve
+    if li_1_sec is None:
+        _restore_psi()
+
+    _eq_stats_final = mygs.get_stats(li_normalization='std', lcfs_pad=psi_pad)
+    final_li = _eq_stats_final['l_i']
+    Ip_tokamaker = _eq_stats_final['Ip']
+    print(f"[li match] final li(1)={final_li:.6f}  target={li_target:.6f}  |err|={abs(final_li - li_target):.6f}")
+
+    # ---- 6. Ip-correction secant (set_targets Ip rescaling) ----------
+    #
+    # The jphi-linterp profile type has inherent Ip drift because the
+    # actual integrated current depends on the equilibrium geometry.
+    # We correct this by iterating on the Ip target passed to
+    # mygs.set_targets() — TokaMaker internally rescales the current
+    # density to enforce the constraint.  The j_phi profile *shape*
+    # is unchanged, so li is minimally perturbed.
+    Ip_desired = abs(eqdsk.Ip)
+    Ip_tol = 0.0005  # relative tolerance on Ip
+    max_Ip_iters = 8
+
+    # Current j_phi components after li convergence (fixed throughout)
+    j_ind_li = ind_1 * j_inductive_fit  # li-matched inductive profile
+    j_phi_li = j_ind_li + j_BS_isolated
+
+    def _solve_and_get_Ip(Ip_trial):
+        """Set Ip target, solve, return (actual Ip, li)."""
+        mygs.set_targets(Ip=Ip_trial,pax=pres_tmp[0])
+        try:
+            mygs.solve()
+        except ValueError:
+            print(f"[Ip match]   solve failed for Ip_target={Ip_trial:.1f}, "
+                  "restoring last good psi")
+            _restore_psi()
+            return None, None
+        _save_psi()
+        stats = mygs.get_stats(li_normalization='std', lcfs_pad=psi_pad)
+        return stats['Ip'], stats['l_i']
+
+    Ip_err_rel = abs(Ip_tokamaker - Ip_desired) / Ip_desired
+    if Ip_err_rel > Ip_tol:
+        print(f"\n[Ip match] desired={Ip_desired:.1f}  current={Ip_tokamaker:.1f}  "
+              f"err={100 * (Ip_tokamaker - Ip_desired) / Ip_desired:+.4f}%")
+
+        # Two initial evaluations for secant:
+        # pt 0: Ip_target = Ip_desired (the true target), result already known
+        # pt 1: Ip_target adjusted by a first-order correction
+        t0, Ip_0 = Ip_desired, Ip_tokamaker
+        t1 = Ip_desired * (Ip_desired / Ip_tokamaker)  # first-order correction
+        Ip_1, li_1_Ip = _solve_and_get_Ip(t1)
+
+        if Ip_1 is not None:
+            print(f"[Ip match] iter 0: Ip_target={t0:.1f}  Ip={Ip_0:.1f}")
+            print(f"[Ip match] iter 1: Ip_target={t1:.1f}  Ip={Ip_1:.1f}  "
+                  f"li={li_1_Ip:.6f}")
+
+            for Ip_iter in range(2, max_Ip_iters):
+                e0 = Ip_0 - Ip_desired
+                e1 = Ip_1 - Ip_desired
+
+                if abs(e1 / Ip_desired) < Ip_tol:
+                    print(f"[Ip match] converged at iter {Ip_iter}: "
+                          f"Ip_target={t1:.1f}  Ip={Ip_1:.1f}  li={li_1_Ip:.6f}")
+                    break
+
+                denom = e1 - e0
+                if abs(denom) < 1.0:
+                    print(f"[Ip match] secant denominator ~0, stopping")
+                    break
+
+                t_new = t1 - e1 * (t1 - t0) / denom
+                t_new = max(t_new, 0.5 * Ip_desired)  # safety floor
+
+                t0, Ip_0 = t1, Ip_1
+                t1 = t_new
+                Ip_1, li_1_Ip = _solve_and_get_Ip(t1)
+                if Ip_1 is None:
+                    print(f"[Ip match] solve failed, keeping previous result")
+                    break
+
+                print(f"[Ip match] iter {Ip_iter}: Ip_target={t1:.1f}  "
+                      f"Ip={Ip_1:.1f}  li={li_1_Ip:.6f}")
+            else:
+                print(f"[Ip match] WARNING: did not converge within "
+                      f"{max_Ip_iters} iterations")
+    else:
+        print(f"\n[Ip match] already within tolerance: "
+              f"err={100 * (Ip_tokamaker - Ip_desired) / Ip_desired:+.4f}%")
+
+    # -- Final stats after Ip correction --------------------------------
+    _eq_stats_final = mygs.get_stats(li_normalization='std', lcfs_pad=psi_pad)
+    final_li = _eq_stats_final['l_i']
+    Ip_tokamaker = _eq_stats_final['Ip']
+    print(f"[final] li(1)={final_li:.6f}  Ip={Ip_tokamaker:.1f}  "
+          f"Ip_err={100 * (Ip_tokamaker - Ip_desired) / Ip_desired:+.4f}%  "
+          f"li_err={abs(final_li - li_target):.6f}")
+
+    # Final profiles (unchanged from li matching — Ip corrected via set_targets)
+    j_ind_final = j_ind_li.copy()
+    j_BS_final = j_BS_isolated.copy()
+    j_phi_final = j_phi_li.copy()
+
+    # FF' from the converged TokaMaker equilibrium
+    _, F_prof, Fp_prof, _, _ = mygs.get_profiles(psi=eqdsk.psi_N)
+    ffprime_tokamaker = F_prof * Fp_prof
+
+    return {
+        'ne': ne.copy(),
+        'te': te.copy(),
+        'ni': ni.copy(),
+        'ti': ti.copy(),
+        'Zeff': Zeff.copy(),
+        'isoflux_pts': isoflux_pts.copy(),
+        'weights': weights.copy(),
+        'psi_lcfs_val': float(mygs.psi_bounds[0]),
+        'j_inductive_fit': j_ind_final.copy(),
+        'j_phi_fit': j_phi_final.copy(),
+        'j_BS_used': j_BS_final.copy(),
+        'psi': mygs.get_psi(False),
+        'pprime': pprime_tmp.copy(),
+        'ffprime': ffprime_tokamaker.copy(),
+        'ind_factor_final': ind_1,
+        'bs_factor_final': 1.0,
+        'Ip_tokamaker': Ip_tokamaker,
+        'eqdsk_jtor': eqdsk_jtor.copy(),
+        'eqdsk_psi_N': eqdsk.psi_N.copy(),
+        'eqdsk_pres': eqdsk.pres.copy(),
+        'eqdsk_boundary_R': eqdsk.boundary_R.copy(),
+        'eqdsk_boundary_Z': eqdsk.boundary_Z.copy(),
+        'eqdsk_ffprim': eqdsk.ffprim.copy(),
+        'eqdsk_li': dict(eqdsk.li),
+        'eqdsk_Ip': eqdsk.Ip,
+        'pres_tokamaker': pres_tmp.copy(),
+        'psi_N_grid': eqdsk.psi_N.copy(),
+        'li_final': final_li,
+    }

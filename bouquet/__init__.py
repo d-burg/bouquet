@@ -21,6 +21,7 @@ from .TokaMaker_interface import (
     fit_inductive_profile,
     perturb_kinetic_equilibrium,
     generate_perturbed_equilibria,
+    reconstruct_equilibrium,
 )
 
 from .uncertainties import (

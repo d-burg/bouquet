@@ -195,7 +195,6 @@ def plot_tokamaker_comparison(mygs, all_results, plot_idx=None):
         _li_efit_vals, _li_tkmkr_vals, _short_labels = [], [], []
         _li_pct_vals, _Ip_pct_vals = [], []
         _ov_max_dev_mm, _ov_rms_dev_mm = [], []
-        _all_lcfs = []
 
         ax_te = axes[1, 2].twinx()
 
@@ -226,26 +225,18 @@ def plot_tokamaker_comparison(mygs, all_results, plot_idx=None):
             axes[1, 0].plot(psi_N, r['eqdsk_pres'] / 1e3, color=color, lw=_LW, ls=':', alpha=0.75)
 
             # (1,1) pprime (TokaMaker only)
-            axes[1, 1].plot(psi_N, r['pprime'], color=color, lw=_LW, ls='--', label=lbl)
+            axes[1, 1].plot(psi_N, np.abs(r['pprime']), color=color, lw=_LW, ls='--', label=lbl)
 
             # (1,2) ne dashed, te dash-dot
             axes[1, 2].plot(psi_N, r['ne'] / 1e19, color=color, lw=_LW, ls='--')
             ax_te.plot(psi_N, r['te'] / 1e3, color=color, lw=_LW, ls='-.')
 
-            # (2,0) LCFS — dashed=TokaMaker, dotted=geqdsk
-            _lcfs = _lcfs_from_psi(mygs, r['psi'], r['isoflux_pts'], r.get('psi_lcfs_val'))
-            _all_lcfs.append(_lcfs)
-            axes[2, 0].plot(_lcfs[:, 0], _lcfs[:, 1], color=color, lw=_LW, ls='--', label=lbl)
-            axes[2, 0].plot(r['eqdsk_boundary_R'], r['eqdsk_boundary_Z'],
-                            color=color, lw=_LW, ls=':', alpha=0.75)
-            _p_lo_ov, _p_hi_ov = r['psi'].min(), r['psi'].max()
-            if abs(_p_hi_ov - _p_lo_ov) > 1e-10:
-                _psi_n_ov = (r['psi'] - _p_lo_ov) / (_p_hi_ov - _p_lo_ov)
-                axes[2, 0].tricontour(mygs.r[:, 0], mygs.r[:, 1], mygs.lc, _psi_n_ov,
-                                      levels=np.linspace(0.1, 0.9, 9),
-                                      colors=[color], linewidths=0.5, alpha=0.35)
+            # (2,0) FF' — dashed=TokaMaker, dotted=geqdsk
+            axes[2, 0].plot(psi_N, r['ffprime'], color=color, lw=_LW, ls='--', label=lbl)
+            axes[2, 0].plot(psi_N, r['eqdsk_ffprim'], color=color, lw=_LW, ls=':', alpha=0.75)
 
-            # Boundary deviation stats
+            # Boundary deviation stats (LCFS still needed for deviation panel)
+            _lcfs = _lcfs_from_psi(mygs, r['psi'], r['isoflux_pts'], r.get('psi_lcfs_val'))
             _tree_ov = _cKDTree(_lcfs)
             _devs_ov, _ = _tree_ov.query(r['isoflux_pts'])
             _ov_max_dev_mm.append(_devs_ov.max() * 1e3)
@@ -288,8 +279,8 @@ def plot_tokamaker_comparison(mygs, all_results, plot_idx=None):
         axes[1, 0].grid(ls=':')
 
         axes[1, 1].set_xlabel(r'$\psi_N$')
-        axes[1, 1].set_ylabel(r"$p'$ [Pa Wb$^{-1}$]")
-        axes[1, 1].set_title(r"$p'(\psi_N)$")
+        axes[1, 1].set_ylabel(r"$P'$ [Pa Wb$^{-1}$]")
+        axes[1, 1].set_title(r"$P'(\psi_N)$")
         axes[1, 1].legend(fontsize=7)
         axes[1, 1].grid(ls=':')
 
@@ -304,17 +295,12 @@ def plot_tokamaker_comparison(mygs, all_results, plot_idx=None):
              _L2D([0], [0], color='k', lw=_LW, ls='-.')],
             [r'$n_e$', r'$T_e$'], fontsize=8, loc='upper right')
 
-        # (2,0) LCFS panel — crop to union of all LCFS bounding boxes
-        axes[2, 0].set_xlabel('$R$ [m]')
-        axes[2, 0].set_ylabel('$Z$ [m]')
-        axes[2, 0].set_aspect('equal')
-        axes[2, 0].set_title('LCFS + core flux surfaces (dashed=TokaMaker, dotted=geqdsk)')
+        # (2,0) FF' panel
+        axes[2, 0].set_xlabel(r'$\psi_N$')
+        axes[2, 0].set_ylabel(r"$FF'$ [T$^2$ m$^2$ Wb$^{-1}$]")
+        axes[2, 0].set_title(r"$FF'(\psi_N)$ (dashed=TokaMaker, dotted=geqdsk)")
         axes[2, 0].legend(fontsize=7)
-        _lcfs_pad = 0.06
-        _all_R_ov = np.concatenate([_l[:, 0] for _l in _all_lcfs])
-        _all_Z_ov = np.concatenate([_l[:, 1] for _l in _all_lcfs])
-        axes[2, 0].set_xlim(_all_R_ov.min() - _lcfs_pad, _all_R_ov.max() + _lcfs_pad)
-        axes[2, 0].set_ylim(_all_Z_ov.min() - _lcfs_pad, _all_Z_ov.max() + _lcfs_pad)
+        axes[2, 0].grid(ls=':')
 
         # (2,1) boundary deviation bar chart
         _x_bars = np.arange(len(keys))
@@ -379,7 +365,7 @@ def plot_tokamaker_comparison(mygs, all_results, plot_idx=None):
         ax.plot(psi_N, r['j_inductive_fit'] / 1e6, color=_C1, lw=_LW,
                 label=r'$j_\mathrm{inductive}$ (fit)')
         ax.plot(psi_N, r['j_BS_used'] / 1e6, color=_C3, lw=_LW, ls='-.',
-                label=rf'$j_{{BS}}$ (\u00d7{r["bs_factor_final"]:.3f})')
+                label=f'$j_{{BS}}$ (\u00d7{r["bs_factor_final"]:.3f})')
         ax.plot(psi_N, r['j_phi_fit'] / 1e6, color=_C2, ls='--', lw=_LW,
                 label=r'$j_\mathrm{ind} + j_{BS}$')
         ax.plot(psi_N, r['eqdsk_jtor'] / 1e6, 'k-', lw=_LW,
@@ -405,10 +391,10 @@ def plot_tokamaker_comparison(mygs, all_results, plot_idx=None):
 
         # (1,1) pprime
         ax = axes[1, 1]
-        ax.plot(psi_N, eqdsk_ref.pprime, 'k-', lw=_LW, label="geqdsk $p'$")
-        ax.plot(psi_N, r['pprime'], color=_C2, ls='--', lw=_LW, label="TokaMaker $p'$")
-        ax.set_xlabel(r'$\psi_N$'); ax.set_ylabel(r"$p'$ [Pa Wb$^{-1}$]")
-        ax.set_title(r"$p'(\psi)$ comparison"); ax.legend(fontsize=8); ax.grid(ls=':')
+        ax.plot(psi_N, np.abs(eqdsk_ref.pprime), 'k-', lw=_LW, label="geqdsk $P'$")
+        ax.plot(psi_N, np.abs(r['pprime']), color=_C2, ls='--', lw=_LW, label="TokaMaker $P'$")
+        ax.set_xlabel(r'$\psi_N$'); ax.set_ylabel(r"$P'$ [Pa Wb$^{-1}$]")
+        ax.set_title(r"$P'(\psi)$ comparison"); ax.legend(fontsize=8); ax.grid(ls=':')
 
         # (1,2) Kinetics
         ax = axes[1, 2]; ax2 = ax.twinx()
@@ -429,20 +415,12 @@ def plot_tokamaker_comparison(mygs, all_results, plot_idx=None):
         # --- Shared LCFS extraction ---
         _tk_lcfs = _lcfs_from_psi(mygs,r['psi'], r['isoflux_pts'], r.get('psi_lcfs_val'))
 
-        # --- (2,0) LCFS + core flux surface contours ---
-        ax_bndy = axes[2, 0]
-        ax_bndy.plot(_tk_lcfs[:, 0], _tk_lcfs[:, 1],
-                     color=_C1, lw=_LW, label='TokaMaker LCFS', zorder=5)
-        ax_bndy.plot(R_bnd, Z_bnd, color=_C2, lw=_LW, ls='--',
-                     label='geqdsk boundary', zorder=6)
-        _core_contours(mygs,ax_bndy, r['psi'])
-        _lcfs_pad = 0.06
-        ax_bndy.set_xlim(_tk_lcfs[:, 0].min() - _lcfs_pad, _tk_lcfs[:, 0].max() + _lcfs_pad)
-        ax_bndy.set_ylim(_tk_lcfs[:, 1].min() - _lcfs_pad, _tk_lcfs[:, 1].max() + _lcfs_pad)
-        ax_bndy.set_xlabel('$R$ [m]'); ax_bndy.set_ylabel('$Z$ [m]')
-        ax_bndy.set_aspect('equal')
-        ax_bndy.legend(fontsize=8, loc='lower right')
-        ax_bndy.set_title('LCFS + core flux surfaces')
+        # --- (2,0) FF' comparison ---
+        ax_ffp = axes[2, 0]
+        ax_ffp.plot(psi_N, eqdsk_ref.ffprim, 'k-', lw=_LW, label=r"geqdsk $FF'$")
+        ax_ffp.plot(psi_N, r['ffprime'], color=_C2, ls='--', lw=_LW, label=r"TokaMaker $FF'$")
+        ax_ffp.set_xlabel(r'$\psi_N$'); ax_ffp.set_ylabel(r"$FF'$ [T$^2$ m$^2$ Wb$^{-1}$]")
+        ax_ffp.set_title(r"$FF'(\psi)$ comparison"); ax_ffp.legend(fontsize=8); ax_ffp.grid(ls=':')
 
         # --- (2,1) Quantified boundary deviation ---
         ax_dev = axes[2, 1]

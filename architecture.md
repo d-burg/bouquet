@@ -365,6 +365,24 @@ omghb = (R_mid * Bp_mid)^2 / Bt_mid * d(omega_ExB)/dpsi
 These use exact outboard-midplane values of R, Bp, Bt (not
 flux-surface averages), following the OMFIT convention.
 
+**Hahm-Burrell derivative method:** The `d(omega_ExB)/dpsi` term is
+computed using a Savitzky-Golay filter with `deriv=1` (window ≈ 3%
+of the grid, minimum 7 points, polynomial order 3).  This is
+mathematically equivalent to fitting a local cubic polynomial and
+analytically differentiating it, which is optimal for noisy data.
+A naive `np.gradient()` on `omega_ExB` amplifies grid-scale noise
+because `omghb` is effectively a **second derivative** of the
+kinetic profiles (`omega_ExB ~ d(nT)/dpsi`, `omghb ~ d^2(nT)/dpsi^2`).
+
+**Baseline consistency:** When storing the baseline p-file to HDF5,
+`generate_bouquet()` recomputes the baseline rotation profiles
+(diamagnetic, ExB decomposition, Er, omghb) using the same midplane
+method as the perturbed p-files.  This ensures the baseline and
+perturbed curves in `plot_pfile_bouquet()` are directly comparable.
+Without this recomputation, the baseline `omghb` (from the original
+p-file creation tool) can differ from the perturbed `omghb` by an
+order of magnitude purely due to methodological differences.
+
 ### 6.4 Numerical Safeguards
 
 Near the magnetic axis, `dpsi = gradient(psi)` approaches zero and

@@ -721,14 +721,31 @@ class PFile:
             if Bt is not None and psi is not None:
                 Bt = np.asarray(Bt, dtype=float)
                 psi = np.asarray(psi, dtype=float)
-                dpsi = np.gradient(psi)
-                # Floor |dpsi| and |Bt| to avoid axis/edge spikes
-                dpsi_floor = max(1e-4 * np.max(np.abs(dpsi)), 1e-30)
-                dpsi_safe = np.where(np.abs(dpsi) > dpsi_floor, dpsi,
-                                     np.sign(dpsi) * dpsi_floor)
                 Bt_safe = np.where(np.abs(Bt) > 1e-6, Bt,
                                    np.sign(Bt) * 1e-6)
-                omghb = (R * Bp) ** 2 / Bt_safe * np.gradient(omgeb) / dpsi_safe
+                # The Hahm-Burrell shearing rate is effectively a
+                # second derivative of the kinetic profiles
+                # (omgeb ~ d(nT)/dpsi, omghb ~ d(omgeb)/dpsi), so
+                # grid-scale noise is amplified enormously.  We use a
+                # Savitzky-Golay filter to compute the derivative in
+                # one step: it fits a local polynomial and analytically
+                # differentiates it, which is mathematically optimal for
+                # noisy data.  The window is ~3% of the grid (minimum
+                # 7 points), wide enough to suppress two-grid-point
+                # oscillations while preserving the pedestal gradient.
+                from scipy.signal import savgol_filter
+                n_pts = len(omgeb)
+                win = max(7, int(np.round(n_pts * 0.03)) | 1)
+                if win >= n_pts:
+                    win = n_pts - (1 - n_pts % 2)
+                delta_psi = np.abs(np.median(np.diff(psi)))
+                if delta_psi == 0:
+                    delta_psi = 1.0  # fallback for degenerate grids
+                domgeb_dpsi = savgol_filter(
+                    omgeb, win, min(3, win - 1),
+                    deriv=1, delta=delta_psi,
+                )
+                omghb = (R * Bp) ** 2 / Bt_safe * domgeb_dpsi
                 np.nan_to_num(omghb, copy=False, nan=0.0,
                               posinf=0.0, neginf=0.0)
                 self.set_profile("omghb", psinorm, omghb)

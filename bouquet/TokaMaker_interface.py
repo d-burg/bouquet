@@ -806,6 +806,46 @@ def generate_bouquet(
 
     # Store baseline profiles and uncertainties so the .h5 file is
     # self-contained (the plotting GUI only needs the file path).
+    #
+    # Recompute the baseline p-file's rotation profiles using the same
+    # midplane method we use for perturbed p-files.  This ensures that
+    # baseline and perturbed omghb / Er are computed consistently and
+    # can be compared directly in plots.
+    stored_pfile_bytes = baseline_pfile_bytes
+    if baseline_pfile_bytes is not None and baseline_eqdsk_bytes is not None:
+        try:
+            from .io.pfile import PFile as _PFile
+            from .io import GEQDSKEquilibrium as _GEQDSK
+            from scipy.interpolate import interp1d
+
+            pf_bl = _PFile.from_bytes(baseline_pfile_bytes)
+            eq_bl = _GEQDSK.from_bytes(baseline_eqdsk_bytes)
+            psi_pf = pf_bl.psinorm_for("ne")
+            dpsi_bl = eq_bl.psi_boundary - eq_bl.psi_axis
+            psi_Wb_bl = psi_pf * dpsi_bl + eq_bl.psi_axis
+
+            pf_bl.compute_diamagnetic_rotations(psi_Wb_bl)
+
+            mid_bl = eq_bl.midplane
+            psi_eq = eq_bl.psi_N
+            R_bl = interp1d(
+                psi_eq, mid_bl["R"],
+                fill_value="extrapolate")(psi_pf)
+            Bp_bl = interp1d(
+                psi_eq, mid_bl["Bp"],
+                fill_value="extrapolate")(psi_pf)
+            Bt_bl = interp1d(
+                psi_eq, mid_bl["Bt"],
+                fill_value="extrapolate")(psi_pf)
+
+            pf_bl.compute_rotation_decomposition(
+                R=R_bl, Bp=Bp_bl, Bt=Bt_bl, psi=psi_Wb_bl)
+            stored_pfile_bytes = pf_bl.to_bytes()
+        except Exception as exc:
+            import traceback
+            print(f"  WARNING: could not recompute baseline rotations: {exc}")
+            traceback.print_exc()
+
     store_baseline_profiles(
         header, psi_N,
         ne, te, ni, ti,
@@ -814,7 +854,7 @@ def generate_bouquet(
         initial_Ip_target, l_i_target,
         scan_val=scan_val,
         eqdsk_bytes=baseline_eqdsk_bytes,
-        pfile_bytes=baseline_pfile_bytes,
+        pfile_bytes=stored_pfile_bytes,
     )
 
     t_batch_start = time.perf_counter()

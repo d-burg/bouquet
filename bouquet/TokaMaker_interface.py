@@ -957,9 +957,15 @@ def generate_bouquet(
                         )(psi_grid)
                         pf.set_profile(pf_key, psi_grid, vals)
 
-                # Recompute impurity density from quasi-neutrality
-                if "nz1" in pf and pf.ion_species is not None:
-                    pf.compute_quasineutrality()
+                # Keep baseline nz1 rather than recomputing from
+                # quasi-neutrality.  Bouquet perturbs ne and ni
+                # independently, which can push nz1 = (ne-ni-nb)/Z
+                # negative — an unphysical result that produces
+                # sign-flipped diamagnetic terms and spikes in Er/omghb.
+                # The baseline nz1 is a physically consistent impurity
+                # density and a reasonable approximation for the
+                # perturbed case since we are not perturbing the
+                # impurity content itself.
 
                 # Recompute total pressure
                 pf.compute_pressure()

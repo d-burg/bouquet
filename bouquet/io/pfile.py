@@ -522,6 +522,15 @@ class PFile:
             nb = np.zeros_like(psinorm)
 
         nz1 = (ne - ni - nb) / Z_imp
+        n_neg = np.count_nonzero(nz1 < 0)
+        if n_neg:
+            warnings.warn(
+                f"Quasi-neutrality produced negative nz1 at {n_neg}/{len(nz1)} "
+                f"grid points (min = {nz1.min():.4g}).  This usually means "
+                f"the perturbed ne is too low relative to ni + nb.  Consider "
+                f"skipping quasi-neutrality recomputation and keeping the "
+                f"baseline impurity density instead."
+            )
         self.set_profile("nz1", psinorm, nz1)
 
     def compute_zeff(self):
@@ -629,14 +638,28 @@ class PFile:
             raise ValueError("Ion species (N Z A) block required")
         Z_imp = nza["Z"][0]
 
+        # Floor |dpsi| to avoid division-by-zero spikes near the axis
+        # where psi is nearly flat.  The floor is set at 1e-4 × max|dpsi|
+        # which is small enough to preserve the physics everywhere except
+        # the degenerate axis point.
+        dpsi_floor = max(1e-4 * np.max(np.abs(dpsi)), 1e-30)
+        dpsi_safe = np.where(np.abs(dpsi) > dpsi_floor, dpsi,
+                             np.sign(dpsi) * dpsi_floor)
+        # Also floor densities to avoid spikes where n → 0 at edges
+        # or where quasi-neutrality pushes nz1 negative.
+        n_floor = 1e-4 * np.max(np.abs(ne))
+        nI_safe = np.maximum(np.abs(nI), n_floor)
+        ni_safe = np.maximum(np.abs(ni), n_floor)
+        ne_safe = np.maximum(np.abs(ne), n_floor)
+
         # Impurity diamagnetic (counter-current, negative by convention)
         with np.errstate(divide="ignore", invalid="ignore"):
-            omgpp = -np.abs(np.gradient(nI * TI) / dpsi / (nI * Z_imp))
+            omgpp = -np.abs(np.gradient(nI * TI) / dpsi_safe / (nI_safe * Z_imp))
             # Main ion diamagnetic (counter-current, negative by convention)
-            ommpp = -np.abs(np.gradient(ni * ti) / dpsi / (ni * 1.0))
+            ommpp = -np.abs(np.gradient(ni * ti) / dpsi_safe / (ni_safe * 1.0))
             # Electron diamagnetic (co-current, positive by convention)
-            omepp = np.abs(np.gradient(ne * te) / dpsi / (ne * 1.0))
-        # Replace NaN/inf at boundary where density -> 0
+            omepp = np.abs(np.gradient(ne * te) / dpsi_safe / (ne_safe * 1.0))
+        # Replace any remaining NaN/inf
         np.nan_to_num(omgpp, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
         np.nan_to_num(ommpp, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
         np.nan_to_num(omepp, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
@@ -699,7 +722,15 @@ class PFile:
                 Bt = np.asarray(Bt, dtype=float)
                 psi = np.asarray(psi, dtype=float)
                 dpsi = np.gradient(psi)
-                omghb = (R * Bp) ** 2 / Bt * np.gradient(omgeb) / dpsi
+                # Floor |dpsi| and |Bt| to avoid axis/edge spikes
+                dpsi_floor = max(1e-4 * np.max(np.abs(dpsi)), 1e-30)
+                dpsi_safe = np.where(np.abs(dpsi) > dpsi_floor, dpsi,
+                                     np.sign(dpsi) * dpsi_floor)
+                Bt_safe = np.where(np.abs(Bt) > 1e-6, Bt,
+                                   np.sign(Bt) * 1e-6)
+                omghb = (R * Bp) ** 2 / Bt_safe * np.gradient(omgeb) / dpsi_safe
+                np.nan_to_num(omghb, copy=False, nan=0.0,
+                              posinf=0.0, neginf=0.0)
                 self.set_profile("omghb", psinorm, omghb)
 
     # --- Remap ---

@@ -459,7 +459,11 @@ class TestPhysics:
         pf, psi_N = kinetic_pfile
         nb = 0.1 * np.ones(128)
         pf.set_profile("nb", psi_N, nb)
-        pf.compute_quasineutrality()
+        with pytest.warns(UserWarning, match="negative nz1"):
+            pf.compute_quasineutrality()
+        # With nb=0.1, some grid points have ne < ni + nb so nz1 goes
+        # negative.  The function warns but does NOT clamp — the caller
+        # decides how to handle negative impurity densities.
         expected = (pf.ne - pf.ni - nb) / 6.0
         np.testing.assert_allclose(pf._get_data("nz1"), expected)
 

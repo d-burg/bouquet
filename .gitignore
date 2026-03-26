@@ -50,3 +50,9 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# IDA_workflow
+*.zip
+IDA_workflow/*/*.cdf
+IDA_workflow/*/p*
+IDA_workflow/*/g*

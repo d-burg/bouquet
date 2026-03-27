@@ -783,13 +783,18 @@ class PFile:
                 new_raw[k] = val.copy()
                 continue
 
+            # Use boundary values for out-of-range points instead of
+            # linear extrapolation, which can produce unphysical values
+            # (e.g. negative densities) at the edge.
             f_data = interpolate.interp1d(
                 val["psinorm"], val["data"],
-                kind="linear", fill_value="extrapolate",
+                kind="linear", bounds_error=False,
+                fill_value=(val["data"][0], val["data"][-1]),
             )
             f_deriv = interpolate.interp1d(
                 val["psinorm"], val["derivative"],
-                kind="linear", fill_value="extrapolate",
+                kind="linear", bounds_error=False,
+                fill_value=(val["derivative"][0], val["derivative"][-1]),
             )
             new_raw[k] = {
                 "psinorm": target.copy(),

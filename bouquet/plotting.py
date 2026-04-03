@@ -709,11 +709,27 @@ def draw_jphi_profiles(axes, psi_N, j_phi, sigma_jphi,
 #  Data loading helper
 # ====================================================================
 def _load_all_perturbations(h5path, scan_value=None):
-    """Load all perturbed equilibria for a scan value as a list of dicts."""
-    n = count_equilibria(h5path, scan_value=scan_value)
+    """Load all perturbed equilibria for a scan value as a list of dicts.
+
+    Handles non-contiguous indices (from skipped equilibria) by
+    discovering actual stored group names rather than assuming
+    sequential 0..N-1.
+    """
+    from .utils import _scan_val_key
+    bkey = _scan_val_key(scan_value)
+    with h5py.File(h5path, "r") as hf:
+        if bkey is not None:
+            parent = hf[f"scan/{bkey}"]
+        else:
+            parent = hf
+        # Find all integer-keyed groups (skip _baseline, scan, etc.)
+        stored_counts = sorted(
+            int(k) for k in parent.keys()
+            if k not in ("_baseline", "scan") and k.isdigit()
+        )
     return [
         load_equilibrium_by_path(h5path, count=i, scan_value=scan_value)
-        for i in range(n)
+        for i in stored_counts
     ]
 
 

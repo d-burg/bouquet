@@ -1422,8 +1422,8 @@ def generate_bouquet(
         eq_stats_iter = mygs.get_stats(li_normalization="iter", lcfs_pad=psi_pad)
         li3 = eq_stats_iter["l_i"]
 
-        pressure_perturb = EC * (ne_perturb * te_perturb
-                                  + ni_perturb * ti_perturb)
+        # Pressure on the equilibrium grid (for storage and plotting)
+        pressure_perturb = EC * (ne_eq * te_eq + ni_eq * ti_eq)
 
         # Extract coil currents from TokaMaker
         coil_current_dict, _ = mygs.get_coil_currents()

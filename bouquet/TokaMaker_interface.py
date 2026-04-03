@@ -646,7 +646,7 @@ def perturb_kinetic_equilibrium(
         Dimensionless inductive :math:`j_\phi` shape (required when
         ``recalculate_j_BS=True``).
     l_i_tolerance : float
-        Absolute :math:`l_i` matching tolerance.
+        :math:`l_i` matching tolerance [%].
     l_i_proxy_threshold : float
         Proxy :math:`l_i` relative error threshold [%].
     psi_pad : float
@@ -852,7 +852,7 @@ def perturb_kinetic_equilibrium(
     proxy_target = baseline_li_proxy
 
     for li_iter in range(1, max_li_iter + 1):
-        if abs(l_i - l_i_target) <= l_i_tolerance:
+        if 100.0 * abs(l_i - l_i_target) / l_i_target <= l_i_tolerance:
             break
 
         t_phase = time.perf_counter()
@@ -1037,7 +1037,8 @@ def perturb_kinetic_equilibrium(
         print(f"  matched l_i (proxy):  {final_li_proxy:.4f}")
         print(f"  Ip error vs target:   {Ip_err:.3f}%")
         print(f"  proxy vs real l_i:    {proxy_vs_real:+.2f}%")
-        print(f"  |l_i - l_i_target|:   {abs(l_i - l_i_target):.4f}")
+        _li_pct_err = 100.0 * abs(l_i - l_i_target) / l_i_target if l_i_target != 0 else float('inf')
+        print(f"  l_i error:            {_li_pct_err:.2f}% (tolerance: {l_i_tolerance:.2f}%)")
 
         iteration_l_is.append(l_i)
         iteration_Ips.append(Ip)
@@ -1045,7 +1046,8 @@ def perturb_kinetic_equilibrium(
         # Fired only if the for-loop exhausted without break
         raise RuntimeError(
             f"l_i match not found after {max_li_iter} iterations "
-            f"(last |l_i - target| = {abs(l_i - l_i_target):.4f}, "
+            f"(last l_i error = {100.0 * abs(l_i - l_i_target) / l_i_target:.2f}%, "
+            f"tolerance = {l_i_tolerance:.2f}%, "
             f"target={l_i_target:.4f}, best={l_i:.4f}).\n"
             f"Try reducing your kinetic profile uncertainties or "
             f"increasing l_i_tolerance."
@@ -1175,7 +1177,7 @@ def generate_bouquet(
     input_jinductive : ndarray or None
         Dimensionless inductive :math:`j_\phi` shape.
     l_i_tolerance : float
-        Absolute :math:`l_i` tolerance.
+        :math:`l_i` tolerance [%].
     l_i_proxy_threshold : float
         Proxy :math:`l_i` relative-error threshold [%].
     psi_pad : float

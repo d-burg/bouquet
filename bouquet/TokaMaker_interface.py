@@ -591,6 +591,7 @@ def perturb_kinetic_equilibrium(
     max_pressure_iter=_MAX_PRESSURE_ITER,
     max_li_iter=_MAX_LI_ITER,
     psi_N_kinetic=None,
+    max_proxy_draws=500,
 ):
     r"""Perturb kinetic and current-density profiles and iterate to
     match :math:`I_p` and :math:`l_i` targets.
@@ -870,6 +871,12 @@ def perturb_kinetic_equilibrium(
         proxy_draws = 0
         while l_i_rel_err > l_i_proxy_threshold:
             proxy_draws += 1
+            if proxy_draws > max_proxy_draws:
+                raise RuntimeError(
+                    f"Proxy match not found after {max_proxy_draws} draws "
+                    f"(last err={l_i_rel_err:.3f}%, threshold={l_i_proxy_threshold}%). "
+                    f"Try increasing l_i_proxy_threshold or max_proxy_draws."
+                )
             jphi_perturb = generate_perturbed_GPR(
                 psi_N,
                 step_j_phi / j_phi_0,
@@ -1118,6 +1125,7 @@ def generate_bouquet(
     baseline_eqdsk_bytes=None,
     baseline_pfile_bytes=None,
     psi_N_kinetic=None,
+    max_proxy_draws=500,
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
 
@@ -1373,6 +1381,7 @@ def generate_bouquet(
                 scale_jBS=scale_jBS,
                 diagnostic_plots=diagnostic_plots,
                 psi_N_kinetic=psi_N_kinetic,
+                max_proxy_draws=max_proxy_draws,
             )
         except (RuntimeError, ValueError) as e:
             print(f"\n  STOPPED: {e}")

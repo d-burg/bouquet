@@ -153,6 +153,7 @@ def store_equilibrium(
     pfile_bytes=None,
     Zeff=None,
     coil_currents=None,
+    psi_N_kinetic=None,
 ):
     """
     Write one perturbed equilibrium into the HDF5 database.
@@ -223,6 +224,10 @@ def store_equilibrium(
         grp.create_dataset("n_i [m^-3]",          data=np.asarray(n_i,         dtype=np.float64))
         grp.create_dataset("T_i [eV]",            data=np.asarray(T_i,         dtype=np.float64))
         grp.create_dataset("w_ExB [rad/s]",       data=np.asarray(w_ExB,       dtype=np.float64))
+
+        # ---- optional: kinetic profile grid (when different from psi_N) ----
+        if psi_N_kinetic is not None:
+            grp.create_dataset("psi_N_kinetic", data=np.asarray(psi_N_kinetic, dtype=np.float64))
 
         if pressure is not None:
             grp.create_dataset("pressure [Pa]", data=np.asarray(pressure, dtype=np.float64))
@@ -354,6 +359,7 @@ def store_baseline_profiles(
     scan_val=None,
     eqdsk_bytes=None,
     pfile_bytes=None,
+    psi_N_kinetic=None,
 ):
     """
     Store the input (baseline) profiles and their uncertainties.
@@ -400,6 +406,9 @@ def store_baseline_profiles(
         grp.create_dataset("sigma_ni [m^-3]",    data=np.asarray(sigma_ni,   dtype=np.float64))
         grp.create_dataset("sigma_ti [eV]",      data=np.asarray(sigma_ti,   dtype=np.float64))
         grp.create_dataset("sigma_jphi [A m^-2]", data=np.asarray(sigma_jphi, dtype=np.float64))
+
+        if psi_N_kinetic is not None:
+            grp.create_dataset("psi_N_kinetic", data=np.asarray(psi_N_kinetic, dtype=np.float64))
 
         grp.attrs["Ip_target"]  = float(Ip_target)
         grp.attrs["l_i_target"] = float(l_i_target)
@@ -534,6 +543,9 @@ def load_equilibrium_by_path(h5path, count, scan_value=None):
 
         if "pressure [Pa]" in grp:
             result["pressure [Pa]"] = np.array(grp["pressure [Pa]"])
+
+        if "psi_N_kinetic" in grp:
+            result["psi_N_kinetic"] = np.array(grp["psi_N_kinetic"])
 
         if "Zeff" in grp:
             result["Zeff"] = np.array(grp["Zeff"])

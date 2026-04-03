@@ -531,11 +531,12 @@ def draw_kinetic_profiles(axes, psi_N, ne, ni, te, ti,
     if perturbed_data_list:
         n_equils = len(perturbed_data_list)
         for i, data in enumerate(perturbed_data_list):
+            _psi_pert = data.get("psi_N_kinetic", psi_N)
             for (a, orig, scale, sig, clr, lbl, ylabel), key in zip(
                 _pairs, _keys
             ):
                 a.plot(
-                    psi_N, data[key] * scale,
+                    _psi_pert, data[key] * scale,
                     c=clr, alpha=0.9, lw=1.5,
                     label=f"perturbed ({n_equils})" if i == 0 else None,
                     zorder=2,
@@ -808,13 +809,16 @@ def plot_bouquet(h5path_or_header, scan_value=None, mode="kinetic"):
     psi_N = bl["psi_N"]
     perturbed = _load_all_perturbations(h5path, scan_value=scan_value)
 
+    # Use psi_N_kinetic for kinetic profiles if available
+    psi_N_kin = bl.get("psi_N_kinetic", psi_N)
+
     figs = []
     axes_list = []
 
     if mode in ("kinetic", "all"):
         fig, ax = plt.subplots(2, 2, figsize=(8, 5), sharex=True)
         draw_kinetic_profiles(
-            ax, psi_N,
+            ax, psi_N_kin,
             bl["n_e [m^-3]"], bl["n_i [m^-3]"],
             bl["T_e [eV]"],   bl["T_i [eV]"],
             bl["sigma_ne [m^-3]"], bl["sigma_ni [m^-3]"],

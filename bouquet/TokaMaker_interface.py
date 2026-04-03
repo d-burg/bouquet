@@ -1306,6 +1306,7 @@ def generate_bouquet(
         scan_val=scan_val,
         eqdsk_bytes=baseline_eqdsk_bytes,
         pfile_bytes=stored_pfile_bytes,
+        psi_N_kinetic=psi_N_kinetic,
     )
 
     t_batch_start = time.perf_counter()
@@ -1517,6 +1518,7 @@ def generate_bouquet(
             pfile_bytes=perturbed_pfile_bytes,
             Zeff=Zeff_profile,
             coil_currents=coil_current_dict,
+            psi_N_kinetic=psi_N_kinetic,
         )
 
         # Clean up on-disk eqdsk after archiving

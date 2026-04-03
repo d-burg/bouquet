@@ -1544,7 +1544,7 @@ def plot_traces(h5path_or_header, scan_value="all"):
     figs : list of Figure
         The three figures ``[fig_li, fig_Ip, fig_boundary]``.
     """
-    from .utils import read_eqdsk_from_bytes
+    from .utils import read_eqdsk_from_bytes, _scan_val_key
 
     if not h5path_or_header.endswith(".h5"):
         h5path = os.path.abspath(f"{h5path_or_header}.h5")
@@ -1572,7 +1572,6 @@ def plot_traces(h5path_or_header, scan_value="all"):
         # Get input geqdsk boundary for deviation calculation.
         # Try baseline eqdsk bytes first, then stored boundary arrays.
         bl_boundary = None
-        from .utils import read_eqdsk_from_bytes as _read_eqdsk
         bl_eqdsk_key = None
         with h5py.File(h5path, "r") as hf:
             bkey_bl = _scan_val_key(sv)
@@ -1583,7 +1582,7 @@ def plot_traces(h5path_or_header, scan_value="all"):
                 if eqdsk_keys:
                     try:
                         raw = bytes(bl_grp[eqdsk_keys[0]][()])
-                        eq_bl = _read_eqdsk(raw, read_geqdsk)
+                        eq_bl = read_eqdsk_from_bytes(raw, read_geqdsk)
                         bl_boundary = np.column_stack(
                             [eq_bl.boundary_R, eq_bl.boundary_Z])
                     except Exception:
@@ -1596,8 +1595,6 @@ def plot_traces(h5path_or_header, scan_value="all"):
 
         # Load all perturbed equilibria — read eqdsk bytes directly
         # from HDF5 to extract Ip and boundary.
-        from .utils import _scan_val_key, read_eqdsk_from_bytes
-
         bkey = _scan_val_key(sv)
         indices = []
         li1_vals, li3_vals = [], []

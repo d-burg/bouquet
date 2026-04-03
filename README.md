@@ -1,5 +1,7 @@
 # bouquet
 
+[![DOI](https://zenodo.org/badge/1162850908.svg)](https://doi.org/10.5281/zenodo.19398541)
+
 **BO**otstrap **U**ncertainty **QU**antified **E**quilibrium **T**oolkit
 
 GP-sampled perturbed equilibria for uncertainty quantification with TokaMaker.
@@ -16,6 +18,13 @@ HDF5 database.
 </p>
 
 ---
+
+## Citation
+
+If you use Bouquet in your research, please cite:
+
+> Burgess, D., Hansen, C. (2025). Bouquet (v0.1.0). Zenodo. https://doi.org/10.5281/zenodo.19398542
+
 
 ## Contents
 

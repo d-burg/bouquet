@@ -14,7 +14,7 @@ HDF5 database.
 
 <p align="center">
 <img src="https://img.shields.io/badge/python-%E2%89%A53.9-blue" alt="Python 3.9+"/>
-<img src="https://img.shields.io/badge/version-0.1.0-green" alt="v0.1.0"/>
+<img src="https://img.shields.io/badge/version-0.2.0-green" alt="v0.2.0"/>
 </p>
 
 ---
@@ -47,10 +47,23 @@ If you use Bouquet in your research, please cite:
 - **Gaussian Process perturbation** of kinetic profiles (n_e, T_e, n_i, T_i)
   with user-supplied uncertainty envelopes and spatially-varying correlation
   lengths (Gibbs non-stationary kernels).
+- **Dual-grid kinetic profiles**: kinetic profiles can be specified on a
+  separate grid (`psi_N_kinetic`) that extends past ψ_N = 1 into the SOL.
+  GPR sampling includes the SOL; equilibrium solving uses the confined region.
+- **Corrective j_phi iteration**: adaptive Newton iteration (2–8 steps) drives
+  TokaMaker's output j_phi to match the target profile, compensating for
+  geometry coupling in the jphi-linterp ↔ GS solve round-trip.
+- **Bootstrap-aware edge reconstruction**: Sauter bootstrap spike is preserved
+  in all reconstructions regardless of whether the input geqdsk includes a
+  bootstrap model. Profile classifier (`H_mode`, `Lmode_like_jphi`, `L_mode`)
+  with edge spike alignment metrics.
 - **Pressure and l_i matching**: perturbed profiles are constrained to match
-  the baseline volume-averaged pressure and internal inductance.
-- **Current decomposition**: explicit bootstrap (Sauter model) + inductive
-  separation with iterative l_i convergence.
+  the baseline volume-averaged pressure and internal inductance (% tolerance).
+- **Current decomposition**: explicit bootstrap (Sauter/Redl model) + inductive
+  separation with iterative l_i convergence and corrective j_phi iteration.
+- **Reconstruction quality metrics**: each reconstruction reports jphi_mode,
+  spike alignment, core/edge j_phi RMS, l_i error, Ip error, and LCFS
+  boundary RMS/max deviation.
 - **COCOS-aware GEQDSK reader** with full flux-surface geometry (κ, δ,
   squareness), safety factor, current density, and exact outboard-midplane
   profiles — all computed independently of external tools.
@@ -155,39 +168,42 @@ from OpenFUSIONToolkit import OFT_env
 from OpenFUSIONToolkit.TokaMaker import TokaMaker
 
 from bouquet import (
-    new_uncertainty_profiles,
+    reconstruct_equilibrium,
     generate_bouquet,
     plot_bouquet,
+    plot_traces,
     plot_geqdsk_bouquet,
     plot_pfile_bouquet,
 )
 
-# 1. Define uncertainties on the baseline profiles
-sigma_ne, sigma_te, sigma_ni, sigma_ti, sigma_jphi = new_uncertainty_profiles(
-    psi_N, ne, te, ni, ti, j_phi
+# 1. Reconstruct baseline equilibrium
+result = reconstruct_equilibrium(
+    mygs, eqdsk,
+    ne_SI, te_SI, ni_SI, ti_SI, Zeff_eq,
+    isoflux_pts, isoflux_weights, pad_psi,
+    guess_jinductive=guess_jinductive,
 )
 
 # 2. Generate perturbed equilibria
+#    Kinetic profiles on psi_N_kinetic (IDA grid, may include SOL)
+#    Equilibrium profiles (j_phi, etc.) on psi_N (g-file grid)
 generate_bouquet(
-    mygs=mygs,                          # TokaMaker instance
-    header="my_run",
-    N=10,                               # number of perturbations
-    psi_N=psi_N,
-    ne=ne, te=te, ni=ni, ti=ti,
-    j_phi=j_phi, j_BS=j_BS,
-    sigma_ne=sigma_ne, sigma_te=sigma_te,
-    sigma_ni=sigma_ni, sigma_ti=sigma_ti,
-    sigma_jphi=sigma_jphi,
-    Ip_target=Ip_target,
-    l_i_target=li_target,
-    eqdsk_bytes=open("baseline.geqdsk", "rb").read(),
-    pfile_bytes=open("baseline.pfile", "rb").read(),
+    mygs, psi_N, 10, "my_run",
+    result['j_phi_fit'],
+    ne_SI, te_SI, ni_SI, ti_SI,           # on psi_N or psi_N_kinetic
+    sigma_ne, sigma_te, sigma_ni, sigma_ti, sigma_jphi,
+    n_ls, t_ls, j_ls,
+    Ip_target, l_i_target, Zeff_eq,
+    input_jinductive=result['j_inductive_fit'],
+    l_i_tolerance=10,                      # % error tolerance
+    l_i_proxy_threshold=12.5,              # % proxy threshold
+    psi_N_kinetic=psi_N_kinetic,           # optional: IDA grid with SOL
 )
 
 # 3. Visualise
-plot_bouquet(h5path="my_run.h5")
-plot_geqdsk_bouquet(h5path="my_run.h5", x_coord="psi_N")
-plot_pfile_bouquet(h5path="my_run.h5", x_coord="psi_N")
+plot_bouquet("my_run", scan_value=0, mode="all")
+plot_traces("my_run", scan_value="all")
+plot_pfile_bouquet(h5path="my_run.h5", scan_val=0, x_coord="psi_N")
 ```
 
 ---
@@ -324,10 +340,12 @@ All plotting functions return `(fig, axes)` and work in two modes:
 ```python
 from bouquet import (
     plot_bouquet,               # Full overview (kinetics + jphi + coils)
+    plot_traces,                # l_i, Ip, boundary deviation traces
     plot_geqdsk_bouquet,        # 3×3 grid: pressure, current, q, geometry, li, flux surfaces
     plot_pfile_bouquet,         # Multi-panel: densities, temperatures, rotations
     plot_coil_currents,         # Bar chart of coil currents
     plot_tokamaker_comparison,  # TokaMaker vs source geqdsk comparison
+    classify_jphi_profile,      # Edge current profile classifier
     draw_kinetic_profiles,      # ne, Te, ni, Ti on existing axes
     draw_pressure_profiles,     # Pressure + perturbed ensemble
     draw_jphi_total,            # j_phi with uncertainty band
@@ -354,9 +372,10 @@ discover_scan_values("run.h5")  # e.g. ['0', '1', '2']
 
 ### Styling
 
-In HDF5 mode, the **baseline** is plotted in black (lw=1.5) and **perturbed**
-equilibria in orange (lw=1.5, alpha=0.7). In file-list mode (no baseline/perturbed
-distinction), all entries use the `tab10` colormap uniformly.
+In HDF5 mode, the **baseline** is plotted in black (background, zorder=1) and
+**perturbed** equilibria in colour (foreground, zorder=3, alpha=0.65). In
+file-list mode (no baseline/perturbed distinction), all entries use the `tab10`
+colormap uniformly.
 
 ---
 
@@ -463,10 +482,11 @@ in [`architecture.md`](architecture.md). Key topics include:
 
 | Function | Description |
 |----------|-------------|
-| `generate_bouquet()` | Batch driver: draw N perturbations, solve GS, archive to HDF5 |
-| `perturb_kinetic_equilibrium()` | Single perturbation: draw profiles, match pressure and l_i |
-| `reconstruct_equilibrium()` | Reconstruct one GS equilibrium from geqdsk + profiles |
-| `fit_inductive_profile()` | Spline fit of inductive current scaled to target l_i |
+| `generate_bouquet()` | Batch driver: draw N perturbations, solve GS, archive to HDF5. Supports `psi_N_kinetic` for SOL-aware profiles. |
+| `perturb_kinetic_equilibrium()` | Single perturbation: draw profiles, match pressure and l_i, corrective j_phi iteration |
+| `reconstruct_equilibrium()` | Reconstruct one GS equilibrium from geqdsk + profiles with corrective iteration |
+| `classify_jphi_profile()` | Classify edge current profile (H_mode / Lmode_like_jphi / L_mode) |
+| `fit_inductive_profile()` | Smoothing spline + PCHIP fit of inductive current scaled to target l_i |
 
 ### Sampling
 
@@ -511,6 +531,7 @@ in [`architecture.md`](architecture.md). Key topics include:
 | Function | Description |
 |----------|-------------|
 | `plot_bouquet()` | Notebook-friendly overview plot |
+| `plot_traces()` | l_i, Ip, and boundary deviation traces across equilibria |
 | `plot_geqdsk_bouquet()` | GEQDSK multi-panel (9 panels: pressure, current, q, geometry, …) |
 | `plot_pfile_bouquet()` | P-file multi-panel (densities, temperatures, rotations) |
 | `plot_coil_currents()` | Coil current bar chart |

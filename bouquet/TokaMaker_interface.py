@@ -25,6 +25,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from .sampling import (
+    GPRProfilePerturber,
     generate_perturbed_GPR,
     calc_cylindrical_li_proxy,
     get_li_proxy_geometry,
@@ -626,6 +627,8 @@ def perturb_kinetic_equilibrium(
     spike_profile_recon_cached=None,
     proxy_bias_warmstart=None,
     pin_jphi=False,
+    verbose_interval=200,
+    **kwargs
 ):
     r"""Perturb kinetic and current-density profiles and iterate to
     match :math:`I_p` and :math:`l_i` targets.
@@ -757,6 +760,16 @@ def perturb_kinetic_equilibrium(
     # ----------------------------------------------------------------
     inp_avg = mygs.flux_integral(psi_N, pressure)
 
+    # Pre-compute GPR eigenfactors for the four kinetic profiles.
+    _ne_gpr = GPRProfilePerturber(kernel_func="rbf", length_scale=n_ls)
+    _ne_gpr.precompute_factor(psi_kin, sigma_ne / ne[0])
+    _te_gpr = GPRProfilePerturber(kernel_func="rbf", length_scale=t_ls)
+    _te_gpr.precompute_factor(psi_kin, sigma_te / te[0])
+    _ni_gpr = GPRProfilePerturber(kernel_func="rbf", length_scale=n_ls)
+    _ni_gpr.precompute_factor(psi_kin, sigma_ni / ni[0])
+    _ti_gpr = GPRProfilePerturber(kernel_func="rbf", length_scale=t_ls)
+    _ti_gpr.precompute_factor(psi_kin, sigma_ti / ti[0])
+
     p_err = np.inf
     p_iter = 0
     # p_thresh is a FRACTION (e.g. 0.05 == 5%); p_err is computed in percent.
@@ -765,6 +778,8 @@ def perturb_kinetic_equilibrium(
 
     while p_err > _p_thresh_pct:
         p_iter += 1
+        if (p_iter % verbose_interval == 0):
+            print(f"    pressure match: iter={p_iter}, err={p_err:.3f}% (threshold {p_thresh}%)")
         if p_iter > max_pressure_iter:
             raise RuntimeError(
                 f"Pressure match not found within {max_pressure_iter} iterations "
@@ -773,19 +788,19 @@ def perturb_kinetic_equilibrium(
 
         # GPR sampling on psi_kin (kinetic grid, may include SOL)
         ne_perturb = _draw_monotonic_perturbation(
-            psi_kin, ne / ne[0], sigma_ne / ne[0], n_ls
+            psi_kin, ne / ne[0], sigma_ne / ne[0], n_ls, perturber=_ne_gpr
         ) * ne[0]
 
         te_perturb = _draw_monotonic_perturbation(
-            psi_kin, te / te[0], sigma_te / te[0], t_ls
+            psi_kin, te / te[0], sigma_te / te[0], t_ls, perturber=_te_gpr
         ) * te[0]
 
         ni_perturb = _draw_monotonic_perturbation(
-            psi_kin, ni / ni[0], sigma_ni / ni[0], n_ls
+            psi_kin, ni / ni[0], sigma_ni / ni[0], n_ls, perturber=_ni_gpr
         ) * ni[0]
 
         ti_perturb = _draw_monotonic_perturbation(
-            psi_kin, ti / ti[0], sigma_ti / ti[0], t_ls
+            psi_kin, ti / ti[0], sigma_ti / ti[0], t_ls, perturber=_ti_gpr
         ) * ti[0]
 
         # Pressure matching on equilibrium grid (psi_N, confined only)
@@ -990,6 +1005,7 @@ def perturb_kinetic_equilibrium(
                 isolate_edge_jBS=isolate_edge_jBS,
                 diagnostic_plots=False,
                 verbose=False,
+                **kwargs
             )
         finally:
             if _stashed_bounds is not None:
@@ -1192,6 +1208,7 @@ def perturb_kinetic_equilibrium(
                 # SWB H-mode self-consistency iterations (default 3).  Env
                 # SWB_ITERS lets us trim for speed (2 is usually enough).
                 iterations=int(os.environ.get('SWB_ITERS', '3')),
+                **kwargs
             )
             if os.environ.get('PROFILE', '0') == '1':
                 print(f"  [profile] SWB call: {time.perf_counter()-_t_swb0:.1f}s")
@@ -1854,6 +1871,7 @@ def generate_bouquet(
     baseline_pfile_bytes=None,
     psi_N_kinetic=None,
     max_proxy_draws=500,
+    verbose_interval=200,
     coil_drift=0.01,
     coil_drift_floor_A=50.0,
     vsc_coils=('F9A', 'F9B'),
@@ -1871,6 +1889,7 @@ def generate_bouquet(
     jphi_baseline=True,
     seed=None,
     pin_jphi=False,
+    **kwargs
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
 
@@ -2756,7 +2775,7 @@ def generate_bouquet(
                     initial_Ip_target, _swb_seed_cache,
                     scale_jBS=1.0,
                     isolate_edge_jBS=isolate_edge_jBS,
-                    diagnostic_plots=False, verbose=False,
+                    diagnostic_plots=False, verbose=False,**kwargs
                 )
                 _diff_spike_recon = np.asarray(
                     _cache_results["isolated_j_BS"]).copy()
@@ -2978,6 +2997,8 @@ def generate_bouquet(
                 spike_profile_recon_cached=_diff_spike_recon,
                 proxy_bias_warmstart=_proxy_bias_warmstart,
                 pin_jphi=pin_jphi,
+                verbose_interval=verbose_interval,
+                **kwargs
             )
         except Exception as e:
             # Catch ANY exception during a perturbed solve -- ValueError
@@ -3684,7 +3705,7 @@ def generate_bouquet(
 def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff, 
                             isoflux_pts, weights, psi_pad,
                             guess_jinductive,n_k,psi_bridge,rescale_j_BS,
-                            shelf_psi_N,initialize_psi=True):
+                            shelf_psi_N,initialize_psi=True,**kwargs):
     r"""Reconstruct a single Grad-Shafranov equilibrium from a geqdsk
     reference and kinetic profiles, matching the EFIT :math:`l_i(1)`.
 
@@ -3776,6 +3797,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         scale_jBS=1.0,
         isolate_edge_jBS=True,
         diagnostic_plots=False,
+        **kwargs
     )
 
     j_BS_isolated = results['isolated_j_BS']

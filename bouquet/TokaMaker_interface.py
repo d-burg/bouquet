@@ -25,6 +25,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from .sampling import (
+    GPRProfilePerturber,
     generate_perturbed_GPR,
     calc_cylindrical_li_proxy,
     get_li_proxy_geometry,
@@ -626,6 +627,9 @@ def perturb_kinetic_equilibrium(
     spike_profile_recon_cached=None,
     proxy_bias_warmstart=None,
     pin_jphi=False,
+    verbose_interval=200,
+    worker_id=None,
+    **kwargs
 ):
     r"""Perturb kinetic and current-density profiles and iterate to
     match :math:`I_p` and :math:`l_i` targets.
@@ -710,6 +714,15 @@ def perturb_kinetic_equilibrium(
         pressure matching and equilibrium solving.  Returned
         perturbed profiles are on ``psi_N_kinetic``.  If ``None``,
         ``psi_N`` is used for everything (original behaviour).
+    max_proxy_draws : int
+        Maximum number of proxy-space draws attempted per :math:`l_i`
+        iteration before raising ``RuntimeError`` (default 500).
+    verbose_interval : int
+        Print pressure-matching progress every this many iterations
+        (default 200).
+    worker_id : int or None
+        Worker identifier prepended to log messages when running inside
+        a multiprocessing pool.  ``None`` (default) disables the prefix.
 
     Returns
     -------
@@ -743,6 +756,7 @@ def perturb_kinetic_equilibrium(
     # Kinetic grid: either the user-supplied extended grid or psi_N
     psi_kin = psi_N_kinetic if psi_N_kinetic is not None else psi_N
     _dual_grid = psi_N_kinetic is not None
+    _pfx = f"[Worker {worker_id}] " if worker_id is not None else ""
 
     def _kin_to_eq(arr_kin):
         """Interpolate a profile from kinetic grid onto equilibrium grid."""
@@ -757,14 +771,26 @@ def perturb_kinetic_equilibrium(
     # ----------------------------------------------------------------
     inp_avg = mygs.flux_integral(psi_N, pressure)
 
+    # Pre-compute GPR eigenfactors for the four kinetic profiles.
+    _ne_gpr = GPRProfilePerturber(kernel_func="rbf", length_scale=n_ls)
+    _ne_gpr.precompute_factor(psi_kin, sigma_ne / ne[0])
+    _te_gpr = GPRProfilePerturber(kernel_func="rbf", length_scale=t_ls)
+    _te_gpr.precompute_factor(psi_kin, sigma_te / te[0])
+    _ni_gpr = GPRProfilePerturber(kernel_func="rbf", length_scale=n_ls)
+    _ni_gpr.precompute_factor(psi_kin, sigma_ni / ni[0])
+    _ti_gpr = GPRProfilePerturber(kernel_func="rbf", length_scale=t_ls)
+    _ti_gpr.precompute_factor(psi_kin, sigma_ti / ti[0])
+
     p_err = np.inf
     p_iter = 0
     # p_thresh is a FRACTION (e.g. 0.05 == 5%); p_err is computed in percent.
     _p_thresh_pct = float(p_thresh) * 100.0
-    print("Searching for pressure profile match...")
+    print(f"{_pfx}Searching for pressure profile match...")
 
     while p_err > _p_thresh_pct:
         p_iter += 1
+        if (p_iter % verbose_interval == 0):
+            print(f"{_pfx}  pressure match: iter={p_iter}, err={p_err:.3f}% (threshold {p_thresh}%)")
         if p_iter > max_pressure_iter:
             raise RuntimeError(
                 f"Pressure match not found within {max_pressure_iter} iterations "
@@ -773,19 +799,19 @@ def perturb_kinetic_equilibrium(
 
         # GPR sampling on psi_kin (kinetic grid, may include SOL)
         ne_perturb = _draw_monotonic_perturbation(
-            psi_kin, ne / ne[0], sigma_ne / ne[0], n_ls
+            psi_kin, ne / ne[0], sigma_ne / ne[0], n_ls, perturber=_ne_gpr
         ) * ne[0]
 
         te_perturb = _draw_monotonic_perturbation(
-            psi_kin, te / te[0], sigma_te / te[0], t_ls
+            psi_kin, te / te[0], sigma_te / te[0], t_ls, perturber=_te_gpr
         ) * te[0]
 
         ni_perturb = _draw_monotonic_perturbation(
-            psi_kin, ni / ni[0], sigma_ni / ni[0], n_ls
+            psi_kin, ni / ni[0], sigma_ni / ni[0], n_ls, perturber=_ni_gpr
         ) * ni[0]
 
         ti_perturb = _draw_monotonic_perturbation(
-            psi_kin, ti / ti[0], sigma_ti / ti[0], t_ls
+            psi_kin, ti / ti[0], sigma_ti / ti[0], t_ls, perturber=_ti_gpr
         ) * ti[0]
 
         # Pressure matching on equilibrium grid (psi_N, confined only)
@@ -990,6 +1016,7 @@ def perturb_kinetic_equilibrium(
                 isolate_edge_jBS=isolate_edge_jBS,
                 diagnostic_plots=False,
                 verbose=False,
+                **kwargs
             )
         finally:
             if _stashed_bounds is not None:
@@ -1192,6 +1219,7 @@ def perturb_kinetic_equilibrium(
                 # SWB H-mode self-consistency iterations (default 3).  Env
                 # SWB_ITERS lets us trim for speed (2 is usually enough).
                 iterations=int(os.environ.get('SWB_ITERS', '3')),
+                **kwargs
             )
             if os.environ.get('PROFILE', '0') == '1':
                 print(f"  [profile] SWB call: {time.perf_counter()-_t_swb0:.1f}s")
@@ -1602,7 +1630,7 @@ def perturb_kinetic_equilibrium(
                 f"widen l_i_tolerance/PRESCREEN_MARGIN or check sigma_jphi")
 
         dt_proxy = time.perf_counter() - t_phase
-        print(f"  [li_iter={li_iter}] GPR draw "
+        print(f"{_pfx}  [li_iter={li_iter}] GPR draw "
               f"({_gpr_try} tries, {_n_skipped} pre-screen-skipped, "
               f"{dt_proxy:.1f}s)")
 
@@ -1636,8 +1664,8 @@ def perturb_kinetic_equilibrium(
             _, q_pre, _, _, _, _ = mygs.get_q(npsi=npsi, psi_pad=psi_pad)
             if q_pre[0] < 1.0:
                 dt_scale = time.perf_counter() - t_scale
-                print(f"  [li_iter={li_iter}] find_optimal_scale: {dt_scale:.1f}s")
-                print("Skipping this equilibrium, q_0 < 1.0 (pre-check)")
+                print(f"{_pfx}  [li_iter={li_iter}] find_optimal_scale: {dt_scale:.1f}s")
+                print(f"{_pfx}Skipping this equilibrium, q_0 < 1.0 (pre-check)")
                 l_i = np.inf
                 continue
 
@@ -1645,13 +1673,13 @@ def perturb_kinetic_equilibrium(
         # solver holds Ip to target natively, so Ip_target is used unscaled
         # downstream (no Ip-scale secant).
         dt_scale = time.perf_counter() - t_scale
-        print(f"  [li_iter={li_iter}] find_optimal_scale (j0 only): {dt_scale:.1f}s")
+        print(f"{_pfx}  [li_iter={li_iter}] find_optimal_scale (j0 only): {dt_scale:.1f}s")
 
         # ---- 5d. Definitive sawtooth constraint (after Ip scaling) --
         if constrain_sawteeth:
             _, q, _, _, _, _ = mygs.get_q(npsi=npsi, psi_pad=psi_pad)
             if q[0] < 1.0:
-                print("Skipping this equilibrium, q_0 < 1.0")
+                print(f"{_pfx}Skipping this equilibrium, q_0 < 1.0")
                 l_i = np.inf
                 continue
 
@@ -1688,7 +1716,7 @@ def perturb_kinetic_equilibrium(
             rtol=0.05, verbose=False,
         )
         if _n_corr > 2:
-            print(f"  [jphi correction] {_n_corr} iterations, "
+            print(f"{_pfx}  [jphi correction] {_n_corr} iterations, "
                   f"edge RMS: {_corr_hist[0]/1e6:.4f} → {_corr_hist[-1]/1e6:.4f} MA/m²")
 
         if diagnostic_plots:
@@ -1741,14 +1769,14 @@ def perturb_kinetic_equilibrium(
         if l_i > 0 and np.isfinite(l_i):
             proxy_target = final_li_proxy * (l_i_target / l_i)
 
-        print(f"  l_i target (equil):   {l_i_target:.4f}")
-        print(f"  proxy target:         {proxy_target:.4f}  (corrected)")
-        print(f"  matched l_i (equil):  {l_i:.4f}")
-        print(f"  matched l_i (proxy):  {final_li_proxy:.4f}")
-        print(f"  Ip error vs target:   {Ip_err:.3f}%")
-        print(f"  proxy vs real l_i:    {proxy_vs_real:+.2f}%")
+        print(f"{_pfx}  l_i target (equil):   {l_i_target:.4f}")
+        print(f"{_pfx}  proxy target:         {proxy_target:.4f}  (corrected)")
+        print(f"{_pfx}  matched l_i (equil):  {l_i:.4f}")
+        print(f"{_pfx}  matched l_i (proxy):  {final_li_proxy:.4f}")
+        print(f"{_pfx}  Ip error vs target:   {Ip_err:.3f}%")
+        print(f"{_pfx}  proxy vs real l_i:    {proxy_vs_real:+.2f}%")
         _li_pct_err = 100.0 * abs(l_i - l_i_target) / l_i_target if l_i_target != 0 else float('inf')
-        print(f"  l_i error:            {_li_pct_err:.2f}% (tolerance: {_li_tol_pct:.2f}%)")
+        print(f"{_pfx}  l_i error:            {_li_pct_err:.2f}% (tolerance: {_li_tol_pct:.2f}%)")
 
         iteration_l_is.append(l_i)
         iteration_Ips.append(Ip)
@@ -1854,6 +1882,7 @@ def generate_bouquet(
     baseline_pfile_bytes=None,
     psi_N_kinetic=None,
     max_proxy_draws=500,
+    verbose_interval=200,
     coil_drift=0.01,
     coil_drift_floor_A=50.0,
     vsc_coils=('F9A', 'F9B'),
@@ -1871,6 +1900,9 @@ def generate_bouquet(
     jphi_baseline=True,
     seed=None,
     pin_jphi=False,
+    keep_geqdsk=False,
+    worker_id=None,
+    **kwargs
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
 
@@ -2016,6 +2048,29 @@ def generate_bouquet(
         Soft-reg weight for the ``#VSC`` channel (default 1.0).  Kept
         much lower than ``soft_reg_weight`` so the VSC has freedom to
         do vertical-mode control work without being heavily penalized.
+    keep_geqdsk : bool
+        If ``True``, the temporary per-equilibrium ``.geqdsk`` files written
+        by ``mygs.save_eqdsk`` are kept on disk after being archived into the
+        HDF5 database.  Useful for manual inspection or debugging.
+        Default is ``False`` (files are deleted after archiving).
+    psi_N_kinetic : ndarray or None
+        Optional extended kinetic-profile grid (starting at 0, ending at
+        :math:`\hat{\psi} \geq 1`).  When provided, ``ne``, ``te``,
+        ``ni``, ``ti`` and their sigmas must be on this grid;
+        profiles are interpolated onto ``psi_N`` before the GS solve.
+        Returned perturbed profiles are on ``psi_N_kinetic``.
+        ``None`` uses ``psi_N`` for everything.
+    max_proxy_draws : int
+        Maximum proxy draws per :math:`l_i` iteration before
+        ``RuntimeError`` (default 500).  Forwarded to
+        :func:`perturb_kinetic_equilibrium`.
+    verbose_interval : int
+        Print pressure-matching progress every this many iterations
+        (default 200).  Forwarded to
+        :func:`perturb_kinetic_equilibrium`.
+    worker_id : int or None
+        Worker identifier prepended to log messages.  ``None`` (default)
+        disables the prefix.
 
     Returns
     -------
@@ -2028,6 +2083,7 @@ def generate_bouquet(
         np.random.seed(int(seed))
 
     all_diagnostics = []
+    _pfx = f"[Worker {worker_id}] " if worker_id is not None else ""
 
     # self-consistent pressure for baseline <P>
     # When kinetic profiles are on a different grid, interpolate
@@ -2756,7 +2812,7 @@ def generate_bouquet(
                     initial_Ip_target, _swb_seed_cache,
                     scale_jBS=1.0,
                     isolate_edge_jBS=isolate_edge_jBS,
-                    diagnostic_plots=False, verbose=False,
+                    diagnostic_plots=False, verbose=False,**kwargs
                 )
                 _diff_spike_recon = np.asarray(
                     _cache_results["isolated_j_BS"]).copy()
@@ -2837,14 +2893,14 @@ def generate_bouquet(
             remaining = avg_s * (n_equils - count)
             eta_min = remaining / 60.0
             eta_str = f"  ETA: {eta_min:.1f} min"
-        print(f"\n{'='*60}")
-        print(f"  Equilibrium {count+1}/{n_equils}  "
+        print(f"\n{_pfx}{'='*60}")
+        print(f"{_pfx}  Equilibrium {count+1}/{n_equils}  "
               f"(scale_jBS={scale_jBS:.4f}){eta_str}")
         if l_i_uncertainty > 0.0:
             _dev_pct = 100.0 * (l_i_target_draw - l_i_target) / l_i_target
-            print(f"  l_i_target sampled: {l_i_target_draw:.4f} "
-                  f"({_dev_pct:+.2f}% vs recon, σ={100*l_i_uncertainty:.1f}%)")
-        print(f"{'='*60}")
+            print(f"{_pfx}  l_i_target sampled: {l_i_target_draw:.4f} "
+                  f"{_pfx}({_dev_pct:+.2f}% vs recon, σ={100*l_i_uncertainty:.1f}%)")
+        print(f"{_pfx}{'='*60}")
         t_start = time.perf_counter()
 
         # ---- Warm-start restore ----
@@ -2978,6 +3034,9 @@ def generate_bouquet(
                 spike_profile_recon_cached=_diff_spike_recon,
                 proxy_bias_warmstart=_proxy_bias_warmstart,
                 pin_jphi=pin_jphi,
+                verbose_interval=verbose_interval,
+                worker_id=worker_id,
+                **kwargs
             )
         except Exception as e:
             # Catch ANY exception during a perturbed solve -- ValueError
@@ -3435,7 +3494,7 @@ def generate_bouquet(
         elapsed = time.perf_counter() - t_start
         elapsed_times.append(elapsed)
         total_elapsed = time.perf_counter() - t_batch_start
-        print(f"  Wall-clock time: {elapsed:.1f}s  "
+        print(f"{_pfx}  Wall-clock time: {elapsed:.1f}s  "
               f"(total: {total_elapsed/60:.1f} min, "
               f"avg: {np.mean(elapsed_times):.1f}s/eq)")
 
@@ -3463,7 +3522,7 @@ def generate_bouquet(
         # ---- save geqdsk to a temporary file, archive, delete -------
         eqdsk_filename = f"{header}_count={count}.geqdsk"
         full_path = os.path.abspath(eqdsk_filename)
-        print(f"  Saving to: {full_path}")
+        print(f"{_pfx}  Saving to: {full_path}")
 
         # safe_save_eqdsk: snapshot mygs equilibrium before save, restore
         # after.  Prevents save_eqdsk's q-profile tracer from shifting
@@ -3614,7 +3673,7 @@ def generate_bouquet(
                 perturbed_pfile_bytes = pf.to_bytes()
             except Exception as exc:
                 import traceback
-                print(f"  WARNING: could not build perturbed p-file: {exc}")
+                print(f"{_pfx}  WARNING: could not build perturbed p-file: {exc}")
                 traceback.print_exc()
 
         store_equilibrium(
@@ -3650,11 +3709,14 @@ def generate_bouquet(
         )
 
         # Clean up on-disk eqdsk after archiving
-        try:
-            os.remove(full_path)
-            print(f"  Deleted temporary file: {full_path}")
-        except OSError as exc:
-            print(f"  WARNING: could not delete {full_path}: {exc}")
+        if keep_geqdsk:
+            print(f"{_pfx}  Keeping temporary file: {full_path}")
+        else:
+            try:
+                os.remove(full_path)
+                print(f"{_pfx}  Deleted temporary file: {full_path}")
+            except OSError as exc:
+                print(f"{_pfx}  WARNING: could not delete {full_path}: {exc}")
 
         all_diagnostics.append(diagnostics)
 
@@ -3681,10 +3743,11 @@ def generate_bouquet(
 # ====================================================================
 #  Single-equilibrium reconstruction from geqdsk + kinetic profiles
 # ====================================================================
-def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff, 
+def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
                             isoflux_pts, weights, psi_pad,
-                            guess_jinductive,n_k,psi_bridge,rescale_j_BS,
-                            shelf_psi_N,initialize_psi=True):
+                            guess_jinductive, n_k, psi_bridge, rescale_j_BS,
+                            shelf_psi_N, initialize_psi=True,
+                            psi_N_kinetic=None, **kwargs):
     r"""Reconstruct a single Grad-Shafranov equilibrium from a geqdsk
     reference and kinetic profiles, matching the EFIT :math:`l_i(1)`.
 
@@ -3717,8 +3780,13 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         Ion density on ``eqdsk.psi_N`` [m\ :sup:`-3`].
     ti : ndarray
         Ion temperature on ``eqdsk.psi_N`` [eV].
-    Zeff : ndarray
-        Effective charge on ``eqdsk.psi_N``.
+    Zeff : dict or ndarray
+        Effective ion charge profile.  Either:
+        * a dictionary ``{'x': psi_grid, 'y': values}`` giving the
+          profile on an arbitrary normalised psi grid, or
+        * a scalar float / 1-D array on ``eqdsk.psi_N`` (length
+          ``len(eqdsk.psi_N)``) or on ``psi_N_kinetic`` (length
+          ``len(psi_N_kinetic)`` when psi_N_kinetic is provided). 
     isoflux_pts : ndarray, shape (N, 2)
         :math:`(R, Z)` coordinates of isoflux constraint points
         [m].  Passed to ``mygs.set_isoflux``.
@@ -3747,6 +3815,13 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         If ``True`` (default), call ``mygs.init_psi`` using LCFS
         geometry estimated from the geqdsk boundary.  Set to ``False``
         to skip initialisation (e.g. when reusing a prior solution).
+    psi_N_kinetic : ndarray or None
+        Optional kinetic-profile grid (starting at 0, ending at
+        :math:`\hat{\psi} \geq 1`).  When provided, ``ne``, ``te``,
+        ``ni`` and ``ti`` are expected on this
+        grid and are interpolated onto ``eqdsk.psi_N`` before the GS
+        solve.  Mirrors the same parameter in :func:`generate_bouquet`.
+        ``guess_jinductive`` is always on ``eqdsk.psi_N``.
 
     Returns
     -------
@@ -3757,6 +3832,76 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
     from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
     from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
 
+    # --- Grid sanity checks ---
+    _psi = eqdsk.psi_N
+    _dpsi = np.diff(_psi)
+    assert (np.isclose(_psi[0], 0.0) and np.isclose(_psi[-1], 1.0)), f"eqdsk.psi_N must run from 0 to 1; got [{_psi[0]:.6g}, {_psi[-1]:.6g}]"
+    assert np.allclose(_dpsi, _dpsi[0]), "eqdsk.psi_N not uniformly sampled"
+
+    _eq_len    = len(_psi)
+    _dual_grid = psi_N_kinetic is not None
+    _kin_len   = len(psi_N_kinetic) if _dual_grid else _eq_len
+
+    # psi_N_kinetic bounds and same-length ambiguity (mirrors generate_bouquet)
+    if _dual_grid:
+        if not (np.isclose(psi_N_kinetic[0], 0.0) and psi_N_kinetic[-1] >= 1.0):
+            raise ValueError(
+                "psi_N_kinetic must start at 0 and end at psi_N >= 1; "
+                f"got [{psi_N_kinetic[0]:.6g}, {psi_N_kinetic[-1]:.6g}]"
+            )
+        if _kin_len == _eq_len:
+            if np.allclose(psi_N_kinetic, _psi):
+                warn(
+                    "psi_N_kinetic has the same length and endpoints as eqdsk.psi_N; "
+                    "providing a separate kinetic grid of identical length is redundant. "
+                    "This usage is deprecated.",
+                    DeprecationWarning, stacklevel=2,
+                )
+            elif not isinstance(Zeff, dict) and np.ndim(Zeff) > 0:
+                raise ValueError(
+                    "psi_N_kinetic and eqdsk.psi_N have the same length but differ: "
+                    "it is ambiguous which grid array-valued Zeff belongs to. "
+                    "Use dict-format Zeff to specify the psi grid explicitly."
+                )
+
+    if len(guess_jinductive) != _eq_len:
+        raise ValueError(
+            f"guess_jinductive has length {len(guess_jinductive)} "
+            f"but eqdsk.psi_N has length {_eq_len}"
+        )
+    for _name, _arr in {'ne': ne, 'te': te, 'ni': ni, 'ti': ti}.items():
+        if len(_arr) != _kin_len:
+            _grid_name = 'psi_N_kinetic' if _dual_grid else 'eqdsk.psi_N'
+            raise ValueError(
+                f"{_name} has length {len(_arr)} but expected "
+                f"{_kin_len} ({_grid_name})"
+            )
+    if not isinstance(Zeff, dict):
+        Zeff = np.asarray(Zeff)
+        if Zeff.ndim > 0 and len(Zeff) not in (_kin_len, _eq_len):
+            raise ValueError(
+                f"Zeff has length {len(Zeff)} but expected either "
+                f"eqdsk.psi_N ({_eq_len})"
+                + (f" or psi_N_kinetic ({_kin_len})" if _dual_grid else "")
+            )
+
+    # Interpolate kinetic profiles from psi_N_kinetic onto the equilibrium
+    # grid eqdsk.psi_N when a separate kinetic grid is supplied.
+    # Mirrors the _kin_to_eq logic in generate_bouquet.
+    if _dual_grid:
+        from scipy.interpolate import interp1d as _interp1d_kin
+        def _kin_to_eq(_arr):
+            return _interp1d_kin(
+                psi_N_kinetic, _arr, kind='linear',
+                bounds_error=False, fill_value=(_arr[0], _arr[-1])
+            )(_psi)
+        ne   = _kin_to_eq(ne)
+        te   = _kin_to_eq(te)
+        ni   = _kin_to_eq(ni)
+        ti   = _kin_to_eq(ti)
+        if not isinstance(Zeff, dict) and Zeff.ndim > 0 and len(Zeff) == _kin_len:
+            Zeff = _kin_to_eq(Zeff)
+
     if initialize_psi:
         # Estimate shape parameters from geqdsk LCFS geometry
         geo = eqdsk.geometry
@@ -3765,6 +3910,9 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         a = geo['a'][-1]
         kappa = geo['kappa'][-1]
         delta = geo['delta'][-1]
+        ffp_prof = create_power_flux_fun(40,1.5,2.0)
+        pp_prof = create_power_flux_fun(40,4.0,1.0)
+        mygs.set_profiles(ffp_prof=ffp_prof,pp_prof=pp_prof,foffset=kwargs.get('F0', None)) # Need to reset flux profiles to prevent old jphi-linterp or jphi-split-bootstrap ffp_profs throwing errors
         mygs.init_psi(R0, Z0, a, kappa, delta)
 
     eqdsk_jtor = abs(eqdsk.j_tor_averaged_direct)
@@ -3776,6 +3924,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         scale_jBS=1.0,
         isolate_edge_jBS=True,
         diagnostic_plots=False,
+        **kwargs
     )
 
     j_BS_isolated = results['isolated_j_BS']
@@ -3876,6 +4025,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         "x": eqdsk.psi_N,
     }
 
+    mygs.set_targets(Ip=abs(eqdsk.Ip), pax=pres_tmp[0])
     mygs.set_profiles(ffp_prof=ffp_prof, pp_prof=pp_prof)
     mygs.solve()
 

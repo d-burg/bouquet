@@ -16,6 +16,7 @@ from bouquet.uncertainties import new_uncertainty_profiles
 from bouquet.sampling import (
     GPRProfilePerturber,
     generate_perturbed_GPR,
+    _draw_monotonic_perturbation,
 )
 from bouquet.utils import (
     initialize_equilibrium_database,
@@ -156,6 +157,153 @@ class TestGPRProfilePerturber:
         p = GPRProfilePerturber(kernel_func="matern52", length_scale=0.2)
         result = p.generate_profiles(psi_N, profile, sigma, n_samples=3)
         assert result.shape == (3, len(psi_N))
+
+    def test_output_shape_single_redraw(self):
+        psi_N = np.linspace(0, 1, 51)
+        profile = 1.0 - psi_N
+        sigma = 0.05 * np.ones_like(psi_N)
+        p = GPRProfilePerturber(kernel_func="rbf", length_scale=0.2)
+        p.precompute_factor(psi_N, sigma)
+        rng = np.random.default_rng(0)
+        result = p.draw_from_factor(profile, 1, rng)
+        assert result.shape == (1, len(psi_N))
+
+    def test_output_shape_multi_redraw(self):
+        psi_N = np.linspace(0, 1, 51)
+        profile = 1.0 - psi_N
+        sigma = 0.05 * np.ones_like(psi_N)
+        p = GPRProfilePerturber(kernel_func="rbf", length_scale=0.2)
+        p.precompute_factor(psi_N, sigma)
+        rng = np.random.default_rng(0)
+        result = p.draw_from_factor(profile, 10, rng)
+        assert result.shape == (10, len(psi_N))
+
+    def test_zero_sigma_returns_mean_redraw(self):
+        psi_N = np.linspace(0, 1, 51)
+        profile = 1.0 - psi_N
+        sigma = np.zeros_like(psi_N)
+        p = GPRProfilePerturber(kernel_func="rbf", length_scale=0.2)
+        p.precompute_factor(psi_N, sigma)
+        rng = np.random.default_rng(0)
+        result = p.draw_from_factor(profile, 5, rng)
+        # Every row should match the input profile
+        for i in range(result.shape[0]):
+            np.testing.assert_allclose(result[i], profile, atol=1e-10)
+
+    def test_marginal_std_matches_sigma_redraw(self):
+        """Empirical pointwise std should match the input sigma."""
+        rng = np.random.default_rng(42)
+        psi_N = np.linspace(0, 1, 41)
+        profile = np.ones_like(psi_N)
+        sigma = 0.1 * np.ones_like(psi_N)
+        p = GPRProfilePerturber(kernel_func="rbf", length_scale=0.2)
+        p.precompute_factor(psi_N, sigma)
+        samples = p.draw_from_factor(profile, 5000, rng)
+        empirical_std = np.std(samples, axis=0)
+        np.testing.assert_allclose(empirical_std, sigma, rtol=0.1)
+
+    def test_redraw_matches_generate_profiles_redraw(self):
+        """Re-draw and generate_profiles must produce the same marginal std."""
+        psi_N = np.linspace(0, 1, 41)
+        profile = np.ones_like(psi_N)
+        sigma = 0.1 * np.ones_like(psi_N)
+        p = GPRProfilePerturber(kernel_func="rbf", length_scale=0.2)
+        p.precompute_factor(psi_N, sigma)
+
+        rng_a = np.random.default_rng(7)
+        samples_a = p.draw_from_factor(profile, 3000, rng_a)
+
+        rng_b = np.random.default_rng(7)
+        samples_b = p.generate_profiles(psi_N, profile, sigma, n_samples=3000, rng=rng_b)
+
+        std_a = np.std(samples_a, axis=0)
+        std_b = np.std(samples_b, axis=0)
+        # Empirical stds agree to within 1 % (Monte-Carlo noise)
+        np.testing.assert_allclose(std_a, std_b, rtol=0.01)
+
+    def test_matern52_runs_redraw(self):
+        psi_N = np.linspace(0, 1, 51)
+        profile = 1.0 - psi_N
+        sigma = 0.05 * np.ones_like(psi_N)
+        p = GPRProfilePerturber(kernel_func="matern52", length_scale=0.2)
+        p.precompute_factor(psi_N, sigma)
+        rng = np.random.default_rng(0)
+        result = p.draw_from_factor(profile, 3, rng)
+        assert result.shape == (3, len(psi_N))
+
+    def test_precompute_reuse_consistent(self):
+        """Multiple draw_from_factor calls with the same factor must be i.i.d."""
+        psi_N = np.linspace(0, 1, 31)
+        profile = np.ones_like(psi_N)
+        sigma = 0.1 * np.ones_like(psi_N)
+        p = GPRProfilePerturber(kernel_func="rbf", length_scale=0.2)
+        p.precompute_factor(psi_N, sigma)
+        rng = np.random.default_rng(99)
+        # Draw in two separate calls and stack
+        batch1 = p.draw_from_factor(profile, 3000, rng)
+        batch2 = p.draw_from_factor(profile, 3000, rng)
+        # Verify batch1 and batch2 are actually different (independent)
+        assert not np.allclose(batch1, batch2), "batch1 and batch2 should be different"
+        combined = np.vstack([batch1, batch2])
+        empirical_std = np.std(combined, axis=0)
+        # Check thath their standard deviation is similar
+        np.testing.assert_allclose(empirical_std, sigma, rtol=0.01)
+
+
+class TestDrawMonotonicPerturbation:
+    """Quick tests for _draw_monotonic_perturbation."""
+
+    # A strictly decreasing parabola — nearly every GPR draw is monotone
+    PSI = np.linspace(0, 1, 32)
+    PROFILE = 1.0 - PSI ** 2
+    SIGMA = 0.02 * np.ones(32)
+
+    def test_returns_monotone_array(self):
+        result = _draw_monotonic_perturbation(
+            self.PSI, self.PROFILE, self.SIGMA, length_scale=0.3,
+        )
+        assert result.shape == (len(self.PSI),)
+        assert np.all(np.diff(result) <= 0.0)
+
+    def test_pre_built_perturber_accepted(self):
+        """Passing a pre-built perturber must still return a valid monotone draw."""
+        p = GPRProfilePerturber(kernel_func="rbf", length_scale=0.3)
+        p.precompute_factor(self.PSI, self.SIGMA)
+        rng = np.random.default_rng(7)
+        result = _draw_monotonic_perturbation(
+            self.PSI, self.PROFILE, self.SIGMA, length_scale=0.3,
+            perturber=p, rng=rng,
+        )
+        assert np.all(np.diff(result) <= 0.0)
+
+    def test_shared_rng_advances_state(self):
+        """Two calls with the same rng object produce different draws."""
+        p = GPRProfilePerturber(kernel_func="rbf", length_scale=0.3)
+        p.precompute_factor(self.PSI, self.SIGMA)
+        rng = np.random.default_rng(42)
+        r1 = _draw_monotonic_perturbation(
+            self.PSI, self.PROFILE, self.SIGMA, length_scale=0.3,
+            perturber=p, rng=rng,
+        )
+        r2 = _draw_monotonic_perturbation(
+            self.PSI, self.PROFILE, self.SIGMA, length_scale=0.3,
+            perturber=p, rng=rng,
+        )
+        assert not np.allclose(r1, r2)
+
+    def test_exhaustion_raises_runtime_error(self):
+        """RuntimeError must be raised when no monotone draw is found in max_draws."""
+        # Flat profile + huge sigma: draws will not be monotone in 1 attempt.
+        p = GPRProfilePerturber(kernel_func="rbf", length_scale=0.3)
+        psi = np.linspace(0, 1, 8)
+        sigma = 10.0 * np.ones(8)
+        p.precompute_factor(psi, sigma)
+        rng = np.random.default_rng(0)
+        with pytest.raises(RuntimeError, match="monotonically"):
+            _draw_monotonic_perturbation(
+                psi, np.ones(8), sigma, length_scale=0.3,
+                max_draws=1, batch_size=1, perturber=p, rng=rng,
+            )
 
 
 class TestGeneratePerturbedGPR:

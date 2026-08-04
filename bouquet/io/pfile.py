@@ -225,6 +225,9 @@ class PFile:
     ----------
     filename : str or path-like
         Path to the p-file.
+    doRemap: bool
+        Switch to automatically run remap function upon loading the p-file data
+        in order to get all profiles on a common grid.
 
     Examples
     --------
@@ -236,8 +239,11 @@ class PFile:
     True
     """
 
-    def __init__(self, filename):
+    def __init__(self, filename, doRemap=True):
         self._raw = _read_pfile(filename)
+        
+        if doRemap:
+            self.remap(overwrite=True)
 
     @classmethod
     def from_bytes(cls, raw_bytes):
@@ -762,7 +768,7 @@ class PFile:
 
     # --- Remap ---
 
-    def remap(self, psinorm=None, key="ne"):
+    def remap(self, psinorm=None, key="ne", overwrite=False):
         """Return a new :class:`PFile` with all profiles on a common grid.
 
         Parameters
@@ -772,6 +778,8 @@ class PFile:
             If ``int``, use ``np.linspace(0, 1, psinorm)``.
         key : str
             Profile whose grid to use when *psinorm* is ``None``.
+        overwrite: bool
+            Switch to overwrite the raw profiles of the current PFile object.
 
         Returns
         -------
@@ -817,6 +825,11 @@ class PFile:
         # Build a new PFile without re-parsing a file
         obj = object.__new__(PFile)
         obj._raw = new_raw
+        
+        # Overwrite the currently stored profiles with the ones on the common grid
+        if overwrite:
+            self._raw = new_raw
+
         return obj
 
     def __repr__(self):

@@ -981,6 +981,7 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
             p_fast=p_fast_eq,
             Z_imp=Z_imp_recon,
             l_i_tolerance=float(config.generation.l_i_tolerance),
+            **config.generation.bootstrap_kwargs,
         )
         # get_stats traces the q-profile and can emit gs_get_qprof warnings, so
         # keep these inside the capture too.

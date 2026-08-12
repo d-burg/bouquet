@@ -930,9 +930,10 @@ class GenerationConfig:
     # already ~clean, so flooring is redundant -- and it REGRESSED a stiff
     # high-l_i case (clipping its isolate-edge spike drove yield to 0).
     floor_j_BS: bool = False
-    # solve_with_bootstrap H-mode self-consistency iterations per draw (default
-    # 3); lowering to 2 trades a little accuracy for speed on large bouquets.
-    swb_iterations: int = 3
+    # Keyword dict forwarded to every solve_with_bootstrap call. Single UI surface
+    # for backend/Sauter options (e.g. the Fortran set_boot_ops options djBS_tol,
+    # taper_edge_jBS/psi0/shape, or iterations). Validated in __post_init__.
+    bootstrap_kwargs: dict = field(default_factory=dict)
     # Coil handling (homotopy-based). The inverse solve drifts coils within
     # coil_drift, stepped through homotopy_passes = list of (F_tol, VSC_tol)
     # stages that tighten loose->tight (each warm-starts the next). A single

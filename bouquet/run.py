@@ -2336,6 +2336,7 @@ class Bouquet:
                 mygs, ne, te, ni, ti, Zeff, bl.Ip_target, swb_seed,
                 scale_jBS=1.0, isolate_edge_jBS=iso,
                 diagnostic_plots=False, verbose=False,
+                **gc.bootstrap_kwargs,
             )
             # Same axis-transition smoothing every per-draw spike receives, so
             # the sigma=0 draw reproduces this baseline split exactly.
@@ -2908,7 +2909,7 @@ class Bouquet:
         fig.suptitle(ttl, fontsize=11); fig.tight_layout()
         return fig, ax
 
-    def verify_sigma0_consistency(self, tol_frac=0.02, swb_iterations=3):
+    def verify_sigma0_consistency(self, tol_frac=0.02):
         """Regression guard: the draw pipeline must reproduce the baseline
         j_BS split when the kinetics are UNPERTURBED (sigma=0).
 
@@ -2949,8 +2950,6 @@ class Bouquet:
         tol_frac : float
             Pass threshold on ``max|spike0 - j_BS|`` as a fraction of
             ``max(j_BS)`` (default 2%).
-        swb_iterations : int
-            Iterations for the SWB call (match GenerationConfig).
 
         Returns
         -------
@@ -3062,7 +3061,7 @@ class Bouquet:
             float(bl.Ip_target), seed,
             scale_jBS=float(getattr(bl, "bs_scale", 1.0)),
             isolate_edge_jBS=bool(gc.isolate_edge_jBS),
-            diagnostic_plots=False, iterations=swb_iterations)
+            **gc.bootstrap_kwargs)
         spike0 = smooth_jbs_transition(
             _swb_jbs_to_toroidal(mygs, res["isolated_j_BS"], psi_pad))
         if gc.floor_j_BS:
@@ -3375,7 +3374,6 @@ class Bouquet:
                 perturb_jind_in_anchor=gc.perturb_jind_in_anchor,
                 jBS_scale_range=_jbs_range,
                 jbs_delta_mode=gc.jbs_delta_mode,
-                swb_iterations=gc.swb_iterations,
                 diagnostic_plots=gc.diagnostic_plots,
                 capture_live_eq=gc.capture_live_eq,
                 capture_npsi=gc.capture_npsi,
@@ -3448,6 +3446,7 @@ class Bouquet:
                 # bounds the target-vs-achieved gap to its tolerance (~2-3%
                 # core RMS) -- storing the achieved output removes even that.
                 store_achieved_jphi=True,
+                **gc.bootstrap_kwargs,
             )
         self.generation_log = _cap["text"] or None
 

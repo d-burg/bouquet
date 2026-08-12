@@ -964,8 +964,17 @@ class GenerationConfig:
     # to skip that cost (self-validated + graceful fallback either way).
     capture_exact_inv_R2: bool = True
 
+    #: ``solve_with_bootstrap`` arguments the call sites set themselves;
+    #: ``bootstrap_kwargs`` may not shadow them (they would collide as
+    #: duplicate keywords, or silently override a per-draw value).
+    _RESERVED = frozenset(
+        "mygs ne Te ni Ti Zeff Ip_target inductive_jphi scale_jBS "
+        "isolate_edge_jBS verbose diagnostic_plots".split()
+    )
+
     def __post_init__(self):
-        """Resolve ``structured_preset`` into the individual structured fields.
+        """Validate ``bootstrap_kwargs``, then resolve ``structured_preset``
+        into the individual structured fields.
 
         Thin wrapper over :func:`resolve_structured_preset`, which carries the
         rules (and is called again at the closure's own entry point, where it
@@ -993,6 +1002,10 @@ class GenerationConfig:
         switches the channel on -- ``structured_preset=None`` resolves to the
         DEFAULT preset only when the channel is already ``"structured"``.
         """
+        bad = sorted(self._RESERVED & self.bootstrap_kwargs.keys())
+        if bad:
+            raise ValueError(
+                f"bootstrap_kwargs may not set {bad}: passed explicitly at call sites.")
         resolve_structured_preset(self, stacklevel=4)
 
 

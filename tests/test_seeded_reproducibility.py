@@ -295,7 +295,7 @@ def _generate_one_ensemble(header):
         psi_pad=float(getattr(b.config.source, "psi_pad", 1e-3)),
         constrain_sawteeth=gc.constrain_sawteeth, recalculate_j_BS=True,
         isolate_edge_jBS=gc.isolate_edge_jBS, floor_j_BS=gc.floor_j_BS,
-        swb_iterations=gc.swb_iterations, scan_key=0,
+        scan_key=0,
         psi_N_kinetic=np.asarray(bl.psi_N_kinetic, dtype=float),
         # production coil schedule (what Bouquet.generate() passes)
         coil_drift=gc.coil_drift,
@@ -451,7 +451,6 @@ def _run_r2_probe(outdir):
             constrain_sawteeth=False, recalculate_j_BS=True,
             isolate_edge_jBS=gc.isolate_edge_jBS, floor_j_BS=gc.floor_j_BS,
             scale_jBS=float(getattr(bl, "bs_scale", 1.0)),
-            swb_iterations=gc.swb_iterations,
             perturb_jind_in_anchor=True, accept_anchor_inband=False,
             psi_N_kinetic=psi_kin, p_thresh=0.05, rng=_SEED,
         )

@@ -30,10 +30,17 @@ _THERMAL_PAX = re.compile(r"pax\s*=\s*pressure\s*\[\s*0\s*\]")
 _THERMAL_PP = re.compile(r"pchip_derivative\(\s*psi_N\s*,\s*pressure\s*\)")
 
 
-def test_no_solve_site_anchors_at_thermal_only_pressure():
-    src = _SRC.read_text()
+def _code_lines(src):
+    """The module with comment-only lines stripped, so a historical note
+    quoting the legacy spelling cannot fail the guard (Copilot review)."""
+    return "\n".join(ln for ln in src.splitlines()
+                     if not ln.lstrip().startswith("#"))
 
-    offenders = _THERMAL_PAX.findall(src) + _THERMAL_PP.findall(src)
+
+def test_no_solve_site_anchors_at_thermal_only_pressure():
+    code = _code_lines(_SRC.read_text())
+
+    offenders = _THERMAL_PAX.findall(code) + _THERMAL_PP.findall(code)
 
     assert not offenders, (
         f"TokaMaker_interface.py anchors a solve at the thermal-only "
@@ -69,8 +76,7 @@ def test_the_guard_regexes_pass_the_fixed_spellings(ok):
 def test_the_anchor_sites_use_the_full_pressure():
     """Positive assertion: the per-draw anchor uses pres_tmp and the
     jBS-delta cache anchor uses pressure_solve, as calls, not comments."""
-    code = "\n".join(ln for ln in _SRC.read_text().splitlines()
-                     if not ln.lstrip().startswith("#"))
+    code = _code_lines(_SRC.read_text())
 
     assert re.search(r"pchip_derivative\(\s*psi_N\s*,\s*pres_tmp\s*\)", code)
     assert re.search(

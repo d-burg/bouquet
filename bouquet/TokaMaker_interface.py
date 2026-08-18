@@ -1382,6 +1382,30 @@ def _r2_ip_scale(anchor_ip, mygs, j_ind, j_other, psi_N, Ip_target):
         method="brentq", rtol=1e-6).root)
 
 
+def _floored_zone_note(input_jinductive):
+    """Annotation for the ``[R2-invariant]`` line on floored baselines.
+
+    Where ``floor_inductive_split`` clamped the baseline ``j_inductive`` to 0,
+    the archived ``j_BS`` absorbed the deficit, so a sigma=0 draw CANNOT
+    reproduce the archived split there -- the amplitude root redistributes
+    that current and ``s`` carries it.  Real and expected, not measurement
+    error, so it is annotated rather than carved out (measured on the worst
+    demo archive: 0.873 % of Ip inside a 6-point zone, 0.006 % elsewhere;
+    issue #35 item 1).  The sigma0 guard's carve-out verifies a DIFFERENT
+    contract (SWB-context reproducibility) and does not apply here.
+
+    Returns '' when nothing is floored, so the QC line is unchanged on the
+    (typical) un-floored case.
+    """
+    if input_jinductive is None:
+        return ""
+    n = int(np.sum(np.asarray(input_jinductive, dtype=float) <= 0.0))
+    if not n:
+        return ""
+    return (f"  [{n} floored j_ind pts: the invariant carries an expected "
+            f"floor here; issue #35]")
+
+
 def _fmt_s_and_find(s, f_ind, mode=None):
     """The R2 QC fragment: ``|s-1|``, ``f_ind`` and their product, together.
 
@@ -2591,7 +2615,8 @@ def perturb_kinetic_equilibrium(
                 print(f"  [R2-invariant] s={_r2_scale_used:.6f}"
                       + _fmt_s_and_find(_r2_scale_used, _r2_f_ind_used,
                                         _r2_mode)
-                      + "  (bound is on the product; issue #23)", flush=True)
+                      + "  (bound is on the product; issue #23)"
+                      + _floored_zone_note(input_jinductive), flush=True)
             if _erp > _tolp:
                 raise RuntimeError(
                     f"perturb_jind_in_anchor: no in-band draw in {int(max_li_iter)} "

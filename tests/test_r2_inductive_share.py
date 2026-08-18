@@ -295,3 +295,23 @@ def test_ratio_mode_is_retired():
     with pytest.raises(ValueError, match="retired"):
         _AnchorIpRenorm(_StubGS(Ip=1.0e6), psi_N, total, 1.0e6, 1e-3,
                         mode="ratio")
+
+
+# ---------------------------------------------------------------------------
+#  the floored-zone annotation (issue #35 item 1)
+# ---------------------------------------------------------------------------
+def test_floored_zone_note_annotates_only_floored_baselines():
+    """On a floored baseline the QC line must say so -- the sigma=0 invariant
+    carries an expected floor there (the amplitude root redistributes the
+    floor-absorbed current) and a reader comparing against the bar needs
+    that context on the line itself.  Un-floored baselines (the typical
+    case) must be byte-unchanged."""
+    from bouquet.TokaMaker_interface import _floored_zone_note
+
+    j = np.linspace(1.0, 0.1, 12)
+    assert _floored_zone_note(j) == ""
+    assert _floored_zone_note(None) == ""
+
+    j_floored = j.copy(); j_floored[-3:] = 0.0
+    note = _floored_zone_note(j_floored)
+    assert "3 floored" in note and "#35" in note

@@ -2195,15 +2195,32 @@ def perturb_kinetic_equilibrium(
                       f"({_wreg_exc}); SWB runs under strong reg")
                 _stashed_reg = None
 
+        # Anchor at pres_tmp -- the full solve pressure (thermal + p_fast +
+        # impurity + p_diff) that every OTHER solve site in this function
+        # uses (the draw solve, PIN_JPHI, and the diff path all set
+        # pax=pres_tmp[0]).  This was the one site still on the thermal-only
+        # `pressure` argument, which made the anchor a genuinely different
+        # equilibrium from the reconstruction that produced input_j_phi
+        # (issue #35 Defect 1): on a 27 kPa-p_fast case the missing pressure
+        # shrinks the Shafranov shift enough that the archived j_phi
+        # integrates +4.1 % of Ip high on the anchor geometry.  The
+        # positional `pressure` argument CANNOT simply carry the full
+        # pressure instead: it doubles as the kinetics pressure-match target,
+        # which is thermal by construction (feeding it full pressure fails
+        # that loop by exactly the p_fast fraction -- measured 42.7 % on the
+        # same case).  Note pres_tmp is the DRAW's own perturbed pressure, so
+        # the anchor now tracks the draw it anchors, per maintainer decision
+        # (2026-08-18): at sigma=0 this equals the baseline full pressure
+        # bitwise; at sigma>0 it is the state the draw actually solves.
         _pre_pp = {"type": "linterp",
-                    "y": pchip_derivative(psi_N, pressure) /
+                    "y": pchip_derivative(psi_N, pres_tmp) /
                          (mygs.psi_bounds[1] - mygs.psi_bounds[0]),
                     "x": psi_N}
         _pre_pp["y"][-1] = 0.0
         _pre_ffp = {"type": "jphi-linterp",
                      "y": input_j_phi.copy(),
                      "x": psi_N}
-        mygs.set_targets(Ip=Ip_target, pax=pressure[0])
+        mygs.set_targets(Ip=Ip_target, pax=pres_tmp[0])
         mygs.set_profiles(pp_prof=_pre_pp, ffp_prof=_pre_ffp)
         try:
             mygs.solve()
@@ -4336,18 +4353,25 @@ def generate_bouquet(
                 mygs.set_coil_bounds(None)
             # State-anchor solve before SWB.  Mirrors per-draw flow at
             # line ~870 -- without this, SWB sometimes inherits a stale
-            # mygs state and hits maxits.  Uses recon pressure +
-            # input_j_phi (the exact recon profile) so this is recon's
-            # natural equilibrium re-solved.
+            # mygs state and hits maxits.  Uses pressure_solve (thermal +
+            # p_fast + impurity + p_diff, the same assembly the baseline
+            # jphi-linterp solve uses) + input_j_phi so this is recon's
+            # natural equilibrium re-solved -- post-#22 the reconstruction
+            # solves at the FULL pressure, so anchoring this cache at the
+            # thermal-only `pressure` re-solved a different, lower-pressure
+            # equilibrium (issue #35 Defect 1, fifth site).  This is a
+            # BASELINE cache, so the baseline assembly is the consistent
+            # choice here (the per-draw anchor tracks pres_tmp instead).
             try:
                 _cache_pp = {"type": "linterp",
-                             "y": pchip_derivative(psi_N, pressure) /
+                             "y": pchip_derivative(psi_N, pressure_solve) /
                                   (mygs.psi_bounds[1] - mygs.psi_bounds[0]),
                              "x": psi_N}
                 _cache_pp["y"][-1] = 0.0
                 _cache_ffp = {"type": "jphi-linterp",
                               "y": input_j_phi.copy(), "x": psi_N}
-                mygs.set_targets(Ip=initial_Ip_target, pax=pressure[0])
+                mygs.set_targets(Ip=initial_Ip_target,
+                                 pax=float(pressure_solve[0]))
                 mygs.set_profiles(pp_prof=_cache_pp, ffp_prof=_cache_ffp)
                 mygs.solve()
                 print(f"  [DIFF_BS] state-anchor solve OK; entering SWB")

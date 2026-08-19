@@ -3,6 +3,4 @@
 #SBATCH --cpus-per-task=1
 #SBATCH --time=00:20:00
 #SBATCH --mem=16G
-# compute-node environment (adjust for your cluster), e.g.:
-# export OFT_PYTHONPATH=/path/to/OpenFUSIONToolkit/build_release/python
-python -m bouquet.parallel merge bouquet_2000ms_bundle.pkl
+python -m bouquet.parallel merge bouquet_2000ms_bundle.json

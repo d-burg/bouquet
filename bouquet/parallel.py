@@ -516,6 +516,13 @@ def emit_slurm_script(config, *, n_workers, seed, threads_per_worker,
         n_equils_total=int(config.generation.n_equils),
         scan_key=config.generation.scan_key,
         out_header=config.output_header,
+        # The stored config is the TEMPLATE: the shard runner overwrites
+        # solver.nthreads with threads_per_worker at run time (see _cli),
+        # so a reader of this file must not take solver.nthreads at face
+        # value for the parallel run it describes.
+        _shard_note=(f"solver.nthreads is overwritten to threads_per_worker "
+                     f"(= {int(threads_per_worker)}) by the shard runner; "
+                     f"the embedded value is the serial-template default"),
     )
     bname = f"{job_name}_bundle.json"
     bpath = os.path.join(out_dir, bname)
@@ -523,7 +530,28 @@ def emit_slurm_script(config, *, n_workers, seed, threads_per_worker,
         json.dump(bundle, fh, indent=2)
 
     part = f"#SBATCH --partition={partition}\n" if partition else ""
-    extra = "".join(f"{line}\n" for line in (setup or []))
+    # No setup lines given: emit the commented hint instead of nothing --
+    # without OFT importable every shard dies at `import OpenFUSIONToolkit`,
+    # and a user copying the sbatch never saw this docstring.  (The hint
+    # shipped in the committed example scripts for months and was lost when
+    # they were regenerated; Copilot review on PR #39.)
+    if setup:
+        extra = "".join(f"{line}\n" for line in setup)
+    else:
+        extra = ("# compute-node environment (adjust for your cluster), e.g.:\n"
+                 "# module load conda && conda activate bouquet\n"
+                 "# export OFT_PYTHONPATH=/path/to/OpenFUSIONToolkit"
+                 "/build_release/python\n")
+    # threads_per_worker > 1 trades bit-reproducibility for per-worker speed;
+    # the Python API warns at call time (_warn_multithreaded), but someone
+    # running the sbatch directly never sees that warning -- carry it in the
+    # script itself.
+    thread_note = ("" if int(threads_per_worker) <= 1 else
+                   "# NOTE threads_per_worker > 1: BLAS/OpenMP reductions are\n"
+                   "# no longer bit-reproducible run-to-run, and DLSODE has\n"
+                   "# been observed to hang under heavy oversubscription --\n"
+                   "# keep cpus-per-task == threads_per_worker (see\n"
+                   "# bouquet.parallel._warn_multithreaded).\n")
     # threads pinned to the task's cores; BLAS held to the same to avoid nesting.
     env = (f"export OMP_NUM_THREADS={threads_per_worker}\n"
            "export OMP_PROC_BIND=close OMP_PLACES=cores\n"
@@ -539,7 +567,7 @@ def emit_slurm_script(config, *, n_workers, seed, threads_per_worker,
         f"#SBATCH --array=0-{n_workers - 1}\n"
         f"#SBATCH --cpus-per-task={threads_per_worker}\n"
         f"#SBATCH --time={time_limit}\n#SBATCH --mem={mem_per_task}\n{part}"
-        f"{extra}{env}"
+        f"{extra}{thread_note}{env}"
         f"{python} -m bouquet.parallel shard {bname} $SLURM_ARRAY_TASK_ID\n"
     )
     merge = (

@@ -1,0 +1,115 @@
+{
+  "config": {
+    "source": {
+      "ids_path": "D3Dlike_baseline_omas.json",
+      "time": 2.3043,
+      "ida_path": null,
+      "impurity_Z": 6.0,
+      "LCFS_geqdsk": null,
+      "source_type": "imas"
+    },
+    "solver": {
+      "mesh_path": "DIIID_mesh.h5",
+      "nthreads": 1,
+      "order": 3,
+      "F0": null,
+      "isoflux_pts": null,
+      "isoflux_weights": null,
+      "saddle_targets": null,
+      "saddle_weights": null,
+      "coil_vsc": {
+        "F9A": 1.0,
+        "F9B": -1.0
+      },
+      "coil_reg": [],
+      "region_overrides": null
+    },
+    "output_header": "D3Dlike_par_ts_2000ms",
+    "uncertainty": {
+      "ida_path": null,
+      "sigma_mode": "auto",
+      "sigma_method": "percentile",
+      "sigma_ni_from_ne": true,
+      "ne_scalar_sigma": 0.05,
+      "te_scalar_sigma": 0.05,
+      "ni_scalar_sigma": 0.1,
+      "ti_scalar_sigma": 0.1,
+      "sigma_profiles": {},
+      "log_sigma_sources": true,
+      "jphi_scalar_sigma": 0.05,
+      "zeff_scalar_sigma": 0.05,
+      "n_ls": 0.5,
+      "t_ls": 0.4,
+      "j_ls": 0.25,
+      "aux_sigmas": {},
+      "aux_baselines": {},
+      "aux_length_scales": {}
+    },
+    "generation": {
+      "n_equils": 256,
+      "seed": null,
+      "scan_key": 2000,
+      "l_i_tolerance": 0.05,
+      "constrain_sawteeth": false,
+      "recalculate_j_BS": true,
+      "single_profile_jphi": false,
+      "jBS_scale_range": [
+        0.99,
+        1.01
+      ],
+      "jbs_delta_mode": false,
+      "isolate_edge_jBS": false,
+      "jBS_baseline_mode": "diff",
+      "accept_anchor_inband": false,
+      "perturb_jind_in_anchor": true,
+      "allow_unsafe_workflow": false,
+      "workflow": "auto",
+      "allow_incomplete_pressure": false,
+      "anchor_jtor_to_equilibrium": true,
+      "kinetic_source": "fuse",
+      "anchor_pressure_to_equilibrium": false,
+      "imas_corrective_jphi": false,
+      "floor_j_BS": false,
+      "swb_iterations": 3,
+      "coil_drift": 0.01,
+      "coil_drift_hard_factor": null,
+      "homotopy_passes": [
+        [
+          0.05,
+          0.1
+        ],
+        [
+          0.02,
+          0.05
+        ],
+        [
+          0.01,
+          0.01
+        ]
+      ],
+      "diagnostic_plots": false,
+      "capture_live_eq": true,
+      "capture_npsi": 257,
+      "capture_exact_inv_R2": true
+    },
+    "filtering": {
+      "rms_max_mm": 5.0,
+      "inspec_F_max": 0.02,
+      "inspec_VSC_max": 0.02
+    },
+    "fixed_components": {
+      "p_fast": null,
+      "j_NBI": null,
+      "j_RF": null,
+      "psi_N": null,
+      "p_fast_reduction": "trace"
+    },
+    "verbose": false
+  },
+  "n_workers": 32,
+  "seed": 12345,
+  "threads_per_worker": 4,
+  "n_equils_total": 256,
+  "scan_key": 2000,
+  "out_header": "D3Dlike_par_ts_2000ms"
+}

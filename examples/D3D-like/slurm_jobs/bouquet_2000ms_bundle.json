@@ -111,5 +111,6 @@
   "threads_per_worker": 4,
   "n_equils_total": 256,
   "scan_key": 2000,
-  "out_header": "D3Dlike_par_ts_2000ms"
+  "out_header": "D3Dlike_par_ts_2000ms",
+  "_shard_note": "solver.nthreads is overwritten to threads_per_worker (= 4) by the shard runner; the embedded value is the serial-template default"
 }

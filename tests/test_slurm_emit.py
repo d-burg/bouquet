@@ -26,6 +26,16 @@ from bouquet.config import (BouquetConfig, ReconstructionSource,
 from bouquet.parallel import emit_slurm_script
 
 
+def _read(path):
+    with open(path) as fh:
+        return fh.read()
+
+
+def _read_json(path):
+    with open(path) as fh:
+        return json.load(fh)
+
+
 def _mini_config():
     """A structurally-valid config; the emitter never opens these paths."""
     return BouquetConfig(
@@ -41,7 +51,7 @@ def test_emit_carries_the_env_hint_when_no_setup_given(tmp_path):
                               threads_per_worker=1, out_dir=str(tmp_path),
                               job_name="t")
     for key in ("array", "merge"):
-        txt = open(paths[key]).read()
+        txt = _read(paths[key])
         assert "compute-node environment" in txt, key
         assert "OFT_PYTHONPATH" in txt, key
 
@@ -53,7 +63,7 @@ def test_explicit_setup_lines_replace_the_hint():
         paths = emit_slurm_script(_mini_config(), n_workers=2, seed=1,
                                   threads_per_worker=1, out_dir=d,
                                   job_name="t2", setup=["module load x"])
-        txt = open(paths["array"]).read()
+        txt = _read(paths["array"])
         assert "module load x" in txt
         assert "compute-node environment" not in txt
 
@@ -67,8 +77,8 @@ def test_emit_warns_in_script_when_multithreaded(tmp_path):
         single = emit_slurm_script(_mini_config(), n_workers=2, seed=1,
                                    threads_per_worker=1,
                                    out_dir=str(tmp_path), job_name="ts")
-    assert "no longer bit-reproducible" in open(multi["array"]).read()
-    assert "no longer bit-reproducible" not in open(single["array"]).read()
+    assert "no longer bit-reproducible" in _read(multi["array"])
+    assert "no longer bit-reproducible" not in _read(single["array"])
 
 
 def test_bundle_notes_the_nthreads_overwrite(tmp_path):
@@ -77,7 +87,7 @@ def test_bundle_notes_the_nthreads_overwrite(tmp_path):
         paths = emit_slurm_script(_mini_config(), n_workers=2, seed=1,
                                   threads_per_worker=4,
                                   out_dir=str(tmp_path), job_name="tb")
-    b = json.load(open(paths["bundle"]))
+    b = _read_json(paths["bundle"])
     assert "_shard_note" in b
     assert "threads_per_worker" in b["_shard_note"]
     assert "(= 4)" in b["_shard_note"]

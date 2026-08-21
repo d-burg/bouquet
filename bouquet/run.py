@@ -823,6 +823,20 @@ class Bouquet:
                 ip_fuse_tot = _ip(FUSE_tot)
                 sgn = np.sign(ip_fuse_tot) or 1.0
                 fuse_tot_err_pct = 100.0 * (abs(ip_fuse_tot) - Ip_t) / Ip_t
+                # Diagnostics BEFORE any gate, so a refusal still leaves the
+                # evidence: is the MEASURE wrong (roundtrip), or does FUSE's
+                # total genuinely not carry Ip (which TokaMaker otherwise hides
+                # by renormalising the shape)?
+                try:
+                    _ip_solved = abs(float(mygs.get_stats(lcfs_pad=psi_pad)["Ip"]))
+                except Exception:
+                    _ip_solved = float("nan")
+                _e = lambda v: 100.0 * (abs(v) - Ip_t) / Ip_t
+                print("[imas SWB-split:ohmic DIAG] Ip_target=%.1f A | FSA roundtrip(eq own profile) %+.3f%% | "
+                      "FSA(FUSE_tot) %+.3f%% | fsa-convention(FUSE_tot) %+.3f%% | OFT compute_flux_integral(FUSE_tot) %+.3f%% | "
+                      "cyl proxy(FUSE_tot) %+.3f%% | solver achieved Ip %+.3f%% | <1/R^2> from %s"
+                      % (Ip_t, _e(_ip_roundtrip), fuse_tot_err_pct, _e(_ip_fsaconv(FUSE_tot)),
+                         _e(_ip_oft(FUSE_tot)), _e(_ip_cyl(FUSE_tot)), _e(_ip_solved), _inv_r2_src), flush=True)
                 if abs(fuse_tot_err_pct) > 2.0:
                     raise RuntimeError(
                         f"ohmic mode: FSA current integral of FUSE's own total is "

@@ -707,6 +707,28 @@ class Bouquet:
             j_BS_src = np.asarray(bl.j_BS, dtype=float)        # source bootstrap (FUSE)
             FUSE_tot = np.asarray(bl.j_phi, dtype=float)       # source total (j_tor)
             j_fixed = FUSE_tot - j_ind - j_BS_src              # = j_NBI + j_RF
+            # 'ohmic' mode: freeze the ANCHOR geometry now. solve_with_bootstrap
+            # iterates its own GS solves (generic inductive seed + its bootstrap)
+            # and leaves mygs on a different equilibrium; integrating FUSE's
+            # profile on that landed geometry read +31% of Ip on 161172 @ 1.6 s
+            # (vs +0.8% on the anchor) and collapsed the closure. Every Ip
+            # integral in the ohmic branch is taken on this snapshot.
+            _anchor = None
+            if str(gc.jBS_baseline_mode) == "ohmic":
+                from .utils import fsa_current_geometry as _fcg
+                from .physics import capture_equilibrium_fsa as _cef
+                _anchor = {"eq": mygs.copy_eq()}
+                _anchor["geom"] = _fcg(_anchor["eq"], np.asarray(psi_N, dtype=float), psi_pad=psi_pad)
+                _anchor["inv_r2_src"] = "get_q ravgs dict"
+                if _anchor["geom"]["inv_R2"] is None:
+                    _cap = _cef(mygs, npsi=max(257, psi_N.size), psi_pad=psi_pad, exact_inv_R2=True)
+                    if _cap.get("avg_inv_R2") is None:
+                        raise RuntimeError("ohmic mode: <1/R^2> unavailable on the anchor geometry")
+                    _anchor["geom"]["inv_R2"] = np.interp(
+                        np.asarray(_anchor["geom"]["psi_q"], float),
+                        np.asarray(_cap["psi_N"], float), np.asarray(_cap["avg_inv_R2"], float))
+                    _anchor["inv_r2_src"] = "capture_equilibrium_fsa contour quadrature (anchor, pre-SWB)"
+                _anchor["Ip_anchor"] = abs(float(mygs.get_stats(lcfs_pad=psi_pad)["Ip"]))
             swb_seed = create_power_flux_fun(psi_N.size, 1.5, 1.5)["y"]
             swb = solve_with_bootstrap(
                 mygs, ne, te, ni, ti, Zeff, bl.Ip_target, swb_seed,
@@ -775,31 +797,9 @@ class Bouquet:
                 from .sampling import get_li_proxy_geometry
                 from scipy import integrate as _integ
                 _psi_ip = np.asarray(psi_N, dtype=float)
-                _eq_snap = mygs.copy_eq()
-                _geom = fsa_current_geometry(_eq_snap, _psi_ip, psi_pad=psi_pad)
-                # <1/R^2>: this OFT build's get_q returns the legacy 3-entry
-                # ravgs without it, and the exact "jphi-linterp" measure needs
-                # it. Take it from capture_equilibrium_fsa's contour quadrature
-                # (exact_inv_R2=True), evaluated on the LIVE mygs at this same
-                # converged first-pass state (the snapshot was just taken from
-                # it; nothing has touched the solver in between). The quadrature
-                # self-validates its <1/R> against sauter_fc to 2% and drops
-                # avg_inv_R2 otherwise -- in that case we stop, not fall back.
-                _inv_r2_src = "get_q ravgs dict"
-                if _geom["inv_R2"] is None:
-                    from .physics import capture_equilibrium_fsa
-                    _cap = capture_equilibrium_fsa(mygs, npsi=max(257, psi_N.size),
-                                                   psi_pad=psi_pad, exact_inv_R2=True)
-                    if _cap.get("avg_inv_R2") is None:
-                        raise RuntimeError(
-                            "ohmic mode: <1/R^2> unavailable -- get_q is legacy "
-                            "and capture_equilibrium_fsa's quadrature failed its "
-                            "<1/R> self-check; refusing the biased 'fsa' fallback")
-                    _geom["inv_R2"] = np.interp(
-                        np.asarray(_geom["psi_q"], float),
-                        np.asarray(_cap["psi_N"], float),
-                        np.asarray(_cap["avg_inv_R2"], float))
-                    _inv_r2_src = "capture_equilibrium_fsa contour quadrature (interp onto psi_q)"
+                _eq_snap = _anchor["eq"]          # frozen BEFORE solve_with_bootstrap
+                _geom = _anchor["geom"]
+                _inv_r2_src = _anchor["inv_r2_src"]
                 # P' sign follows the case's flux convention: probe it against the
                 # source total rather than assume (a sign slip is ~6% of Ip).
                 _probe = eq_jphi_profile(_geom, "jphi-linterp", eq=_eq_snap)
@@ -824,9 +824,9 @@ class Bouquet:
                 _ip_fsaconv = lambda j: float(Ip_fsa_integral(
                     _eq_snap, _psi_ip, np.asarray(j, dtype=float),
                     convention="fsa", geom=_geom))   # documented ~+0.9% bias
-                _ip_oft = lambda j: float(mygs.compute_flux_integral(
+                _ip_oft = lambda j: float(_eq_snap.compute_flux_integral(
                     _psi_ip, np.asarray(j, dtype=float)))
-                _geo_cyl = get_li_proxy_geometry(mygs, psi_N.size, psi_pad)
+                _geo_cyl = get_li_proxy_geometry(_eq_snap, psi_N.size, psi_pad)
                 _dA_cyl = np.asarray(_geo_cyl["dA"], dtype=float)
                 _ip_cyl = lambda j: float(_integ.trapezoid(np.asarray(j, float) * _dA_cyl))
                 Ip_t = abs(float(bl.Ip_target))
@@ -837,14 +837,11 @@ class Bouquet:
                 # evidence: is the MEASURE wrong (roundtrip), or does FUSE's
                 # total genuinely not carry Ip (which TokaMaker otherwise hides
                 # by renormalising the shape)?
-                try:
-                    _ip_solved = abs(float(mygs.get_stats(lcfs_pad=psi_pad)["Ip"]))
-                except Exception:
-                    _ip_solved = float("nan")
+                _ip_solved = _anchor["Ip_anchor"]
                 _e = lambda v: 100.0 * (abs(v) - Ip_t) / Ip_t
                 print("[imas SWB-split:ohmic DIAG] Ip_target=%.1f A | FSA roundtrip(eq own profile) %+.3f%% | "
                       "FSA(FUSE_tot) %+.3f%% | fsa-convention(FUSE_tot) %+.3f%% | OFT compute_flux_integral(FUSE_tot) %+.3f%% | "
-                      "cyl proxy(FUSE_tot) %+.3f%% | solver achieved Ip %+.3f%% | <1/R^2> from %s"
+                      "cyl proxy(FUSE_tot) %+.3f%% | anchor eq Ip %+.3f%% | <1/R^2> from %s"
                       % (Ip_t, _e(_ip_roundtrip), fuse_tot_err_pct, _e(_ip_fsaconv(FUSE_tot)),
                          _e(_ip_oft(FUSE_tot)), _e(_ip_cyl(FUSE_tot)), _e(_ip_solved), _inv_r2_src), flush=True)
                 # GATE: validity of the MEASURE. The equilibrium's own GS current

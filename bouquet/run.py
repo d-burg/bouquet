@@ -758,15 +758,32 @@ class Bouquet:
                 # uses, on the converged first-pass geometry, and record the
                 # proxy's own error on the FUSE total so a biased proxy cannot
                 # masquerade as a physical ohmic rescale.
+                # Ip integral: OFT's exact area integral of a flux function,
+                # int f dA on the converged first-pass equilibrium. NOT the
+                # bouquet l_i proxy (get_li_proxy_geometry): that builds
+                # dA = dV/(2*pi*<R>) -- 1/<R> where the exact weight is <1/R> --
+                # and truncates at psi_pad, and on 148798 it mis-integrated
+                # FUSE's own total by +7.75%. The proxy is still evaluated and
+                # recorded below so the bias is visible, never used for closure.
                 from .sampling import get_li_proxy_geometry
                 from scipy import integrate as _integ
+                _psi_ip = np.asarray(psi_N, dtype=float)
+                _ip = lambda j: float(mygs.compute_flux_integral(
+                    _psi_ip, np.asarray(j, dtype=float)))
                 geo = get_li_proxy_geometry(mygs, psi_N.size, psi_pad)
-                dA = np.asarray(geo["dA"], dtype=float)
-                _ip = lambda j: float(_integ.trapezoid(np.asarray(j, float) * dA))
+                _dA_proxy = np.asarray(geo["dA"], dtype=float)
+                _ip_proxy = lambda j: float(_integ.trapezoid(np.asarray(j, float) * _dA_proxy))
                 Ip_t = abs(float(bl.Ip_target))
-                sgn = np.sign(_ip(FUSE_tot)) or 1.0
-                ip_ind, ip_bs, ip_fix = _ip(j_ind), _ip(j_BS_swb), _ip(j_fixed)
                 ip_fuse_tot = _ip(FUSE_tot)
+                sgn = np.sign(ip_fuse_tot) or 1.0
+                fuse_tot_err_pct = 100.0 * (abs(ip_fuse_tot) - Ip_t) / Ip_t
+                if abs(fuse_tot_err_pct) > 2.0:
+                    raise RuntimeError(
+                        f"ohmic mode: OFT area integral of FUSE's own total is "
+                        f"{fuse_tot_err_pct:+.2f}% off Ip_target -- j_phi is not "
+                        "integrating as the flux function TokaMaker assumes; "
+                        "refusing to close Ip by rescaling on top of that")
+                ip_ind, ip_bs, ip_fix = _ip(j_ind), _ip(j_BS_swb), _ip(j_fixed)
                 if abs(ip_ind) < 1e-6 * Ip_t:
                     raise RuntimeError("ohmic mode: FUSE j_inductive integrates to ~0; "
                                        "cannot close Ip on it")
@@ -785,20 +802,28 @@ class Bouquet:
                 _jd = getattr(bl, "jphi_diff", None)
                 ip_jd = _ip(k2e(_jd)) if _jd is not None else 0.0
                 bl.ip_closure = dict(
+                    integrator="OFT compute_flux_integral (int f dA)",
                     Ip_target=Ip_t,
-                    proxy_Ip_fuse_total=ip_fuse_tot,
-                    proxy_fuse_total_err_pct=100.0 * (abs(ip_fuse_tot) - Ip_t) / Ip_t,
-                    proxy_Ip_ohmic_unscaled=ip_ind, proxy_Ip_jBS_swb=ip_bs,
-                    proxy_Ip_fixed=ip_fix, ohm_scale=float(ohm_scale),
-                    proxy_Ip_hybrid=_ip(bl.j_phi),
+                    Ip_fuse_total=ip_fuse_tot,
+                    fuse_total_err_pct=fuse_tot_err_pct,
+                    Ip_ohmic_unscaled=ip_ind, Ip_jBS_swb=ip_bs, Ip_fixed=ip_fix,
+                    ohm_scale=float(ohm_scale),
+                    Ip_hybrid=_ip(bl.j_phi),
                     jphi_diff_dropped_Ip=ip_jd,
                     jphi_diff_dropped_pct_of_Ip=100.0 * ip_jd / Ip_t,
-                    swb_over_fuse_jBS_peak=float(ratio))
+                    swb_over_fuse_jBS_peak=float(ratio),
+                    # bouquet cylindrical proxy, for the record (NOT used)
+                    proxy_Ip_fuse_total=_ip_proxy(FUSE_tot),
+                    proxy_fuse_total_err_pct=100.0 * (abs(_ip_proxy(FUSE_tot)) - Ip_t) / Ip_t,
+                    proxy_ohm_scale_would_be=float(
+                        (sgn * Ip_t - _ip_proxy(j_BS_swb) - _ip_proxy(j_fixed)) / _ip_proxy(j_ind)))
                 print(f"[imas SWB-split:ohmic] ohm_scale={ohm_scale:.4f}  "
                       f"proxy Ip: ohm={ip_ind/1e6:.3f} jBS={ip_bs/1e6:.3f} "
                       f"fixed={ip_fix/1e6:.3f} MA -> hybrid={_ip(bl.j_phi)/1e6:.4f} "
-                      f"(target {Ip_t/1e6:.4f}); proxy err on FUSE total "
-                      f"{bl.ip_closure['proxy_fuse_total_err_pct']:+.2f}%; "
+                      f"(target {Ip_t/1e6:.4f}); OFT-integral err on FUSE total "
+                      f"{fuse_tot_err_pct:+.2f}% [bouquet proxy would be "
+                      f"{bl.ip_closure['proxy_fuse_total_err_pct']:+.2f}%, "
+                      f"ohm_scale {bl.ip_closure['proxy_ohm_scale_would_be']:.4f}]; "
                       f"jphi_diff anchor NOT applied ({100*ip_jd/Ip_t:+.2f}% of Ip); "
                       f"SWB/FUSE jBS peak={ratio:.3f}")
             else:

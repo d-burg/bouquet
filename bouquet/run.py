@@ -758,30 +758,50 @@ class Bouquet:
                 # uses, on the converged first-pass geometry, and record the
                 # proxy's own error on the FUSE total so a biased proxy cannot
                 # masquerade as a physical ohmic rescale.
-                # Ip integral: OFT's exact area integral of a flux function,
-                # int f dA on the converged first-pass equilibrium. NOT the
-                # bouquet l_i proxy (get_li_proxy_geometry): that builds
-                # dA = dV/(2*pi*<R>) -- 1/<R> where the exact weight is <1/R> --
-                # and truncates at psi_pad, and on 148798 it mis-integrated
-                # FUSE's own total by +7.75%. The proxy is still evaluated and
-                # recorded below so the bias is visible, never used for closure.
+                # Ip integral: bouquet's LCFS-truncated FSA current integral,
+                #   I_p = int dpsi (V'/2pi) <j_phi/R>
+                # (utils.Ip_fsa_integral, convention "jphi-linterp" -- the variable
+                # bouquet's arrays are handed to set_profiles as), evaluated on a
+                # copy_eq() SNAPSHOT of the converged first-pass geometry so no
+                # later solve can move it. NOT TokaMaker.compute_flux_integral:
+                # that integrates the whole reg==1 limiter region with the flux
+                # function held at its LCFS value outside the plasma, charging the
+                # scrape-off area at f(psi_N=1) (+11.9% of Ip on the D3D-like
+                # anchor; see the utils.py module note). And NOT the cylindrical
+                # l_i proxy (1/<R> for <1/R>; +7.75% on 148798). Both are still
+                # evaluated and RECORDED below so the biases stay visible.
+                from .utils import (fsa_current_geometry, Ip_fsa_integral,
+                                    eq_jphi_profile)
                 from .sampling import get_li_proxy_geometry
                 from scipy import integrate as _integ
                 _psi_ip = np.asarray(psi_N, dtype=float)
-                _ip = lambda j: float(mygs.compute_flux_integral(
+                _eq_snap = mygs.copy_eq()
+                _geom = fsa_current_geometry(_eq_snap, _psi_ip, psi_pad=psi_pad)
+                # P' sign follows the case's flux convention: probe it against the
+                # source total rather than assume (a sign slip is ~6% of Ip).
+                _probe = eq_jphi_profile(_geom, "jphi-linterp", eq=_eq_snap)
+                _pps = 1.0 if float(np.dot(_probe, FUSE_tot)) > 0.0 else -1.0
+                _ip = lambda j: float(Ip_fsa_integral(
+                    _eq_snap, _psi_ip, np.asarray(j, dtype=float),
+                    convention="jphi-linterp", pprime_sign=_pps, geom=_geom))
+                # the measure's own self-consistency: the equilibrium's OWN
+                # profile must integrate to its true Ip (validated +0.0055%)
+                _ip_roundtrip = _ip(_probe)
+                # recorded-only alternatives
+                _ip_oft = lambda j: float(mygs.compute_flux_integral(
                     _psi_ip, np.asarray(j, dtype=float)))
-                geo = get_li_proxy_geometry(mygs, psi_N.size, psi_pad)
-                _dA_proxy = np.asarray(geo["dA"], dtype=float)
-                _ip_proxy = lambda j: float(_integ.trapezoid(np.asarray(j, float) * _dA_proxy))
+                _geo_cyl = get_li_proxy_geometry(mygs, psi_N.size, psi_pad)
+                _dA_cyl = np.asarray(_geo_cyl["dA"], dtype=float)
+                _ip_cyl = lambda j: float(_integ.trapezoid(np.asarray(j, float) * _dA_cyl))
                 Ip_t = abs(float(bl.Ip_target))
                 ip_fuse_tot = _ip(FUSE_tot)
                 sgn = np.sign(ip_fuse_tot) or 1.0
                 fuse_tot_err_pct = 100.0 * (abs(ip_fuse_tot) - Ip_t) / Ip_t
                 if abs(fuse_tot_err_pct) > 2.0:
                     raise RuntimeError(
-                        f"ohmic mode: OFT area integral of FUSE's own total is "
+                        f"ohmic mode: FSA current integral of FUSE's own total is "
                         f"{fuse_tot_err_pct:+.2f}% off Ip_target -- j_phi is not "
-                        "integrating as the flux function TokaMaker assumes; "
+                        "integrating as the jphi-linterp profile it is handed as; "
                         "refusing to close Ip by rescaling on top of that")
                 ip_ind, ip_bs, ip_fix = _ip(j_ind), _ip(j_BS_swb), _ip(j_fixed)
                 if abs(ip_ind) < 1e-6 * Ip_t:
@@ -802,7 +822,10 @@ class Bouquet:
                 _jd = getattr(bl, "jphi_diff", None)
                 ip_jd = _ip(k2e(_jd)) if _jd is not None else 0.0
                 bl.ip_closure = dict(
-                    integrator="OFT compute_flux_integral (int f dA)",
+                    integrator="bouquet Ip_fsa_integral (LCFS-truncated FSA, jphi-linterp) on copy_eq snapshot",
+                    pprime_sign=_pps,
+                    fsa_roundtrip_Ip=_ip_roundtrip,
+                    fsa_roundtrip_err_pct=100.0 * (abs(_ip_roundtrip) - Ip_t) / Ip_t,
                     Ip_target=Ip_t,
                     Ip_fuse_total=ip_fuse_tot,
                     fuse_total_err_pct=fuse_tot_err_pct,
@@ -812,23 +835,29 @@ class Bouquet:
                     jphi_diff_dropped_Ip=ip_jd,
                     jphi_diff_dropped_pct_of_Ip=100.0 * ip_jd / Ip_t,
                     swb_over_fuse_jBS_peak=float(ratio),
-                    # bouquet cylindrical proxy, for the record (NOT used)
-                    proxy_Ip_fuse_total=_ip_proxy(FUSE_tot),
-                    proxy_fuse_total_err_pct=100.0 * (abs(_ip_proxy(FUSE_tot)) - Ip_t) / Ip_t,
+                    # recorded-only alternatives (NOT used for closure)
+                    oft_flux_integral_fuse_total=_ip_oft(FUSE_tot),
+                    oft_flux_integral_err_pct=100.0 * (abs(_ip_oft(FUSE_tot)) - Ip_t) / Ip_t,
+                    oft_ohm_scale_would_be=float(
+                        ((np.sign(_ip_oft(FUSE_tot)) or 1.0) * Ip_t
+                         - _ip_oft(j_BS_swb) - _ip_oft(j_fixed)) / _ip_oft(j_ind)),
+                    proxy_Ip_fuse_total=_ip_cyl(FUSE_tot),
+                    proxy_fuse_total_err_pct=100.0 * (abs(_ip_cyl(FUSE_tot)) - Ip_t) / Ip_t,
                     # the proxy carries its own sign convention (it came out
                     # negative on 148798 where OFT's integral is positive), so
                     # use ITS sign here, not the OFT one -- otherwise this
                     # diagnostic reads as a nonsensical negative rescale.
                     proxy_ohm_scale_would_be=float(
-                        ((np.sign(_ip_proxy(FUSE_tot)) or 1.0) * Ip_t
-                         - _ip_proxy(j_BS_swb) - _ip_proxy(j_fixed)) / _ip_proxy(j_ind)))
+                        ((np.sign(_ip_cyl(FUSE_tot)) or 1.0) * Ip_t
+                         - _ip_cyl(j_BS_swb) - _ip_cyl(j_fixed)) / _ip_cyl(j_ind)))
                 print(f"[imas SWB-split:ohmic] ohm_scale={ohm_scale:.4f}  "
                       f"proxy Ip: ohm={ip_ind/1e6:.3f} jBS={ip_bs/1e6:.3f} "
                       f"fixed={ip_fix/1e6:.3f} MA -> hybrid={_ip(bl.j_phi)/1e6:.4f} "
-                      f"(target {Ip_t/1e6:.4f}); OFT-integral err on FUSE total "
-                      f"{fuse_tot_err_pct:+.2f}% [bouquet proxy would be "
-                      f"{bl.ip_closure['proxy_fuse_total_err_pct']:+.2f}%, "
-                      f"ohm_scale {bl.ip_closure['proxy_ohm_scale_would_be']:.4f}]; "
+                      f"(target {Ip_t/1e6:.4f}); FSA-integral err on FUSE total "
+                      f"{fuse_tot_err_pct:+.2f}% (roundtrip {bl.ip_closure['fsa_roundtrip_err_pct']:+.3f}%) "
+                      f"[OFT compute_flux_integral would be {bl.ip_closure['oft_flux_integral_err_pct']:+.2f}%, "
+                      f"s={bl.ip_closure['oft_ohm_scale_would_be']:.4f}; cyl proxy "
+                      f"{bl.ip_closure['proxy_fuse_total_err_pct']:+.2f}%, s={bl.ip_closure['proxy_ohm_scale_would_be']:.4f}]; "
                       f"jphi_diff anchor NOT applied ({100*ip_jd/Ip_t:+.2f}% of Ip); "
                       f"SWB/FUSE jBS peak={ratio:.3f}")
             else:

@@ -85,3 +85,39 @@ def test_measure_failure_leaves_the_target_untouched():
                                                1.0e6, 1e-3)
     assert factor == 1.0
     np.testing.assert_array_equal(scaled, target)
+
+
+# ---------------------------------------------------------------------------
+#  structural guard: every corrector call site renormalises first
+# ---------------------------------------------------------------------------
+import re
+from pathlib import Path
+
+_SRC = Path(__file__).resolve().parents[1] / "bouquet" / "TokaMaker_interface.py"
+
+
+def _code(src):
+    return "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
+
+
+def test_every_corrector_call_site_renormalises_its_target_first():
+    """Each `_corrective_jphi_iteration(` call in TokaMaker_interface must be
+    preceded (within the same block) by a `_renormalize_target_to_Ip(` call.
+    A third site that bypasses it would reintroduce #29 silently."""
+    code = _code(_SRC.read_text())
+    calls = [m.start() for m in re.finditer(r"_corrective_jphi_iteration\(", code)
+             if not code[max(0, m.start() - 4):m.start()].endswith("def ")]
+    assert len(calls) >= 2, "expected the recon and per-draw call sites"
+    for pos in calls:
+        window = code[max(0, pos - 1500):pos]
+        assert "_renormalize_target_to_Ip(" in window, (
+            f"corrector call at offset {pos} is not preceded by a target "
+            "renormalisation (issue #29)")
+
+
+def test_the_guard_is_not_satisfied_by_a_comment():
+    """Negative control: a renormalise mention in a comment must not count."""
+    fake = ("# _renormalize_target_to_Ip( would go here\n"
+            "out = _corrective_jphi_iteration(mygs, psi_N, t, pp, Ip, pax, pad)\n")
+    code = _code(fake)
+    assert "_renormalize_target_to_Ip(" not in code

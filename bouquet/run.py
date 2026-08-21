@@ -815,8 +815,13 @@ class Bouquet:
                     # bouquet cylindrical proxy, for the record (NOT used)
                     proxy_Ip_fuse_total=_ip_proxy(FUSE_tot),
                     proxy_fuse_total_err_pct=100.0 * (abs(_ip_proxy(FUSE_tot)) - Ip_t) / Ip_t,
+                    # the proxy carries its own sign convention (it came out
+                    # negative on 148798 where OFT's integral is positive), so
+                    # use ITS sign here, not the OFT one -- otherwise this
+                    # diagnostic reads as a nonsensical negative rescale.
                     proxy_ohm_scale_would_be=float(
-                        (sgn * Ip_t - _ip_proxy(j_BS_swb) - _ip_proxy(j_fixed)) / _ip_proxy(j_ind)))
+                        ((np.sign(_ip_proxy(FUSE_tot)) or 1.0) * Ip_t
+                         - _ip_proxy(j_BS_swb) - _ip_proxy(j_fixed)) / _ip_proxy(j_ind)))
                 print(f"[imas SWB-split:ohmic] ohm_scale={ohm_scale:.4f}  "
                       f"proxy Ip: ohm={ip_ind/1e6:.3f} jBS={ip_bs/1e6:.3f} "
                       f"fixed={ip_fix/1e6:.3f} MA -> hybrid={_ip(bl.j_phi)/1e6:.4f} "

@@ -743,16 +743,77 @@ class Bouquet:
                 bl.j_phi = j_ind + bl.j_BS + j_fixed
                 print(f"[imas SWB-split:rescale] scale={scale:.3f}; FUSE ohmic kept; "
                       f"SWB/FUSE jBS peak={ratio:.3f}")
+            elif mode == "ohmic":
+                # Hybrid: FUSE ohmic + SWB bootstrap on the (IDA) kinetics +
+                # FUSE fixed (NBI/RF), with Ip closed by rescaling j_ohmic ONLY.
+                # Rationale: 'diff' pins the total to FUSE (erasing the pedestal
+                # current change that better kinetics imply) and 'rescale' scales
+                # the bootstrap to close l_i. Here the bootstrap and NBCD are
+                # taken as-is and the inductive absorbs the Ip mismatch, because
+                # it is the component with the weakest independent constraint.
+                # NOTE solve_jphi() passes the profile as a "jphi-linterp" SHAPE
+                # and TokaMaker rescales it uniformly to Ip_target, which would
+                # scale j_BS and j_fixed too -- so the closure MUST happen here,
+                # before the solve. We integrate with the same dA the l_i proxy
+                # uses, on the converged first-pass geometry, and record the
+                # proxy's own error on the FUSE total so a biased proxy cannot
+                # masquerade as a physical ohmic rescale.
+                from .sampling import get_li_proxy_geometry
+                from scipy import integrate as _integ
+                geo = get_li_proxy_geometry(mygs, psi_N.size, psi_pad)
+                dA = np.asarray(geo["dA"], dtype=float)
+                _ip = lambda j: float(_integ.trapezoid(np.asarray(j, float) * dA))
+                Ip_t = abs(float(bl.Ip_target))
+                sgn = np.sign(_ip(FUSE_tot)) or 1.0
+                ip_ind, ip_bs, ip_fix = _ip(j_ind), _ip(j_BS_swb), _ip(j_fixed)
+                ip_fuse_tot = _ip(FUSE_tot)
+                if abs(ip_ind) < 1e-6 * Ip_t:
+                    raise RuntimeError("ohmic mode: FUSE j_inductive integrates to ~0; "
+                                       "cannot close Ip on it")
+                ohm_scale = (sgn * Ip_t - ip_bs - ip_fix) / ip_ind
+                if not (0.2 < ohm_scale < 5.0):
+                    raise RuntimeError(
+                        f"ohmic mode: j_ohmic rescale {ohm_scale:.3f} is outside "
+                        "[0.2, 5] -- the hybrid components do not add up to Ip; "
+                        "refusing to hide that behind a rescale")
+                bl.jBS_diff = None
+                bl.bs_scale = 1.0
+                bl.ohm_scale = float(ohm_scale)
+                bl.j_BS = j_BS_swb
+                bl.j_inductive = ohm_scale * j_ind
+                bl.j_phi = bl.j_inductive + j_BS_swb + j_fixed
+                _jd = getattr(bl, "jphi_diff", None)
+                ip_jd = _ip(k2e(_jd)) if _jd is not None else 0.0
+                bl.ip_closure = dict(
+                    Ip_target=Ip_t,
+                    proxy_Ip_fuse_total=ip_fuse_tot,
+                    proxy_fuse_total_err_pct=100.0 * (abs(ip_fuse_tot) - Ip_t) / Ip_t,
+                    proxy_Ip_ohmic_unscaled=ip_ind, proxy_Ip_jBS_swb=ip_bs,
+                    proxy_Ip_fixed=ip_fix, ohm_scale=float(ohm_scale),
+                    proxy_Ip_hybrid=_ip(bl.j_phi),
+                    jphi_diff_dropped_Ip=ip_jd,
+                    jphi_diff_dropped_pct_of_Ip=100.0 * ip_jd / Ip_t,
+                    swb_over_fuse_jBS_peak=float(ratio))
+                print(f"[imas SWB-split:ohmic] ohm_scale={ohm_scale:.4f}  "
+                      f"proxy Ip: ohm={ip_ind/1e6:.3f} jBS={ip_bs/1e6:.3f} "
+                      f"fixed={ip_fix/1e6:.3f} MA -> hybrid={_ip(bl.j_phi)/1e6:.4f} "
+                      f"(target {Ip_t/1e6:.4f}); proxy err on FUSE total "
+                      f"{bl.ip_closure['proxy_fuse_total_err_pct']:+.2f}%; "
+                      f"jphi_diff anchor NOT applied ({100*ip_jd/Ip_t:+.2f}% of Ip); "
+                      f"SWB/FUSE jBS peak={ratio:.3f}")
             else:
                 raise ValueError(f"unknown jBS_baseline_mode {mode!r} "
-                                 "(expected 'diff' or 'rescale')")
+                                 "(expected 'diff', 'rescale' or 'ohmic')")
             # Solve the resulting total so coils + li_1 reflect this equilibrium.
             # Anchor to equilibrium.j_tor (add the fixed jphi_diff) so the baseline
             # l_i/coils reflect the same total the draws use (== equilibrium.j_tor),
             # not the core_profiles total. The diff-mode component split above stays
             # on core_profiles.j_tor; jphi_diff is the fixed equilibrium offset.
             _jphi_solve = np.asarray(bl.j_phi, dtype=float)
-            if getattr(bl, "jphi_diff", None) is not None:
+            # jphi_diff re-anchors the total to FUSE's equilibrium.j_tor; in
+            # 'ohmic' mode the whole point is NOT to anchor to FUSE, so skip it
+            # (its magnitude is recorded in bl.ip_closure for the reader).
+            if getattr(bl, "jphi_diff", None) is not None and mode != "ohmic":
                 _jphi_solve = _jphi_solve + k2e(bl.jphi_diff)
             nl_its = solve_jphi(_jphi_solve)
 
@@ -792,7 +853,12 @@ class Bouquet:
         metrics = dict(bl.li_metrics or {})
         metrics.update(tokamaker_li_1=tok_li1, tokamaker_li_3=tok_li3,
                        forward_solve_nl_its=nl_its,
-                       forward_solve_ip_err_pct=ip_err_pct)
+                       forward_solve_ip_err_pct=ip_err_pct,
+                       jBS_baseline_mode=str(self.config.generation.jBS_baseline_mode),
+                       bs_scale=float(getattr(bl, "bs_scale", 1.0)),
+                       ohm_scale=float(getattr(bl, "ohm_scale", 1.0)))
+        if getattr(bl, "ip_closure", None):
+            metrics["ip_closure"] = dict(bl.ip_closure)
         bl.li_metrics = metrics
         # Target TokaMaker li_3 ('iter').  The IMAS path is not itself affected
         # by the geqdsk estimator mismatch (both sides come from TokaMaker),
@@ -1127,10 +1193,10 @@ class Bouquet:
                                 "find_optimal_scale/corrector matching loop "
                                 "homogenizes draws; use diff+C "
                                 "(perturb_jind_in_anchor=True)")
-            if gc.jBS_baseline_mode not in ("diff", "rescale"):
+            if gc.jBS_baseline_mode not in ("diff", "rescale", "ohmic"):
                 problems.append(f"IMAS path jBS_baseline_mode="
                                 f"{gc.jBS_baseline_mode!r} not in "
-                                f"('diff','rescale')")
+                                f"('diff','rescale','ohmic')")
         if not problems:
             return
         msg = ("bouquet workflow guard: " + "; ".join(problems)

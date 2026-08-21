@@ -777,6 +777,29 @@ class Bouquet:
                 _psi_ip = np.asarray(psi_N, dtype=float)
                 _eq_snap = mygs.copy_eq()
                 _geom = fsa_current_geometry(_eq_snap, _psi_ip, psi_pad=psi_pad)
+                # <1/R^2>: this OFT build's get_q returns the legacy 3-entry
+                # ravgs without it, and the exact "jphi-linterp" measure needs
+                # it. Take it from capture_equilibrium_fsa's contour quadrature
+                # (exact_inv_R2=True), evaluated on the LIVE mygs at this same
+                # converged first-pass state (the snapshot was just taken from
+                # it; nothing has touched the solver in between). The quadrature
+                # self-validates its <1/R> against sauter_fc to 2% and drops
+                # avg_inv_R2 otherwise -- in that case we stop, not fall back.
+                _inv_r2_src = "get_q ravgs dict"
+                if _geom["inv_R2"] is None:
+                    from .physics import capture_equilibrium_fsa
+                    _cap = capture_equilibrium_fsa(mygs, npsi=max(257, psi_N.size),
+                                                   psi_pad=psi_pad, exact_inv_R2=True)
+                    if _cap.get("avg_inv_R2") is None:
+                        raise RuntimeError(
+                            "ohmic mode: <1/R^2> unavailable -- get_q is legacy "
+                            "and capture_equilibrium_fsa's quadrature failed its "
+                            "<1/R> self-check; refusing the biased 'fsa' fallback")
+                    _geom["inv_R2"] = np.interp(
+                        np.asarray(_geom["psi_q"], float),
+                        np.asarray(_cap["psi_N"], float),
+                        np.asarray(_cap["avg_inv_R2"], float))
+                    _inv_r2_src = "capture_equilibrium_fsa contour quadrature (interp onto psi_q)"
                 # P' sign follows the case's flux convention: probe it against the
                 # source total rather than assume (a sign slip is ~6% of Ip).
                 _probe = eq_jphi_profile(_geom, "jphi-linterp", eq=_eq_snap)
@@ -788,6 +811,9 @@ class Bouquet:
                 # profile must integrate to its true Ip (validated +0.0055%)
                 _ip_roundtrip = _ip(_probe)
                 # recorded-only alternatives
+                _ip_fsaconv = lambda j: float(Ip_fsa_integral(
+                    _eq_snap, _psi_ip, np.asarray(j, dtype=float),
+                    convention="fsa", geom=_geom))   # documented ~+0.9% bias
                 _ip_oft = lambda j: float(mygs.compute_flux_integral(
                     _psi_ip, np.asarray(j, dtype=float)))
                 _geo_cyl = get_li_proxy_geometry(mygs, psi_N.size, psi_pad)
@@ -824,6 +850,7 @@ class Bouquet:
                 bl.ip_closure = dict(
                     integrator="bouquet Ip_fsa_integral (LCFS-truncated FSA, jphi-linterp) on copy_eq snapshot",
                     pprime_sign=_pps,
+                    inv_R2_source=_inv_r2_src,
                     fsa_roundtrip_Ip=_ip_roundtrip,
                     fsa_roundtrip_err_pct=100.0 * (abs(_ip_roundtrip) - Ip_t) / Ip_t,
                     Ip_target=Ip_t,
@@ -836,6 +863,7 @@ class Bouquet:
                     jphi_diff_dropped_pct_of_Ip=100.0 * ip_jd / Ip_t,
                     swb_over_fuse_jBS_peak=float(ratio),
                     # recorded-only alternatives (NOT used for closure)
+                    fsaconv_fuse_total_err_pct=100.0 * (abs(_ip_fsaconv(FUSE_tot)) - Ip_t) / Ip_t,
                     oft_flux_integral_fuse_total=_ip_oft(FUSE_tot),
                     oft_flux_integral_err_pct=100.0 * (abs(_ip_oft(FUSE_tot)) - Ip_t) / Ip_t,
                     oft_ohm_scale_would_be=float(

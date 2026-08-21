@@ -837,12 +837,25 @@ class Bouquet:
                       "cyl proxy(FUSE_tot) %+.3f%% | solver achieved Ip %+.3f%% | <1/R^2> from %s"
                       % (Ip_t, _e(_ip_roundtrip), fuse_tot_err_pct, _e(_ip_fsaconv(FUSE_tot)),
                          _e(_ip_oft(FUSE_tot)), _e(_ip_cyl(FUSE_tot)), _e(_ip_solved), _inv_r2_src), flush=True)
-                if abs(fuse_tot_err_pct) > 2.0:
+                # GATE: validity of the MEASURE. The equilibrium's own GS current
+                # profile must round-trip to its Ip (bouquet validated +0.0055%,
+                # measured -0.002% on 148798). If it does not, no closure built
+                # on this geometry is meaningful -- stop. (Re-targeted 2026-08-21,
+                # user-approved: the previous gate tested whether FUSE's total
+                # carries Ip, which is a property of the FUSE DATA, not of the
+                # measure -- and absorbing that deficit into s, visibly, is the
+                # whole point of this mode. In every other mode TokaMaker
+                # absorbs it silently by renormalising the shape.)
+                _rt_err = 100.0 * (abs(_ip_roundtrip) - Ip_t) / Ip_t
+                if abs(_rt_err) > 0.5:
                     raise RuntimeError(
-                        f"ohmic mode: FSA current integral of FUSE's own total is "
-                        f"{fuse_tot_err_pct:+.2f}% off Ip_target -- j_phi is not "
-                        "integrating as the jphi-linterp profile it is handed as; "
-                        "refusing to close Ip by rescaling on top of that")
+                        f"ohmic mode: the FSA current measure does not round-trip "
+                        f"the equilibrium's own profile to its Ip ({_rt_err:+.3f}%); "
+                        "the geometry/measure is wrong, refusing to close Ip on it")
+                # Property of the DATA: reported, recorded, absorbed by s.
+                print(f"[imas SWB-split:ohmic] FUSE core_profiles total carries "
+                      f"{fuse_tot_err_pct:+.2f}% of Ip_target (exact FSA measure) "
+                      f"-> absorbed into ohm_scale", flush=True)
                 ip_ind, ip_bs, ip_fix = _ip(j_ind), _ip(j_BS_swb), _ip(j_fixed)
                 if abs(ip_ind) < 1e-6 * Ip_t:
                     raise RuntimeError("ohmic mode: FUSE j_inductive integrates to ~0; "

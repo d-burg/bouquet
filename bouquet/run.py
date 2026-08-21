@@ -771,7 +771,7 @@ class Bouquet:
                 # l_i proxy (1/<R> for <1/R>; +7.75% on 148798). Both are still
                 # evaluated and RECORDED below so the biases stay visible.
                 from .utils import (fsa_current_geometry, Ip_fsa_integral,
-                                    eq_jphi_profile)
+                                    Ip_fsa_weights, eq_jphi_profile)
                 from .sampling import get_li_proxy_geometry
                 from scipy import integrate as _integ
                 _psi_ip = np.asarray(psi_N, dtype=float)
@@ -807,6 +807,16 @@ class Bouquet:
                 _ip = lambda j: float(Ip_fsa_integral(
                     _eq_snap, _psi_ip, np.asarray(j, dtype=float),
                     convention="jphi-linterp", pprime_sign=_pps, geom=_geom))
+                # The jphi-linterp measure is AFFINE: I_p[J] = int w J + c, with c
+                # the P'-term of the GS source (~3% of Ip). Summing per-component
+                # _ip() calls counts c once PER COMPONENT -- the first version of
+                # this closure did exactly that and landed the hybrid +4.5% over
+                # Ip (which TokaMaker would then have renormalised out of the whole
+                # shape, j_BS included). Close on the LINEAR part and carry c once.
+                _w_lin, _c_affine = Ip_fsa_weights(_geom, convention="jphi-linterp",
+                                                   pprime_sign=_pps)
+                _lin = lambda j: float(_integ.trapezoid(
+                    _w_lin * np.asarray(j, dtype=float), np.asarray(_geom["psi_N"], float)))
                 # the measure's own self-consistency: the equilibrium's OWN
                 # profile must integrate to its true Ip (validated +0.0055%)
                 _ip_roundtrip = _ip(_probe)
@@ -856,11 +866,12 @@ class Bouquet:
                 print(f"[imas SWB-split:ohmic] FUSE core_profiles total carries "
                       f"{fuse_tot_err_pct:+.2f}% of Ip_target (exact FSA measure) "
                       f"-> absorbed into ohm_scale", flush=True)
-                ip_ind, ip_bs, ip_fix = _ip(j_ind), _ip(j_BS_swb), _ip(j_fixed)
+                ip_ind, ip_bs, ip_fix = _lin(j_ind), _lin(j_BS_swb), _lin(j_fixed)
                 if abs(ip_ind) < 1e-6 * Ip_t:
                     raise RuntimeError("ohmic mode: FUSE j_inductive integrates to ~0; "
                                        "cannot close Ip on it")
-                ohm_scale = (sgn * Ip_t - ip_bs - ip_fix) / ip_ind
+                # s * lin(ohm) + lin(bs) + lin(fix) + c = Ip_target
+                ohm_scale = (sgn * Ip_t - _c_affine - ip_bs - ip_fix) / ip_ind
                 if not (0.2 < ohm_scale < 5.0):
                     raise RuntimeError(
                         f"ohmic mode: j_ohmic rescale {ohm_scale:.3f} is outside "
@@ -872,12 +883,19 @@ class Bouquet:
                 bl.j_BS = j_BS_swb
                 bl.j_inductive = ohm_scale * j_ind
                 bl.j_phi = bl.j_inductive + j_BS_swb + j_fixed
+                _closed_err = 100.0 * (abs(_ip(bl.j_phi)) - Ip_t) / Ip_t
+                if abs(_closed_err) > 0.05:
+                    raise RuntimeError(
+                        f"ohmic mode: closed hybrid integrates to {_closed_err:+.3f}% "
+                        "of Ip_target after closure -- algebra error, refusing")
                 _jd = getattr(bl, "jphi_diff", None)
-                ip_jd = _ip(k2e(_jd)) if _jd is not None else 0.0
+                ip_jd = _lin(k2e(_jd)) if _jd is not None else 0.0
                 bl.ip_closure = dict(
                     integrator="bouquet Ip_fsa_integral (LCFS-truncated FSA, jphi-linterp) on copy_eq snapshot",
                     pprime_sign=_pps,
                     inv_R2_source=_inv_r2_src,
+                    affine_pprime_term_c=float(_c_affine),
+                    affine_pprime_term_pct_of_Ip=100.0 * float(_c_affine) / Ip_t,
                     fsa_roundtrip_Ip=_ip_roundtrip,
                     fsa_roundtrip_err_pct=100.0 * (abs(_ip_roundtrip) - Ip_t) / Ip_t,
                     Ip_target=Ip_t,
@@ -906,8 +924,9 @@ class Bouquet:
                         ((np.sign(_ip_cyl(FUSE_tot)) or 1.0) * Ip_t
                          - _ip_cyl(j_BS_swb) - _ip_cyl(j_fixed)) / _ip_cyl(j_ind)))
                 print(f"[imas SWB-split:ohmic] ohm_scale={ohm_scale:.4f}  "
-                      f"proxy Ip: ohm={ip_ind/1e6:.3f} jBS={ip_bs/1e6:.3f} "
-                      f"fixed={ip_fix/1e6:.3f} MA -> hybrid={_ip(bl.j_phi)/1e6:.4f} "
+                      f"linear Ip parts: ohm={ip_ind/1e6:.3f} jBS={ip_bs/1e6:.3f} "
+                      f"fixed={ip_fix/1e6:.3f} + P'-term c={_c_affine/1e6:+.4f} MA "
+                      f"-> hybrid={_ip(bl.j_phi)/1e6:.4f} "
                       f"(target {Ip_t/1e6:.4f}); FSA-integral err on FUSE total "
                       f"{fuse_tot_err_pct:+.2f}% (roundtrip {bl.ip_closure['fsa_roundtrip_err_pct']:+.3f}%) "
                       f"[OFT compute_flux_integral would be {bl.ip_closure['oft_flux_integral_err_pct']:+.2f}%, "

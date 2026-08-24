@@ -867,19 +867,45 @@ class Bouquet:
                 if abs(ip_ind) < 1e-6 * Ip_t:
                     raise RuntimeError("ohmic mode: FUSE j_inductive integrates to ~0; "
                                        "cannot close Ip on it")
-                # s * lin(ohm) + lin(bs) + lin(fix) + c = Ip_target
-                ohm_scale = (sgn * Ip_t - _c_affine - ip_bs - ip_fix) / ip_ind
-                if not (0.2 < ohm_scale < 5.0):
-                    raise RuntimeError(
-                        f"ohmic mode: j_ohmic rescale {ohm_scale:.3f} is outside "
-                        "[0.2, 5] -- the hybrid components do not add up to Ip; "
-                        "refusing to hide that behind a rescale")
-                bl.jBS_diff = None
-                bl.bs_scale = 1.0
-                bl.ohm_scale = float(ohm_scale)
-                bl.j_BS = j_BS_swb
-                bl.j_inductive = ohm_scale * j_ind
-                bl.j_phi = bl.j_inductive + j_BS_swb + j_fixed
+                # Which channel absorbs the Ip closure. "ohmic" (default):
+                #   s * lin(ohm) + lin(bs) + lin(fix) + c = Ip_target
+                # "bootstrap": keep j_ohmic exactly as FUSE diffused it and put
+                # the whole deficit on j_BS instead:
+                #   lin(ohm) + s_BS * lin(bs) + lin(fix) + c = Ip_target
+                # The two are the extreme attributions of the same deficit; run
+                # both to bracket the closure uncertainty.
+                _chan = str(getattr(gc, "ohmic_closure_channel", "ohmic"))
+                if _chan == "bootstrap":
+                    if abs(ip_bs) < 1e-6 * Ip_t:
+                        raise RuntimeError("ohmic mode/bootstrap channel: j_BS "
+                                           "integrates to ~0; cannot close Ip on it")
+                    bs_scale = (sgn * Ip_t - _c_affine - ip_ind - ip_fix) / ip_bs
+                    if not (0.2 < bs_scale < 5.0):
+                        raise RuntimeError(
+                            f"ohmic mode/bootstrap channel: j_BS rescale "
+                            f"{bs_scale:.3f} is outside [0.2, 5]; refusing")
+                    ohm_scale = 1.0
+                    bl.jBS_diff = None
+                    bl.bs_scale = float(bs_scale)
+                    bl.ohm_scale = 1.0
+                    bl.j_BS = bs_scale * j_BS_swb
+                    bl.j_inductive = j_ind
+                elif _chan == "ohmic":
+                    ohm_scale = (sgn * Ip_t - _c_affine - ip_bs - ip_fix) / ip_ind
+                    if not (0.2 < ohm_scale < 5.0):
+                        raise RuntimeError(
+                            f"ohmic mode: j_ohmic rescale {ohm_scale:.3f} is outside "
+                            "[0.2, 5] -- the hybrid components do not add up to Ip; "
+                            "refusing to hide that behind a rescale")
+                    bl.jBS_diff = None
+                    bl.bs_scale = 1.0
+                    bl.ohm_scale = float(ohm_scale)
+                    bl.j_BS = j_BS_swb
+                    bl.j_inductive = ohm_scale * j_ind
+                else:
+                    raise ValueError(f"unknown ohmic_closure_channel {_chan!r} "
+                                     "(expected 'ohmic' or 'bootstrap')")
+                bl.j_phi = bl.j_inductive + bl.j_BS + j_fixed
                 _closed_err = 100.0 * (abs(_ip(bl.j_phi)) - Ip_t) / Ip_t
                 if abs(_closed_err) > 0.05:
                     raise RuntimeError(
@@ -899,7 +925,8 @@ class Bouquet:
                     Ip_fuse_total=ip_fuse_tot,
                     fuse_total_err_pct=fuse_tot_err_pct,
                     Ip_ohmic_unscaled=ip_ind, Ip_jBS_swb=ip_bs, Ip_fixed=ip_fix,
-                    ohm_scale=float(ohm_scale),
+                    closure_channel=_chan,
+                    ohm_scale=float(ohm_scale), bs_scale=float(getattr(bl, 'bs_scale', 1.0)),
                     Ip_hybrid=_ip(bl.j_phi),
                     jphi_diff_dropped_Ip=ip_jd,
                     jphi_diff_dropped_pct_of_Ip=100.0 * ip_jd / Ip_t,
@@ -920,7 +947,7 @@ class Bouquet:
                     proxy_ohm_scale_would_be=float(
                         ((np.sign(_ip_cyl(FUSE_tot)) or 1.0) * Ip_t
                          - _ip_cyl(j_BS_swb) - _ip_cyl(j_fixed)) / _ip_cyl(j_ind)))
-                print(f"[imas SWB-split:ohmic] ohm_scale={ohm_scale:.4f}  "
+                print(f"[imas SWB-split:ohmic] channel={_chan} ohm_scale={ohm_scale:.4f} bs_scale={float(getattr(bl,'bs_scale',1.0)):.4f}  "
                       f"linear Ip parts: ohm={ip_ind/1e6:.3f} jBS={ip_bs/1e6:.3f} "
                       f"fixed={ip_fix/1e6:.3f} + P'-term c={_c_affine/1e6:+.4f} MA "
                       f"-> hybrid={_ip(bl.j_phi)/1e6:.4f} "

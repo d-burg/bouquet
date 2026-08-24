@@ -391,6 +391,11 @@ class GenerationConfig:
     #               kinetic source has a materially different pedestal than
     #               FUSE -- "diff" would erase that current change.
     jBS_baseline_mode: str = "diff"
+    #: Which channel absorbs the Ip closure in jBS_baseline_mode="ohmic":
+    #: "ohmic" rescales j_inductive (default); "bootstrap" keeps j_inductive as
+    #: FUSE diffused it and rescales j_BS instead. The two bracket the closure
+    #: uncertainty of the hybrid recipe.
+    ohmic_closure_channel: str = "ohmic"
     # Fix B: when the recon-anchor's equilibrium l_i is already within the band,
     # accept the anchor and skip find_optimal_scale + the corrective iteration
     # (which otherwise overshoot l_i and drift degenerate coils off baseline).

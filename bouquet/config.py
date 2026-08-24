@@ -395,7 +395,7 @@ class GenerationConfig:
     #: "ohmic" rescales j_inductive (default); "bootstrap" keeps j_inductive as
     #: FUSE diffused it and rescales j_BS instead. The two bracket the closure
     #: uncertainty of the hybrid recipe.
-    ohmic_closure_channel: str = "ohmic"
+    closure_channel: str = "ohmic"
     # Fix B: when the recon-anchor's equilibrium l_i is already within the band,
     # accept the anchor and skip find_optimal_scale + the corrective iteration
     # (which otherwise overshoot l_i and drift degenerate coils off baseline).

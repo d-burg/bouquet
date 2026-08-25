@@ -874,7 +874,7 @@ class Bouquet:
                 #   lin(ohm) + s_BS * lin(bs) + lin(fix) + c = Ip_target
                 # The two are the extreme attributions of the same deficit; run
                 # both to bracket the closure uncertainty.
-                _chan = str(getattr(gc, "closure_channel", "ohmic"))
+                _chan = str(getattr(gc, "closure_channel", "bootstrap"))
                 if _chan == "bootstrap":
                     if abs(ip_bs) < 1e-6 * Ip_t:
                         raise RuntimeError("ohmic mode/bootstrap channel: j_BS "

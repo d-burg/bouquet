@@ -971,6 +971,10 @@ class Bouquet:
                     if _act.sum() < 4:
                         raise RuntimeError(f"closure_channel='mse': only {int(_act.sum())} active MSE chords")
                     _pts = np.column_stack([_mR[_act], _mZ[_act]])
+                    # FWTGAM is EFIT's fit weight (effective sigma = sigma/sqrt(w)),
+                    # NOT a 0/1 mask -- fold it in ONCE so the chi^2 sum and the
+                    # sigma_sys bisection agree about the per-chord uncertainty.
+                    _sgeff2 = _sg[_act] ** 2 / np.maximum(_wt[_act], 1e-12)
                     # COCOS reconciliation: the equilibrium's stored field
                     # orientation vs the EFIT02 measurement convention differs
                     # per shot (Ip/Bt helicity). Resolve it EMPIRICALLY once per
@@ -993,8 +997,8 @@ class Bouquet:
                             syn = ((_A[1][_act] * sp * B[:, 2] + _A5[_act] * _Er[_act])
                                    / (_A[2][_act] * st * B[:, 1]
                                       + _A[3][_act] * sp * B[:, 0] + _A[4][_act] * sp * B[:, 2]))
-                            r = (syn - _tg[_act]) / _sg[_act]
-                            return float(np.sum(_wt[_act] * r * r)), syn
+                            r2 = (syn - _tg[_act]) ** 2 / _sgeff2
+                            return float(np.sum(r2)), syn
                         if not _sign["fixed"]:
                             _best = min(((sp, st) for sp in (1.0, -1.0) for st in (1.0, -1.0)),
                                         key=lambda c: _c2(*c)[0])
@@ -1027,9 +1031,9 @@ class Bouquet:
                         _jr = int(np.argmin([c for _, _, c in _raw]))
                         _sbest = _raw[_jr][0]
                         _dres = _syns[_sbest] - _tg[_act]
-                        _w = _wt[_act]; _sg2 = _sg[_act] ** 2; _na = int(_act.sum())
+                        _na = int(_act.sum())
                         def _c2of(ss2):
-                            return float(np.sum(_w * _dres ** 2 / (_sg2 + ss2)))
+                            return float(np.sum(_dres ** 2 / (_sgeff2 + ss2)))
                         _ss2 = 0.0
                         if _c2of(0.0) > _na:
                             loA, hiA = 0.0, float(np.max(_dres ** 2)) * 10 + 1e-12
@@ -1041,7 +1045,7 @@ class Bouquet:
                         _sig_sys = float(np.sqrt(_ss2))
                         # (b) rebuild the penalized curve with inflated sigma
                         _curve = [(a, b, (np.inf if not np.isfinite(c) else
-                                   float(np.sum(_w * (_syns[a] - _tg[_act]) ** 2 / (_sg2 + _ss2)))
+                                   float(np.sum((_syns[a] - _tg[_act]) ** 2 / (_sgeff2 + _ss2)))
                                    + ((a - 1.0) / _psig) ** 2))
                                   for a, b, c in _curve]
                     else:

@@ -283,14 +283,17 @@ class UncertaintyConfig:
     zeff_scalar_sigma: float = 0.05
     # Where the Z_eff envelope's MAGNITUDE comes from (the channel is enabled
     # by zeff_scalar_sigma > 0 either way):
-    #   "auto"     -- measured IDA sigma_Zeff when the file provides one
-    #                 (ensemble-sample spread, or the Zeff_err dataset on
-    #                 newer direct-layout vintages), else the scalar.  The
-    #                 measured envelope runs ~8-9 % median in-core vs the 5 %
-    #                 scalar default, with radial structure to ~15 % -- the
-    #                 highest-fidelity tier available per file wins.
-    #   "measured" -- require the measured envelope; warn LOUDLY and fall
-    #                 back to the scalar if this file cannot provide one.
+    #   "auto"     -- highest-fidelity tier the file supports:
+    #                 carbon-propagated dilution sigma (n_12C6_err / the
+    #                 dilution posterior; 1.9-5.8 % of Zeff in-core on the
+    #                 demo shots, sane in the SOL) > the file's VB-measured
+    #                 sigma_Zeff (Zeff_err / sample spread; 8-9 % core but
+    #                 44-130 % SOL, grand means to ~90 % on some shots) >
+    #                 the scalar.  The Zeff-primary scheme perturbs Zeff to
+    #                 move the dilution ni = ne - Z nC, and CER carbon IS
+    #                 that dilution's direct measurement, hence the order.
+    #   "carbon"   -- require the carbon-propagated tier; loud fallback.
+    #   "measured" -- require the VB-measured envelope; loud fallback.
     #   "scalar"   -- always the flat zeff_scalar_sigma fraction (pre-1.3.2
     #                 behaviour).
     # Only the reconstruction/IDA path is eligible for the measured tier: on

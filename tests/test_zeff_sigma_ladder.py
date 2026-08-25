@@ -49,6 +49,7 @@ def _write_direct(path, with_zeff_err, with_carbon=True):
             f["Zeff_err"] = (0.09 * zeff)[None, :]     # 9 % measured
         if with_carbon:
             f["n_12C6"] = n_c[None, :]
+            f["n_12C6_err"] = (0.25 * n_c)[None, :]
     return psi, zeff
 
 
@@ -113,6 +114,23 @@ class TestReaderTiers:
         r = read_ida(p)
         assert r.zeff_carbon_dev["median"] == pytest.approx(0.10, rel=0.02)
 
+    def test_direct_carbon_tier_propagates_nc_and_ne_errors(self, tmp_path):
+        p = str(tmp_path / "carb.cdf")
+        psi, zeff = _write_direct(p, with_zeff_err=True, with_carbon=True)
+        r = read_ida(p)
+        assert r.sigma_Zeff_carbon_source == "n_12C6_err"
+        # fixture: s_nC/nC = 0.25, s_ne/ne = 0.05, dilution = zeff - 1
+        expect = (zeff - 1.0) * np.sqrt(0.25 ** 2 + 0.05 ** 2)
+        np.testing.assert_allclose(r.sigma_Zeff_carbon, expect, rtol=1e-6)
+
+    def test_ensemble_carbon_tier_uses_the_dilution_posterior(self, tmp_path):
+        p = str(tmp_path / "enscarb.cdf")
+        _write_ensemble(p)
+        r = read_ida(p, sigma_method="std")
+        assert r.sigma_Zeff_carbon_source == "ensemble-samples"
+        assert np.all(np.isfinite(r.sigma_Zeff_carbon))
+        assert np.any(r.sigma_Zeff_carbon > 0)
+
     def test_absent_carbon_channel_skips_the_check(self, tmp_path):
         p = str(tmp_path / "nocarb.cdf")
         _write_direct(p, with_zeff_err=True, with_carbon=False)
@@ -149,11 +167,43 @@ class TestEnvelopeLadder:
         np.testing.assert_allclose(env, 0.05 * self._base)
 
     def test_demanding_measured_warns_loudly_when_unavailable(self):
-        with pytest.warns(UserWarning, match="measured unavailable|falling back"):
+        with pytest.warns(UserWarning, match="falling back"):
             env, label = resolve_zeff_envelope("measured", 0.05, self._base,
                                                True, None, "none")
         np.testing.assert_allclose(env, 0.05 * self._base)
-        assert "unavailable" in label
+        assert "no measured tier available" in label
+
+    # ---- the carbon tier (dilution's direct measurement) ------------------
+    _carb = np.full(10, 0.04)
+
+    def test_auto_prefers_carbon_over_vb(self):
+        env, label = resolve_zeff_envelope(
+            "auto", 0.05, self._base, True, self._meas, "Zeff_err",
+            carbon_sigma=self._carb, carbon_source="n_12C6_err")
+        np.testing.assert_array_equal(env, self._carb)
+        assert "carbon-propagated (n_12C6_err)" in label
+
+    def test_forced_carbon_falls_back_to_vb_with_a_warning(self):
+        with pytest.warns(UserWarning, match="carbon"):
+            env, label = resolve_zeff_envelope(
+                "carbon", 0.05, self._base, True, self._meas, "Zeff_err",
+                carbon_sigma=None, carbon_source="none")
+        np.testing.assert_array_equal(env, self._meas)
+        assert "measured IDA" in label
+
+    def test_forced_measured_still_means_the_vb_tier(self):
+        env, label = resolve_zeff_envelope(
+            "measured", 0.05, self._base, True, self._meas, "Zeff_err",
+            carbon_sigma=self._carb, carbon_source="n_12C6_err")
+        np.testing.assert_array_equal(env, self._meas)
+        assert "measured IDA" in label
+
+    def test_implausibly_large_envelope_draws_the_report_warning(self):
+        huge = 0.8 * self._base                      # 80 % of Zeff
+        with pytest.warns(UserWarning, match="implausibly large"):
+            env, label = resolve_zeff_envelope(
+                "measured", 0.05, self._base, True, huge, "Zeff_err")
+        np.testing.assert_array_equal(env, huge)     # report-only, not clipped
 
     def test_unusable_measurement_falls_back_with_a_warning(self):
         bad = np.full(3, 0.1)                      # wrong shape

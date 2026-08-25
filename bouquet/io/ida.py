@@ -65,6 +65,20 @@ class IDAProfiles:
     sigma_Zeff: Optional[np.ndarray] = None
     #: Provenance of ``sigma_Zeff``: "ensemble-samples" | "Zeff_err" | "none".
     sigma_Zeff_source: str = "none"
+    #: Carbon-propagated dilution uncertainty, expressed as a sigma on Zeff:
+    #: ``Z(Z-1)(nC/ne) sqrt((s_nC/nC)^2 + (s_ne/ne)^2)`` on the direct
+    #: layout, the sample spread of ``1 + Z(Z-1) nC_s/ne_s`` on the ensemble
+    #: layout.  This is the DIRECT measurement of the dilution the
+    #: Zeff-primary scheme perturbs (ni = ne - Z nC), and it is markedly
+    #: tighter and better behaved than the file's VB-derived ``Zeff_err``
+    #: (measured on the demo shots: 1.9-2.4 % core / 4-19 % SOL, vs
+    #: 8-9 % core / 44-130 % SOL for Zeff_err, whose n_e^2 sqrt(T_e)
+    #: propagation + calibration + mantle-subtraction systematics dominate).
+    #: Drawing Zeff with this sigma IS error propagation through
+    #: ``ni = ne - Z nC``: ni is an exact function of the drawn (ne, Zeff).
+    sigma_Zeff_carbon: Optional[np.ndarray] = None
+    #: Provenance: "n_12C6_err" | "ensemble-samples" | "none".
+    sigma_Zeff_carbon_source: str = "none"
     #: Zeff-vs-carbon cross-check, when the file also carries ``n_12C6``:
     #: relative deviation of reported Zeff (VB) from
     #: ``1 + Z(Z-1) n_C/n_e`` (CER carbon) over psi_N <= 0.9, as
@@ -202,6 +216,13 @@ def read_ida(
             # Zeff envelope is measured the same way as the kinetic ones.
             sigma_Zeff = _band(zf_s)
             sigma_Zeff_source = "ensemble-samples"
+            # Carbon tier: the dilution's own posterior, per sample.
+            sigma_Zeff_carbon, sigma_Zeff_carbon_source = None, "none"
+            if "n_12C6" in f:
+                nc_s = _samples("n_12C6")
+                zc_s = 1.0 + impurity_Z * (impurity_Z - 1.0) * nc_s                     / np.clip(ne_s, 1e10, None)
+                sigma_Zeff_carbon = _band(zc_s)
+                sigma_Zeff_carbon_source = "ensemble-samples"
         else:
             def col(key):       # one radial profile at the selected time
                 return np.asarray(f[key][t_idx], dtype=float)
@@ -219,6 +240,16 @@ def read_ida(
             else:
                 sigma_Zeff = None
                 sigma_Zeff_source = "none"
+            sigma_Zeff_carbon, sigma_Zeff_carbon_source = None, "none"
+            if "n_12C6" in f and "n_12C6_err" in f:
+                _nc, _snc = col("n_12C6"), col("n_12C6_err")
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    _dil = impurity_Z * (impurity_Z - 1.0) * _nc                         / np.clip(ne, 1e10, None)
+                    sigma_Zeff_carbon = _dil * np.sqrt(
+                        (_snc / np.clip(_nc, 1e10, None)) ** 2
+                        + (sigma_ne / np.clip(ne, 1e10, None)) ** 2)
+                sigma_Zeff_carbon = np.nan_to_num(sigma_Zeff_carbon, nan=0.0)
+                sigma_Zeff_carbon_source = "n_12C6_err"
 
         # Main-ion density from the measured (ne, Zeff) via single-impurity
         # quasineutrality: ni = ne (Z_imp - Zeff)/(Z_imp - 1). The IDA file
@@ -269,6 +300,8 @@ def read_ida(
         raw_bytes=raw_bytes,
         sigma_Zeff=sigma_Zeff,
         sigma_Zeff_source=sigma_Zeff_source,
+        sigma_Zeff_carbon=sigma_Zeff_carbon,
+        sigma_Zeff_carbon_source=sigma_Zeff_carbon_source,
         zeff_carbon_dev=zeff_carbon_dev,
     )
 

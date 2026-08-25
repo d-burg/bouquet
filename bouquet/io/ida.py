@@ -55,6 +55,25 @@ class IDAProfiles:
     time: float                     # selected slice [s]
     raw_bytes: Optional[bytes] = None   # original file bytes for archival
 
+    #: Measured 1-sigma envelope on ``Zeff``, when the file provides one:
+    #: sample spread on the ensemble layout, the ``Zeff_err`` dataset on newer
+    #: direct-layout files.  ``None`` on older direct files that carry no Zeff
+    #: uncertainty -- the envelope resolver then falls back to
+    #: ``UncertaintyConfig.zeff_scalar_sigma`` (measured values run ~8-9 %
+    #: median in-core vs the 5 % scalar default, so the tiers are NOT
+    #: interchangeable; the resolver logs which one won).
+    sigma_Zeff: Optional[np.ndarray] = None
+    #: Provenance of ``sigma_Zeff``: "ensemble-samples" | "Zeff_err" | "none".
+    sigma_Zeff_source: str = "none"
+    #: Zeff-vs-carbon cross-check, when the file also carries ``n_12C6``:
+    #: relative deviation of reported Zeff (VB) from
+    #: ``1 + Z(Z-1) n_C/n_e`` (CER carbon) over psi_N <= 0.9, as
+    #: ``{"median": ..., "worst": ..., "psi_worst": ...}``.  Report-only --
+    #: measured -1.7 % / +4.7 % / +11.3 % core-median on three DIII-D demo
+    #: shots, i.e. shot-dependent and mostly within the measured sigma_Zeff;
+    #: a large value flags the file, not the workflow.
+    zeff_carbon_dev: Optional[dict] = None
+
 
 @dataclass
 class IDACERProfiles:
@@ -179,6 +198,10 @@ def read_ida(
             ti_s, zf_s = _samples("T_12C6"), _samples("Zeff")
             ne, te, ti, Zeff = (ne_s.mean(0), te_s.mean(0), ti_s.mean(0), zf_s.mean(0))
             sigma_ne, sigma_te, sigma_ti = _band(ne_s), _band(te_s), _band(ti_s)
+            # Highest-fidelity tier: the posterior carries Zeff samples, so the
+            # Zeff envelope is measured the same way as the kinetic ones.
+            sigma_Zeff = _band(zf_s)
+            sigma_Zeff_source = "ensemble-samples"
         else:
             def col(key):       # one radial profile at the selected time
                 return np.asarray(f[key][t_idx], dtype=float)
@@ -187,6 +210,15 @@ def read_ida(
             ne, te = col("n_e"), col("T_e")          # m^-3, eV
             ti, Zeff = col("T_12C6"), col("Zeff")    # eV (carbon CER), dimensionless
             sigma_ne, sigma_te, sigma_ti = col("n_e_err"), col("T_e_err"), col("T_12C6_err")
+            # Newer direct-layout vintages carry a measured Zeff_err profile;
+            # older ones do not.  None (NOT a guessed scalar) marks the older
+            # vintage so the envelope resolver can say which tier it used.
+            if "Zeff_err" in f:
+                sigma_Zeff = col("Zeff_err")
+                sigma_Zeff_source = "Zeff_err"
+            else:
+                sigma_Zeff = None
+                sigma_Zeff_source = "none"
 
         # Main-ion density from the measured (ne, Zeff) via single-impurity
         # quasineutrality: ni = ne (Z_imp - Zeff)/(Z_imp - 1). The IDA file
@@ -195,6 +227,34 @@ def read_ida(
         # (ne, ni). Z_eff is clipped to [1, Z_imp] so 0 <= ni <= ne.
         Zeff_c = np.clip(Zeff, 1.0, impurity_Z)
         ni = main_ion_density_from_zeff(ne, Zeff_c, impurity_Z)
+
+        # Zeff-vs-carbon consistency (report-only, issue-#19-adjacent QC):
+        # the file reports Zeff from visible bremsstrahlung AND n_12C6 from
+        # CER; under the same single-impurity assumption they must agree as
+        # Zeff = 1 + Z(Z-1) n_C/n_e.  Callahan 2019 (JINST 14 C10002) shows
+        # the two techniques agree at DIII-D when C6+ dominates, so a large
+        # deviation flags THIS file (non-carbon impurity, calibration, or
+        # fit vintage), not the method.  No acceptance criterion -- one line.
+        zeff_carbon_dev = None
+        if "n_12C6" in f:
+            n_c_raw = np.asarray(f["n_12C6"][t_idx], dtype=float)
+            n_c = n_c_raw.mean(0) if n_c_raw.ndim == 2 else n_c_raw
+            with np.errstate(divide="ignore", invalid="ignore"):
+                z_from_c = 1.0 + impurity_Z * (impurity_Z - 1.0) * n_c                     / np.clip(ne, 1e10, None)
+                _core = psi_N <= 0.9
+                _rd = (Zeff[_core] - z_from_c[_core]) / np.clip(
+                    z_from_c[_core], 1e-3, None)
+            _iw = int(np.argmax(np.abs(_rd)))
+            zeff_carbon_dev = {
+                "median": float(np.median(_rd)),
+                "worst": float(_rd[_iw]),
+                "psi_worst": float(psi_N[_core][_iw]),
+            }
+            print(f"[read_ida] Zeff(VB) vs 1+Z(Z-1)nC/ne (CER carbon), "
+                  f"psi_N<=0.9: median {100*zeff_carbon_dev['median']:+.1f}%, "
+                  f"worst {100*zeff_carbon_dev['worst']:+.1f}% at "
+                  f"psi_N={zeff_carbon_dev['psi_worst']:.2f}  "
+                  f"(report-only; see Callahan 2019 JINST 14 C10002)")
         # sigma_ni is only used in the (now rare) independent-ni fallback;
         # propagate the ne fractional error onto the derived ni.
         with np.errstate(divide="ignore", invalid="ignore"):
@@ -207,6 +267,9 @@ def read_ida(
         sigma_ne=sigma_ne, sigma_te=sigma_te, sigma_ni=sigma_ni, sigma_ti=sigma_ti,
         time=t_sel,
         raw_bytes=raw_bytes,
+        sigma_Zeff=sigma_Zeff,
+        sigma_Zeff_source=sigma_Zeff_source,
+        zeff_carbon_dev=zeff_carbon_dev,
     )
 
 

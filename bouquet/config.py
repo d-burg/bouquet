@@ -126,8 +126,15 @@ class ImasSource:
     # When set, the baseline ne/Te/Ti/omega_tor are taken from this IDA .cdf
     # (externally fit, smoother across time than FUSE's per-slice profile fits),
     # resampled onto the FUSE core_profiles psi_N grid. Z_eff / Z_imp / the ni
-    # dilution stay FUSE (IDA's reported Z_eff is unreliable -- internally
-    # inconsistent with its own carbon density). Everything else (currents,
+    # dilution stay FUSE, for consistency with FUSE's own resistive diffusion
+    # (which consumed FUSE's Z_eff to produce j_ohmic).  NOTE the old blanket
+    # rationale "IDA's Z_eff is internally inconsistent with its own carbon
+    # density" is SHOT-DEPENDENT, not general: measured Zeff(VB) vs
+    # 1+Z(Z-1)nC/ne core-median deviations are -1.7 % / +4.7 % / +11.3 % on
+    # three DIII-D demo shots, i.e. mostly within the file's own measured
+    # sigma_Zeff (~8-9 %); read_ida now prints this cross-check per file
+    # (Callahan 2019 JINST 14 C10002 is the agreement pedigree when C6+
+    # dominates). Everything else (currents,
     # equilibrium, p_fast, anchors) stays FUSE. Also wire it to
     # UncertaintyConfig.ida_path so the sigma envelopes come from the same IDA.
     ida_path: Optional[str] = None
@@ -274,6 +281,22 @@ class UncertaintyConfig:
     # Set 0.0 to disable (Z_eff held at baseline, ni drawn independently).
     # An explicit aux_sigmas['zeff'] always overrides this.
     zeff_scalar_sigma: float = 0.05
+    # Where the Z_eff envelope's MAGNITUDE comes from (the channel is enabled
+    # by zeff_scalar_sigma > 0 either way):
+    #   "auto"     -- measured IDA sigma_Zeff when the file provides one
+    #                 (ensemble-sample spread, or the Zeff_err dataset on
+    #                 newer direct-layout vintages), else the scalar.  The
+    #                 measured envelope runs ~8-9 % median in-core vs the 5 %
+    #                 scalar default, with radial structure to ~15 % -- the
+    #                 highest-fidelity tier available per file wins.
+    #   "measured" -- require the measured envelope; warn LOUDLY and fall
+    #                 back to the scalar if this file cannot provide one.
+    #   "scalar"   -- always the flat zeff_scalar_sigma fraction (pre-1.3.2
+    #                 behaviour).
+    # Only the reconstruction/IDA path is eligible for the measured tier: on
+    # the IMAS/ida_hybrid path the Z_eff baseline is FUSE's, and pairing a
+    # FUSE baseline with an IDA-measured envelope would mix channels.
+    zeff_sigma_source: str = "auto"
 
     # GPR correlation length scales (psi_N units) -- define the perturbation
     n_ls: float = 0.5                      # density

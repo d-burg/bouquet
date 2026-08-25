@@ -183,6 +183,61 @@ def resolve_baseline(config: "BouquetConfig", mygs=None) -> Baseline:
     raise TypeError(f"unknown baseline source type: {type(source).__name__}")
 
 
+def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
+                          zeff_is_ida, measured_sigma, measured_source):
+    """The Z_eff envelope ladder: highest-fidelity tier available per file.
+
+    Returns ``(sigma_array, label)``.  Tiers, in order:
+
+    1. measured IDA ``sigma_Zeff`` (ensemble-sample spread or the direct
+       layout's ``Zeff_err``) -- eligible only when the Z_eff baseline itself
+       is the IDA one (``zeff_is_ida``; on the IMAS/ida_hybrid path the
+       baseline is FUSE's and pairing it with an IDA envelope mixes
+       channels), under ``zeff_sigma_source`` "auto" or "measured";
+    2. the flat ``zeff_scalar_sigma`` fraction of ``|Z_eff|`` -- the
+       pre-1.3.2 behaviour, the "scalar" setting, and the loud fallback when
+       "measured" was demanded of a file that cannot provide it.
+
+    Measured envelopes run ~8-9 % median in-core on the DIII-D demo files vs
+    the 5 % scalar default, so which tier won is load-bearing for the width
+    of every downstream ni band; the caller logs the label.
+    """
+    import warnings
+
+    import numpy as np
+
+    if zeff_sigma_source not in ("auto", "measured", "scalar"):
+        raise ValueError(
+            f"zeff_sigma_source={zeff_sigma_source!r} is not one of "
+            "'auto', 'measured', 'scalar'")
+    base = np.abs(np.asarray(base_zeff, dtype=float))
+    scalar_env = float(zeff_scalar_sigma) * base
+    scalar_label = f"scalar zeff_scalar_sigma={float(zeff_scalar_sigma):g}"
+    if zeff_sigma_source == "scalar":
+        return scalar_env, scalar_label
+    if measured_sigma is not None and zeff_is_ida:
+        m = np.asarray(measured_sigma, dtype=float)
+        if m.shape == base.shape and np.all(np.isfinite(m)) and np.any(m > 0):
+            return m, f"measured IDA ({measured_source})"
+        warnings.warn(
+            f"resolve_zeff_envelope: measured sigma_Zeff ({measured_source}) "
+            f"is unusable (shape {m.shape} vs {base.shape}, or non-finite/"
+            f"all-zero); falling back to the scalar envelope", stacklevel=2)
+        return scalar_env, scalar_label + " (measured unusable)"
+    if zeff_sigma_source == "measured":
+        warnings.warn(
+            "resolve_zeff_envelope: zeff_sigma_source='measured' but "
+            + ("this source's Z_eff baseline is not the IDA one (IMAS/"
+               "ida_hybrid path)" if measured_sigma is not None else
+               "this IDA file carries no Zeff uncertainty (older direct "
+               "vintage)")
+            + "; falling back to the scalar envelope -- the resulting ni "
+            "bands use the ASSUMED 5 %-class width, not a measured one",
+            stacklevel=2)
+        return scalar_env, scalar_label + " (measured unavailable)"
+    return scalar_env, scalar_label
+
+
 def resolve_uncertainty(config, baseline) -> dict:
     """Resolve the perturbation envelope for :func:`generate_bouquet`.
 
@@ -228,6 +283,7 @@ def resolve_uncertainty(config, baseline) -> dict:
 
     # IDA arrays (read once) available as a fallback below
     ida_sig = None
+    _ida_zeff_sigma, _ida_zeff_source = None, "none"
     if ida_path is not None:
         from .io.ida import read_ida
         ida = read_ida(
@@ -241,6 +297,9 @@ def resolve_uncertainty(config, baseline) -> dict:
 
         ida_sig = {"ne": _to_kin(ida.sigma_ne), "te": _to_kin(ida.sigma_te),
                    "ni": _to_kin(ida.sigma_ni), "ti": _to_kin(ida.sigma_ti)}
+        if getattr(ida, "sigma_Zeff", None) is not None:
+            _ida_zeff_sigma = _to_kin(ida.sigma_Zeff)
+            _ida_zeff_source = str(getattr(ida, "sigma_Zeff_source", "?"))
 
     # Per-channel resolution: explicit profile > IDA > flat scalar fraction.
     _profiles = unc.sigma_profiles or {}
@@ -321,13 +380,23 @@ def resolve_uncertainty(config, baseline) -> dict:
     # else baseline.Zeff for the reconstruction path), on the kinetic grid.
     user_sigmas = dict(unc.aux_sigmas or {})
     if "zeff" not in user_sigmas and float(getattr(unc, "zeff_scalar_sigma", 0.0)) > 0:
-        base_zeff = src_aux.get("zeff")
+        _zeff_from_src = src_aux.get("zeff")
+        base_zeff = _zeff_from_src
         if base_zeff is None:
             base_zeff = np.asarray(baseline.Zeff, dtype=float)
         if "zeff" not in man_base:
             man_base["zeff"] = np.asarray(base_zeff, dtype=float)
-        user_sigmas["zeff"] = unc.zeff_scalar_sigma * np.abs(
-            np.asarray(man_base["zeff"], dtype=float))
+        _z_env, _z_label = resolve_zeff_envelope(
+            getattr(unc, "zeff_sigma_source", "auto"),
+            unc.zeff_scalar_sigma,
+            man_base["zeff"],
+            zeff_is_ida=(_zeff_from_src is None),
+            measured_sigma=_ida_zeff_sigma,
+            measured_source=_ida_zeff_source,
+        )
+        user_sigmas["zeff"] = _z_env
+        if getattr(unc, "log_sigma_sources", True):
+            print(f"[sigma] zeff envelope <- {_z_label}")
 
     resolved_sigma, resolved_base = {}, {}
     for name, sig in user_sigmas.items():

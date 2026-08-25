@@ -971,13 +971,29 @@ class Bouquet:
                     if _act.sum() < 4:
                         raise RuntimeError(f"closure_channel='mse': only {int(_act.sum())} active MSE chords")
                     _pts = np.column_stack([_mR[_act], _mZ[_act]])
+                    # COCOS reconciliation: the equilibrium's stored field
+                    # orientation vs the EFIT02 measurement convention differs
+                    # per shot (Ip/Bt helicity). Resolve it EMPIRICALLY once per
+                    # slice: at the first usable trial, test the four
+                    # (+-B_pol, +-B_t) combinations and freeze the one that
+                    # minimizes chi^2 -- this selects a sign convention, not a
+                    # fit to the data (the two wrong-helicity branches are off
+                    # by orders of magnitude). Recorded in ip_closure.
+                    _sign = {"pol": 1.0, "tor": 1.0, "fixed": False}
                     def _mse_chi2():
                         Beval = mygs.get_field_eval("B")     # fresh per solve (stale eval segfaults)
                         B = np.array([Beval.eval(pp) for pp in _pts], dtype=float)
-                        syn = (_A[1][_act] * B[:, 2]) / (_A[2][_act] * B[:, 1]
-                              + _A[3][_act] * B[:, 0] + _A[4][_act] * B[:, 2])
-                        r = (syn - _tg[_act]) / _sg[_act]
-                        return float(np.sum(_wt[_act] * r * r)), syn
+                        def _c2(sp, st):
+                            syn = (_A[1][_act] * sp * B[:, 2]) / (_A[2][_act] * st * B[:, 1]
+                                  + _A[3][_act] * sp * B[:, 0] + _A[4][_act] * sp * B[:, 2])
+                            r = (syn - _tg[_act]) / _sg[_act]
+                            return float(np.sum(_wt[_act] * r * r)), syn
+                        if not _sign["fixed"]:
+                            _best = min(((sp, st) for sp in (1.0, -1.0) for st in (1.0, -1.0)),
+                                        key=lambda c: _c2(*c)[0])
+                            _sign["pol"], _sign["tor"] = _best
+                            _sign["fixed"] = True
+                        return _c2(_sign["pol"], _sign["tor"])
                     def _sbs_of(s):
                         return (sgn * Ip_t - _c_affine - s * ip_ind - ip_fix) / ip_bs
                     _lo, _hi, _n = getattr(gc, "mse_scan", (0.70, 1.15, 8))
@@ -1006,7 +1022,10 @@ class Bouquet:
                         if _den > 0:
                             _h = x1 - x0
                             _sopt = min(max(x1 + 0.5 * _h * (y0 - y2) / _den, x0), x2)
-                            _sig_s = float(_h * np.sqrt(1.0 / _den))   # Delta-chi2 = 1
+                            # Delta-chi2 = 1, inflated by sqrt(chi2_red) when the
+                            # residuals exceed the stated sigma (standard practice)
+                            _sig_s = float(_h * np.sqrt(1.0 / _den)
+                                           * max(1.0, np.sqrt(y1 / max(int(_act.sum()), 1))))
                     ohm_scale = float(_sopt)
                     bs_scale = float(_sbs_of(_sopt))
                     if not (0.2 < bs_scale < 5.0):
@@ -1030,6 +1049,7 @@ class Bouquet:
                         mse_tgamma_meas=[float(x) for x in _tg[_act]],
                         mse_tgamma_syn_at_opt=[float(x) for x in _synf],
                         mse_chord_R=[float(x) for x in _mR[_act]],
+                        mse_sign_convention=dict(pol=_sign["pol"], tor=_sign["tor"]),
                         mse_er_terms="A5/A6 omitted (no E_r input); A8=0 (standard chords)")
                 else:
                     ohm_scale, bs_scale = close_ip(

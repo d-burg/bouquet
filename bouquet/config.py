@@ -406,6 +406,9 @@ class GenerationConfig:
     mse_data: Optional[dict] = None
     mse_scan: tuple = (0.70, 1.15, 8)
     mse_prior_sigma: float = 0.25
+    #: minimum inflated-sigma chi^2 improvement over s_ohm=1 required to adopt
+    #: the MSE optimum; below it the slice falls back to the bootstrap channel.
+    mse_accept_dchi2: float = 9.0
     # Fix B: when the recon-anchor's equilibrium l_i is already within the band,
     # accept the anchor and skip find_optimal_scale + the corrective iteration
     # (which otherwise overshoot l_i and drift degenerate coils off baseline).

@@ -980,12 +980,19 @@ class Bouquet:
                     # fit to the data (the two wrong-helicity branches are off
                     # by orders of magnitude). Recorded in ip_closure.
                     _sign = {"pol": 1.0, "tor": 1.0, "fixed": False}
+                    # E_r correction (A5 term, k-file convention: numerator += A5*Er
+                    # with Er in V/m at the chord). Supplied per chord by the driver
+                    # (CER force-balance E_r mapped through the EFIT01 geometry);
+                    # absent -> 0 and the omission is recorded. A6 (E_z) ~ 0.
+                    _Er = np.asarray(md.get("Er", np.zeros(_mR.size)), dtype=float)
+                    _A5 = np.asarray(md.get("A5", np.zeros(_mR.size)), dtype=float)
                     def _mse_chi2():
                         Beval = mygs.get_field_eval("B")     # fresh per solve (stale eval segfaults)
                         B = np.array([Beval.eval(pp) for pp in _pts], dtype=float)
                         def _c2(sp, st):
-                            syn = (_A[1][_act] * sp * B[:, 2]) / (_A[2][_act] * st * B[:, 1]
-                                  + _A[3][_act] * sp * B[:, 0] + _A[4][_act] * sp * B[:, 2])
+                            syn = ((_A[1][_act] * sp * B[:, 2] + _A5[_act] * _Er[_act])
+                                   / (_A[2][_act] * st * B[:, 1]
+                                      + _A[3][_act] * sp * B[:, 0] + _A[4][_act] * sp * B[:, 2]))
                             r = (syn - _tg[_act]) / _sg[_act]
                             return float(np.sum(_wt[_act] * r * r)), syn
                         if not _sign["fixed"]:
@@ -998,18 +1005,47 @@ class Bouquet:
                         return (sgn * Ip_t - _c_affine - s * ip_ind - ip_fix) / ip_bs
                     _lo, _hi, _n = getattr(gc, "mse_scan", (0.70, 1.15, 8))
                     _psig = float(getattr(gc, "mse_prior_sigma", 0.25))
-                    _curve = []
+                    _curve = []; _syns = {}
                     for _s in np.linspace(float(_lo), float(_hi), int(_n)):
                         _sb = _sbs_of(_s)
                         if not (0.2 < _sb < 5.0):
                             _curve.append((float(_s), float(_sb), np.inf)); continue
                         try:
                             solve_jphi(_s * j_ind + _sb * j_BS_swb + j_fixed)
-                            _c2, _ = _mse_chi2()
-                            _curve.append((float(_s), float(_sb),
-                                           _c2 + ((_s - 1.0) / _psig) ** 2))
+                            _c2, _sy = _mse_chi2()
+                            _syns[float(_s)] = _sy
+                            _curve.append((float(_s), float(_sb), _c2))
                         except Exception:
                             _curve.append((float(_s), float(_sb), np.inf))
+                    # --- model-error-aware post-processing (NO extra solves) ---
+                    # (a) inflate the chord sigma with a systematic term sigma_sys
+                    #     chosen so chi2_red = 1 at the RAW best point: a tiny
+                    #     stated SIGGAM can then no longer convert systematic
+                    #     model misfit (e.g. missing E_r) into a strong pull.
+                    _raw = [(a, b, c) for a, b, c in _curve if np.isfinite(c)]
+                    if len(_raw) >= 3:
+                        _jr = int(np.argmin([c for _, _, c in _raw]))
+                        _sbest = _raw[_jr][0]
+                        _dres = _syns[_sbest] - _tg[_act]
+                        _w = _wt[_act]; _sg2 = _sg[_act] ** 2; _na = int(_act.sum())
+                        def _c2of(ss2):
+                            return float(np.sum(_w * _dres ** 2 / (_sg2 + ss2)))
+                        _ss2 = 0.0
+                        if _c2of(0.0) > _na:
+                            loA, hiA = 0.0, float(np.max(_dres ** 2)) * 10 + 1e-12
+                            for _ in range(60):
+                                mid = 0.5 * (loA + hiA)
+                                if _c2of(mid) > _na: loA = mid
+                                else: hiA = mid
+                            _ss2 = 0.5 * (loA + hiA)
+                        _sig_sys = float(np.sqrt(_ss2))
+                        # (b) rebuild the penalized curve with inflated sigma
+                        _curve = [(a, b, (np.inf if not np.isfinite(c) else
+                                   float(np.sum(_w * (_syns[a] - _tg[_act]) ** 2 / (_sg2 + _ss2)))
+                                   + ((a - 1.0) / _psig) ** 2))
+                                  for a, b, c in _curve]
+                    else:
+                        _sig_sys = 0.0
                     if sum(np.isfinite(c[2]) for c in _curve) < 3:
                         raise RuntimeError("closure_channel='mse': fewer than 3 usable "
                                            "scan points -- cannot locate a minimum")
@@ -1026,6 +1062,22 @@ class Bouquet:
                             # residuals exceed the stated sigma (standard practice)
                             _sig_s = float(_h * np.sqrt(1.0 / _den)
                                            * max(1.0, np.sqrt(y1 / max(int(_act.sum()), 1))))
+                    # (c) significance gate: adopt s_ohm != 1 only when the
+                    #     inflated-sigma chi^2 improvement over s_ohm = 1 exceeds
+                    #     mse_accept_dchi2 (default 9 ~ 3 sigma). Otherwise fall
+                    #     back to the bootstrap channel (s_ohm = 1) -- the
+                    #     148798-type pitfall (marginal outer-chord gain dragging
+                    #     the scale) becomes structurally impossible.
+                    _fs = [c[0] for c in _curve if np.isfinite(c[2])]
+                    _fc = [c[2] for c in _curve if np.isfinite(c[2])]
+                    _chi_at_1 = float(np.interp(1.0, _fs, _fc))
+                    _chi_at_opt = float(np.interp(_sopt, _fs, _fc))
+                    _dchi2_vs_1 = _chi_at_1 - _chi_at_opt
+                    _accept = float(getattr(gc, "mse_accept_dchi2", 9.0))
+                    _verdict = "accepted"
+                    if _dchi2_vs_1 < _accept:
+                        _verdict = f"insignificant (dchi2 {_dchi2_vs_1:.1f} < {_accept:g}) -> s_ohm=1 fallback"
+                        _sopt = 1.0
                     ohm_scale = float(_sopt)
                     bs_scale = float(_sbs_of(_sopt))
                     if not (0.2 < bs_scale < 5.0):
@@ -1050,7 +1102,12 @@ class Bouquet:
                         mse_tgamma_syn_at_opt=[float(x) for x in _synf],
                         mse_chord_R=[float(x) for x in _mR[_act]],
                         mse_sign_convention=dict(pol=_sign["pol"], tor=_sign["tor"]),
-                        mse_er_terms="A5/A6 omitted (no E_r input); A8=0 (standard chords)")
+                        mse_sigma_sys=_sig_sys,
+                        mse_dchi2_vs_s1=_dchi2_vs_1,
+                        mse_verdict=_verdict,
+                        mse_er_applied=bool(np.any(_Er[_act] != 0.0)),
+                        mse_er_terms=("A5*Er applied (driver CER force-balance)" if np.any(_Er[_act] != 0.0)
+                                      else "A5/A6 omitted (no E_r input)") + "; A8=0; A6(E_z)~0")
                 else:
                     ohm_scale, bs_scale = close_ip(
                         _chan, sgn * Ip_t, _c_affine, ip_ind, ip_bs,

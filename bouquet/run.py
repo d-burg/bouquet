@@ -945,13 +945,101 @@ class Bouquet:
                 # and its refusals live in utils.close_ip so the tests
                 # exercise the SHIPPED formulas, not a re-derivation.
                 _chan = str(getattr(gc, "closure_channel", "bootstrap"))
-                ohm_scale, bs_scale = close_ip(
-                    _chan, sgn * Ip_t, _c_affine, ip_ind, ip_bs, ip_fix)
-                bl.jBS_diff = None
-                bl.bs_scale = float(bs_scale)
-                bl.ohm_scale = float(ohm_scale)
-                bl.j_BS = bs_scale * j_BS_swb
-                bl.j_inductive = ohm_scale * j_ind
+                _mse_extra = {}
+                if _chan == "mse":
+                    # MSE-constrained closure: choose s_ohm to minimize the raw
+                    # tan(gamma) chi^2 along the Ip-closed manifold, with j_BS
+                    # absorbing the remainder in CLOSED FORM at every trial:
+                    #   s_BS(s) = (Ip - c - s*lin(ohm) - lin(fix)) / lin(bs)
+                    # -> a 1-D scan on a FIXED grid (+ parabola refinement and a
+                    # weak prior toward s=1), NOT a 2-D minimization: Ip is exact
+                    # by construction everywhere, chi^2 only arbitrates along the
+                    # line, and the full curve + curvature are archived so any
+                    # slice-to-slice jitter is quantified, not mysterious.
+                    # Forward model (EFIT k-file convention, A8=0 std chords):
+                    #   tan(gamma) = A1*BZ / (A2*Bt + A3*BR + A4*BZ)
+                    # A5/A6 (E_r terms) omitted -- no E_r input here; O(1-5%).
+                    md = getattr(gc, "mse_data", None)
+                    if not md:
+                        raise RuntimeError("closure_channel='mse' needs gc.mse_data "
+                                           "(chord R/Z, tgamma, sigma, weight, A1..A4)")
+                    _mR = np.asarray(md["R"], dtype=float); _mZ = np.asarray(md["Z"], dtype=float)
+                    _tg = np.asarray(md["tgamma"], dtype=float); _sg = np.asarray(md["sigma"], dtype=float)
+                    _wt = np.asarray(md["weight"], dtype=float)
+                    _A = {k: np.asarray(md[f"A{k}"], dtype=float) for k in (1, 2, 3, 4)}
+                    _act = (_wt > 0) & np.isfinite(_tg) & np.isfinite(_sg) & (_sg > 0)
+                    if _act.sum() < 4:
+                        raise RuntimeError(f"closure_channel='mse': only {int(_act.sum())} active MSE chords")
+                    _pts = np.column_stack([_mR[_act], _mZ[_act]])
+                    def _mse_chi2():
+                        Beval = mygs.get_field_eval("B")     # fresh per solve (stale eval segfaults)
+                        B = np.array([Beval.eval(pp) for pp in _pts], dtype=float)
+                        syn = (_A[1][_act] * B[:, 2]) / (_A[2][_act] * B[:, 1]
+                              + _A[3][_act] * B[:, 0] + _A[4][_act] * B[:, 2])
+                        r = (syn - _tg[_act]) / _sg[_act]
+                        return float(np.sum(_wt[_act] * r * r)), syn
+                    def _sbs_of(s):
+                        return (sgn * Ip_t - _c_affine - s * ip_ind - ip_fix) / ip_bs
+                    _lo, _hi, _n = getattr(gc, "mse_scan", (0.70, 1.15, 8))
+                    _psig = float(getattr(gc, "mse_prior_sigma", 0.25))
+                    _curve = []
+                    for _s in np.linspace(float(_lo), float(_hi), int(_n)):
+                        _sb = _sbs_of(_s)
+                        if not (0.2 < _sb < 5.0):
+                            _curve.append((float(_s), float(_sb), np.inf)); continue
+                        try:
+                            solve_jphi(_s * j_ind + _sb * j_BS_swb + j_fixed)
+                            _c2, _ = _mse_chi2()
+                            _curve.append((float(_s), float(_sb),
+                                           _c2 + ((_s - 1.0) / _psig) ** 2))
+                        except Exception:
+                            _curve.append((float(_s), float(_sb), np.inf))
+                    if sum(np.isfinite(c[2]) for c in _curve) < 3:
+                        raise RuntimeError("closure_channel='mse': fewer than 3 usable "
+                                           "scan points -- cannot locate a minimum")
+                    _j = int(np.argmin([c[2] for c in _curve]))
+                    _sopt = _curve[_j][0]; _sig_s = None
+                    if 0 < _j < len(_curve) - 1 and all(np.isfinite(_curve[_j + k][2]) for k in (-1, 1)):
+                        x0, x1, x2 = (_curve[_j + k][0] for k in (-1, 0, 1))
+                        y0, y1, y2 = (_curve[_j + k][2] for k in (-1, 0, 1))
+                        _den = y0 - 2 * y1 + y2
+                        if _den > 0:
+                            _h = x1 - x0
+                            _sopt = min(max(x1 + 0.5 * _h * (y0 - y2) / _den, x0), x2)
+                            _sig_s = float(_h * np.sqrt(1.0 / _den))   # Delta-chi2 = 1
+                    ohm_scale = float(_sopt)
+                    bs_scale = float(_sbs_of(_sopt))
+                    if not (0.2 < bs_scale < 5.0):
+                        raise RuntimeError(f"mse channel: bs_scale {bs_scale:.3f} "
+                                           "outside [0.2, 5] at the chi^2 optimum")
+                    bl.jBS_diff = None
+                    bl.bs_scale = bs_scale
+                    bl.ohm_scale = ohm_scale
+                    bl.j_BS = bs_scale * j_BS_swb
+                    bl.j_inductive = ohm_scale * j_ind
+                    solve_jphi(ohm_scale * j_ind + bs_scale * j_BS_swb + j_fixed)
+                    _c2f, _synf = _mse_chi2()
+                    _mse_extra = dict(
+                        mse_n_active=int(_act.sum()),
+                        mse_chi2_curve=[[round(a, 4), round(b, 4),
+                                         (None if not np.isfinite(c) else round(c, 3))]
+                                        for a, b, c in _curve],
+                        mse_chi2_at_opt=float(_c2f),
+                        mse_chi2_red_at_opt=float(_c2f / max(int(_act.sum()), 1)),
+                        mse_s_sigma=_sig_s, mse_prior_sigma=_psig,
+                        mse_tgamma_meas=[float(x) for x in _tg[_act]],
+                        mse_tgamma_syn_at_opt=[float(x) for x in _synf],
+                        mse_chord_R=[float(x) for x in _mR[_act]],
+                        mse_er_terms="A5/A6 omitted (no E_r input); A8=0 (standard chords)")
+                else:
+                    ohm_scale, bs_scale = close_ip(
+                        _chan, sgn * Ip_t, _c_affine, ip_ind, ip_bs,
+                        ip_fix)
+                    bl.jBS_diff = None
+                    bl.bs_scale = float(bs_scale)
+                    bl.ohm_scale = float(ohm_scale)
+                    bl.j_BS = bs_scale * j_BS_swb
+                    bl.j_inductive = ohm_scale * j_ind
                 bl.j_phi = bl.j_inductive + bl.j_BS + j_fixed
                 _closed_err = 100.0 * (abs(_ip(bl.j_phi)) - Ip_t) / Ip_t
                 if abs(_closed_err) > 0.05:
@@ -1005,6 +1093,8 @@ class Bouquet:
                     proxy_fuse_total_err_pct=100.0 * (abs(_cyl_tot) - Ip_t) / Ip_t,
                     proxy_ohm_scale_would_be=_would_be(_cyl_tot, _cyl_bs,
                                                        _cyl_fix, _cyl_ind))
+                if _mse_extra:
+                    bl.ip_closure.update(_mse_extra)
                 print(f"[imas SWB-split:ohmic] channel={_chan} ohm_scale={ohm_scale:.4f} bs_scale={float(getattr(bl,'bs_scale',1.0)):.4f}  "
                       f"linear Ip parts: ohm={ip_ind/1e6:.3f} jBS={ip_bs/1e6:.3f} "
                       f"fixed={ip_fix/1e6:.3f} + P'-term c={_c_affine/1e6:+.4f} MA "

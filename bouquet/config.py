@@ -399,6 +399,13 @@ class GenerationConfig:
     #: value whenever the recomputed bootstrap fraction is far above the source's.
     #: Run both channels to bracket the closure uncertainty.
     closure_channel: str = "bootstrap"
+    #: closure_channel="mse" inputs: per-slice measured MSE payload (chord R/Z,
+    #: tgamma, sigma, weight, A1..A4 from the EFIT02 MEASUREMENTS node or a
+    #: k-file), the fixed s_ohm scan grid, and the weak prior toward s_ohm=1
+    #: that data-weak slices relax to (continuity across a trace).
+    mse_data: Optional[dict] = None
+    mse_scan: tuple = (0.70, 1.15, 8)
+    mse_prior_sigma: float = 0.25
     # Fix B: when the recon-anchor's equilibrium l_i is already within the band,
     # accept the anchor and skip find_optimal_scale + the corrective iteration
     # (which otherwise overshoot l_i and drift degenerate coils off baseline).

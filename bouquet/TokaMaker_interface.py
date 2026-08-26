@@ -4404,10 +4404,17 @@ def generate_bouquet(
                 print(f"  [DIFF_BS] state-anchor solve failed "
                       f"({_anch_exc}); SWB may inherit stale state")
             try:
+                # scale_jBS MUST match the per-draw spike's scaling (which is
+                # re-centred on bl.bs_scale in run.py): OFT applies the factor
+                # INSIDE SWB, so a 1.0 reference here makes the delta
+                #   bs*SWB0 + bs*SWB_pert - 1.0*SWB0
+                # i.e. every draw loses (1-bs)/bs of the pedestal bootstrap.
+                # Exactly zero at bs_scale=1 (why the 148798 validation passed)
+                # and 9.7% of Ip at bs_scale=0.70. See PIPELINE_LESSONS 14q.
                 _cache_results = _swb(
                     mygs, ne_cache, te_cache, ni_cache, ti_cache, Zeff,
                     initial_Ip_target, _swb_seed_cache,
-                    scale_jBS=1.0,
+                    scale_jBS=float(scale_jBS),
                     isolate_edge_jBS=isolate_edge_jBS,
                     diagnostic_plots=False, verbose=False,
                 )

@@ -721,7 +721,10 @@ class Bouquet:
                 _anchor["geom"] = _fcg(_anchor["eq"], np.asarray(psi_N, dtype=float), psi_pad=psi_pad)
                 _anchor["inv_r2_src"] = "get_q ravgs dict"
                 if _anchor["geom"]["inv_R2"] is None:
-                    _cap = _cef(mygs, npsi=max(257, psi_N.size), psi_pad=psi_pad, exact_inv_R2=True)
+                    _npsi_env = __import__("os").environ.get("BQ_FSA_NPSI")
+                    _cap = _cef(mygs,
+                                npsi=int(_npsi_env) if _npsi_env else max(257, psi_N.size),
+                                psi_pad=psi_pad, exact_inv_R2=True)
                     if _cap.get("avg_inv_R2") is None:
                         raise RuntimeError("ohmic mode: <1/R^2> unavailable on the anchor geometry")
                     _anchor["geom"]["inv_R2"] = np.interp(

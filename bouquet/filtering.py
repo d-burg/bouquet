@@ -44,9 +44,102 @@ __all__ = [
     "read_filter_flags",
     "select_indices",
     "export_filtered",
+    "boundary_deviation_mm",
+    "passes_coil_spec",
+    "passes_boundary_spec",
+    "passes_all_filters",
 ]
 
 _FILTER_FLAGS = ("passes_coil_filter", "passes_boundary_filter")
+
+
+# --------------------------------------------------------------------------
+#  the selection predicate -- ONE definition, two call sites
+# --------------------------------------------------------------------------
+#  These three are the whole of what "in spec" means. They are used BOTH by
+#  the postprocess filters below AND, in-loop, by generate_bouquet's
+#  until-N-in-spec stopping rule (GenerationConfig.n_inspec_target).
+#
+#  Keeping one definition is not tidiness -- it is the guarantee that a run
+#  which stops after counting N in-spec draws still shows N selected draws
+#  once .filter() runs over the archive. Two independent implementations
+#  would drift: the in-loop [bnd-diag] print, for instance, queries the
+#  BASELINE tree with the PERTURBED points, which is the opposite direction
+#  from boundary_deviation_mm below and gives a different max (and a
+#  slightly different RMS) on the same pair of contours.
+def boundary_deviation_mm(baseline_boundary, perturbed_boundary):
+    """``(rms_mm, max_mm)`` of a perturbed LCFS vs the baseline contour.
+
+    Nearest-neighbour distance **from each baseline point to the perturbed
+    contour** -- the direction ``plot_traces`` and the boundary filter both
+    report. Returns ``(nan, nan)`` when either contour is missing or too
+    short to build a tree from (fewer than 2 points), which the callers
+    treat as "no verdict" rather than as a pass.
+    """
+    if baseline_boundary is None or perturbed_boundary is None:
+        return (np.nan, np.nan)
+    bl = np.asarray(baseline_boundary, dtype=float)
+    pt = np.asarray(perturbed_boundary, dtype=float)
+    if bl.ndim != 2 or pt.ndim != 2 or len(bl) < 2 or len(pt) < 2:
+        return (np.nan, np.nan)
+    try:
+        devs, _ = _cKDTree(pt).query(bl)
+        return (float(np.sqrt(np.mean(devs ** 2)) * 1e3),
+                float(np.max(devs) * 1e3))
+    except Exception:
+        return (np.nan, np.nan)
+
+
+def passes_coil_spec(F_pct, V_pct, F_max_pct, V_max_pct):
+    """Coil-current spec test, in PERCENT on both sides.
+
+    A non-finite drift or a non-finite threshold fails: an unmeasured draw is
+    not silently in spec.
+    """
+    ok_F = (np.isfinite(F_pct) and np.isfinite(F_max_pct)
+            and F_pct <= F_max_pct)
+    ok_V = (np.isfinite(V_pct) and np.isfinite(V_max_pct)
+            and V_pct <= V_max_pct)
+    return bool(ok_F and ok_V)
+
+
+def passes_boundary_spec(rms_mm, max_mm, rms_max_mm=None, max_max_mm=None):
+    """LCFS-deviation test against whichever bounds are supplied.
+
+    A bound left at ``None`` is not applied (that channel passes), so with
+    both ``None`` this is the report-only mode of :func:`filter_boundaries`
+    and every draw passes. A supplied bound against a non-finite deviation
+    fails, for the same reason as in :func:`passes_coil_spec`.
+    """
+    ok_rms = (rms_max_mm is None) or (np.isfinite(rms_mm)
+                                      and rms_mm <= rms_max_mm)
+    ok_max = (max_max_mm is None) or (np.isfinite(max_mm)
+                                      and max_mm <= max_max_mm)
+    return bool(ok_rms and ok_max)
+
+
+def passes_all_filters(F_pct, V_pct, baseline_boundary, perturbed_boundary,
+                       F_max_pct, V_max_pct,
+                       rms_max_mm=None, max_max_mm=None):
+    """The full ``selected`` verdict for one draw, from raw quantities.
+
+    Composes :func:`passes_coil_spec` and :func:`passes_boundary_spec` over
+    :func:`boundary_deviation_mm` -- the same AND that ``_recompute_selected``
+    forms from the two stored flags. This is what ``generate_bouquet``'s
+    until-N loop counts with, so that a run stopping at N in-spec draws
+    yields N ``selected`` draws once the postprocess filters run.
+
+    Returns ``(passed, rms_mm, max_mm, reasons)``, where ``reasons`` is the
+    tuple of failing channels (empty on a pass) -- ``('coil',)``,
+    ``('boundary',)`` or both -- for the per-draw log line.
+    """
+    rms_mm, max_mm = boundary_deviation_mm(baseline_boundary,
+                                           perturbed_boundary)
+    ok_coil = passes_coil_spec(F_pct, V_pct, F_max_pct, V_max_pct)
+    ok_bnd = passes_boundary_spec(rms_mm, max_mm, rms_max_mm, max_max_mm)
+    reasons = tuple(([] if ok_coil else ["coil"])
+                    + ([] if ok_bnd else ["boundary"]))
+    return bool(ok_coil and ok_bnd), rms_mm, max_mm, reasons
 
 
 # --------------------------------------------------------------------------
@@ -162,13 +255,7 @@ def _boundary_devs(bl_boundary, grp):
             perturbed = np.column_stack([eq.boundary_R, eq.boundary_Z])
         except Exception:
             return (np.nan, np.nan)
-    try:
-        tree = _cKDTree(perturbed)
-        devs, _ = tree.query(bl_boundary)
-        return (float(np.sqrt(np.mean(devs ** 2)) * 1e3),
-                float(np.max(devs) * 1e3))
-    except Exception:
-        return (np.nan, np.nan)
+    return boundary_deviation_mm(bl_boundary, perturbed)
 
 
 # --------------------------------------------------------------------------
@@ -303,9 +390,7 @@ def filter_coil_currents(h5path_or_header, scan_key=None,
         results = {}
         draws = {}
         for i, F, V, fthr, vthr in rows:
-            ok_F = np.isfinite(F) and np.isfinite(fthr) and F <= fthr
-            ok_V = np.isfinite(V) and np.isfinite(vthr) and V <= vthr
-            passed = bool(ok_F and ok_V)
+            passed = passes_coil_spec(F, V, fthr, vthr)
             results[i] = passed
             draws[i] = {"max_F_drift_pct": F, "max_VSC_drift_pct": V,
                         "F_max_pct": fthr, "VSC_max_pct": vthr,
@@ -349,11 +434,7 @@ def filter_boundaries(h5path_or_header, scan_key=None,
         results = {}
         draws = {}
         for i, rms, mx in rows:
-            ok_rms = (rms_max_mm is None) or (np.isfinite(rms)
-                                              and rms <= rms_max_mm)
-            ok_max = (max_max_mm is None) or (np.isfinite(mx)
-                                              and mx <= max_max_mm)
-            passed = bool(ok_rms and ok_max)
+            passed = passes_boundary_spec(rms, mx, rms_max_mm, max_max_mm)
             results[i] = passed
             draws[i] = {"rms_mm": rms, "max_mm": mx, "passes": passed}
         if apply and cutting:

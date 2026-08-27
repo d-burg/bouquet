@@ -806,7 +806,31 @@ class Bouquet:
                 # P' sign follows the case's flux convention: probe it against the
                 # source total rather than assume (a sign slip is ~6% of Ip).
                 _probe = eq_jphi_profile(_geom, "jphi-linterp", eq=_eq_snap)
-                _pps = 1.0 if float(np.dot(_probe, FUSE_tot)) > 0.0 else -1.0
+                # P' sign: determine it SELF-CONSISTENTLY, by which choice makes the
+                # measure reproduce the equilibrium's own Ip. The previous heuristic
+                # -- sign(dot(eq j_phi, core_profiles j_tor)) -- tests whether those
+                # two profiles share a CURRENT-DIRECTION convention, which is not the
+                # same question: on the ohmic ramp shots the equilibrium's j_phi is
+                # positive while FUSE's dd carries j_tor with the physical DIII-D
+                # sign (Ip < 0), so it flipped and c came out with the wrong sign,
+                # costing +1.31% of Ip (vs +0.002% with the right sign). The two
+                # candidates are separated by orders of magnitude, so this is a
+                # well-posed determination, and the roundtrip gate still validates it.
+                _Ipt_probe = abs(float(bl.Ip_target))
+                _rt_cand = {}
+                for _s_try in (1.0, -1.0):
+                    try:
+                        _rt_cand[_s_try] = float(Ip_fsa_integral(
+                            _eq_snap, _psi_ip, np.asarray(_probe, dtype=float),
+                            convention="jphi-linterp", pprime_sign=_s_try, geom=_geom))
+                    except Exception:
+                        _rt_cand[_s_try] = float("nan")
+                _pps = min(_rt_cand, key=lambda k: abs(abs(_rt_cand[k]) - _Ipt_probe)
+                           if np.isfinite(_rt_cand[k]) else np.inf)
+                _pps_err = {k: 100.0 * (abs(v) - _Ipt_probe) / _Ipt_probe for k, v in _rt_cand.items()}
+                print(f"[imas SWB-split:ohmic] P\' sign self-consistency: "
+                      f"+1 -> {_pps_err[1.0]:+.3f}%, -1 -> {_pps_err[-1.0]:+.3f}%  => chose {_pps:+.0f}",
+                      flush=True)
                 _ip = lambda j: float(Ip_fsa_integral(
                     _eq_snap, _psi_ip, np.asarray(j, dtype=float),
                     convention="jphi-linterp", pprime_sign=_pps, geom=_geom))
@@ -823,6 +847,22 @@ class Bouquet:
                 # the measure's own self-consistency: the equilibrium's OWN
                 # profile must integrate to its true Ip (validated +0.0055%)
                 _ip_roundtrip = _ip(_probe)
+                # BQ_CLOSURE_DUMP=<path.npz>: dump the measure's ingredients so the
+                # roundtrip error can be localised in psi_N (diagnostic only).
+                _dumpf = __import__("os").environ.get("BQ_CLOSURE_DUMP")
+                if _dumpf:
+                    _gp = np.asarray(_geom["psi_N"], float)
+                    _cum = _integ.cumulative_trapezoid(_w_lin * np.asarray(_probe, float), _gp, initial=0.0)
+                    np.savez(_dumpf,
+                             psi_N_geom=_gp, w_lin=np.asarray(_w_lin, float),
+                             c_affine=float(_c_affine), probe=np.asarray(_probe, float),
+                             cum_lin=_cum, ip_roundtrip=float(_ip_roundtrip),
+                             Ip_target=float(abs(bl.Ip_target)), pprime_sign=float(_pps),
+                             inv_R2=np.asarray(_geom.get("inv_R2", []), float),
+                             psi_q=np.asarray(_geom.get("psi_q", []), float),
+                             fuse_tot=np.asarray(FUSE_tot, float),
+                             psi_N_kin=np.asarray(psi_N, float))
+                    print(f"[closure-dump] wrote {_dumpf}", flush=True)
                 # recorded-only alternatives
                 _ip_fsaconv = lambda j: float(Ip_fsa_integral(
                     _eq_snap, _psi_ip, np.asarray(j, dtype=float),

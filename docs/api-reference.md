@@ -41,6 +41,7 @@ Docstrings in the source are authoritative; this page is a map.
 | `discover_scan_keys()` / `count_equilibria()` / `list_equilibrium_indices()` | Archive introspection |
 | `select_indices()` / `read_filter_flags()` | Filter-flag queries |
 | `filter_coil_currents()` / `filter_boundaries()` / `export_filtered()` | Post-generation selection of the machine-realizable subset |
+| `bouquet.filtering.passes_all_filters()` (+ `passes_coil_spec` / `passes_boundary_spec` / `boundary_deviation_mm`) | The selection predicate itself, on raw numbers rather than an archive. Shared with `generate_bouquet`'s [until-N](workflows.md#until-n-in-spec-draws) stopping rule so the two agree by construction. Module-level, not re-exported at the package root |
 
 Layout spec: [archive-schema.md](archive-schema.md). Code source of truth:
 [`bouquet/schema.py`](../bouquet/schema.py).

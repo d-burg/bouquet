@@ -131,6 +131,25 @@ def _warn_multithreaded(threads_per_worker):
 # --------------------------------------------------------------------------
 #  worker: generate one shard
 # --------------------------------------------------------------------------
+def _reject_until_n(config, where):
+    """The until-N stopping rule is serial-only -- refuse it here.
+
+    Each shard is a separate process with its own archive and no view of the
+    others' yield, so N workers each chasing ``n_inspec_target`` would deliver
+    N*target draws, and no worker can chase a shared fraction of it. Rejecting
+    is the honest option: silently ignoring the field would hand back a
+    differently-sized ensemble than the config asks for.
+    """
+    tgt = getattr(config.generation, "n_inspec_target", None)
+    if tgt is not None:
+        raise ValueError(
+            f"generation.n_inspec_target={tgt} is not supported by {where}: "
+            f"the until-N-in-spec stopping rule is serial-only (workers cannot "
+            f"see each other's yield). Either run serially via Bouquet."
+            f"generate(), or set n_inspec_target=None and size n_equils to "
+            f"the yield you expect.")
+
+
 def run_shard(config, worker_id, n_workers, *, n_equils_total, seed_base,
               out_header, scan_key, threads_per_worker, verbose=False,
               progress_q=None):
@@ -145,6 +164,7 @@ def run_shard(config, worker_id, n_workers, *, n_equils_total, seed_base,
     (otherwise N workers x every slice floods the parent's stdout); set True to
     stream it for debugging.
     """
+    _reject_until_n(config, "run_shard")
     n = _shard_size(n_equils_total, n_workers, worker_id)
     if n == 0:
         return dict(worker_id=worker_id, path=None, n=0,
@@ -355,6 +375,7 @@ def parallel_generate(config, *, n_workers=None, threads_per_worker=1, seed=0,
     raises (a worker did not converge to the shared baseline -- e.g. a stray
     ``nthreads>1`` or a mismatched source). Returns a summary dict.
     """
+    _reject_until_n(config, "parallel_generate")
     n_total = int(config.generation.n_equils)
     scan_key = config.generation.scan_key
     out_header = config.output_header
@@ -505,6 +526,7 @@ def emit_slurm_script(config, *, n_workers, seed, threads_per_worker,
     shard/merged ``.h5`` outputs land there too unless
     ``config.output_header`` is an absolute path.)
     """
+    _reject_until_n(config, "emit_slurm_script")
     _warn_multithreaded(threads_per_worker)
     os.makedirs(out_dir, exist_ok=True)
     # Config JSON bundle (not pickle): portable across package/Python versions,

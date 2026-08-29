@@ -92,6 +92,14 @@ def _load_golden(sv="0"):
             te=np.asarray(bl["T_e"][()]),
             ni=np.asarray(bl["n_i"][()]),
             ti=np.asarray(bl["T_i"][()]),
+            # NOTE the semantics: since store_achieved_jphi=True (2026-07),
+            # the archived _baseline/j_phi is the ACHIEVED FSA current of the
+            # converged solve -- the solver's OUTPUT, not the pin target.
+            # Pinning it re-poses a DIFFERENT problem than the one that
+            # produced the archived coils (the target->achieved map is not
+            # idempotent; measured ~2.5% on the softest coil, F9B).  Modes
+            # 1/2 therefore pin the live reconstruction TARGET captured in
+            # the replay fixture below, never this array.
             jphi=np.asarray(bl["j_phi"][()]),
             pressure=np.asarray(bl["pressure"][()]),
             recon_lcfs=np.asarray(bl["recon_lcfs_ref"][()]),
@@ -190,6 +198,15 @@ def replay(tmp_path_factory):
     base["l_i_target"] = float(
         mygs.get_stats(lcfs_pad=pad, li_normalization="iter")["l_i"])
 
+    # The pin TARGET for modes 1/2: the live reconstruction's j_phi -- the
+    # same array run.generate() hands generate_bouquet as input_j_phi.  The
+    # archived base["jphi"] is the ACHIEVED profile (see _load_golden) and
+    # pinning it lands the coils ~2.5% off; pinning the target re-poses the
+    # exact problem that produced the archived baseline, so the replay
+    # recovers its coils to ~0.007%.  Deliberately recomputed live rather
+    # than stored: if reconstruct() drifts, this test SHOULD fail.
+    base["jphi_pin_target"] = np.asarray(bl_run.j_phi, dtype=float)
+
     z = np.zeros_like(psi_pf)
     zj = np.zeros_like(psi_N)
     with open(_GEQ, 'rb') as fh:
@@ -240,14 +257,15 @@ def replay(tmp_path_factory):
     results = {"base": base, "draws": draws, "mode1": None,
                "mode2": {}, "mode3": {}}
     # Mode 1: pinned, baseline kinetics -> baseline
+    _jpin = base["jphi_pin_target"]
     results["mode1"] = _run(
         work + "/m1", base["ne"], base["te"], base["ni"], base["ti"],
-        base["jphi"], base["jphi"], base["l_i_target"], pin_jphi=True)
+        _jpin, _jpin, base["l_i_target"], pin_jphi=True)
     # Modes 2 & 3 per draw
     for i, d in draws.items():
         results["mode2"][i] = _run(
             work + f"/m2_{i}", d["ne"], d["te"], d["ni"], d["ti"],
-            base["jphi"], base["jphi"], base["l_i_target"], pin_jphi=True)
+            _jpin, _jpin, base["l_i_target"], pin_jphi=True)
         results["mode3"][i] = _run(
             work + f"/m3_{i}", d["ne"], d["te"], d["ni"], d["ti"],
             d["jphi"], d["jind"], d["li3"], pin_jphi=False)

@@ -249,7 +249,8 @@ def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
                 + ("to the VB-measured sigma_Zeff"
                    if _usable(measured_sigma) is not None
                    else "to the scalar envelope"), stacklevel=2)
-    if chosen is None and zeff_is_ida             and zeff_sigma_source in ("auto", "carbon", "measured"):
+    if (chosen is None and zeff_is_ida
+            and zeff_sigma_source in ("auto", "carbon", "measured")):
         m = _usable(measured_sigma)
         if m is not None:
             chosen = (m, f"measured IDA ({measured_source})")
@@ -260,7 +261,8 @@ def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
                 "vintage); falling back to the scalar envelope -- the "
                 "resulting ni bands use the ASSUMED 5 %-class width, not a "
                 "measured one", stacklevel=2)
-    if chosen is None and not zeff_is_ida             and zeff_sigma_source in ("carbon", "measured"):
+    if (chosen is None and not zeff_is_ida
+            and zeff_sigma_source in ("carbon", "measured")):
         warnings.warn(
             f"resolve_zeff_envelope: zeff_sigma_source="
             f"'{zeff_sigma_source}' but this source's Z_eff baseline is not "
@@ -445,11 +447,12 @@ def resolve_uncertainty(config, baseline) -> dict:
         # whether baseline.aux carries a 'zeff' entry: the reconstruction
         # path also populates aux['zeff'] (it IS the IDA Zeff, stored for
         # the aux plots), so testing the aux dict wrongly disqualified every
-        # recon-path run -- caught by the 179633 end-to-end A/B, where the
-        # 'auto' arm silently resolved to the scalar.  Only the IMAS /
+        # recon-path run -- caught by an end-to-end A/B on a demo shot, where
+        # the 'auto' arm silently resolved to the scalar.  Only the IMAS /
         # ida_hybrid path (ImasSource), whose Z_eff baseline is FUSE's, must
         # be kept away from an IDA-measured envelope.
-        _zeff_baseline_is_ida = isinstance(src, ReconstructionSource)             and ida_path is not None
+        _zeff_baseline_is_ida = (isinstance(src, ReconstructionSource)
+                                 and ida_path is not None)
         _z_env, _z_label = resolve_zeff_envelope(
             getattr(unc, "zeff_sigma_source", "auto"),
             unc.zeff_scalar_sigma,

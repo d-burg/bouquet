@@ -105,8 +105,6 @@ class TestReaderTiers:
     def test_carbon_crosscheck_measures_an_injected_inconsistency(self, tmp_path):
         p = str(tmp_path / "incons.cdf")
         psi, ne, te, zeff = _grids()
-        with h5py.File(p, "a") as f:
-            pass
         _write_direct(p, with_zeff_err=True, with_carbon=False)
         with h5py.File(p, "a") as f:
             # carbon implying Zeff 10 % LOWER than reported

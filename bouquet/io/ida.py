@@ -220,7 +220,8 @@ def read_ida(
             sigma_Zeff_carbon, sigma_Zeff_carbon_source = None, "none"
             if "n_12C6" in f:
                 nc_s = _samples("n_12C6")
-                zc_s = 1.0 + impurity_Z * (impurity_Z - 1.0) * nc_s                     / np.clip(ne_s, 1e10, None)
+                zc_s = (1.0 + impurity_Z * (impurity_Z - 1.0) * nc_s
+                        / np.clip(ne_s, 1e10, None))
                 sigma_Zeff_carbon = _band(zc_s)
                 sigma_Zeff_carbon_source = "ensemble-samples"
         else:
@@ -244,7 +245,8 @@ def read_ida(
             if "n_12C6" in f and "n_12C6_err" in f:
                 _nc, _snc = col("n_12C6"), col("n_12C6_err")
                 with np.errstate(divide="ignore", invalid="ignore"):
-                    _dil = impurity_Z * (impurity_Z - 1.0) * _nc                         / np.clip(ne, 1e10, None)
+                    _dil = (impurity_Z * (impurity_Z - 1.0) * _nc
+                            / np.clip(ne, 1e10, None))
                     sigma_Zeff_carbon = _dil * np.sqrt(
                         (_snc / np.clip(_nc, 1e10, None)) ** 2
                         + (sigma_ne / np.clip(ne, 1e10, None)) ** 2)
@@ -271,7 +273,8 @@ def read_ida(
             n_c_raw = np.asarray(f["n_12C6"][t_idx], dtype=float)
             n_c = n_c_raw.mean(0) if n_c_raw.ndim == 2 else n_c_raw
             with np.errstate(divide="ignore", invalid="ignore"):
-                z_from_c = 1.0 + impurity_Z * (impurity_Z - 1.0) * n_c                     / np.clip(ne, 1e10, None)
+                z_from_c = (1.0 + impurity_Z * (impurity_Z - 1.0) * n_c
+                            / np.clip(ne, 1e10, None))
                 _core = psi_N <= 0.9
                 _rd = (Zeff[_core] - z_from_c[_core]) / np.clip(
                     z_from_c[_core], 1e-3, None)

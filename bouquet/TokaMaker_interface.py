@@ -100,6 +100,70 @@ def _count_masked_anchor_failure(site, exc):
 
 
 # ---- Adaptive corrective iteration ----
+def _renormalize_target_to_Ip(mygs, psi_N, target_jphi, Ip_target, psi_pad,
+                              label="jphi_corr"):
+    """Scale a corrector target so it carries ``Ip_target`` (issue #29).
+
+    The corrective iteration hands TokaMaker a ``jphi-linterp`` input and the
+    solver renormalises that input's AMPLITUDE to hit ``Ip_target`` on every
+    iterate.  A target whose own current integral is not ``Ip_target`` is
+    therefore a shape the solver can reproduce but a total it is constrained
+    to refuse -- and the Newton update ``input += target - output`` keeps
+    re-injecting that refused current.  Measured (#29) on eight cases, the
+    reconstruction's target carried **-3.9 % to +18.7 % of Ip** (golden
+    +6.0 %; its amplitude comes from the l_i secant, which never sees Ip),
+    while every solver output sat at Ip to <= 0.06 %.
+
+    Uniform scaling is the right operation: ``l_i`` depends on the shape, not
+    the amplitude, so the step-6 match is preserved in shape; and a
+    uniformly-scaled target is exactly what ``jphi-linterp`` hands back.
+
+    The measure is the physical FSA current integral on the LIVE geometry
+    (self-validated to 0.01-0.04 % on real cases, #35) -- never the
+    limiter-area ``flux_integral``, which reads the same target +10..+44 %
+    high.  It is AFFINE, ``Ip[J] = int(w*J) + c`` (the ``P'`` term lands in
+    ``c``, -3.3 % of Ip on the golden), so the scale is solved exactly,
+    ``s = (Ip_target - c) / int(w*J)`` -- a plain ratio ``Ip_target/Ip[J]``
+    would miss by ``(1-s)*c``, measured -0.19..-0.26 % of Ip.
+
+    Returns ``(scaled_target, factor)``; factor is 1.0 (target untouched) if
+    the measure is unavailable, with a loud note, so the corrector still runs
+    rather than not at all.
+    """
+    from scipy.integrate import trapezoid
+    from .utils import (fsa_current_geometry, Ip_fsa_weights,
+                        eq_jphi_profile)
+    psi = np.asarray(psi_N, dtype=float)
+    t = np.asarray(target_jphi, dtype=float)
+    try:
+        geom = fsa_current_geometry(mygs, psi)
+        probe = eq_jphi_profile(geom, "jphi-linterp", eq=mygs)
+        sign = 1.0 if float(np.dot(probe, t)) > 0.0 else -1.0
+        w, c = Ip_fsa_weights(geom, convention="jphi-linterp",
+                              pprime_sign=sign)
+        lin = float(trapezoid(w * t, psi))
+        Ip_t = lin + c
+    except Exception as exc:          # measure unavailable: do not block
+        print(f"  [{label}] WARN: target Ip measure failed ({exc}); "
+              f"corrector target NOT renormalised (issue #29)", flush=True)
+        return t.copy(), 1.0
+    if not (np.isfinite(lin) and np.isfinite(c) and lin != 0.0
+            and np.isfinite(Ip_target)):
+        print(f"  [{label}] WARN: target Ip measure non-finite "
+              f"(lin={lin}, c={c}); corrector target NOT renormalised "
+              f"(issue #29)", flush=True)
+        return t.copy(), 1.0
+    factor = (float(Ip_target) - c) / lin
+    if not np.isfinite(factor) or factor <= 0.0:
+        print(f"  [{label}] WARN: target Ip scale {factor} is not positive; "
+              f"corrector target NOT renormalised (issue #29)", flush=True)
+        return t.copy(), 1.0
+    print(f"  [{label}] target renormalised to Ip: carried "
+          f"{100.0 * (Ip_t / float(Ip_target) - 1.0):+.3f}% of Ip_target, "
+          f"scaled x{factor:.6f} (affine-exact; issue #29)", flush=True)
+    return t * factor, factor
+
+
 def _corrective_jphi_iteration(mygs, psi_N, target_jphi, pp_prof,
                                 Ip_target, pax_target, psi_pad,
                                 min_iters=2, max_iters=8,
@@ -2993,6 +3057,16 @@ def perturb_kinetic_equilibrium(
         target_jphi_perturb = (
             matched_j_inductive * final_scale_j0 + spike_profile + j_fixed_eff
         )
+        # Issue #29 (second site): the inductive amplitude above was rooted on
+        # the limiter-area flux integral (#15), so the assembled target does
+        # not carry Ip_target in the physical measure either.  Same uniform
+        # renormalisation as the reconstruction site -- the solver will scale
+        # the input to Ip regardless; make the target the profile it can
+        # actually return, so the Newton update stops re-injecting refused
+        # current.
+        target_jphi_perturb, _corr_ip_factor = _renormalize_target_to_Ip(
+            mygs, psi_N, target_jphi_perturb, Ip_target, psi_pad,
+            label="jphi_corr/draw")
 
         output_jphi, _n_corr, _corr_hist = _corrective_jphi_iteration(
             mygs, psi_N, target_jphi_perturb, pp_prof,
@@ -6083,6 +6157,13 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
     # No knob values change: rtol=0.05, max_iters=8, min_iters=2, damping=1.0
     # (the IMAS site's rtol=0.02 / damping=0.5 are ITS tuning, not part of this
     # change -- only the state protection is mirrored).
+    # Issue #29: the target's amplitude comes from the l_i secant and never
+    # saw Ip -- measured +6.0 % of Ip on the golden, +6.2 % on a DIII-D
+    # archive.  Renormalise (uniformly; l_i is shape-only) to the current the
+    # solver will actually produce, so the corrector chases a reachable target.
+    corr_target, _corr_ip_factor = _renormalize_target_to_Ip(
+        mygs, eqdsk.psi_N, corr_target, Ip_final_target, psi_pad,
+        label="jphi_corr/recon")
     j_phi_output_corr, _n_corr, _corr_hist = _corrective_jphi_iteration(
         mygs, eqdsk.psi_N, corr_target, pp_prof,
         Ip_final_target, pres_tmp[0], psi_pad,

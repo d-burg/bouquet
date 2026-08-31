@@ -1070,7 +1070,7 @@ class Bouquet:
                     #     inflated-sigma chi^2 improvement over s_ohm = 1 exceeds
                     #     mse_accept_dchi2 (default 9 ~ 3 sigma). Otherwise fall
                     #     back to the bootstrap channel (s_ohm = 1) -- the
-                    #     148798-type pitfall (marginal outer-chord gain dragging
+                    #     validation-era pitfall (marginal outer-chord gain dragging
                     #     the scale) becomes structurally impossible.
                     _fs = [c[0] for c in _curve if np.isfinite(c[2])]
                     _fc = [c[2] for c in _curve if np.isfinite(c[2])]

@@ -1400,6 +1400,15 @@ class Bouquet:
                 problems.append(f"IMAS path jBS_baseline_mode="
                                 f"{gc.jBS_baseline_mode!r} not in "
                                 f"('diff','rescale','ohmic')")
+            elif gc.jBS_baseline_mode == "ohmic":
+                # Baseline-only for now: the draw path's sigma=0 reproduction
+                # of an ohmic-closed baseline has not been verified, so the
+                # UQ ensemble refuses the mode rather than silently drawing
+                # around an unvalidated split.
+                problems.append(
+                    "jBS_baseline_mode='ohmic' is baseline-only for now "
+                    "(draw-path sigma=0 reproduction unverified); run the "
+                    "baseline study without generate()")
         if not problems:
             return
         msg = ("bouquet workflow guard: " + "; ".join(problems)

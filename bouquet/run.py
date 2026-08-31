@@ -710,8 +710,8 @@ class Bouquet:
             # 'ohmic' mode: freeze the ANCHOR geometry now. solve_with_bootstrap
             # iterates its own GS solves (generic inductive seed + its bootstrap)
             # and leaves mygs on a different equilibrium; integrating FUSE's
-            # profile on that landed geometry read +31% of Ip on 161172 @ 1.6 s
-            # (vs +0.8% on the anchor) and collapsed the closure. Every Ip
+            # profile on that landed geometry read +31% of Ip on an ohmic-ramp
+            # slice (vs +0.8% on the anchor) and collapsed the closure. Every Ip
             # integral in the ohmic branch is taken on this snapshot.
             _anchor = None
             if str(gc.jBS_baseline_mode) == "ohmic":
@@ -793,7 +793,8 @@ class Bouquet:
                 # function held at its LCFS value outside the plasma, charging the
                 # scrape-off area at f(psi_N=1) (+11.9% of Ip on the D3D-like
                 # anchor; see the utils.py module note). And NOT the cylindrical
-                # l_i proxy (1/<R> for <1/R>; +7.75% on 148798). Both are still
+                # l_i proxy (1/<R> for <1/R>; +7.75% on the FUSE validation
+                # case). Both are still
                 # evaluated and RECORDED below so the biases stay visible.
                 from .utils import (fsa_current_geometry, Ip_fsa_integral,
                                     Ip_fsa_weights, eq_jphi_profile)
@@ -889,7 +890,8 @@ class Bouquet:
                          _e(_ip_oft(FUSE_tot)), _e(_ip_cyl(FUSE_tot)), _e(_ip_solved), _inv_r2_src), flush=True)
                 # GATE: validity of the MEASURE. The equilibrium's own GS current
                 # profile must round-trip to its Ip (bouquet validated +0.0055%,
-                # measured -0.002% on 148798). If it does not, no closure built
+                # measured -0.002% on the FUSE validation case). If it does
+                # not, no closure built
                 # on this geometry is meaningful -- stop. (Re-targeted 2026-08-21,
                 # user-approved: the previous gate tested whether FUSE's total
                 # carries Ip, which is a property of the FUSE DATA, not of the
@@ -984,7 +986,8 @@ class Bouquet:
                     proxy_Ip_fuse_total=_ip_cyl(FUSE_tot),
                     proxy_fuse_total_err_pct=100.0 * (abs(_ip_cyl(FUSE_tot)) - Ip_t) / Ip_t,
                     # the proxy carries its own sign convention (it came out
-                    # negative on 148798 where OFT's integral is positive), so
+                    # negative on the FUSE validation case where OFT's
+                    # integral is positive), so
                     # use ITS sign here, not the OFT one -- otherwise this
                     # diagnostic reads as a nonsensical negative rescale.
                     proxy_ohm_scale_would_be=float(

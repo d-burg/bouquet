@@ -4409,8 +4409,9 @@ def generate_bouquet(
                 # INSIDE SWB, so a 1.0 reference here makes the delta
                 #   bs*SWB0 + bs*SWB_pert - 1.0*SWB0
                 # i.e. every draw loses (1-bs)/bs of the pedestal bootstrap.
-                # Exactly zero at bs_scale=1 (why the 148798 validation passed)
-                # and 9.7% of Ip at bs_scale=0.70. See PIPELINE_LESSONS 14q.
+                # Exactly zero at bs_scale=1 (why the original validation
+                # passed) and ~10% of Ip at bs_scale=0.70. Full diagnosis in
+                # issue #44.
                 _cache_results = _swb(
                     mygs, ne_cache, te_cache, ni_cache, ti_cache, Zeff,
                     initial_Ip_target, _swb_seed_cache,

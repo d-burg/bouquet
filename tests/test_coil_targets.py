@@ -62,6 +62,19 @@ class TestApplyCoilReg:
         by = {list(t["coils"])[0]: t for t in got}
         assert by["F1A"]["target"] == 1234.0 and by["F1A"]["weight"] == 9.0
 
+    def test_ignores_coils_absent_from_the_mesh(self):
+        """A measurement source is not mesh-specific: DIII-D pf_active has 24
+        circuits, the shipped mesh models 20. coil_reg_term raises KeyError on
+        an unknown coil, which would kill setup_solver."""
+        spec = [{"coils": {"F1A": 1.0}, "target": 5.0, "weight": 1.0},
+                {"coils": {"E567UP": 1.0}, "target": 7.0, "weight": 1.0}]
+        with pytest.warns(UserWarning, match="E567UP"):
+            got = self._run(spec)
+        names = {c for t in got for c in t["coils"]}
+        assert "E567UP" not in names
+        by = {list(t["coils"])[0]: t for t in got}
+        assert by["F1A"]["target"] == 5.0
+
     def test_unnamed_coils_still_get_a_zero_target(self):
         got = self._run([{"coils": {"F1A": 1.0}, "target": 1234.0, "weight": 9.0}])
         by = {list(t["coils"])[0]: t for t in got}

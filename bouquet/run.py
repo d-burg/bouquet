@@ -378,6 +378,19 @@ class Bouquet:
         """
         spec = list(getattr(self.config.solver, "coil_reg", None) or [])
         if spec:
+            # Drop terms naming coils this MESH does not model. A measurement
+            # source is not mesh-specific: DIII-D pf_active carries all 24
+            # circuits while the shipped D3D mesh models 20 coil sets (no
+            # E567UP/E567DN/E89UP/E89DN), and coil_reg_term raises KeyError on
+            # an unknown name -- which would kill setup_solver outright.
+            known = set(mygs.coil_sets) | {"#VSC"}
+            skipped = sorted({c for t in spec for c in t["coils"]} - known)
+            spec = [t for t in spec if set(t["coils"]) <= known]
+            if skipped:
+                import warnings
+                warnings.warn(
+                    "coil_reg: ignoring %d coil(s) absent from this mesh: %s"
+                    % (len(skipped), ", ".join(skipped)))
             reg_terms = [
                 mygs.coil_reg_term(dict(t["coils"]),
                                    target=float(t.get("target", 0.0)),

@@ -125,3 +125,24 @@ class TestFixedSigma:
         from bouquet.coil_spec import coil_sigma_fixed
         sig, fac = coil_sigma_fixed({"E1": [(1.0, 100.0, 7.0)]})
         assert "E1" not in sig
+
+
+def test_with_sigma_ref_removes_daq_epoch_dependence():
+    """Same drift, 2012-epoch (8x) vs 2017-epoch sigma: chi2 differs by ~64x
+    on the dd values and is identical once referenced to the fixed table."""
+    from bouquet.coil_spec import (SIGMA_REF_D3D_A, coil_chi2,
+                                   coil_sigma_in_base_units, with_sigma_ref)
+    base = {"F1A": -86300.0, "ECOILA": 18370.0}
+    draw = {"F1A": -86300.0 + 400.0, "ECOILA": 18370.0 + 200.0}
+    meas_2017 = {"F1A": (-1609.0, 7.0), "ECOILA": (18842.0, 69.0)}
+    meas_2012 = {"F1A": (-1609.0, 55.3), "ECOILA": (18842.0, 551.0)}
+    c17 = coil_chi2(draw, base, coil_sigma_in_base_units(base, meas_2017))["chi2_nu"]
+    c12 = coil_chi2(draw, base, coil_sigma_in_base_units(base, meas_2012))["chi2_nu"]
+    assert c17 / c12 > 50.0
+    r17 = coil_chi2(draw, base, coil_sigma_in_base_units(base, with_sigma_ref(meas_2017)))["chi2_nu"]
+    r12 = coil_chi2(draw, base, coil_sigma_in_base_units(base, with_sigma_ref(meas_2012)))["chi2_nu"]
+    assert r12 == pytest.approx(r17) == pytest.approx(c17)
+    # coils with no family entry keep their own sigma
+    out = with_sigma_ref({"F1A": (1.0, 55.0), "XYZ": (1.0, 3.0)}, {"F": 7.0})
+    assert out["F1A"][1] == 7.0 and out["XYZ"][1] == 3.0
+    assert SIGMA_REF_D3D_A == {"F": 7.0, "E": 69.0}

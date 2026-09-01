@@ -286,7 +286,7 @@ def measured_coil_currents(dd_path, time_s):
 
 
 def filter_coil_chi2(h5path_or_header, dd_path, scan_key=None,
-                     chi2_max=4.0, apply=True):
+                     chi2_max=4.0, apply=True, sigma_ref=None):
     """Measurement-referenced coil filter (see :mod:`bouquet.coil_spec`).
 
     Scores each draw by ``chi2/nu`` of its coil currents against the baseline,
@@ -300,8 +300,12 @@ def filter_coil_chi2(h5path_or_header, dd_path, scan_key=None,
     ensemble (91%) while disagreeing on ~11% of individual draws.
 
     A draw with no usable coil scores NaN and FAILS: unjudgeable is not a pass.
+
+    ``sigma_ref``: ``None`` uses the dd's ``data_error_upper`` (10 digitizer
+    LSB, DAQ-epoch dependent); ``"d3d"`` uses ``SIGMA_REF_D3D_A``; a dict
+    ``{"F": A, "E": A}`` gives a custom per-family table.
     """
-    from .coil_spec import coil_chi2, coil_sigma_in_base_units
+    from .coil_spec import coil_chi2, coil_sigma_in_base_units, with_sigma_ref
 
     h5path = _resolve(h5path_or_header)
     summary = {}
@@ -315,6 +319,8 @@ def filter_coil_chi2(h5path_or_header, dd_path, scan_key=None,
             baseline = dict(zip(bn, np.asarray(
                 grp["_baseline"]["coil_currents"][()], dtype=float).tolist()))
             meas = measured_coil_currents(dd_path, float(sv))
+            if sigma_ref is not None:
+                meas = with_sigma_ref(meas, None if sigma_ref == "d3d" else sigma_ref)
             sigma = coil_sigma_in_base_units(baseline, meas)
             rows = {}
             for key in sorted((k for k in grp if k.isdigit()), key=int):

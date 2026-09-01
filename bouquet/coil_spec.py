@@ -37,11 +37,27 @@ from typing import Dict, Optional, Sequence, Tuple
 
 import numpy as np
 
-__all__ = ["coil_sigma_in_base_units", "coil_sigma_fixed", "coil_chi2"]
+__all__ = ["coil_sigma_in_base_units", "coil_sigma_fixed", "coil_chi2",
+           "SIGMA_REF_D3D_A", "with_sigma_ref"]
 
 #: Below this measured current [A] the fractional precision is meaningless and
 #: the coil is dropped from the metric rather than allowed to dominate it.
 MIN_ABS_MEASURED_A = 50.0
+
+# Fixed per-family measured sigma [A per turn], DIII-D 2017+ DAQ.  The OMAS
+# d3d mapping writes pf_active data_error_upper as 10 digitizer LSB, which is
+# ~8x larger on pre-2017 hardware (150000: 55 A F / 551 A E), so a chi2 cut
+# referenced to the dd value changes meaning across DAQ epochs.  This table is
+# what chi2_max=4.0 was calibrated against.
+SIGMA_REF_D3D_A = {"F": 7.0, "E": 69.0}
+
+
+def with_sigma_ref(measured, table=None):
+    """Replace each coil's measured sigma by the per-family value in *table*
+    (keyed by the coil name's first letter); coils with no family entry keep
+    their own sigma.  ``table=None`` -> ``SIGMA_REF_D3D_A``."""
+    table = SIGMA_REF_D3D_A if table is None else table
+    return {n: (i, float(table.get(n[:1], s))) for n, (i, s) in measured.items()}
 
 
 def coil_sigma_in_base_units(

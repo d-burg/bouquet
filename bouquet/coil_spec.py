@@ -15,10 +15,22 @@ units of the MEASURED precision::
     z_i     = (I_i^draw - I_i^base) / sigma_i^base
     chi2/nu = mean_i z_i^2
 
-``sigma_i^base = sigma_i^meas * |I_i^base| / |I_i^meas|`` carries the measured
-fractional precision into whatever units the solver reports. That ratio is the
-per-coil turns factor, so no turns table is needed, and the metric is invariant
-under any per-coil rescaling shared by baseline and draw.
+``sigma_i^base = sigma_i^meas * |I_i^base| / |I_i^meas|`` rescales the measured
+FRACTIONAL precision onto the baseline current, so
+
+    z_i = (fractional drift from baseline) / (measured fractional precision)
+
+i.e. "how many measurement precisions is this draw's drift". No turns table is
+needed and the metric is invariant under any per-coil rescaling shared by
+baseline and draw.
+
+The assumption is that the measured fractional precision is a fair yardstick for
+the solver's current -- NOT that ``|I^base|/|I^meas|`` is a fixed turns factor.
+It is not: measured across 26 slices of DIII-D 174823 that ratio is stable only
+for F6A/F6B/F7A/F7B (54-56, 8-12% spread) and varies 59-295% for 16 of 24 coils,
+because the free-boundary solve fits the BOUNDARY and lands on one of many coil
+sets consistent with it. Since sigma^base is formed per slice from that slice's
+own baseline and measurement, the metric stays self-consistent regardless.
 """
 
 from typing import Dict, Optional, Sequence, Tuple

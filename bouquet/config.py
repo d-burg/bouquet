@@ -72,6 +72,11 @@ class SolverConfig:
     # the reset runs immediately before the IMAS baseline solve, so anything
     # installed only at setup is discarded.
     coil_reg: list = field(default_factory=list)
+    # Initial coil currents {name: A-t} for the IMAS baseline inverse solve --
+    # seeds the iteration in a chosen basin; does NOT constrain the answer.
+    # Applied inside _forward_solve_imas_baseline after init_psi. Unset =>
+    # coils start at zero (historical behaviour).
+    coil_init: Optional[dict] = None
     region_overrides: Optional[dict] = None          # special-case cond/coil dict edits
 
 

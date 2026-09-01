@@ -80,3 +80,36 @@ class TestApplyCoilReg:
         by = {list(t["coils"])[0]: t for t in got}
         assert by["F6A"]["target"] == 0.0
         assert "#VSC" in by
+
+
+class TestCoilInit:
+    """SolverConfig.coil_init seeds the inverse iterate; it must not constrain."""
+
+    class _GS:
+        def __init__(self, sets):
+            self.coil_sets = list(sets)
+            self._cur = {k: 0.0 for k in sets}
+            self.set_calls = []
+        def init_psi(self, *a): pass
+        def get_coil_currents(self): return dict(self._cur), None
+        def set_coil_currents(self, cur):
+            self.set_calls.append(dict(cur)); self._cur = dict(cur)
+
+    def test_seeds_only_known_coils_and_keeps_the_rest(self):
+        """A 24-circuit measurement against a 20-set mesh: unknown names are
+        dropped, known ones are seeded, unlisted known coils keep their value."""
+        gs = self._GS(["F1A", "F6A", "ECOILA"])
+        gs._cur["ECOILA"] = -5.0
+        ci = {"F1A": 1000.0, "E567UP": 99.0}           # E567UP not in mesh
+        known = set(gs.coil_sets)
+        use = {k: float(v) for k, v in ci.items() if k in known}
+        cur, _ = gs.get_coil_currents(); cur.update(use); gs.set_coil_currents(cur)
+        assert gs.set_calls[-1] == {"F1A": 1000.0, "F6A": 0.0, "ECOILA": -5.0}
+        assert "E567UP" not in gs.set_calls[-1]
+
+    def test_config_field_defaults_to_none(self):
+        from bouquet.config import SolverConfig
+        import dataclasses
+        f = {x.name: x for x in dataclasses.fields(SolverConfig)}
+        assert "coil_init" in f
+        assert SolverConfig(mesh_path="x").coil_init is None

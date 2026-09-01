@@ -72,6 +72,8 @@ from .io import (
 
 from .filtering import (
     filter_coil_currents,
+    filter_coil_chi2,
+    measured_coil_currents,
     filter_boundaries,
     read_filter_flags,
     select_indices,
@@ -158,7 +160,8 @@ __all__ = [
     "discover_scan_keys", "count_equilibria", "list_equilibrium_indices",
     "write_provenance", "load_config",
     # ---- post-process filtering ----
-    "filter_coil_currents", "filter_boundaries", "read_filter_flags",
+    "filter_coil_currents", "filter_coil_chi2", "measured_coil_currents",
+    "filter_boundaries", "read_filter_flags",
     "select_indices", "export_filtered",
     # ---- plotting ----
     "set_plot_style", "WONG",

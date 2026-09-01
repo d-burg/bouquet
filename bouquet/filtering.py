@@ -40,6 +40,8 @@ from .io import read_geqdsk
 
 __all__ = [
     "filter_coil_currents",
+    "filter_coil_chi2",
+    "measured_coil_currents",
     "filter_boundaries",
     "read_filter_flags",
     "select_indices",
@@ -256,6 +258,90 @@ def select_indices(h5path_or_header, scan_key=None, selection="selected"):
 # --------------------------------------------------------------------------
 #  the two filters
 # --------------------------------------------------------------------------
+def measured_coil_currents(dd_path, time_s):
+    """``{name: (current_A, sigma_A)}`` from an IMAS ``pf_active`` at *time_s*.
+
+    ``data_error_upper`` is read as the 1-sigma magnitude (FUSE writes the error
+    itself there, not ``data + error``).
+    """
+    import json
+
+    with open(dd_path) as fh:
+        dd = json.load(fh)
+    out = {}
+    for c in dd.get("pf_active", {}).get("coil", []):
+        name = c.get("name") or c.get("identifier")
+        cur = c.get("current") or {}
+        if not name or "data" not in cur or "time" not in cur:
+            continue
+        t = np.asarray(cur["time"], dtype=float)
+        d = np.asarray(cur["data"], dtype=float)
+        e = cur.get("data_error_upper")
+        if e is None:
+            continue
+        e = np.abs(np.asarray(e, dtype=float))
+        j = int(np.argmin(np.abs(t - float(time_s))))
+        out[name] = (float(d[j]), float(e[j]))
+    return out
+
+
+def filter_coil_chi2(h5path_or_header, dd_path, scan_key=None,
+                     chi2_max=4.0, apply=True):
+    """Measurement-referenced coil filter (see :mod:`bouquet.coil_spec`).
+
+    Scores each draw by ``chi2/nu`` of its coil currents against the baseline,
+    weighted by the measured per-coil precision from ``pf_active``, and cuts at
+    *chi2_max*. Unlike :func:`filter_coil_currents` this covers EVERY coil the
+    measurement carries (E-coils included) and weights each by its own
+    precision rather than a flat fractional band.
+
+    ``chi2_max=4.0`` is RMS |z| = 2 -- "within 2 sigma per coil on average" --
+    and reproduces the legacy filter's acceptance rate on the DIII-D 174823
+    ensemble (91%) while disagreeing on ~11% of individual draws.
+
+    A draw with no usable coil scores NaN and FAILS: unjudgeable is not a pass.
+    """
+    from .coil_spec import coil_chi2, coil_sigma_in_base_units
+
+    h5path = _resolve(h5path_or_header)
+    summary = {}
+    for sv in _iter_scan_keys(h5path, scan_key):
+        with h5py.File(h5path, "r") as hf:
+            grp = hf["scan"][str(sv)]
+            if "_baseline" not in grp:
+                continue
+            bn = [x.decode() if isinstance(x, bytes) else str(x)
+                  for x in grp["_baseline"]["coil_names"][()]]
+            baseline = dict(zip(bn, np.asarray(
+                grp["_baseline"]["coil_currents"][()], dtype=float).tolist()))
+            meas = measured_coil_currents(dd_path, float(sv))
+            sigma = coil_sigma_in_base_units(baseline, meas)
+            rows = {}
+            for key in sorted((k for k in grp if k.isdigit()), key=int):
+                g = grp[key]
+                if "coil_currents" not in g:
+                    continue
+                names = [x.decode() if isinstance(x, bytes) else str(x)
+                         for x in g["coil_names"][()]]
+                draw = dict(zip(names, np.asarray(
+                    g["coil_currents"][()], dtype=float).tolist()))
+                rows[int(key)] = coil_chi2(draw, baseline, sigma)
+        results = {i: bool(np.isfinite(r["chi2_nu"]) and r["chi2_nu"] <= chi2_max)
+                   for i, r in rows.items()}
+        if apply:
+            _write_filter_result(h5path, sv, results, "passes_coil_filter")
+        n_pass = sum(results.values())
+        summary[sv] = {
+            "n_total": len(results), "n_pass": n_pass,
+            "n_fail": len(results) - n_pass, "chi2_max": float(chi2_max),
+            "n_coils": (max((r["nu"] for r in rows.values()), default=0)),
+            "draws": {i: {"chi2_nu": r["chi2_nu"], "max_abs_z": r["max_abs_z"],
+                          "worst_coil": r["worst_coil"], "nu": r["nu"],
+                          "passes": results[i]} for i, r in rows.items()},
+        }
+    return _finalize_scan_result(summary, scan_key)
+
+
 def filter_coil_currents(h5path_or_header, scan_key=None,
                           F_max_pct=None, VSC_max_pct=None,
                           apply=True, plot=True):

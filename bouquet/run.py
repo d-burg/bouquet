@@ -659,6 +659,18 @@ class Bouquet:
         # init psi from the LCFS shape parameters
         R0, Z0, a, kappa, delta = _shape_from_boundary(self._boundary_RZ)
         mygs.init_psi(R0, Z0, a, kappa, delta)
+        # Optional coil INITIAL ITERATE (SolverConfig.coil_init, {name: A-t}).
+        # Distinct from coil_reg: this seeds the inverse iteration in a chosen
+        # basin of the degenerate coil manifold without adding a term that
+        # fights the boundary. Must go AFTER init_psi, which reinitialises coil
+        # currents from the regularisation and would overwrite an earlier set.
+        _ci = getattr(self.config.solver, "coil_init", None)
+        if _ci:
+            _known = set(mygs.coil_sets)
+            _use = {k: float(v) for k, v in _ci.items() if k in _known}
+            _cur, _ = mygs.get_coil_currents()
+            _cur = dict(_cur); _cur.update(_use)
+            mygs.set_coil_currents(_cur)
 
         # kinetic profiles + total pressure on the equilibrium grid (IMAS shares
         # psi_N between the kinetic and current grids).

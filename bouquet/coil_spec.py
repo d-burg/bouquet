@@ -37,7 +37,7 @@ from typing import Dict, Optional, Sequence, Tuple
 
 import numpy as np
 
-__all__ = ["coil_sigma_in_base_units", "coil_chi2"]
+__all__ = ["coil_sigma_in_base_units", "coil_sigma_fixed", "coil_chi2"]
 
 #: Below this measured current [A] the fractional precision is meaningless and
 #: the coil is dropped from the metric rather than allowed to dominate it.
@@ -100,3 +100,57 @@ def coil_chi2(
     return {"chi2_nu": float(np.mean(zv ** 2)), "chi2": float(np.sum(zv ** 2)),
             "nu": len(names), "max_abs_z": float(np.max(np.abs(zv))),
             "worst_coil": worst, "z": z}
+
+
+def coil_sigma_fixed(samples, min_abs_measured=1000.0,
+                     fallback_abs_measured=MIN_ABS_MEASURED_A):
+    """Per-coil sigma held FIXED across a discharge, in baseline units.
+
+    ``coil_sigma_in_base_units`` rescales by the INSTANTANEOUS
+    ``|I^base|/|I^meas|``. When a coil's measured current passes near zero that
+    ratio explodes and the coil is handed an absurdly loose tolerance -- on
+    DIII-D 174823, F4B gets 9.7x and ECOILA/ECOILB ~8x their typical sigma on
+    one slice, purely because a different current momentarily crossed zero.
+    The reconstruction's own current is no less determined at those instants.
+
+    Here the conversion factor is a robust median over the discharge, taken only
+    from slices where the coil is carrying enough current for the ratio to mean
+    anything, so sigma is constant in time:
+
+        sigma_i = median_t(sigma_i^meas) * median_t(|I_i^base| / |I_i^meas|)
+
+    Typical values are unchanged (within a few percent on 174823); only the
+    outliers go away.
+
+    Parameters
+    ----------
+    samples : {name: sequence of (i_measured, i_baseline, sigma_measured)}
+    min_abs_measured : float
+        Slices below this |measured current| are excluded from the ratio.
+    fallback_abs_measured : float
+        Relaxed floor used when fewer than 3 slices clear ``min_abs_measured``.
+
+    Returns
+    -------
+    ({name: sigma}, {name: conversion_factor})
+    """
+    sigma, factor = {}, {}
+    for name, rows in samples.items():
+        arr = np.asarray([r for r in rows], dtype=float)
+        if arr.ndim != 2 or arr.shape[0] == 0:
+            continue
+        i_meas, i_base, sig_meas = arr[:, 0], arr[:, 1], arr[:, 2]
+        good = np.abs(i_meas) > min_abs_measured
+        if int(good.sum()) < 3:
+            good = np.abs(i_meas) > fallback_abs_measured
+        if int(good.sum()) < 1:
+            continue
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = np.abs(i_base[good] / i_meas[good])
+        ratio = ratio[np.isfinite(ratio)]
+        s_m = sig_meas[np.isfinite(sig_meas) & (sig_meas > 0)]
+        if not ratio.size or not s_m.size:
+            continue
+        factor[name] = float(np.median(ratio))
+        sigma[name] = float(np.median(s_m)) * factor[name]
+    return sigma, factor

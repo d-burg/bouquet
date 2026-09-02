@@ -287,7 +287,7 @@ def measured_coil_currents(dd_path, time_s):
 
 def filter_coil_chi2(h5path_or_header, dd_path=None, scan_key=None,
                      chi2_max=4.0, apply=True, sigma=None, device=None,
-                     sigma_ref=None):
+                     shot=None, sigma_ref=None):
     """Measurement-referenced coil filter (see :mod:`bouquet.coil_spec`).
 
     Scores each draw by ``chi2/nu`` of its coil currents against the baseline,
@@ -338,7 +338,7 @@ def filter_coil_chi2(h5path_or_header, dd_path=None, scan_key=None,
                     meas = with_sigma_ref(meas, None if sigma_ref == "d3d" else sigma_ref)
                 sig, model = coil_sigma_in_base_units(baseline, meas), {"kind": "dd_referenced", "sigma_ref": str(sigma_ref)}
             else:
-                sig, model = resolve_coil_sigma(baseline, sigma=sigma, device=device)
+                sig, model = resolve_coil_sigma(baseline, sigma=sigma, device=device, shot=shot)
             rows = {}
             for key in sorted((k for k in grp if k.isdigit()), key=int):
                 g = grp[key]

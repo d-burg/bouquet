@@ -384,3 +384,16 @@ def test_chi2_filter_stamps_provenance_and_falls_back_loudly(tmp_path, monkeypat
     summ2 = filter_coil_chi2(work, None, apply=False, sigma={"floor": 1050.0, "fraction": 0.0088})
     for sv in summ:
         assert summ2[sv]["n_pass"] == summ[sv]["n_pass"]
+
+
+def test_infer_shot_from_geqdsk_name_and_header():
+    from bouquet.run import Bouquet
+    class S: geqdsk_path = "/x/y/g169510.03000"
+    class C: source = S(); output_header = "D3D_169510_3000"
+    b = Bouquet.__new__(Bouquet); b.config = C()
+    assert b._infer_shot() == 169510
+    class S2: pass
+    class C2: source = S2(); output_header = "D3D_204441_4400"
+    b.config = C2(); assert b._infer_shot() == 204441
+    class C3: source = S2(); output_header = "nothing_here"
+    b.config = C3(); assert b._infer_shot() is None

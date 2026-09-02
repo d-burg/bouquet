@@ -84,22 +84,27 @@ class CoilSigmaUnavailable(RuntimeError):
     """No per-coil tolerance could be resolved for this archive/device."""
 
 
-def resolve_coil_sigma(baseline, sigma=None, device=None):
+def resolve_coil_sigma(baseline, sigma=None, device=None, shot=None):
     """Resolve the per-coil sigma for a chi2 coil filter.  Returns (sigma, model)
     where *model* is a JSON-able provenance record.
 
     Resolution order (first that applies):
       1. ``sigma`` given explicitly --
+         * a string -> a named model of the device (e.g. ``"rms_incl_offset"``)
          * ``{"floor": A-t, "fraction": f}``  -> floor+fraction model
          * ``{coil_name: sigma, ...}``       -> per-coil table (coils absent from
            the table are NOT judged; must cover >= 1 baseline coil)
          * callable(baseline) -> {coil: sigma}
       2. ``device`` (a :class:`DeviceSpec`, a device name, or None -> detected
-         from the baseline coil names): the device's floor+fraction model.
+         from the baseline coil names): the device's random-part tolerance, with
+         the floor chosen for ``shot`` when the device has era bands.
       3. otherwise :class:`CoilSigmaUnavailable` -- the caller decides the
          fallback (Bouquet.filter falls back LOUDLY to the legacy rule).
     """
-    from .devices import DeviceSpec, resolve_device
+    from .devices import DeviceSpec, resolve_device, tolerance_for
+    named_model = None
+    if isinstance(sigma, str):
+        named_model, sigma = sigma, None
     if sigma is not None:
         if callable(sigma):
             out = {str(k): float(v) for k, v in sigma(baseline).items() if k in baseline}
@@ -119,9 +124,11 @@ def resolve_coil_sigma(baseline, sigma=None, device=None):
             "no coil-current tolerance available: the mesh coil names match no registered "
             f"device ({sorted(baseline)[:6]}...). Set BouquetConfig.device, or give "
             "filtering.coil_sigma = {'floor': <A-t>, 'fraction': <f>} (or a per-coil table).")
-    return (coil_sigma_floor_fraction(baseline, spec.sigma_floor, spec.sigma_fraction),
-            {"kind": "device", "device": spec.name, "floor": spec.sigma_floor,
-             "fraction": spec.sigma_fraction, "provenance": spec.sigma_provenance})
+    floor, fraction = tolerance_for(spec, shot=shot, model=named_model)
+    return (coil_sigma_floor_fraction(baseline, floor, fraction),
+            {"kind": "device", "device": spec.name, "model": named_model or "random",
+             "shot": (int(shot) if shot is not None else None), "floor": floor,
+             "fraction": fraction, "provenance": spec.sigma_provenance})
 
 
 def with_sigma_ref(measured, table=None):

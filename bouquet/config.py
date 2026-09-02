@@ -512,6 +512,7 @@ class FilterConfig:
     #   {"floor": A-t, "fraction": f} -> sigma_i = hypot(floor, fraction*|I_i|)
     #   {coil_name: sigma_A-t, ...}   -> per-coil table
     #   callable(baseline) -> {coil: sigma}
+    #   "<model name>"                -> a named model of the device (e.g. "rms_incl_offset")
     coil_sigma: Optional[Any] = None
     inspec_F_max: float = 0.02      # +/-2% coil-current spec (DIII-D); legacy only
     inspec_VSC_max: float = 0.02
@@ -520,7 +521,7 @@ class FilterConfig:
         if self.coil_filter not in ("chi2", "legacy"):
             raise ValueError("filtering.coil_filter must be 'chi2' or 'legacy'")
         cs = self.coil_sigma
-        if cs is not None and not callable(cs) and not isinstance(cs, dict):
+        if cs is not None and not callable(cs) and not isinstance(cs, (dict, str)):
             raise ValueError("filtering.coil_sigma must be None, a {'floor','fraction'} dict, "
                              "a {coil: sigma} dict, or a callable(baseline)")
         if isinstance(cs, dict) and {"floor", "fraction"} <= set(cs):

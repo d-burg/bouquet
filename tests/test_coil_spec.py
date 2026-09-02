@@ -235,3 +235,32 @@ class TestDeviceRegistryAndResolution:
             FilterConfig(coil_sigma={"floor": -1.0, "fraction": 0.01})
         with pytest.raises(ValueError):
             FilterConfig(coil_sigma=3.0)
+
+
+class TestEraTolerance:
+    D3D = {**{f"F{i}{s}": 1e5 for i in range(1, 10) for s in "AB"}, "ECOILA": 2e4, "ECOILB": 2e4}
+
+    def test_random_part_is_the_default_and_floor_follows_the_era(self):
+        from bouquet.coil_spec import resolve_coil_sigma
+        s_new, m_new = resolve_coil_sigma(self.D3D, shot=204441)
+        s_old, m_old = resolve_coil_sigma(self.D3D, shot=153072)
+        s_unk, m_unk = resolve_coil_sigma(self.D3D)
+        assert (m_new["floor"], m_new["fraction"]) == (325.0, 0.0035)
+        assert (m_old["floor"], m_old["fraction"]) == (825.0, 0.0035)
+        assert m_unk["floor"] == 325.0 and m_unk["shot"] is None
+        assert s_old["F1A"] > s_new["F1A"]
+
+    def test_named_model_selects_the_rms_option(self):
+        from bouquet.coil_spec import resolve_coil_sigma
+        s, m = resolve_coil_sigma(self.D3D, sigma="rms_incl_offset", shot=204441)
+        assert (m["floor"], m["fraction"]) == (1050.0, 0.0088) and m["model"] == "rms_incl_offset"
+        with pytest.raises(KeyError, match="no sigma model"):
+            resolve_coil_sigma(self.D3D, sigma="nonsense")
+
+    def test_vsc_swing_rejected_under_random_tolerance_but_not_under_rms(self):
+        """189392 F9A: 4.0 kA-t swing on 62.6 kA-t (legacy-rejected draw)."""
+        from bouquet.coil_spec import coil_chi2, resolve_coil_sigma
+        base = {"F9A": 62600.0}; draw = {"F9A": 62600.0 + 4001.0}
+        z_rand = coil_chi2(draw, base, resolve_coil_sigma(base, device="DIII-D", shot=189392)[0])["max_abs_z"]
+        z_rms = coil_chi2(draw, base, resolve_coil_sigma(base, device="DIII-D", sigma="rms_incl_offset")[0])["max_abs_z"]
+        assert z_rand > 8.0 and z_rms < 4.0

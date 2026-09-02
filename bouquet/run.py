@@ -1368,6 +1368,7 @@ class Bouquet:
                 coil_summary = filter_coil_chi2(
                     header, None, scan_key=sk, chi2_max=fc.chi2_max,
                     apply=True, sigma=fc.coil_sigma, device=self.config.device,
+                    shot=self._infer_shot(),
                 )
                 coil_fig = None
                 if plot:  # drift-distribution figure only; writes no flags
@@ -1407,6 +1408,28 @@ class Bouquet:
             self._selection["figures"] = (coil_fig, bnd_fig)
         self._print_generation_summary(coil_summary, bnd_summary)
         return self._selection
+
+    def _infer_shot(self):
+        """Best-effort shot number for era-dependent tolerances: an explicit
+        ``source.shot``, else the ``g<shot>.<time>`` pattern in a geqdsk path,
+        else the header; None if nothing matches (the device default applies)."""
+        import re
+        src = self.config.source
+        for attr in ("shot", "pulse"):
+            v = getattr(src, attr, None)
+            if v is not None:
+                try:
+                    return int(v)
+                except (TypeError, ValueError):
+                    pass
+        for attr in ("geqdsk_path", "geqdsk", "path", "dd_path"):
+            v = getattr(src, attr, None)
+            if isinstance(v, str):
+                m = re.search(r"g(\d{5,6})[._]", v.split("/")[-1]) or re.search(r"D3D_(\d{5,6})", v)
+                if m:
+                    return int(m.group(1))
+        m = re.search(r"(\d{6})", str(self.config.output_header))
+        return int(m.group(1)) if m else None
 
     def _print_generation_summary(self, coil_summary, bnd_summary):
         """Concise post-generation summary (draws / coil spec / boundary / in-spec),

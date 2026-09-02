@@ -22,7 +22,7 @@ and a documented home for every knob -- a typo fails immediately in
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional, Union, TYPE_CHECKING
+from typing import Any, Optional, Union, TYPE_CHECKING
 
 if TYPE_CHECKING:
     import numpy as np
@@ -506,18 +506,26 @@ class FilterConfig:
     #   "legacy" -> +/-inspec_F_max on F-coils, +/-inspec_VSC_max on the VSC pair
     coil_filter: str = "chi2"
     chi2_max: float = 4.0
-    coil_sigma_ref: str = "efit"
+    # Per-coil tolerance for the chi2 filter. None -> the device model (device named
+    # in BouquetConfig.device or detected from the mesh coil names); if neither is
+    # available Bouquet.filter() falls back LOUDLY to the legacy rule.
+    #   {"floor": A-t, "fraction": f} -> sigma_i = hypot(floor, fraction*|I_i|)
+    #   {coil_name: sigma_A-t, ...}   -> per-coil table
+    #   callable(baseline) -> {coil: sigma}
+    coil_sigma: Optional[Any] = None
     inspec_F_max: float = 0.02      # +/-2% coil-current spec (DIII-D); legacy only
     inspec_VSC_max: float = 0.02
 
     def __post_init__(self):
         if self.coil_filter not in ("chi2", "legacy"):
             raise ValueError("filtering.coil_filter must be 'chi2' or 'legacy'")
-        if self.coil_filter == "chi2" and self.coil_sigma_ref != "efit":
-            # only the EFIT-residual model is dd-free; the others need a dd path
-            # that Bouquet.filter() does not carry
-            raise ValueError("filtering.coil_sigma_ref must be 'efit' for Bouquet.filter(); "
-                             "call filter_coil_chi2() directly for dd-referenced sigmas")
+        cs = self.coil_sigma
+        if cs is not None and not callable(cs) and not isinstance(cs, dict):
+            raise ValueError("filtering.coil_sigma must be None, a {'floor','fraction'} dict, "
+                             "a {coil: sigma} dict, or a callable(baseline)")
+        if isinstance(cs, dict) and {"floor", "fraction"} <= set(cs):
+            if float(cs["floor"]) < 0 or not (0 <= float(cs["fraction"]) < 1):
+                raise ValueError("filtering.coil_sigma: floor must be >= 0 A-t and 0 <= fraction < 1")
 
 
 # ---------------------------------------------------------------------------
@@ -538,6 +546,11 @@ class BouquetConfig:
     # baseline reconstruction (DLSODE / gs_get_qprof / li-match iteration) is
     # captured to baseline.reconstruction_log and only a curated quality summary
     # is printed. Set True to stream the full solver output for debugging.
+    # Device name (bouquet.devices.DEVICES). Optional: detected from the mesh coil
+    # names when they match a registered device exactly; required only when the
+    # chi2 coil filter needs a device tolerance model and no filtering.coil_sigma
+    # is given -- Bouquet.filter() then falls back loudly to the legacy rule.
+    device: Optional[str] = None
     verbose: bool = False
 
     def __post_init__(self):

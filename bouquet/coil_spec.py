@@ -39,7 +39,8 @@ import numpy as np
 
 __all__ = ["coil_sigma_in_base_units", "coil_sigma_fixed", "coil_chi2",
            "SIGMA_REF_D3D_A", "with_sigma_ref",
-           "EFIT_RESIDUAL_FLOOR_AT", "EFIT_RESIDUAL_FRACTION", "coil_sigma_efit_residual"]
+           "EFIT_RESIDUAL_FLOOR_AT", "EFIT_RESIDUAL_FRACTION", "coil_sigma_efit_residual",
+           "coil_sigma_floor_fraction", "resolve_coil_sigma", "CoilSigmaUnavailable"]
 
 #: Below this measured current [A] the fractional precision is meaningless and
 #: the coil is dropped from the metric rather than allowed to dominate it.
@@ -63,14 +64,64 @@ EFIT_RESIDUAL_FLOOR_AT = 1050.0
 EFIT_RESIDUAL_FRACTION = 0.0088
 
 
+def coil_sigma_floor_fraction(baseline, floor, fraction):
+    """Per-coil sigma [baseline units] = hypot(floor, fraction*|I_base|).
+
+    The intuitive two-number tolerance model ("about X A-t, plus Y % of the
+    coil current").  Needs only the baseline currents; every coil gets a sigma.
+    """
+    return {n: float(np.hypot(float(floor), float(fraction) * abs(float(i))))
+            for n, i in baseline.items()}
+
+
 def coil_sigma_efit_residual(baseline, floor=EFIT_RESIDUAL_FLOOR_AT,
                              fraction=EFIT_RESIDUAL_FRACTION):
-    """Per-coil sigma [baseline units] from the EFIT-residual floor+fraction model.
+    """DIII-D EFIT-residual instance of :func:`coil_sigma_floor_fraction`."""
+    return coil_sigma_floor_fraction(baseline, floor, fraction)
 
-    Needs only the baseline currents (no dd read).  Every coil in *baseline*
-    gets a sigma, so none drops out for having a small measured current.
+
+class CoilSigmaUnavailable(RuntimeError):
+    """No per-coil tolerance could be resolved for this archive/device."""
+
+
+def resolve_coil_sigma(baseline, sigma=None, device=None):
+    """Resolve the per-coil sigma for a chi2 coil filter.  Returns (sigma, model)
+    where *model* is a JSON-able provenance record.
+
+    Resolution order (first that applies):
+      1. ``sigma`` given explicitly --
+         * ``{"floor": A-t, "fraction": f}``  -> floor+fraction model
+         * ``{coil_name: sigma, ...}``       -> per-coil table (coils absent from
+           the table are NOT judged; must cover >= 1 baseline coil)
+         * callable(baseline) -> {coil: sigma}
+      2. ``device`` (a :class:`DeviceSpec`, a device name, or None -> detected
+         from the baseline coil names): the device's floor+fraction model.
+      3. otherwise :class:`CoilSigmaUnavailable` -- the caller decides the
+         fallback (Bouquet.filter falls back LOUDLY to the legacy rule).
     """
-    return {n: float(np.hypot(floor, fraction * abs(float(i)))) for n, i in baseline.items()}
+    from .devices import DeviceSpec, resolve_device
+    if sigma is not None:
+        if callable(sigma):
+            out = {str(k): float(v) for k, v in sigma(baseline).items() if k in baseline}
+            return out, {"kind": "callable", "n_coils": len(out)}
+        if isinstance(sigma, dict) and {"floor", "fraction"} <= set(sigma):
+            fl, fr = float(sigma["floor"]), float(sigma["fraction"])
+            return coil_sigma_floor_fraction(baseline, fl, fr), {"kind": "floor_fraction", "floor": fl, "fraction": fr}
+        if isinstance(sigma, dict):
+            out = {str(k): float(v) for k, v in sigma.items() if k in baseline and float(v) > 0}
+            if not out:
+                raise CoilSigmaUnavailable("per-coil sigma table names none of the baseline coils")
+            return out, {"kind": "per_coil", "n_coils": len(out)}
+        raise TypeError("sigma must be {'floor','fraction'}, {coil: sigma}, or callable(baseline)")
+    spec = device if isinstance(device, DeviceSpec) else resolve_device(device, baseline.keys())
+    if spec is None:
+        raise CoilSigmaUnavailable(
+            "no coil-current tolerance available: the mesh coil names match no registered "
+            f"device ({sorted(baseline)[:6]}...). Set BouquetConfig.device, or give "
+            "filtering.coil_sigma = {'floor': <A-t>, 'fraction': <f>} (or a per-coil table).")
+    return (coil_sigma_floor_fraction(baseline, spec.sigma_floor, spec.sigma_fraction),
+            {"kind": "device", "device": spec.name, "floor": spec.sigma_floor,
+             "fraction": spec.sigma_fraction, "provenance": spec.sigma_provenance})
 
 
 def with_sigma_ref(measured, table=None):

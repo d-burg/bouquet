@@ -286,7 +286,8 @@ def measured_coil_currents(dd_path, time_s):
 
 
 def filter_coil_chi2(h5path_or_header, dd_path=None, scan_key=None,
-                     chi2_max=4.0, apply=True, sigma_ref="efit"):
+                     chi2_max=4.0, apply=True, sigma=None, device=None,
+                     sigma_ref=None):
     """Measurement-referenced coil filter (see :mod:`bouquet.coil_spec`).
 
     Scores each draw by ``chi2/nu`` of its coil currents against the baseline,
@@ -301,22 +302,24 @@ def filter_coil_chi2(h5path_or_header, dd_path=None, scan_key=None,
 
     A draw with no usable coil scores NaN and FAILS: unjudgeable is not a pass.
 
-    ``sigma_ref`` selects the per-coil sigma:
+    Per-coil sigma (see :func:`coil_spec.resolve_coil_sigma`): ``sigma`` explicit
+    (``{"floor","fraction"}`` model, per-coil table, or callable), else the
+    ``device`` model (named, or detected from the mesh coil names), else
+    :class:`coil_spec.CoilSigmaUnavailable` is raised.  Needs no dd.
 
-    * ``"efit"`` (default): the machine tolerance EFIT itself exhibits,
-      ``sqrt(1050^2 + (0.0088*|I_base|)^2)`` A-t
-      (:func:`coil_spec.coil_sigma_efit_residual`).  Needs no dd.
-    * ``"d3d"``: fixed 2017-DAQ digitizer table (7 A F / 69 A E), rescaled to
-      baseline units by |I_base|/|I_meas| -- a *resolution*, 2.5-6x tighter
-      than ``"efit"``.  Needs ``dd_path``.
-    * ``None``: the dd's own ``data_error_upper`` (10 digitizer LSB, ~8x
-      DAQ-epoch dependent; not recommended).  Needs ``dd_path``.
-    * a dict ``{"F": A, "E": A}``: custom per-family table, as ``"d3d"``.
+    ``sigma_ref`` (legacy, dd-referenced; requires ``dd_path``): ``"d3d"`` uses the
+    digitizer table rescaled by |I_base|/|I_meas|; a dict ``{"F": A, "E": A}``
+    a custom per-family table; ``"dd"`` the dd's own ``data_error_upper``.
+    Raises :class:`ValueError` if given without ``dd_path``.
+
+    The model used is stamped on the scan group as ``coil_sigma_model`` (JSON)
+    and ``coil_filter`` = "chi2" when ``apply`` is True.
     """
+    import json
     from .coil_spec import (coil_chi2, coil_sigma_in_base_units, with_sigma_ref,
-                            coil_sigma_efit_residual)
-    if sigma_ref != "efit" and dd_path is None:
-        raise ValueError("filter_coil_chi2: dd_path is required unless sigma_ref='efit'")
+                            resolve_coil_sigma)
+    if sigma_ref is not None and dd_path is None:
+        raise ValueError("filter_coil_chi2: sigma_ref is dd-referenced and needs dd_path")
 
     h5path = _resolve(h5path_or_header)
     summary = {}
@@ -329,13 +332,13 @@ def filter_coil_chi2(h5path_or_header, dd_path=None, scan_key=None,
                   for x in grp["_baseline"]["coil_names"][()]]
             baseline = dict(zip(bn, np.asarray(
                 grp["_baseline"]["coil_currents"][()], dtype=float).tolist()))
-            if sigma_ref == "efit":
-                sigma = coil_sigma_efit_residual(baseline)
-            else:
+            if sigma_ref is not None:
                 meas = measured_coil_currents(dd_path, float(sv))
-                if sigma_ref is not None:
+                if sigma_ref != "dd":
                     meas = with_sigma_ref(meas, None if sigma_ref == "d3d" else sigma_ref)
-                sigma = coil_sigma_in_base_units(baseline, meas)
+                sig, model = coil_sigma_in_base_units(baseline, meas), {"kind": "dd_referenced", "sigma_ref": str(sigma_ref)}
+            else:
+                sig, model = resolve_coil_sigma(baseline, sigma=sigma, device=device)
             rows = {}
             for key in sorted((k for k in grp if k.isdigit()), key=int):
                 g = grp[key]
@@ -345,15 +348,21 @@ def filter_coil_chi2(h5path_or_header, dd_path=None, scan_key=None,
                          for x in g["coil_names"][()]]
                 draw = dict(zip(names, np.asarray(
                     g["coil_currents"][()], dtype=float).tolist()))
-                rows[int(key)] = coil_chi2(draw, baseline, sigma)
+                rows[int(key)] = coil_chi2(draw, baseline, sig)
         results = {i: bool(np.isfinite(r["chi2_nu"]) and r["chi2_nu"] <= chi2_max)
                    for i, r in rows.items()}
         if apply:
             _write_filter_result(h5path, sv, results, "passes_coil_filter")
+            with h5py.File(h5path, "a") as hf:
+                gp = f"scan/{sv}" if f"scan/{sv}" in hf else None
+                if gp is not None:
+                    hf[gp].attrs["coil_filter"] = "chi2"
+                    hf[gp].attrs["coil_sigma_model"] = json.dumps(model)
         n_pass = sum(results.values())
         summary[sv] = {
             "n_total": len(results), "n_pass": n_pass,
             "n_fail": len(results) - n_pass, "chi2_max": float(chi2_max),
+            "sigma_model": model,
             "n_coils": (max((r["nu"] for r in rows.values()), default=0)),
             "draws": {i: {"chi2_nu": r["chi2_nu"], "max_abs_z": r["max_abs_z"],
                           "worst_coil": r["worst_coil"], "nu": r["nu"],

@@ -70,6 +70,8 @@ from .io import (
     read_pfile,
 )
 
+from .devices import detect_device, DEVICES
+from .coil_spec import resolve_coil_sigma, CoilSigmaUnavailable, coil_sigma_floor_fraction
 from .filtering import (
     filter_coil_currents,
     filter_coil_chi2,
@@ -161,6 +163,7 @@ __all__ = [
     "write_provenance", "load_config",
     # ---- post-process filtering ----
     "filter_coil_currents", "filter_coil_chi2", "measured_coil_currents",
+    "resolve_coil_sigma", "CoilSigmaUnavailable", "coil_sigma_floor_fraction", "detect_device", "DEVICES",
     "filter_boundaries", "read_filter_flags",
     "select_indices", "export_filtered",
     # ---- plotting ----

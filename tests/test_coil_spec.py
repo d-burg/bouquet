@@ -172,11 +172,66 @@ class TestEfitResidualSigma:
         z_digi = coil_chi2(draw, base, {"F6A": 7.0 * 55.0})["max_abs_z"]
         assert z_efit < 1.0 and z_digi > 3.5
 
-    def test_filter_default_is_efit_and_needs_no_dd(self):
+    def test_filter_default_needs_no_dd_and_dd_modes_require_one(self):
         import inspect
         from bouquet.filtering import filter_coil_chi2
         sig = inspect.signature(filter_coil_chi2)
-        assert sig.parameters["sigma_ref"].default == "efit"
+        assert sig.parameters["sigma_ref"].default is None
+        assert sig.parameters["sigma"].default is None
         assert sig.parameters["dd_path"].default is None
         with pytest.raises(ValueError):
             filter_coil_chi2("nonexistent.h5", None, sigma_ref="d3d")
+
+
+
+class TestDeviceRegistryAndResolution:
+    D3D = {**{f"F{i}{s}": 1e5 for i in range(1, 10) for s in "AB"}, "ECOILA": 2e4, "ECOILB": 2e4}
+
+    def test_detects_diiid_from_the_exact_coil_signature_only(self):
+        from bouquet.devices import detect_device
+        assert detect_device(self.D3D.keys()) == "DIII-D"
+        assert detect_device(list(self.D3D)[:-1]) is None            # one coil missing
+        assert detect_device(list(self.D3D) + ["PF7"]) is None        # one coil extra
+        assert detect_device(["PF1", "PF2", "CS1"]) is None
+
+    def test_explicit_floor_fraction_wins_over_device(self):
+        from bouquet.coil_spec import resolve_coil_sigma
+        s, model = resolve_coil_sigma({"F6A": -270e3}, sigma={"floor": 500.0, "fraction": 0.01}, device="DIII-D")
+        assert model["kind"] == "floor_fraction"
+        assert s["F6A"] == pytest.approx((500.0**2 + 2700.0**2) ** 0.5)
+
+    def test_per_coil_table_judges_only_named_coils(self):
+        from bouquet.coil_spec import resolve_coil_sigma, CoilSigmaUnavailable
+        s, model = resolve_coil_sigma({"F1A": 1.0, "F2A": 1.0}, sigma={"F1A": 300.0, "XYZ": 1.0})
+        assert model["kind"] == "per_coil" and set(s) == {"F1A"}
+        with pytest.raises(CoilSigmaUnavailable):
+            resolve_coil_sigma({"F1A": 1.0}, sigma={"XYZ": 1.0})
+
+    def test_callable(self):
+        from bouquet.coil_spec import resolve_coil_sigma
+        s, model = resolve_coil_sigma({"F1A": 2.0}, sigma=lambda b: {k: 10.0 * abs(v) for k, v in b.items()})
+        assert model["kind"] == "callable" and s["F1A"] == 20.0
+
+    def test_device_model_named_or_detected(self):
+        from bouquet.coil_spec import resolve_coil_sigma
+        s1, m1 = resolve_coil_sigma(self.D3D)                       # detected
+        s2, m2 = resolve_coil_sigma(self.D3D, device="DIII-D")     # named
+        assert m1["kind"] == m2["kind"] == "device" and m1["device"] == "DIII-D"
+        assert s1 == s2 and "provenance" in m1
+        assert s1["ECOILA"] == pytest.approx((1050.0**2 + (0.0088 * 2e4) ** 2) ** 0.5)
+
+    def test_unknown_device_is_loud_not_silent(self):
+        from bouquet.coil_spec import resolve_coil_sigma, CoilSigmaUnavailable
+        with pytest.raises(CoilSigmaUnavailable, match="BouquetConfig.device"):
+            resolve_coil_sigma({"PF1": 1e5, "PF2": 1e5})
+        with pytest.raises(KeyError, match="unknown device"):
+            resolve_coil_sigma({"PF1": 1e5}, device="NOT-A-TOKAMAK")
+
+    def test_config_validation(self):
+        from bouquet.config import FilterConfig
+        FilterConfig(coil_sigma={"floor": 1000.0, "fraction": 0.01})
+        FilterConfig(coil_sigma={"F1A": 300.0})
+        with pytest.raises(ValueError):
+            FilterConfig(coil_sigma={"floor": -1.0, "fraction": 0.01})
+        with pytest.raises(ValueError):
+            FilterConfig(coil_sigma=3.0)

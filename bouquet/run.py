@@ -1361,16 +1361,34 @@ class Bouquet:
         rms = fc.rms_max_mm if rms_max_mm is None else rms_max_mm
 
         sk = self.config.generation.scan_key
+        coil_filter_used = fc.coil_filter
         if fc.coil_filter == "chi2":
-            coil_summary = filter_coil_chi2(
-                header, None, scan_key=sk, chi2_max=fc.chi2_max,
-                apply=True, sigma_ref=fc.coil_sigma_ref,
-            )
-            coil_fig = None
-            if plot:  # the drift-distribution figure is still informative; no flags written
-                _, coil_fig = filter_coil_currents(
-                    header, scan_key=sk, F_max_pct=fc.inspec_F_max * 100.0,
-                    VSC_max_pct=fc.inspec_VSC_max * 100.0, apply=False, plot=True,
+            from .coil_spec import CoilSigmaUnavailable
+            try:
+                coil_summary = filter_coil_chi2(
+                    header, None, scan_key=sk, chi2_max=fc.chi2_max,
+                    apply=True, sigma=fc.coil_sigma, device=self.config.device,
+                )
+                coil_fig = None
+                if plot:  # drift-distribution figure only; writes no flags
+                    _, coil_fig = filter_coil_currents(
+                        header, scan_key=sk, F_max_pct=fc.inspec_F_max * 100.0,
+                        VSC_max_pct=fc.inspec_VSC_max * 100.0, apply=False, plot=True,
+                    )
+            except CoilSigmaUnavailable as e:
+                import warnings
+                warnings.warn(
+                    "COIL FILTER FALLBACK: chi2 coil filter disabled -- " + str(e) +
+                    f" Using the legacy rule (|dI/I| <= {fc.inspec_F_max:.0%} F-coils, "
+                    f"{fc.inspec_VSC_max:.0%} VSC), which is NOT a measurement-referenced "
+                    "criterion and rejected 20-80% of draws on DIII-D L-mode ensembles.",
+                    stacklevel=2)
+                coil_filter_used = "legacy(fallback)"
+                coil_summary, coil_fig = filter_coil_currents(
+                    header, scan_key=sk,
+                    F_max_pct=fc.inspec_F_max * 100.0,
+                    VSC_max_pct=fc.inspec_VSC_max * 100.0,
+                    apply=True, plot=plot,
                 )
         else:
             coil_summary, coil_fig = filter_coil_currents(
@@ -1383,7 +1401,8 @@ class Bouquet:
             header, scan_key=sk, rms_max_mm=rms, apply=True, plot=plot,
         )
         # one scan key -> each summary is a single {counts, draws} dict
-        self._selection = {"coil": coil_summary, "boundary": bnd_summary}
+        self._selection = {"coil": coil_summary, "boundary": bnd_summary,
+                           "coil_filter_used": coil_filter_used}
         if plot:
             self._selection["figures"] = (coil_fig, bnd_fig)
         self._print_generation_summary(coil_summary, bnd_summary)

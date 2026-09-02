@@ -218,7 +218,7 @@ class TestDeviceRegistryAndResolution:
         s2, m2 = resolve_coil_sigma(self.D3D, device="DIII-D")     # named
         assert m1["kind"] == m2["kind"] == "device" and m1["device"] == "DIII-D"
         assert s1 == s2 and "provenance" in m1
-        assert s1["ECOILA"] == pytest.approx((1050.0**2 + (0.0088 * 2e4) ** 2) ** 0.5)
+        assert s1["ECOILA"] == pytest.approx((325.0**2 + (0.0035 * 2e4) ** 2) ** 0.5)
 
     def test_unknown_device_is_loud_not_silent(self):
         from bouquet.coil_spec import resolve_coil_sigma, CoilSigmaUnavailable

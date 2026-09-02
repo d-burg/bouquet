@@ -380,10 +380,15 @@ def test_chi2_filter_stamps_provenance_and_falls_back_loudly(tmp_path, monkeypat
     monkeypatch.setattr(dev, "detect_device", lambda names: None)
     with pytest.raises(CoilSigmaUnavailable):
         filter_coil_chi2(work, None, apply=False)
-    # explicit floor/fraction rescues it without a device
-    summ2 = filter_coil_chi2(work, None, apply=False, sigma={"floor": 1050.0, "fraction": 0.0088})
+    # explicit floor/fraction rescues it without a device (same numbers -> same verdicts)
+    summ2 = filter_coil_chi2(work, None, apply=False, sigma={"floor": 325.0, "fraction": 0.0035})
     for sv in summ:
         assert summ2[sv]["n_pass"] == summ[sv]["n_pass"]
+    # the looser rms-including-offset model never rejects more
+    monkeypatch.undo()
+    summ3 = filter_coil_chi2(work, None, apply=False, sigma="rms_incl_offset")
+    for sv in summ:
+        assert summ3[sv]["n_pass"] >= summ[sv]["n_pass"]
 
 
 def test_infer_shot_from_geqdsk_name_and_header():

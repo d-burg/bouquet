@@ -336,3 +336,24 @@ def test_stored_xpoint_used_for_bottom(manifest):
             assert has_xpt["lower"]
             np.testing.assert_allclose(
                 pts["bottom"], lower[np.argmin(lower[:, 1])], atol=1e-9)
+
+
+def test_chi2_filter_is_the_default_and_needs_no_dd(tmp_path):
+    """Bouquet.filter() default = chi2 with the EFIT-residual sigma: writes
+    passes_coil_filter for every draw from the archive alone and refreshes
+    'selected'; the legacy rule stays selectable."""
+    from bouquet.config import FilterConfig
+    from bouquet import filter_coil_chi2
+    assert FilterConfig().coil_filter == "chi2"
+    assert FilterConfig(coil_filter="legacy").coil_filter == "legacy"
+    with pytest.raises(ValueError):
+        FilterConfig(coil_filter="bogus")
+    work = str(tmp_path / "work.h5")
+    shutil.copy(_SLIM, work)
+    summ = filter_coil_chi2(work, None, apply=True)
+    flags = read_filter_flags(work)
+    for sv, drect in flags.items():
+        assert summ[sv]["n_total"] == len(drect)
+        for i, rec in drect.items():
+            assert "passes_coil_filter" in rec
+            assert rec["selected"] == (rec["passes_coil_filter"] and rec.get("passes_boundary_filter", True))

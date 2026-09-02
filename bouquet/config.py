@@ -499,8 +499,25 @@ class FilterConfig:
     """Postprocessing selection of the machine-realizable subset."""
 
     rms_max_mm: float = 5.0
-    inspec_F_max: float = 0.02      # +/-2% coil-current spec (DIII-D)
+    # Coil filter used by Bouquet.filter():
+    #   "chi2"   -> measurement-referenced chi2/nu <= chi2_max with the per-coil
+    #               sigma from coil_sigma_ref ("efit" = EFIT-residual floor+fraction,
+    #               no dd needed; "d3d" = digitizer table, needs a dd)   [DEFAULT]
+    #   "legacy" -> +/-inspec_F_max on F-coils, +/-inspec_VSC_max on the VSC pair
+    coil_filter: str = "chi2"
+    chi2_max: float = 4.0
+    coil_sigma_ref: str = "efit"
+    inspec_F_max: float = 0.02      # +/-2% coil-current spec (DIII-D); legacy only
     inspec_VSC_max: float = 0.02
+
+    def __post_init__(self):
+        if self.coil_filter not in ("chi2", "legacy"):
+            raise ValueError("filtering.coil_filter must be 'chi2' or 'legacy'")
+        if self.coil_filter == "chi2" and self.coil_sigma_ref != "efit":
+            # only the EFIT-residual model is dd-free; the others need a dd path
+            # that Bouquet.filter() does not carry
+            raise ValueError("filtering.coil_sigma_ref must be 'efit' for Bouquet.filter(); "
+                             "call filter_coil_chi2() directly for dd-referenced sigmas")
 
 
 # ---------------------------------------------------------------------------

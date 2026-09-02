@@ -1354,19 +1354,31 @@ class Bouquet:
         produced and returned under ``summary["figures"] = (coil_fig, bnd_fig)``
         (F7 -- the notebooks re-called the module filters just to get these).
         """
-        from .filtering import filter_coil_currents, filter_boundaries
+        from .filtering import filter_coil_currents, filter_boundaries, filter_coil_chi2
 
         header = self.config.output_header
         fc = self.config.filtering
         rms = fc.rms_max_mm if rms_max_mm is None else rms_max_mm
 
         sk = self.config.generation.scan_key
-        coil_summary, coil_fig = filter_coil_currents(
-            header, scan_key=sk,
-            F_max_pct=fc.inspec_F_max * 100.0,
-            VSC_max_pct=fc.inspec_VSC_max * 100.0,
-            apply=True, plot=plot,
-        )
+        if fc.coil_filter == "chi2":
+            coil_summary = filter_coil_chi2(
+                header, None, scan_key=sk, chi2_max=fc.chi2_max,
+                apply=True, sigma_ref=fc.coil_sigma_ref,
+            )
+            coil_fig = None
+            if plot:  # the drift-distribution figure is still informative; no flags written
+                _, coil_fig = filter_coil_currents(
+                    header, scan_key=sk, F_max_pct=fc.inspec_F_max * 100.0,
+                    VSC_max_pct=fc.inspec_VSC_max * 100.0, apply=False, plot=True,
+                )
+        else:
+            coil_summary, coil_fig = filter_coil_currents(
+                header, scan_key=sk,
+                F_max_pct=fc.inspec_F_max * 100.0,
+                VSC_max_pct=fc.inspec_VSC_max * 100.0,
+                apply=True, plot=plot,
+            )
         bnd_summary, bnd_fig = filter_boundaries(
             header, scan_key=sk, rms_max_mm=rms, apply=True, plot=plot,
         )

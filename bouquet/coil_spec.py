@@ -38,7 +38,8 @@ from typing import Dict, Optional, Sequence, Tuple
 import numpy as np
 
 __all__ = ["coil_sigma_in_base_units", "coil_sigma_fixed", "coil_chi2",
-           "SIGMA_REF_D3D_A", "with_sigma_ref"]
+           "SIGMA_REF_D3D_A", "with_sigma_ref",
+           "EFIT_RESIDUAL_FLOOR_AT", "EFIT_RESIDUAL_FRACTION", "coil_sigma_efit_residual"]
 
 #: Below this measured current [A] the fractional precision is meaningless and
 #: the coil is dropped from the metric rather than allowed to dominate it.
@@ -50,6 +51,26 @@ MIN_ABS_MEASURED_A = 50.0
 # referenced to the dd value changes meaning across DAQ epochs.  This table is
 # what chi2_max=4.0 was calibrated against.
 SIGMA_REF_D3D_A = {"F": 7.0, "E": 69.0}
+
+# Machine tolerance from EFIT itself: rms of (calculated - measured) F-coil
+# current over the flat-top, 72 coil-shots on DIII-D 150000/171317/173982/
+# 174823 with FWTFC=0 (coils floating against the magnetics), fitted as
+# sigma^2 = floor^2 + (fraction*|I|)^2 in ampere-turns.  Mostly a floor with a
+# mild current dependence (log-log slope 0.36).  E-coils were not in the fit
+# (EFIT holds them fixed); the same model is applied to them in their own
+# baseline units as a stated assumption.
+EFIT_RESIDUAL_FLOOR_AT = 1050.0
+EFIT_RESIDUAL_FRACTION = 0.0088
+
+
+def coil_sigma_efit_residual(baseline, floor=EFIT_RESIDUAL_FLOOR_AT,
+                             fraction=EFIT_RESIDUAL_FRACTION):
+    """Per-coil sigma [baseline units] from the EFIT-residual floor+fraction model.
+
+    Needs only the baseline currents (no dd read).  Every coil in *baseline*
+    gets a sigma, so none drops out for having a small measured current.
+    """
+    return {n: float(np.hypot(floor, fraction * abs(float(i)))) for n, i in baseline.items()}
 
 
 def with_sigma_ref(measured, table=None):

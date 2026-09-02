@@ -285,8 +285,8 @@ def measured_coil_currents(dd_path, time_s):
     return out
 
 
-def filter_coil_chi2(h5path_or_header, dd_path, scan_key=None,
-                     chi2_max=4.0, apply=True, sigma_ref=None):
+def filter_coil_chi2(h5path_or_header, dd_path=None, scan_key=None,
+                     chi2_max=4.0, apply=True, sigma_ref="efit"):
     """Measurement-referenced coil filter (see :mod:`bouquet.coil_spec`).
 
     Scores each draw by ``chi2/nu`` of its coil currents against the baseline,
@@ -301,11 +301,22 @@ def filter_coil_chi2(h5path_or_header, dd_path, scan_key=None,
 
     A draw with no usable coil scores NaN and FAILS: unjudgeable is not a pass.
 
-    ``sigma_ref``: ``None`` uses the dd's ``data_error_upper`` (10 digitizer
-    LSB, DAQ-epoch dependent); ``"d3d"`` uses ``SIGMA_REF_D3D_A``; a dict
-    ``{"F": A, "E": A}`` gives a custom per-family table.
+    ``sigma_ref`` selects the per-coil sigma:
+
+    * ``"efit"`` (default): the machine tolerance EFIT itself exhibits,
+      ``sqrt(1050^2 + (0.0088*|I_base|)^2)`` A-t
+      (:func:`coil_spec.coil_sigma_efit_residual`).  Needs no dd.
+    * ``"d3d"``: fixed 2017-DAQ digitizer table (7 A F / 69 A E), rescaled to
+      baseline units by |I_base|/|I_meas| -- a *resolution*, 2.5-6x tighter
+      than ``"efit"``.  Needs ``dd_path``.
+    * ``None``: the dd's own ``data_error_upper`` (10 digitizer LSB, ~8x
+      DAQ-epoch dependent; not recommended).  Needs ``dd_path``.
+    * a dict ``{"F": A, "E": A}``: custom per-family table, as ``"d3d"``.
     """
-    from .coil_spec import coil_chi2, coil_sigma_in_base_units, with_sigma_ref
+    from .coil_spec import (coil_chi2, coil_sigma_in_base_units, with_sigma_ref,
+                            coil_sigma_efit_residual)
+    if sigma_ref != "efit" and dd_path is None:
+        raise ValueError("filter_coil_chi2: dd_path is required unless sigma_ref='efit'")
 
     h5path = _resolve(h5path_or_header)
     summary = {}
@@ -318,10 +329,13 @@ def filter_coil_chi2(h5path_or_header, dd_path, scan_key=None,
                   for x in grp["_baseline"]["coil_names"][()]]
             baseline = dict(zip(bn, np.asarray(
                 grp["_baseline"]["coil_currents"][()], dtype=float).tolist()))
-            meas = measured_coil_currents(dd_path, float(sv))
-            if sigma_ref is not None:
-                meas = with_sigma_ref(meas, None if sigma_ref == "d3d" else sigma_ref)
-            sigma = coil_sigma_in_base_units(baseline, meas)
+            if sigma_ref == "efit":
+                sigma = coil_sigma_efit_residual(baseline)
+            else:
+                meas = measured_coil_currents(dd_path, float(sv))
+                if sigma_ref is not None:
+                    meas = with_sigma_ref(meas, None if sigma_ref == "d3d" else sigma_ref)
+                sigma = coil_sigma_in_base_units(baseline, meas)
             rows = {}
             for key in sorted((k for k in grp if k.isdigit()), key=int):
                 g = grp[key]

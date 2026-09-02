@@ -146,3 +146,37 @@ def test_with_sigma_ref_removes_daq_epoch_dependence():
     out = with_sigma_ref({"F1A": (1.0, 55.0), "XYZ": (1.0, 3.0)}, {"F": 7.0})
     assert out["F1A"][1] == 7.0 and out["XYZ"][1] == 3.0
     assert SIGMA_REF_D3D_A == {"F": 7.0, "E": 69.0}
+
+
+class TestEfitResidualSigma:
+    def test_floor_plus_fraction_values(self):
+        from bouquet.coil_spec import coil_sigma_efit_residual
+        s = coil_sigma_efit_residual({"a": 20e3, "b": 100e3, "c": 270e3, "d": -270e3, "e": 0.0})
+        assert s["a"] == pytest.approx(1065, rel=0.01)
+        assert s["b"] == pytest.approx(1370, rel=0.01)
+        assert s["c"] == pytest.approx(2598, rel=0.01)
+        assert s["d"] == s["c"]                      # sign-blind
+        assert s["e"] == pytest.approx(1050.0)       # floor at zero current
+
+    def test_every_baseline_coil_gets_a_sigma(self):
+        from bouquet.coil_spec import coil_sigma_efit_residual
+        base = {"F5B": 127.8, "F6A": -266e3, "ECOILA": 18371.0}
+        assert set(coil_sigma_efit_residual(base)) == set(base)
+
+    def test_high_ip_fractional_drift_is_plausible_under_efit_sigma(self):
+        """171317 H: 0.57 % drift on a 266 kA-t coil is ~4 sigma on the
+        digitizer table and <1 sigma on the machine tolerance."""
+        from bouquet.coil_spec import coil_chi2, coil_sigma_efit_residual
+        base = {"F6A": -266479.0}; draw = {"F6A": -266479.0 - 1518.0}
+        z_efit = coil_chi2(draw, base, coil_sigma_efit_residual(base))["max_abs_z"]
+        z_digi = coil_chi2(draw, base, {"F6A": 7.0 * 55.0})["max_abs_z"]
+        assert z_efit < 1.0 and z_digi > 3.5
+
+    def test_filter_default_is_efit_and_needs_no_dd(self):
+        import inspect
+        from bouquet.filtering import filter_coil_chi2
+        sig = inspect.signature(filter_coil_chi2)
+        assert sig.parameters["sigma_ref"].default == "efit"
+        assert sig.parameters["dd_path"].default is None
+        with pytest.raises(ValueError):
+            filter_coil_chi2("nonexistent.h5", None, sigma_ref="d3d")

@@ -39,16 +39,16 @@ def q_ravg(ravgs, which: str):
     return ravgs[_GET_Q_RAVG_INDEX[which]]
 
 
-def isotropize_fast_pressure(p_perp, p_par, method: str = "trace"):
+def isotropize_fast_pressure(p_perp, p_par, method: str = "sum"):
     """Reduce anisotropic fast-ion pressure to a scalar for the scalar-p GS solve.
 
     For a gyrotropic pressure tensor ``P = p_par b b + p_perp (I - b b)`` the
     standard scalar pressure is one-third of the trace:
 
-        method="trace"  ->  (2 * p_perp + p_par) / 3        [DEFAULT]
+        method="trace"  ->  (2 * p_perp + p_par) / 3
         method="mean"   ->  (p_perp + p_par) / 2
         method="perp"   ->  p_perp
-        method="sum"    ->  p_par + 2 * p_perp
+        method="sum"    ->  p_par + 2 * p_perp             [DEFAULT]
 
     ``"sum"`` is for sources that store the directional fields PER DEGREE OF
     FREEDOM rather than as the full perpendicular/parallel pressures. IMAS.jl
@@ -59,7 +59,7 @@ def isotropize_fast_pressure(p_perp, p_par, method: str = "trace"):
     DIII-D 150000/171317/173982/174823: the deficit is 8-35 % of the total
     pressure and closes to <2 % with ``"sum"``).
 
-    ``"trace"`` is recommended: it is the textbook scalar pressure p = tr(P)/3 of
+    ``"trace"`` is the textbook scalar pressure p = tr(P)/3 of
     a gyrotropic distribution and it preserves the fast-ion energy density
     (w = (1/2)(p_par + 2 p_perp) = (3/2) p_scalar), consistent with how
     kinetic-EFIT constrains the total stored pressure

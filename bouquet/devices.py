@@ -15,9 +15,6 @@ __all__ = ["DeviceSpec", "DEVICES", "detect_device", "resolve_device", "get_devi
 class DeviceSpec:
     name: str
     coil_signature: frozenset                 # exact coil-set names in the mesh
-    # additional exact signatures for other meshes of the same device (e.g. finer
-    # meshes that split a coil into separately-driven circuits)
-    alt_signatures: Tuple[frozenset, ...] = ()
     # coil-current tolerance model sigma_i = hypot(floor, fraction*|I_i|), baseline units.
     # This is the RANDOM part of the reconstruction's coil-current residual (per-shot
     # systematic offsets are already absorbed by the baseline fit, so a draw about the
@@ -27,6 +24,9 @@ class DeviceSpec:
     sigma_floor: float                        # [A-t]
     sigma_fraction: float
     sigma_provenance: str
+    # additional exact signatures for other meshes of the same device (e.g. finer
+    # meshes that split a coil into separately-driven circuits)
+    alt_signatures: Tuple[frozenset, ...] = ()
     sigma_floor_by_shot: Tuple[Tuple[float, float, float, str], ...] = ()   # (lo, hi, floor, era label)
     # per-coil floors by era label (coils absent from the table use the era floor);
     # clipped below at sigma_floor_min[era] so a coil near zero current keeps a floor

@@ -15,6 +15,9 @@ __all__ = ["DeviceSpec", "DEVICES", "detect_device", "resolve_device", "get_devi
 class DeviceSpec:
     name: str
     coil_signature: frozenset                 # exact coil-set names in the mesh
+    # additional exact signatures for other meshes of the same device (e.g. finer
+    # meshes that split a coil into separately-driven circuits)
+    alt_signatures: Tuple[frozenset, ...] = ()
     # coil-current tolerance model sigma_i = hypot(floor, fraction*|I_i|), baseline units.
     # This is the RANDOM part of the reconstruction's coil-current residual (per-shot
     # systematic offsets are already absorbed by the baseline fit, so a draw about the
@@ -43,6 +46,8 @@ DEVICES: Dict[str, DeviceSpec] = {
     "DIII-D": DeviceSpec(
         name="DIII-D",
         coil_signature=frozenset(_D3D_F + ["ECOILA", "ECOILB"]),
+        # xia_v1 mesh: the E-coil split into the six EFIT E circuits
+        alt_signatures=(frozenset(_D3D_F + ["ECOILA", "ECOILB", "E567UP", "E567DN", "E89UP", "E89DN"]),),
         sigma_floor=325.0, sigma_fraction=0.0035,
         sigma_floor_by_shot=((0, 165000, 825.0, "pre2014"), (165000, float("inf"), 325.0, "modern")),
         # per-coil random floor with the 0.35 percent fraction removed in quadrature, median
@@ -100,7 +105,7 @@ def detect_device(coil_names) -> Optional[str]:
     """Device whose coil signature EXACTLY matches *coil_names*, else None."""
     names = frozenset(str(n) for n in coil_names)
     for spec in DEVICES.values():
-        if names == spec.coil_signature:
+        if names == spec.coil_signature or names in spec.alt_signatures:
             return spec.name
     return None
 

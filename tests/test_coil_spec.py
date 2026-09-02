@@ -193,6 +193,9 @@ class TestDeviceRegistryAndResolution:
         assert detect_device(list(self.D3D)[:-1]) is None            # one coil missing
         assert detect_device(list(self.D3D) + ["PF7"]) is None        # one coil extra
         assert detect_device(["PF1", "PF2", "CS1"]) is None
+        xia = list(self.D3D) + ["E567UP", "E567DN", "E89UP", "E89DN"]
+        assert detect_device(xia) == "DIII-D"                          # finer DIII-D mesh
+        assert detect_device(xia[:-1]) is None
 
     def test_explicit_floor_fraction_wins_over_device(self):
         from bouquet.coil_spec import resolve_coil_sigma

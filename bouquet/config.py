@@ -506,6 +506,7 @@ class FilterConfig:
     #   "legacy" -> +/-inspec_F_max on F-coils, +/-inspec_VSC_max on the VSC pair
     coil_filter: str = "chi2"
     chi2_max: float = 4.0
+    z_max: Optional[float] = 5.0      # worst-single-coil |z| guard (None = off)
     # Per-coil tolerance for the chi2 filter. None -> the device model (device named
     # in BouquetConfig.device or detected from the mesh coil names); if neither is
     # available Bouquet.filter() falls back LOUDLY to the legacy rule.

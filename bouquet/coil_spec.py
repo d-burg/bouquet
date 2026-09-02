@@ -64,13 +64,15 @@ EFIT_RESIDUAL_FLOOR_AT = 1050.0
 EFIT_RESIDUAL_FRACTION = 0.0088
 
 
-def coil_sigma_floor_fraction(baseline, floor, fraction):
-    """Per-coil sigma [baseline units] = hypot(floor, fraction*|I_base|).
+def coil_sigma_floor_fraction(baseline, floor, fraction, floor_by_coil=None):
+    """Per-coil sigma [baseline units] = hypot(floor_i, fraction*|I_base,i|).
 
     The intuitive two-number tolerance model ("about X A-t, plus Y % of the
-    coil current").  Needs only the baseline currents; every coil gets a sigma.
+    coil current"); ``floor_by_coil`` optionally overrides the floor per coil.
+    Needs only the baseline currents; every coil gets a sigma.
     """
-    return {n: float(np.hypot(float(floor), float(fraction) * abs(float(i))))
+    fb = floor_by_coil or {}
+    return {n: float(np.hypot(float(fb.get(n, floor)), float(fraction) * abs(float(i))))
             for n, i in baseline.items()}
 
 
@@ -124,11 +126,12 @@ def resolve_coil_sigma(baseline, sigma=None, device=None, shot=None):
             "no coil-current tolerance available: the mesh coil names match no registered "
             f"device ({sorted(baseline)[:6]}...). Set BouquetConfig.device, or give "
             "filtering.coil_sigma = {'floor': <A-t>, 'fraction': <f>} (or a per-coil table).")
-    floor, fraction = tolerance_for(spec, shot=shot, model=named_model)
-    return (coil_sigma_floor_fraction(baseline, floor, fraction),
+    floor, fraction, by_coil, era = tolerance_for(spec, shot=shot, model=named_model)
+    return (coil_sigma_floor_fraction(baseline, floor, fraction, by_coil),
             {"kind": "device", "device": spec.name, "model": named_model or "random",
-             "shot": (int(shot) if shot is not None else None), "floor": floor,
-             "fraction": fraction, "provenance": spec.sigma_provenance})
+             "era": era, "shot": (int(shot) if shot is not None else None), "floor": floor,
+             "fraction": fraction, "per_coil_floors": {c: v for c, v in by_coil.items() if c in baseline},
+             "provenance": spec.sigma_provenance})
 
 
 def with_sigma_ref(measured, table=None):

@@ -287,7 +287,7 @@ def measured_coil_currents(dd_path, time_s):
 
 def filter_coil_chi2(h5path_or_header, dd_path=None, scan_key=None,
                      chi2_max=4.0, apply=True, sigma=None, device=None,
-                     shot=None, sigma_ref=None):
+                     shot=None, sigma_ref=None, z_max=5.0):
     """Measurement-referenced coil filter (see :mod:`bouquet.coil_spec`).
 
     Scores each draw by ``chi2/nu`` of its coil currents against the baseline,
@@ -311,6 +311,10 @@ def filter_coil_chi2(h5path_or_header, dd_path=None, scan_key=None,
     digitizer table rescaled by |I_base|/|I_meas|; a dict ``{"F": A, "E": A}``
     a custom per-family table; ``"dd"`` the dd's own ``data_error_upper``.
     Raises :class:`ValueError` if given without ``dd_path``.
+
+    A draw passes when ``chi2/nu <= chi2_max`` AND its worst single coil has
+    ``|z| <= z_max`` (``None`` disables the guard): the pooled statistic alone
+    lets one coil at 7 sigma hide behind seventeen quiet ones.
 
     The model used is stamped on the scan group as ``coil_sigma_model`` (JSON)
     and ``coil_filter`` = "chi2" when ``apply`` is True.
@@ -349,7 +353,8 @@ def filter_coil_chi2(h5path_or_header, dd_path=None, scan_key=None,
                 draw = dict(zip(names, np.asarray(
                     g["coil_currents"][()], dtype=float).tolist()))
                 rows[int(key)] = coil_chi2(draw, baseline, sig)
-        results = {i: bool(np.isfinite(r["chi2_nu"]) and r["chi2_nu"] <= chi2_max)
+        results = {i: bool(np.isfinite(r["chi2_nu"]) and r["chi2_nu"] <= chi2_max
+                           and (z_max is None or r["max_abs_z"] <= z_max))
                    for i, r in rows.items()}
         if apply:
             _write_filter_result(h5path, sv, results, "passes_coil_filter")
@@ -362,7 +367,7 @@ def filter_coil_chi2(h5path_or_header, dd_path=None, scan_key=None,
         summary[sv] = {
             "n_total": len(results), "n_pass": n_pass,
             "n_fail": len(results) - n_pass, "chi2_max": float(chi2_max),
-            "sigma_model": model,
+            "z_max": (None if z_max is None else float(z_max)), "sigma_model": model,
             "n_coils": (max((r["nu"] for r in rows.values()), default=0)),
             "draws": {i: {"chi2_nu": r["chi2_nu"], "max_abs_z": r["max_abs_z"],
                           "worst_coil": r["worst_coil"], "nu": r["nu"],

@@ -263,4 +263,45 @@ class TestEraTolerance:
         base = {"F9A": 62600.0}; draw = {"F9A": 62600.0 + 4001.0}
         z_rand = coil_chi2(draw, base, resolve_coil_sigma(base, device="DIII-D", shot=189392)[0])["max_abs_z"]
         z_rms = coil_chi2(draw, base, resolve_coil_sigma(base, device="DIII-D", sigma="rms_incl_offset")[0])["max_abs_z"]
-        assert z_rand > 8.0 and z_rms < 4.0
+        assert z_rand > 5.0 and z_rms < 4.0      # caught by the z_max=5 guard; not by the rms model
+
+
+class TestPerCoilFloorsAndZGuard:
+    D3D = {**{f"F{i}{s}": 1e5 for i in range(1, 10) for s in "AB"}, "ECOILA": 2e4, "ECOILB": 2e4}
+
+    def test_per_coil_floor_applies_with_era_and_min_clip(self):
+        from bouquet.coil_spec import resolve_coil_sigma
+        s, m = resolve_coil_sigma(self.D3D, device="DIII-D", shot=204441)
+        assert m["era"] == "modern"
+        assert s["F9A"] == pytest.approx((580.0**2 + (0.0035 * 1e5) ** 2) ** 0.5)   # table value
+        assert s["F1A"] == pytest.approx((100.0**2 + (0.0035 * 1e5) ** 2) ** 0.5)   # 0 in table -> clipped to 100
+        assert s["ECOILA"] == pytest.approx((325.0**2 + (0.0035 * 2e4) ** 2) ** 0.5)  # not in table -> era floor
+        s2, m2 = resolve_coil_sigma(self.D3D, device="DIII-D", shot=153072)
+        assert m2["era"] == "pre2014"
+        assert s2["F1A"] > s["F1A"] and s2["ECOILA"] > s["ECOILA"]      # era floors differ
+        assert abs(s2["F9A"] - s["F9A"]) < 0.05 * s["F9A"]                 # F9A: ~575 A-t in both eras
+
+    def test_named_model_has_no_per_coil_table(self):
+        from bouquet.coil_spec import resolve_coil_sigma
+        s, m = resolve_coil_sigma(self.D3D, device="DIII-D", sigma="rms_incl_offset", shot=204441)
+        assert m["per_coil_floors"] == {} and s["F9A"] == s["F1A"]
+
+    def test_z_guard_catches_a_single_bad_coil(self, tmp_path):
+        """chi2/nu can hide one coil at 7 sigma among 17 quiet ones; z_max cannot."""
+        import h5py, numpy as np
+        from bouquet.filtering import filter_coil_chi2
+        names = list(self.D3D); base = np.array([self.D3D[n] for n in names])
+        sig = {n: 1.0 for n in names}
+        h5 = str(tmp_path / "t.h5")
+        with h5py.File(h5, "w") as hf:
+            g = hf.create_group("scan/1"); b = g.create_group("_baseline")
+            b.create_dataset("coil_names", data=np.array(names, dtype="S")); b.create_dataset("coil_currents", data=base)
+            d = g.create_group("0"); d.create_dataset("coil_names", data=np.array(names, dtype="S"))
+            draw = base.copy(); draw[names.index("F9B")] += 7.0     # 7 sigma on one coil
+            d.create_dataset("coil_currents", data=draw)
+        r = filter_coil_chi2(h5, None, scan_key=1, apply=False, sigma=sig, z_max=None)
+        assert r["draws"][0]["chi2_nu"] < 4.0 and r["draws"][0]["passes"]
+        r = filter_coil_chi2(h5, None, scan_key=1, apply=False, sigma=sig, z_max=5.0)
+        assert not r["draws"][0]["passes"] and r["z_max"] == 5.0
+        from bouquet.config import FilterConfig
+        assert FilterConfig().z_max == 5.0

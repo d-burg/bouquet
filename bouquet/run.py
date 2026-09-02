@@ -1368,7 +1368,7 @@ class Bouquet:
                 coil_summary = filter_coil_chi2(
                     header, None, scan_key=sk, chi2_max=fc.chi2_max,
                     apply=True, sigma=fc.coil_sigma, device=self.config.device,
-                    shot=self._infer_shot(),
+                    shot=self._infer_shot(), z_max=fc.z_max,
                 )
                 coil_fig = None
                 if plot:  # drift-distribution figure only; writes no flags

@@ -24,7 +24,11 @@ class DeviceSpec:
     sigma_floor: float                        # [A-t]
     sigma_fraction: float
     sigma_provenance: str
-    sigma_floor_by_shot: Tuple[Tuple[float, float, float], ...] = ()
+    sigma_floor_by_shot: Tuple[Tuple[float, float, float, str], ...] = ()   # (lo, hi, floor, era label)
+    # per-coil floors by era label (coils absent from the table use the era floor);
+    # clipped below at sigma_floor_min[era] so a coil near zero current keeps a floor
+    sigma_floor_by_coil: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    sigma_floor_min: Dict[str, float] = field(default_factory=dict)
     # alternative models a user may select by name via filtering.coil_sigma="<name>"
     sigma_models: Dict[str, Tuple[float, float]] = field(default_factory=dict)
     # measured-current conventions (used by the coil-target and dd-referenced paths)
@@ -40,7 +44,12 @@ DEVICES: Dict[str, DeviceSpec] = {
         name="DIII-D",
         coil_signature=frozenset(_D3D_F + ["ECOILA", "ECOILB"]),
         sigma_floor=325.0, sigma_fraction=0.0035,
-        sigma_floor_by_shot=((0, 165000, 825.0), (165000, float("inf"), 325.0)),
+        sigma_floor_by_shot=((0, 165000, 825.0, "pre2014"), (165000, float("inf"), 325.0, "modern")),
+        # per-coil random floor with the 0.35 percent fraction removed in quadrature, median
+        # over shots (408 pre-2014 / 63 modern); F6A/F6B and F9A carry the largest scatter
+        sigma_floor_by_coil={"pre2014": {"F1A": 1170, "F2A": 1040, "F3A": 910, "F4A": 1060, "F5A": 740, "F6A": 650, "F7A": 250, "F8A": 420, "F9A": 570, "F1B": 1470, "F2B": 780, "F3B": 1000, "F4B": 1170, "F5B": 1070, "F6B": 1120, "F7B": 0, "F8B": 240, "F9B": 370},
+                             "modern": {"F1A": 0, "F2A": 0, "F3A": 160, "F4A": 0, "F5A": 0, "F6A": 840, "F7A": 0, "F8A": 230, "F9A": 580, "F1B": 0, "F2B": 0, "F3B": 0, "F4B": 0, "F5B": 0, "F6B": 780, "F7B": 0, "F8B": 0, "F9B": 180}},
+        sigma_floor_min={"pre2014": 250.0, "modern": 100.0},
         sigma_models={"random": (325.0, 0.0035), "random_pre2014": (825.0, 0.0030),
                       "rms_incl_offset": (1050.0, 0.0088)},
         sigma_provenance=("offset-removed std of EFIT calculated-minus-measured F-coil current "
@@ -58,21 +67,33 @@ DEVICES: Dict[str, DeviceSpec] = {
 
 
 def tolerance_for(spec: DeviceSpec, shot=None, model: Optional[str] = None):
-    """(floor, fraction) for *spec*: a named alternative model, else the era floor for
-    *shot* (default floor when the shot is unknown)."""
+    """(floor, fraction, floor_by_coil, era) for *spec*.
+
+    A named alternative model gives (floor, fraction, {}, model).  Otherwise the
+    era is chosen from *shot* (the default era -- the last band -- when the shot
+    is unknown) and the per-coil floor table for that era is returned, clipped
+    below at ``sigma_floor_min[era]``; coils absent from the table get the era
+    floor.
+    """
     if model is not None:
         try:
-            return spec.sigma_models[model]
+            fl, fr = spec.sigma_models[model]
         except KeyError:
             raise KeyError(f"device {spec.name!r} has no sigma model {model!r}; "
                            f"available: {sorted(spec.sigma_models)}") from None
-    floor = spec.sigma_floor
-    if shot is not None:
-        for lo, hi, fl in spec.sigma_floor_by_shot:
-            if lo <= float(shot) < hi:
-                floor = fl
-                break
-    return floor, spec.sigma_fraction
+        return fl, fr, {}, model
+    floor, era = spec.sigma_floor, None
+    bands = spec.sigma_floor_by_shot
+    if bands:
+        lo, hi, fl, era = bands[-1]; floor = fl            # default: the latest era
+        if shot is not None:
+            for lo, hi, fl, lab in bands:
+                if lo <= float(shot) < hi:
+                    floor, era = fl, lab
+                    break
+    fmin = spec.sigma_floor_min.get(era, 0.0) if era else 0.0
+    by_coil = {c: max(float(v), fmin) for c, v in spec.sigma_floor_by_coil.get(era, {}).items()} if era else {}
+    return floor, spec.sigma_fraction, by_coil, era
 
 
 def detect_device(coil_names) -> Optional[str]:

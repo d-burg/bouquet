@@ -543,9 +543,9 @@ class BouquetConfig:
                 f"{type(src).__name__}"
             )
 
-        if self.fixed_components.p_fast_reduction not in ("trace", "mean", "perp"):
+        if self.fixed_components.p_fast_reduction not in ("trace", "mean", "perp", "sum"):
             raise ValueError(
-                "fixed_components.p_fast_reduction must be 'trace', 'mean', or 'perp'"
+                "fixed_components.p_fast_reduction must be 'trace', 'mean', 'perp', or 'sum'"
             )
         if self.uncertainty.sigma_mode not in ("auto", "direct", "ensemble"):
             raise ValueError("uncertainty.sigma_mode must be 'auto', 'direct', or 'ensemble'")

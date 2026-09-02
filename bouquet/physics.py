@@ -48,6 +48,16 @@ def isotropize_fast_pressure(p_perp, p_par, method: str = "trace"):
         method="trace"  ->  (2 * p_perp + p_par) / 3        [DEFAULT]
         method="mean"   ->  (p_perp + p_par) / 2
         method="perp"   ->  p_perp
+        method="sum"    ->  p_par + 2 * p_perp
+
+    ``"sum"`` is for sources that store the directional fields PER DEGREE OF
+    FREEDOM rather than as the full perpendicular/parallel pressures. IMAS.jl
+    (FUSE) does this: its ``pressure`` expression is
+    ``p_par + 2*p_perp`` and ``physics/fast.jl`` writes ``pressa/3`` into each
+    of ``pressure_fast_parallel`` and ``pressure_fast_perpendicular``. On such
+    a dd ``"trace"`` returns one third of the fast-ion pressure (verified on
+    DIII-D 150000/171317/173982/174823: the deficit is 8-35 % of the total
+    pressure and closes to <2 % with ``"sum"``).
 
     ``"trace"`` is recommended: it is the textbook scalar pressure p = tr(P)/3 of
     a gyrotropic distribution and it preserves the fast-ion energy density
@@ -78,6 +88,8 @@ def isotropize_fast_pressure(p_perp, p_par, method: str = "trace"):
         return (p_perp + p_par) / 2.0
     if method == "perp":
         return p_perp
+    if method == "sum":
+        return p_par + 2.0 * p_perp
     raise ValueError(
         f"unknown p_fast reduction method {method!r}; expected 'trace', 'mean', or 'perp'"
     )

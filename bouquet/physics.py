@@ -91,7 +91,7 @@ def isotropize_fast_pressure(p_perp, p_par, method: str = "trace"):
     if method == "sum":
         return p_par + 2.0 * p_perp
     raise ValueError(
-        f"unknown p_fast reduction method {method!r}; expected 'trace', 'mean', or 'perp'"
+        f"unknown p_fast reduction method {method!r}; expected 'trace', 'mean', 'perp', or 'sum'"
     )
 
 

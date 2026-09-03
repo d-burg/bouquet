@@ -27,11 +27,20 @@ across coils and shots (log-space least squares); per-coil floors are the
 per-shot std with the universal fraction removed in quadrature, median over
 shots per DAQ era.
 
-Assumptions not yet verified (2026-09-03): sigma is used as a SYMMETRIC scale
-(z = dI/sigma, chi2 = sum z^2) -- the shape of r(t) about its mean (skew,
-tails, slow drift within the window inflating ``std``) has not been checked;
-and the baseline's own offset relative to the measured current has not been
-compared with EFIT's on the same shots.
+What has been checked (2026-09-03, 2940 coil-shots, 296k slices): r(t) about
+its mean is symmetric and Gaussian in the core (skew +0.1, |z|>2 fraction
+4.4 % vs 4.55 %), so a symmetric sigma is defensible; but the far tail is
+heavy (|z|>5 occurs ~750x the Gaussian rate), so the ``z_max = 5`` guard is
+empirically a ~3.5-sigma cut.  About 63 % of the variance behind ``std`` is
+slow coherent drift of the discrepancy within the flat-top, not
+slice-to-slice scatter -- the F6A/F6B/F9A "floors" are drift, not noise.
+``std`` is kept deliberately: a reconstruction is one slice and the drift is
+present at that slice.  The 18 F-coil residuals are not independent (median
+|pair correlation| 0.37, n_eff ~ 4), so chi2/nu is not an 18-dof statistic;
+the max-|z| guard carries most of the discrimination.
+
+Not yet verified: the baseline's own offset relative to the measured current
+vs EFIT's on the same shots (in progress).
 """
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Optional, Tuple

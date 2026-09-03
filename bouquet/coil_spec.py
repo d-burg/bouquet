@@ -99,7 +99,10 @@ def resolve_coil_sigma(baseline, sigma=None, device=None, shot=None):
          * callable(baseline) -> {coil: sigma}
       2. ``device`` (a :class:`DeviceSpec`, a device name, or None -> detected
          from the baseline coil names): the device's random-part tolerance, with
-         the floor chosen for ``shot`` when the device has era bands.
+         the floor chosen for ``shot`` when the device has era bands.  See the
+         :mod:`bouquet.devices` module docstring for how the model was derived
+         (offset-removed std of the reconstruction's coil residual, NOT the
+         offset itself) and which assumptions are untested.
       3. otherwise :class:`CoilSigmaUnavailable` -- the caller decides the
          fallback (Bouquet.filter falls back LOUDLY to the legacy rule).
     """

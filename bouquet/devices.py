@@ -4,6 +4,34 @@ A TokaMaker mesh carries no device identifier (only ``coil_dict``/``cond_dict``)
 so a device is either named in ``BouquetConfig.device`` or detected from the
 exact set of coil-set names in the mesh.  Detection is all-or-nothing: an exact
 signature match is full confidence, anything else is "unknown".
+
+Coil-current tolerance model -- how it was derived and what it assumes
+----------------------------------------------------------------------
+The chi2 coil filter compares each draw's coil currents with the baseline's,
+coil by coil, in units of a per-coil sigma.  For DIII-D that sigma comes from
+the reconstruction code's own coil-current residual: over the flat-top of each
+shot, r(t) = (EFIT calculated coil current) - (measured coil current), in
+ampere-turns, with the coil-current fit weights at zero so the coils float
+against the magnetics.  Two scalars are formed per coil per shot:
+
+* ``rms`` = sqrt(mean r^2) -- includes the shot's mean offset;
+* ``std`` = scatter of r(t) about its own mean -- the offset removed.
+
+The offset is a signed, per-shot, per-coil bias (typically 1-3 kA-t) between
+the reported current and what the magnetics want.  The TokaMaker baseline fit
+carries its own such offset, so draws about the baseline must not re-explore
+it: the DEFAULT model (``"random"``) is fitted to ``std``.  ``"rms_incl_offset"``
+is fitted to ``rms`` and is the looser "everything the plasma might have seen"
+option.  Both are floor+fraction fits, sigma^2 = floor^2 + (fraction*|I|)^2,
+across coils and shots (log-space least squares); per-coil floors are the
+per-shot std with the universal fraction removed in quadrature, median over
+shots per DAQ era.
+
+Assumptions not yet verified (2026-09-03): sigma is used as a SYMMETRIC scale
+(z = dI/sigma, chi2 = sum z^2) -- the shape of r(t) about its mean (skew,
+tails, slow drift within the window inflating ``std``) has not been checked;
+and the baseline's own offset relative to the measured current has not been
+compared with EFIT's on the same shots.
 """
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Optional, Tuple

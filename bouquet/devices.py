@@ -18,11 +18,14 @@ against the magnetics.  Two scalars are formed per coil per shot:
 * ``std`` = scatter of r(t) about its own mean -- the offset removed.
 
 The offset is a signed, per-shot, per-coil bias (typically 1-3 kA-t) between
-the reported current and what the magnetics want.  The TokaMaker baseline fit
-carries its own such offset, so draws about the baseline must not re-explore
-it: the DEFAULT model (``"random"``) is fitted to ``std``.  ``"rms_incl_offset"``
-is fitted to ``rms`` and is the looser "everything the plasma might have seen"
-option.  Both are floor+fraction fits, sigma^2 = floor^2 + (fraction*|I|)^2,
+the reported current and what the magnetics want.  It is a property of the
+reconstruction's null-space choice, not of the machine: a different code
+lands on a different offset.  The DEFAULT model (``"random"``) is therefore
+fitted to ``std`` -- the part of the residual that is stable from shot to shot
+and independent of which fit produced the baseline -- and answers "how far
+can this coil plausibly move for a plausible change of the plasma state".
+``"rms_incl_offset"`` is fitted to ``rms`` and is the looser option.  NOTE:
+this is NOT because the baseline "absorbs" EFIT's offset -- see below.  Both are floor+fraction fits, sigma^2 = floor^2 + (fraction*|I|)^2,
 across coils and shots (log-space least squares); per-coil floors are the
 per-shot std with the universal fraction removed in quadrature, median over
 shots per DAQ era.
@@ -39,8 +42,16 @@ present at that slice.  The 18 F-coil residuals are not independent (median
 |pair correlation| 0.37, n_eff ~ 4), so chi2/nu is not an 18-dof statistic;
 the max-|z| guard carries most of the discrimination.
 
-Not yet verified: the baseline's own offset relative to the measured current
-vs EFIT's on the same shots (in progress).
+Baseline vs measured currents (checked 2026-09-03, 42 slices x 18 coils): an
+UNREGULARISED TokaMaker baseline (``coil_reg`` empty) sits a median 11.6 kA-t
+from the measured currents, ~10x EFIT's own offset, essentially uncorrelated
+with it (r^2 = 0.05, same sign 68 %), and 25-30 adopted sigma away -- 86 % of
+its coils would fail this filter's own guard.  The excursion is low-rank
+(3 SVD modes, F4/F5/F8 and the F9A-F9B direction), i.e. the coil null space.
+Draws about such a baseline are judged for plausibility RELATIVE TO IT; the
+baseline's own distance from the magnetics is invisible to this filter and
+must be handled upstream, by regularising the baseline toward the measured
+currents (``SolverConfig.coil_reg``, see ``coil_targets``).
 """
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Optional, Tuple

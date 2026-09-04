@@ -302,9 +302,27 @@ class TestPerCoilFloorsAndZGuard:
             d = g.create_group("0"); d.create_dataset("coil_names", data=np.array(names, dtype="S"))
             draw = base.copy(); draw[names.index("F9B")] += 7.0     # 7 sigma on one coil
             d.create_dataset("coil_currents", data=draw)
-        r = filter_coil_chi2(h5, None, scan_key=1, apply=False, sigma=sig, z_max=None)
-        assert r["draws"][0]["chi2_nu"] < 4.0 and r["draws"][0]["passes"]
-        r = filter_coil_chi2(h5, None, scan_key=1, apply=False, sigma=sig, z_max=5.0)
-        assert not r["draws"][0]["passes"] and r["z_max"] == 5.0
+        r = filter_coil_chi2(h5, None, scan_key=1, apply=False, sigma=sig, z_max=False)
+        assert r["draws"][0]["chi2_nu"] < 4.0 and r["draws"][0]["passes"] and r["z_max"] is None
+        r = filter_coil_chi2(h5, None, scan_key=1, apply=False, sigma=sig)        # explicit sigma -> generic 4 / 5
+        assert not r["draws"][0]["passes"] and r["z_max"] == 5.0 and r["chi2_max"] == 4.0
+        assert r["sigma_model"]["acceptance"]["source"] == "generic"
         from bouquet.config import FilterConfig
-        assert FilterConfig().z_max == 5.0
+        assert FilterConfig().z_max is None and FilterConfig().chi2_max is None
+
+    def test_device_acceptance_is_the_calibrated_quantile(self, tmp_path):
+        import h5py, numpy as np
+        from bouquet.filtering import filter_coil_chi2
+        from bouquet.devices import get_device
+        names = list(self.D3D); base = np.array([self.D3D[n] for n in names])
+        h5 = str(tmp_path / "d.h5")
+        with h5py.File(h5, "w") as hf:
+            g = hf.create_group("scan/1"); b = g.create_group("_baseline")
+            b.create_dataset("coil_names", data=np.array(names, dtype="S")); b.create_dataset("coil_currents", data=base)
+            d = g.create_group("0"); d.create_dataset("coil_names", data=np.array(names, dtype="S")); d.create_dataset("coil_currents", data=base)
+        r = filter_coil_chi2(h5, None, scan_key=1, apply=False, shot=204441)
+        acc = get_device("DIII-D").acceptance
+        assert r["chi2_max"] == acc["chi2_max"] == 6.1 and r["z_max"] == acc["z_max"] == 6.3
+        assert r["sigma_model"]["acceptance"]["source"] == "device q95"
+        r2 = filter_coil_chi2(h5, None, scan_key=1, apply=False, shot=204441, chi2_max=4.0, z_max=5.0)
+        assert r2["chi2_max"] == 4.0 and r2["z_max"] == 5.0

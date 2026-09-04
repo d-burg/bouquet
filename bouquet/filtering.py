@@ -286,8 +286,8 @@ def measured_coil_currents(dd_path, time_s):
 
 
 def filter_coil_chi2(h5path_or_header, dd_path=None, scan_key=None,
-                     chi2_max=4.0, apply=True, sigma=None, device=None,
-                     shot=None, sigma_ref=None, z_max=5.0):
+                     chi2_max=None, apply=True, sigma=None, device=None,
+                     shot=None, sigma_ref=None, z_max=None):
     """Measurement-referenced coil filter (see :mod:`bouquet.coil_spec`).
 
     Scores each draw by ``chi2/nu`` of its coil currents against the baseline,
@@ -313,8 +313,12 @@ def filter_coil_chi2(h5path_or_header, dd_path=None, scan_key=None,
     Raises :class:`ValueError` if given without ``dd_path``.
 
     A draw passes when ``chi2/nu <= chi2_max`` AND its worst single coil has
-    ``|z| <= z_max`` (``None`` disables the guard): the pooled statistic alone
-    lets one coil at 7 sigma hide behind seventeen quiet ones.
+    ``|z| <= z_max``: the pooled statistic alone lets one coil at 7 sigma hide
+    behind seventeen quiet ones.  Both default (``None``) to the device's
+    empirically calibrated acceptance (:attr:`DeviceSpec.acceptance`, a chosen
+    quantile of what real machine states score under the same sigma) when the
+    sigma came from a device model, else to :data:`devices.GENERIC_ACCEPTANCE`.
+    Pass ``z_max=False`` to disable the guard.
 
     The model used is stamped on the scan group as ``coil_sigma_model`` (JSON)
     and ``coil_filter`` = "chi2" when ``apply`` is True.
@@ -343,6 +347,17 @@ def filter_coil_chi2(h5path_or_header, dd_path=None, scan_key=None,
                 sig, model = coil_sigma_in_base_units(baseline, meas), {"kind": "dd_referenced", "sigma_ref": str(sigma_ref)}
             else:
                 sig, model = resolve_coil_sigma(baseline, sigma=sigma, device=device, shot=shot)
+            # acceptance: explicit > device calibration (when sigma is the device model) > generic
+            from .devices import GENERIC_ACCEPTANCE, get_device
+            acc = dict(GENERIC_ACCEPTANCE); acc_src = "generic"
+            if model.get("kind") == "device" and model.get("model") == "random":
+                dacc = get_device(model["device"]).acceptance
+                if dacc:
+                    acc.update({k: dacc[k] for k in ("chi2_max", "z_max") if k in dacc}); acc_src = "device q%g" % (100 * dacc.get("quantile", float("nan")))
+            cm = float(acc["chi2_max"]) if chi2_max is None else float(chi2_max)
+            zm = (acc["z_max"] if z_max is None else z_max)
+            zm = None if zm is False else (None if zm is None else float(zm))
+            model = dict(model, acceptance={"chi2_max": cm, "z_max": zm, "source": acc_src})
             rows = {}
             for key in sorted((k for k in grp if k.isdigit()), key=int):
                 g = grp[key]
@@ -353,8 +368,8 @@ def filter_coil_chi2(h5path_or_header, dd_path=None, scan_key=None,
                 draw = dict(zip(names, np.asarray(
                     g["coil_currents"][()], dtype=float).tolist()))
                 rows[int(key)] = coil_chi2(draw, baseline, sig)
-        results = {i: bool(np.isfinite(r["chi2_nu"]) and r["chi2_nu"] <= chi2_max
-                           and (z_max is None or r["max_abs_z"] <= z_max))
+        results = {i: bool(np.isfinite(r["chi2_nu"]) and r["chi2_nu"] <= cm
+                           and (zm is None or r["max_abs_z"] <= zm))
                    for i, r in rows.items()}
         if apply:
             _write_filter_result(h5path, sv, results, "passes_coil_filter")
@@ -366,8 +381,8 @@ def filter_coil_chi2(h5path_or_header, dd_path=None, scan_key=None,
         n_pass = sum(results.values())
         summary[sv] = {
             "n_total": len(results), "n_pass": n_pass,
-            "n_fail": len(results) - n_pass, "chi2_max": float(chi2_max),
-            "z_max": (None if z_max is None else float(z_max)), "sigma_model": model,
+            "n_fail": len(results) - n_pass, "chi2_max": cm,
+            "z_max": zm, "sigma_model": model,
             "n_coils": (max((r["nu"] for r in rows.values()), default=0)),
             "draws": {i: {"chi2_nu": r["chi2_nu"], "max_abs_z": r["max_abs_z"],
                           "worst_coil": r["worst_coil"], "nu": r["nu"],

@@ -505,8 +505,12 @@ class FilterConfig:
     #               no dd needed; "d3d" = digitizer table, needs a dd)   [DEFAULT]
     #   "legacy" -> +/-inspec_F_max on F-coils, +/-inspec_VSC_max on the VSC pair
     coil_filter: str = "chi2"
-    chi2_max: float = 4.0
-    z_max: Optional[float] = 5.0      # worst-single-coil |z| guard (None = off)
+    # Acceptance: None -> the device's empirically calibrated thresholds (DIII-D:
+    # chi2/nu <= 6.1 and worst-coil |z| <= 6.3, the 95th percentile of what real
+    # machine states score), or the generic 4 / 5 when no device calibration
+    # applies. Give numbers to override; z_max=False disables the guard.
+    chi2_max: Optional[float] = None
+    z_max: Optional[Any] = None
     # Per-coil tolerance for the chi2 filter. None -> the device model (device named
     # in BouquetConfig.device or detected from the mesh coil names); if neither is
     # available Bouquet.filter() falls back LOUDLY to the legacy rule.

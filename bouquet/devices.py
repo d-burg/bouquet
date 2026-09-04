@@ -56,7 +56,7 @@ currents (``SolverConfig.coil_reg``, see ``coil_targets``).
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Optional, Tuple
 
-__all__ = ["DeviceSpec", "DEVICES", "detect_device", "resolve_device", "get_device", "tolerance_for"]
+__all__ = ["DeviceSpec", "DEVICES", "detect_device", "resolve_device", "get_device", "tolerance_for", "GENERIC_ACCEPTANCE"]
 
 
 @dataclass(frozen=True)
@@ -82,12 +82,21 @@ class DeviceSpec:
     sigma_floor_min: Dict[str, float] = field(default_factory=dict)
     # alternative models a user may select by name via filtering.coil_sigma="<name>"
     sigma_models: Dict[str, Tuple[float, float]] = field(default_factory=dict)
+    # acceptance thresholds calibrated on the machine's own residual distribution:
+    # the chosen quantile of chi2/nu and worst-coil |z| that real flat-top slices
+    # score under this device's sigma model. None -> the generic defaults.
+    acceptance: Dict[str, float] = field(default_factory=dict)   # {"chi2_max","z_max","quantile"}
+    acceptance_provenance: str = ""
     # measured-current conventions (used by the coil-target and dd-referenced paths)
     turns: Dict[str, float] = field(default_factory=dict)       # measured A -> mesh A-t
     coil_family: Callable[[str], str] = lambda n: n[:1]         # for per-family tables
     digitizer_sigma: Dict[str, float] = field(default_factory=dict)  # per family, A (measured)
     vsc_pair: Tuple[str, ...] = ()
 
+
+# Generic acceptance when no device calibration is available (a Gaussian-ish
+# "RMS 2 sigma per coil, no coil beyond 5" rule; DIII-D's empirical values are looser).
+GENERIC_ACCEPTANCE = {"chi2_max": 4.0, "z_max": 5.0}
 
 _D3D_F = [f"F{i}{s}" for i in range(1, 10) for s in "AB"]
 DEVICES: Dict[str, DeviceSpec] = {
@@ -115,6 +124,14 @@ DEVICES: Dict[str, DeviceSpec] = {
                **{f"F{i}{s}": 55.0 for i in (6, 7, 9) for s in "AB"}},
         digitizer_sigma={"F": 7.0, "E": 69.0},
         vsc_pair=("F9A", "F9B"),
+        acceptance={"chi2_max": 6.1, "z_max": 6.3, "quantile": 0.95},
+        acceptance_provenance=("95th percentile of chi2/nu and worst-coil |z| scored by real DIII-D "
+                               "flat-top slices (r(t)-mean per coil over the adopted per-coil era "
+                               "sigma; 16573 slices, 105 CTM + 59 IBS shots): a 5% false-rejection "
+                               "rate on real machine states by construction. The empirical "
+                               "distribution is not a chi2 of any dof (q50 0.78, q95 6.1, q99 51; "
+                               "the tail is slow drift), so dof-based calibration is not used. "
+                               "2026-09-04"),
     ),
 }
 

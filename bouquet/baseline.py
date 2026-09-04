@@ -265,9 +265,11 @@ def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
             and zeff_sigma_source in ("carbon", "measured")):
         warnings.warn(
             f"resolve_zeff_envelope: zeff_sigma_source="
-            f"'{zeff_sigma_source}' but this source's Z_eff baseline is not "
-            "the IDA one (IMAS/ida_hybrid path); falling back to the scalar "
-            "envelope", stacklevel=2)
+            f"'{zeff_sigma_source}' but this source's Z_eff baseline does "
+            "not come from the IDA file supplying the sigmas (IMAS/"
+            "ida_hybrid path, a p-file baseline, or unc.ida_path pointing "
+            "at a different file than the source's own .cdf); falling back "
+            "to the scalar envelope", stacklevel=2)
     if chosen is None:
         chosen = (scalar_env, scalar_label
                   + ("" if zeff_sigma_source == "scalar"
@@ -343,6 +345,10 @@ def resolve_uncertainty(config, baseline) -> dict:
             ida_path, time=getattr(src, "time", None),
             sigma_mode=unc.sigma_mode, sigma_method=unc.sigma_method,
             sigma_ni_from_ne=unc.sigma_ni_from_ne,
+            # the carbon tier's Z(Z-1) propagation is quadratically
+            # Z-sensitive; the kinetics loader already passes this, and
+            # omitting it here silently pinned the sigma math to carbon
+            impurity_Z=float(getattr(src, "impurity_Z", 6.0)),
         )
 
         def _to_kin(arr):
@@ -437,8 +443,7 @@ def resolve_uncertainty(config, baseline) -> dict:
     # else baseline.Zeff for the reconstruction path), on the kinetic grid.
     user_sigmas = dict(unc.aux_sigmas or {})
     if "zeff" not in user_sigmas and float(getattr(unc, "zeff_scalar_sigma", 0.0)) > 0:
-        _zeff_from_src = src_aux.get("zeff")
-        base_zeff = _zeff_from_src
+        base_zeff = src_aux.get("zeff")
         if base_zeff is None:
             base_zeff = np.asarray(baseline.Zeff, dtype=float)
         if "zeff" not in man_base:
@@ -448,11 +453,19 @@ def resolve_uncertainty(config, baseline) -> dict:
         # path also populates aux['zeff'] (it IS the IDA Zeff, stored for
         # the aux plots), so testing the aux dict wrongly disqualified every
         # recon-path run -- caught by an end-to-end A/B on a demo shot, where
-        # the 'auto' arm silently resolved to the scalar.  Only the IMAS /
-        # ida_hybrid path (ImasSource), whose Z_eff baseline is FUSE's, must
-        # be kept away from an IDA-measured envelope.
-        _zeff_baseline_is_ida = (isinstance(src, ReconstructionSource)
-                                 and ida_path is not None)
+        # the 'auto' arm silently resolved to the scalar.  Two exclusions:
+        # the IMAS / ida_hybrid path (ImasSource), whose Z_eff baseline is
+        # FUSE's, and a recon source whose OWN profiles file is NOT the .cdf
+        # supplying the sigmas -- a p-file Zeff baseline, or unc.ida_path
+        # pointing at a different file/vintage than the baseline's .cdf,
+        # would otherwise be paired with an absolute measured envelope from
+        # a file its Zeff never came from (the exact cross-channel mixing
+        # this gate exists to forbid).
+        _src_cdf = (str(getattr(src, "profiles_path", ""))
+                    if isinstance(src, ReconstructionSource) else "")
+        _zeff_baseline_is_ida = (ida_path is not None
+                                 and _src_cdf.endswith(".cdf")
+                                 and ida_path == _src_cdf)
         _z_env, _z_label = resolve_zeff_envelope(
             getattr(unc, "zeff_sigma_source", "auto"),
             unc.zeff_scalar_sigma,

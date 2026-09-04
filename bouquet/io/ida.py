@@ -30,6 +30,10 @@ from typing import Optional
 
 import numpy as np
 
+# Magnitude above which a value is treated as a netCDF fill marker rather
+# than data (default fills are ~9.97e36; physical densities are < 1e22).
+_CARBON_FILL = 1e30
+
 
 @dataclass
 class IDAProfiles:
@@ -244,14 +248,34 @@ def read_ida(
             sigma_Zeff_carbon, sigma_Zeff_carbon_source = None, "none"
             if "n_12C6" in f and "n_12C6_err" in f:
                 _nc, _snc = col("n_12C6"), col("n_12C6_err")
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    _dil = (impurity_Z * (impurity_Z - 1.0) * _nc
-                            / np.clip(ne, 1e10, None))
-                    sigma_Zeff_carbon = _dil * np.sqrt(
-                        (_snc / np.clip(_nc, 1e10, None)) ** 2
-                        + (sigma_ne / np.clip(ne, 1e10, None)) ** 2)
-                sigma_Zeff_carbon = np.nan_to_num(sigma_Zeff_carbon, nan=0.0)
-                sigma_Zeff_carbon_source = "n_12C6_err"
+                # The propagation is only meaningful where the carbon data is
+                # physical.  Negative nC (SOL spline undershoot), netCDF fill
+                # values (~1e36) and NaN holes all survive the clip floors:
+                # a negative nC keeps its sign while its |value| is floored
+                # out of the relative-error denominator, producing ~1e6-scale
+                # sigmas that pass every downstream guard (finite, some > 0)
+                # and silently corrupt the Zeff ensemble.  Any garbage radius
+                # -> no carbon tier at all (loud fallback), matching the
+                # None-not-a-guessed-scalar rule above.
+                _bad = ~(np.isfinite(_nc) & np.isfinite(_snc)
+                         & np.isfinite(ne) & np.isfinite(sigma_ne)
+                         & (_nc > 0) & (_snc >= 0) & (ne > 0)
+                         & (np.abs(_nc) < _CARBON_FILL)
+                         & (np.abs(_snc) < _CARBON_FILL))
+                if np.any(_bad):
+                    print(f"[read_ida] carbon-tier sigma skipped: "
+                          f"{int(_bad.sum())}/{_bad.size} radii carry "
+                          f"non-physical n_12C6/n_12C6_err (negative, "
+                          f"non-finite, or fill values); the Zeff envelope "
+                          f"falls back a tier")
+                else:
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        _dil = (impurity_Z * (impurity_Z - 1.0) * _nc
+                                / np.clip(ne, 1e10, None))
+                        sigma_Zeff_carbon = _dil * np.sqrt(
+                            (_snc / np.clip(_nc, 1e10, None)) ** 2
+                            + (sigma_ne / np.clip(ne, 1e10, None)) ** 2)
+                    sigma_Zeff_carbon_source = "n_12C6_err"
 
         # Main-ion density from the measured (ne, Zeff) via single-impurity
         # quasineutrality: ni = ne (Z_imp - Zeff)/(Z_imp - 1). The IDA file
@@ -272,23 +296,34 @@ def read_ida(
         if "n_12C6" in f:
             n_c_raw = np.asarray(f["n_12C6"][t_idx], dtype=float)
             n_c = n_c_raw.mean(0) if n_c_raw.ndim == 2 else n_c_raw
-            with np.errstate(divide="ignore", invalid="ignore"):
-                z_from_c = (1.0 + impurity_Z * (impurity_Z - 1.0) * n_c
-                            / np.clip(ne, 1e10, None))
-                _core = psi_N <= 0.9
-                _rd = (Zeff[_core] - z_from_c[_core]) / np.clip(
-                    z_from_c[_core], 1e-3, None)
-            _iw = int(np.argmax(np.abs(_rd)))
-            zeff_carbon_dev = {
-                "median": float(np.median(_rd)),
-                "worst": float(_rd[_iw]),
-                "psi_worst": float(psi_N[_core][_iw]),
-            }
-            print(f"[read_ida] Zeff(VB) vs 1+Z(Z-1)nC/ne (CER carbon), "
-                  f"psi_N<=0.9: median {100*zeff_carbon_dev['median']:+.1f}%, "
-                  f"worst {100*zeff_carbon_dev['worst']:+.1f}% at "
-                  f"psi_N={zeff_carbon_dev['psi_worst']:.2f}  "
-                  f"(report-only; see Callahan 2019 JINST 14 C10002)")
+            # Restrict to VALID core points: an edge-only fit vintage
+            # (no psi_N <= 0.9 at all) previously crashed the argmax on an
+            # empty array -- from a check documented as report-only -- and
+            # negative/fill-value nC would make the "deviation" meaningless.
+            _core = ((psi_N <= 0.9) & np.isfinite(n_c) & (n_c > 0)
+                     & (np.abs(n_c) < _CARBON_FILL)
+                     & np.isfinite(ne) & (ne > 0))
+            if np.any(_core):
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    z_from_c = (1.0 + impurity_Z * (impurity_Z - 1.0) * n_c
+                                / np.clip(ne, 1e10, None))
+                    _rd = (Zeff[_core] - z_from_c[_core]) / np.clip(
+                        z_from_c[_core], 1e-3, None)
+                _iw = int(np.argmax(np.abs(_rd)))
+                zeff_carbon_dev = {
+                    "median": float(np.median(_rd)),
+                    "worst": float(_rd[_iw]),
+                    "psi_worst": float(psi_N[_core][_iw]),
+                }
+                print(f"[read_ida] Zeff(VB) vs 1+Z(Z-1)nC/ne (CER carbon), "
+                      f"psi_N<=0.9: "
+                      f"median {100*zeff_carbon_dev['median']:+.1f}%, "
+                      f"worst {100*zeff_carbon_dev['worst']:+.1f}% at "
+                      f"psi_N={zeff_carbon_dev['psi_worst']:.2f}  "
+                      f"(report-only; see Callahan 2019 JINST 14 C10002)")
+            else:
+                print("[read_ida] Zeff-vs-carbon cross-check skipped: no "
+                      "valid core (psi_N<=0.9) carbon points in this file")
         # sigma_ni is only used in the (now rare) independent-ni fallback;
         # propagate the ne fractional error onto the derived ni.
         with np.errstate(divide="ignore", invalid="ignore"):

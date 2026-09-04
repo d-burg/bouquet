@@ -213,3 +213,165 @@ class TestEnvelopeLadder:
     def test_unknown_source_raises(self):
         with pytest.raises(ValueError, match="zeff_sigma_source"):
             resolve_zeff_envelope("magic", 0.05, self._base, True, None, "none")
+
+
+class TestCarbonDataValidity:
+    """Garbage carbon data must drop the tier LOUDLY, never corrupt it.
+
+    Negative n_12C6 (SOL spline undershoot) and netCDF fill values survive
+    the clip floors -- a negative nC keeps its sign while its magnitude is
+    floored out of the relative-error denominator, producing ~1e6-scale
+    sigmas that pass _usable (finite, some > 0) and silently corrupt the
+    whole Zeff/ni ensemble.  NaN holes previously became sigma=0 radii via
+    nan_to_num.  All three now skip the tier with a printed reason.
+    """
+
+    def _direct_with(self, path, mutate):
+        psi, zeff = _write_direct(path, with_zeff_err=True, with_carbon=True)
+        with h5py.File(path, "a") as f:
+            mutate(f)
+        return psi, zeff
+
+    def test_negative_carbon_drops_the_tier(self, tmp_path, capsys):
+        p = str(tmp_path / "negc.cdf")
+
+        def mutate(f):
+            nc = f["n_12C6"][0]
+            nc[-3:] = -2e17                     # SOL undershoot
+            f["n_12C6"][0] = nc
+        self._direct_with(p, mutate)
+        r = read_ida(p)
+        assert r.sigma_Zeff_carbon is None
+        assert r.sigma_Zeff_carbon_source == "none"
+        assert "carbon-tier sigma skipped" in capsys.readouterr().out
+        # the VB tier is untouched and still wins 'auto'
+        assert r.sigma_Zeff is not None
+
+    def test_fill_values_drop_the_tier(self, tmp_path, capsys):
+        p = str(tmp_path / "fill.cdf")
+
+        def mutate(f):
+            err = f["n_12C6_err"][0]
+            err[5] = 9.96921e36                 # netCDF default fill
+            f["n_12C6_err"][0] = err
+        self._direct_with(p, mutate)
+        r = read_ida(p)
+        assert r.sigma_Zeff_carbon is None
+        assert "carbon-tier sigma skipped" in capsys.readouterr().out
+
+    def test_nan_holes_drop_the_tier_instead_of_zeroing(self, tmp_path):
+        """The old nan_to_num turned masked channels into sigma=0 radii --
+        never-perturbed points reported under provenance 'n_12C6_err'."""
+        p = str(tmp_path / "nanhole.cdf")
+
+        def mutate(f):
+            err = f["n_12C6_err"][0]
+            err[7] = np.nan
+            f["n_12C6_err"][0] = err
+        self._direct_with(p, mutate)
+        r = read_ida(p)
+        assert r.sigma_Zeff_carbon is None
+        assert r.sigma_Zeff_carbon_source == "none"
+
+    def test_edge_only_grid_does_not_crash_the_crosscheck(self, tmp_path, capsys):
+        """A pedestal-only fit vintage (no psi_N <= 0.9) crashed read_ida
+        via argmax([]) inside the report-only cross-check."""
+        p = str(tmp_path / "edge.cdf")
+        psi = np.linspace(0.92, 1.05, _NPSI)
+        ne = 1e19 * np.ones(_NPSI)
+        zeff = np.full(_NPSI, 2.0)
+        n_c = (zeff - 1.0) * ne / 30.0
+        with h5py.File(p, "w") as f:
+            f["time"] = np.array([3000.0])
+            f["psi_n"] = psi
+            for k, v in (("n_e", ne), ("T_e", 100 * np.ones(_NPSI)),
+                         ("T_12C6", 90 * np.ones(_NPSI))):
+                f[k] = v[None, :]
+                f[k + "_err"] = (0.05 * v)[None, :]
+            f["Zeff"] = zeff[None, :]
+            f["n_12C6"] = n_c[None, :]
+        r = read_ida(p)                          # must not raise
+        assert r.zeff_carbon_dev is None
+        assert "cross-check skipped" in capsys.readouterr().out
+
+
+class TestEnvelopeWiring:
+    """resolve_uncertainty-level wiring: eligibility + impurity_Z."""
+
+    def _bl(self, psi_kin):
+        from bouquet.baseline import Baseline
+        psi_N = np.linspace(0.0, 1.0, 33)
+        _, ne, te, zeff = _grids()
+        j = 8.0e5 * (1.0 - psi_N ** 2)
+        return Baseline(
+            psi_N=psi_N, j_phi=j, j_inductive=0.85 * j, j_BS=0.15 * j,
+            psi_N_kinetic=psi_kin, ne=ne, te=te, ni=0.9 * ne, ti=0.9 * te,
+            Zeff=zeff, Ip_target=1.2e6, l_i_target=0.85,
+            provenance="reconstruction",
+        )
+
+    def _cfg(self, profiles_path, tmp_path, unc=None, impurity_Z=6.0):
+        from bouquet.config import (BouquetConfig, ReconstructionSource,
+                                    SolverConfig, UncertaintyConfig)
+        return BouquetConfig(
+            source=ReconstructionSource(
+                geqdsk_path=str(tmp_path / "g.geqdsk"),
+                profiles_path=profiles_path, time=3.0,
+                impurity_Z=impurity_Z),
+            solver=SolverConfig(mesh_path=str(tmp_path / "mesh.h5")),
+            output_header=str(tmp_path / "out"),
+            uncertainty=unc or UncertaintyConfig(),
+        )
+
+    def test_own_cdf_gets_the_carbon_tier(self, tmp_path):
+        from bouquet.baseline import resolve_uncertainty
+        cdf = str(tmp_path / "own.cdf")
+        psi, zeff = _write_direct(cdf, with_zeff_err=True, with_carbon=True)
+        env = resolve_uncertainty(self._cfg(cdf, tmp_path), self._bl(psi))
+        expect = (zeff - 1.0) * np.sqrt(0.25 ** 2 + 0.05 ** 2)
+        np.testing.assert_allclose(env["aux_sigmas"]["zeff"], expect,
+                                   rtol=1e-6)
+
+    def test_pfile_baseline_never_pairs_with_an_ida_envelope(self, tmp_path):
+        """A p-file Zeff baseline + unc.ida_path must resolve the SCALAR:
+        pairing it with the .cdf's absolute measured envelope is the
+        cross-channel mixing the gate forbids."""
+        from bouquet.baseline import resolve_uncertainty
+        from bouquet.config import UncertaintyConfig
+        cdf = str(tmp_path / "sig.cdf")
+        _write_direct(cdf, with_zeff_err=True, with_carbon=True)
+        cfg = self._cfg(str(tmp_path / "p.peqdsk"), tmp_path,
+                        unc=UncertaintyConfig(ida_path=cdf))
+        _, _, _, zeff = _grids()
+        bl = self._bl(np.linspace(0.0, 1.2, _NPSI))
+        env = resolve_uncertainty(cfg, bl)
+        np.testing.assert_allclose(env["aux_sigmas"]["zeff"],
+                                   0.05 * np.abs(bl.Zeff), rtol=1e-6)
+
+    def test_mismatched_ida_path_falls_back_to_scalar(self, tmp_path):
+        """unc.ida_path naming a DIFFERENT .cdf than the source's own file
+        (another vintage) must not pair its envelope with this baseline."""
+        from bouquet.baseline import resolve_uncertainty
+        from bouquet.config import UncertaintyConfig
+        own = str(tmp_path / "own.cdf")
+        other = str(tmp_path / "other_vintage.cdf")
+        psi, zeff = _write_direct(own, with_zeff_err=True, with_carbon=True)
+        _write_direct(other, with_zeff_err=True, with_carbon=True)
+        cfg = self._cfg(own, tmp_path, unc=UncertaintyConfig(ida_path=other))
+        env = resolve_uncertainty(cfg, self._bl(psi))
+        np.testing.assert_allclose(env["aux_sigmas"]["zeff"],
+                                   0.05 * np.abs(zeff), rtol=1e-6)
+
+    def test_impurity_Z_reaches_the_carbon_tier(self, tmp_path):
+        """The sigma-envelope read must carry source.impurity_Z: the carbon
+        propagation is Z(Z-1)-quadratic, and the old call site pinned it to
+        carbon (Z=6) for every machine."""
+        from bouquet.baseline import resolve_uncertainty
+        cdf = str(tmp_path / "z5.cdf")
+        psi, zeff = _write_direct(cdf, with_zeff_err=True, with_carbon=True)
+        env = resolve_uncertainty(self._cfg(cdf, tmp_path, impurity_Z=5.0),
+                                  self._bl(psi))
+        # fixture carbon: nc = (zeff-1)*ne/30, so dil(Z=5) = 20*nc/ne
+        expect = (zeff - 1.0) * (20.0 / 30.0) * np.sqrt(0.25 ** 2 + 0.05 ** 2)
+        np.testing.assert_allclose(env["aux_sigmas"]["zeff"], expect,
+                                   rtol=1e-6)

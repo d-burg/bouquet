@@ -633,7 +633,9 @@ class Bouquet:
         # perturb_kinetic_equilibrium; single-ion e*(ne*Te+ni*Ti) omits carbon).
         if getattr(bl, "Z_imp", None):
             from .physics import impurity_pressure
-            p_total = p_total + impurity_pressure(ne, ni, ti, bl.Z_imp)
+            _zf = getattr(bl, "z_fast", None)
+            _ne_th = ne if _zf is None else np.maximum(ne - k2e(_zf), 0.0)
+            p_total = p_total + impurity_pressure(_ne_th, ni, ti, bl.Z_imp)
         if getattr(bl, "p_diff", None) is not None:
             p_total = p_total + k2e(bl.p_diff)
 
@@ -959,7 +961,11 @@ class Bouquet:
         pressure = EC * (ne_eq * te_eq + ni_eq * ti_eq)
         if getattr(bl, "Z_imp", None):
             from .physics import impurity_pressure
-            pressure = pressure + impurity_pressure(ne_eq, ni_eq, ti_eq, bl.Z_imp)
+            _zf = getattr(bl, "z_fast", None)
+            _ne_th_eq = (ne_eq if _zf is None
+                         else np.maximum(ne_eq - k2e(_zf), 0.0))
+            pressure = pressure + impurity_pressure(_ne_th_eq, ni_eq, ti_eq,
+                                                    bl.Z_imp)
         if bl.p_fast is not None:
             pressure = pressure + k2e(bl.p_fast)
         if getattr(bl, "p_diff", None) is not None:
@@ -1256,6 +1262,7 @@ class Bouquet:
                 # single effective Z_imp, + the diff offset that anchors the solve
                 # pressure to the dd equilibrium.pressure (mirrors jBS_diff).
                 Z_imp=getattr(bl, "Z_imp", None),
+                z_fast=getattr(bl, "z_fast", None),
                 p_diff=getattr(bl, "p_diff", None),
                 # Total-current anchor to equilibrium.j_tor (fixed offset; rides
                 # under the SWB bootstrap + perturbed j_ind in every draw).

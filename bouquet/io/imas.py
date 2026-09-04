@@ -39,6 +39,7 @@ from typing import Optional, TYPE_CHECKING
 import numpy as np
 
 from ..physics import (effective_impurity_charge, impurity_pressure,
+                       impurity_charge_with_fast_ions,
                        isotropize_fast_pressure, main_ion_density_from_zeff,
                        parallel_to_toroidal)
 
@@ -314,10 +315,13 @@ def read_imas_baseline(
     ti = None
     main_ion = None
     zeff_num = np.zeros(n)
+    z_fast = np.zeros(n)          # charge carried by fast ions
     for ion in cp["ion"]:
         Z = float(ion["element"][0]["z_n"])
         n_s = np.asarray(ion["density_thermal"], dtype=float)
         zeff_num += n_s * Z * Z
+        if "density_fast" in ion:
+            z_fast += Z * np.asarray(ion["density_fast"], dtype=float)
         p_fast = p_fast + _isotropic_fast_pressure(ion, p_fast_reduction, n)
         if Z == 1.0 and ni is None:        # main (hydrogenic) ion
             ni = n_s
@@ -386,8 +390,14 @@ def read_imas_baseline(
     _o = np.argsort(psiN_eq)
     p_equilibrium = np.interp(psi_N, psiN_eq[_o],
                               np.asarray(eqp1["pressure"], dtype=float)[_o])
-    Z_imp = effective_impurity_charge(ne, ni, Zeff)
-    p_imp = impurity_pressure(ne, ni, ti, Z_imp)
+    # Only ne - sum_s Z_s n_s^fast is neutralised by THERMAL ions; charging
+    # the fast-ion share to the impurity inflates nz.  The helper also
+    # renormalizes Zeff (defined over the FULL ne above) onto the thermal
+    # electrons -- without that the inversion recovers only half the bias
+    # (see impurity_charge_with_fast_ions).  The Zeff consumed by the
+    # bootstrap / forward solve deliberately stays the full-ne one.
+    Z_imp, ne_th = impurity_charge_with_fast_ions(ne, ni, Zeff, z_fast)
+    p_imp = impurity_pressure(ne_th, ni, ti, Z_imp)
     p_recon = _EC * (ne * te + ni * ti) + p_imp + p_fast
     # p_diff anchors the solve thermal pressure to the FUSE equilibrium.pressure.
     # Gated OFF by default: with IDA-hybrid kinetics we trust IDA's pressure and do
@@ -427,6 +437,7 @@ def read_imas_baseline(
         j_NBI=j_NBI,
         j_RF=j_RF,
         p_fast=p_fast,
+        z_fast=(z_fast if np.any(z_fast) else None),
         p_equilibrium=p_equilibrium,
         p_diff=p_diff,
         Z_imp=Z_imp,

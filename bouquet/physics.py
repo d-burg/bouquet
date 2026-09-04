@@ -497,7 +497,31 @@ def effective_impurity_charge(ne, ni, zeff, min_dilution=1e-3):
     return float(np.median(z[ok]))
 
 
-def main_ion_density_from_zeff(ne, zeff, Z_imp):
+def impurity_charge_with_fast_ions(ne, ni, zeff, z_fast):
+    """``(Z_imp, ne_th)`` when fast ions carry part of the neutralization.
+
+    With a beam population, quasineutrality reads
+    ``ne = ni + Z_imp*nz + z_fast`` -- only ``ne_th = ne - z_fast`` is
+    neutralized by THERMAL ions.  A ``zeff`` normalized to the FULL ``ne``
+    (the IMAS convention: thermal-species numerator over total electron
+    density) must therefore be renormalized to ``zeff * ne / ne_th`` before
+    the single-impurity inversion; passing the thermal ``ne`` with the
+    full-``ne`` ``zeff`` recovers only half the bias (measured: raw 1.95,
+    half-applied 3.19, true 6.00 for C6 at 25 % fast fraction).  Surfaces
+    where ``z_fast >= ne`` get a non-finite renormalized zeff and are
+    excluded by :func:`effective_impurity_charge`'s own validity mask.
+    """
+    ne = np.asarray(ne, dtype=float)
+    z_fast = np.asarray(z_fast, dtype=float)
+    ne_th = np.maximum(ne - z_fast, 0.0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        zeff_th = np.where(ne_th > 0.0,
+                           np.asarray(zeff, dtype=float) * ne / ne_th,
+                           np.nan)
+    return effective_impurity_charge(ne_th, ni, zeff_th), ne_th
+
+
+def main_ion_density_from_zeff(ne, zeff, Z_imp, z_fast=None):
     """Main-ion density from (ne, Zeff) under single-impurity quasineutrality.
 
     ::
@@ -508,13 +532,29 @@ def main_ion_density_from_zeff(ne, zeff, Z_imp):
     For ``1 <= Zeff <= Z_imp`` this guarantees ``0 <= ni <= ne`` and
     ``nz >= 0`` -- the consistent (ne, ni, Zeff, nz) set that the independent
     per-channel draws cannot provide. Returns ``ni``.
+
+    With a fast-ion charge profile ``z_fast`` the thermal quasineutrality is
+    ``ni + Z_imp nz = ne - z_fast`` while ``zeff`` keeps the full-``ne``
+    normalization, giving
+
+    ::
+
+        ni = (Z_imp (ne - z_fast) - Zeff ne) / (Z_imp - 1)
+
+    which reduces to the plain form at ``z_fast = 0``.  The corresponding
+    physical bounds on a full-``ne`` Zeff are
+    ``ne_th/ne <= Zeff <= Z_imp ne_th/ne`` (both reduce to the familiar
+    ``[1, Z_imp]`` without fast ions).
     """
     ne = np.asarray(ne, dtype=float)
     zeff = np.asarray(zeff, dtype=float)
     Z_imp = float(Z_imp)
     if not Z_imp > 1.0:
         raise ValueError(f"Z_imp must exceed 1 (got {Z_imp})")
-    return ne * (Z_imp - zeff) / (Z_imp - 1.0)
+    if z_fast is None:
+        return ne * (Z_imp - zeff) / (Z_imp - 1.0)
+    ne_th = np.maximum(ne - np.asarray(z_fast, dtype=float), 0.0)
+    return (Z_imp * ne_th - zeff * ne) / (Z_imp - 1.0)
 
 
 # Elementary charge [C] -- thermal pressure p = e * sum_s(n_s * T_s) with n in

@@ -93,6 +93,20 @@ ANCHOR_MASKED_FAILURES = {"recon_anchor_fallback": 0, "band_resample": 0,
                           "jphi_baseline": 0}
 
 
+def sigma0_reference_scale(jBS_scale_range):
+    """Bootstrap scale of the sigma=0 delta-mode reference spike.
+
+    The cached reference must sit at the CENTER of the per-draw scale
+    distribution so the delta composition telescopes at sigma=0: the
+    midpoint of ``jBS_scale_range`` (uniform draws -> mean == midpoint;
+    run.py has already re-centred the range on ``bl.bs_scale``), and 1.0
+    when no range is configured (every draw then runs at scale 1.0).
+    """
+    if jBS_scale_range is None:
+        return 1.0
+    return 0.5 * (float(jBS_scale_range[0]) + float(jBS_scale_range[1]))
+
+
 def _count_masked_anchor_failure(site, exc):
     ANCHOR_MASKED_FAILURES[site] += 1
     print(f"  [anchor-masked-failure] {site} #{ANCHOR_MASKED_FAILURES[site]}: "
@@ -4478,18 +4492,23 @@ def generate_bouquet(
                 print(f"  [DIFF_BS] state-anchor solve failed "
                       f"({_anch_exc}); SWB may inherit stale state")
             try:
-                # scale_jBS MUST match the per-draw spike's scaling (which is
-                # re-centred on bl.bs_scale in run.py): OFT applies the factor
-                # INSIDE SWB, so a 1.0 reference here makes the delta
+                # The sigma=0 reference MUST carry the CENTER of the per-draw
+                # scale distribution: OFT applies scale_jBS INSIDE SWB, so a
+                # 1.0 reference makes the delta
                 #   bs*SWB0 + bs*SWB_pert - 1.0*SWB0
                 # i.e. every draw loses (1-bs)/bs of the pedestal bootstrap.
-                # Exactly zero at bs_scale=1 (why the original validation
-                # passed) and ~10% of Ip at bs_scale=0.70. Full diagnosis in
-                # issue #44.
+                # Exactly zero at bs=1 (why the original validation passed)
+                # and ~10% of Ip at bs=0.70.  Full diagnosis in issue #44.
+                # See sigma0_reference_scale for the center definition.  NOTE
+                # the per-draw `scale_jBS` local does NOT exist yet here (it
+                # is bound inside the draw loop below); referencing it raises
+                # UnboundLocalError, which the enclosing except used to
+                # swallow into a silent cache-disable fallback.
+                _scale_ref = sigma0_reference_scale(jBS_scale_range)
                 _cache_results = _swb(
                     mygs, ne_cache, te_cache, ni_cache, ti_cache, Zeff,
                     initial_Ip_target, _swb_seed_cache,
-                    scale_jBS=float(scale_jBS),
+                    scale_jBS=_scale_ref,
                     isolate_edge_jBS=isolate_edge_jBS,
                     diagnostic_plots=False, verbose=False,
                 )

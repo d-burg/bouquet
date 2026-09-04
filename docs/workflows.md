@@ -10,6 +10,7 @@ controls it. See [`../README.md`](../README.md) for the short version and
 - [Stage reference](#stage-reference)
 - [What is perturbed vs. held fixed](#what-is-perturbed-vs-held-fixed)
 - [Configuration reference](#configuration-reference)
+- [until-N in-spec draws](#until-n-in-spec-draws)
 - [Workflow presets and the guard](#workflow-presets-and-the-guard)
 - [Reading an archive back](#reading-an-archive-back)
 - [Exporting draws](#exporting-draws)
@@ -67,7 +68,7 @@ logic map with a `file:line` anchor on every node:
 | Solver | `setup_solver()` | Stands up the TokaMaker object from `SolverConfig` (mesh, order, isoflux/saddle constraints, VSC definition). Idempotent. |
 | Baseline | `prepare()` / `reconstruct()` / `prepare_baseline()` | Resolves the baseline from `config.source`. `reconstruct()` is the g-file-path alias (`setup_solver()` + `prepare_baseline()`) and prints the reconstruction-fidelity summary; `prepare()` is the source-agnostic form. The IMAS path does a single forward solve instead of a reconstruction. |
 | Guard | `verify_sigma0_consistency()` | Optional but recommended: one bootstrap solve confirming the *draw* pipeline reproduces the *baseline* j_BS split at σ=0. See [physics-notes.md](physics-notes.md#the-0-consistency-guard). |
-| Draws | `generate(n=None)` | Draws `n` (default `GenerationConfig.n_equils`) perturbations, solves each, archives to `{header}.h5`. Returns the per-draw diagnostics list. |
+| Draws | `generate(n=None)` | Draws `n` (default `GenerationConfig.n_equils`) perturbations, solves each, archives to `{header}.h5`. Returns the per-draw diagnostics list. With `generation.n_inspec_target` set, keeps drawing until that many pass the filters — see [until-N](#until-n-in-spec-draws). |
 | Selection | `filter(rms_max_mm=None, plot=False)` | Applies the coil-drift and boundary-RMS filters, writing non-destructive pass flags into the archive. Returns a summary dict. |
 | Export | `export()` / `export_bundle()` / `export_ids()` | Pruned `{header}_selected.h5`, a per-draw file bundle, or one IMAS/OMAS IDS per draw. |
 | All of it | `run()` | `setup_solver → prepare_baseline → generate → filter → export`, idempotent on the early stages. |
@@ -154,7 +155,9 @@ their scalars always apply.
 
 | Knob | Default | Meaning |
 |---|---|---|
-| `n_equils` | `20` | Draws to attempt |
+| `n_equils` | `20` | Draws to attempt — or, with `n_inspec_target` set, the initial allocation |
+| `n_inspec_target` | `None` | Draw **until N draws pass both filters** rather than exactly `n_equils`. See [until-N](#until-n-in-spec-draws) below |
+| `max_total_draws` | `None` | Attempt cap for `n_inspec_target` (default `5 ×` the target, never below `n_equils`). Hitting it is a loud, non-fatal outcome |
 | `seed` | `None` | The run's one RNG seed. Consumed once into a single `numpy.random.Generator` threaded into every draw (GPR kinetic/aux/j_φ, the per-draw `scale_jBS`, the per-draw l_i target), so the same seed + inputs + solver gives a **bitwise-identical** archive on one machine (across machines the draws agree to ~1e-9, not bitwise -- LAPACK/BLAS). `None` = OS entropy |
 | `scan_key` | `0` | Label for this bouquet within the archive (`scan/<key>/`) — a time in ms, a beta value, … |
 | `l_i_tolerance` | `0.05` | l_i acceptance band, as a **fraction** of target |
@@ -201,6 +204,60 @@ anisotropic fast-pressure reduction applied before the isotropic GS solve.
 > calibrated to a realistic `<P>` measurement uncertainty) is currently a
 > `generate_bouquet` keyword only — it is not surfaced on `GenerationConfig`,
 > so the class API always uses the default.
+
+## until-N in-spec draws
+
+By default a run draws exactly `n_equils` times and you get whatever yield the
+equilibrium gives — 20 draws might leave 12 selected on a stiff case and 19 on
+an easy one, so ensembles are not comparable in size across shots. Setting
+`generation.n_inspec_target` inverts that: the loop keeps drawing until **N
+draws pass both filters**, then stops.
+
+```python
+b.generation.n_equils = 20            # initial allocation, not the total
+b.generation.n_inspec_target = 20     # what you actually want delivered
+b.generation.max_total_draws = 60     # optional; default is 5 x the target
+b.filtering.rms_max_mm = 5.0          # the bounds the loop stops on
+b.generate()
+b.filter()                            # -> >= 20 selected
+```
+
+Points worth knowing:
+
+- **The count is the one `filter()` will agree with.** The loop's per-draw
+  verdict comes from `filtering.passes_all_filters`, which is the same
+  `passes_coil_spec` / `passes_boundary_spec` pair the postprocess filters use,
+  over the same `boundary_deviation_mm` metric and the same two archived LCFS
+  contours. It reads its thresholds from `config.filtering`, so stopping at N
+  and then filtering to fewer than N is not a state this can reach. (Where the
+  two *can* differ — a draw whose high-res LCFS trace failed — the loop calls
+  it out of spec while the postprocess falls back to the coarse eqdsk contour,
+  so the run over-delivers rather than under-delivers.)
+- **Re-cutting afterwards is still your call.** The identity is against the
+  thresholds in `config.filtering` at generation time. Passing a different
+  bound to `filter(rms_max_mm=…)` later re-cuts the archive at the new
+  criterion, and the selected count moves accordingly — that is the filters
+  working as designed, not the loop having miscounted.
+- **`run_slices` chases the target per slice.** Each slice gets its own N
+  in-spec draws, which is usually what a timeseries sweep wants; budget the
+  wall-clock as N-per-slice divided by the worst slice's yield.
+- **Nothing is discarded.** Out-of-spec draws are archived exactly as before;
+  the run just doesn't stop until N have passed. The yield is still visible in
+  `filter()`'s summary and `plot_spec_summary()`.
+- **The cost scales with the inverse yield.** A 40 %-yield equilibrium spends
+  ~2.5× the solves of a 100 %-yield one for the same delivered ensemble. Budget
+  wall-clock accordingly; the per-draw log prints the running tally and a
+  yield-projected ETA.
+- **Hitting `max_total_draws` is a failure, not an answer.** It warns
+  (`RuntimeWarning`) and says how far it got. The fix is more attempts, or a
+  deliberate decision about the thresholds — not a quietly short bouquet.
+- **Serial only.** `parallel_generate`, `run_shard` and `emit_slurm_script` all
+  reject a config carrying `n_inspec_target`: shards cannot see each other's
+  yield, so N workers each chasing the target would deliver N×target draws.
+- **The RNG stream is untouched when the feature is off.** The `jBS_scales`
+  block draw is unchanged for the first `n_equils` draws and only extends past
+  it when until-N actually runs on, so `n_inspec_target=None` runs are bitwise
+  what they were.
 
 ## Workflow presets and the guard
 

@@ -303,6 +303,31 @@ class GenerationConfig:
     """Perturbed-bouquet sampling over the uncertainty neighborhood."""
 
     n_equils: int = 20
+    # --- until-N-in-spec (optional) ----------------------------------------
+    # None (default): draw exactly n_equils times, whatever the yield -- the
+    # historical behaviour, and bit-identical to it (the sampler's draw stream
+    # is untouched when this is off).
+    #
+    # An int: keep drawing until this many draws pass BOTH postprocess filters
+    # (coil-current spec + LCFS deviation, at filtering.inspec_F_max /
+    # inspec_VSC_max / rms_max_mm), then stop. n_equils becomes the initial
+    # allocation rather than the total, so a shot with a 40% yield spends ~2.5x
+    # the solves that a 100%-yield shot does for the same delivered ensemble.
+    #
+    # The verdict is computed by the SAME predicate the postprocess filters use
+    # (bouquet.filtering.passes_coil_spec / passes_boundary_spec /
+    # boundary_deviation_mm), so the count this loop stops on is the count
+    # .filter() then marks 'selected'. Draws that fail are still archived --
+    # nothing is discarded, the run just doesn't stop until N have passed.
+    #
+    # SERIAL ONLY: run_parallel/SLURM shards cannot see each other's yield, so
+    # the shard runner rejects a config with this set (bouquet.parallel).
+    n_inspec_target: Optional[int] = None
+    # Hard ceiling on total draw ATTEMPTS when n_inspec_target is set -- the
+    # backstop against a configuration whose yield is ~0 solving forever.
+    # None -> 5 * n_inspec_target (and never below n_equils). Reaching the cap
+    # is a loud, non-fatal outcome: the run returns what it got and says so.
+    max_total_draws: Optional[int] = None
     # The run's ONE random seed. It is consumed into a single
     # numpy.random.Generator (sampling.make_rng) that is threaded explicitly
     # into every draw site -- the GPR kinetic/aux/j_phi draws, the per-draw
@@ -554,6 +579,23 @@ class BouquetConfig:
                 "uncertainty.sigma_method must be 'percentile' or 'std'")
         if self.generation.n_equils < 1:
             raise ValueError("generation.n_equils must be >= 1")
+        _tgt = self.generation.n_inspec_target
+        _cap = self.generation.max_total_draws
+        if _tgt is not None:
+            if int(_tgt) < 1:
+                raise ValueError(
+                    "generation.n_inspec_target must be >= 1 (or None to draw "
+                    "exactly n_equils)")
+            if _cap is not None and int(_cap) < int(_tgt):
+                raise ValueError(
+                    f"generation.max_total_draws ({int(_cap)}) is below "
+                    f"n_inspec_target ({int(_tgt)}): the cap would stop the "
+                    f"run before the target could ever be met")
+        elif _cap is not None:
+            raise ValueError(
+                "generation.max_total_draws only applies with "
+                "n_inspec_target set; without a target the run draws exactly "
+                "n_equils")
         if self.generation.workflow not in (
                 "auto", "geqdsk-standard", "imas-diff-c", "custom"):
             raise ValueError(

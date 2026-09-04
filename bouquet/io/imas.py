@@ -437,6 +437,7 @@ def read_imas_baseline(
         j_NBI=j_NBI,
         j_RF=j_RF,
         p_fast=p_fast,
+        z_fast=(z_fast if np.any(z_fast) else None),
         p_equilibrium=p_equilibrium,
         p_diff=p_diff,
         Z_imp=Z_imp,

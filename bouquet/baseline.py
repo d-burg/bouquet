@@ -93,6 +93,12 @@ class Baseline:
     p_equilibrium: Optional["np.ndarray"] = None
     p_diff: Optional["np.ndarray"] = None
     Z_imp: Optional[float] = None
+    # Fast-ion charge density sum_s Z_s n_s^fast [m^-3] on the KINETIC grid
+    # (IMAS path; None elsewhere).  Fixed across draws, like p_fast: the
+    # thermal impurity math (Z_imp above, nz, p_imp, the Zeff-primary ni
+    # derivation) must run on ne - z_fast, while the Zeff consumed by the
+    # bootstrap stays on the full ne.
+    z_fast: Optional[np.ndarray] = None
 
     # IMAS total-current anchor: jphi_diff = equilibrium.profiles_1d.j_tor
     # (the GS-consistent current GPEC reads, with the pedestal current) minus the

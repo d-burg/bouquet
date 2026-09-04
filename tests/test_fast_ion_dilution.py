@@ -81,3 +81,59 @@ def test_imas_wiring_uses_the_helper():
     src = inspect.getsource(imas)
     assert "impurity_charge_with_fast_ions(ne, ni, Zeff, z_fast)" in src
     assert "effective_impurity_charge(ne_th" not in src
+
+
+class TestThermalDrawPathConsistency:
+    """(b) follow-up: every impurity consumer must run on ne - z_fast.
+
+    The baseline reader derived Z_imp/p_imp on thermal ne while run.py's
+    forward solves and the per-draw assembly still used the full ne with
+    the thermal-derived Z_imp -- a sigma=0 pressure skew of
+    e*z_fast*ti/Z_imp between reader and solver.
+    """
+
+    def _plasma(self, fast_frac=0.25):
+        ne = np.full(48, 5.0e19)
+        nC = 0.02 * ne
+        z_fast = fast_frac * ne
+        ni = ne - 6.0 * nC - z_fast
+        zeff = (ni + 36.0 * nC) / ne
+        return ne, ni, z_fast, zeff, nC
+
+    def test_thermal_ni_derivation_recovers_the_exact_carbon(self):
+        """main_ion_density_from_zeff(z_fast=...) inverts the same set the
+        baseline Z_imp came from: ni and nz land exactly on the truth."""
+        from bouquet.physics import main_ion_density_from_zeff
+        ne, ni, z_fast, zeff, nC = self._plasma()
+        ni_back = main_ion_density_from_zeff(ne, zeff, 6.0, z_fast=z_fast)
+        np.testing.assert_allclose(ni_back, ni, rtol=1e-12)
+        nz = (np.maximum(ne - z_fast, 0.0) - ni_back) / 6.0
+        np.testing.assert_allclose(nz, nC, rtol=1e-12)
+
+    def test_z_fast_none_reduces_to_the_plain_form(self):
+        from bouquet.physics import main_ion_density_from_zeff
+        ne, ni, z_fast, zeff, nC = self._plasma(fast_frac=0.0)
+        np.testing.assert_allclose(
+            main_ion_density_from_zeff(ne, zeff, 6.0, z_fast=None),
+            main_ion_density_from_zeff(ne, zeff, 6.0,
+                                       z_fast=np.zeros_like(ne)),
+            rtol=1e-12)
+
+    def test_baseline_carries_z_fast_field(self):
+        from bouquet.baseline import Baseline
+        assert Baseline.__dataclass_fields__["z_fast"].default is None
+
+    def test_consumers_are_wired_thermal(self):
+        """Source-level wiring pins: the draw assembly, the baseline
+        reference assembly, and run.py's two forward-solve assemblies all
+        subtract z_fast before impurity_pressure."""
+        import inspect
+        import bouquet.TokaMaker_interface as tmi
+        import bouquet.run as brun
+        tsrc = inspect.getsource(tmi)
+        rsrc = inspect.getsource(brun)
+        assert tsrc.count("z_fast=z_fast") >= 2       # sig pass-throughs
+        assert "impurity_pressure(_ne_th_eq, ni_eq, ti_eq, Z_imp)" in tsrc
+        assert "impurity_pressure(_kin2eq(_ne_bl)" in tsrc
+        assert "impurity_pressure(_ne_th, ni, ti, bl.Z_imp)" in rsrc
+        assert "impurity_pressure(_ne_th_eq, ni_eq, ti_eq,\n" in rsrc

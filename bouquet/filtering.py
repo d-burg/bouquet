@@ -48,6 +48,7 @@ __all__ = [
     "passes_coil_spec",
     "passes_boundary_spec",
     "passes_all_filters",
+    "until_n_delivered",
 ]
 
 _FILTER_FLAGS = ("passes_coil_filter", "passes_boundary_filter")
@@ -140,6 +141,19 @@ def passes_all_filters(F_pct, V_pct, baseline_boundary, perturbed_boundary,
     reasons = tuple(([] if ok_coil else ["coil"])
                     + ([] if ok_bnd else ["boundary"]))
     return bool(ok_coil and ok_bnd), rms_mm, max_mm, reasons
+
+
+def until_n_delivered(diagnostics_list):
+    """In-spec draws delivered by an until-N run, from its diagnostics.
+
+    Counts the per-draw ``until_n_inspec`` verdicts ``generate_bouquet``
+    stores at accounting time.  This is how ``Bouquet.generate`` re-derives
+    the outcome OUTSIDE the quiet-mode output capture -- the in-loop prints
+    and the cap-missed warning land in ``generation_log`` on the default
+    path, which is not a place a failure signal may live alone.
+    """
+    return sum(bool(d.get("until_n_inspec", False))
+               for d in (diagnostics_list or []))
 
 
 # --------------------------------------------------------------------------

@@ -1181,6 +1181,16 @@ class Bouquet:
         # re-check the until-N pair here -- the point where they take effect.
         if gc.n_inspec_target is not None and int(gc.n_inspec_target) < 1:
             raise ValueError("generation.n_inspec_target must be >= 1 or None")
+        if (gc.n_inspec_target is not None
+                and gc.max_total_draws is not None
+                and int(gc.max_total_draws) < int(gc.n_inspec_target)):
+            # the constructor validates this pair, but the documented
+            # notebook idiom mutates the fields afterwards -- catch it here
+            # rather than after minutes of baseline work inside generate
+            raise ValueError(
+                f"generation.max_total_draws ({int(gc.max_total_draws)}) is "
+                f"below n_inspec_target ({int(gc.n_inspec_target)}): the cap "
+                "would stop the run before the target could ever be met")
         if gc.n_inspec_target is None and gc.max_total_draws is not None:
             import warnings as _w
             _w.warn(
@@ -1310,6 +1320,31 @@ class Bouquet:
                 store_achieved_jphi=True,
             )
         self.generation_log = _cap["text"] or None
+
+        # until-N outcome, OUTSIDE the capture: on the default quiet path the
+        # in-loop prints and generate_bouquet's cap-missed RuntimeWarning were
+        # swallowed into generation_log (capture_native_output redirects
+        # stderr too), so a run that failed to deliver the requested ensemble
+        # returned with zero visible signal unless .filter() happened to run.
+        # A failure signal may not live only in a log attribute.
+        if gc.n_inspec_target is not None:
+            from .filtering import until_n_delivered
+            _tgt = int(gc.n_inspec_target)
+            _got = until_n_delivered(self.diagnostics)
+            _tries = len(self.diagnostics or [])
+            if _got < _tgt:
+                import warnings as _w
+                _msg = (f"until-N did not reach its target: {_got}/{_tgt} "
+                        f"in-spec draws after {_tries} attempts (cap "
+                        f"{gc.max_total_draws or 'default'}). The archive "
+                        "holds every attempt; raise max_total_draws, loosen "
+                        "the filter thresholds deliberately, or treat the "
+                        "low yield as a finding about this equilibrium.")
+                print(f"[until-N] WARNING: {_msg}")
+                _w.warn(_msg, RuntimeWarning, stacklevel=2)
+            else:
+                print(f"[until-N] target met: {_got}/{_tgt} in-spec draws "
+                      f"in {_tries} attempts.")
 
         # Stamp provenance (schema/version/timestamp + full config JSON) onto the
         # archive so the run is self-describing and load_config() can round-trip it.

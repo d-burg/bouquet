@@ -159,7 +159,7 @@ b.generation.seed = 1234
 | `uncertainty.log_sigma_sources` | `True` | Log which source each kinetic sigma actually resolved from |
 | `generation.n_equils` | `20` | Draws to attempt |
 | `generation.n_inspec_target` | `None` | Set it to draw **until N draws pass the filters** instead of exactly `n_equils` — `n_equils` becomes the initial allocation. The stopping rule uses the same predicate `filter()` applies, so the count it stops on is the count marked `selected`. Serial only |
-| `generation.max_total_draws` | `None` | Attempt cap for the above (default `5 × n_inspec_target`). Reaching it warns and returns what was achieved |
+| `generation.max_total_draws` | `None` | Attempt cap for the above (default `5 × n_inspec_target`, never below `n_equils`; an explicit value is a hard ceiling even below `n_equils`). Reaching it warns and returns what was achieved |
 | `generation.seed` | `None` | The run's one seed. Set it and the ensemble is **bitwise** reproducible |
 | `generation.l_i_tolerance` | `0.05` | l_i acceptance band, as a fraction of target |
 | `generation.scan_key` | `0` | Label for this bouquet within the archive |

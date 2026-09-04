@@ -322,11 +322,13 @@ def test_generate_bouquet_defaults_the_feature_off():
 
 
 def test_the_loop_counts_with_the_shared_predicate():
-    """Not a re-implementation: if this call is ever inlined, the in-loop and
-    postprocess verdicts can drift apart silently."""
-    src = _gb_source()
-    assert "from .filtering import passes_all_filters" in src
-    assert "passes_all_filters(" in src
+    """Not a re-implementation: the loop routes through _until_n_verdict,
+    whose whole body is a passes_all_filters call -- if either link is ever
+    inlined, the in-loop and postprocess verdicts can drift apart silently."""
+    import bouquet.TokaMaker_interface as tmi
+    assert "_until_n_verdict(" in _gb_source()
+    helper = inspect.getsource(tmi._until_n_verdict)
+    assert "passes_all_filters(" in helper
 
 
 def test_the_jbs_block_draw_is_untouched_when_the_feature_is_off():
@@ -345,7 +347,7 @@ def test_a_boundary_bounded_target_refuses_to_run_without_a_reference():
     verdict -- the loop could then never terminate before the attempt cap.
     That must fail up front, not after N solves."""
     src = _gb_source()
-    assert "recon_lcfs_ref is None or len(np.asarray(recon_lcfs_ref)) < 2" in src
+    assert "_ref_arr.ndim != 2 or len(_ref_arr) < 2" in src
     assert "BNDDIAG=0" in src
     # and the check must precede the draw loop, not sit inside it
     assert src.index("BNDDIAG=0 disables") < src.index("for count in eq_iter:")
@@ -365,10 +367,35 @@ def test_a_missing_perturbed_trace_undercounts_rather_than_overcounts():
 
 def test_missing_the_target_is_warned_not_swallowed():
     """Hitting the attempt cap means the requested ensemble was NOT delivered;
-    it must not look like a completed run."""
+    it must not look like a completed run -- and the warning must be emitted
+    OUTSIDE the quiet-mode output capture, which swallows stdout AND stderr
+    into generation_log (where a failure signal may not live alone)."""
     src = _gb_source()
     assert "RuntimeWarning" in src
     assert "_inspec_hit_target" in src
+    from bouquet.run import Bouquet
+    import inspect as _i
+    gen = _i.getsource(Bouquet.generate)
+    assert "until_n_delivered" in gen
+    # the re-derivation must sit after the capture block closes
+    assert gen.index('_cap["text"]') < gen.index("until_n_delivered(")
+
+
+def test_coil_channel_failfast_precedes_the_loop():
+    """NaN coil drifts (SKIP_HARD=1 / coil_drift=None) fail every verdict by
+    design; with a target set that is a livelock to the attempt cap, so it
+    must raise before the first solve, like the boundary guard."""
+    src = _gb_source()
+    assert "needs a measurable coil channel" in src
+    assert src.index("needs a measurable coil channel") \
+        < src.index("for count in eq_iter:")
+
+
+def test_archived_in_spec_flag_uses_the_shared_predicate():
+    """The pre-existing in-loop [in-spec] print is the one other place the
+    counted-vs-selected identity could rot; it must route through
+    passes_coil_spec, not re-implement it."""
+    assert "_in_spec = passes_coil_spec(" in _gb_source()
 
 
 def test_the_loop_and_the_filter_read_the_same_thresholds():
@@ -405,3 +432,136 @@ def test_orphan_cap_set_after_construction_warns_at_generate():
     gen = inspect.getsource(Bouquet.generate)
     assert "max_total_draws has no effect without n_inspec_target" in gen
     assert "n_inspec_target must be >= 1" in gen
+
+
+# ---------------------------------------------------------------------------
+#  7. the extracted helpers -- the loop's arithmetic, executed
+# ---------------------------------------------------------------------------
+#  These replace the source-text placeholders above with behavioral coverage:
+#  the budget arithmetic, the verdict glue (keys + percent conversion +
+#  keyword wiring), the lazy scale extension's rng semantics, and the
+#  delivered-count the caller re-derives outside the output capture.
+
+class TestAttemptBudget:
+    def _budget(self, *a):
+        from bouquet.TokaMaker_interface import _resolve_attempt_budget
+        return _resolve_attempt_budget(*a)
+
+    def test_feature_off_is_exactly_n_equils(self):
+        assert self._budget(20, None, None) == (None, 20)
+
+    def test_default_cap_is_five_targets_floored_at_n_equils(self):
+        assert self._budget(20, 3, None) == (3, 20)     # floor wins
+        assert self._budget(20, 10, None) == (10, 50)   # 5x wins
+
+    def test_explicit_cap_is_a_hard_ceiling_even_below_n_equils(self):
+        assert self._budget(50, 10, 30) == (10, 30)
+
+    def test_cap_below_target_raises(self):
+        with pytest.raises(ValueError, match="could never be met"):
+            self._budget(20, 10, 5)
+
+    def test_nonpositive_target_raises_for_direct_callers(self):
+        """generate_bouquet(n_inspec_target=0) used to 'meet' its target
+        after one draw -- a silently truncated ensemble."""
+        for bad in (0, -3):
+            with pytest.raises(ValueError, match=">= 1"):
+                self._budget(20, bad, None)
+
+    def test_non_integral_and_bool_targets_raise(self):
+        with pytest.raises(ValueError, match="integer"):
+            self._budget(20, 2.5, None)
+        with pytest.raises(ValueError, match="integer"):
+            self._budget(20, True, None)
+        assert self._budget(20, 3.0, None)[0] == 3   # int-valued float is fine
+
+
+class TestUntilNVerdict:
+    def _verdict(self, diag, **kw):
+        from bouquet.TokaMaker_interface import _until_n_verdict
+        kw.setdefault("recon_lcfs_ref", _circle())
+        kw.setdefault("perturbed_lcfs_ref", _circle())
+        kw.setdefault("inspec_F_max", 0.02)
+        kw.setdefault("inspec_VSC_max", 0.10)
+        return _until_n_verdict(diag, kw.pop("recon_lcfs_ref"),
+                                kw.pop("perturbed_lcfs_ref"),
+                                kw.pop("inspec_F_max"),
+                                kw.pop("inspec_VSC_max"), **kw)
+
+    def test_fraction_thresholds_convert_to_percent(self):
+        """diagnostics carry PERCENT drifts; the config carries fractions.
+        A dropped x100 fails a 1.8%-drift draw against a 2% spec."""
+        ok, *_ = self._verdict({"max_F_drift_pct": 1.8,
+                                "max_VSC_drift_pct": 5.0})
+        assert ok is True
+        ok, *_ = self._verdict({"max_F_drift_pct": 2.2,
+                                "max_VSC_drift_pct": 5.0})
+        assert ok is False
+
+    def test_argument_order_cannot_be_transposed_silently(self):
+        """F and VSC have different limits (2% vs 10%): a draw with F=1%,
+        VSC=9% passes only if the channels are wired the right way round.
+        With both thresholds equal (the default FilterConfig) a swap is
+        invisible in production -- this is the test that sees it."""
+        ok, *_ = self._verdict({"max_F_drift_pct": 1.0,
+                                "max_VSC_drift_pct": 9.0})
+        assert ok is True
+        ok, _, _, why = self._verdict({"max_F_drift_pct": 9.0,
+                                       "max_VSC_drift_pct": 1.0})
+        assert ok is False and why == ("coil",)
+
+    def test_missing_diagnostics_keys_fail_not_pass(self):
+        ok, _, _, why = self._verdict({})
+        assert ok is False and "coil" in why
+
+    def test_boundary_bound_flows_through(self):
+        far = _circle(r=1.02)                 # ~20 mm off a 1 m circle
+        ok, rms, mx, why = self._verdict(
+            {"max_F_drift_pct": 1.0, "max_VSC_drift_pct": 1.0},
+            perturbed_lcfs_ref=far, rms_max_mm=5.0)
+        assert ok is False and why == ("boundary",) and rms > 5.0
+
+    def test_matches_the_postprocess_predicate_exactly(self):
+        from bouquet.filtering import passes_all_filters
+        diag = {"max_F_drift_pct": 1.7, "max_VSC_drift_pct": 8.0}
+        got = self._verdict(diag, rms_max_mm=5.0)
+        want = passes_all_filters(1.7, 8.0, _circle(), _circle(),
+                                  2.0, 10.0, rms_max_mm=5.0)
+        assert got == want
+
+
+class TestScaleBlockExtension:
+    def test_no_range_extends_with_ones(self):
+        from bouquet.TokaMaker_interface import _extend_scale_block
+        out = _extend_scale_block(np.ones(4), None, None, 4)
+        np.testing.assert_array_equal(out, np.ones(8))
+
+    def test_extension_is_deterministic_and_leaves_the_block_alone(self):
+        """The rng-stream contract, executed: the initial block is identical
+        with and without the feature (the extension consumes the generator
+        only AFTER the block draw), and the extension itself is
+        reproducible under the run's seed."""
+        from bouquet.TokaMaker_interface import _extend_scale_block
+        lo, hi, n = 0.6, 0.8, 5
+        g1 = np.random.default_rng(42)
+        block_only = g1.uniform(lo, hi, size=n)
+        g2 = np.random.default_rng(42)
+        block = g2.uniform(lo, hi, size=n)
+        extended = _extend_scale_block(block, g2, (lo, hi), n)
+        np.testing.assert_array_equal(block_only, extended[:n])
+        assert len(extended) == 2 * n
+        assert np.all((extended >= lo) & (extended <= hi))
+        g3 = np.random.default_rng(42)
+        g3.uniform(lo, hi, size=n)
+        again = _extend_scale_block(block, g3, (lo, hi), n)
+        np.testing.assert_array_equal(extended, again)
+
+
+class TestDeliveredCount:
+    def test_counts_only_the_stored_verdicts(self):
+        from bouquet.filtering import until_n_delivered
+        diags = [{"until_n_inspec": True}, {"until_n_inspec": False},
+                 {}, {"until_n_inspec": True}]
+        assert until_n_delivered(diags) == 2
+        assert until_n_delivered([]) == 0
+        assert until_n_delivered(None) == 0

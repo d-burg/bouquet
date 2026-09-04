@@ -3276,6 +3276,77 @@ def perturb_kinetic_equilibrium(
 # ====================================================================
 #  Top-level scan driver
 # ====================================================================
+def _resolve_attempt_budget(n_equils, n_inspec_target, max_total_draws):
+    """``(until_n, max_attempts)`` for generate_bouquet's draw loop.
+
+    ``until_n`` is None (draw exactly ``n_equils``, the historical loop) or a
+    validated positive int.  ``max_attempts`` is the explicit cap when given,
+    else ``max(n_equils, 5 * until_n)`` -- the default never goes below the
+    allocation, an EXPLICIT cap is honored even below it (the caller prints a
+    note).  Raises on a non-integral / bool / sub-1 target and on a cap below
+    the target, for DIRECT callers too -- the config layer's validation does
+    not protect the legacy ``generate_bouquet(...)`` surface, where a target
+    of 0 used to "meet" itself after one draw.
+    """
+    if n_inspec_target is None:
+        return None, int(n_equils)
+    if isinstance(n_inspec_target, bool) or (
+            float(n_inspec_target) != int(n_inspec_target)):
+        raise ValueError(
+            f"n_inspec_target={n_inspec_target!r} must be an integer count "
+            "of in-spec draws (or None)")
+    until_n = int(n_inspec_target)
+    if until_n < 1:
+        raise ValueError(
+            f"n_inspec_target={until_n} must be >= 1 (or None to draw "
+            "exactly n_equils)")
+    max_attempts = (int(max_total_draws) if max_total_draws is not None
+                    else max(int(n_equils), 5 * until_n))
+    if max_attempts < until_n:
+        raise ValueError(
+            f"max_total_draws={max_attempts} is below n_inspec_target="
+            f"{until_n}; the target could never be met")
+    return until_n, max_attempts
+
+
+def _until_n_verdict(diagnostics, recon_lcfs_ref, perturbed_lcfs_ref,
+                     inspec_F_max, inspec_VSC_max,
+                     rms_max_mm=None, max_max_mm=None):
+    """``(ok, rms_mm, max_mm, reasons)`` for one archived draw.
+
+    The SHIPPED glue between the per-draw diagnostics dict and
+    ``filtering.passes_all_filters``: the key names, the fraction->percent
+    conversion, and keyword-only wiring so an argument transposition cannot
+    hide behind equal default thresholds.  Kept module-level so the identity
+    ("the count the loop stops on is the count .filter() marks selected")
+    is exercised by tests without a solver.
+    """
+    from .filtering import passes_all_filters
+    return passes_all_filters(
+        float(diagnostics.get('max_F_drift_pct', float('nan'))),
+        float(diagnostics.get('max_VSC_drift_pct', float('nan'))),
+        recon_lcfs_ref, perturbed_lcfs_ref,
+        F_max_pct=float(inspec_F_max) * 100.0,
+        V_max_pct=float(inspec_VSC_max) * 100.0,
+        rms_max_mm=rms_max_mm, max_max_mm=max_max_mm)
+
+
+def _extend_scale_block(scales, rng, scale_range, chunk):
+    """One more ``chunk``-sized block of bootstrap scales for until-N.
+
+    Ones when no range is configured (every draw runs at 1.0), else uniforms
+    from the SAME range and Generator as the initial block draw --
+    deterministic under the run's seed.  Extracted so the rng semantics are
+    testable: extending never touches values already drawn, and a run that
+    never extends leaves the stream exactly as it was before this feature.
+    """
+    if scale_range is None:
+        return np.concatenate([scales, np.ones(int(chunk))])
+    return np.concatenate([
+        scales, rng.uniform(scale_range[0], scale_range[1],
+                            size=int(chunk))])
+
+
 def generate_bouquet(
     mygs,
     psi_N,
@@ -3864,7 +3935,14 @@ def generate_bouquet(
         def _report_bnd(stage):
             """Print boundary deviation from the recon LCFS captured at
             generate_bouquet entry.  No-op if diagnostic disabled or
-            LCFS trace fails."""
+            LCFS trace fails.
+
+            DELIBERATELY the opposite query direction from
+            filtering.boundary_deviation_mm (tree on the BASELINE, queried
+            with the perturbed trace): this is a per-stage progress print
+            against a tree built once at startup, not the filter metric.
+            Its rms/max can differ from the [until-N] / filter numbers on
+            the same contour pair -- that is expected, not a bug."""
             if _bnd_diag_tree is None:
                 return
             try:
@@ -4275,13 +4353,8 @@ def generate_bouquet(
         """
         nonlocal jBS_scales
         while i >= len(jBS_scales):
-            if jBS_scale_range is None:
-                jBS_scales = np.concatenate([jBS_scales, np.ones(n_equils)])
-            else:
-                jBS_scales = np.concatenate([
-                    jBS_scales,
-                    rng.uniform(jBS_scale_range[0], jBS_scale_range[1],
-                                size=n_equils)])
+            jBS_scales = _extend_scale_block(jBS_scales, rng,
+                                             jBS_scale_range, n_equils)
         return float(jBS_scales[i])
 
     # Store baseline profiles and uncertainties so the .h5 file is
@@ -4587,16 +4660,31 @@ def generate_bouquet(
     # Without a target this is exactly range(n_equils), as it always was.
     # With one, n_equils is only the initial allocation and the loop runs to
     # the cap, breaking early the moment the target is met.
-    _until_n = None if n_inspec_target is None else int(n_inspec_target)
-    if _until_n is None:
-        _max_attempts = int(n_equils)
-    else:
-        _max_attempts = (int(max_total_draws) if max_total_draws is not None
-                         else max(int(n_equils), 5 * _until_n))
-        if _max_attempts < _until_n:
+    _until_n, _max_attempts = _resolve_attempt_budget(
+        n_equils, n_inspec_target, max_total_draws)
+    if _until_n is not None:
+        if max_total_draws is not None and _max_attempts < int(n_equils):
+            # An explicit cap is a hard ceiling and wins over the allocation
+            # (incl. an explicit n= override) -- but silently is how a user
+            # discovers their n was ignored, so say it.
+            print(f"[until-N] NOTE: explicit max_total_draws="
+                  f"{_max_attempts} is below the allocation n_equils="
+                  f"{n_equils}; attempts are capped at {_max_attempts}.")
+        # The coil channel must be measurable or no draw can EVER count as
+        # in-spec (passes_coil_spec fails NaN by design): without this the
+        # loop grinds through the full attempt cap -- hours of solves --
+        # before warning.  Mirrors the boundary-channel guard below.
+        _hard_skipped = os.environ.get('SKIP_HARD', '0') == '1'
+        if coil_drift is None or _recon_Ip is None or _hard_skipped:
             raise ValueError(
-                f"max_total_draws={_max_attempts} is below n_inspec_target="
-                f"{_until_n}; the target could never be met")
+                "n_inspec_target needs a measurable coil channel, but coil "
+                "drifts are disabled ("
+                + ("SKIP_HARD=1" if _hard_skipped else
+                   "coil_drift=None" if coil_drift is None else
+                   "no reconstruction Ip")
+                + ") so every draw's verdict would be NaN -> out-of-spec "
+                "and the loop could only grind to the attempt cap. "
+                "Re-enable the coil diagnostic or drop the target.")
         # A boundary-bounded target needs a baseline contour to measure
         # against. recon_lcfs_ref is normally promoted from the bnd-diag
         # startup trace; BNDDIAG=0 skips that promotion, which would leave
@@ -4604,7 +4692,12 @@ def generate_bouquet(
         # grinding to the attempt cap without ever being able to terminate.
         # Fail here, where the cause is obvious, rather than after N solves.
         if inspec_rms_max_mm is not None or inspec_max_max_mm is not None:
-            if recon_lcfs_ref is None or len(np.asarray(recon_lcfs_ref)) < 2:
+            _ref_arr = (None if recon_lcfs_ref is None
+                        else np.asarray(recon_lcfs_ref))
+            # same validity test boundary_deviation_mm applies -- a 1-D or
+            # Nx3 contour would pass a bare len() check and then NaN every
+            # verdict, the exact livelock this guard exists to prevent
+            if _ref_arr is None or _ref_arr.ndim != 2 or len(_ref_arr) < 2:
                 raise ValueError(
                     "n_inspec_target with an LCFS bound needs a baseline "
                     "contour to measure against, but recon_lcfs_ref is "
@@ -5315,8 +5408,13 @@ def generate_bouquet(
                                       if n in _vsc_in_set}
                         _max_vsc_drift = float(max(
                             (abs(d) for d in _vsc_only.values()), default=0.0))
-                    _in_spec = (_max_f_drift <= inspec_F_max * 100.0
-                                 and _max_vsc_drift <= inspec_VSC_max * 100.0)
+                    from .filtering import passes_coil_spec
+                    # same predicate the postprocess filter and the until-N
+                    # stopping rule use -- a second inline implementation is
+                    # how the archived flag and the stop count drift apart
+                    _in_spec = passes_coil_spec(
+                        _max_f_drift, _max_vsc_drift,
+                        inspec_F_max * 100.0, inspec_VSC_max * 100.0)
                     _spec_msg = ('IN_SPEC' if _in_spec else 'OUT_OF_SPEC')
                     print(f"  [in-spec] {_spec_msg}: max non-VSC F-drift="
                           f"{_max_f_drift:.2f}% (limit {inspec_F_max*100:.1f}%), "
@@ -5705,14 +5803,19 @@ def generate_bouquet(
         # well pass it. That makes the loop undercount, never overcount, so
         # the delivered ensemble is "at least N selected", never fewer.
         if _until_n is not None:
-            from .filtering import passes_all_filters
-            _ok, _rms_mm, _max_mm, _reasons = passes_all_filters(
-                diagnostics.get('max_F_drift_pct', float('nan')),
-                diagnostics.get('max_VSC_drift_pct', float('nan')),
-                recon_lcfs_ref, perturbed_lcfs_ref,
-                inspec_F_max * 100.0, inspec_VSC_max * 100.0,
+            _ok, _rms_mm, _max_mm, _reasons = _until_n_verdict(
+                diagnostics, recon_lcfs_ref, perturbed_lcfs_ref,
+                inspec_F_max, inspec_VSC_max,
                 rms_max_mm=inspec_rms_max_mm,
                 max_max_mm=inspec_max_max_mm)
+            # Stored per draw so the caller (Bouquet.generate) can re-derive
+            # the delivered count OUTSIDE the output capture -- the printed
+            # warning below lands in generation_log on the default quiet
+            # path, which is not a place a failure signal may live alone.
+            diagnostics['until_n_inspec'] = bool(_ok)
+            diagnostics['until_n_rms_mm'] = float(_rms_mm)
+            diagnostics['until_n_max_mm'] = float(_max_mm)
+            diagnostics['until_n_reasons'] = list(_reasons)
             if _ok:
                 _n_inspec_seen += 1
             _why = "in-spec" if _ok else "OUT (" + ", ".join(_reasons) + ")"

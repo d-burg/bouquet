@@ -1410,28 +1410,82 @@ class Bouquet:
         produced and returned under ``summary["figures"] = (coil_fig, bnd_fig)``
         (F7 -- the notebooks re-called the module filters just to get these).
         """
-        from .filtering import filter_coil_currents, filter_boundaries
+        from .filtering import filter_coil_currents, filter_boundaries, filter_coil_chi2
 
         header = self.config.output_header
         fc = self.config.filtering
         rms = fc.rms_max_mm if rms_max_mm is None else rms_max_mm
 
         sk = self.config.generation.scan_key
-        coil_summary, coil_fig = filter_coil_currents(
-            header, scan_key=sk,
-            F_max_pct=fc.inspec_F_max * 100.0,
-            VSC_max_pct=fc.inspec_VSC_max * 100.0,
-            apply=True, plot=plot,
-        )
+        coil_filter_used = fc.coil_filter
+        if fc.coil_filter == "chi2":
+            from .coil_spec import CoilSigmaUnavailable
+            try:
+                coil_summary = filter_coil_chi2(
+                    header, None, scan_key=sk, chi2_max=fc.chi2_max,
+                    apply=True, sigma=fc.coil_sigma, device=self.config.device,
+                    shot=self._infer_shot(), z_max=fc.z_max,
+                )
+                coil_fig = None
+                if plot:  # drift-distribution figure only; writes no flags
+                    _, coil_fig = filter_coil_currents(
+                        header, scan_key=sk, F_max_pct=fc.inspec_F_max * 100.0,
+                        VSC_max_pct=fc.inspec_VSC_max * 100.0, apply=False, plot=True,
+                    )
+            except CoilSigmaUnavailable as e:
+                import warnings
+                warnings.warn(
+                    "COIL FILTER FALLBACK: chi2 coil filter disabled -- " + str(e) +
+                    f" Using the legacy rule (|dI/I| <= {fc.inspec_F_max:.0%} F-coils, "
+                    f"{fc.inspec_VSC_max:.0%} VSC), which is NOT a measurement-referenced "
+                    "criterion and rejected 20-80% of draws on DIII-D L-mode ensembles.",
+                    stacklevel=2)
+                coil_filter_used = "legacy(fallback)"
+                coil_summary, coil_fig = filter_coil_currents(
+                    header, scan_key=sk,
+                    F_max_pct=fc.inspec_F_max * 100.0,
+                    VSC_max_pct=fc.inspec_VSC_max * 100.0,
+                    apply=True, plot=plot,
+                )
+        else:
+            coil_summary, coil_fig = filter_coil_currents(
+                header, scan_key=sk,
+                F_max_pct=fc.inspec_F_max * 100.0,
+                VSC_max_pct=fc.inspec_VSC_max * 100.0,
+                apply=True, plot=plot,
+            )
         bnd_summary, bnd_fig = filter_boundaries(
             header, scan_key=sk, rms_max_mm=rms, apply=True, plot=plot,
         )
         # one scan key -> each summary is a single {counts, draws} dict
-        self._selection = {"coil": coil_summary, "boundary": bnd_summary}
+        self._selection = {"coil": coil_summary, "boundary": bnd_summary,
+                           "coil_filter_used": coil_filter_used}
         if plot:
             self._selection["figures"] = (coil_fig, bnd_fig)
         self._print_generation_summary(coil_summary, bnd_summary)
         return self._selection
+
+    def _infer_shot(self):
+        """Best-effort shot number for era-dependent tolerances: an explicit
+        ``source.shot``, else the ``g<shot>.<time>`` pattern in a geqdsk path,
+        else the header; None if nothing matches (the device default applies)."""
+        import re
+        src = self.config.source
+        for attr in ("shot", "pulse"):
+            v = getattr(src, attr, None)
+            if v is not None:
+                try:
+                    return int(v)
+                except (TypeError, ValueError):
+                    pass
+        for attr in ("geqdsk_path", "geqdsk", "path", "dd_path"):
+            v = getattr(src, attr, None)
+            if isinstance(v, str):
+                m = re.search(r"g(\d{5,6})[._]", v.split("/")[-1]) or re.search(r"D3D_(\d{5,6})", v)
+                if m:
+                    return int(m.group(1))
+        m = re.search(r"(\d{6})", str(self.config.output_header))
+        return int(m.group(1)) if m else None
 
     def _print_generation_summary(self, coil_summary, bnd_summary):
         """Concise post-generation summary (draws / coil spec / boundary / in-spec),

@@ -40,6 +40,8 @@ from .io import read_geqdsk
 
 __all__ = [
     "filter_coil_currents",
+    "filter_coil_chi2",
+    "measured_coil_currents",
     "filter_boundaries",
     "read_filter_flags",
     "select_indices",
@@ -256,6 +258,139 @@ def select_indices(h5path_or_header, scan_key=None, selection="selected"):
 # --------------------------------------------------------------------------
 #  the two filters
 # --------------------------------------------------------------------------
+def measured_coil_currents(dd_path, time_s):
+    """``{name: (current_A, sigma_A)}`` from an IMAS ``pf_active`` at *time_s*.
+
+    ``data_error_upper`` is read as the 1-sigma magnitude (FUSE writes the error
+    itself there, not ``data + error``).
+    """
+    import json
+
+    with open(dd_path) as fh:
+        dd = json.load(fh)
+    out = {}
+    for c in dd.get("pf_active", {}).get("coil", []):
+        name = c.get("name") or c.get("identifier")
+        cur = c.get("current") or {}
+        if not name or "data" not in cur or "time" not in cur:
+            continue
+        t = np.asarray(cur["time"], dtype=float)
+        d = np.asarray(cur["data"], dtype=float)
+        e = cur.get("data_error_upper")
+        if e is None:
+            continue
+        e = np.abs(np.asarray(e, dtype=float))
+        j = int(np.argmin(np.abs(t - float(time_s))))
+        out[name] = (float(d[j]), float(e[j]))
+    return out
+
+
+def filter_coil_chi2(h5path_or_header, dd_path=None, scan_key=None,
+                     chi2_max=None, apply=True, sigma=None, device=None,
+                     shot=None, sigma_ref=None, z_max=None):
+    """Measurement-referenced coil filter (see :mod:`bouquet.coil_spec`).
+
+    Scores each draw by ``chi2/nu`` of its coil currents against the baseline,
+    weighted by the measured per-coil precision from ``pf_active``, and cuts at
+    *chi2_max*. Unlike :func:`filter_coil_currents` this covers EVERY coil the
+    measurement carries (E-coils included) and weights each by its own
+    precision rather than a flat fractional band.
+
+    ``chi2_max=4.0`` is RMS |z| = 2 -- "within 2 sigma per coil on average" --
+    and reproduces the legacy filter's acceptance rate on the DIII-D 174823
+    ensemble (91%) while disagreeing on ~11% of individual draws.
+
+    A draw with no usable coil scores NaN and FAILS: unjudgeable is not a pass.
+
+    Per-coil sigma (see :func:`coil_spec.resolve_coil_sigma`): ``sigma`` explicit
+    (``{"floor","fraction"}`` model, per-coil table, or callable), else the
+    ``device`` model (named, or detected from the mesh coil names), else
+    :class:`coil_spec.CoilSigmaUnavailable` is raised.  Needs no dd.
+
+    ``sigma_ref`` (legacy, dd-referenced; requires ``dd_path``): ``"d3d"`` uses the
+    digitizer table rescaled by |I_base|/|I_meas|; a dict ``{"F": A, "E": A}``
+    a custom per-family table; ``"dd"`` the dd's own ``data_error_upper``.
+    Raises :class:`ValueError` if given without ``dd_path``.
+
+    A draw passes when ``chi2/nu <= chi2_max`` AND its worst single coil has
+    ``|z| <= z_max``: the pooled statistic alone lets one coil at 7 sigma hide
+    behind seventeen quiet ones.  Both default (``None``) to the device's
+    empirically calibrated acceptance (:attr:`DeviceSpec.acceptance`, a chosen
+    quantile of what real machine states score under the same sigma) when the
+    sigma came from a device model, else to :data:`devices.GENERIC_ACCEPTANCE`.
+    Pass ``z_max=False`` to disable the guard.
+
+    The model used is stamped on the scan group as ``coil_sigma_model`` (JSON)
+    and ``coil_filter`` = "chi2" when ``apply`` is True.
+    """
+    import json
+    from .coil_spec import (coil_chi2, coil_sigma_in_base_units, with_sigma_ref,
+                            resolve_coil_sigma)
+    if sigma_ref is not None and dd_path is None:
+        raise ValueError("filter_coil_chi2: sigma_ref is dd-referenced and needs dd_path")
+
+    h5path = _resolve(h5path_or_header)
+    summary = {}
+    for sv in _iter_scan_keys(h5path, scan_key):
+        with h5py.File(h5path, "r") as hf:
+            grp = hf["scan"][str(sv)]
+            if "_baseline" not in grp:
+                continue
+            bn = [x.decode() if isinstance(x, bytes) else str(x)
+                  for x in grp["_baseline"]["coil_names"][()]]
+            baseline = dict(zip(bn, np.asarray(
+                grp["_baseline"]["coil_currents"][()], dtype=float).tolist()))
+            if sigma_ref is not None:
+                meas = measured_coil_currents(dd_path, float(sv))
+                if sigma_ref != "dd":
+                    meas = with_sigma_ref(meas, None if sigma_ref == "d3d" else sigma_ref)
+                sig, model = coil_sigma_in_base_units(baseline, meas), {"kind": "dd_referenced", "sigma_ref": str(sigma_ref)}
+            else:
+                sig, model = resolve_coil_sigma(baseline, sigma=sigma, device=device, shot=shot)
+            # acceptance: explicit > device calibration (when sigma is the device model) > generic
+            from .devices import GENERIC_ACCEPTANCE, get_device
+            acc = dict(GENERIC_ACCEPTANCE); acc_src = "generic"
+            if model.get("kind") == "device" and model.get("model") == "random":
+                dacc = get_device(model["device"]).acceptance
+                if dacc:
+                    acc.update({k: dacc[k] for k in ("chi2_max", "z_max") if k in dacc}); acc_src = "device q%g" % (100 * dacc.get("quantile", float("nan")))
+            cm = float(acc["chi2_max"]) if chi2_max is None else float(chi2_max)
+            zm = (acc["z_max"] if z_max is None else z_max)
+            zm = None if zm is False else (None if zm is None else float(zm))
+            model = dict(model, acceptance={"chi2_max": cm, "z_max": zm, "source": acc_src})
+            rows = {}
+            for key in sorted((k for k in grp if k.isdigit()), key=int):
+                g = grp[key]
+                if "coil_currents" not in g:
+                    continue
+                names = [x.decode() if isinstance(x, bytes) else str(x)
+                         for x in g["coil_names"][()]]
+                draw = dict(zip(names, np.asarray(
+                    g["coil_currents"][()], dtype=float).tolist()))
+                rows[int(key)] = coil_chi2(draw, baseline, sig)
+        results = {i: bool(np.isfinite(r["chi2_nu"]) and r["chi2_nu"] <= cm
+                           and (zm is None or r["max_abs_z"] <= zm))
+                   for i, r in rows.items()}
+        if apply:
+            _write_filter_result(h5path, sv, results, "passes_coil_filter")
+            with h5py.File(h5path, "a") as hf:
+                gp = f"scan/{sv}" if f"scan/{sv}" in hf else None
+                if gp is not None:
+                    hf[gp].attrs["coil_filter"] = "chi2"
+                    hf[gp].attrs["coil_sigma_model"] = json.dumps(model)
+        n_pass = sum(results.values())
+        summary[sv] = {
+            "n_total": len(results), "n_pass": n_pass,
+            "n_fail": len(results) - n_pass, "chi2_max": cm,
+            "z_max": zm, "sigma_model": model,
+            "n_coils": (max((r["nu"] for r in rows.values()), default=0)),
+            "draws": {i: {"chi2_nu": r["chi2_nu"], "max_abs_z": r["max_abs_z"],
+                          "worst_coil": r["worst_coil"], "nu": r["nu"],
+                          "passes": results[i]} for i, r in rows.items()},
+        }
+    return _finalize_scan_result(summary, scan_key)
+
+
 def filter_coil_currents(h5path_or_header, scan_key=None,
                           F_max_pct=None, VSC_max_pct=None,
                           apply=True, plot=True):

@@ -336,3 +336,69 @@ def test_stored_xpoint_used_for_bottom(manifest):
             assert has_xpt["lower"]
             np.testing.assert_allclose(
                 pts["bottom"], lower[np.argmin(lower[:, 1])], atol=1e-9)
+
+
+def test_chi2_filter_is_the_default_and_needs_no_dd(tmp_path):
+    """Bouquet.filter() default = chi2 with the EFIT-residual sigma: writes
+    passes_coil_filter for every draw from the archive alone and refreshes
+    'selected'; the legacy rule stays selectable."""
+    from bouquet.config import FilterConfig
+    from bouquet import filter_coil_chi2
+    assert FilterConfig().coil_filter == "chi2"
+    assert FilterConfig(coil_filter="legacy").coil_filter == "legacy"
+    with pytest.raises(ValueError):
+        FilterConfig(coil_filter="bogus")
+    work = str(tmp_path / "work.h5")
+    shutil.copy(_SLIM, work)
+    summ = filter_coil_chi2(work, None, apply=True)
+    flags = read_filter_flags(work)
+    for sv, drect in flags.items():
+        assert summ[sv]["n_total"] == len(drect)
+        for i, rec in drect.items():
+            assert "passes_coil_filter" in rec
+            assert rec["selected"] == (rec["passes_coil_filter"] and rec.get("passes_boundary_filter", True))
+
+
+
+def test_chi2_filter_stamps_provenance_and_falls_back_loudly(tmp_path, monkeypatch):
+    """Device detected from the golden (DIII-D) coil names -> model stamped on the
+    scan group; with detection defeated and no sigma, the filter raises
+    CoilSigmaUnavailable (Bouquet.filter turns that into a warning + legacy rule)."""
+    import json, h5py, warnings
+    from bouquet import filter_coil_chi2
+    from bouquet.coil_spec import CoilSigmaUnavailable
+    import bouquet.devices as dev
+    work = str(tmp_path / "work.h5")
+    shutil.copy(_SLIM, work)
+    summ = filter_coil_chi2(work, None, apply=True)
+    for sv, v in summ.items():
+        assert v["sigma_model"]["kind"] == "device" and v["sigma_model"]["device"] == "DIII-D"
+    with h5py.File(work) as hf:
+        sk = list(hf["scan"].keys())[0]
+        assert hf["scan"][sk].attrs["coil_filter"] == "chi2"
+        assert json.loads(hf["scan"][sk].attrs["coil_sigma_model"])["device"] == "DIII-D"
+    monkeypatch.setattr(dev, "detect_device", lambda names: None)
+    with pytest.raises(CoilSigmaUnavailable):
+        filter_coil_chi2(work, None, apply=False)
+    # explicit floor/fraction rescues it without a device
+    summ2 = filter_coil_chi2(work, None, apply=False, sigma={"floor": 325.0, "fraction": 0.0035})
+    for sv in summ:
+        assert summ2[sv]["sigma_model"]["kind"] == "floor_fraction" and summ2[sv]["n_total"] == summ[sv]["n_total"]
+    # the looser rms-including-offset model never rejects more
+    monkeypatch.undo()
+    summ3 = filter_coil_chi2(work, None, apply=False, sigma="rms_incl_offset")
+    for sv in summ:
+        assert summ3[sv]["n_pass"] >= summ[sv]["n_pass"]
+
+
+def test_infer_shot_from_geqdsk_name_and_header():
+    from bouquet.run import Bouquet
+    class S: geqdsk_path = "/x/y/g169510.03000"
+    class C: source = S(); output_header = "D3D_169510_3000"
+    b = Bouquet.__new__(Bouquet); b.config = C()
+    assert b._infer_shot() == 169510
+    class S2: pass
+    class C2: source = S2(); output_header = "D3D_204441_4400"
+    b.config = C2(); assert b._infer_shot() == 204441
+    class C3: source = S2(); output_header = "nothing_here"
+    b.config = C3(); assert b._infer_shot() is None

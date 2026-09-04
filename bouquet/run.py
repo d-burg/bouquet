@@ -725,11 +725,11 @@ class Bouquet:
                 # run-time dispatch would otherwise burn the full SWB
                 # iteration sequence and only then refuse a typo.
                 if str(getattr(gc, "closure_channel", "bootstrap")) \
-                        not in ("bootstrap", "ohmic"):
+                        not in ("bootstrap", "ohmic", "mse"):
                     raise ValueError(
                         f"unknown closure_channel "
                         f"{gc.closure_channel!r} "
-                        "(expected 'ohmic' or 'bootstrap')")
+                        "(expected 'ohmic', 'bootstrap' or 'mse')")
                 from .utils import fsa_current_geometry as _fcg
                 from .physics import capture_equilibrium_fsa as _cef
                 _anchor = {"eq": mygs.copy_eq()}
@@ -1591,13 +1591,13 @@ class Bouquet:
                                 f"('diff','rescale','ohmic')")
             elif gc.jBS_baseline_mode == "ohmic":
                 if str(getattr(gc, "closure_channel", "bootstrap")) \
-                        not in ("bootstrap", "ohmic"):
+                        not in ("bootstrap", "ohmic", "mse"):
                     # catch the typo HERE: the run-time dispatch only reaches
                     # its unknown-channel refusal after the full SWB solve
                     problems.append(
                         f"closure_channel="
                         f"{gc.closure_channel!r} not in "
-                        f"('bootstrap','ohmic')")
+                        f"('bootstrap','ohmic','mse')")
                 # Baseline-only for now: the draw path's sigma=0 reproduction
                 # of an ohmic-closed baseline has not been verified, so the
                 # UQ ensemble refuses the mode rather than silently drawing

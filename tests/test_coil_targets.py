@@ -113,3 +113,10 @@ class TestCoilInit:
         f = {x.name: x for x in dataclasses.fields(SolverConfig)}
         assert "coil_init" in f
         assert SolverConfig(mesh_path="x").coil_init is None
+
+
+def test_turns_come_from_the_device_registry():
+    from bouquet.coil_targets import TURNFC_D3D
+    from bouquet.devices import get_device
+    assert TURNFC_D3D == get_device("DIII-D").turns
+    assert TURNFC_D3D["F1A"] == 58.0 and TURNFC_D3D["F6A"] == 55.0 and "ECOILA" not in TURNFC_D3D

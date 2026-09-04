@@ -347,11 +347,9 @@ class Bouquet:
                    if sc.saddle_weights is not None else None)
             mygs.set_saddle_constraints(_sad, weights=_sw)
 
-        # Weak coil regularisation toward zero + small VSC freedom
-        reg_terms = [mygs.coil_reg_term({name: 1.0}, target=0.0, weight=1.0)
-                     for name in mygs.coil_sets]
-        reg_terms.append(mygs.coil_reg_term({"#VSC": 1.0}, target=0.0, weight=1e-2))
-        mygs.set_coil_reg(reg_terms=reg_terms)
+        # Coil regularisation: SolverConfig.coil_reg targets when given, else
+        # the historical weak pull toward zero + small VSC freedom.
+        self._apply_coil_reg(mygs)
 
         self.mygs = mygs
         self._myOFT = myOFT          # keep the env alive
@@ -363,6 +361,55 @@ class Bouquet:
         # _reset_solver_state. copy_eq/replace_eq need OFT PR #248+.
         self._clean_eq = mygs.copy_eq() if hasattr(mygs, "copy_eq") else None
         return self
+
+    def _apply_coil_reg(self, mygs):
+        """Install the coil regularisation: configured targets, else toward zero.
+
+        ``SolverConfig.coil_reg`` is a list of
+        ``{"coils": {name: coeff}, "target": float, "weight": float}``. When it
+        is empty the historical behaviour is used unchanged -- every coil pulled
+        toward ZERO at unit weight, plus a weak VSC term.
+
+        Called from BOTH :meth:`setup_solver` and :meth:`_reset_solver_state`.
+        That matters: ``_repoint_imas_geometry`` resets the solver immediately
+        before the IMAS baseline solve, so targets installed only at setup were
+        silently discarded and the solve ran on the zero-target default. A
+        1e8-weight target moved its coil by 0.2 % for exactly that reason.
+        """
+        spec = list(getattr(self.config.solver, "coil_reg", None) or [])
+        if spec:
+            # Drop terms naming coils this MESH does not model. A measurement
+            # source is not mesh-specific: DIII-D pf_active carries all 24
+            # circuits while the shipped D3D mesh models 20 coil sets (no
+            # E567UP/E567DN/E89UP/E89DN), and coil_reg_term raises KeyError on
+            # an unknown name -- which would kill setup_solver outright.
+            known = set(mygs.coil_sets) | {"#VSC"}
+            skipped = sorted({c for t in spec for c in t["coils"]} - known)
+            spec = [t for t in spec if set(t["coils"]) <= known]
+            if skipped:
+                import warnings
+                warnings.warn(
+                    "coil_reg: ignoring %d coil(s) absent from this mesh: %s"
+                    % (len(skipped), ", ".join(skipped)))
+            reg_terms = [
+                mygs.coil_reg_term(dict(t["coils"]),
+                                   target=float(t.get("target", 0.0)),
+                                   weight=float(t.get("weight", 1.0)))
+                for t in spec
+            ]
+            named = {c for t in spec for c in t["coils"]}
+            reg_terms += [mygs.coil_reg_term({n: 1.0}, target=0.0, weight=1.0)
+                          for n in mygs.coil_sets if n not in named]
+            if "#VSC" not in named:
+                reg_terms.append(
+                    mygs.coil_reg_term({"#VSC": 1.0}, target=0.0, weight=1e-2))
+        else:
+            reg_terms = [mygs.coil_reg_term({name: 1.0}, target=0.0, weight=1.0)
+                         for name in mygs.coil_sets]
+            reg_terms.append(
+                mygs.coil_reg_term({"#VSC": 1.0}, target=0.0, weight=1e-2))
+        mygs.set_coil_reg(reg_terms=reg_terms)
+        return reg_terms
 
     def _reset_solver_state(self):
         """Restore the clean post-:meth:`setup_solver` coil state.
@@ -380,10 +427,7 @@ class Bouquet:
         # full reset of the equilibrium + coil currents to the post-setup state
         if getattr(self, "_clean_eq", None) is not None:
             mygs.replace_eq(source_eq=self._clean_eq)
-        reg_terms = [mygs.coil_reg_term({name: 1.0}, target=0.0, weight=1.0)
-                     for name in mygs.coil_sets]
-        reg_terms.append(mygs.coil_reg_term({"#VSC": 1.0}, target=0.0, weight=1e-2))
-        mygs.set_coil_reg(reg_terms=reg_terms)
+        self._apply_coil_reg(mygs)
         if hasattr(mygs, "_coil_drift_bounds"):
             mygs.set_coil_bounds(None)        # widen: prior slice had bounds set
             delattr(mygs, "_coil_drift_bounds")
@@ -615,6 +659,18 @@ class Bouquet:
         # init psi from the LCFS shape parameters
         R0, Z0, a, kappa, delta = _shape_from_boundary(self._boundary_RZ)
         mygs.init_psi(R0, Z0, a, kappa, delta)
+        # Optional coil INITIAL ITERATE (SolverConfig.coil_init, {name: A-t}).
+        # Distinct from coil_reg: this seeds the inverse iteration in a chosen
+        # basin of the degenerate coil manifold without adding a term that
+        # fights the boundary. Must go AFTER init_psi, which reinitialises coil
+        # currents from the regularisation and would overwrite an earlier set.
+        _ci = getattr(self.config.solver, "coil_init", None)
+        if _ci:
+            _known = set(mygs.coil_sets)
+            _use = {k: float(v) for k, v in _ci.items() if k in _known}
+            _cur, _ = mygs.get_coil_currents()
+            _cur = dict(_cur); _cur.update(_use)
+            mygs.set_coil_currents(_cur)
 
         # kinetic profiles + total pressure on the equilibrium grid (IMAS shares
         # psi_N between the kinetic and current grids).

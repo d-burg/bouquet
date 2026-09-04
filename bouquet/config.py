@@ -63,7 +63,20 @@ class SolverConfig:
     saddle_targets: Optional["np.ndarray"] = None    # (N, 2) X-point pins
     saddle_weights: Optional["np.ndarray"] = None    # (N,); default 1.0 each
     coil_vsc: dict = field(default_factory=lambda: {"F9A": 1.0, "F9B": -1.0})
+    # Coil-current regularisation terms, each
+    #   {"coils": {name: coeff}, "target": float, "weight": float}
+    # Empty (default) => every coil pulled toward ZERO at unit weight, the
+    # historical behaviour. Populate to pin coils to measured currents; see
+    # bouquet.coil_targets.coil_reg_from_measured. Applied by
+    # Bouquet._apply_coil_reg at BOTH setup_solver and _reset_solver_state --
+    # the reset runs immediately before the IMAS baseline solve, so anything
+    # installed only at setup is discarded.
     coil_reg: list = field(default_factory=list)
+    # Initial coil currents {name: A-t} for the IMAS baseline inverse solve --
+    # seeds the iteration in a chosen basin; does NOT constrain the answer.
+    # Applied inside _forward_solve_imas_baseline after init_psi. Unset =>
+    # coils start at zero (historical behaviour).
+    coil_init: Optional[dict] = None
     region_overrides: Optional[dict] = None          # special-case cond/coil dict edits
 
 

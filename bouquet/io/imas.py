@@ -39,6 +39,7 @@ from typing import Optional, TYPE_CHECKING
 import numpy as np
 
 from ..physics import (effective_impurity_charge, impurity_pressure,
+                       impurity_charge_with_fast_ions,
                        isotropize_fast_pressure, main_ion_density_from_zeff,
                        parallel_to_toroidal)
 
@@ -389,11 +390,13 @@ def read_imas_baseline(
     _o = np.argsort(psiN_eq)
     p_equilibrium = np.interp(psi_N, psiN_eq[_o],
                               np.asarray(eqp1["pressure"], dtype=float)[_o])
-    # Only ne - sum_s Z_s n_s^fast is neutralised by THERMAL ions; charging the
-    # fast-ion share to the impurity inflates nz (Z_imp drifts off the real
-    # impurity charge whenever the beam fraction is non-negligible).
-    ne_th = np.maximum(ne - z_fast, 0.0)
-    Z_imp = effective_impurity_charge(ne_th, ni, Zeff)
+    # Only ne - sum_s Z_s n_s^fast is neutralised by THERMAL ions; charging
+    # the fast-ion share to the impurity inflates nz.  The helper also
+    # renormalizes Zeff (defined over the FULL ne above) onto the thermal
+    # electrons -- without that the inversion recovers only half the bias
+    # (see impurity_charge_with_fast_ions).  The Zeff consumed by the
+    # bootstrap / forward solve deliberately stays the full-ne one.
+    Z_imp, ne_th = impurity_charge_with_fast_ions(ne, ni, Zeff, z_fast)
     p_imp = impurity_pressure(ne_th, ni, ti, Z_imp)
     p_recon = _EC * (ne * te + ni * ti) + p_imp + p_fast
     # p_diff anchors the solve thermal pressure to the FUSE equilibrium.pressure.

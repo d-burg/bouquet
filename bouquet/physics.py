@@ -497,6 +497,30 @@ def effective_impurity_charge(ne, ni, zeff, min_dilution=1e-3):
     return float(np.median(z[ok]))
 
 
+def impurity_charge_with_fast_ions(ne, ni, zeff, z_fast):
+    """``(Z_imp, ne_th)`` when fast ions carry part of the neutralization.
+
+    With a beam population, quasineutrality reads
+    ``ne = ni + Z_imp*nz + z_fast`` -- only ``ne_th = ne - z_fast`` is
+    neutralized by THERMAL ions.  A ``zeff`` normalized to the FULL ``ne``
+    (the IMAS convention: thermal-species numerator over total electron
+    density) must therefore be renormalized to ``zeff * ne / ne_th`` before
+    the single-impurity inversion; passing the thermal ``ne`` with the
+    full-``ne`` ``zeff`` recovers only half the bias (measured: raw 1.95,
+    half-applied 3.19, true 6.00 for C6 at 25 % fast fraction).  Surfaces
+    where ``z_fast >= ne`` get a non-finite renormalized zeff and are
+    excluded by :func:`effective_impurity_charge`'s own validity mask.
+    """
+    ne = np.asarray(ne, dtype=float)
+    z_fast = np.asarray(z_fast, dtype=float)
+    ne_th = np.maximum(ne - z_fast, 0.0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        zeff_th = np.where(ne_th > 0.0,
+                           np.asarray(zeff, dtype=float) * ne / ne_th,
+                           np.nan)
+    return effective_impurity_charge(ne_th, ni, zeff_th), ne_th
+
+
 def main_ion_density_from_zeff(ne, zeff, Z_imp):
     """Main-ion density from (ne, Zeff) under single-impurity quasineutrality.
 

@@ -183,6 +183,115 @@ def resolve_baseline(config: "BouquetConfig", mygs=None) -> Baseline:
     raise TypeError(f"unknown baseline source type: {type(source).__name__}")
 
 
+def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
+                          zeff_is_ida, measured_sigma, measured_source,
+                          carbon_sigma=None, carbon_source="none"):
+    """The Z_eff envelope ladder: highest-fidelity tier available per file.
+
+    Returns ``(sigma_array, label)``.  Tiers, in fidelity order:
+
+    1. **carbon-propagated** (``sigma_Zeff_carbon``: n_12C6_err on the direct
+       layout, the dilution's own posterior on the ensemble layout).  The
+       Zeff-primary scheme perturbs Zeff precisely to move the DILUTION
+       ``ni = ne - Z nC``, and CER carbon density is that dilution's direct
+       measurement; drawing Zeff with this sigma IS error propagation
+       through ``ni = ne - Z nC``.  Measured on the demo shots it is 1.9-5.8
+       % of Zeff in-core and stays sane in the SOL (4-19 %).
+    2. **VB-measured** (``sigma_Zeff``: the file's Zeff_err / Zeff sample
+       spread).  Conservative -- the visible-bremsstrahlung inversion's own
+       error, which carries n_e^2 sqrt(T_e) propagation, calibration and
+       mantle-subtraction systematics: 8-9 % core but 44-130 % in the SOL
+       on the demo direct files, and grand means up to ~90 % on some shots.
+    3. the flat ``zeff_scalar_sigma`` fraction of ``|Z_eff|`` -- the
+       pre-1.3.2 behaviour, the "scalar" setting, and the loud fallback.
+
+    Both measured tiers are eligible only when the Z_eff baseline itself is
+    the IDA one (``zeff_is_ida``); a FUSE baseline (IMAS/ida_hybrid path)
+    must not be paired with an IDA envelope.  ``zeff_sigma_source`` picks:
+    "auto" (carbon > VB > scalar), "carbon", "measured" (VB), "scalar" --
+    the two forced measured modes warn LOUDLY and fall back when the file
+    cannot provide them.  A chosen envelope whose median fraction of |Zeff|
+    exceeds 25 % draws a report-only warning naming the alternatives.
+    """
+    import warnings
+
+    import numpy as np
+
+    if zeff_sigma_source not in ("auto", "carbon", "measured", "scalar"):
+        raise ValueError(
+            f"zeff_sigma_source={zeff_sigma_source!r} is not one of "
+            "'auto', 'carbon', 'measured', 'scalar'")
+    base = np.abs(np.asarray(base_zeff, dtype=float))
+    scalar_env = float(zeff_scalar_sigma) * base
+    scalar_label = f"scalar zeff_scalar_sigma={float(zeff_scalar_sigma):g}"
+
+    def _usable(m):
+        if m is None:
+            return None
+        a = np.asarray(m, dtype=float)
+        if a.shape == base.shape and np.all(np.isfinite(a)) and np.any(a > 0):
+            return a
+        warnings.warn(
+            f"resolve_zeff_envelope: a measured sigma_Zeff is unusable "
+            f"(shape {a.shape} vs {base.shape}, or non-finite/all-zero); "
+            f"tier skipped", stacklevel=3)
+        return None
+
+    chosen = None
+    if zeff_is_ida and zeff_sigma_source in ("auto", "carbon"):
+        c = _usable(carbon_sigma)
+        if c is not None:
+            chosen = (c, f"carbon-propagated ({carbon_source})")
+        elif zeff_sigma_source == "carbon":
+            warnings.warn(
+                "resolve_zeff_envelope: zeff_sigma_source='carbon' but this "
+                "file provides no n_12C6 uncertainty; falling back "
+                + ("to the VB-measured sigma_Zeff"
+                   if _usable(measured_sigma) is not None
+                   else "to the scalar envelope"), stacklevel=2)
+    if (chosen is None and zeff_is_ida
+            and zeff_sigma_source in ("auto", "carbon", "measured")):
+        m = _usable(measured_sigma)
+        if m is not None:
+            chosen = (m, f"measured IDA ({measured_source})")
+        elif zeff_sigma_source == "measured":
+            warnings.warn(
+                "resolve_zeff_envelope: zeff_sigma_source='measured' but "
+                "this IDA file carries no Zeff uncertainty (older direct "
+                "vintage); falling back to the scalar envelope -- the "
+                "resulting ni bands use the ASSUMED 5 %-class width, not a "
+                "measured one", stacklevel=2)
+    if (chosen is None and not zeff_is_ida
+            and zeff_sigma_source in ("carbon", "measured")):
+        warnings.warn(
+            f"resolve_zeff_envelope: zeff_sigma_source="
+            f"'{zeff_sigma_source}' but this source's Z_eff baseline does "
+            "not come from the IDA file supplying the sigmas (IMAS/"
+            "ida_hybrid path, a p-file baseline, or unc.ida_path pointing "
+            "at a different file than the source's own .cdf); falling back "
+            "to the scalar envelope", stacklevel=2)
+    if chosen is None:
+        chosen = (scalar_env, scalar_label
+                  + ("" if zeff_sigma_source == "scalar"
+                     else " (no measured tier available)"
+                     if zeff_is_ida else ""))
+
+    env, label = chosen
+    with np.errstate(divide="ignore", invalid="ignore"):
+        _frac = np.median(env / np.clip(base, 1e-3, None))
+    if _frac > 0.25:
+        warnings.warn(
+            f"resolve_zeff_envelope: the chosen Z_eff envelope "
+            f"({label}) has median fraction {100 * _frac:.0f} % of |Zeff| -- "
+            f"implausibly large for a 1-sigma dilution uncertainty (VB "
+            f"Zeff_err is known to blow up in the SOL and on some shots; "
+            f"grand means near 90 % have been observed).  Report-only: "
+            f"consider zeff_sigma_source='carbon' (direct dilution "
+            f"measurement) or 'scalar'.", stacklevel=2)
+    return env, label
+
+
+
 def resolve_uncertainty(config, baseline) -> dict:
     """Resolve the perturbation envelope for :func:`generate_bouquet`.
 
@@ -228,12 +337,18 @@ def resolve_uncertainty(config, baseline) -> dict:
 
     # IDA arrays (read once) available as a fallback below
     ida_sig = None
+    _ida_zeff_sigma, _ida_zeff_source = None, "none"
+    _ida_zeff_carbon, _ida_zeff_carbon_source = None, "none"
     if ida_path is not None:
         from .io.ida import read_ida
         ida = read_ida(
             ida_path, time=getattr(src, "time", None),
             sigma_mode=unc.sigma_mode, sigma_method=unc.sigma_method,
             sigma_ni_from_ne=unc.sigma_ni_from_ne,
+            # the carbon tier's Z(Z-1) propagation is quadratically
+            # Z-sensitive; the kinetics loader already passes this, and
+            # omitting it here silently pinned the sigma math to carbon
+            impurity_Z=float(getattr(src, "impurity_Z", 6.0)),
         )
 
         def _to_kin(arr):
@@ -241,6 +356,13 @@ def resolve_uncertainty(config, baseline) -> dict:
 
         ida_sig = {"ne": _to_kin(ida.sigma_ne), "te": _to_kin(ida.sigma_te),
                    "ni": _to_kin(ida.sigma_ni), "ti": _to_kin(ida.sigma_ti)}
+        if getattr(ida, "sigma_Zeff", None) is not None:
+            _ida_zeff_sigma = _to_kin(ida.sigma_Zeff)
+            _ida_zeff_source = str(getattr(ida, "sigma_Zeff_source", "?"))
+        if getattr(ida, "sigma_Zeff_carbon", None) is not None:
+            _ida_zeff_carbon = _to_kin(ida.sigma_Zeff_carbon)
+            _ida_zeff_carbon_source = str(
+                getattr(ida, "sigma_Zeff_carbon_source", "?"))
 
     # Per-channel resolution: explicit profile > IDA > flat scalar fraction.
     _profiles = unc.sigma_profiles or {}
@@ -326,8 +448,37 @@ def resolve_uncertainty(config, baseline) -> dict:
             base_zeff = np.asarray(baseline.Zeff, dtype=float)
         if "zeff" not in man_base:
             man_base["zeff"] = np.asarray(base_zeff, dtype=float)
-        user_sigmas["zeff"] = unc.zeff_scalar_sigma * np.abs(
-            np.asarray(man_base["zeff"], dtype=float))
+        # Measured-tier eligibility is decided by the SOURCE TYPE, not by
+        # whether baseline.aux carries a 'zeff' entry: the reconstruction
+        # path also populates aux['zeff'] (it IS the IDA Zeff, stored for
+        # the aux plots), so testing the aux dict wrongly disqualified every
+        # recon-path run -- caught by an end-to-end A/B on a demo shot, where
+        # the 'auto' arm silently resolved to the scalar.  Two exclusions:
+        # the IMAS / ida_hybrid path (ImasSource), whose Z_eff baseline is
+        # FUSE's, and a recon source whose OWN profiles file is NOT the .cdf
+        # supplying the sigmas -- a p-file Zeff baseline, or unc.ida_path
+        # pointing at a different file/vintage than the baseline's .cdf,
+        # would otherwise be paired with an absolute measured envelope from
+        # a file its Zeff never came from (the exact cross-channel mixing
+        # this gate exists to forbid).
+        _src_cdf = (str(getattr(src, "profiles_path", ""))
+                    if isinstance(src, ReconstructionSource) else "")
+        _zeff_baseline_is_ida = (ida_path is not None
+                                 and _src_cdf.endswith(".cdf")
+                                 and ida_path == _src_cdf)
+        _z_env, _z_label = resolve_zeff_envelope(
+            getattr(unc, "zeff_sigma_source", "auto"),
+            unc.zeff_scalar_sigma,
+            man_base["zeff"],
+            zeff_is_ida=_zeff_baseline_is_ida,
+            measured_sigma=_ida_zeff_sigma,
+            measured_source=_ida_zeff_source,
+            carbon_sigma=_ida_zeff_carbon,
+            carbon_source=_ida_zeff_carbon_source,
+        )
+        user_sigmas["zeff"] = _z_env
+        if getattr(unc, "log_sigma_sources", True):
+            print(f"[sigma] zeff envelope <- {_z_label}")
 
     resolved_sigma, resolved_base = {}, {}
     for name, sig in user_sigmas.items():

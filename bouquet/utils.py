@@ -587,10 +587,19 @@ def fsa_current_geometry(eq, psi_N, psi_pad=_FSA_PSI_PAD, want_pprime=True):
     if not np.isfinite(dpsi_dpsiN) or dpsi_dpsiN <= 0.0:
         raise RuntimeError(f"fsa_current_geometry: bad psi_bounds {bounds}")
 
+    if inv_R2 is not None and not np.all(np.isfinite(inv_R2)):
+        raise RuntimeError("fsa_current_geometry: get_q returned non-finite "
+                           "<1/R^2> averages")
+
     pprime = None
     if want_pprime:
         prof = eq.get_profiles(psi=psi_q.copy())
         pprime = np.asarray(prof[4], dtype=float)
+        if not np.all(np.isfinite(pprime)):
+            raise RuntimeError("fsa_current_geometry: get_profiles returned "
+                               "non-finite P' -- a NaN here would poison the "
+                               "affine c term and pass every downstream "
+                               "threshold gate silently")
 
     return {
         "psi_N": psi_N,
@@ -645,6 +654,49 @@ def _trapezoid(y, x):
     from scipy.integrate import trapezoid
     return float(trapezoid(np.asarray(y, dtype=float),
                            np.asarray(x, dtype=float)))
+
+
+def close_ip(channel, Ip_target_signed, c_affine, ip_ind, ip_bs, ip_fix,
+             scale_bounds=(0.2, 5.0)):
+    """Channel scales closing the affine Ip measure on a hybrid baseline.
+
+    Solves ``s_ohm*ip_ind + s_bs*ip_bs + ip_fix + c = Ip`` for the one free
+    scale, where ``ip_*`` are the LINEAR parts (``trapezoid(w * j)``) of each
+    component under :func:`Ip_fsa_weights` and ``c`` is the affine P' term
+    carried exactly once.  ``channel`` picks which component absorbs the
+    deficit: ``"bootstrap"`` keeps ``s_ohm = 1`` and rescales the bootstrap;
+    ``"ohmic"`` keeps ``s_bs = 1`` and rescales the inductive.  Returns
+    ``(ohm_scale, bs_scale)``.
+
+    Refuses (``RuntimeError``) when the rescaled component's linear part is
+    ~0 relative to the target (the closure would be a division by noise) or
+    when the resulting scale falls outside ``scale_bounds`` -- the hybrid
+    components then simply do not add up to Ip and hiding that behind a
+    rescale would be a lie.  Unknown channels raise ``ValueError``.
+    """
+    Ip_t = abs(float(Ip_target_signed))
+    deficit = float(Ip_target_signed) - float(c_affine) - float(ip_fix)
+    if channel == "bootstrap":
+        if abs(ip_bs) < 1e-6 * Ip_t:
+            raise RuntimeError("close_ip/bootstrap channel: j_BS integrates "
+                               "to ~0; cannot close Ip on it")
+        scales = (1.0, (deficit - float(ip_ind)) / float(ip_bs))
+    elif channel == "ohmic":
+        if abs(ip_ind) < 1e-6 * Ip_t:
+            raise RuntimeError("close_ip/ohmic channel: j_inductive "
+                               "integrates to ~0; cannot close Ip on it")
+        scales = ((deficit - float(ip_bs)) / float(ip_ind), 1.0)
+    else:
+        raise ValueError(f"unknown closure_channel {channel!r} "
+                         "(expected 'ohmic' or 'bootstrap')")
+    lo, hi = scale_bounds
+    for name, s in zip(("ohm_scale", "bs_scale"), scales):
+        if not (lo < s < hi):
+            raise RuntimeError(
+                f"close_ip/{channel} channel: {name} {s:.3f} is outside "
+                f"[{lo:g}, {hi:g}] -- the hybrid components do not add up "
+                "to Ip; refusing to hide that behind a rescale")
+    return scales
 
 
 def Ip_fsa_integral(eq, psi_N, j_profile, convention="jphi-linterp",

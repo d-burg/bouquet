@@ -108,7 +108,12 @@ class TestAffineMeasure:
 
 
 class TestClosureAlgebra:
-    """The channel scale formulas close Ip exactly on the affine measure."""
+    """utils.close_ip -- the SHIPPED channel formulas -- closes Ip exactly.
+
+    Earlier versions of these tests re-derived the scale formulas locally
+    and so validated the tester's algebra, not run.py's (adversarial
+    review); close_ip is the single implementation both now share.
+    """
 
     def _parts(self):
         g = _geom()
@@ -121,22 +126,65 @@ class TestClosureAlgebra:
         return g, w, c, j_ind, j_bs, j_fix, lin
 
     def test_bootstrap_channel_closes_exactly(self):
+        from bouquet.utils import close_ip
         g, w, c, j_ind, j_bs, j_fix, lin = self._parts()
         Ip_t = 1.1 * (lin(j_ind) + lin(j_bs) + lin(j_fix) + c)  # 10% deficit
-        s_bs = (Ip_t - c - lin(j_ind) - lin(j_fix)) / lin(j_bs)
+        ohm_s, bs_s = close_ip("bootstrap", Ip_t, c,
+                               lin(j_ind), lin(j_bs), lin(j_fix))
+        assert ohm_s == 1.0
         closed = Ip_fsa_integral(None, g["psi_N"],
-                                 j_ind + s_bs * j_bs + j_fix,
+                                 ohm_s * j_ind + bs_s * j_bs + j_fix,
                                  convention="jphi-linterp", geom=g)
         assert closed == pytest.approx(Ip_t, rel=1e-12)
 
     def test_ohmic_channel_closes_exactly(self):
+        from bouquet.utils import close_ip
         g, w, c, j_ind, j_bs, j_fix, lin = self._parts()
         Ip_t = 0.93 * (lin(j_ind) + lin(j_bs) + lin(j_fix) + c)
-        s_ohm = (Ip_t - c - lin(j_bs) - lin(j_fix)) / lin(j_ind)
+        ohm_s, bs_s = close_ip("ohmic", Ip_t, c,
+                               lin(j_ind), lin(j_bs), lin(j_fix))
+        assert bs_s == 1.0
         closed = Ip_fsa_integral(None, g["psi_N"],
-                                 s_ohm * j_ind + j_bs + j_fix,
+                                 ohm_s * j_ind + bs_s * j_bs + j_fix,
                                  convention="jphi-linterp", geom=g)
         assert closed == pytest.approx(Ip_t, rel=1e-12)
+
+    def test_negative_current_convention_closes_too(self):
+        """DIII-D-sign data: a signed (negative) Ip target with negative
+        linear parts must close without the abs() bookkeeping leaking in."""
+        from bouquet.utils import close_ip
+        g, w, c, j_ind, j_bs, j_fix, lin = self._parts()
+        Ip_t = 1.05 * (lin(j_ind) + lin(j_bs) + lin(j_fix) + c)
+        ohm_s, bs_s = close_ip("bootstrap", -Ip_t, -c,
+                               -lin(j_ind), -lin(j_bs), -lin(j_fix))
+        assert bs_s == pytest.approx(
+            close_ip("bootstrap", Ip_t, c, lin(j_ind), lin(j_bs),
+                     lin(j_fix))[1], rel=1e-12)
+
+    def test_zero_divisor_refusals(self):
+        from bouquet.utils import close_ip
+        with pytest.raises(RuntimeError, match="j_BS integrates"):
+            close_ip("bootstrap", 1.2e6, 0.0, 1.0e6, 0.0, 1e5)
+        with pytest.raises(RuntimeError, match="j_inductive integrates"):
+            close_ip("ohmic", 1.2e6, 0.0, 0.0, 2e5, 1e5)
+
+    def test_out_of_bounds_scale_refused(self):
+        from bouquet.utils import close_ip
+        # components sum to ~Ip/10 -> bs_scale would be ~7: refuse
+        with pytest.raises(RuntimeError, match="outside"):
+            close_ip("bootstrap", 1.2e6, 0.0, 1.0e5, 1.5e5, 0.0)
+
+    def test_nan_inputs_are_refused_not_propagated(self):
+        """NaN parts must raise, not return a NaN scale that downstream
+        threshold gates (False for NaN) would wave through."""
+        from bouquet.utils import close_ip
+        with pytest.raises(RuntimeError):
+            close_ip("bootstrap", 1.2e6, float("nan"), 8e5, 2e5, 1e5)
+
+    def test_unknown_channel_raises_value_error(self):
+        from bouquet.utils import close_ip
+        with pytest.raises(ValueError, match="closure_channel"):
+            close_ip("bootstap", 1.2e6, 0.0, 8e5, 2e5, 1e5)
 
 
 class TestWorkflowGuard:
@@ -171,6 +219,14 @@ class TestWorkflowGuard:
     def test_custom_workflow_downgrades_to_warning(self, capsys):
         self._validate(self._config("ohmic", workflow="custom"))
         assert "baseline-only" in capsys.readouterr().out
+
+    def test_closure_channel_typo_is_refused_at_validation(self):
+        """A channel typo must be caught by the validator, not after the
+        full solve_with_bootstrap iteration sequence."""
+        cfg = self._config("ohmic")
+        cfg.generation.closure_channel = "bootstap"
+        with pytest.raises(ValueError, match="closure_channel"):
+            self._validate(cfg)
 
 
 class TestDefaults:

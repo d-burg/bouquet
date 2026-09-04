@@ -26,12 +26,10 @@ __all__ = ["TURNFC_D3D", "coil_reg_from_measured", "measured_from_pf_active"]
 #: converted with these. E-coils are deliberately absent: the shipped D3D mesh
 #: carries their turns itself (``coil_dict`` nturns sums to 61.0 for ECOILA and
 #: ECOILB), which is the ``/61.0`` divisor in the OFT DIII-D example.
-TURNFC_D3D = {
-    "F1A": 58.0, "F2A": 58.0, "F3A": 58.0, "F4A": 58.0, "F5A": 58.0,
-    "F6A": 55.0, "F7A": 55.0, "F8A": 58.0, "F9A": 55.0,
-    "F1B": 58.0, "F2B": 58.0, "F3B": 58.0, "F4B": 58.0, "F5B": 58.0,
-    "F6B": 55.0, "F7B": 55.0, "F8B": 58.0, "F9B": 55.0,
-}
+# Turn counts now live in the device registry (bouquet.devices); this name is kept
+# as an alias so existing callers and configs keep working.
+from .devices import get_device as _get_device
+TURNFC_D3D = dict(_get_device("DIII-D").turns)
 
 
 def measured_from_pf_active(dd_path: str, time_s: float) -> Dict[str, float]:
@@ -65,7 +63,8 @@ def coil_reg_from_measured(measured: Dict[str, float],
     weights : {name: weight}, optional
         Per-coil weights; coils absent fall back to *default_weight*.
     turns : {name: turns}, optional
-        Circuit-amps -> solver-units conversion, default :data:`TURNFC_D3D`.
+        Circuit-amps -> solver-units conversion; default the DIII-D device
+        registry's turns (:data:`TURNFC_D3D` is an alias of it).
         A coil with no entry converts at 1.0.
     """
     turns = TURNFC_D3D if turns is None else turns

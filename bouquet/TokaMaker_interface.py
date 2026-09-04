@@ -138,7 +138,18 @@ def _renormalize_target_to_Ip(mygs, psi_N, target_jphi, Ip_target, psi_pad,
     try:
         geom = fsa_current_geometry(mygs, psi)
         probe = eq_jphi_profile(geom, "jphi-linterp", eq=mygs)
+        # sign expresses the affine c term in the TARGET's current-direction
+        # convention (relative to the anchor's own GS profile).  It is valid
+        # exactly when Ip_target shares the target's convention -- the
+        # invariant of every call site.  NOTE the ohmic baseline closure is
+        # DIFFERENT: its abs/sgn bookkeeping needs c in the anchor's own
+        # convention, so it fixes +1 by construction (see run.py).
         sign = 1.0 if float(np.dot(probe, t)) > 0.0 else -1.0
+        if sign < 0.0:
+            print(f"  [{label}] NOTE: target j_phi carries the OPPOSITE "
+                  f"current-direction convention to the anchor's GS profile; "
+                  f"the P' term is flipped to match (verify Ip_target shares "
+                  f"the target's convention)", flush=True)
         w, c = Ip_fsa_weights(geom, convention="jphi-linterp",
                               pprime_sign=sign)
         lin = float(trapezoid(w * t, psi))
@@ -1283,18 +1294,34 @@ class _AnchorIpRenorm:
         # from the anchor instead of assuming (the P' term is -3.3 % of Ip,
         # so a sign slip would be a 6.6 % error).
         probe = eq_jphi_profile(geom, "jphi-linterp", eq=self._eq)
+        # _pprime_sign expresses c in the REFERENCE profile's convention
+        # (relative to the anchor's own GS profile); valid exactly when
+        # Ip_target shares that convention, which is the call sites'
+        # invariant.  (The ohmic baseline closure differs: its abs/sgn
+        # bookkeeping fixes +1 by construction -- see run.py.)
         self._pprime_sign = (
             1.0 if float(np.dot(probe, reference_total)) > 0.0 else -1.0)
+        if self._pprime_sign < 0.0:
+            print("  [R2-anchor] NOTE: reference j_phi carries the OPPOSITE "
+                  "current-direction convention to the anchor's GS profile; "
+                  "the P' term is flipped to match", flush=True)
         self._w, self._c = Ip_fsa_weights(
             geom, convention=convention, pprime_sign=self._pprime_sign)
         # Runtime validation of the measure ON THIS CASE: integrate the
         # anchor's own current profile and compare with its true Ip.
         # Measured 0.009-0.043 % across the seven DIII-D demo archives
         # (issue #35), so a self_check far above that is a geometry problem,
-        # not noise.
+        # not noise.  Evaluated in the ANCHOR's own (+1) orientation on both
+        # sides so it measures the MEASURE: with the previous flipped-sign
+        # evaluation, a legitimate -1 convention flip read as self_check
+        # = -200 % and drowned the validation it exists to perform.
         j_eq = eq_jphi_profile(geom, convention, eq=self._eq,
-                               pprime_sign=self._pprime_sign)
-        self._self_check = self._Ip_of(j_eq) / self._Ip_anchor - 1.0
+                               pprime_sign=1.0)
+        w1, c1 = Ip_fsa_weights(geom, convention=convention, pprime_sign=1.0)
+        from scipy.integrate import trapezoid as _trap
+        _ip_own = float(_trap(w1 * np.asarray(j_eq, dtype=float),
+                              self._psi_N)) + c1
+        self._self_check = _ip_own / self._Ip_anchor - 1.0
         self._ref_bias = self._Ip_of(reference_total) / self._Ip_anchor - 1.0
         self._target = self._Ip_target
 

@@ -670,9 +670,15 @@ class Bouquet:
         # from OFT's SWB -- so a sigma=0 draw lands at j_inductive + SWB_spike !=
         # bl.j_phi and every draw inherits a fixed (SWB - source_jBS) offset.
         #
-        # Fix: keep the inductive component as FUSE's actual ohmic current
-        # (bl.j_inductive from the reader already equals to_toroidal(j_ohmic) --
-        # the residual against FUSE's own bootstrap), recompute the bootstrap via
+        # Fix: keep the inductive component as the reader's j_inductive.
+        # NOTE that is a RESIDUAL, j_tor - j_BS - j_NBI - j_RF (imas.py), NOT
+        # to_toroidal(j_ohmic): on postdictive FUSE files the two agree to
+        # ~0.4% of Ip at flattop, but any unmodelled non-inductive term the
+        # dd carries (verified: NOT the sawteeth source, which nets exactly
+        # zero current and is already folded into FUSE's diffused j_ohmic;
+        # the observed gap is a near-axis j_non_inductive artifact) lands in
+        # this component and is what ohm_scale rescales.  Recompute the
+        # bootstrap via
         # SWB, and rebuild the total as ohmic + SWB + fixed. We do NOT make the
         # inductive a residual against SWB (an earlier version did, which forced
         # j_ind to absorb the SWB-vs-FUSE bootstrap shape difference), and we do
@@ -707,6 +713,40 @@ class Bouquet:
             j_BS_src = np.asarray(bl.j_BS, dtype=float)        # source bootstrap (FUSE)
             FUSE_tot = np.asarray(bl.j_phi, dtype=float)       # source total (j_tor)
             j_fixed = FUSE_tot - j_ind - j_BS_src              # = j_NBI + j_RF
+            # 'ohmic' mode: freeze the ANCHOR geometry now. solve_with_bootstrap
+            # iterates its own GS solves (generic inductive seed + its bootstrap)
+            # and leaves mygs on a different equilibrium; integrating FUSE's
+            # profile on that landed geometry read +31% of Ip on an ohmic-ramp
+            # slice (vs +0.8% on the anchor) and collapsed the closure. Every Ip
+            # integral in the ohmic branch is taken on this snapshot.
+            _anchor = None
+            if str(gc.jBS_baseline_mode) == "ohmic":
+                # Validate the channel BEFORE solve_with_bootstrap: the
+                # run-time dispatch would otherwise burn the full SWB
+                # iteration sequence and only then refuse a typo.
+                if str(getattr(gc, "closure_channel", "bootstrap")) \
+                        not in ("bootstrap", "ohmic"):
+                    raise ValueError(
+                        f"unknown closure_channel "
+                        f"{gc.closure_channel!r} "
+                        "(expected 'ohmic' or 'bootstrap')")
+                from .utils import fsa_current_geometry as _fcg
+                from .physics import capture_equilibrium_fsa as _cef
+                _anchor = {"eq": mygs.copy_eq()}
+                _anchor["geom"] = _fcg(_anchor["eq"], np.asarray(psi_N, dtype=float), psi_pad=psi_pad)
+                _anchor["inv_r2_src"] = "get_q ravgs dict"
+                if _anchor["geom"]["inv_R2"] is None:
+                    _npsi_env = __import__("os").environ.get("BQ_FSA_NPSI")
+                    _cap = _cef(mygs,
+                                npsi=int(_npsi_env) if _npsi_env else max(257, psi_N.size),
+                                psi_pad=psi_pad, exact_inv_R2=True)
+                    if _cap.get("avg_inv_R2") is None:
+                        raise RuntimeError("ohmic mode: <1/R^2> unavailable on the anchor geometry")
+                    _anchor["geom"]["inv_R2"] = np.interp(
+                        np.asarray(_anchor["geom"]["psi_q"], float),
+                        np.asarray(_cap["psi_N"], float), np.asarray(_cap["avg_inv_R2"], float))
+                    _anchor["inv_r2_src"] = "capture_equilibrium_fsa contour quadrature (anchor, pre-SWB)"
+                _anchor["Ip_anchor"] = abs(float(mygs.get_stats(lcfs_pad=psi_pad)["Ip"]))
             swb_seed = create_power_flux_fun(psi_N.size, 1.5, 1.5)["y"]
             swb = solve_with_bootstrap(
                 mygs, ne, te, ni, ti, Zeff, bl.Ip_target, swb_seed,
@@ -743,16 +783,258 @@ class Bouquet:
                 bl.j_phi = j_ind + bl.j_BS + j_fixed
                 print(f"[imas SWB-split:rescale] scale={scale:.3f}; FUSE ohmic kept; "
                       f"SWB/FUSE jBS peak={ratio:.3f}")
+            elif mode == "ohmic":
+                # Hybrid: FUSE ohmic + SWB bootstrap on the (IDA) kinetics +
+                # FUSE fixed (NBI/RF), with Ip closed by rescaling j_ohmic ONLY.
+                # Rationale: 'diff' pins the total to FUSE (erasing the pedestal
+                # current change that better kinetics imply) and 'rescale' scales
+                # the bootstrap to close l_i. Here the bootstrap and NBCD are
+                # taken as-is and the inductive absorbs the Ip mismatch, because
+                # it is the component with the weakest independent constraint.
+                # NOTE solve_jphi() passes the profile as a "jphi-linterp" SHAPE
+                # and TokaMaker rescales it uniformly to Ip_target, which would
+                # scale j_BS and j_fixed too -- so the closure MUST happen here,
+                # before the solve. We integrate with the same dA the l_i proxy
+                # uses, on the converged first-pass geometry, and record the
+                # proxy's own error on the FUSE total so a biased proxy cannot
+                # masquerade as a physical ohmic rescale.
+                # Ip integral: bouquet's LCFS-truncated FSA current integral,
+                #   I_p = int dpsi (V'/2pi) <j_phi/R>
+                # (utils.Ip_fsa_integral, convention "jphi-linterp" -- the variable
+                # bouquet's arrays are handed to set_profiles as), evaluated on a
+                # copy_eq() SNAPSHOT of the converged first-pass geometry so no
+                # later solve can move it. NOT TokaMaker.compute_flux_integral:
+                # that integrates the whole reg==1 limiter region with the flux
+                # function held at its LCFS value outside the plasma, charging the
+                # scrape-off area at f(psi_N=1) (+11.9% of Ip on the D3D-like
+                # anchor; see the utils.py module note). And NOT the cylindrical
+                # l_i proxy (1/<R> for <1/R>; +7.75% on the FUSE validation
+                # case). Both are still
+                # evaluated and RECORDED below so the biases stay visible.
+                from .utils import (fsa_current_geometry, Ip_fsa_integral,
+                                    Ip_fsa_weights, eq_jphi_profile, close_ip)
+                from .sampling import get_li_proxy_geometry
+                from scipy import integrate as _integ
+                _psi_ip = np.asarray(psi_N, dtype=float)
+                _eq_snap = _anchor["eq"]          # frozen BEFORE solve_with_bootstrap
+                _geom = _anchor["geom"]
+                _inv_r2_src = _anchor["inv_r2_src"]
+                _probe = eq_jphi_profile(_geom, "jphi-linterp", eq=_eq_snap)
+                # P' sign: identically +1 BY CONSTRUCTION.  The affine c term
+                # is built from the ANCHOR's own get_profiles P' on the
+                # anchor's own geometry -- the same solved equilibrium -- so
+                # the GS identity fixes its orientation; the external (FUSE)
+                # profile carries no P' and its current-direction convention
+                # enters only through sgn/abs handling of the linear parts
+                # below.  Two failed detectors are retired here: the old
+                # sign(dot(eq j_phi, cp j_tor)) heuristic tested a
+                # current-direction convention (it flipped on ohmic-ramp
+                # slices, costing +1.31% of Ip), and the "self-consistency
+                # probe" that replaced it was a tautology -- the probe is
+                # built with pprime_sign=+1, so +1 reproduced the anchor's Ip
+                # to machine precision and could never lose (adversarial
+                # review, 2026-09-01).  The roundtrip gate below validates
+                # the measure either way.
+                _pps = 1.0
+                _ip = lambda j: float(Ip_fsa_integral(
+                    _eq_snap, _psi_ip, np.asarray(j, dtype=float),
+                    convention="jphi-linterp", pprime_sign=_pps, geom=_geom))
+                # The jphi-linterp measure is AFFINE: I_p[J] = int w J + c, with c
+                # the P'-term of the GS source (~3% of Ip). Summing per-component
+                # _ip() calls counts c once PER COMPONENT -- the first version of
+                # this closure did exactly that and landed the hybrid +4.5% over
+                # Ip (which TokaMaker would then have renormalised out of the whole
+                # shape, j_BS included). Close on the LINEAR part and carry c once.
+                _w_lin, _c_affine = Ip_fsa_weights(_geom, convention="jphi-linterp",
+                                                   pprime_sign=_pps)
+                _lin = lambda j: float(_integ.trapezoid(
+                    _w_lin * np.asarray(j, dtype=float), np.asarray(_geom["psi_N"], float)))
+                # the measure's own self-consistency: the equilibrium's OWN
+                # profile must integrate to its true Ip (validated +0.0055%)
+                _ip_roundtrip = _ip(_probe)
+                # NaN is FALSE in every threshold comparison below, so a
+                # non-finite measure would sail through both gates and die
+                # much later in the scale-range guard with a message blaming
+                # the data.  Refuse it here, by name.
+                if not (np.all(np.isfinite(_w_lin)) and np.isfinite(_c_affine)
+                        and np.isfinite(_ip_roundtrip)):
+                    raise RuntimeError(
+                        "ohmic mode: the FSA measure is non-finite (NaN/inf "
+                        "in the weights, the affine P' term, or the "
+                        "roundtrip) -- the anchor geometry or its profiles "
+                        "carry bad values; refusing to close Ip on it")
+                # BQ_CLOSURE_DUMP=<path.npz>: dump the measure's ingredients so the
+                # roundtrip error can be localised in psi_N (diagnostic only).
+                _dumpf = __import__("os").environ.get("BQ_CLOSURE_DUMP")
+                if _dumpf:
+                    _gp = np.asarray(_geom["psi_N"], float)
+                    _cum = _integ.cumulative_trapezoid(_w_lin * np.asarray(_probe, float), _gp, initial=0.0)
+                    np.savez(_dumpf,
+                             psi_N_geom=_gp, w_lin=np.asarray(_w_lin, float),
+                             c_affine=float(_c_affine), probe=np.asarray(_probe, float),
+                             cum_lin=_cum, ip_roundtrip=float(_ip_roundtrip),
+                             Ip_target=float(abs(bl.Ip_target)), pprime_sign=float(_pps),
+                             inv_R2=np.asarray(_geom.get("inv_R2", []), float),
+                             psi_q=np.asarray(_geom.get("psi_q", []), float),
+                             fuse_tot=np.asarray(FUSE_tot, float),
+                             psi_N_kin=np.asarray(psi_N, float))
+                    print(f"[closure-dump] wrote {_dumpf}", flush=True)
+                # recorded-only alternatives
+                _ip_fsaconv = lambda j: float(Ip_fsa_integral(
+                    _eq_snap, _psi_ip, np.asarray(j, dtype=float),
+                    convention="fsa", geom=_geom))   # documented ~+0.9% bias
+                _ip_oft = lambda j: float(_eq_snap.compute_flux_integral(
+                    _psi_ip, np.asarray(j, dtype=float)))
+                _geo_cyl = get_li_proxy_geometry(_eq_snap, psi_N.size, psi_pad)
+                _dA_cyl = np.asarray(_geo_cyl["dA"], dtype=float)
+                _ip_cyl = lambda j: float(_integ.trapezoid(np.asarray(j, float) * _dA_cyl))
+                Ip_t = abs(float(bl.Ip_target))
+                ip_fuse_tot = _ip(FUSE_tot)
+                fuse_tot_err_pct = 100.0 * (abs(ip_fuse_tot) - Ip_t) / Ip_t
+                # Diagnostics BEFORE any gate, so a refusal still leaves the
+                # evidence: is the MEASURE wrong (roundtrip), or does FUSE's
+                # total genuinely not carry Ip (which TokaMaker otherwise hides
+                # by renormalising the shape)?
+                _ip_solved = _anchor["Ip_anchor"]
+                _e = lambda v: 100.0 * (abs(v) - Ip_t) / Ip_t
+                print("[imas SWB-split:ohmic DIAG] Ip_target=%.1f A | FSA roundtrip(eq own profile) %+.3f%% | "
+                      "FSA(FUSE_tot) %+.3f%% | fsa-convention(FUSE_tot) %+.3f%% | OFT compute_flux_integral(FUSE_tot) %+.3f%% | "
+                      "cyl proxy(FUSE_tot) %+.3f%% | anchor eq Ip %+.3f%% | <1/R^2> from %s"
+                      % (Ip_t, _e(_ip_roundtrip), fuse_tot_err_pct, _e(_ip_fsaconv(FUSE_tot)),
+                         _e(_ip_oft(FUSE_tot)), _e(_ip_cyl(FUSE_tot)), _e(_ip_solved), _inv_r2_src), flush=True)
+                # GATE: validity of the MEASURE. The equilibrium's own GS current
+                # profile must round-trip to its Ip (bouquet validated +0.0055%,
+                # measured -0.002% on the FUSE validation case). If it does
+                # not, no closure built
+                # on this geometry is meaningful -- stop. (Re-targeted 2026-08-21,
+                # user-approved: the previous gate tested whether FUSE's total
+                # carries Ip, which is a property of the FUSE DATA, not of the
+                # measure -- and absorbing that deficit into s, visibly, is the
+                # whole point of this mode. In every other mode TokaMaker
+                # absorbs it silently by renormalising the shape.)
+                # Reference: the anchor's ACHIEVED Ip, not Ip_target -- "its
+                # Ip" means the equilibrium the profile came from.  A first
+                # pass that converged 0.6% off target would otherwise fail a
+                # perfect measure (and a 0.4% solver offset would eat most of
+                # the gate's budget while masking a real measure error).
+                _rt_err = 100.0 * (abs(_ip_roundtrip) - _ip_solved) / _ip_solved
+                if abs(_rt_err) > 0.5:
+                    raise RuntimeError(
+                        f"ohmic mode: the FSA current measure does not round-trip "
+                        f"the equilibrium's own profile to its achieved Ip "
+                        f"({_rt_err:+.3f}% vs the anchor's {_ip_solved:.1f} A); "
+                        "the geometry/measure is wrong, refusing to close Ip on it")
+                # Property of the DATA: reported, recorded, absorbed by s.
+                print(f"[imas SWB-split:ohmic] FUSE core_profiles total carries "
+                      f"{fuse_tot_err_pct:+.2f}% of Ip_target (exact FSA measure) "
+                      f"-> absorbed into the closure channel's scale",
+                      flush=True)
+                ip_ind, ip_bs, ip_fix = _lin(j_ind), _lin(j_BS_swb), _lin(j_fixed)
+                # The data's current-direction convention: sign of the LINEAR
+                # total.  (Taking it from _ip(FUSE_tot) folded the anchor's c
+                # into the vote, which could flip it on a low-Ip ramp slice
+                # where |lin| < |c|.)
+                sgn = float(np.sign(ip_ind + ip_bs + ip_fix) or 1.0)
+                # Which channel absorbs the Ip closure -- "bootstrap"
+                # (default): keep j_ohmic exactly as FUSE diffused it,
+                #   lin(ohm) + s_BS * lin(bs) + lin(fix) + c = Ip_target;
+                # "ohmic": rescale j_inductive instead,
+                #   s * lin(ohm) + lin(bs) + lin(fix) + c = Ip_target.
+                # The two are the extreme attributions of the same deficit;
+                # run both to bracket the closure uncertainty.  The algebra
+                # and its refusals live in utils.close_ip so the tests
+                # exercise the SHIPPED formulas, not a re-derivation.
+                _chan = str(getattr(gc, "closure_channel", "bootstrap"))
+                ohm_scale, bs_scale = close_ip(
+                    _chan, sgn * Ip_t, _c_affine, ip_ind, ip_bs, ip_fix)
+                bl.jBS_diff = None
+                bl.bs_scale = float(bs_scale)
+                bl.ohm_scale = float(ohm_scale)
+                bl.j_BS = bs_scale * j_BS_swb
+                bl.j_inductive = ohm_scale * j_ind
+                bl.j_phi = bl.j_inductive + bl.j_BS + j_fixed
+                _closed_err = 100.0 * (abs(_ip(bl.j_phi)) - Ip_t) / Ip_t
+                if abs(_closed_err) > 0.05:
+                    raise RuntimeError(
+                        f"ohmic mode: closed hybrid integrates to {_closed_err:+.3f}% "
+                        "of Ip_target after closure -- algebra error, refusing")
+                _jd = getattr(bl, "jphi_diff", None)
+                ip_jd = _lin(k2e(_jd)) if _jd is not None else 0.0
+                _oft_tot, _oft_bs = _ip_oft(FUSE_tot), _ip_oft(j_BS_swb)
+                _oft_fix, _oft_ind = _ip_oft(j_fixed), _ip_oft(j_ind)
+                _cyl_tot, _cyl_bs = _ip_cyl(FUSE_tot), _ip_cyl(j_BS_swb)
+                _cyl_fix, _cyl_ind = _ip_cyl(j_fixed), _ip_cyl(j_ind)
+                _would_be = lambda tot, bs_, fix_, ind_: (
+                    float(((np.sign(tot) or 1.0) * Ip_t - bs_ - fix_) / ind_)
+                    if abs(ind_) > 1e-6 * Ip_t else float("nan"))
+                bl.ip_closure = dict(
+                    integrator="bouquet Ip_fsa_integral (LCFS-truncated FSA, jphi-linterp) on copy_eq snapshot",
+                    pprime_sign=_pps,
+                    inv_R2_source=_inv_r2_src,
+                    affine_pprime_term_c=float(_c_affine),
+                    affine_pprime_term_pct_of_Ip=100.0 * float(_c_affine) / Ip_t,
+                    fsa_roundtrip_Ip=_ip_roundtrip,
+                    fsa_roundtrip_err_pct=_rt_err,
+                    Ip_anchor=float(_ip_solved),
+                    Ip_target=Ip_t,
+                    Ip_fuse_total=ip_fuse_tot,
+                    fuse_total_err_pct=fuse_tot_err_pct,
+                    Ip_ohmic_unscaled=ip_ind, Ip_jBS_swb=ip_bs, Ip_fixed=ip_fix,
+                    closure_channel=_chan,
+                    ohm_scale=float(ohm_scale), bs_scale=float(getattr(bl, 'bs_scale', 1.0)),
+                    Ip_hybrid=_ip(bl.j_phi),
+                    jphi_diff_dropped_Ip=ip_jd,
+                    jphi_diff_dropped_pct_of_Ip=100.0 * ip_jd / Ip_t,
+                    swb_over_fuse_jBS_peak=float(ratio),
+                    # recorded-only alternatives (NOT used for closure).
+                    # Each integrator runs ONCE per profile (they were
+                    # re-evaluated up to 4x for print+dict), and the would-be
+                    # scales guard their divisor: a ~0 alternative-integrator
+                    # j_ind must record NaN, not raise ZeroDivisionError from
+                    # a diagnostic.  The proxy carries its own sign
+                    # convention (negative on the FUSE validation case where
+                    # OFT's integral is positive), so each would-be uses ITS
+                    # OWN total's sign -- otherwise the diagnostic reads as a
+                    # nonsensical negative rescale.
+                    fsaconv_fuse_total_err_pct=100.0 * (abs(_ip_fsaconv(FUSE_tot)) - Ip_t) / Ip_t,
+                    oft_flux_integral_fuse_total=_oft_tot,
+                    oft_flux_integral_err_pct=100.0 * (abs(_oft_tot) - Ip_t) / Ip_t,
+                    oft_ohm_scale_would_be=_would_be(_oft_tot, _oft_bs,
+                                                     _oft_fix, _oft_ind),
+                    proxy_Ip_fuse_total=_cyl_tot,
+                    proxy_fuse_total_err_pct=100.0 * (abs(_cyl_tot) - Ip_t) / Ip_t,
+                    proxy_ohm_scale_would_be=_would_be(_cyl_tot, _cyl_bs,
+                                                       _cyl_fix, _cyl_ind))
+                print(f"[imas SWB-split:ohmic] channel={_chan} ohm_scale={ohm_scale:.4f} bs_scale={float(getattr(bl,'bs_scale',1.0)):.4f}  "
+                      f"linear Ip parts: ohm={ip_ind/1e6:.3f} jBS={ip_bs/1e6:.3f} "
+                      f"fixed={ip_fix/1e6:.3f} + P'-term c={_c_affine/1e6:+.4f} MA "
+                      f"-> hybrid={_ip(bl.j_phi)/1e6:.4f} "
+                      f"(target {Ip_t/1e6:.4f}); FSA-integral err on FUSE total "
+                      f"{fuse_tot_err_pct:+.2f}% (roundtrip {bl.ip_closure['fsa_roundtrip_err_pct']:+.3f}%) "
+                      f"[OFT compute_flux_integral would be {bl.ip_closure['oft_flux_integral_err_pct']:+.2f}%, "
+                      f"s={bl.ip_closure['oft_ohm_scale_would_be']:.4f}; cyl proxy "
+                      f"{bl.ip_closure['proxy_fuse_total_err_pct']:+.2f}%, s={bl.ip_closure['proxy_ohm_scale_would_be']:.4f}]; "
+                      f"jphi_diff anchor NOT applied ({100*ip_jd/Ip_t:+.2f}% of Ip); "
+                      f"SWB/FUSE jBS peak={ratio:.3f}")
+                # The dropped anchor is recorded above; CLEAR it so it cannot
+                # leak past the baseline: generate() passes bl.jphi_diff
+                # through unconditionally, so a workflow='custom' ohmic
+                # generate() would otherwise fold it into every draw and the
+                # archived baseline while the forward solve below omits it.
+                bl.jphi_diff = None
             else:
                 raise ValueError(f"unknown jBS_baseline_mode {mode!r} "
-                                 "(expected 'diff' or 'rescale')")
+                                 "(expected 'diff', 'rescale' or 'ohmic')")
             # Solve the resulting total so coils + li_1 reflect this equilibrium.
             # Anchor to equilibrium.j_tor (add the fixed jphi_diff) so the baseline
             # l_i/coils reflect the same total the draws use (== equilibrium.j_tor),
             # not the core_profiles total. The diff-mode component split above stays
             # on core_profiles.j_tor; jphi_diff is the fixed equilibrium offset.
             _jphi_solve = np.asarray(bl.j_phi, dtype=float)
-            if getattr(bl, "jphi_diff", None) is not None:
+            # jphi_diff re-anchors the total to FUSE's equilibrium.j_tor; in
+            # 'ohmic' mode the whole point is NOT to anchor to FUSE, so skip it
+            # (its magnitude is recorded in bl.ip_closure for the reader).
+            if getattr(bl, "jphi_diff", None) is not None and mode != "ohmic":
                 _jphi_solve = _jphi_solve + k2e(bl.jphi_diff)
             nl_its = solve_jphi(_jphi_solve)
 
@@ -792,7 +1074,12 @@ class Bouquet:
         metrics = dict(bl.li_metrics or {})
         metrics.update(tokamaker_li_1=tok_li1, tokamaker_li_3=tok_li3,
                        forward_solve_nl_its=nl_its,
-                       forward_solve_ip_err_pct=ip_err_pct)
+                       forward_solve_ip_err_pct=ip_err_pct,
+                       jBS_baseline_mode=str(self.config.generation.jBS_baseline_mode),
+                       bs_scale=float(getattr(bl, "bs_scale", 1.0)),
+                       ohm_scale=float(getattr(bl, "ohm_scale", 1.0)))
+        if getattr(bl, "ip_closure", None):
+            metrics["ip_closure"] = dict(bl.ip_closure)
         bl.li_metrics = metrics
         # Target TokaMaker li_3 ('iter').  The IMAS path is not itself affected
         # by the geqdsk estimator mismatch (both sides come from TokaMaker),
@@ -1127,10 +1414,27 @@ class Bouquet:
                                 "find_optimal_scale/corrector matching loop "
                                 "homogenizes draws; use diff+C "
                                 "(perturb_jind_in_anchor=True)")
-            if gc.jBS_baseline_mode not in ("diff", "rescale"):
+            if gc.jBS_baseline_mode not in ("diff", "rescale", "ohmic"):
                 problems.append(f"IMAS path jBS_baseline_mode="
                                 f"{gc.jBS_baseline_mode!r} not in "
-                                f"('diff','rescale')")
+                                f"('diff','rescale','ohmic')")
+            elif gc.jBS_baseline_mode == "ohmic":
+                if str(getattr(gc, "closure_channel", "bootstrap")) \
+                        not in ("bootstrap", "ohmic"):
+                    # catch the typo HERE: the run-time dispatch only reaches
+                    # its unknown-channel refusal after the full SWB solve
+                    problems.append(
+                        f"closure_channel="
+                        f"{gc.closure_channel!r} not in "
+                        f"('bootstrap','ohmic')")
+                # Baseline-only for now: the draw path's sigma=0 reproduction
+                # of an ohmic-closed baseline has not been verified, so the
+                # UQ ensemble refuses the mode rather than silently drawing
+                # around an unvalidated split.
+                problems.append(
+                    "jBS_baseline_mode='ohmic' is baseline-only for now "
+                    "(draw-path sigma=0 reproduction unverified); run the "
+                    "baseline study without generate()")
         if not problems:
             return
         msg = ("bouquet workflow guard: " + "; ".join(problems)

@@ -384,7 +384,21 @@ class GenerationConfig:
     #               misalignment when the perturbed pedestal moves).
     #   "rescale" : keep FUSE ohmic; rescale SWB by a single factor so l_i
     #               matches the source (fully self-consistent bootstrap).
+    #   "ohmic"   : HYBRID. SWB bootstrap (from the kinetic source, e.g. IDA)
+    #               and FUSE NBI/RF taken as-is; Ip closed by rescaling FUSE
+    #               j_ohmic only (factor recorded as Baseline.ohm_scale). The
+    #               jphi_diff equilibrium anchor is NOT applied. Use when the
+    #               kinetic source has a materially different pedestal than
+    #               FUSE -- "diff" would erase that current change.
     jBS_baseline_mode: str = "diff"
+    #: Which channel absorbs the Ip closure in jBS_baseline_mode="ohmic":
+    #: "bootstrap" (default) keeps j_inductive exactly as the source diffused it
+    #: and rescales j_BS; "ohmic" rescales j_inductive instead (shape preserved).
+    #: Bootstrap is the default because it preserves the source's core current --
+    #: closure on j_ohmic hollows the core and lifts q_min against the measured
+    #: value whenever the recomputed bootstrap fraction is far above the source's.
+    #: Run both channels to bracket the closure uncertainty.
+    closure_channel: str = "bootstrap"
     # Fix B: when the recon-anchor's equilibrium l_i is already within the band,
     # accept the anchor and skip find_optimal_scale + the corrective iteration
     # (which otherwise overshoot l_i and drift degenerate coils off baseline).

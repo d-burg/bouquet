@@ -74,6 +74,12 @@ class Baseline:
     # _forward_solve_imas_baseline, mirroring the g-file fit_inductive_profile).
     # 1.0 means no rebuild was done (raw source split kept).
     bs_scale: float = 1.0
+    # 'ohmic' mode only: factor applied to FUSE j_inductive so the hybrid
+    # (s*j_ohm + SWB_jBS + j_fixed) integrates to Ip_target. 1.0 otherwise.
+    ohm_scale: float = 1.0
+    # 'ohmic' mode bookkeeping: proxy-Ip of each component, the proxy's own
+    # error on the FUSE total, and the jphi_diff anchor that was NOT applied.
+    ip_closure: Optional[dict] = None
 
     # Case-B ("diff") fixed bootstrap correction profile [A/m^2] = FUSE_jBS - SWB,
     # added to the baseline AND every draw's j_phi so the total anchors to the

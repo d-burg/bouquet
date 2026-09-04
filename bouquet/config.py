@@ -183,10 +183,12 @@ class FixedComponentsConfig:
     # How to collapse anisotropic fast-ion pressure (p_perp, p_par) to the scalar
     # p_fast that a scalar-pressure GS solver needs. See
     # bouquet.physics.isotropize_fast_pressure.
-    #   "trace" -> (2*p_perp + p_par)/3   [DEFAULT; tr(P)/3, preserves fast energy]
+    #   "sum"   -> p_par + 2*p_perp         [DEFAULT; IMAS.jl stores per-degree-of-freedom
+    #                                       fields, pressa/3 each -- "trace" keeps 1/3 of p_fast]
+    #   "trace" -> (2*p_perp + p_par)/3   [tr(P)/3 for sources storing full p_perp/p_par]
     #   "mean"  -> (p_perp + p_par)/2
     #   "perp"  -> p_perp                 (diamagnetic-dominant)
-    p_fast_reduction: str = "trace"
+    p_fast_reduction: str = "sum"
 
 
 # ---------------------------------------------------------------------------
@@ -543,9 +545,9 @@ class BouquetConfig:
                 f"{type(src).__name__}"
             )
 
-        if self.fixed_components.p_fast_reduction not in ("trace", "mean", "perp"):
+        if self.fixed_components.p_fast_reduction not in ("trace", "mean", "perp", "sum"):
             raise ValueError(
-                "fixed_components.p_fast_reduction must be 'trace', 'mean', or 'perp'"
+                "fixed_components.p_fast_reduction must be 'trace', 'mean', 'perp', or 'sum'"
             )
         if self.uncertainty.sigma_mode not in ("auto", "direct", "ensemble"):
             raise ValueError("uncertainty.sigma_mode must be 'auto', 'direct', or 'ensemble'")

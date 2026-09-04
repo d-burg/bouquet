@@ -243,7 +243,7 @@ def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impu
 def read_imas_baseline(
     source: "ImasSource",
     fixed: Optional["FixedComponentsConfig"] = None,
-    p_fast_reduction: str = "trace",
+    p_fast_reduction: str = "sum",
     allow_incomplete_pressure: bool = False,
     anchor_jtor_to_equilibrium: bool = True,
     kinetic_source: str = "fuse",

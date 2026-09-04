@@ -544,3 +544,13 @@ class TestFloorInductiveSplit:
         j_bs = np.full(9, 0.2e6)
         ji2, jb2 = floor_inductive_split(j_ind, j_bs)
         assert np.array_equal(ji2, j_ind) and np.array_equal(jb2, j_bs)
+
+
+def test_isotropize_sum_recovers_imas_per_dof_fast_pressure():
+    """IMAS.jl stores pressa/3 in each directional field; 'sum' recovers pressa,
+    'trace' returns pressa/3 (the defect seen on FUSE dds)."""
+    from bouquet.physics import isotropize_fast_pressure
+    pressa = np.array([3.0e4, 1.5e4, 0.0])
+    p_perp = p_par = pressa / 3.0
+    assert np.allclose(isotropize_fast_pressure(p_perp, p_par, method="sum"), pressa)
+    assert np.allclose(isotropize_fast_pressure(p_perp, p_par, method="trace"), pressa / 3.0)

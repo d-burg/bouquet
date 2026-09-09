@@ -539,7 +539,7 @@ def resolve_uncertainty(config, baseline) -> dict:
         ida = read_ida(
             ida_path, time=getattr(src, "time", None),
             sigma_mode=unc.sigma_mode, sigma_method=unc.sigma_method,
-            sigma_ni_from_ne=unc.sigma_ni_from_ne,
+            ni_source=getattr(src, "ni_source", "all"),
             # the carbon tier's Z(Z-1) propagation is quadratically
             # Z-sensitive; the kinetics loader already passes this, and
             # omitting it here silently pinned the sigma math to carbon
@@ -624,6 +624,14 @@ def resolve_uncertainty(config, baseline) -> dict:
             stacklevel=2,
         )
 
+    # --- who draws ni when the zeff channel is active ------------------------
+    # Auto: hand ni back to its own sigma whenever that sigma is a real envelope
+    # (an IDA ni_source route, or an explicit array) rather than the flat
+    # ni_scalar_sigma fallback. An explicit UncertaintyConfig.ni_from_zeff wins.
+    _nfz = getattr(unc, "ni_from_zeff", None)
+    out["ni_from_zeff"] = (bool(_won["ni"].startswith("scalar"))
+                           if _nfz is None else bool(_nfz))
+
     # --- switchboard: resolve the auxiliary perturbed profiles ---------------
     # A sigma entry enables a profile. Baseline = manual (aux_baselines) over
     # source-provided (baseline.aux). Warn + skip if the baseline is absent or
@@ -632,10 +640,11 @@ def resolve_uncertainty(config, baseline) -> dict:
     man_base = dict(unc.aux_baselines or {})
 
     # Z_eff channel is enabled by default for EVERY source (the consistent
-    # density scheme): unless the user set an explicit aux_sigmas['zeff'], a
-    # flat fractional envelope zeff_scalar_sigma * Z_eff_baseline is injected.
-    # The baseline Z_eff is source-provided (baseline.aux['zeff'] for IMAS,
-    # else baseline.Zeff for the reconstruction path), on the kinetic grid.
+    # density scheme): unless the user set an explicit aux_sigmas['zeff'], the
+    # envelope is the IDA Zeff_err when an IDA is in play, else a flat fractional
+    # zeff_scalar_sigma * Z_eff_baseline. zeff_scalar_sigma still GATES the
+    # channel either way (0.0 -> disabled). The baseline Z_eff is source-provided
+    # (baseline.aux['zeff'] for IMAS, else baseline.Zeff), on the kinetic grid.
     user_sigmas = dict(unc.aux_sigmas or {})
     # Provenance of the Z_eff envelope, always present: None when the ladder
     # never ran (an explicit aux_sigmas['zeff'], or the channel disabled),
@@ -766,7 +775,8 @@ def _load_kinetic_profiles(source) -> dict:
     path = source.profiles_path
     if path.endswith(".cdf"):
         from .io.ida import read_ida
-        ida = read_ida(path, time=source.time, impurity_Z=source.impurity_Z)
+        ida = read_ida(path, time=source.time, impurity_Z=source.impurity_Z,
+                       ni_source=source.ni_source)
         return dict(
             psi_N=np.asarray(ida.psi_N, dtype=float),
             ne=np.asarray(ida.ne, dtype=float),

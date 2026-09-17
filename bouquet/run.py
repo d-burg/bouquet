@@ -1290,6 +1290,8 @@ class Bouquet:
                 axis=(None if axis is None else dict(axis)),
                 w_lin=np.asarray(w_lin, dtype=float),
                 c_signed=float(c_signed), Ip_signed=float(sgn * Ip_t),
+                ip_ind=float(ip_ind), ip_bs=float(ip_bs),
+                ip_fix=float(ip_fix),
                 basis=basis_spec, weights=wspec,
                 q0_tol=float(getattr(gc, "q0_tol", 0.01)),
                 gated=bool(gated),
@@ -1307,7 +1309,8 @@ class Bouquet:
                 float(out["bs_scale_eff"]), extra, state)
 
     @staticmethod
-    def _close_ip_structured_corrector(state, bl, mygs, solve_jphi):
+    def _close_ip_structured_corrector(state, bl, mygs, solve_jphi,
+                                       ip_of=None, roundtrip_gate=None):
         """Correct q0 and/or l_i after the structured solve, at most 2 solves.
 
         Same contract and (by default) the same cost ceiling as
@@ -1494,8 +1497,28 @@ class Bouquet:
                      and q0_target != 0.0)
         li_usable = (li_target is not None and np.isfinite(li_tok)
                      and li_tok > 0.0 and float(li_target) > 0.0)
-        want_q0 = bool(gated and abs(res) > state["q0_tol"])
-        want_li = bool(li_target is not None and abs(li_res) > li_tol)
+        # BEFORE the tolerance tests: abs(nan) > tol is False, so a non-finite
+        # solved q0 or l_i used to make BOTH want_* False and the slice was
+        # reported as "predictor accepted, no extra solve" with
+        # closure_limited untouched -- the readback failing is not the same
+        # thing as the readback landing inside tolerance.  The q0_usable /
+        # li_usable guards below could not catch it either: they were only
+        # consulted once want_* had already been decided.
+        q0_unreadable = bool(gated and not (np.isfinite(q0_tok)
+                                            and np.isfinite(res)))
+        li_unreadable = bool(li_target is not None
+                             and not (np.isfinite(li_tok)
+                                      and np.isfinite(li_res)))
+        if q0_unreadable:
+            reasons.append("q0 is not finite: no residual and no corrector "
+                           "step")
+        if li_unreadable:
+            reasons.append("l_i is not finite: no residual and no corrector "
+                           "step")
+        want_q0 = bool(gated and not q0_unreadable
+                       and abs(res) > state["q0_tol"])
+        want_li = bool(li_target is not None and not li_unreadable
+                       and abs(li_res) > li_tol)
         if want_q0 and not q0_usable:
             reasons.append("q0 reference unusable for a step")
             want_q0 = False
@@ -1577,11 +1600,17 @@ class Bouquet:
                         p_use = (float(LI_GAIN_EXPONENT) if p_sec is None
                                  else float(p_sec))
                     li_exponents.append(p_use)
-                    li_row = li_corrector_row(li_target, li_cur, row=li_row,
-                                              exponent=p_use)
                 try:
+                    # INSIDE the try: li_corrector_row raises ValueError (not
+                    # RuntimeError) on a non-positive or non-finite l_i, and
+                    # the docstring above promises that a refusal here keeps
+                    # the last accepted equilibrium rather than killing the
+                    # run.
+                    if want_li:
+                        li_row = li_corrector_row(li_target, li_cur,
+                                                  row=li_row, exponent=p_use)
                     out = _resolve(axis, li_row)
-                except RuntimeError as e:
+                except (RuntimeError, ValueError) as e:
                     _kept = ("predictor" if n_solves == 0
                              else f"corrector step {n_solves}")
                     rec.update(structured_corrector_refusal=str(e)[:300])
@@ -1724,44 +1753,88 @@ class Bouquet:
                             f"s_bs {s_bs.min():.3f}-{s_bs.max():.3f}")
                 print("".join(_msg), flush=True)
 
+        rec["ohm_scale"] = float(getattr(bl, "ohm_scale", 1.0))
+        rec["bs_scale"] = float(getattr(bl, "bs_scale", 1.0))
+
+        # ---- the health record, re-derived from what was DELIVERED ---------
+        # The predictor's block was computed from the PREDICTOR's effective
+        # scalars.  A corrector solve replaces both, so f_BS_closed and the
+        # bs_scale reason describe a closure this run did not deliver -- and
+        # `closure_limited` could not acquire a new reason at all, because the
+        # soft-Ip branch rebuilt it from the predictor's reason tuple.  One
+        # refresh, from the delivered scales, same function and thresholds;
+        # everything below then appends to THAT.
+        from .utils import closure_health, SOFT_IP_FLAG_PREFIX
+        _prev = getattr(bl, "ip_closure", None) or {}
+        _z_for_health = ip_z_final if (soft and ip_z_final is not None
+                                       and np.isfinite(ip_z_final)) else None
+        _health = closure_health(rec["ohm_scale"], rec["bs_scale"],
+                                 state["Ip_signed"], state["c_signed"],
+                                 state["ip_ind"], state["ip_bs"],
+                                 state["ip_fix"],
+                                 soft_ip_residual_sigma=_z_for_health)
+        _reasons = list(_health["closure_limited_reasons"])
+        if soft and _z_for_health is None:
+            # No corrector re-solve, so nothing new to say about the
+            # posterior: carry the predictor's soft-Ip flag rather than
+            # dropping it.
+            _reasons += [r for r in (_prev.get("closure_limited_reasons", ())
+                                     or ())
+                         if str(r).startswith(SOFT_IP_FLAG_PREFIX)]
+
+        def _flag(why):
+            if why not in _reasons:
+                _reasons.append(why)
+            print("[imas SWB-split:ohmic structured] WARNING closure-limited: "
+                  + why, flush=True)
+
+        # A readback that could not be taken at all.
+        for _why in reasons:
+            if "not finite" in _why:
+                _flag(_why)
+
         # Hard-channel l_i acceptance: FLAG, never retry.  The corrected
         # residual is the delivered one, so this is the first place in the
         # record where a missed hard l_i row can be seen at all.
         _lres_final = rec.get("structured_li_residual_corrected")
-        if (li_target is not None and not soft and _lres_final is not None
-                and np.isfinite(_lres_final)
-                and abs(float(_lres_final)) > li_tol):
-            _prev = getattr(bl, "ip_closure", None) or {}
-            _old = tuple(_prev.get("closure_limited_reasons", ()) or ())
-            _why = (f"l_i misses its hard row by {float(_lres_final):+.4f} "
-                    f"(> tol {li_tol:g}) after {rec.get('n_extra_solves', 0)} "
-                    "corrector solve(s)")
-            if _why not in _old:
-                rec["closure_limited_reasons"] = _old + (_why,)
-            rec["closure_limited"] = True
-            print("[imas SWB-split:ohmic structured] WARNING closure-limited: "
-                  + _why, flush=True)
+        if li_target is not None and not soft:
+            if _lres_final is None or not np.isfinite(_lres_final):
+                _flag("l_i was not readable after the corrector "
+                      f"({_lres_final!r})")
+            elif abs(float(_lres_final)) > li_tol:
+                _flag(f"l_i misses its hard row by {float(_lres_final):+.4f} "
+                      f"(> tol {li_tol:g}) after "
+                      f"{rec.get('n_extra_solves', 0)} corrector solve(s)")
 
-        # Soft-channel Ip acceptance: the same FLAG, on the DELIVERED posterior.
-        # The predictor already wrote one; a corrector re-solve moved the
-        # posterior, so replace it rather than letting two stale numbers stack.
-        if soft and ip_z_final is not None and np.isfinite(ip_z_final):
-            from .utils import SOFT_IP_FLAG_PREFIX
-            _prev = getattr(bl, "ip_closure", None) or {}
-            _keep = tuple(r for r in (_prev.get("closure_limited_reasons", ())
-                                      or ())
-                          if not str(r).startswith(SOFT_IP_FLAG_PREFIX))
-            if abs(float(ip_z_final)) > 1.0:
-                _why = (SOFT_IP_FLAG_PREFIX
-                        + f" (z_Ip = {float(ip_z_final):+.2f})")
-                _keep = _keep + (_why,)
-                print("[imas SWB-split:ohmic structured] WARNING "
-                      "closure-limited: " + _why, flush=True)
-            rec["closure_limited_reasons"] = _keep
-            rec["closure_limited"] = bool(_keep)
+        # Soft-channel Ip acceptance: the same FLAG, on the DELIVERED
+        # posterior.  closure_health already carries it when the corrector
+        # re-solved (soft_ip_residual_sigma above); nothing stacks, because
+        # the predictor's copy of that flag was dropped with the rest of the
+        # predictor's block.
+        rec["closure_limited_reasons"] = tuple(_reasons)
+        rec["closure_limited"] = bool(_reasons)
+        for _k, _v in _health.items():
+            if _k not in ("closure_limited", "closure_limited_reasons"):
+                rec[_k] = _v
 
-        rec["ohm_scale"] = float(getattr(bl, "ohm_scale", 1.0))
-        rec["bs_scale"] = float(getattr(bl, "bs_scale", 1.0))
+        # ---- the assembly gates, re-taken on the delivered profile ---------
+        # The corrector reassembles bl.j_phi and nothing re-checked it: the
+        # round-trip gate exists to catch an assembly, and this IS one.  Same
+        # gate, same tolerance, same reference rule (the soft channel's
+        # posterior moves with the re-solve, so the refreshed posterior is
+        # what it is compared against -- see utils.ip_roundtrip_gate).
+        if ip_of is not None:
+            rec["Ip_hybrid"] = float(ip_of(bl.j_phi))
+            if roundtrip_gate is not None:
+                _g2 = roundtrip_gate(
+                    rec["Ip_hybrid"],
+                    posterior=(rec.get("structured_ip_posterior") if soft
+                               else None),
+                    sigma_Ip=(state.get("ip_sigma") if soft else None))
+                rec["structured_roundtrip_post_corrector_err_pct"] = float(
+                    _g2["err_pct"])
+                rec["structured_roundtrip_post_corrector_reference"] = \
+                    _g2["reference_name"]
         if getattr(bl, "ip_closure", None) is not None:
             bl.ip_closure.update(rec)
         return nl_out
@@ -2598,7 +2671,8 @@ class Bouquet:
             # then share the one extra solve).
             if _structured_state is not None:
                 _nl_corr = self._close_ip_structured_corrector(
-                    _structured_state, bl, mygs, solve_jphi)
+                    _structured_state, bl, mygs, solve_jphi,
+                    ip_of=_ip, roundtrip_gate=ip_roundtrip_gate)
                 if _nl_corr is not None:
                     nl_its = _nl_corr
 

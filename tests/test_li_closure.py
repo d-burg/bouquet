@@ -1025,11 +1025,12 @@ class TestLiCorrectorGainLaw:
 class _FakeSnap:
     """Enough of a TokaMaker ``copy_eq()`` snapshot for the corrector."""
 
-    def __init__(self, li):
+    def __init__(self, li, q0=1.05):
         self._li = float(li)
+        self._q0 = float(q0)
 
     def get_q(self, psi=None, compute_geo=False):
-        return (np.asarray(psi, dtype=float), np.full(np.size(psi), 1.05),
+        return (np.asarray(psi, dtype=float), np.full(np.size(psi), self._q0),
                 None, None)
 
     def get_stats(self, lcfs_pad=None, li_normalization=None):
@@ -1041,7 +1042,7 @@ class _FakeGS:
         self._world = world
 
     def copy_eq(self):
-        return _FakeSnap(self._world["li"])
+        return _FakeSnap(self._world["li"], self._world.get("q0", 1.05))
 
 
 class _FakeBaseline:
@@ -1053,7 +1054,9 @@ class _FakeBaseline:
 
 
 def _stub_corrector(monkeypatch, p_true, target, C=None, li_sigma=None,
-                    max_steps=1, soft=False, ip_sigma=None, ip_post=None):
+                    max_steps=1, soft=False, ip_sigma=None, ip_post=None,
+                    state_extra=None, ip_of=None, roundtrip_gate=None,
+                    bl=None, solver_raises=None, bs_eff=1.0, q0=1.05):
     """Run ``_close_ip_structured_corrector`` against ``achieved = C row**p``.
 
     The closure solvers and ``li_achieved`` are stubbed: what is under test is
@@ -1066,14 +1069,18 @@ def _stub_corrector(monkeypatch, p_true, target, C=None, li_sigma=None,
 
     if C is None:
         C = 0.97 * target / target ** p_true
-    world = {"li": C * target ** p_true, "row": float(target), "solves": 0}
+    world = {"li": C * target ** p_true, "row": float(target), "solves": 0,
+             "q0": q0}
 
     def _fake_solver(*a, **kw):
+        if solver_raises is not None:
+            raise solver_raises
         row = kw["li_target"]
         world["row"] = float(row)
         _post = 1.0e6 if ip_post is None else float(ip_post)
         return dict(s_ind=np.ones(5), s_bs=np.ones(5), a=[1.0], b=[1.0],
-                    ohm_scale_eff=1.0, bs_scale_eff=1.0, structure_ind=0.0,
+                    ohm_scale_eff=1.0, bs_scale_eff=float(bs_eff),
+                    structure_ind=0.0,
                     structure_bs=0.0, ip_residual_pct=0.0,
                     Ip_hybrid=_post, ip_residual=_post - 1.0e6,
                     residual_sigma_Ip=(None if not ip_sigma
@@ -1092,20 +1099,25 @@ def _stub_corrector(monkeypatch, p_true, target, C=None, li_sigma=None,
         world["li"] = C * world["row"] ** p_true
         return 7
 
-    bl = _FakeBaseline()
+    bl = _FakeBaseline() if bl is None else bl
     state = dict(
         q0_target=1.05, psi_q=np.linspace(0.0, 1.0, 5),
         psi_geom=np.linspace(0.0, 1.0, 5),
         j_ind=np.ones(5), j_BS_swb=np.ones(5), j_fixed=np.zeros(5),
         axis=None, w_lin=np.ones(5), c_signed=0.0, Ip_signed=1.0e6,
+        # linear Ip parts, consistent with Ip_signed so the refreshed
+        # closure-health block is clean unless a case makes it dirty
+        ip_ind=7.0e5, ip_bs=3.0e5, ip_fix=0.0,
         basis=None, weights=None, q0_tol=0.01, gated=False, soft=soft,
         ip_sigma=ip_sigma, sigma_ind=None, sigma_bs=None,
         li_target=float(target), li_sigma=li_sigma, li_kind="li_1",
         li_geom={"perimeter": 4.2}, psi_pad=1e-3, li_tol=0.005,
         li_max_corrector_steps=max_steps,
     )
+    state.update(state_extra or {})
     Bouquet._close_ip_structured_corrector(state, bl, _FakeGS(world),
-                                           _solve_jphi)
+                                           _solve_jphi, ip_of=ip_of,
+                                           roundtrip_gate=roundtrip_gate)
     return bl.ip_closure, world
 
 
@@ -1274,3 +1286,194 @@ class TestCorrectorKeepsThePosteriorIp:
                                                                rel=1e-12)
         assert "structured_residual_sigma_Ip" not in rec
         assert rec["closure_limited"] is False
+
+
+# ---------------------------------------------------------------------------
+class TestCorrectorRefusalAndHealthPaths:
+    """The corrector's delivery side: what it flags, what it keeps, what it
+    re-checks.  Every branch here decides which equilibrium ships, and none of
+    them was reached by the suite before.
+    """
+
+    IP = 1.0e6
+    SIG = 0.005 * 1.0e6
+
+    # ---- B4: a readback that could not be taken --------------------------
+    def test_a_non_finite_q0_is_not_reported_as_predictor_accepted(
+            self, monkeypatch):
+        """``abs(nan) > tol`` is False, so a NaN q0 used to make want_q0 False
+        and print "predictor accepted, no extra solve" with closure_limited
+        untouched.  The usable-reference guards could not catch it: they were
+        only consulted after want_* had been decided."""
+        rec, world = _stub_corrector(monkeypatch, 2.0, 0.9,
+                                     C=0.9 / 0.9 ** 2.0,   # l_i lands exactly
+                                     q0=float("nan"),
+                                     state_extra=dict(gated=True))
+        assert world["solves"] == 0
+        assert rec["n_extra_solves"] == 0
+        assert "not finite" in rec["sawtooth_verdict"]
+        assert "predictor accepted" not in rec["sawtooth_verdict"]
+        assert rec["closure_limited"] is True
+        assert any("q0 is not finite" in str(r)
+                   for r in rec["closure_limited_reasons"])
+
+    def test_a_non_finite_li_is_not_reported_as_predictor_accepted(
+            self, monkeypatch):
+        rec, world = _stub_corrector(monkeypatch, 2.0, 0.9, C=float("nan"))
+        assert world["solves"] == 0
+        assert "not finite" in rec["sawtooth_verdict"]
+        assert rec["closure_limited"] is True
+        assert any("l_i is not finite" in str(r)
+                   for r in rec["closure_limited_reasons"])
+
+    def test_a_finite_readback_inside_tolerance_is_still_clean(self,
+                                                               monkeypatch):
+        """The guard must not make every slice closure-limited."""
+        T = 0.9
+        rec, world = _stub_corrector(monkeypatch, 2.0, T, C=T / T ** 2.0,
+                                     q0=1.05, state_extra=dict(gated=True))
+        assert world["solves"] == 0
+        assert rec["sawtooth_verdict"] == "structured predictor (0 extra solves)"
+        assert rec["closure_limited"] is False
+        assert rec["closure_limited_reasons"] == ()
+
+    # ---- B8 / "keep the predictor" ---------------------------------------
+    @pytest.mark.parametrize("exc", [
+        RuntimeError("close_ip_structured: singular KKT system"),
+        ValueError("close_ip_structured: 1 basis functions but 4/4 weights"),
+    ])
+    def test_a_refused_re_solve_keeps_the_predictor(self, monkeypatch, exc):
+        """The docstring promises the last accepted equilibrium is KEPT.  The
+        ValueError half of that promise was not kept: ``close_ip_structured``
+        raises ValueError on a bad basis or weight spec and only RuntimeError
+        was caught."""
+        rec, world = _stub_corrector(monkeypatch, 2.0, 0.9, solver_raises=exc)
+        assert world["solves"] == 0
+        assert rec["n_extra_solves"] == 0
+        assert rec["sawtooth_verdict"] == ("structured predictor kept "
+                                           "(corrector step refused)")
+        assert str(exc)[:20] in rec["structured_corrector_refusal"]
+        # the predictor's own residual is still the delivered one
+        assert rec["structured_li_residual_corrected"] == rec[
+            "structured_li_residual_predictor"]
+
+    def test_a_row_update_refusal_is_caught_too(self, monkeypatch):
+        """``li_corrector_row`` raises ValueError on a non-positive or
+        non-finite l_i and used to be called OUTSIDE the try."""
+        from bouquet import utils
+
+        def _boom(*a, **kw):
+            raise ValueError("li_corrector_row: non-finite l_i")
+        monkeypatch.setattr(utils, "li_corrector_row", _boom)
+        rec, world = _stub_corrector(monkeypatch, 2.0, 0.9)
+        assert world["solves"] == 0
+        assert "refused" in rec["sawtooth_verdict"]
+        assert "li_corrector_row" in rec["structured_corrector_refusal"]
+
+    # ---- B9: the health record describes what was delivered ---------------
+    def test_a_corrector_that_deepens_the_downscale_is_flagged(self,
+                                                               monkeypatch):
+        """The predictor lands a healthy bs_scale, the corrector solve returns
+        one under bs_scale_min.  The record used to keep the predictor's."""
+        rec, world = _stub_corrector(monkeypatch, 2.0, 0.9, bs_eff=0.41)
+        assert world["solves"] == 1
+        assert rec["bs_scale"] == pytest.approx(0.41)
+        assert rec["closure_limited"] is True
+        assert any("bs_scale" in str(r)
+                   for r in rec["closure_limited_reasons"])
+        # f_BS_closed follows the DELIVERED bootstrap
+        assert rec["f_BS_closed"] == pytest.approx(0.41 * 3.0e5 / 1.0e6,
+                                                   rel=1e-12)
+
+    def test_the_health_block_is_refreshed_even_with_no_corrector_solve(
+            self, monkeypatch):
+        T = 0.9
+        rec, _ = _stub_corrector(monkeypatch, 2.0, T, C=T / T ** 2.0)
+        assert rec["f_BS_closed"] == pytest.approx(3.0e5 / 1.0e6, rel=1e-12)
+        assert rec["raw_components_ip_mismatch_pct"] == pytest.approx(
+            0.0, abs=1e-12)
+
+    def test_a_soft_flag_does_not_stack_across_the_refresh(self, monkeypatch):
+        from bouquet.utils import SOFT_IP_FLAG_PREFIX
+
+        bl = _FakeBaseline()
+        bl.ip_closure["closure_limited_reasons"] = (
+            SOFT_IP_FLAG_PREFIX + " (z_Ip = +1.90)",)
+        bl.ip_closure["closure_limited"] = True
+        rec, _ = _stub_corrector(monkeypatch, 2.0, 0.9, li_sigma=0.04,
+                                 soft=True, ip_sigma=self.SIG,
+                                 ip_post=self.IP * 1.008, bl=bl)
+        assert sum(str(r).startswith(SOFT_IP_FLAG_PREFIX)
+                   for r in rec["closure_limited_reasons"]) == 1
+        assert "+1.60" in " ".join(rec["closure_limited_reasons"])
+
+    def test_a_stale_soft_flag_is_kept_when_no_corrector_solve_ran(
+            self, monkeypatch):
+        """Nothing new to say about the posterior -> the predictor's flag
+        stands rather than being silently dropped by the refresh."""
+        from bouquet.utils import SOFT_IP_FLAG_PREFIX
+
+        T = 0.9
+        bl = _FakeBaseline()
+        bl.ip_closure["closure_limited_reasons"] = (
+            SOFT_IP_FLAG_PREFIX + " (z_Ip = +1.90)",)
+        bl.ip_closure["closure_limited"] = True
+        rec, world = _stub_corrector(monkeypatch, 2.0, T, C=T / T ** 2.0,
+                                     li_sigma=0.04, soft=True,
+                                     ip_sigma=self.SIG, bl=bl)
+        assert world["solves"] == 0
+        assert rec["closure_limited"] is True
+        assert any(str(r).startswith(SOFT_IP_FLAG_PREFIX)
+                   for r in rec["closure_limited_reasons"])
+
+    # ---- B10: the assembly gate, re-run on the delivered hybrid -----------
+    def test_the_roundtrip_gate_re_runs_after_the_corrector(self, monkeypatch):
+        from bouquet.utils import ip_roundtrip_gate
+
+        seen = []
+
+        def _gate(ip, posterior=None, sigma_Ip=None):
+            seen.append((float(ip), posterior, sigma_Ip))
+            return ip_roundtrip_gate(ip, self.IP, posterior=posterior,
+                                     sigma_Ip=sigma_Ip)
+        post = self.IP * 1.003
+        rec, world = _stub_corrector(
+            monkeypatch, 2.0, 0.9, li_sigma=0.04, soft=True,
+            ip_sigma=self.SIG, ip_post=post,
+            ip_of=lambda j: post, roundtrip_gate=_gate)
+        assert world["solves"] == 1
+        assert rec["Ip_hybrid"] == pytest.approx(post, rel=1e-12)
+        # the SOFT reference is the refreshed posterior, not the measurement
+        assert seen == [(post, pytest.approx(post, rel=1e-12), self.SIG)]
+        assert rec["structured_roundtrip_post_corrector_reference"] == \
+            "the closure's own posterior Ip"
+        assert abs(rec["structured_roundtrip_post_corrector_err_pct"]) < 1e-9
+
+    def test_a_hard_channel_re_gates_against_the_measurement(self,
+                                                             monkeypatch):
+        from bouquet.utils import ip_roundtrip_gate
+
+        seen = []
+
+        def _gate(ip, posterior=None, sigma_Ip=None):
+            seen.append((posterior, sigma_Ip))
+            return ip_roundtrip_gate(ip, self.IP, posterior=posterior,
+                                     sigma_Ip=sigma_Ip)
+        rec, _ = _stub_corrector(monkeypatch, 2.0, 0.9,
+                                 ip_of=lambda j: self.IP, roundtrip_gate=_gate)
+        assert seen == [(None, None)]
+        assert rec["structured_roundtrip_post_corrector_reference"] == \
+            "Ip_target"
+
+    def test_a_bad_assembly_after_the_corrector_is_refused(self, monkeypatch):
+        """The corrector IS an assembly; the gate that exists to catch a bad
+        one has to see it."""
+        from bouquet.utils import ip_roundtrip_gate
+
+        with pytest.raises(RuntimeError, match="algebra error"):
+            _stub_corrector(monkeypatch, 2.0, 0.9,
+                            ip_of=lambda j: self.IP * 1.01,
+                            roundtrip_gate=lambda ip, posterior=None,
+                            sigma_Ip=None: ip_roundtrip_gate(
+                                ip, self.IP, posterior=posterior,
+                                sigma_Ip=sigma_Ip))

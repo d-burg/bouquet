@@ -712,6 +712,54 @@ class TestIpRoundtripGate:
         assert any(str(r).startswith(SOFT_IP_FLAG_PREFIX)
                    for r in h["closure_limited_reasons"])
 
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"),
+                                     -float("inf")])
+    def test_a_non_finite_round_trip_is_refused_not_passed(self, bad):
+        """``abs(nan) > tol`` is False.  A NaN in the assembled profile -- the
+        exact class of defect this gate exists to catch -- used to pass it and
+        be recorded as ``err_pct = nan``."""
+        from bouquet.utils import ip_roundtrip_gate
+
+        with pytest.raises(RuntimeError, match="refusing"):
+            ip_roundtrip_gate(bad, self.IP)
+        with pytest.raises(RuntimeError, match="refusing"):
+            ip_roundtrip_gate(bad, self.IP, posterior=self.IP,
+                              sigma_Ip=self.SIG)
+
+    @pytest.mark.parametrize("bad", [float("nan"), 0.0])
+    def test_an_unusable_reference_is_refused(self, bad):
+        from bouquet.utils import ip_roundtrip_gate
+
+        with pytest.raises(RuntimeError, match="no usable reference|refusing"):
+            ip_roundtrip_gate(self.IP, bad)
+
+    def test_a_non_finite_posterior_falls_back_to_the_measurement(self):
+        """Already guarded by ``np.isfinite`` -- pinned so the NaN hardening
+        above cannot accidentally turn it into a refusal."""
+        from bouquet.utils import ip_roundtrip_gate
+
+        g = ip_roundtrip_gate(self.IP, self.IP, posterior=float("nan"))
+        assert g["reference_name"] == "Ip_target"
+        assert g["err_pct"] == pytest.approx(0.0, abs=1e-12)
+
+    @pytest.mark.parametrize("kw", [
+        dict(ohm_scale=float("nan")), dict(bs_scale=float("nan")),
+        dict(ip_bs=float("nan")), dict(c_affine=float("inf")),
+    ])
+    def test_closure_health_flags_a_non_finite_input(self, kw):
+        """Same hole, same shape: every test in closure_health is
+        ``abs(x) > threshold``, so a NaN scale gave closure_limited=False with
+        f_BS_closed=nan and an EMPTY reason tuple."""
+        from bouquet.utils import closure_health
+
+        base = dict(ohm_scale=1.0, bs_scale=1.0, Ip_target_signed=self.IP,
+                    c_affine=0.0, ip_ind=0.6e6, ip_bs=0.2e6, ip_fix=0.2e6)
+        base.update(kw)
+        h = closure_health(**base)
+        assert h["closure_limited"] is True
+        assert any("unreadable" in str(r)
+                   for r in h["closure_limited_reasons"])
+
     def test_inside_one_sigma_is_not_flagged(self):
         from bouquet.utils import closure_health
 

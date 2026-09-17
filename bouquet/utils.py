@@ -904,10 +904,22 @@ def ip_roundtrip_gate(ip_closed, Ip_measured, posterior=None, sigma_Ip=None,
     delivered hybrid's own Ip against the measurement, in sigma units.  They
     differ only by the round-trip itself.
 
-    :raises RuntimeError: round trip outside *tol_pct* of the reference.
+    :raises RuntimeError: round trip outside *tol_pct* of the reference, or
+        not finite.  ``abs(nan) > tol`` is ``False``, so a NaN in the assembled
+        profile -- exactly the class of defect this gate exists to catch --
+        used to pass it silently and be recorded as ``err_pct = nan``.  A gate
+        that cannot read its input has not been passed.
     """
     ip_closed = abs(float(ip_closed))
     Ip_meas = abs(float(Ip_measured))
+    if not np.isfinite(ip_closed):
+        raise RuntimeError(
+            f"ohmic mode: the closed hybrid integrates to {ip_closed} -- the "
+            "assembled profile is not finite, refusing")
+    if not (np.isfinite(Ip_meas) and Ip_meas > 0.0):
+        raise RuntimeError(
+            f"ohmic mode: Ip_measured is {Ip_measured!r} -- the round-trip "
+            "gate has no usable reference, refusing")
     ref, ref_name = Ip_meas, "Ip_target"
     if posterior is not None and np.isfinite(float(posterior)) \
             and abs(float(posterior)) > 0.0:
@@ -964,6 +976,14 @@ def closure_health(ohm_scale, bs_scale, Ip_target_signed, c_affine,
     design, so a small offset is the channel working; beyond 1 sigma_Ip the
     slice is FLAGGED here -- never retried and never refused, exactly like a
     missed hard l_i row.
+
+    **Non-finite inputs are flagged, not ignored.**  Every test here is of the
+    form ``abs(x) > threshold``, which is ``False`` for a NaN, so a NaN scale
+    or a NaN component integral used to give ``closure_limited = False`` with
+    ``f_BS_closed = nan`` and an empty reason tuple -- a clean verdict on an
+    unreadable slice.  A quantity this record cannot read is now its own named
+    reason.  Flag, not refusal: the caller decides what to do with a slice it
+    could not measure, and every other verdict in this record is a flag too.
     """
     Ip_t = abs(float(Ip_target_signed))
     raw = float(ip_ind) + float(ip_bs) + float(ip_fix) + float(c_affine)
@@ -971,6 +991,16 @@ def closure_health(ohm_scale, bs_scale, Ip_target_signed, c_affine,
     f_bs_unscaled = abs(float(ip_bs)) / Ip_t
     f_bs_closed = abs(float(bs_scale) * float(ip_bs)) / Ip_t
     reasons = []
+    _nonfinite = [nm for nm, v in (("ohm_scale", ohm_scale),
+                                   ("bs_scale", bs_scale),
+                                   ("Ip_target", Ip_target_signed),
+                                   ("c_affine", c_affine),
+                                   ("ip_ind", ip_ind), ("ip_bs", ip_bs),
+                                   ("ip_fix", ip_fix))
+                  if not np.isfinite(float(v))]
+    if _nonfinite or not np.isfinite(mismatch_pct):
+        reasons.append("closure health is unreadable: non-finite "
+                       + ", ".join(_nonfinite or ["Ip mismatch"]))
     if abs(mismatch_pct) > float(mismatch_max_pct):
         reasons.append(f"raw components miss Ip by {mismatch_pct:+.1f}% "
                        f"(> {float(mismatch_max_pct):g}%)")

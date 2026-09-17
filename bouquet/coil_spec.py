@@ -26,8 +26,9 @@ baseline and draw.
 
 The assumption is that the measured fractional precision is a fair yardstick for
 the solver's current -- NOT that ``|I^base|/|I^meas|`` is a fixed turns factor.
-It is not: measured across 26 slices of DIII-D 174823 that ratio is stable only
-for F6A/F6B/F7A/F7B (54-56, 8-12% spread) and varies 59-295% for 16 of 24 coils,
+It is not: measured across 26 flat-top slices of one DIII-D discharge that
+ratio is stable only for F6A/F6B/F7A/F7B (54-56, 8-12% spread) and varies
+59-295% for 16 of 24 coils,
 because the free-boundary solve fits the BOUNDARY and lands on one of many coil
 sets consistent with it. Since sigma^base is formed per slice from that slice's
 own baseline and measurement, the metric stays self-consistent regardless.
@@ -44,19 +45,24 @@ __all__ = ["coil_sigma_in_base_units", "coil_sigma_fixed", "coil_chi2",
 
 #: Below this measured current [A] the fractional precision is meaningless and
 #: the coil is dropped from the metric rather than allowed to dominate it.
+#: Adopted, not fitted: it is ~7x the F-coil digitizer sigma below, i.e. the
+#: current at which |I^base|/|I^meas| stops being a ~10%-precision ratio.  A
+#: coil is DROPPED, never given a looser sigma, so the choice cannot relax the
+#: acceptance criterion -- it only narrows which coils are judged.
 MIN_ABS_MEASURED_A = 50.0
 
 # Fixed per-family measured sigma [A per turn], DIII-D 2017+ DAQ.  The OMAS
 # d3d mapping writes pf_active data_error_upper as 10 digitizer LSB, which is
-# ~8x larger on pre-2017 hardware (150000: 55 A F / 551 A E), so a chi2 cut
+# ~8x larger on pre-2017 hardware (55 A F / 551 A E), so a chi2 cut
 # referenced to the dd value changes meaning across DAQ epochs.  This table is
-# what chi2_max=4.0 was calibrated against.
+# what the dd-referenced ("d3d") sigma_ref path is calibrated against; it is NOT
+# the default per-coil sigma (that is the device model in bouquet.devices).
 SIGMA_REF_D3D_A = {"F": 7.0, "E": 69.0}
 
 # Machine tolerance from EFIT itself: rms of (calculated - measured) F-coil
-# current over the flat-top, 72 coil-shots on DIII-D 150000/171317/173982/
-# 174823 with FWTFC=0 (coils floating against the magnetics), fitted as
-# sigma^2 = floor^2 + (fraction*|I|)^2 in ampere-turns.  Mostly a floor with a
+# current over the flat-top, 72 coil-discharge pairs over four DIII-D
+# discharges with the coil fit weights zeroed (coils floating against the
+# magnetics), fitted as sigma^2 = floor^2 + (fraction*|I|)^2 in ampere-turns.  Mostly a floor with a
 # mild current dependence (log-log slope 0.36).  E-coils were not in the fit
 # (EFIT holds them fixed); the same model is applied to them in their own
 # baseline units as a stated assumption.
@@ -86,7 +92,7 @@ class CoilSigmaUnavailable(RuntimeError):
     """No per-coil tolerance could be resolved for this archive/device."""
 
 
-def resolve_coil_sigma(baseline, sigma=None, device=None, shot=None):
+def resolve_coil_sigma(baseline, sigma=None, device=None, era=None):
     """Resolve the per-coil sigma for a chi2 coil filter.  Returns (sigma, model)
     where *model* is a JSON-able provenance record.
 
@@ -99,14 +105,22 @@ def resolve_coil_sigma(baseline, sigma=None, device=None, shot=None):
          * callable(baseline) -> {coil: sigma}
       2. ``device`` (a :class:`DeviceSpec`, a device name, or None -> detected
          from the baseline coil names): the device's random-part tolerance, with
-         the floor chosen for ``shot`` when the device has era bands.  See the
-         :mod:`bouquet.devices` module docstring for how the model was derived
-         (offset-removed std of the reconstruction's coil residual, NOT the
-         offset itself) and which assumptions are untested.
+         the floor chosen for the named tolerance ``era`` when the device has
+         era bands.  See the :mod:`bouquet.devices` module docstring for how the
+         model was derived (offset-removed std of the reconstruction's coil
+         residual, NOT the offset itself) and which assumptions are untested.
       3. otherwise :class:`CoilSigmaUnavailable` -- the caller decides the
          fallback (Bouquet.filter falls back LOUDLY to the legacy rule).
+
+    ``era`` is an explicit label (:func:`devices.era_labels`); it is NEVER
+    inferred from a path or header.  ``None`` means "era unknown": the device's
+    default (tightest) band applies and a warning is emitted, because the era
+    chooses the tolerance FLOOR and silently picking the wrong one moves an
+    acceptance criterion.
     """
-    from .devices import DeviceSpec, resolve_device, tolerance_for
+    import warnings
+
+    from .devices import DeviceSpec, era_labels, resolve_device, tolerance_for
     named_model = None
     if isinstance(sigma, str):
         named_model, sigma = sigma, None
@@ -129,10 +143,17 @@ def resolve_coil_sigma(baseline, sigma=None, device=None, shot=None):
             "no coil-current tolerance available: the mesh coil names match no registered "
             f"device ({sorted(baseline)[:6]}...). Set BouquetConfig.device, or give "
             "filtering.coil_sigma = {'floor': <A-t>, 'fraction': <f>} (or a per-coil table).")
-    floor, fraction, by_coil, era = tolerance_for(spec, shot=shot, model=named_model)
+    if named_model is None and era is None and era_labels(spec):
+        warnings.warn(
+            f"coil tolerance: no era given for device {spec.name!r}, whose sigma floor is "
+            f"era-dependent (known eras: {sorted(era_labels(spec))}). Falling back to the "
+            "default band, which carries the TIGHTEST floor -- an unknown era must not buy "
+            "a looser tolerance. Set filtering.coil_daq_era explicitly (or supply an "
+            "explicit pulse number on the source) to select the right one.", stacklevel=2)
+    floor, fraction, by_coil, resolved_era = tolerance_for(spec, era=era, model=named_model)
     return (coil_sigma_floor_fraction(baseline, floor, fraction, by_coil),
             {"kind": "device", "device": spec.name, "model": named_model or "random",
-             "era": era, "shot": (int(shot) if shot is not None else None), "floor": floor,
+             "era": resolved_era, "era_given": era, "floor": floor,
              "fraction": fraction, "per_coil_floors": {c: v for c, v in by_coil.items() if c in baseline},
              "provenance": spec.sigma_provenance})
 
@@ -210,8 +231,9 @@ def coil_sigma_fixed(samples, min_abs_measured=1000.0,
     ``coil_sigma_in_base_units`` rescales by the INSTANTANEOUS
     ``|I^base|/|I^meas|``. When a coil's measured current passes near zero that
     ratio explodes and the coil is handed an absurdly loose tolerance -- on
-    DIII-D 174823, F4B gets 9.7x and ECOILA/ECOILB ~8x their typical sigma on
-    one slice, purely because a different current momentarily crossed zero.
+    one DIII-D discharge, F4B gets 9.7x and ECOILA/ECOILB ~8x their typical
+    sigma on one slice, purely because a different current momentarily crossed
+    zero.
     The reconstruction's own current is no less determined at those instants.
 
     Here the conversion factor is a robust median over the discharge, taken only
@@ -220,7 +242,7 @@ def coil_sigma_fixed(samples, min_abs_measured=1000.0,
 
         sigma_i = median_t(sigma_i^meas) * median_t(|I_i^base| / |I_i^meas|)
 
-    Typical values are unchanged (within a few percent on 174823); only the
+    Typical values are unchanged (within a few percent on that discharge); only the
     outliers go away.
 
     Parameters
@@ -228,8 +250,13 @@ def coil_sigma_fixed(samples, min_abs_measured=1000.0,
     samples : {name: sequence of (i_measured, i_baseline, sigma_measured)}
     min_abs_measured : float
         Slices below this |measured current| are excluded from the ratio.
+        Adopted, not fitted: 1 kA is roughly where the F-coil ratio stops
+        varying with current on the discharge this was checked against.  It
+        selects which SLICES inform the median conversion factor; it is not an
+        acceptance threshold and cannot loosen one.
     fallback_abs_measured : float
-        Relaxed floor used when fewer than 3 slices clear ``min_abs_measured``.
+        Relaxed floor used when fewer than 3 slices clear ``min_abs_measured``
+        (3 = the smallest count for which a median is not a single sample).
 
     Returns
     -------

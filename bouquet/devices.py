@@ -42,6 +42,34 @@ present at that slice.  The 18 F-coil residuals are not independent (median
 |pair correlation| 0.37, n_eff ~ 4), so chi2/nu is not an 18-dof statistic;
 the max-|z| guard carries most of the discrimination.
 
+Scope of the calibration -- READ BEFORE TRUSTING THE QUANTILES
+-------------------------------------------------------------
+Both the sigma model and the acceptance quantiles were measured over the
+**18 F-coils only**, because those are the coils the reconstruction lets float
+against the magnetics.  The filter, however, assigns a sigma to EVERY baseline
+coil: the E-coils ride on the F-coil-derived era floor plus the same fractional
+term, which is an EXTRAPOLATION (the reconstruction holds the E-coils fixed, so
+they contribute no residual to fit).  Two consequences, neither of which is
+absorbed by the numbers below:
+
+* ``chi2/nu`` pools calibrated and extrapolated terms, so the pooled statistic
+  is not the random variable the quantile was measured on;
+* ``max|z|`` is an ORDER STATISTIC.  Its 95th percentile depends on how many
+  coils the maximum runs over, and the shipped mesh judges 20 (18 F + 2 E)
+  while the finer signature judges 24.  Applying an 18-coil quantile to a
+  20- or 24-coil maximum gives a false-rejection rate ABOVE the nominal 5 %.
+
+``DeviceSpec.acceptance["calibrated_nu"]`` records the coil count the
+thresholds were measured at; the filter records the count it actually used and
+warns when they differ.  The thresholds themselves are left at their calibrated
+values -- moving an acceptance threshold is a decision for the operator, not a
+side effect of a mesh choice.
+
+One further transfer assumption, recorded rather than fixed: the calibration
+population is (reconstruction-calculated minus measured) coil current, while
+the filter measures (draw minus baseline).  These are different random
+variables; the adopted sigma is used as a yardstick for both.
+
 Baseline vs measured currents (checked 2026-09-03, 42 slices x 18 coils): an
 UNREGULARISED TokaMaker baseline (``coil_reg`` empty) sits a median 11.6 kA-t
 from the measured currents, ~10x EFIT's own offset, essentially uncorrelated
@@ -56,7 +84,8 @@ currents (``SolverConfig.coil_reg``, see ``coil_targets``).
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Optional, Tuple
 
-__all__ = ["DeviceSpec", "DEVICES", "detect_device", "resolve_device", "get_device", "tolerance_for", "GENERIC_ACCEPTANCE"]
+__all__ = ["DeviceSpec", "DEVICES", "detect_device", "resolve_device", "get_device",
+           "tolerance_for", "era_labels", "era_for_pulse", "GENERIC_ACCEPTANCE"]
 
 
 @dataclass(frozen=True)
@@ -64,18 +93,28 @@ class DeviceSpec:
     name: str
     coil_signature: frozenset                 # exact coil-set names in the mesh
     # coil-current tolerance model sigma_i = hypot(floor, fraction*|I_i|), baseline units.
-    # This is the RANDOM part of the reconstruction's coil-current residual (per-shot
-    # systematic offsets are already absorbed by the baseline fit, so a draw about the
-    # baseline must not re-explore them).  The floor may depend on the DAQ era: give
-    # sigma_floor_by_shot as ((shot_lo, shot_hi, floor), ...) and sigma_floor is the
-    # default when the shot is unknown.
+    # This is the RANDOM (offset-removed) part of the reconstruction's coil-current
+    # residual.  It is NOT that the baseline "absorbs" the reconstruction's per-pulse
+    # systematic offset -- an unregularised baseline demonstrably does not (it sits
+    # 25-30 sigma away along the coil null space; see the module docstring).  The
+    # offset is excluded because it is a property of whichever fit produced the
+    # baseline, so it is not a fair yardstick for how far a DRAW about that baseline
+    # may move; regularising the baseline toward the measured currents
+    # (``SolverConfig.coil_reg``) is the fix for the offset itself.
+    # The floor may depend on the acquisition era: give sigma_floor_by_era as
+    # ((pulse_lo, pulse_hi, floor, era_label), ...) and sigma_floor is the default
+    # when the era is unknown.
     sigma_floor: float                        # [A-t]
     sigma_fraction: float
     sigma_provenance: str
     # additional exact signatures for other meshes of the same device (e.g. finer
     # meshes that split a coil into separately-driven circuits)
     alt_signatures: Tuple[frozenset, ...] = ()
-    sigma_floor_by_shot: Tuple[Tuple[float, float, float, str], ...] = ()   # (lo, hi, floor, era label)
+    # Era bands, ordered; the LAST band is the default when the era is unknown.
+    # The pulse bounds are era BOUNDARIES (the pulse index at which the coil-current
+    # acquisition hardware changed), not discharges of interest -- use
+    # ``era_for_pulse`` to map an explicitly-known pulse onto a label.
+    sigma_floor_by_era: Tuple[Tuple[float, float, float, str], ...] = ()
     # per-coil floors by era label (coils absent from the table use the era floor);
     # clipped below at sigma_floor_min[era] so a coil near zero current keeps a floor
     sigma_floor_by_coil: Dict[str, Dict[str, float]] = field(default_factory=dict)
@@ -85,7 +124,10 @@ class DeviceSpec:
     # acceptance thresholds calibrated on the machine's own residual distribution:
     # the chosen quantile of chi2/nu and worst-coil |z| that real flat-top slices
     # score under this device's sigma model. None -> the generic defaults.
-    acceptance: Dict[str, float] = field(default_factory=dict)   # {"chi2_max","z_max","quantile"}
+    # "calibrated_nu" is the number of coils the quantiles were measured over;
+    # max|z| is an order statistic, so applying them to a different coil count
+    # changes their meaning (the filter records both counts and warns).
+    acceptance: Dict[str, float] = field(default_factory=dict)   # {"chi2_max","z_max","quantile","calibrated_nu"}
     acceptance_provenance: str = ""
     # measured-current conventions (used by the coil-target and dd-referenced paths)
     turns: Dict[str, float] = field(default_factory=dict)       # measured A -> mesh A-t
@@ -99,6 +141,15 @@ class DeviceSpec:
 GENERIC_ACCEPTANCE = {"chi2_max": 4.0, "z_max": 5.0}
 
 _D3D_F = [f"F{i}{s}" for i in range(1, 10) for s in "AB"]
+
+#: Era boundary for the DIII-D coil-current tolerance model: the pulse index at
+#: which the coil-current acquisition (digitiser/DAQ) was upgraded and the
+#: residual floor dropped by ~2.5x.  This is a BOUNDARY between two hardware
+#: eras, not a discharge -- it is a number only because pulse index is the only
+#: monotone clock the archive carries.  Use :func:`era_for_pulse` to map an
+#: explicitly-known pulse onto an era label; nothing infers it from a file name.
+D3D_DAQ_UPGRADE_PULSE = 165000
+
 DEVICES: Dict[str, DeviceSpec] = {
     "DIII-D": DeviceSpec(
         name="DIII-D",
@@ -106,44 +157,88 @@ DEVICES: Dict[str, DeviceSpec] = {
         # xia_v1 mesh: the E-coil split into the six EFIT E circuits
         alt_signatures=(frozenset(_D3D_F + ["ECOILA", "ECOILB", "E567UP", "E567DN", "E89UP", "E89DN"]),),
         sigma_floor=325.0, sigma_fraction=0.0035,
-        sigma_floor_by_shot=((0, 165000, 825.0, "pre2014"), (165000, float("inf"), 325.0, "modern")),
+        sigma_floor_by_era=((0, D3D_DAQ_UPGRADE_PULSE, 825.0, "pre2014"),
+                            (D3D_DAQ_UPGRADE_PULSE, float("inf"), 325.0, "modern")),
         # per-coil random floor with the 0.35 percent fraction removed in quadrature, median
-        # over shots (408 pre-2014 / 63 modern); F6A/F6B and F9A carry the largest scatter
+        # over pulses (408 pre-upgrade / 63 post-upgrade); F6A/F6B and F9A carry the largest scatter
         sigma_floor_by_coil={"pre2014": {"F1A": 1170, "F2A": 1040, "F3A": 910, "F4A": 1060, "F5A": 740, "F6A": 650, "F7A": 250, "F8A": 420, "F9A": 570, "F1B": 1470, "F2B": 780, "F3B": 1000, "F4B": 1170, "F5B": 1070, "F6B": 1120, "F7B": 0, "F8B": 240, "F9B": 370},
                              "modern": {"F1A": 0, "F2A": 0, "F3A": 160, "F4A": 0, "F5A": 0, "F6A": 840, "F7A": 0, "F8A": 230, "F9A": 580, "F1B": 0, "F2B": 0, "F3B": 0, "F4B": 0, "F5B": 0, "F6B": 780, "F7B": 0, "F8B": 0, "F9B": 180}},
+        # Lower clip on the per-coil floor, adopted rather than fitted: several
+        # coils fit a per-coil floor of exactly 0, which would leave their sigma
+        # as the fractional term alone and make a quiet coil arbitrarily hard to
+        # satisfy. The clip is ~1/3 of the era floor in both eras. It only makes
+        # sigma LARGER for the affected coils, so it is a documented softening of
+        # the per-coil table toward the era floor, not a change to the acceptance
+        # thresholds; revisit it if the per-coil floors are ever refitted.
         sigma_floor_min={"pre2014": 250.0, "modern": 100.0},
         sigma_models={"random": (325.0, 0.0035), "random_pre2014": (825.0, 0.0030),
                       "rms_incl_offset": (1050.0, 0.0088)},
-        sigma_provenance=("offset-removed std of EFIT calculated-minus-measured F-coil current "
-                          "over the flat-top (FWTFC=0), per-shot floor+fraction fits over 497 "
-                          "DIII-D shots (105-shot CTM set + 392-shot IBS set): fraction ~0.3% "
-                          "in every era; floor ~800 A-t for shots < ~165000 and ~300 A-t after "
-                          "(DAQ era). 'rms_incl_offset' (1050 + 0.88%, 4 shots) also includes "
-                          "the per-shot reported-current bias; 2026-09-02"),
+        sigma_provenance=("offset-removed std of reconstruction calculated-minus-measured "
+                          "F-coil current over the flat-top (coil fit weights zeroed), "
+                          "per-pulse floor+fraction fits over 497 DIII-D pulses drawn from two "
+                          "flat-top survey sets: fraction ~0.3% in every era; floor ~800 A-t "
+                          "before the coil-current DAQ upgrade and ~300 A-t after. "
+                          "'rms_incl_offset' (1050 + 0.88%, 4 pulses) also includes the "
+                          "per-pulse reported-current bias. Calibrated on the 18 F-coils only; "
+                          "E-coils are carried on the same model as a stated extrapolation. "
+                          "2026-09-02"),
         turns={**{f"F{i}{s}": 58.0 for i in (1, 2, 3, 4, 5, 8) for s in "AB"},
                **{f"F{i}{s}": 55.0 for i in (6, 7, 9) for s in "AB"}},
         digitizer_sigma={"F": 7.0, "E": 69.0},
         vsc_pair=("F9A", "F9B"),
-        acceptance={"chi2_max": 6.1, "z_max": 6.3, "quantile": 0.95},
+        acceptance={"chi2_max": 6.1, "z_max": 6.3, "quantile": 0.95, "calibrated_nu": 18},
         acceptance_provenance=("95th percentile of chi2/nu and worst-coil |z| scored by real DIII-D "
                                "flat-top slices (r(t)-mean per coil over the adopted per-coil era "
-                               "sigma; 16573 slices, 105 CTM + 59 IBS shots): a 5% false-rejection "
-                               "rate on real machine states by construction. The empirical "
-                               "distribution is not a chi2 of any dof (q50 0.78, q95 6.1, q99 51; "
-                               "the tail is slow drift), so dof-based calibration is not used. "
+                               "sigma; 16573 slices from the larger of the two flat-top survey sets "
+                               "-- the second set was NOT pooled into the quantile): a 5% "
+                               "false-rejection rate on real machine states by construction. "
+                               "The empirical distribution is "
+                               "not a chi2 of any dof (q50 0.78, q95 6.1, q99 51; the tail is slow "
+                               "drift), so dof-based calibration is not used. Measured over the 18 "
+                               "F-coils ('calibrated_nu'); max|z| is an order statistic, so these "
+                               "quantiles are tied to that coil count -- see the module docstring. "
                                "2026-09-04"),
     ),
 }
 
 
-def tolerance_for(spec: DeviceSpec, shot=None, model: Optional[str] = None):
+def era_labels(spec: DeviceSpec) -> Tuple[str, ...]:
+    """The tolerance-era labels *spec* defines, in order (() if it has none)."""
+    return tuple(lab for _lo, _hi, _fl, lab in spec.sigma_floor_by_era)
+
+
+def era_for_pulse(spec: DeviceSpec, pulse) -> Optional[str]:
+    """Era label whose pulse band contains *pulse*, else None.
+
+    The ONLY sanctioned way to turn a pulse number into an era.  *pulse* must be
+    a number the caller actually knows (an explicit source field or config
+    setting) -- never digits scraped out of a file name or run header, which is
+    how a mesh resolution or a date used to buy a 2.5x looser tolerance floor.
+    """
+    if pulse is None:
+        return None
+    try:
+        p = float(pulse)
+    except (TypeError, ValueError):
+        return None
+    for lo, hi, _fl, lab in spec.sigma_floor_by_era:
+        if lo <= p < hi:
+            return lab
+    return None
+
+
+def tolerance_for(spec: DeviceSpec, era: Optional[str] = None,
+                  model: Optional[str] = None):
     """(floor, fraction, floor_by_coil, era) for *spec*.
 
     A named alternative model gives (floor, fraction, {}, model).  Otherwise the
-    era is chosen from *shot* (the default era -- the last band -- when the shot
-    is unknown) and the per-coil floor table for that era is returned, clipped
-    below at ``sigma_floor_min[era]``; coils absent from the table get the era
-    floor.
+    per-coil floor table for *era* is returned, clipped below at
+    ``sigma_floor_min[era]``; coils absent from the table get the era floor.
+
+    *era* must be one of :func:`era_labels`.  ``None`` means "era unknown" and
+    selects the device's default band (the last one, which is the most recent
+    and carries the TIGHTEST floor -- an unknown era must never buy a looser
+    tolerance); callers are expected to say so out loud.
     """
     if model is not None:
         try:
@@ -152,18 +247,25 @@ def tolerance_for(spec: DeviceSpec, shot=None, model: Optional[str] = None):
             raise KeyError(f"device {spec.name!r} has no sigma model {model!r}; "
                            f"available: {sorted(spec.sigma_models)}") from None
         return fl, fr, {}, model
-    floor, era = spec.sigma_floor, None
-    bands = spec.sigma_floor_by_shot
+    floor, resolved = spec.sigma_floor, None
+    bands = spec.sigma_floor_by_era
     if bands:
-        lo, hi, fl, era = bands[-1]; floor = fl            # default: the latest era
-        if shot is not None:
-            for lo, hi, fl, lab in bands:
-                if lo <= float(shot) < hi:
-                    floor, era = fl, lab
+        if era is None:
+            _lo, _hi, floor, resolved = bands[-1]        # default: the latest era
+        else:
+            known = era_labels(spec)
+            if era not in known:
+                raise KeyError(f"device {spec.name!r} has no tolerance era {era!r}; "
+                               f"available: {sorted(known)}")
+            for _lo, _hi, fl, lab in bands:
+                if lab == era:
+                    floor, resolved = fl, lab
                     break
-    fmin = spec.sigma_floor_min.get(era, 0.0) if era else 0.0
-    by_coil = {c: max(float(v), fmin) for c, v in spec.sigma_floor_by_coil.get(era, {}).items()} if era else {}
-    return floor, spec.sigma_fraction, by_coil, era
+    fmin = spec.sigma_floor_min.get(resolved, 0.0) if resolved else 0.0
+    by_coil = ({c: max(float(v), fmin)
+                for c, v in spec.sigma_floor_by_coil.get(resolved, {}).items()}
+               if resolved else {})
+    return floor, spec.sigma_fraction, by_coil, resolved
 
 
 def detect_device(coil_names) -> Optional[str]:

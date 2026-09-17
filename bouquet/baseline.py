@@ -350,6 +350,16 @@ def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
         if not np.all(np.isfinite(a)):
             skipped.append((tier, "invalid data: non-finite entries"))
             return None
+        if np.any(a < 0.0):
+            # These are 1-sigma MAGNITUDES.  A negative entry is not a wide
+            # band, it is corrupt data, and it propagates a sign into the
+            # draw scales -- so `all finite and any > 0` was too weak: it
+            # admitted an array with negative entries as long as one entry
+            # was positive.
+            skipped.append((tier, f"invalid data: {int(np.sum(a < 0.0))} of "
+                                  f"{a.size} entries are negative (these are "
+                                  f"1-sigma magnitudes)"))
+            return None
         if not np.any(a > 0.0):
             skipped.append((tier, "invalid data: all-zero"))
             return None

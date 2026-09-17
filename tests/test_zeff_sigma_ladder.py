@@ -236,6 +236,19 @@ class TestEnvelopeLadder:
         np.testing.assert_allclose(env, 0.05 * self._base)
         assert any("shape" in s["reason"] for s in meta["skipped"])
 
+    def test_negative_sigma_entries_are_refused(self):
+        """These are 1-sigma MAGNITUDES.  ``all finite and any > 0`` admitted
+        an array with negative entries as long as one entry was positive, and
+        a negative sigma propagates a sign into the draw scales."""
+        bad = self._meas.copy()
+        bad[4] = -0.17
+        with pytest.warns(UserWarning, match="negative"):
+            env, label, meta = resolve_zeff_envelope(
+                "auto", 0.05, self._base, True, bad, "Zeff_err",
+                ida_in_play=True)
+        np.testing.assert_allclose(env, 0.05 * self._base)
+        assert any("negative" in s["reason"] for s in meta["skipped"])
+
     def test_all_zero_sigma_is_still_refused(self):
         with pytest.warns(UserWarning, match="all-zero"):
             env, _, meta = resolve_zeff_envelope(

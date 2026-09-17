@@ -3068,6 +3068,46 @@ class Bouquet:
                         f"{gc.closure_channel!r} not in "
                         f"('bootstrap','ohmic','sawtooth_bootstrap',"
                         f"'structured')")
+                elif str(getattr(gc, "closure_channel", "")) == "structured":
+                    # Same rule as the typo above: a structured-channel
+                    # misconfiguration used to raise deep inside the
+                    # predictor, i.e. AFTER the full SWB iteration sequence.
+                    # The run-time refusals stay (defence in depth); these
+                    # catch the same mistakes before anything is solved.
+                    if (getattr(gc, "structured_ip_sigma", None) is not None
+                            and getattr(gc, "structured_ip_sigma_frac", None)
+                            is not None):
+                        problems.append(
+                            "closure_channel='structured': "
+                            "structured_ip_sigma and structured_ip_sigma_frac "
+                            "are mutually exclusive; set one, so the recorded "
+                            "sigma_Ip is unambiguous")
+                    if (getattr(gc, "structured_soft", False)
+                            and getattr(gc, "structured_li_target", None)
+                            is not None
+                            and getattr(gc, "structured_li_sigma", None)
+                            is None):
+                        problems.append(
+                            "closure_channel='structured' with "
+                            "structured_soft=True and structured_li_target "
+                            "set needs structured_li_sigma: the soft channel "
+                            "weights l_i by its own error bar and bouquet "
+                            "will not invent one")
+                    _steps = getattr(gc, "structured_li_max_corrector_steps",
+                                     1)
+                    if _steps is not None and int(_steps) < 1:
+                        # was silently coerced to 1 by max(1, int(x) or 1)
+                        problems.append(
+                            "structured_li_max_corrector_steps="
+                            f"{_steps!r} must be >= 1 (it is a ceiling on "
+                            "extra solves, and 0 does not mean 'no corrector' "
+                            "-- the predictor readback always happens)")
+                    _ltol = getattr(gc, "structured_li_tol", 0.005)
+                    if _ltol is not None and float(_ltol) <= 0.0:
+                        problems.append(
+                            f"structured_li_tol={_ltol!r} must be > 0 "
+                            "(a non-positive acceptance band flags every "
+                            "slice closure-limited)")
                 # Baseline-only for now: the draw path's sigma=0 reproduction
                 # of an ohmic-closed baseline has not been verified, so the
                 # UQ ensemble refuses the mode -- UNLESS workflow='custom'

@@ -618,6 +618,37 @@ class TestWorkflowWhitelists:
         with pytest.raises(ValueError, match="closure_channel"):
             self._validate(cfg)
 
+    @pytest.mark.parametrize("kw, match", [
+        (dict(structured_ip_sigma=1.0e4, structured_ip_sigma_frac=0.005),
+         "mutually exclusive"),
+        (dict(structured_soft=True, structured_li_target=0.9),
+         "needs structured_li_sigma"),
+        (dict(structured_li_max_corrector_steps=0), "must be >= 1"),
+        (dict(structured_li_tol=0.0), "must be > 0"),
+    ])
+    def test_structured_misconfiguration_is_caught_before_any_solve(
+            self, kw, match):
+        """These used to raise deep inside the predictor, i.e. AFTER the full
+        SWB iteration sequence -- exactly the failure mode the channel-typo
+        guard beside them exists to prevent.  ``structured_li_max_corrector_
+        steps = 0`` was worse than late: ``max(1, int(x) or 1)`` silently
+        coerced it to 1."""
+        cfg = self._config("structured")
+        cfg.generation.workflow = "auto"     # no 'custom' downgrade
+        for k, v in kw.items():
+            setattr(cfg.generation, k, v)
+        with pytest.raises(ValueError, match=match):
+            self._validate(cfg)
+
+    def test_a_well_formed_structured_config_still_passes(self):
+        cfg = self._config("structured")
+        cfg.generation.structured_soft = True
+        cfg.generation.structured_ip_sigma_frac = 0.005
+        cfg.generation.structured_li_target = 0.9
+        cfg.generation.structured_li_sigma = 0.03
+        cfg.generation.structured_li_max_corrector_steps = 2
+        self._validate(cfg)
+
     def test_presolve_dispatch_guard_lists_structured(self):
         """The guard is a literal tuple inside the ohmic block; assert on the
         source so a future edit that drops the channel is caught here rather

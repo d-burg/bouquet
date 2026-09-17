@@ -86,10 +86,22 @@ _files_ok = all(os.path.isfile(p) for p in (_GEQ, _PF, _MESH))
 
 #: The acceptance the l_i identity had to clear before being wired in: the
 #: discrete form must reproduce TokaMaker's OWN get_stats l_i on the anchor.
-#: Measured +0.0215 % -- 46x margin.  Not to be widened: a miss means the
-#: 2 pi mu0 identity, the psi Jacobian or the (vol, perimeter, R_axis) read has
-#: moved.
-_LI_SELF_CONSISTENCY = 1.0e-2
+#: Measured +0.0208-0.0215 %.  TIGHTENED from 1e-2 to 1e-3 (adversarial
+#: review): at 1 % the bar sat ~46x above the physics and a 0.5 % drift in the
+#: psi Jacobian, the volume read or the perimeter would have passed silently.
+#: 1e-3 keeps a ~4.6x margin over the measured agreement and was verified
+#: against a live solver run of every assertion below.  Not to be widened: a
+#: miss means the 2 pi mu0 identity, the psi Jacobian or the
+#: (vol, perimeter, R_axis) read has moved.
+_LI_SELF_CONSISTENCY = 1.0e-3
+
+#: A DIFFERENT comparison: the ARCHIVED baseline total against the
+#: equilibrium's own GS profile.  These are two profiles that genuinely
+#: differ, so this is not the identity above and must not borrow its bar --
+#: sharing one constant is what forced that constant up to 46x the physics.
+#: Measured 0.1506 % on l_i(3) in a live solver run, with l_i(1) inside the
+#: same bar.  TIGHTENED from the shared 1e-2 to 3e-3, ~2x the measurement.
+_LI_ARCHIVED_AGREEMENT = 3.0e-3
 
 
 def _oft_importable():
@@ -653,14 +665,25 @@ class TestConfigSurface:
     def test_the_two_ip_sigma_spellings_are_mutually_exclusive(self):
         """A campaign runner that does not know Ip passes a fraction; a caller
         that does passes amps.  Setting both would make the recorded sigma_Ip
-        ambiguous, so the predictor refuses instead of picking one."""
-        import inspect
+        ambiguous, so it is refused instead of one being picked.
 
+        Asserted by TRIGGERING the refusal, not by reading the source: the
+        old test passed against a file with the guard deleted and a comment
+        left behind.
+        """
+        from bouquet.config import BouquetConfig, ImasSource, SolverConfig
         from bouquet.run import Bouquet
 
-        src = inspect.getsource(Bouquet._close_ip_structured_predictor)
-        assert "mutually exclusive" in src
-        assert "structured_ip_sigma_frac" in src
+        cfg = BouquetConfig(source=ImasSource(ids_path="unused.json"),
+                            solver=SolverConfig(mesh_path="unused.h5"),
+                            output_header="t")
+        cfg.generation.jBS_baseline_mode = "ohmic"
+        cfg.generation.perturb_jind_in_anchor = True
+        cfg.generation.closure_channel = "structured"
+        cfg.generation.structured_ip_sigma = 1.0e4
+        cfg.generation.structured_ip_sigma_frac = 0.005
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            Bouquet(cfg)._validate_workflow()
 
     def test_the_default_channel_is_unchanged(self):
         from bouquet.config import GenerationConfig
@@ -769,7 +792,7 @@ def test_the_identity_reproduces_the_solvers_own_Bp_volume_integral(measured):
     assert err <= _LI_SELF_CONSISTENCY, (
         f"the enclosed-current identity gives Bp_vol = {got:.6e} against the "
         f"solver's {measured['Bp_vol']:.6e} ({100 * err:.4f}%, bar "
-        f"{100 * _LI_SELF_CONSISTENCY:.1f}%)")
+        f"{100 * _LI_SELF_CONSISTENCY:.2f}%)")
 
 
 @pytest.mark.solver
@@ -782,7 +805,7 @@ def test_the_discrete_form_reproduces_get_stats_li_3(measured):
     err = abs(got / ref - 1.0)
     assert err <= _LI_SELF_CONSISTENCY, (
         f"identity gives l_i(3) {got:.6f} against get_stats' {ref:.6f} "
-        f"({100 * err:.4f}%, bar {100 * _LI_SELF_CONSISTENCY:.1f}%)")
+        f"({100 * err:.4f}%, bar {100 * _LI_SELF_CONSISTENCY:.2f}%)")
 
 
 @pytest.mark.solver
@@ -800,7 +823,7 @@ def test_the_discrete_form_reproduces_get_stats_li_1_on_its_own_perimeter(
     assert err <= _LI_SELF_CONSISTENCY, (
         f"identity gives l_i(1) {got:.6f} on get_stats' own dl against its "
         f"{ref:.6f} ({100 * err:.4f}%, bar "
-        f"{100 * _LI_SELF_CONSISTENCY:.1f}%)")
+        f"{100 * _LI_SELF_CONSISTENCY:.2f}%)")
 
 
 @pytest.mark.solver
@@ -868,13 +891,19 @@ def test_the_geometry_is_read_off_the_calls_it_claims(measured):
 def test_the_archived_profile_agrees_too(measured):
     """The archived baseline total is not bit-identical to the equilibrium's
     own GS profile, so its l_i differs -- but only at the level the profiles
-    themselves differ, not at the level of a wrong formula."""
+    themselves differ, not at the level of a wrong formula.
+
+    A DIFFERENT quantity from the identity above, and so its own bar: the
+    identity reproduces TokaMaker's own l_i from the same profile (0.02 %),
+    while this compares two profiles that genuinely differ (0.15 %).  Sharing
+    one constant is what forced that constant to be 46x the physics.
+    """
     err = abs(float(measured["archived"]["li_3"])
               / float(measured["li_3_stats"]) - 1.0)
-    assert err <= _LI_SELF_CONSISTENCY, err
+    assert err <= _LI_ARCHIVED_AGREEMENT, err
     err = abs(float(measured["archived"]["li_1_with_get_stats_dl"])
               / float(measured["li_1_stats"]) - 1.0)
-    assert err <= _LI_SELF_CONSISTENCY, err
+    assert err <= _LI_ARCHIVED_AGREEMENT, err
 
 
 @pytest.mark.solver
@@ -1477,3 +1506,62 @@ class TestCorrectorRefusalAndHealthPaths:
                             sigma_Ip=None: ip_roundtrip_gate(
                                 ip, self.IP, posterior=posterior,
                                 sigma_Ip=sigma_Ip))
+
+
+# ---------------------------------------------------------------------------
+class TestSoftSolverConvergenceRefusals:
+    """The two ``RuntimeError``s that decide what the posterior mode delivers
+    when it fails.  Nothing reached either of them: the suite only ever
+    exercised solves that converged, so the branches that choose between
+    "here is an answer" and "there is no answer" were untested.
+    """
+
+    def _case(self):
+        psi, w, c, ji, jb, jf, lin, Ip_s, lg = _li_parts()
+        m, _ = _model()
+        return (psi, w, c, ji, jb, jf, Ip_s, lg,
+                structured_li_of(m)[0] * 1.03)
+
+    def test_a_run_out_of_iterations_is_refused_not_returned(self):
+        """`max_iter` exhausted must raise, never hand back the last iterate:
+        a half-converged posterior is not a posterior."""
+        psi, w, c, ji, jb, jf, Ip_s, lg, target = self._case()
+        with pytest.raises(RuntimeError,
+                           match="did not converge in 1 iterations"):
+            close_ip_structured_soft(psi, w, c, Ip_s, 0.005 * abs(Ip_s),
+                                     ji, jb, jf, li_target=target,
+                                     li_sigma=0.03, li_geom=lg, max_iter=1)
+
+    def test_the_refusal_names_the_objective_it_stopped_at(self):
+        psi, w, c, ji, jb, jf, Ip_s, lg, target = self._case()
+        with pytest.raises(RuntimeError, match=r"objective [0-9.]+e"):
+            close_ip_structured_soft(psi, w, c, Ip_s, 0.005 * abs(Ip_s),
+                                     ji, jb, jf, li_target=target,
+                                     li_sigma=0.03, li_geom=lg, max_iter=2)
+
+    def test_damping_that_cannot_find_a_descent_step_is_refused(self,
+                                                                monkeypatch):
+        """The other terminal branch.  It is defensive -- no in-spec input
+        found in review reaches it -- so the step solver is made to return a
+        uselessly uphill direction and the SHIPPED damping loop, gradient test
+        and refusal run unmodified around it."""
+        real = np.linalg.lstsq
+
+        def _uphill(A, b, rcond=None):
+            d = real(A, b, rcond=rcond)
+            return (np.full(np.shape(d[0]), 1.0e3),) + tuple(d[1:])
+        monkeypatch.setattr(np.linalg, "lstsq", _uphill)
+        psi, w, c, ji, jb, jf, Ip_s, lg, target = self._case()
+        with pytest.raises(RuntimeError,
+                           match="could not find a descent step"):
+            close_ip_structured_soft(psi, w, c, Ip_s, 0.005 * abs(Ip_s),
+                                     ji, jb, jf, li_target=target,
+                                     li_sigma=0.03, li_geom=lg)
+
+    def test_a_converged_solve_is_unaffected_by_either_guard(self):
+        psi, w, c, ji, jb, jf, Ip_s, lg, target = self._case()
+        out = close_ip_structured_soft(psi, w, c, Ip_s, 0.005 * abs(Ip_s),
+                                       ji, jb, jf, li_target=target,
+                                       li_sigma=0.03, li_geom=lg)
+        assert 1 <= out["n_iter"] < 100
+        assert np.isfinite(out["objective"])

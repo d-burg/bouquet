@@ -384,13 +384,25 @@ class Bouquet:
             # E567UP/E567DN/E89UP/E89DN), and coil_reg_term raises KeyError on
             # an unknown name -- which would kill setup_solver outright.
             known = set(mygs.coil_sets) | {"#VSC"}
-            skipped = sorted({c for t in spec for c in t["coils"]} - known)
+            dropped = [t for t in spec if not set(t["coils"]) <= known]
             spec = [t for t in spec if set(t["coils"]) <= known]
-            if skipped:
+            if dropped:
+                # Report the whole TERM, not just the off-mesh coil. A term is
+                # dropped WHOLE, so a difference constraint like
+                # {"F1A": 1.0, "E567UP": -1.0} also releases F1A, which then falls
+                # through to the target=0, weight=1 default -- the opposite of what
+                # was asked. Naming only E567UP would leave the operator unaware
+                # that F1A moved too.
                 import warnings
                 warnings.warn(
-                    "coil_reg: ignoring %d coil(s) absent from this mesh: %s"
-                    % (len(skipped), ", ".join(skipped)))
+                    "coil_reg: dropping %d term(s) that name coil(s) absent from this "
+                    "mesh. EVERY coil in a dropped term loses its target and reverts "
+                    "to the target=0, weight=1 default: %s"
+                    % (len(dropped),
+                       "; ".join("{%s} (absent: %s)"
+                                 % (", ".join(sorted(t["coils"])),
+                                    ", ".join(sorted(set(t["coils"]) - known)))
+                                 for t in dropped)))
             reg_terms = [
                 mygs.coil_reg_term(dict(t["coils"]),
                                    target=float(t.get("target", 0.0)),
@@ -410,6 +422,44 @@ class Bouquet:
                 mygs.coil_reg_term({"#VSC": 1.0}, target=0.0, weight=1e-2))
         mygs.set_coil_reg(reg_terms=reg_terms)
         return reg_terms
+
+    def _seed_coil_init(self, mygs):
+        """Seed the inverse iterate from ``SolverConfig.coil_init`` ({name: A-t}).
+
+        Distinct from ``coil_reg``: this sets a STARTING POINT on the degenerate
+        coil manifold without adding a term that fights the boundary.  Coils the
+        mesh does not model are dropped (a measurement covers more circuits than
+        a mesh models); coils the setting does not name keep whatever ``init_psi``
+        left them at.
+
+        Must run AFTER ``init_psi``, which reinitialises coil currents from the
+        regularisation and would overwrite an earlier set.
+
+        KNOWN NO-OP for the shipped inverse baseline solve: the inverse solver
+        re-solves every coil current at each Picard step, so the seed is
+        discarded before it can influence the converged answer.  It is kept
+        because it is the only hook for choosing a basin if a forward-mode or
+        warm-started baseline path is ever added, and because a silent
+        `set_coil_currents` buried in the hot baseline solve was itself the trap
+        -- it now lives in one named place.  Do not reach for it expecting the
+        baseline to move; use ``coil_reg`` (see :mod:`bouquet.coil_targets`).
+
+        Returns the dict that was installed, or None when the setting is unset.
+        """
+        ci = getattr(self.config.solver, "coil_init", None)
+        if not ci:
+            return None
+        if not hasattr(ci, "items"):
+            raise TypeError(
+                "solver.coil_init must be a {coil_name: current_A_turns} mapping, "
+                f"got {type(ci).__name__}")
+        known = set(mygs.coil_sets)
+        use = {k: float(v) for k, v in ci.items() if k in known}
+        cur, _ = mygs.get_coil_currents()
+        cur = dict(cur)
+        cur.update(use)
+        mygs.set_coil_currents(cur)
+        return cur
 
     def _reset_solver_state(self):
         """Restore the clean post-:meth:`setup_solver` coil state.
@@ -659,18 +709,7 @@ class Bouquet:
         # init psi from the LCFS shape parameters
         R0, Z0, a, kappa, delta = _shape_from_boundary(self._boundary_RZ)
         mygs.init_psi(R0, Z0, a, kappa, delta)
-        # Optional coil INITIAL ITERATE (SolverConfig.coil_init, {name: A-t}).
-        # Distinct from coil_reg: this seeds the inverse iteration in a chosen
-        # basin of the degenerate coil manifold without adding a term that
-        # fights the boundary. Must go AFTER init_psi, which reinitialises coil
-        # currents from the regularisation and would overwrite an earlier set.
-        _ci = getattr(self.config.solver, "coil_init", None)
-        if _ci:
-            _known = set(mygs.coil_sets)
-            _use = {k: float(v) for k, v in _ci.items() if k in _known}
-            _cur, _ = mygs.get_coil_currents()
-            _cur = dict(_cur); _cur.update(_use)
-            mygs.set_coil_currents(_cur)
+        self._seed_coil_init(mygs)
 
         # kinetic profiles + total pressure on the equilibrium grid (IMAS shares
         # psi_N between the kinetic and current grids).

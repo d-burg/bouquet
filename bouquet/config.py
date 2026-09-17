@@ -74,8 +74,13 @@ class SolverConfig:
     coil_reg: list = field(default_factory=list)
     # Initial coil currents {name: A-t} for the IMAS baseline inverse solve --
     # seeds the iteration in a chosen basin; does NOT constrain the answer.
-    # Applied inside _forward_solve_imas_baseline after init_psi. Unset =>
-    # coils start at zero (historical behaviour).
+    # Applied by Bouquet._seed_coil_init, after init_psi. Unset => coils start
+    # where init_psi left them (historical behaviour).
+    # KNOWN NO-OP on the shipped path: the inverse solver re-solves every coil
+    # current at each Picard step, so the seed is discarded before it can change
+    # the converged baseline. It is retained as the single named hook for basin
+    # selection if a forward-mode or warm-started baseline is ever added. To move
+    # the baseline's coils use coil_reg (see bouquet.coil_targets), not this.
     coil_init: Optional[dict] = None
     region_overrides: Optional[dict] = None          # special-case cond/coil dict edits
 

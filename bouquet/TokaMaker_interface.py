@@ -2369,6 +2369,20 @@ def perturb_kinetic_equilibrium(
         # recon (verified 2026-05: identical state+kinetics converge with
         # weak reg, diverge with 1e4 reg).  Stash the strong reg, install a
         # weak recon-like reg for the whole SWB block, restore in finally.
+        #
+        # OPEN, and deliberately NOT changed here: "recon-like" is hard-coded as
+        # target=0, weight=1.0, which stopped being the recon setup the moment
+        # SolverConfig.coil_reg could carry measured-current targets.  So during
+        # the exploratory SWB phase the solve is pulled along the very coil null
+        # space the targets exist to remove.  The ENDPOINT should be unaffected:
+        # the strong reg restored below targets _initial_coils (the baseline's own
+        # pinned currents) and the downstream constrained phase runs under it.
+        # The exploratory PATH is not obviously unaffected -- the SWB scale chosen
+        # by find_optimal_scale, the H-mode iteration and the maxits/failure rate
+        # are all computed under the weak reg.  Deriving this weak reg from
+        # config.solver.coil_reg (same targets, reduced weight) is the natural
+        # fix, but it changes solver behaviour and needs a run to settle; see the
+        # review notes for the A/B that would settle it.
         _stashed_reg = getattr(mygs, '_strong_coil_reg', None)
         if _stashed_reg is not None:
             try:
@@ -3994,9 +4008,13 @@ def generate_bouquet(
         # measure drift relative to -- not the inverse-mode recon
         # coils, which differ slightly from forward-mode equilibrium.
         # Step 2: install soft regularization targeting the post-q-check
-        # forward-mode coils.  Replaces whatever soft reg the user
-        # installed before generate_bouquet (typically target=0 weight=1.0
-        # from the recon setup, which is too loose for perturbed solves).
+        # forward-mode coils.  Replaces whatever soft reg was installed before
+        # generate_bouquet -- target=0 weight=1.0 ONLY when SolverConfig.coil_reg
+        # is empty; with coil_reg populated it is the measured-current targets
+        # instead.  Either way it is too loose for perturbed solves.  This step
+        # is indifferent to which it was: the target installed here is
+        # _initial_coils, the baseline's OWN converged currents, so a baseline
+        # pinned to the measured currents is carried through to every draw.
         _rt = []
         for _name in mygs.coil_sets:
             _target = float(_initial_coils.get(_name, 0.0))

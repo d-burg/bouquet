@@ -1,17 +1,21 @@
-"""Measured Z_eff uncertainty: reader tiers + the envelope ladder.
+"""Measured Z_eff uncertainty: reader tiers + the three-tier envelope ladder.
 
 The IDA files carry a measured Zeff uncertainty in BOTH modern vintages --
 posterior samples (ensemble layout) and a ``Zeff_err`` dataset (newer direct
-layout) -- which the pipeline previously discarded in favour of an assumed
-5 % scalar (measured values run ~8-9 % median in-core).  The reader now
-reports the highest-fidelity tier the file can support, and
-``resolve_zeff_envelope`` picks it with explicit provenance:
+layout) -- and, where CER carbon is present, the dilution's own propagated
+uncertainty, which the pipeline previously discarded in favour of an assumed
+5 % scalar (measured values run ~8-9 % median in-core).  The reader reports
+the highest-fidelity tier the file can support, and ``resolve_zeff_envelope``
+picks it with explicit provenance -- THREE tiers, not two:
 
-    measured IDA sigma_Zeff  >  zeff_scalar_sigma * |Zeff|
+    carbon-propagated  >  VB-measured sigma_Zeff  >  zeff_scalar_sigma*|Zeff|
 
-with the measured tier eligible only when the Z_eff baseline itself is the
-IDA one (recon path) -- a FUSE baseline (IMAS/ida_hybrid) must not be paired
-with an IDA envelope.
+with both measured tiers eligible only when the Z_eff baseline itself is the
+IDA one (recon path, and the SAME file that supplies the sigmas) -- a FUSE
+baseline (IMAS/ida_hybrid) must not be paired with an IDA envelope.  That
+file-identity test compares RESOLVED paths, and every step down the ladder
+warns once and is recorded in ``resolve_uncertainty``'s ``zeff_sigma_tier``
+metadata; none of them may be silent.
 
 Synthetic .cdf-shaped HDF5 files exercise all three vintages; no solver.
 """

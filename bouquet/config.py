@@ -296,9 +296,18 @@ class UncertaintyConfig:
     #   "measured" -- require the VB-measured envelope; loud fallback.
     #   "scalar"   -- always the flat zeff_scalar_sigma fraction (pre-1.3.2
     #                 behaviour).
-    # Only the reconstruction/IDA path is eligible for the measured tier: on
-    # the IMAS/ida_hybrid path the Z_eff baseline is FUSE's, and pairing a
-    # FUSE baseline with an IDA-measured envelope would mix channels.
+    # Only the reconstruction/IDA path is eligible for the measured tiers,
+    # and only when the sigma .cdf IS the source's own profiles file: on the
+    # IMAS/ida_hybrid path the Z_eff baseline is FUSE's, and pairing a FUSE
+    # baseline (or a p-file one, or a different .cdf vintage named via
+    # ida_path) with an IDA-measured envelope would mix channels.  That file
+    # test compares RESOLVED paths (expanduser + realpath, samefile when both
+    # exist), so a relative-vs-absolute, '~'-prefixed, trailing-slash or
+    # symlinked spelling of the same file stays eligible.
+    # NO step down this ladder is silent: each one emits a single warning
+    # naming the tier chosen, the tier skipped and why (source ineligible /
+    # missing dataset / invalid data), and the same record is returned as
+    # resolve_uncertainty()'s "zeff_sigma_tier" metadata.
     zeff_sigma_source: str = "auto"
 
     # GPR correlation length scales (psi_N units) -- define the perturbation

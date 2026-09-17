@@ -371,9 +371,15 @@ li_row' = li_row · (li_target / li_achieved)^(1/p),  p = 2
 and the whole minimal-norm (or posterior-mode) problem is re-solved once. When
 both miss, they are corrected *together* in that single re-solve: the ceiling is
 one extra GS solve per slice, not one per constraint. There is deliberately no
-loop — a residual that is reported is worth more than a residual iterated away
-invisibly — and every predictor/achieved/corrected value, every residual in σ
-units and `n_extra_solves` land in `Baseline.ip_closure`.
+*open-ended* loop — a residual that is reported is worth more than a residual
+iterated away invisibly. The ceiling is a user-visible count
+(`structured_li_max_corrector_steps`, default **1**; the conditional second
+step is described below), never an "iterate until it converges", and every
+predictor/achieved/corrected value, every residual in σ units and
+`n_extra_solves` land in `Baseline.ip_closure`. A q0 or l_i that the delivered
+equilibrium still misses is **flagged** there (`closure_limited_reasons`), and
+so is a readback that came back non-finite — flagged, never retried, and
+`q0_tol` / `structured_li_tol` are untouched by either.
 
 **Why the square root** (`utils.LI_GAIN_EXPONENT = 2`). The obvious update
 inverts a *proportionality* — assume the achieved l_i follows its row with gain

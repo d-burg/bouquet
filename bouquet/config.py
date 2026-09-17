@@ -634,7 +634,12 @@ class GenerationConfig:
     #: pedestal.  Override with e.g.
     #: ``{"kind": "gaussian", "centres": [...], "widths": [...]}``;
     #: ``{"kind": "constant"}`` collapses the channel back onto a single scalar
-    #: pair (that is how the tests prove it CONTAINS close_ip / close_ip_q0).
+    #: pair (that is how the tests prove it CONTAINS close_ip / close_ip_q0),
+    #: and it works on its own: with ``structured_weights`` left at ``None``
+    #: the default prior is derived for the basis ACTUALLY given, so a basis
+    #: whose length is not the default 4 gets a uniform (no-prior) ladder,
+    #: named as such in the record.  The physics prior below is a ladder over
+    #: the DEFAULT basis's radii and has no meaning on any other basis.
     #: Peak-normalised, so a coefficient reads as "how far the multiplier moves
     #: from 1 near this radius"; the basis need not be orthogonal, since with at
     #: most two constraints on 2K unknowns the trust norm -- not the basis --

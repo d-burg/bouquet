@@ -786,3 +786,73 @@ class TestIpRoundtripGate:
         src = inspect.getsource(_run)
         assert 'posterior=(_q0_extra.get("structured_ip_posterior")' in src
         assert "if _soft_ip else None)" in src
+
+
+# ---------------------------------------------------------------------------
+class TestDocumentedConstantBasisOneLiner:
+    """``structured_basis={"kind": "constant"}`` alone, as config.py documents it.
+
+    It used to raise ``1 basis functions but 4/4 ind/bs weights``: the default
+    trust weights are a ladder over the DEFAULT basis's four radii and were
+    not re-derived for the basis actually given, while the scalar-broadcast
+    rule only broadcasts UP (size-1 -> K).  The user had to supply
+    ``{"ind": (1.0,), "bs": (1.0,)}`` as well, which the documentation did not
+    say.
+    """
+
+    def test_it_works_with_the_default_weights(self):
+        psi, w, c, j_ind, j_bs, j_fix, lin, Ip_s = _parts()
+        out = close_ip_structured(psi, w, c, Ip_s, j_ind, j_bs, j_fix,
+                                  basis=_CONST)
+        assert out["basis_K"] == 1
+        assert abs(out["ip_residual_pct"]) < 1e-10
+        # uniform, and the record SAYS it is not the physics ladder
+        assert "uniform" in out["weights_name"]
+        np.testing.assert_array_equal(out["weights_ind"], [1.0])
+        np.testing.assert_array_equal(out["weights_bs"], [1.0])
+
+    def test_the_default_basis_still_gets_the_physics_prior(self):
+        """The substitution must be invisible on the shipped default."""
+        psi, w, c, j_ind, j_bs, j_fix, lin, Ip_s = _parts()
+        out = close_ip_structured(psi, w, c, Ip_s, j_ind, j_bs, j_fix)
+        explicit = close_ip_structured(psi, w, c, Ip_s, j_ind, j_bs, j_fix,
+                                       weights=STRUCTURED_WEIGHTS_PHYSICS)
+        assert out["weights_name"] == "physics-prior"
+        np.testing.assert_array_equal(out["a"], explicit["a"])
+        np.testing.assert_array_equal(out["b"], explicit["b"])
+
+    def test_it_matches_the_two_field_form_exactly(self):
+        psi, w, c, j_ind, j_bs, j_fix, lin, Ip_s = _parts()
+        auto = close_ip_structured(psi, w, c, Ip_s, j_ind, j_bs, j_fix,
+                                   basis=_CONST)
+        spelt = close_ip_structured(psi, w, c, Ip_s, j_ind, j_bs, j_fix,
+                                    basis=_CONST,
+                                    weights=dict(name="u", ind=(1.0,),
+                                                 bs=(1.0,)))
+        np.testing.assert_array_equal(auto["a"], spelt["a"])
+        np.testing.assert_array_equal(auto["b"], spelt["b"])
+
+    def test_the_soft_path_agrees(self):
+        """`sigma_from_weights(None, K)` is the soft channel's route to the
+        same default and failed the same way."""
+        from bouquet.utils import close_ip_structured_soft, sigma_from_weights
+
+        psi, w, c, j_ind, j_bs, j_fix, lin, Ip_s = _parts()
+        sig = sigma_from_weights(None, 1)
+        out = close_ip_structured_soft(psi, w, c, Ip_s, None, j_ind, j_bs,
+                                       j_fix, basis=_CONST,
+                                       sigma_ind=sig["ind"],
+                                       sigma_bs=sig["bs"])
+        hard = close_ip_structured(psi, w, c, Ip_s, j_ind, j_bs, j_fix,
+                                   basis=_CONST)
+        assert out["s_ind"][0] == pytest.approx(hard["s_ind"][0], rel=1e-10)
+        assert out["s_bs"][0] == pytest.approx(hard["s_bs"][0], rel=1e-10)
+
+    def test_a_mismatched_EXPLICIT_weight_ladder_is_still_refused(self):
+        """Only the DEFAULT is derived; a user who spells out the wrong length
+        must still be told."""
+        psi, w, c, j_ind, j_bs, j_fix, lin, Ip_s = _parts()
+        with pytest.raises(ValueError, match="basis functions but"):
+            close_ip_structured(psi, w, c, Ip_s, j_ind, j_bs, j_fix,
+                                basis=_CONST,
+                                weights=STRUCTURED_WEIGHTS_PHYSICS)

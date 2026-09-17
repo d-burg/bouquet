@@ -1144,6 +1144,30 @@ STRUCTURED_WEIGHTS_PHYSICS = dict(name="physics-prior",
                                   ind=(100.0, 10.0, 3.0, 1.0),
                                   bs=(1.0, 3.0, 10.0, 100.0))
 
+def structured_default_weights(K):
+    """The default trust weights for a basis of *K* functions.
+
+    :data:`STRUCTURED_WEIGHTS_PHYSICS` is a ladder over the RADII of the
+    shipped 4-Gaussian basis; it has no meaning on a basis of a different
+    length, and pairing it with one raised
+    ``"K basis functions but 4/4 ind/bs weights"`` -- including for the
+    documented ``structured_basis={"kind": "constant"}`` one-liner, which is
+    how the channel is meant to be collapsed back onto a single scalar pair.
+    For any other K the default is therefore UNIFORM (no prior), and the
+    recorded ``name`` says so, so a reader of the archive can never mistake it
+    for the physics ladder.  Supplying ``structured_weights`` explicitly is
+    unaffected.
+    """
+    K = int(K)
+    n = len(STRUCTURED_WEIGHTS_PHYSICS["ind"])
+    if K == n:
+        return dict(STRUCTURED_WEIGHTS_PHYSICS)
+    return dict(name=f"uniform (K={K}; the physics prior is a ladder over the "
+                     f"{n}-function default basis's radii and does not apply "
+                     "to this basis)",
+                ind=(1.0,) * K, bs=(1.0,) * K)
+
+
 #: The ONE documented alternative, for a sensitivity: no prior at all, every
 #: coefficient penalised equally.  The difference between the two answers is
 #: the part of the result that the physics prior -- not the data -- is holding
@@ -1827,20 +1851,37 @@ def _one_sided_sign_iterate(solve_for, K, who, max_iter=SIGN_ITER_MAX):
               f(a) = a^2/\sigma_{\rm up}^2\ (a>0)
 
     is continuous at 0 with ``f'(0^-) = f'(0^+) = 0`` and a non-decreasing
-    derivative, so it is CONVEX for any pair of positive sigmas.  The whole
-    objective is therefore convex in the coefficients (everything else is the
-    unchanged quadratic prior plus linear constraints or measurements), and
-    its minimiser is unique.
+    derivative, so it is CONVEX for any pair of positive sigmas.  The PRIOR
+    term is therefore convex whichever channel calls this.
 
-    That is what makes this iteration exact rather than heuristic: fix a sign
-    pattern and the objective is an ordinary quadratic, whose minimiser the
-    existing solver returns in closed form.  If the returned coefficients'
-    signs AGREE with the pattern that was assumed, the point is stationary for
-    the true piecewise objective, hence its global minimum.  A stable pattern
-    is the exact answer, not an approximation to it; and because the minimiser
-    is unique, every stable pattern carries the same coefficients -- the
-    starting pattern can change how many solves it takes, never what comes
-    out.
+    **Where the exactness claim holds, and where it does not.**
+
+    * :func:`close_ip_structured` (hard Ip), and
+      :func:`close_ip_structured_soft` with a HARD Ip (``Ip_sigma=None``):
+      Ip is imposed exactly, so ``l_i`` is LINEAR in the coefficients and the
+      whole objective is convex with a unique minimiser.  Then fixing a sign
+      pattern gives an ordinary quadratic whose minimiser the existing solver
+      returns in closed form; if the returned coefficients' signs AGREE with
+      the assumed pattern, the point is stationary for the true piecewise
+      objective, hence its global minimum.  A stable pattern is the exact
+      answer, not an approximation to it, and because the minimiser is unique
+      every stable pattern carries the same coefficients -- the starting
+      pattern can change how many solves it takes, never what comes out.
+    * :func:`close_ip_structured_soft` with a FINITE ``Ip_sigma`` -- the soft
+      channel's headline use: the ``l_i`` measurement term is
+      ``(G S(x) sgn / Ip(x)^2 - li_target)^2 / sigma^2``, a linear form over
+      the SQUARE of another linear form, which is not convex.  Neither
+      uniqueness nor "every stable pattern carries the same coefficients" is
+      guaranteed there, and Gauss-Newton itself only finds a local stationary
+      point.  What a stable pattern gives is a stationary point of the true
+      piecewise objective, not a certified global minimum.
+
+      Empirically benign at shipped settings: on the reference fixture, with
+      sigma_Ip = 0.5 % of Ip and sigma_li = 0.03, a 40-restart
+      Nelder-Mead + BFGS multistart found the same minimum this solver
+      returned (objective agreeing to 10 digits, coefficients to 2.6e-8).
+      That is evidence, not a proof, and an A/B study on this channel should
+      say so.
 
     *solve_for* takes a length-*K* boolean pattern (True = "this coefficient
     is on the up side") and returns a tuple whose FIRST entry is the full
@@ -2072,7 +2113,7 @@ def close_ip_structured(psi_N, w_lin, c_affine, Ip_target_signed,
     basis_spec = dict(STRUCTURED_BASIS_DEFAULT if basis is None else basis)
     Phi = structured_basis_eval(basis_spec, psi)             # (K, N)
     K = Phi.shape[0]
-    wspec = dict(STRUCTURED_WEIGHTS_PHYSICS if weights is None else weights)
+    wspec = dict(structured_default_weights(K) if weights is None else weights)
     W_ind = np.atleast_1d(np.asarray(wspec["ind"], dtype=float)).astype(float)
     W_bs = np.atleast_1d(np.asarray(wspec["bs"], dtype=float)).astype(float)
     if W_ind.size == 1 and K > 1:
@@ -2328,7 +2369,10 @@ def sigma_from_weights(weights=None, K=None):
     which the soft solver also treats as a pin; ``W -> 0`` maps to
     ``sigma = inf``, an unpenalised coefficient.
     """
-    wspec = dict(STRUCTURED_WEIGHTS_PHYSICS if weights is None else weights)
+    wspec = dict(weights if weights is not None
+                 else structured_default_weights(
+                     len(STRUCTURED_WEIGHTS_PHYSICS["ind"]) if K is None
+                     else K))
     out = {"name": str(wspec.get("name", "custom"))}
     for key in ("ind", "bs"):
         W = np.atleast_1d(np.asarray(wspec[key], dtype=float)).astype(float)
@@ -2430,10 +2474,17 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
     width ``sigma_ind[k]`` while it is negative and ``sigma_ind_up[k]`` while
     it is positive -- a half-Gaussian pair, so a tight ``sigma_ind_up`` lets a
     multiplier fall freely and resists it rising.  The negative log posterior
-    stays convex in the prior term and the answer is found by SIGN ITERATION
-    around the Gauss-Newton solve (:func:`_one_sided_sign_iterate`: exact once
-    the pattern is stable, capped at :data:`SIGN_ITER_MAX`, refused loudly if
-    it cycles).  The up ladder must pin (``sigma = 0``) and un-penalise
+    stays convex in the PRIOR term and the answer is found by SIGN ITERATION
+    around the Gauss-Newton solve (:func:`_one_sided_sign_iterate`, capped at
+    :data:`SIGN_ITER_MAX` and refused loudly if it cycles).  A stable pattern
+    is the EXACT minimiser when Ip is hard (``Ip_sigma=None``), where ``l_i``
+    is linear in the coefficients and the objective is convex; with a FINITE
+    ``Ip_sigma`` the l_i term is not convex, so a stable pattern is a
+    stationary point of the true piecewise objective rather than a certified
+    global one.  Benign at shipped sigmas (a 40-restart multistart agreed with
+    this solver to 2.6e-8), but see :func:`_one_sided_sign_iterate` for the
+    statement in full -- it is the one place the two are spelled out
+    together.  The up ladder must pin (``sigma = 0``) and un-penalise
     (``sigma = inf``) in exactly the same places as the down ladder, so the
     set of unknowns and the hard-constraint null space never change with the
     sign.  Still no GS solves.
@@ -2454,9 +2505,17 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
     nonlinear when it is not.  Gauss-Newton on the residual vector, each step
     from a least-squares solve of the Jacobian (never the normal equations),
     with a Levenberg damping fallback: if a full step does not reduce the sum
-    of squares, lambda is raised (x10, up to 1e12) until it does or the step
-    is abandoned.  Converged when the relative change in the objective falls
-    below *rtol* (1e-10) or the step is below the same relative floor on *x*;
+    of squares, lambda is raised (x10, starting from a 1e-8 floor) until it
+    does or the step is abandoned.  **What bounds that search is the try
+    count, not a lambda ceiling**: 16 tries from the 1e-8 floor reach 1e7, so
+    the ``trial_lam > 1e12`` guard in the loop is a belt-and-braces bound that
+    the budget always reaches first.  Acceptance is ``F_new <= F (1 + 1e-14)``
+    -- a hair of slack so a step that is downhill in exact arithmetic but flat
+    to rounding still counts, which makes it a NON-INCREASE test rather than a
+    strict descent test; the ``rtol`` check on the next iteration then
+    declares convergence.  Converged when the relative change in the objective
+    falls below *rtol* (1e-10) or the step is below the same relative floor
+    on *x*;
     a run that hits *max_iter* without either is a ``RuntimeError``, never a
     quietly-returned half-solution.
 
@@ -2678,6 +2737,9 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
                     step = (d, r_new, J_new, F_new)
                     break
                 trial_lam = max(10.0 * trial_lam, 1.0e-8)
+                # Belt and braces: the 16-try budget above is what actually
+                # bounds this search (1e-8 x 10^15 = 1e7), so this never
+                # fires.  Kept so raising the budget cannot run lambda away.
                 if trial_lam > 1.0e12:
                     break
             if step is None:

@@ -357,13 +357,16 @@ class GenerationConfig:
     # is untouched when this is off).
     #
     # An int: keep drawing until this many draws pass BOTH postprocess filters
-    # (coil-current spec + LCFS deviation, at filtering.inspec_F_max /
-    # inspec_VSC_max / rms_max_mm), then stop. n_equils becomes the initial
-    # allocation rather than the total, so a shot with a 40% yield spends ~2.5x
-    # the solves that a 100%-yield shot does for the same delivered ensemble.
+    # (the CONFIGURED coil filter + LCFS deviation, at filtering.coil_filter
+    # with its sigma/era/acceptance settings, and filtering.rms_max_mm), then
+    # stop. n_equils becomes the initial allocation rather than the total, so a
+    # shot with a 40% yield spends ~2.5x the solves that a 100%-yield shot does
+    # for the same delivered ensemble.
     #
     # The verdict is computed by the SAME predicate the postprocess filters use
-    # (bouquet.filtering.passes_coil_spec / passes_boundary_spec /
+    # (bouquet.filtering.passes_all_filters over a coil predicate from
+    # make_coil_predicate -- passes_coil_chi2 on the default chi2 filter,
+    # passes_coil_spec on the legacy band -- and passes_boundary_spec /
     # boundary_deviation_mm), so the count this loop stops on is the count
     # .filter() then marks 'selected'. Draws that fail are still archived --
     # nothing is discarded, the run just doesn't stop until N have passed.

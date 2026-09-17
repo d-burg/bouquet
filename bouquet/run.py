@@ -1156,9 +1156,12 @@ class Bouquet:
         ``n`` overrides ``config.generation.n_equils`` for a quick smaller run.
 
         With ``config.generation.n_inspec_target`` set, the run keeps drawing
-        until that many draws pass the coil + boundary filters (thresholds from
-        ``config.filtering``, so the count matches what :meth:`filter` then
-        marks ``selected``), capped by ``max_total_draws``; ``n_equils`` is then
+        until that many draws pass the coil + boundary filters -- the SAME
+        filters, with the same settings, that :meth:`filter` then applies:
+        ``filtering.coil_filter`` (chi2 by default, with its per-coil sigma,
+        DAQ era and acceptance thresholds) and ``filtering.rms_max_mm``, so
+        the count matches what :meth:`filter` marks ``selected`` --
+        capped by ``max_total_draws``; ``n_equils`` is then
         the initial allocation rather than the total, and ``n`` overrides that
         allocation, not the target. Out-of-spec draws are still archived.
 
@@ -1292,6 +1295,17 @@ class Bouquet:
                 n_inspec_target=gc.n_inspec_target,
                 max_total_draws=gc.max_total_draws,
                 inspec_rms_max_mm=fc.rms_max_mm,
+                # ...including the COIL criterion: same filter, same sigma,
+                # same acceptance numbers and -- via _coil_daq_era() -- the
+                # same era floor .filter() will resolve. A loop still counting
+                # the legacy +/-2% band while .filter() cuts on chi2 would
+                # stop on one set of draws and select a different one.
+                coil_filter=fc.coil_filter,
+                coil_sigma=fc.coil_sigma,
+                coil_device=self.config.device,
+                coil_daq_era=self._coil_daq_era(),
+                coil_chi2_max=fc.chi2_max,
+                coil_z_max=fc.z_max,
                 seed=gc.seed,
                 # Fixed additive components, summed into every draw, never perturbed.
                 p_fast=bl.p_fast,

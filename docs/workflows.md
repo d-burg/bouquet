@@ -292,15 +292,34 @@ b.filter()                            # -> >= 20 selected
 
 Points worth knowing:
 
-- **The count is the one `filter()` will agree with.** The loop's per-draw
-  verdict comes from `filtering.passes_all_filters`, which is the same
-  `passes_coil_spec` / `passes_boundary_spec` pair the postprocess filters use,
-  over the same `boundary_deviation_mm` metric and the same two archived LCFS
-  contours. It reads its thresholds from `config.filtering`, so stopping at N
-  and then filtering to fewer than N is not a state this can reach. (Where the
-  two *can* differ — a draw whose high-res LCFS trace failed — the loop calls
-  it out of spec while the postprocess falls back to the coarse eqdsk contour,
-  so the run over-delivers rather than under-delivers.)
+- **The stopping rule and the filter are one predicate.** The loop's per-draw
+  verdict comes from `filtering.passes_all_filters`, composing the **configured**
+  coil filter with `passes_boundary_spec` over the same `boundary_deviation_mm`
+  metric and the same two archived LCFS contours the postprocess reads back.
+  The coil half is built once per run by `filtering.make_coil_predicate` from
+  the very `config.filtering` fields `filter()` cuts on:
+
+  | `filtering.coil_filter` | in the loop | in `filter()` |
+  |---|---|---|
+  | `"chi2"` *(default)* | `passes_coil_chi2(chi2/nu, max\|z\|)` against the per-coil sigma from `coil_spec.resolve_coil_sigma(coil_sigma, device, coil_daq_era)` | `filter_coil_chi2`, same sigma, same era |
+  | `"legacy"` | `passes_coil_spec` on the ±`inspec_F_max` / ±`inspec_VSC_max` band | `filter_coil_currents`, same band |
+
+  The acceptance numbers come from `coil_spec.resolve_coil_acceptance` on both
+  sides (`chi2_max` / `z_max`, else the device's calibrated quantiles, else the
+  generic rule of thumb), and the DAQ era from the same `_coil_daq_era()` the
+  filter uses — so the two cut at identical thresholds with identical sigma
+  floors, and stopping at N and then filtering to fewer than N is not a state
+  this can reach. If the per-coil sigma cannot be resolved (an unregistered
+  mesh, an archive with no stored coil names) **both** sides fall back to the
+  legacy rule, loudly and together. A draw with no coil currents is
+  unjudgeable and **fails** in the loop, exactly as it fails in the filter.
+  (Where the two *can* differ — a draw whose high-res LCFS trace failed — the
+  loop calls it out of spec while the postprocess falls back to the coarse
+  eqdsk contour, so the run over-delivers rather than under-delivers.)
+- **What the per-draw log shows.** On the chi2 path each `[until-N]` line
+  carries `chi2/nu`, `max|z|` and the worst coil (also stored in the returned
+  diagnostics as `chi2_nu` / `max_abs_z` / `worst_coil` / `coil_nu`); on the
+  legacy path, the F and VSC drift percentages.
 - **Re-cutting afterwards is still your call.** The identity is against the
   thresholds in `config.filtering` at generation time. Passing a different
   bound to `filter(rms_max_mm=…)` later re-cuts the archive at the new

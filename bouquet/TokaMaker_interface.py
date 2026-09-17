@@ -3410,25 +3410,37 @@ def _resolve_attempt_budget(n_equils, n_inspec_target, max_total_draws):
 
 
 def _until_n_verdict(diagnostics, recon_lcfs_ref, perturbed_lcfs_ref,
-                     inspec_F_max, inspec_VSC_max,
+                     coil_predicate, draw_currents=None,
                      rms_max_mm=None, max_max_mm=None):
-    """``(ok, rms_mm, max_mm, reasons)`` for one archived draw.
+    """``(ok, rms_mm, max_mm, reasons, coil_info)`` for one archived draw.
 
-    The SHIPPED glue between the per-draw diagnostics dict and
-    ``filtering.passes_all_filters``: the key names, the fraction->percent
-    conversion, and keyword-only wiring so an argument transposition cannot
-    hide behind equal default thresholds.  Kept module-level so the identity
-    ("the count the loop stops on is the count .filter() marks selected")
-    is exercised by tests without a solver.
+    The SHIPPED glue between one draw's in-flight quantities and
+    ``filtering.passes_all_filters``.  The coil half is the CONFIGURED filter,
+    handed in as *coil_predicate* (built once per run by
+    ``filtering.make_coil_predicate`` from the same ``FilterConfig``
+    ``.filter()`` cuts on) rather than the legacy percent thresholds this
+    used to hard-code: with ``filtering.coil_filter='chi2'`` the postprocess
+    scores ``chi2/nu`` against the measured per-coil sigma, and a loop still
+    counting ``|dI/I| <= 2%`` would stop on a different set of draws than the
+    one ``.filter()`` marks selected.
+
+    *draw_currents* is this draw's ``{coil: current}`` (the chi2 predicate's
+    input; ``None``/empty is unjudgeable and FAILS).  *coil_info* carries the
+    predicate's per-draw numbers for the log line and the diagnostics dict --
+    ``chi2_nu`` / ``max_abs_z`` on the chi2 path, the drift percentages on the
+    legacy one.
+
+    Kept module-level so the identity ("the count the loop stops on is the
+    count .filter() marks selected") is exercised by tests without a solver.
     """
     from .filtering import passes_all_filters
-    return passes_all_filters(
-        float(diagnostics.get('max_F_drift_pct', float('nan'))),
-        float(diagnostics.get('max_VSC_drift_pct', float('nan'))),
-        recon_lcfs_ref, perturbed_lcfs_ref,
-        F_max_pct=float(inspec_F_max) * 100.0,
-        V_max_pct=float(inspec_VSC_max) * 100.0,
-        rms_max_mm=rms_max_mm, max_max_mm=max_max_mm)
+    ok_coil, coil_info = coil_predicate(diagnostics, draw_currents)
+    ok, rms_mm, max_mm, reasons = passes_all_filters(
+        baseline_boundary=recon_lcfs_ref,
+        perturbed_boundary=perturbed_lcfs_ref,
+        rms_max_mm=rms_max_mm, max_max_mm=max_max_mm,
+        coil_ok=ok_coil)
+    return ok, rms_mm, max_mm, reasons, coil_info
 
 
 def _extend_scale_block(scales, rng, scale_range, chunk):
@@ -3514,6 +3526,19 @@ def generate_bouquet(
     max_total_draws=None,
     inspec_rms_max_mm=None,
     inspec_max_max_mm=None,
+    # The COIL half of the stopping rule, mirroring FilterConfig field for
+    # field so the loop cuts at the numbers Bouquet.filter() later cuts at:
+    # "chi2" (the default filter) scores chi2/nu and worst |z| against the
+    # measured per-coil sigma, resolved ONCE per run from coil_sigma /
+    # coil_device / coil_daq_era; "legacy" is the flat +/-inspec_F_max band.
+    # An unresolvable sigma falls back to "legacy" loudly -- exactly where
+    # Bouquet.filter() does.
+    coil_filter="chi2",
+    coil_sigma=None,
+    coil_device=None,
+    coil_daq_era=None,
+    coil_chi2_max=None,
+    coil_z_max=None,
     recon_lcfs_ref=None,
     l_i_uncertainty=0.0,
     save_truncate_eq=True,
@@ -4812,12 +4837,30 @@ def generate_bouquet(
             print(f"[until-N] NOTE: explicit max_total_draws="
                   f"{_max_attempts} is below the allocation n_equils="
                   f"{n_equils}; attempts are capped at {_max_attempts}.")
+        # ---- the CONFIGURED coil predicate, resolved ONCE ---------------
+        # The stopping rule's coil half is whatever Bouquet.filter() will
+        # apply to this archive afterwards: the measurement-referenced chi2
+        # test by default, the legacy band when asked for it or when the
+        # per-coil sigma cannot be resolved (unregistered mesh, no stored
+        # coil names) -- the same CoilSigmaUnavailable fallback, with the
+        # same warning, as the postprocess. The sigma is resolved here, from
+        # the baseline currents already in hand, and reused for every draw.
+        from .filtering import make_coil_predicate
+        _coil_predicate, _coil_kind, _coil_model = make_coil_predicate(
+            coil_filter, _bl_coil_dict,
+            inspec_F_max=inspec_F_max, inspec_VSC_max=inspec_VSC_max,
+            sigma=coil_sigma, device=coil_device, era=coil_daq_era,
+            chi2_max=coil_chi2_max, z_max=coil_z_max)
         # The coil channel must be measurable or no draw can EVER count as
         # in-spec (passes_coil_spec fails NaN by design): without this the
         # loop grinds through the full attempt cap -- hours of solves --
         # before warning.  Mirrors the boundary-channel guard below.
+        # Only the LEGACY predicate reads the drift percentages; the chi2
+        # one scores the stored coil-current vectors, which are written
+        # whatever the drift diagnostic is doing.
         _hard_skipped = os.environ.get('SKIP_HARD', '0') == '1'
-        if coil_drift is None or _recon_Ip is None or _hard_skipped:
+        if (_coil_kind != "chi2"
+                and (coil_drift is None or _recon_Ip is None or _hard_skipped)):
             raise ValueError(
                 "n_inspec_target needs a measurable coil channel, but coil "
                 "drifts are disabled ("
@@ -4848,9 +4891,20 @@ def generate_bouquet(
                     "recon_lcfs_ref explicitly, or drop the LCFS bound "
                     "(filtering.rms_max_mm=None) to target the coil spec "
                     "alone.")
+        if _coil_kind == "chi2":
+            _acc = _coil_model["acceptance"]
+            _coil_crit = (f"coil chi2/nu<={_acc['chi2_max']:g}"
+                          + ("" if _acc["z_max"] is None
+                             else f" / worst |z|<={_acc['z_max']:g}")
+                          + f" [{_acc['source']}, {_acc['nu_sigma']} coils, "
+                          + f"sigma {_coil_model.get('kind')}"
+                          + (f"/{_coil_model.get('era')}"
+                             if _coil_model.get("era") else "") + "]")
+        else:
+            _coil_crit = (f"coil F<={inspec_F_max*100:.1f}% / VSC<="
+                          f"{inspec_VSC_max*100:.1f}% [{_coil_kind}]")
         print(f"\n[until-N] target {_until_n} in-spec draws "
-              f"(coil F<={inspec_F_max*100:.1f}% / VSC<="
-              f"{inspec_VSC_max*100:.1f}%"
+              f"({_coil_crit}"
               + ("" if inspec_rms_max_mm is None
                  else f", LCFS rms<={inspec_rms_max_mm:g} mm")
               + ("" if inspec_max_max_mm is None
@@ -5956,11 +6010,20 @@ def generate_bouquet(
         # well pass it. That makes the loop undercount, never overcount, so
         # the delivered ensemble is "at least N selected", never fewer.
         if _until_n is not None:
-            _ok, _rms_mm, _max_mm, _reasons = _until_n_verdict(
+            # coil_current_dict is this draw's stored vector and _bl_coil_dict
+            # the archived baseline -- the SAME two the postprocess chi2 filter
+            # reads back out of the archive, so the metric is identical rather
+            # than merely similar. A draw with no coil currents is unjudgeable
+            # and FAILS (it is archived, and the postprocess fails it too).
+            _ok, _rms_mm, _max_mm, _reasons, _coil_info = _until_n_verdict(
                 diagnostics, recon_lcfs_ref, perturbed_lcfs_ref,
-                inspec_F_max, inspec_VSC_max,
+                _coil_predicate, draw_currents=coil_current_dict,
                 rms_max_mm=inspec_rms_max_mm,
                 max_max_mm=inspec_max_max_mm)
+            # the configured filter's own per-draw numbers, beside the legacy
+            # drift percentages the diagnostics already carry
+            diagnostics.update(_coil_info)
+            diagnostics['until_n_coil_filter'] = _coil_kind
             # Stored per draw so the caller (Bouquet.generate) can re-derive
             # the delivered count OUTSIDE the output capture -- the printed
             # warning below lands in generation_log on the default quiet
@@ -5972,7 +6035,15 @@ def generate_bouquet(
             if _ok:
                 _n_inspec_seen += 1
             _why = "in-spec" if _ok else "OUT (" + ", ".join(_reasons) + ")"
-            print(f"  [until-N] draw {count}: {_why}; "
+            if _coil_kind == "chi2":
+                _coil_num = (f"coil chi2/nu={_coil_info['chi2_nu']:.2f} "
+                             f"max|z|={_coil_info['max_abs_z']:.2f}"
+                             f" ({_coil_info['worst_coil']}, nu="
+                             f"{_coil_info['coil_nu']})")
+            else:
+                _coil_num = (f"coil F={_coil_info['max_F_drift_pct']:.2f}% "
+                             f"VSC={_coil_info['max_VSC_drift_pct']:.2f}%")
+            print(f"  [until-N] draw {count}: {_why}; {_coil_num}; "
                   f"LCFS rms={_rms_mm:.2f} mm max={_max_mm:.2f} mm; "
                   f"running total {_n_inspec_seen}/{_until_n} in-spec "
                   f"after {count+1} attempts")

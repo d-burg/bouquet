@@ -107,6 +107,19 @@ def test_coil_spec_is_inclusive_at_the_threshold():
     assert passes_coil_spec(1.0, 2.001, 2.0, 2.0) is False
 
 
+def test_coil_chi2_is_inclusive_at_the_threshold_and_fails_the_unjudgeable():
+    """The chi2 sibling of the test above -- and the expression
+    ``filter_coil_chi2`` itself cuts on, so this pins both sides at once."""
+    from bouquet.filtering import passes_coil_chi2
+    assert passes_coil_chi2(6.1, 6.3, 6.1, 6.3) is True
+    assert passes_coil_chi2(6.11, 1.0, 6.1, 6.3) is False
+    assert passes_coil_chi2(1.0, 6.31, 6.1, 6.3) is False
+    assert passes_coil_chi2(1.0, 99.0, 6.1, None) is True     # guard disabled
+    # unjudgeable (no usable coil) is NaN and must FAIL, never pass
+    assert passes_coil_chi2(np.nan, np.nan, 6.1, 6.3) is False
+    assert passes_coil_chi2(1.0, np.nan, 6.1, 6.3) is False
+
+
 @pytest.mark.parametrize("F,V", [(np.nan, 1.0), (1.0, np.nan)])
 def test_unmeasured_coil_drift_is_not_silently_in_spec(F, V):
     assert passes_coil_spec(F, V, 2.0, 2.0) is False
@@ -477,16 +490,25 @@ class TestAttemptBudget:
 
 
 class TestUntilNVerdict:
+    """The verdict glue, on the LEGACY coil predicate.
+
+    The coil half is now a PREDICATE parameter (the configured filter --
+    chi2 by default) rather than two hard-coded percent thresholds, so these
+    build the legacy predicate explicitly through the same factory
+    ``generate_bouquet`` calls.  The chi2 path is covered below.
+    """
+
     def _verdict(self, diag, **kw):
         from bouquet.TokaMaker_interface import _until_n_verdict
+        from bouquet.filtering import make_coil_predicate
         kw.setdefault("recon_lcfs_ref", _circle())
         kw.setdefault("perturbed_lcfs_ref", _circle())
-        kw.setdefault("inspec_F_max", 0.02)
-        kw.setdefault("inspec_VSC_max", 0.10)
+        pred, kind, model = make_coil_predicate(
+            "legacy", inspec_F_max=kw.pop("inspec_F_max", 0.02),
+            inspec_VSC_max=kw.pop("inspec_VSC_max", 0.10))
+        assert (kind, model) == ("legacy", None)
         return _until_n_verdict(diag, kw.pop("recon_lcfs_ref"),
-                                kw.pop("perturbed_lcfs_ref"),
-                                kw.pop("inspec_F_max"),
-                                kw.pop("inspec_VSC_max"), **kw)
+                                kw.pop("perturbed_lcfs_ref"), pred, **kw)
 
     def test_fraction_thresholds_convert_to_percent(self):
         """diagnostics carry PERCENT drifts; the config carries fractions.
@@ -506,17 +528,17 @@ class TestUntilNVerdict:
         ok, *_ = self._verdict({"max_F_drift_pct": 1.0,
                                 "max_VSC_drift_pct": 9.0})
         assert ok is True
-        ok, _, _, why = self._verdict({"max_F_drift_pct": 9.0,
-                                       "max_VSC_drift_pct": 1.0})
+        ok, _, _, why, _ = self._verdict({"max_F_drift_pct": 9.0,
+                                          "max_VSC_drift_pct": 1.0})
         assert ok is False and why == ("coil",)
 
     def test_missing_diagnostics_keys_fail_not_pass(self):
-        ok, _, _, why = self._verdict({})
+        ok, _, _, why, _ = self._verdict({})
         assert ok is False and "coil" in why
 
     def test_boundary_bound_flows_through(self):
         far = _circle(r=1.02)                 # ~20 mm off a 1 m circle
-        ok, rms, mx, why = self._verdict(
+        ok, rms, mx, why, _ = self._verdict(
             {"max_F_drift_pct": 1.0, "max_VSC_drift_pct": 1.0},
             perturbed_lcfs_ref=far, rms_max_mm=5.0)
         assert ok is False and why == ("boundary",) and rms > 5.0
@@ -527,7 +549,278 @@ class TestUntilNVerdict:
         got = self._verdict(diag, rms_max_mm=5.0)
         want = passes_all_filters(1.7, 8.0, _circle(), _circle(),
                                   2.0, 10.0, rms_max_mm=5.0)
-        assert got == want
+        assert got[:4] == want
+        # the drift percentages ride along for the log line / diagnostics
+        assert got[4] == {"max_F_drift_pct": 1.7, "max_VSC_drift_pct": 8.0}
+
+
+class TestConfiguredCoilPredicate:
+    """The until-N loop stops on the CONFIGURED coil filter, not on the
+    legacy band, and on the same numbers the postprocess cuts with.
+
+    ``filtering.coil_filter`` defaults to the measurement-referenced chi2
+    test, so a loop still counting ``|dI/I| <= 2%`` would grind toward its
+    attempt cap chasing legacy-in-spec draws while ``.filter()`` marked a
+    different (and larger) subset selected -- the identity this whole
+    feature rests on, broken in both the count and the cost.
+    """
+
+    #: a 20-circuit signature the device registry resolves (18 F + 2 E)
+    COILS = {**{f"F{i}{s}": 1e5 for i in range(1, 10) for s in "AB"},
+             "ECOILA": 2e4, "ECOILB": 2e4}
+
+    def _sigma(self, era="modern"):
+        from bouquet.coil_spec import resolve_coil_sigma
+        sig, model = resolve_coil_sigma(dict(self.COILS), era=era)
+        return sig, model
+
+    def _predicate(self, **kw):
+        from bouquet.filtering import make_coil_predicate
+        kw.setdefault("era", "modern")
+        return make_coil_predicate("chi2", dict(self.COILS), **kw)
+
+    def test_the_thresholds_are_the_devices_calibrated_acceptance(self):
+        """Not the legacy band, and not a number of this module's own: the
+        same ``resolve_coil_acceptance`` the postprocess filter calls."""
+        _, _, model = self._predicate()
+        acc = model["acceptance"]
+        from bouquet.coil_spec import resolve_coil_acceptance
+        _, sig_model = self._sigma()
+        assert (acc["chi2_max"], acc["z_max"]) == \
+            resolve_coil_acceptance(sig_model)[:2]
+
+    def test_a_draw_inside_the_measured_precision_passes(self):
+        pred, kind, _ = self._predicate()
+        sig, _ = self._sigma()
+        assert kind == "chi2"
+        draw = {c: v + 0.5 * sig[c] for c, v in self.COILS.items()}
+        ok, info = pred({}, draw)
+        assert ok is True and info["chi2_nu"] == pytest.approx(0.25)
+        # ...and the legacy drift percentages are NOT what decided it
+        assert "max_F_drift_pct" not in info
+
+    def test_a_draw_beyond_the_worst_coil_guard_fails(self):
+        """One coil far out hides behind nineteen quiet ones in chi2/nu; the
+        max|z| guard is what rejects it, and the loop must apply it too."""
+        pred, _, model = self._predicate()
+        sig, _ = self._sigma()
+        zm = model["acceptance"]["z_max"]
+        draw = dict(self.COILS)
+        draw["F1A"] = self.COILS["F1A"] + (zm + 1.0) * sig["F1A"]
+        ok, info = pred({}, draw)
+        assert ok is False
+        assert info["chi2_nu"] < model["acceptance"]["chi2_max"]   # pooled: quiet
+        assert info["max_abs_z"] > zm and info["worst_coil"] == "F1A"
+
+    def test_a_draw_with_no_coil_currents_is_a_FAILURE_not_a_pass(self):
+        """Matches the postprocess fix: unjudgeable is not a pass.  In the
+        loop it must also not be counted toward the target."""
+        pred, _, _ = self._predicate()
+        for empty in (None, {}):
+            ok, info = pred({"max_F_drift_pct": 0.0,
+                             "max_VSC_drift_pct": 0.0}, empty)
+            assert ok is False
+            assert np.isnan(info["chi2_nu"]) and info["coil_nu"] == 0
+
+    def test_an_unresolvable_sigma_falls_back_to_legacy_loudly(self, monkeypatch):
+        """Exactly where Bouquet.filter() falls back -- and with the same
+        words, which is a fact about one shared function."""
+        import bouquet.devices as dev
+        monkeypatch.setattr(dev, "detect_device", lambda names: None)
+        with pytest.warns(UserWarning, match="COIL FILTER FALLBACK"):
+            pred, kind, model = self._predicate()
+        assert kind == "legacy(fallback)" and model is None
+        # and it really is the legacy rule now: a 3% drift fails a 2% band
+        assert pred({"max_F_drift_pct": 3.0, "max_VSC_drift_pct": 0.1},
+                    dict(self.COILS))[0] is False
+
+    def test_a_baseline_without_coil_currents_falls_back_too(self):
+        with pytest.warns(UserWarning, match="COIL FILTER FALLBACK"):
+            from bouquet.filtering import make_coil_predicate
+            _, kind, _ = make_coil_predicate("chi2", None, era="modern")
+        assert kind == "legacy(fallback)"
+
+    def test_the_filter_wrapper_and_the_loop_share_one_fallback_message(self):
+        from bouquet import filtering, run
+        assert "_coil_fallback_message" in inspect.getsource(run.Bouquet.filter)
+        assert "_coil_fallback_message" in \
+            inspect.getsource(filtering.make_coil_predicate)
+
+    def test_generate_hands_the_loop_the_filter_config_coil_settings(self):
+        """The wiring that makes the identity possible at all: same filter,
+        same sigma, same acceptance, same DAQ era as .filter() resolves."""
+        from bouquet.run import Bouquet
+        gen = inspect.getsource(Bouquet.generate)
+        for frag in ("coil_filter=fc.coil_filter", "coil_sigma=fc.coil_sigma",
+                     "coil_device=self.config.device",
+                     "coil_daq_era=self._coil_daq_era()",
+                     "coil_chi2_max=fc.chi2_max", "coil_z_max=fc.z_max"):
+            assert frag in gen, frag
+        # the postprocess resolves the era through the same accessor
+        assert "era=self._coil_daq_era()" in inspect.getsource(Bouquet.filter)
+
+    def test_the_postprocess_cuts_with_the_shared_predicate(self):
+        from bouquet import filtering
+        src = inspect.getsource(filtering.filter_coil_chi2)
+        assert "passes_coil_chi2(" in src
+        assert "resolve_coil_acceptance(" in src
+
+
+# ==========================================================================
+#  THE identity, on the configured (chi2) coil filter
+# ==========================================================================
+def _write_coil_archive(path, draws, scan_key=1, radius=None):
+    """One archive: baseline + per-draw coil currents and LCFS contours.
+
+    *draws* is a list of ``{coil: current}``; *radius* an optional list of
+    perturbed-LCFS radii (default: all identical to the baseline contour).
+    """
+    names = list(TestConfiguredCoilPredicate.COILS)
+    base = np.array([TestConfiguredCoilPredicate.COILS[n] for n in names])
+    bl = _circle()
+    with h5py.File(path, "w") as hf:
+        g = hf.create_group(f"scan/{scan_key}")
+        b = g.create_group("_baseline")
+        b.create_dataset("coil_names", data=np.array(names, dtype="S"))
+        b.create_dataset("coil_currents", data=base)
+        b.create_dataset("recon_lcfs_ref", data=bl)
+        for i, cur in enumerate(draws):
+            d = g.create_group(str(i))
+            d.create_dataset("coil_names", data=np.array(names, dtype="S"))
+            d.create_dataset("coil_currents",
+                             data=np.array([cur[n] for n in names]))
+            r = 1.0 if radius is None else radius[i]
+            d.create_dataset("perturbed_lcfs_ref", data=_circle(r=r))
+            # legacy drift percentages, deliberately DISAGREEING with the chi2
+            # verdict: every draw is inside the +/-2% band, so a loop still
+            # counting the legacy rule would pass draws the chi2 filter cuts.
+            d.attrs["max_F_drift_pct"] = 0.5
+            d.attrs["max_VSC_drift_pct"] = 0.5
+            d.attrs["inspec_F_max"] = 0.02
+            d.attrs["inspec_VSC_max"] = 0.02
+    return bl
+
+
+def _filter_selected(header, scan_key=1, **filt):
+    """``Bouquet.filter()`` over an archive, as a run would call it."""
+    from bouquet.config import FilterConfig
+    from bouquet.run import Bouquet
+
+    class Gen:
+        scan_key = None
+        n_inspec_target = None
+    Gen.scan_key = scan_key
+
+    class Cfg:
+        output_header = header
+        filtering = FilterConfig(**filt)
+        generation = Gen()
+        device = None
+        source = type("S", (), {})()
+    b_ = Bouquet.__new__(Bouquet)
+    b_.config = Cfg()
+    b_.filter(plot=False)
+    return set(select_indices(header, scan_key=scan_key, selection="selected"))
+
+
+def _loop_selected(bl_contour, draws, radii, coil_filter="chi2", **pred_kw):
+    """The in-loop stopping rule's verdicts over the same draws."""
+    from bouquet.TokaMaker_interface import _until_n_verdict
+    from bouquet.filtering import make_coil_predicate
+    pred, _, _ = make_coil_predicate(
+        coil_filter, dict(TestConfiguredCoilPredicate.COILS), **pred_kw)
+    out = set()
+    for i, cur in enumerate(draws):
+        ok, *_ = _until_n_verdict(
+            {"max_F_drift_pct": 0.5, "max_VSC_drift_pct": 0.5},
+            bl_contour, _circle(r=radii[i]), pred, draw_currents=cur,
+            rms_max_mm=5.0)
+        if ok:
+            out.add(i)
+    return out
+
+
+def _straddling_draws():
+    """Draws that straddle chi2/nu, max|z| and the LCFS bound, in units of
+    the resolved per-coil sigma -- so the fixture cannot silently stop
+    exercising both outcomes when a floor changes."""
+    from bouquet.coil_spec import resolve_coil_acceptance, resolve_coil_sigma
+    base = dict(TestConfiguredCoilPredicate.COILS)
+    sig, model = resolve_coil_sigma(dict(base), era="modern")
+    cm, zm, _, _ = resolve_coil_acceptance(model)
+    n = np.sqrt(cm)                      # per-coil z that sits exactly at chi2_max
+    draws, radii = [], []
+    #  0: well inside          -> passes both channels
+    draws.append({c: v + 0.3 * n * sig[c] for c, v in base.items()}); radii.append(1.0)
+    #  1: pooled chi2 over     -> coil fails
+    draws.append({c: v + 1.4 * n * sig[c] for c, v in base.items()}); radii.append(1.0)
+    #  2: one coil past z_max  -> coil fails on the worst-coil guard alone
+    d = dict(base); d["F3B"] = base["F3B"] + (zm + 2.0) * sig["F3B"]
+    draws.append(d); radii.append(1.0)
+    #  3: coils fine, LCFS 10 mm out -> boundary fails
+    draws.append({c: v + 0.3 * n * sig[c] for c, v in base.items()}); radii.append(1.010)
+    #  4: just INSIDE chi2_max (and inside z_max) -> passes, narrowly.
+    #     Deliberately 0.98n rather than exactly n: a draw sitting on the
+    #     bound is a float-equality coin toss, and the point of this fixture
+    #     is a near-threshold draw both sides agree on, not the inclusivity
+    #     of the comparison (covered by test_coil_chi2_is_inclusive...).
+    draws.append({c: v + 0.98 * n * sig[c] for c, v in base.items()}); radii.append(1.0)
+    return draws, radii
+
+
+def test_the_identity_holds_on_the_chi2_coil_filter(tmp_path):
+    """THE test: the set the loop would stop on IS the set .filter() selects,
+    with the default (chi2) coil filter -- neither branch had this."""
+    header = str(tmp_path / "chi2id")
+    draws, radii = _straddling_draws()
+    bl = _write_coil_archive(header + ".h5", draws, radius=radii)
+
+    with pytest.warns(UserWarning):        # nu 20 vs calibrated 18 (recorded)
+        post = _filter_selected(header, coil_daq_era="modern",
+                                coil_filter="chi2", rms_max_mm=5.0)
+    inloop = _loop_selected(bl, draws, radii, era="modern")
+
+    assert inloop == post, f"in-loop {sorted(inloop)} != selected {sorted(post)}"
+    # the fixture must exercise both outcomes, or the equality is vacuous
+    assert 0 < len(post) < len(draws)
+    # ...and it must NOT be the legacy verdict: every draw is inside +/-2%,
+    # so a loop on the legacy rule would have counted all five.
+    legacy = _loop_selected(bl, draws, radii, coil_filter="legacy",
+                            inspec_F_max=0.02, inspec_VSC_max=0.02)
+    assert legacy != post and len(legacy) > len(post)
+
+
+def test_the_identity_holds_on_the_legacy_fallback_path(tmp_path, monkeypatch):
+    """Same identity when the sigma cannot be resolved: both sides fall back
+    to the legacy rule, so both sides must still agree."""
+    import bouquet.devices as dev
+    header = str(tmp_path / "legacyid")
+    draws, radii = _straddling_draws()      # needs the registry, before the patch
+    bl = _write_coil_archive(header + ".h5", draws, radius=radii)
+    monkeypatch.setattr(dev, "detect_device", lambda names: None)
+    # make the legacy channel discriminate: draw 2 is out of the +/-2% band
+    with h5py.File(header + ".h5", "a") as hf:
+        hf["scan/1/2"].attrs["max_F_drift_pct"] = 9.0
+
+    with pytest.warns(UserWarning, match="COIL FILTER FALLBACK"):
+        post = _filter_selected(header, coil_filter="chi2", rms_max_mm=5.0)
+    with pytest.warns(UserWarning, match="COIL FILTER FALLBACK"):
+        pred, kind, _ = __import__(
+            "bouquet.filtering", fromlist=["x"]).make_coil_predicate(
+                "chi2", dict(TestConfiguredCoilPredicate.COILS))
+    assert kind == "legacy(fallback)"
+
+    from bouquet.TokaMaker_interface import _until_n_verdict
+    inloop = set()
+    for i, cur in enumerate(draws):
+        diag = {"max_F_drift_pct": 9.0 if i == 2 else 0.5,
+                "max_VSC_drift_pct": 0.5}
+        ok, *_ = _until_n_verdict(diag, bl, _circle(r=radii[i]), pred,
+                                  draw_currents=cur, rms_max_mm=5.0)
+        if ok:
+            inloop.add(i)
+    assert inloop == post, f"in-loop {sorted(inloop)} != selected {sorted(post)}"
+    assert 0 < len(post) < len(draws)
 
 
 class TestScaleBlockExtension:

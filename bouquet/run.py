@@ -1451,13 +1451,12 @@ class Bouquet:
                     )
             except CoilSigmaUnavailable as e:
                 import warnings
+                # one wording, shared with the until-N loop's own fallback, so
+                # "the loop falls back exactly where .filter() does" is a fact
+                # about one function rather than two copies of a message
+                from .filtering import _coil_fallback_message
                 warnings.warn(
-                    "COIL FILTER FALLBACK: chi2 coil filter disabled -- " + str(e) +
-                    f" Using the legacy rule (|dI/I| <= {fc.inspec_F_max:.0%} F-coils, "
-                    f"{fc.inspec_VSC_max:.0%} VSC), which is NOT a measurement-referenced "
-                    "criterion: it is a flat fractional band, so it is many sigma on a "
-                    "high-current coil and a fraction of one on a low-current coil, and it "
-                    "rejects a large and state-dependent share of an L-mode ensemble.",
+                    _coil_fallback_message(e, fc.inspec_F_max, fc.inspec_VSC_max),
                     stacklevel=2)
                 coil_filter_used = "legacy(fallback)"
                 coil_summary, coil_fig = filter_coil_currents(

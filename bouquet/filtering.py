@@ -49,8 +49,10 @@ __all__ = [
     "export_filtered",
     "boundary_deviation_mm",
     "passes_coil_spec",
+    "passes_coil_chi2",
     "passes_boundary_spec",
     "passes_all_filters",
+    "make_coil_predicate",
     "until_n_delivered",
 ]
 
@@ -107,6 +109,22 @@ def passes_coil_spec(F_pct, V_pct, F_max_pct, V_max_pct):
     return bool(ok_F and ok_V)
 
 
+def passes_coil_chi2(chi2_nu, max_abs_z, chi2_max, z_max=None):
+    """Measurement-referenced coil test: ``chi2/nu <= chi2_max`` AND worst
+    single-coil ``|z| <= z_max`` (``z_max=None`` disables the second guard).
+
+    The chi2 sibling of :func:`passes_coil_spec`, and the SAME expression
+    :func:`filter_coil_chi2` cuts on -- it is called there, not re-written, so
+    the until-N loop and the postprocess filter cannot drift apart. An
+    unjudgeable draw scores NaN and FAILS: unjudgeable is not a pass.
+    """
+    ok = bool(np.isfinite(chi2_nu) and np.isfinite(chi2_max)
+              and chi2_nu <= chi2_max)
+    if ok and z_max is not None:
+        ok = bool(np.isfinite(max_abs_z) and max_abs_z <= z_max)
+    return ok
+
+
 def passes_boundary_spec(rms_mm, max_mm, rms_max_mm=None, max_max_mm=None):
     """LCFS-deviation test against whichever bounds are supplied.
 
@@ -122,16 +140,24 @@ def passes_boundary_spec(rms_mm, max_mm, rms_max_mm=None, max_max_mm=None):
     return bool(ok_rms and ok_max)
 
 
-def passes_all_filters(F_pct, V_pct, baseline_boundary, perturbed_boundary,
-                       F_max_pct, V_max_pct,
-                       rms_max_mm=None, max_max_mm=None):
+def passes_all_filters(F_pct=np.nan, V_pct=np.nan, baseline_boundary=None,
+                       perturbed_boundary=None,
+                       F_max_pct=np.nan, V_max_pct=np.nan,
+                       rms_max_mm=None, max_max_mm=None, coil_ok=None):
     """The full ``selected`` verdict for one draw, from raw quantities.
 
-    Composes :func:`passes_coil_spec` and :func:`passes_boundary_spec` over
+    Composes the coil verdict and :func:`passes_boundary_spec` over
     :func:`boundary_deviation_mm` -- the same AND that ``_recompute_selected``
     forms from the two stored flags. This is what ``generate_bouquet``'s
     until-N loop counts with, so that a run stopping at N in-spec draws
     yields N ``selected`` draws once the postprocess filters run.
+
+    ``coil_ok`` is the verdict of the CONFIGURED coil filter, already formed
+    against the same thresholds :meth:`Bouquet.filter` cuts on (in practice by
+    a predicate from :func:`make_coil_predicate`, chi2 or legacy). Left at
+    ``None`` the LEGACY percent test is applied to ``F_pct``/``V_pct`` here --
+    which is what ``.filter()`` applies when ``filtering.coil_filter`` is
+    ``'legacy'``, and what direct callers of the old signature get.
 
     Returns ``(passed, rms_mm, max_mm, reasons)``, where ``reasons`` is the
     tuple of failing channels (empty on a pass) -- ``('coil',)``,
@@ -139,11 +165,119 @@ def passes_all_filters(F_pct, V_pct, baseline_boundary, perturbed_boundary,
     """
     rms_mm, max_mm = boundary_deviation_mm(baseline_boundary,
                                            perturbed_boundary)
-    ok_coil = passes_coil_spec(F_pct, V_pct, F_max_pct, V_max_pct)
+    ok_coil = (passes_coil_spec(F_pct, V_pct, F_max_pct, V_max_pct)
+               if coil_ok is None else bool(coil_ok))
     ok_bnd = passes_boundary_spec(rms_mm, max_mm, rms_max_mm, max_max_mm)
     reasons = tuple(([] if ok_coil else ["coil"])
                     + ([] if ok_bnd else ["boundary"]))
     return bool(ok_coil and ok_bnd), rms_mm, max_mm, reasons
+
+
+# --------------------------------------------------------------------------
+#  the CONFIGURED coil predicate -- one builder, two call sites
+# --------------------------------------------------------------------------
+#  Bouquet.filter() cuts the archive with filter_coil_chi2 (or the legacy
+#  rule); generate_bouquet's until-N loop has to reach the SAME verdict per
+#  draw, in flight, from the coil-current vectors it already holds. This
+#  builder is the single place that decides which rule applies, with which
+#  sigma and which acceptance numbers, so the loop cannot cut at numbers the
+#  postprocess disagrees with.
+def _coil_fallback_message(exc, inspec_F_max, inspec_VSC_max):
+    """The ONE wording for 'the chi2 coil filter could not be resolved'.
+
+    Shared by :meth:`Bouquet.filter` and :func:`make_coil_predicate` so the
+    loop falls back exactly when, and says exactly what, the postprocess does.
+    """
+    return (
+        "COIL FILTER FALLBACK: chi2 coil filter disabled -- " + str(exc) +
+        f" Using the legacy rule (|dI/I| <= {inspec_F_max:.0%} F-coils, "
+        f"{inspec_VSC_max:.0%} VSC), which is NOT a measurement-referenced "
+        "criterion: it is a flat fractional band, so it is many sigma on a "
+        "high-current coil and a fraction of one on a low-current coil, and it "
+        "rejects a large and state-dependent share of an L-mode ensemble.")
+
+
+def make_coil_predicate(coil_filter="chi2", baseline_currents=None,
+                        inspec_F_max=0.02, inspec_VSC_max=0.02,
+                        sigma=None, device=None, era=None,
+                        chi2_max=None, z_max=None):
+    """Build the coil half of the until-N stopping rule.
+
+    Returns ``(predicate, kind, model)``.  ``predicate(diagnostics,
+    draw_currents)`` -> ``(ok, info)``, where *info* carries the per-draw
+    numbers worth logging/archiving (``chi2_nu`` / ``max_abs_z`` /
+    ``coil_nu`` / ``worst_coil`` on the chi2 path, the drift percentages on
+    the legacy one).  ``kind`` is ``"chi2"``, ``"legacy"`` or
+    ``"legacy(fallback)"``; ``model`` is the resolved sigma/acceptance
+    provenance record (``None`` on the legacy path).
+
+    Both paths mirror :meth:`Bouquet.filter` exactly:
+
+    * ``coil_filter="chi2"`` resolves the per-coil sigma ONCE for the run
+      (:func:`coil_spec.resolve_coil_sigma`, with the same ``sigma`` /
+      ``device`` / ``era`` the postprocess is given) and takes the acceptance
+      thresholds from :func:`coil_spec.resolve_coil_acceptance` -- the same
+      function :func:`filter_coil_chi2` calls, so ``chi2_max`` / ``z_max``
+      and the sigma floors are identical on both sides;
+    * a :class:`coil_spec.CoilSigmaUnavailable` (unregistered mesh, an
+      archive/baseline with no coil names) falls back to the legacy predicate
+      LOUDLY, with the same warning text ``.filter()`` emits, because that is
+      precisely when ``.filter()`` falls back;
+    * a draw with no coil currents is unjudgeable and FAILS -- never skipped,
+      never a pass.
+
+    ``inspec_F_max`` / ``inspec_VSC_max`` are FRACTIONS (as in
+    :class:`FilterConfig`); the percent conversion happens here.
+    """
+    import warnings
+    from .coil_spec import (CoilSigmaUnavailable, coil_chi2,
+                            resolve_coil_acceptance, resolve_coil_sigma)
+
+    def _legacy(diagnostics, draw_currents=None):
+        F = float((diagnostics or {}).get("max_F_drift_pct", np.nan))
+        V = float((diagnostics or {}).get("max_VSC_drift_pct", np.nan))
+        ok = passes_coil_spec(F, V, float(inspec_F_max) * 100.0,
+                              float(inspec_VSC_max) * 100.0)
+        return ok, {"max_F_drift_pct": F, "max_VSC_drift_pct": V}
+
+    if coil_filter == "legacy":
+        return _legacy, "legacy", None
+    if coil_filter != "chi2":
+        raise ValueError("coil_filter must be 'chi2' or 'legacy'")
+
+    try:
+        if not baseline_currents:
+            raise CoilSigmaUnavailable(
+                "the baseline carries no coil currents (coil storage disabled, "
+                "or a solver state without coils), so no draw can be judged "
+                "against it.")
+        base = {str(k): float(v) for k, v in baseline_currents.items()}
+        sig, model = resolve_coil_sigma(base, sigma=sigma, device=device,
+                                        era=era)
+        cm, zm, acc_src, cal_nu = resolve_coil_acceptance(
+            model, chi2_max=chi2_max, z_max=z_max)
+    except CoilSigmaUnavailable as exc:
+        warnings.warn(_coil_fallback_message(exc, inspec_F_max, inspec_VSC_max),
+                      stacklevel=2)
+        return _legacy, "legacy(fallback)", None
+
+    def _chi2(diagnostics, draw_currents=None):
+        if not draw_currents:
+            r = {"chi2_nu": float("nan"), "max_abs_z": float("nan"), "nu": 0,
+                 "worst_coil": None}
+        else:
+            r = coil_chi2({str(k): float(v) for k, v in draw_currents.items()},
+                          base, sig)
+        ok = passes_coil_chi2(r["chi2_nu"], r["max_abs_z"], cm, zm)
+        return ok, {"chi2_nu": float(r["chi2_nu"]),
+                    "max_abs_z": float(r["max_abs_z"]),
+                    "coil_nu": int(r["nu"]), "worst_coil": r["worst_coil"]}
+
+    model = dict(model, acceptance={"chi2_max": cm, "z_max": zm,
+                                    "source": acc_src,
+                                    "calibrated_nu": cal_nu,
+                                    "nu_sigma": len(sig)})
+    return _chi2, "chi2", model
 
 
 def until_n_delivered(diagnostics_list):
@@ -469,7 +603,7 @@ def filter_coil_chi2(h5path_or_header, dd_path=None, scan_key=None,
     import warnings
     from .coil_spec import (CoilSigmaUnavailable, coil_chi2,
                             coil_sigma_in_base_units, with_sigma_ref,
-                            resolve_coil_sigma)
+                            resolve_coil_acceptance, resolve_coil_sigma)
     if sigma_ref is not None and dd_path is None:
         raise ValueError("filter_coil_chi2: sigma_ref is dd-referenced and needs dd_path")
     if sigma_ref is not None and time_s is None:
@@ -516,28 +650,12 @@ def filter_coil_chi2(h5path_or_header, dd_path=None, scan_key=None,
                 sig, model = coil_sigma_in_base_units(baseline, meas), {"kind": "dd_referenced", "sigma_ref": str(sigma_ref), "time_s": float(time_s)}
             else:
                 sig, model = resolve_coil_sigma(baseline, sigma=sigma, device=device, era=era)
-            # acceptance: explicit > device calibration (when sigma is the device model) > generic
-            from .devices import GENERIC_ACCEPTANCE, get_device
-            acc = dict(GENERIC_ACCEPTANCE); acc_src = "generic"; cal_nu = None
-            if model.get("kind") == "device":
-                dacc = get_device(model["device"]).acceptance
-                if model.get("model") == "random" and dacc:
-                    acc.update({k: dacc[k] for k in ("chi2_max", "z_max") if k in dacc})
-                    acc_src = "device q%g" % (100 * dacc.get("quantile", float("nan")))
-                    cal_nu = dacc.get("calibrated_nu")
-                elif dacc:
-                    # a named sigma model is a DIFFERENT random variable from the one the
-                    # device quantiles were measured on, so they are not reused -- but say so.
-                    warnings.warn(
-                        f"coil filter: sigma model {model.get('model')!r} has no calibrated "
-                        f"acceptance for device {model['device']!r}; falling back to the generic "
-                        f"chi2/nu <= {GENERIC_ACCEPTANCE['chi2_max']} / |z| <= "
-                        f"{GENERIC_ACCEPTANCE['z_max']} rule of thumb. The device's "
-                        "empirical quantiles were calibrated on the default 'random' model "
-                        "and do not transfer.", stacklevel=2)
-            cm = float(acc["chi2_max"]) if chi2_max is None else float(chi2_max)
-            zm = (acc["z_max"] if z_max is None else z_max)
-            zm = None if zm is False else (None if zm is None else float(zm))
+            # acceptance: explicit > device calibration (when sigma is the device model) >
+            # generic. Resolved by the shared helper, which the until-N loop also calls --
+            # the loop must cut at exactly these numbers.
+            from .devices import get_device
+            cm, zm, acc_src, cal_nu = resolve_coil_acceptance(
+                model, chi2_max=chi2_max, z_max=z_max)
             model = dict(model, acceptance={"chi2_max": cm, "z_max": zm, "source": acc_src,
                                             "calibrated_nu": cal_nu, "nu_sigma": len(sig)})
             rows = {}
@@ -557,8 +675,8 @@ def filter_coil_chi2(h5path_or_header, dd_path=None, scan_key=None,
                 draw = dict(zip(names, np.asarray(
                     g["coil_currents"][()], dtype=float).tolist()))
                 rows[i] = coil_chi2(draw, baseline, sig)
-        results = {i: bool(np.isfinite(r["chi2_nu"]) and r["chi2_nu"] <= cm
-                           and (zm is None or r["max_abs_z"] <= zm))
+        # the SAME predicate generate_bouquet's until-N loop stops on
+        results = {i: passes_coil_chi2(r["chi2_nu"], r["max_abs_z"], cm, zm)
                    for i, r in rows.items()}
         if no_coil_data:
             warnings.warn(

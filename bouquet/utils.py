@@ -829,6 +829,12 @@ def closure_health(ohm_scale, bs_scale, Ip_target_signed, c_affine,
                    mismatch_max_pct=10.0, bs_scale_min=0.5):
     """Per-slice closure-health record for every ohmic-mode channel.
 
+    ``Ip_target_signed`` and ``c_affine`` must carry the SAME
+    current-direction convention as the ``ip_*`` linear parts -- the pair
+    :func:`closure_sign_convention` returns -- or the raw mismatch below
+    is off by ``2c`` on negative-current data, exactly as in
+    :func:`close_ip`.
+
     Ip conservation only says the hybrid components' INTEGRAL is off; a
     single rescale cannot say where.  So record how far the raw (unscaled)
     components miss Ip, the unscaled and closed bootstrap fractions, and flag

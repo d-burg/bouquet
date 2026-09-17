@@ -985,7 +985,8 @@ class Bouquet:
         return ohm_scale, bs_scale, extra, state
 
     @staticmethod
-    def _close_ip_q0_corrector(state, bl, mygs, solve_jphi):
+    def _close_ip_q0_corrector(state, bl, mygs, solve_jphi, ip_of=None,
+                               roundtrip_gate=None):
         """At most ONE Newton step on q0 after the closed-hybrid solve.
 
         Returns the new ``nl_its`` when a corrector solve was taken, else
@@ -994,8 +995,33 @@ class Bouquet:
         ``s_bs(s_ohm) = (sgn*Ip - c_signed - s_ohm*lin(ohm) - lin(fix))/lin(bs)``),
         on the same sign-paired constant the predictor closed on, so
         the achieved-Ip error is recorded rather than defended.
+
+        **Every exit re-derives the closure-health record from the scales this
+        method actually delivered.**  The predictor's block is computed before
+        any of this runs; leaving it in place let a corrector that halved
+        ``bs_scale`` be recorded as unflagged, with the predictor's
+        ``f_BS_closed``.  ``Ip_hybrid`` and the assembly round-trip are
+        likewise re-taken on the delivered profile when *ip_of* /
+        *roundtrip_gate* are supplied (the corrector IS an assembly, and the
+        gate exists to check assemblies).
+
+        **A missed q0 is flagged, never retried.**  ``q0_tol`` is unchanged and
+        no branch here loops: a residual outside it on an admitted slice adds a
+        ``closure_limited`` reason so the Delta' consumer sees the same kind of
+        flag a missed l_i or an over-stretched ``bs_scale`` raises.
+
+        **Non-finite and degenerate inputs get their own named exits.**  A
+        non-finite solved q0 used to fall through ``abs(nan) <= tol`` into the
+        Newton branch and be reported as "q0 insensitive to s_ohm"; a bootstrap
+        with ~no current in the Ip measure used to raise ZeroDivisionError from
+        ``-ip_ind/ip_bs``.  Both now keep the predictor, say so by name, and are
+        flagged -- the same shape as the other two refusal branches, and the
+        same relative floor (``1e-6 * Ip_t``) :func:`~bouquet.utils.close_ip`
+        uses for the component it divides by.
         """
         import numpy as np
+
+        from .utils import closure_health
 
         q0_target = state["q0_target"]
         # Read q off a copy_eq() SNAPSHOT, never the live solver: the geqdsk
@@ -1009,13 +1035,42 @@ class Bouquet:
                    q0_predictor_residual=res,
                    q0_tol=state["q0_tol"])
         nl_out = None
-        if abs(res) <= state["q0_tol"]:
+        if not (np.isfinite(q0_tok) and np.isfinite(res)):
+            # BEFORE the tolerance test: abs(nan) <= tol is False, so a
+            # non-finite q0 otherwise reaches the Newton branch and is
+            # mis-reported as an insensitivity.  An unreadable q0 is not a
+            # small residual -- it is no residual at all.
+            rec.update(n_extra_solves=0, q0_solved=q0_tok, q0_residual=res,
+                       sawtooth_verdict="predictor kept (q0 unreadable: "
+                                        "non-finite solved q0)")
+            print(f"[imas SWB-split:ohmic q0] solved q0={q0_tok} is NOT FINITE "
+                  "-- no residual and no Newton direction; keeping the "
+                  "predictor and flagging the slice closure-limited",
+                  flush=True)
+        elif abs(res) <= state["q0_tol"]:
             rec.update(n_extra_solves=0,
                        sawtooth_verdict="predictor (0 extra solves)",
                        q0_solved=q0_tok, q0_residual=res)
             print(f"[imas SWB-split:ohmic q0] solved q0={q0_tok:.4f} vs "
                   f"q0_target={q0_target:.4f} (residual {res:+.4f}, tol "
                   f"{state['q0_tol']:g}) -- predictor accepted, no extra solve",
+                  flush=True)
+        elif abs(state["ip_bs"]) < 1e-6 * state["Ip_t"]:
+            # The Newton step moves along the Ip-closed manifold
+            # s_bs(s_ohm) = (sgn*Ip - c - s_ohm*lin(ohm) - lin(fix))/lin(bs),
+            # which does not exist when the bootstrap carries ~no current in
+            # the Ip measure.  close_ip's own relative floor, by name, instead
+            # of a ZeroDivisionError two lines down.  (close_ip_q0's
+            # determinant can clear its floor with ip_bs == 0 whenever j_bs0
+            # has core content, so the predictor really can hand this over.)
+            rec.update(n_extra_solves=0, q0_solved=q0_tok, q0_residual=res,
+                       sawtooth_verdict="predictor kept (j_BS integrates to "
+                                        "~0; no Ip-closed manifold to step "
+                                        "along)")
+            print("[imas SWB-split:ohmic q0] j_BS integrates to "
+                  f"{state['ip_bs']:.3e} A (< 1e-6 x Ip_target) -- the "
+                  "Ip-closed manifold is degenerate in s_bs; keeping the "
+                  f"predictor and recording the residual {res:+.4f}",
                   flush=True)
         else:
             # dq0/ds_ohm along the Ip-closed manifold, from q0 ~ 1/j0:
@@ -1073,6 +1128,43 @@ class Bouquet:
                           f"(residual {q0_new - q0_target:+.4f})", flush=True)
         rec["ohm_scale"] = float(getattr(bl, "ohm_scale", 1.0))
         rec["bs_scale"] = float(getattr(bl, "bs_scale", 1.0))
+        # ---- closure health, re-derived from the DELIVERED scales ----------
+        # The predictor's block was computed from the predictor's scales; a
+        # corrector step replaces both, so f_BS_closed, closure_limited and
+        # its reasons all have to be re-taken or they describe an equilibrium
+        # this run did not deliver.  Same function, same thresholds.
+        _health = closure_health(rec["ohm_scale"], rec["bs_scale"],
+                                 state["sgn"] * state["Ip_t"],
+                                 state["c_signed"], state["ip_ind"],
+                                 state["ip_bs"], state["ip_fix"])
+        _reasons = list(_health["closure_limited_reasons"])
+        _q0_res = rec.get("q0_residual")
+        _q0_tol = float(state["q0_tol"])
+        if _q0_res is None or not np.isfinite(float(_q0_res)):
+            _reasons.append("q0 residual is not finite after the corrector")
+        elif abs(float(_q0_res)) > _q0_tol:
+            # Flag only -- never a retry, and q0_tol itself is untouched.  The
+            # channel deliberately spends at most one extra solve; what it owes
+            # the consumer is that a slice it could not land on q0 is not
+            # indistinguishable from one it did.
+            _reasons.append(f"q0 missed by {float(_q0_res):+.4f} "
+                            f"(> q0_tol {_q0_tol:g}) after the corrector")
+        _health["closure_limited_reasons"] = tuple(_reasons)
+        _health["closure_limited"] = bool(_reasons)
+        _health["closure_limited_thresholds"] = dict(
+            _health["closure_limited_thresholds"], q0_tol=_q0_tol)
+        rec.update(_health)
+        if _health["closure_limited"]:
+            print("[imas SWB-split:ohmic q0] WARNING closure-limited after the "
+                  "corrector: " + "; ".join(_reasons)
+                  + " -- treat this slice's current split (and any Delta' "
+                    "built on it) as unvalidated", flush=True)
+        # ---- the assembly gates, re-taken on the delivered profile ---------
+        if ip_of is not None:
+            rec["Ip_hybrid"] = float(ip_of(bl.j_phi))
+            if roundtrip_gate is not None:
+                rec["fsa_roundtrip_post_corrector_err_pct"] = float(
+                    roundtrip_gate(rec["Ip_hybrid"]))
         if getattr(bl, "ip_closure", None) is not None:
             bl.ip_closure.update(rec)
         return nl_out
@@ -1497,17 +1589,28 @@ class Bouquet:
                 bl.j_BS = bs_scale * j_BS_swb
                 bl.j_inductive = ohm_scale * j_ind
                 bl.j_phi = bl.j_inductive + bl.j_BS + j_fixed
-                # Self-check on the SAME affine measure the closure solved:
+                # Round-trip budget on the ASSEMBLY of the closed hybrid (a
+                # wrong component, a double-counted affine term, a misapplied
+                # sign) -- machine precision, not a physics acceptance.  One
+                # definition, used at BOTH assemblies: here, and again on
+                # whatever the q0 corrector delivers.  Non-finite is a refusal,
+                # not a pass: abs(nan) > tol is False, so the profile the gate
+                # exists to catch would otherwise sail through it.
+                def _ip_roundtrip_check(ip_closed):
+                    _e = 100.0 * (abs(float(ip_closed)) - Ip_t) / Ip_t
+                    if not np.isfinite(_e) or abs(_e) > 0.05:
+                        raise RuntimeError(
+                            f"ohmic mode: closed hybrid integrates to {_e:+.3f}% "
+                            "of Ip_target after closure -- algebra error, refusing")
+                    return _e
+                # ... and it is fed the SAME affine measure the closure solved:
                 # linear part + the SIGNED constant.  _ip() adds the unsigned
                 # _c_affine, so on sgn=-1 data it would disagree with the
                 # closure by 2c and fail a correct result.  Identical to
-                # _ip(bl.j_phi) whenever sgn == +1.
-                _closed_err = 100.0 * (
-                    abs(_lin(bl.j_phi) + _c_signed) - Ip_t) / Ip_t
-                if abs(_closed_err) > 0.05:
-                    raise RuntimeError(
-                        f"ohmic mode: closed hybrid integrates to {_closed_err:+.3f}% "
-                        "of Ip_target after closure -- algebra error, refusing")
+                # _ip(bl.j_phi) whenever sgn == +1.  The corrector is handed
+                # this same measure (ip_of below), not _ip.
+                _ip_signed = lambda _j: float(_lin(_j) + _c_signed)
+                _closed_err = _ip_roundtrip_check(_ip_signed(bl.j_phi))
                 _jd = getattr(bl, "jphi_diff", None)
                 ip_jd = _lin(k2e(_jd)) if _jd is not None else 0.0
                 # Closure health, every channel: how much reconciliation one
@@ -1515,8 +1618,8 @@ class Bouquet:
                 # for downstream (Delta') consumers -- not refused, but not
                 # to be read as validated either.
                 from .utils import closure_health
-                _health = closure_health(ohm_scale, bs_scale, sgn * Ip_t,
-                                         _c_affine, ip_ind, ip_bs, ip_fix)
+                _health = closure_health(ohm_scale, bs_scale, _Ip_signed,
+                                         _c_signed, ip_ind, ip_bs, ip_fix)
                 if _health["closure_limited"]:
                     print("[imas SWB-split:ohmic] WARNING closure-limited: "
                           + "; ".join(_health["closure_limited_reasons"])
@@ -1639,7 +1742,8 @@ class Bouquet:
             # worth more than a residual that is iterated away invisibly.
             if _q0_state is not None:
                 _nl_corr = self._close_ip_q0_corrector(
-                    _q0_state, bl, mygs, solve_jphi)
+                    _q0_state, bl, mygs, solve_jphi,
+                    ip_of=_ip_signed, roundtrip_gate=_ip_roundtrip_check)
                 if _nl_corr is not None:
                     nl_its = _nl_corr    # the state l_i/coils are read from
 

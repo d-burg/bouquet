@@ -391,14 +391,60 @@ def test_chi2_filter_stamps_provenance_and_falls_back_loudly(tmp_path, monkeypat
         assert summ3[sv]["n_pass"] >= summ[sv]["n_pass"]
 
 
-def test_infer_shot_from_geqdsk_name_and_header():
+def test_daq_era_is_stated_never_scraped_from_a_name():
+    """The acquisition era picks the coil sigma FLOOR, i.e. an acceptance
+    criterion, so it may only come from something the user stated.
+
+    Regression: the old ``_infer_shot`` matched ANY six consecutive digits in the
+    run header, so a run named after a mesh resolution or a date silently bought
+    a 2.5x looser floor on every coil.
+    """
+    from bouquet.devices import D3D_DAQ_UPGRADE_PULSE, era_for_pulse, get_device
     from bouquet.run import Bouquet
-    class S: geqdsk_path = "/x/y/g169510.03000"
-    class C: source = S(); output_header = "D3D_169510_3000"
+
+    class Filt:
+        coil_daq_era = None
+    class S: pass
+    class C:
+        source = S(); output_header = "mesh_262144_conv"; device = "DIII-D"
+        filtering = Filt()
+
     b = Bouquet.__new__(Bouquet); b.config = C()
-    assert b._infer_shot() == 169510
-    class S2: pass
-    class C2: source = S2(); output_header = "D3D_204441_4400"
-    b.config = C2(); assert b._infer_shot() == 204441
-    class C3: source = S2(); output_header = "nothing_here"
-    b.config = C3(); assert b._infer_shot() is None
+    # a six-digit number in the header (or in a mesh/geqdsk path) buys nothing
+    assert b._coil_daq_era() is None
+    C.output_header = "run_20260904_case"
+    assert b._coil_daq_era() is None
+    S.geqdsk_path = "/x/y/g262144.03000"
+    assert b._coil_daq_era() is None
+
+    # the explicit knob wins
+    Filt.coil_daq_era = "pre2014"
+    assert b._coil_daq_era() == "pre2014"
+    Filt.coil_daq_era = None
+
+    # ... and so does an explicit pulse field on the source, via the era bands
+    S.pulse = D3D_DAQ_UPGRADE_PULSE + 10
+    assert b._coil_daq_era() == "modern"
+    S.pulse = D3D_DAQ_UPGRADE_PULSE - 10
+    assert b._coil_daq_era() == "pre2014"
+
+    spec = get_device("DIII-D")
+    assert era_for_pulse(spec, None) is None
+    assert era_for_pulse(spec, "not-a-pulse") is None
+
+
+def test_a_six_digit_mesh_name_cannot_change_the_coil_sigma():
+    """End-to-end companion to the above: the same archive, judged with a header
+    that happens to contain six digits, must get IDENTICAL sigmas."""
+    import warnings
+    from bouquet.coil_spec import resolve_coil_sigma
+    base = {**{f"F{i}{s}": 1e5 for i in range(1, 10) for s in "AB"},
+            "ECOILA": 2e4, "ECOILB": 2e4}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        s_default, m_default = resolve_coil_sigma(base, device="DIII-D")
+    s_modern, _ = resolve_coil_sigma(base, device="DIII-D", era="modern")
+    s_pre, _ = resolve_coil_sigma(base, device="DIII-D", era="pre2014")
+    assert s_default == s_modern                 # unknown era -> tightest floor
+    assert s_pre["F1A"] > s_modern["F1A"]         # the eras really do differ
+    assert m_default["era_given"] is None

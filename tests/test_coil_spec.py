@@ -99,7 +99,7 @@ class TestFixedSigma:
         """A slice whose measured current is small -- but still ABOVE the
         MIN_ABS_MEASURED_A floor -- must not inflate sigma.
 
-        Real case: DIII-D 174823 F5B at t=5.706 s carries I_meas = -67.8 A
+        Real case: one DIII-D discharge's F5B carries I_meas = -67.8 A
         (clears the 50 A floor) while its baseline is 2.3e4 A-t, so the
         per-slice rescale hands it sigma = 2426 A-t, ~4x its typical value.
         """
@@ -164,7 +164,7 @@ class TestEfitResidualSigma:
         assert set(coil_sigma_efit_residual(base)) == set(base)
 
     def test_high_ip_fractional_drift_is_plausible_under_efit_sigma(self):
-        """171317 H: 0.57 % drift on a 266 kA-t coil is ~4 sigma on the
+        """H-mode case: 0.57 % drift on a 266 kA-t coil is ~4 sigma on the
         digitizer table and <1 sigma on the machine tolerance."""
         from bouquet.coil_spec import coil_chi2, coil_sigma_efit_residual
         base = {"F6A": -266479.0}; draw = {"F6A": -266479.0 - 1518.0}
@@ -245,26 +245,28 @@ class TestEraTolerance:
 
     def test_random_part_is_the_default_and_floor_follows_the_era(self):
         from bouquet.coil_spec import resolve_coil_sigma
-        s_new, m_new = resolve_coil_sigma(self.D3D, shot=204441)
-        s_old, m_old = resolve_coil_sigma(self.D3D, shot=153072)
-        s_unk, m_unk = resolve_coil_sigma(self.D3D)
+        s_new, m_new = resolve_coil_sigma(self.D3D, era="modern")
+        s_old, m_old = resolve_coil_sigma(self.D3D, era="pre2014")
+        with pytest.warns(UserWarning, match="no era given"):
+            s_unk, m_unk = resolve_coil_sigma(self.D3D)
         assert (m_new["floor"], m_new["fraction"]) == (325.0, 0.0035)
         assert (m_old["floor"], m_old["fraction"]) == (825.0, 0.0035)
-        assert m_unk["floor"] == 325.0 and m_unk["shot"] is None
+        assert m_unk["floor"] == 325.0 and m_unk["era_given"] is None
+        assert m_unk["era"] == "modern"          # unknown -> the TIGHTEST floor
         assert s_old["F1A"] > s_new["F1A"]
 
     def test_named_model_selects_the_rms_option(self):
         from bouquet.coil_spec import resolve_coil_sigma
-        s, m = resolve_coil_sigma(self.D3D, sigma="rms_incl_offset", shot=204441)
+        s, m = resolve_coil_sigma(self.D3D, sigma="rms_incl_offset")
         assert (m["floor"], m["fraction"]) == (1050.0, 0.0088) and m["model"] == "rms_incl_offset"
         with pytest.raises(KeyError, match="no sigma model"):
             resolve_coil_sigma(self.D3D, sigma="nonsense")
 
     def test_vsc_swing_rejected_under_random_tolerance_but_not_under_rms(self):
-        """189392 F9A: 4.0 kA-t swing on 62.6 kA-t (legacy-rejected draw)."""
+        """A VSC-pair swing of 4.0 kA-t on 62.6 kA-t (a legacy-rejected draw)."""
         from bouquet.coil_spec import coil_chi2, resolve_coil_sigma
         base = {"F9A": 62600.0}; draw = {"F9A": 62600.0 + 4001.0}
-        z_rand = coil_chi2(draw, base, resolve_coil_sigma(base, device="DIII-D", shot=189392)[0])["max_abs_z"]
+        z_rand = coil_chi2(draw, base, resolve_coil_sigma(base, device="DIII-D", era="modern")[0])["max_abs_z"]
         z_rms = coil_chi2(draw, base, resolve_coil_sigma(base, device="DIII-D", sigma="rms_incl_offset")[0])["max_abs_z"]
         assert z_rand > 5.0 and z_rms < 4.0      # caught by the z_max=5 guard; not by the rms model
 
@@ -274,19 +276,19 @@ class TestPerCoilFloorsAndZGuard:
 
     def test_per_coil_floor_applies_with_era_and_min_clip(self):
         from bouquet.coil_spec import resolve_coil_sigma
-        s, m = resolve_coil_sigma(self.D3D, device="DIII-D", shot=204441)
+        s, m = resolve_coil_sigma(self.D3D, device="DIII-D", era="modern")
         assert m["era"] == "modern"
         assert s["F9A"] == pytest.approx((580.0**2 + (0.0035 * 1e5) ** 2) ** 0.5)   # table value
         assert s["F1A"] == pytest.approx((100.0**2 + (0.0035 * 1e5) ** 2) ** 0.5)   # 0 in table -> clipped to 100
         assert s["ECOILA"] == pytest.approx((325.0**2 + (0.0035 * 2e4) ** 2) ** 0.5)  # not in table -> era floor
-        s2, m2 = resolve_coil_sigma(self.D3D, device="DIII-D", shot=153072)
+        s2, m2 = resolve_coil_sigma(self.D3D, device="DIII-D", era="pre2014")
         assert m2["era"] == "pre2014"
         assert s2["F1A"] > s["F1A"] and s2["ECOILA"] > s["ECOILA"]      # era floors differ
         assert abs(s2["F9A"] - s["F9A"]) < 0.05 * s["F9A"]                 # F9A: ~575 A-t in both eras
 
     def test_named_model_has_no_per_coil_table(self):
         from bouquet.coil_spec import resolve_coil_sigma
-        s, m = resolve_coil_sigma(self.D3D, device="DIII-D", sigma="rms_incl_offset", shot=204441)
+        s, m = resolve_coil_sigma(self.D3D, device="DIII-D", sigma="rms_incl_offset")
         assert m["per_coil_floors"] == {} and s["F9A"] == s["F1A"]
 
     def test_z_guard_catches_a_single_bad_coil(self, tmp_path):
@@ -320,9 +322,141 @@ class TestPerCoilFloorsAndZGuard:
             g = hf.create_group("scan/1"); b = g.create_group("_baseline")
             b.create_dataset("coil_names", data=np.array(names, dtype="S")); b.create_dataset("coil_currents", data=base)
             d = g.create_group("0"); d.create_dataset("coil_names", data=np.array(names, dtype="S")); d.create_dataset("coil_currents", data=base)
-        r = filter_coil_chi2(h5, None, scan_key=1, apply=False, shot=204441)
+        r = filter_coil_chi2(h5, None, scan_key=1, apply=False, era="modern")
         acc = get_device("DIII-D").acceptance
         assert r["chi2_max"] == acc["chi2_max"] == 6.1 and r["z_max"] == acc["z_max"] == 6.3
         assert r["sigma_model"]["acceptance"]["source"] == "device q95"
-        r2 = filter_coil_chi2(h5, None, scan_key=1, apply=False, shot=204441, chi2_max=4.0, z_max=5.0)
+        r2 = filter_coil_chi2(h5, None, scan_key=1, apply=False, era="modern", chi2_max=4.0, z_max=5.0)
         assert r2["chi2_max"] == 4.0 and r2["z_max"] == 5.0
+
+
+class TestArchiveShapes:
+    """The chi2 filter must judge every STORED draw, on every archive layout."""
+
+    D3D = {**{f"F{i}{s}": 1e5 for i in range(1, 10) for s in "AB"},
+           "ECOILA": 2e4, "ECOILB": 2e4}
+
+    def _write(self, path, *, flat=False, draws=(("0", "ok"), ("1", "ok")),
+               baseline_names=True):
+        import h5py
+        names = list(self.D3D)
+        base = np.array([self.D3D[n] for n in names])
+        with h5py.File(path, "w") as hf:
+            root = hf if flat else hf.create_group("scan/1")
+            b = root.create_group("_baseline")
+            if baseline_names:
+                b.create_dataset("coil_names", data=np.array(names, dtype="S"))
+            b.create_dataset("coil_currents", data=base)
+            for key, kind in draws:
+                g = root.create_group(key)
+                if kind == "no_coils":                  # nothing stored at all
+                    g.attrs["placeholder"] = True
+                    continue
+                if kind != "v1":                        # v1 = no coil_names dataset
+                    g.create_dataset("coil_names", data=np.array(names, dtype="S"))
+                cur = base.copy()
+                if kind == "far":
+                    cur[names.index("F1A")] += 1e5      # wildly out of spec
+                g.create_dataset("coil_currents", data=cur)
+        return names
+
+    def test_a_draw_with_no_coil_currents_is_not_selected(self, tmp_path):
+        """The reviewer's 2-draw archive: draw 0 far out of spec, draw 1 with no
+        coil data at all.  The docstring says unjudgeable is not a pass -- it used
+        to be `continue`d past, which left it flagged `selected`."""
+        from bouquet.filtering import filter_coil_chi2, read_filter_flags, select_indices
+        h5 = str(tmp_path / "two.h5")
+        self._write(h5, draws=(("0", "far"), ("1", "no_coils")))
+        with pytest.warns(UserWarning, match="unjudgeable is not a pass"):
+            r = filter_coil_chi2(h5, None, scan_key=1, apply=True, era="modern")
+        assert r["n_total"] == 2 and r["n_pass"] == 0 and r["n_no_coil_data"] == 1
+        assert r["draws"][1]["nu"] == 0 and np.isnan(r["draws"][1]["chi2_nu"])
+        flags = read_filter_flags(h5, scan_key=1)
+        assert flags[1]["passes_coil_filter"] is False and flags[1]["selected"] is False
+        assert select_indices(h5, scan_key=1, selection="selected") == []
+
+    def test_a_v1_draw_without_coil_names_fails_instead_of_raising(self, tmp_path):
+        """``coil_names`` is a schema-v2 dataset; a v1 draw must be judged
+        unjudgeable (and counted), not raise KeyError."""
+        from bouquet.filtering import filter_coil_chi2
+        h5 = str(tmp_path / "v1.h5")
+        self._write(h5, draws=(("0", "ok"), ("1", "v1")))
+        with pytest.warns(UserWarning, match="unjudgeable is not a pass"):
+            r = filter_coil_chi2(h5, None, scan_key=1, apply=False, era="modern")
+        assert r["n_total"] == 2 and r["draws"][0]["passes"] and not r["draws"][1]["passes"]
+
+    def test_a_v1_baseline_without_coil_names_is_loud(self, tmp_path):
+        from bouquet.coil_spec import CoilSigmaUnavailable
+        from bouquet.filtering import filter_coil_chi2
+        h5 = str(tmp_path / "v1b.h5")
+        self._write(h5, baseline_names=False)
+        with pytest.raises(CoilSigmaUnavailable, match="no coil_names"):
+            filter_coil_chi2(h5, None, scan_key=1, apply=False, era="modern")
+
+    def test_flat_legacy_archive_has_no_scan_group(self, tmp_path):
+        """``discover_scan_keys`` returns None for a flat file, so the filter must
+        resolve the draw container the way ``_baseline_boundary`` does instead of
+        indexing hf['scan']."""
+        from bouquet.filtering import filter_coil_chi2, read_filter_flags
+        h5 = str(tmp_path / "flat.h5")
+        self._write(h5, flat=True, draws=(("0", "ok"), ("1", "far")))
+        r = filter_coil_chi2(h5, None, apply=True, era="modern")
+        assert r[None]["n_total"] == 2
+        assert r[None]["draws"][0]["passes"] and not r[None]["draws"][1]["passes"]
+        assert read_filter_flags(h5)[None][1]["selected"] is False
+
+    def test_acceptance_records_the_calibrated_and_the_used_coil_count(self, tmp_path):
+        """The quantiles were calibrated at 18 coils; the shipped signature judges
+        20.  The numbers are NOT moved -- the mismatch is recorded and warned."""
+        from bouquet.filtering import filter_coil_chi2
+        h5 = str(tmp_path / "nu.h5")
+        self._write(h5, draws=(("0", "ok"),))
+        with pytest.warns(UserWarning, match="calibrated over 18 coils"):
+            r = filter_coil_chi2(h5, None, scan_key=1, apply=False, era="modern")
+        acc = r["sigma_model"]["acceptance"]
+        assert acc["calibrated_nu"] == 18 and acc["nu_used"] == 20
+        assert r["chi2_max"] == 6.1 and r["z_max"] == 6.3      # unchanged
+
+
+class TestBouquetFilterWrapper:
+    """Bouquet.filter()'s chi2 branch and its loud legacy fallback."""
+
+    def _run(self, tmp_path, **filt):
+        import h5py
+        from bouquet.config import FilterConfig
+        from bouquet.run import Bouquet
+        names = list(TestArchiveShapes.D3D)
+        base = np.array([TestArchiveShapes.D3D[n] for n in names])
+        header = str(tmp_path / "wrap")
+        with h5py.File(header + ".h5", "w") as hf:
+            g = hf.create_group("scan/1"); b = g.create_group("_baseline")
+            b.create_dataset("coil_names", data=np.array(names, dtype="S"))
+            b.create_dataset("coil_currents", data=base)
+            d = g.create_group("0")
+            d.create_dataset("coil_names", data=np.array(names, dtype="S"))
+            d.create_dataset("coil_currents", data=base)
+            d.attrs["max_F_drift_pct"] = 0.1
+            d.attrs["max_VSC_drift_pct"] = 0.1
+
+        class Gen: scan_key = 1
+        class Cfg:
+            output_header = header
+            filtering = FilterConfig(**filt)
+            generation = Gen()
+            device = None
+            source = type("S", (), {})()
+        b_ = Bouquet.__new__(Bouquet); b_.config = Cfg()
+        return b_.filter(plot=False)
+
+    def test_chi2_branch_is_used_and_recorded(self, tmp_path):
+        sel = self._run(tmp_path, coil_daq_era="modern")
+        assert sel["coil_filter_used"] == "chi2"
+        assert sel["coil"]["chi2_max"] == 6.1
+
+    def test_unresolvable_sigma_falls_back_to_legacy_loudly(self, tmp_path, monkeypatch):
+        import bouquet.devices as dev
+        monkeypatch.setattr(dev, "detect_device", lambda names: None)
+        with pytest.warns(UserWarning, match="COIL FILTER FALLBACK"):
+            sel = self._run(tmp_path)
+        assert sel["coil_filter_used"] == "legacy(fallback)"
+        assert "chi2_max" not in sel["coil"]

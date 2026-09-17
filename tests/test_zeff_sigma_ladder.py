@@ -15,13 +15,14 @@ with an IDA envelope.
 
 Synthetic .cdf-shaped HDF5 files exercise all three vintages; no solver.
 """
+import os
 import warnings
 
 import h5py
 import numpy as np
 import pytest
 
-from bouquet.baseline import resolve_zeff_envelope
+from bouquet.baseline import resolve_zeff_envelope, zeff_sigma_eligibility
 from bouquet.io.ida import read_ida
 
 _NPSI = 40
@@ -140,75 +141,134 @@ class TestEnvelopeLadder:
     _meas = np.full(10, 0.17)
 
     def test_measured_wins_on_the_ida_path(self):
-        env, label = resolve_zeff_envelope("auto", 0.05, self._base, True,
-                                           self._meas, "Zeff_err")
+        env, label, meta = resolve_zeff_envelope(
+            "auto", 0.05, self._base, True, self._meas, "Zeff_err")
         np.testing.assert_array_equal(env, self._meas)
         assert "measured IDA (Zeff_err)" in label
+        assert meta["tier"] == "VB-measured"
+        assert meta["provenance"] == "Zeff_err"
 
     def test_scalar_fallback_when_the_file_has_no_measurement(self):
-        env, label = resolve_zeff_envelope("auto", 0.05, self._base, True,
-                                           None, "none")
+        with pytest.warns(UserWarning, match="skipped"):
+            env, label, meta = resolve_zeff_envelope(
+                "auto", 0.05, self._base, True, None, "none",
+                ida_in_play=True)
         np.testing.assert_allclose(env, 0.05 * self._base)
         assert label.startswith("scalar")
+        assert meta["tier"] == "scalar" and meta["fell_back"]
+        assert [s["tier"] for s in meta["skipped"]] == ["carbon-propagated",
+                                                        "VB-measured"]
+        assert all("missing dataset" in s["reason"] for s in meta["skipped"])
 
     def test_fuse_baseline_never_pairs_with_an_ida_envelope(self):
         """IMAS/ida_hybrid: zeff_is_ida=False must force the scalar even
         though a measured envelope exists."""
-        env, label = resolve_zeff_envelope("auto", 0.05, self._base, False,
-                                           self._meas, "Zeff_err")
+        env, label, meta = resolve_zeff_envelope(
+            "auto", 0.05, self._base, False, self._meas, "Zeff_err")
         np.testing.assert_allclose(env, 0.05 * self._base)
         assert label.startswith("scalar")
+        assert meta["tier"] == "scalar" and not meta["eligible"]
 
     def test_forced_scalar_ignores_the_measurement(self):
-        env, label = resolve_zeff_envelope("scalar", 0.05, self._base, True,
-                                           self._meas, "Zeff_err")
+        env, label, meta = resolve_zeff_envelope(
+            "scalar", 0.05, self._base, True, self._meas, "Zeff_err")
         np.testing.assert_allclose(env, 0.05 * self._base)
+        # explicitly asked for: recorded, but not a fallback and not warned
+        assert meta["tier"] == "scalar" and not meta["fell_back"]
+        assert not meta["warned"]
 
     def test_demanding_measured_warns_loudly_when_unavailable(self):
-        with pytest.warns(UserWarning, match="falling back"):
-            env, label = resolve_zeff_envelope("measured", 0.05, self._base,
-                                               True, None, "none")
+        with pytest.warns(UserWarning, match="skipped"):
+            env, label, meta = resolve_zeff_envelope(
+                "measured", 0.05, self._base, True, None, "none")
         np.testing.assert_allclose(env, 0.05 * self._base)
-        assert "no measured tier available" in label
+        assert "FALLBACK" in label
+        assert meta["warned"] and meta["skipped"][0]["tier"] == "VB-measured"
 
     # ---- the carbon tier (dilution's direct measurement) ------------------
     _carb = np.full(10, 0.04)
 
     def test_auto_prefers_carbon_over_vb(self):
-        env, label = resolve_zeff_envelope(
+        env, label, meta = resolve_zeff_envelope(
             "auto", 0.05, self._base, True, self._meas, "Zeff_err",
             carbon_sigma=self._carb, carbon_source="n_12C6_err")
         np.testing.assert_array_equal(env, self._carb)
         assert "carbon-propagated (n_12C6_err)" in label
+        assert meta["tier"] == "carbon-propagated"
+        assert meta["skipped"] == [] and not meta["warned"]
 
     def test_forced_carbon_falls_back_to_vb_with_a_warning(self):
         with pytest.warns(UserWarning, match="carbon"):
-            env, label = resolve_zeff_envelope(
+            env, label, meta = resolve_zeff_envelope(
                 "carbon", 0.05, self._base, True, self._meas, "Zeff_err",
                 carbon_sigma=None, carbon_source="none")
         np.testing.assert_array_equal(env, self._meas)
         assert "measured IDA" in label
+        assert meta["tier"] == "VB-measured"
+        assert meta["skipped"] == [
+            {"tier": "carbon-propagated",
+             "reason": "missing dataset: this file provides no n_12C6 "
+                       "uncertainty"}]
 
     def test_forced_measured_still_means_the_vb_tier(self):
-        env, label = resolve_zeff_envelope(
+        env, label, meta = resolve_zeff_envelope(
             "measured", 0.05, self._base, True, self._meas, "Zeff_err",
             carbon_sigma=self._carb, carbon_source="n_12C6_err")
         np.testing.assert_array_equal(env, self._meas)
         assert "measured IDA" in label
+        # 'measured' never attempts carbon, so it is not reported as skipped
+        assert meta["skipped"] == []
 
     def test_implausibly_large_envelope_draws_the_report_warning(self):
         huge = 0.8 * self._base                      # 80 % of Zeff
         with pytest.warns(UserWarning, match="implausibly large"):
-            env, label = resolve_zeff_envelope(
+            env, label, meta = resolve_zeff_envelope(
                 "measured", 0.05, self._base, True, huge, "Zeff_err")
         np.testing.assert_array_equal(env, huge)     # report-only, not clipped
+        assert meta["median_fraction_of_zeff"] == pytest.approx(0.8)
 
     def test_unusable_measurement_falls_back_with_a_warning(self):
         bad = np.full(3, 0.1)                      # wrong shape
-        with pytest.warns(UserWarning, match="unusable"):
-            env, label = resolve_zeff_envelope("auto", 0.05, self._base, True,
-                                               bad, "Zeff_err")
+        with pytest.warns(UserWarning, match="invalid data"):
+            env, label, meta = resolve_zeff_envelope(
+                "auto", 0.05, self._base, True, bad, "Zeff_err",
+                ida_in_play=True)
         np.testing.assert_allclose(env, 0.05 * self._base)
+        assert any("shape" in s["reason"] for s in meta["skipped"])
+
+    def test_all_zero_sigma_is_still_refused(self):
+        with pytest.warns(UserWarning, match="all-zero"):
+            env, _, meta = resolve_zeff_envelope(
+                "auto", 0.05, self._base, True, np.zeros(10), "Zeff_err",
+                ida_in_play=True)
+        np.testing.assert_allclose(env, 0.05 * self._base)
+
+    def test_ineligible_source_records_and_warns_when_an_ida_is_in_play(self):
+        """The ida_hybrid case: an IDA file IS configured and its measured
+        envelope is refused by design.  Refusing it silently is what this
+        ladder must never do."""
+        with pytest.warns(UserWarning, match="source ineligible"):
+            env, label, meta = resolve_zeff_envelope(
+                "auto", 0.05, self._base, False, self._meas, "Zeff_err",
+                ineligible_reason="the Z_eff baseline comes from the "
+                                  "IMAS/FUSE source",
+                ida_in_play=True)
+        np.testing.assert_allclose(env, 0.05 * self._base)
+        assert meta["ineligible_reason"].startswith("the Z_eff baseline")
+        assert all("source ineligible" in s["reason"] for s in meta["skipped"])
+
+    def test_no_ida_file_at_all_is_recorded_but_not_warned(self):
+        """No IDA file configured: there is no ladder to fall down, so the
+        scalar is not a fallback event -- still fully recorded."""
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            env, label, meta = resolve_zeff_envelope(
+                "auto", 0.05, self._base, False, None, "none",
+                ineligible_reason="no IDA sigma file is configured",
+                ida_in_play=False)
+        np.testing.assert_allclose(env, 0.05 * self._base)
+        assert meta["tier"] == "scalar" and not meta["warned"]
+        assert meta["skipped"], "the un-attempted tiers must still be recorded"
 
     def test_unknown_source_raises(self):
         with pytest.raises(ValueError, match="zeff_sigma_source"):
@@ -295,33 +355,38 @@ class TestCarbonDataValidity:
         assert "cross-check skipped" in capsys.readouterr().out
 
 
+def _mk_bl(psi_kin):
+    from bouquet.baseline import Baseline
+    psi_N = np.linspace(0.0, 1.0, 33)
+    _, ne, te, zeff = _grids()
+    j = 8.0e5 * (1.0 - psi_N ** 2)
+    return Baseline(
+        psi_N=psi_N, j_phi=j, j_inductive=0.85 * j, j_BS=0.15 * j,
+        psi_N_kinetic=psi_kin, ne=ne, te=te, ni=0.9 * ne, ti=0.9 * te,
+        Zeff=zeff, Ip_target=1.2e6, l_i_target=0.85,
+        provenance="reconstruction",
+    )
+
+
+def _mk_cfg(profiles_path, tmp_path, unc=None, impurity_Z=6.0):
+    from bouquet.config import (BouquetConfig, ReconstructionSource,
+                                SolverConfig, UncertaintyConfig)
+    return BouquetConfig(
+        source=ReconstructionSource(
+            geqdsk_path=str(tmp_path / "g.geqdsk"),
+            profiles_path=profiles_path, time=3.0,
+            impurity_Z=impurity_Z),
+        solver=SolverConfig(mesh_path=str(tmp_path / "mesh.h5")),
+        output_header=str(tmp_path / "out"),
+        uncertainty=unc or UncertaintyConfig(),
+    )
+
+
 class TestEnvelopeWiring:
     """resolve_uncertainty-level wiring: eligibility + impurity_Z."""
 
-    def _bl(self, psi_kin):
-        from bouquet.baseline import Baseline
-        psi_N = np.linspace(0.0, 1.0, 33)
-        _, ne, te, zeff = _grids()
-        j = 8.0e5 * (1.0 - psi_N ** 2)
-        return Baseline(
-            psi_N=psi_N, j_phi=j, j_inductive=0.85 * j, j_BS=0.15 * j,
-            psi_N_kinetic=psi_kin, ne=ne, te=te, ni=0.9 * ne, ti=0.9 * te,
-            Zeff=zeff, Ip_target=1.2e6, l_i_target=0.85,
-            provenance="reconstruction",
-        )
-
-    def _cfg(self, profiles_path, tmp_path, unc=None, impurity_Z=6.0):
-        from bouquet.config import (BouquetConfig, ReconstructionSource,
-                                    SolverConfig, UncertaintyConfig)
-        return BouquetConfig(
-            source=ReconstructionSource(
-                geqdsk_path=str(tmp_path / "g.geqdsk"),
-                profiles_path=profiles_path, time=3.0,
-                impurity_Z=impurity_Z),
-            solver=SolverConfig(mesh_path=str(tmp_path / "mesh.h5")),
-            output_header=str(tmp_path / "out"),
-            uncertainty=unc or UncertaintyConfig(),
-        )
+    _bl = staticmethod(_mk_bl)
+    _cfg = staticmethod(_mk_cfg)
 
     def test_own_cdf_gets_the_carbon_tier(self, tmp_path):
         from bouquet.baseline import resolve_uncertainty
@@ -375,3 +440,198 @@ class TestEnvelopeWiring:
         expect = (zeff - 1.0) * (20.0 / 30.0) * np.sqrt(0.25 ** 2 + 0.05 ** 2)
         np.testing.assert_allclose(env["aux_sigmas"]["zeff"], expect,
                                    rtol=1e-6)
+
+
+class TestSigmaPathSpelling:
+    """A path SPELLING must never cost a run its measured Z_eff tiers.
+
+    The first version of the gate compared RAW strings
+    (``ida_path == src.profiles_path``).  That answers "different file" for a
+    relative path, a ``~`` prefix, a trailing ``/`` or ``./`` segment and a
+    symlink -- and the consequence was a silent drop to the ASSUMED scalar
+    envelope, the same failure class this feature's own end-to-end A/B
+    caught.  Every spelling below names the SAME file and must keep the
+    carbon tier; a genuinely different file must still be refused, and must
+    say so.
+
+    Each case asserts the two spellings are UNEQUAL AS STRINGS, so this
+    module fails loudly if the comparison ever reverts to string equality.
+    """
+
+    def _own(self, tmp_path):
+        own = tmp_path / "own.cdf"
+        psi, zeff = _write_direct(str(own), with_zeff_err=True,
+                                  with_carbon=True)
+        return own, psi, zeff
+
+    def _expect_carbon(self, zeff):
+        # the fixture's carbon propagation, identical to the wiring tests
+        return (zeff - 1.0) * np.sqrt(0.25 ** 2 + 0.05 ** 2)
+
+    # ---- unit level: the eligibility predicate itself ---------------------
+
+    def _eligible(self, src_spelling, sigma_spelling, tmp_path):
+        from bouquet.config import ReconstructionSource
+        src = ReconstructionSource(geqdsk_path=str(tmp_path / "g.geqdsk"),
+                                   profiles_path=str(src_spelling), time=3.0)
+        return zeff_sigma_eligibility(src, str(sigma_spelling))
+
+    def test_relative_vs_absolute_is_the_same_file(self, tmp_path,
+                                                   monkeypatch):
+        own, _, _ = self._own(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        rel = "own.cdf"
+        assert rel != str(own)              # raw equality would say "differ"
+        ok, why = self._eligible(rel, own, tmp_path)
+        assert ok, why
+        assert self._eligible(own, rel, tmp_path)[0]
+
+    def test_dot_segment_is_the_same_file(self, tmp_path):
+        own, _, _ = self._own(tmp_path)
+        dotted = os.path.join(str(tmp_path), ".", "own.cdf")
+        assert dotted != str(own)
+        assert self._eligible(dotted, own, tmp_path)[0]
+
+    def test_trailing_separator_is_the_same_file(self, tmp_path):
+        own, _, _ = self._own(tmp_path)
+        trailing = str(own) + "/"
+        assert trailing != str(own)
+        # note: the raw-string `.endswith(".cdf")` screen also fails on this
+        assert self._eligible(trailing, own, tmp_path)[0]
+
+    def test_tilde_prefix_is_the_same_file(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        own = home / "own.cdf"
+        _write_direct(str(own), with_zeff_err=True, with_carbon=True)
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
+        tilde = os.path.join("~", "own.cdf")
+        assert tilde != str(own)
+        assert self._eligible(tilde, own, tmp_path)[0]
+
+    def test_symlinked_file_is_the_same_file(self, tmp_path):
+        own, _, _ = self._own(tmp_path)
+        link = tmp_path / "link.cdf"
+        link.symlink_to(own)
+        assert str(link) != str(own)
+        assert self._eligible(link, own, tmp_path)[0]
+
+    def test_symlinked_parent_directory_is_the_same_file(self, tmp_path):
+        real = tmp_path / "real"
+        real.mkdir()
+        own = real / "own.cdf"
+        _write_direct(str(own), with_zeff_err=True, with_carbon=True)
+        alias = tmp_path / "alias"
+        alias.symlink_to(real, target_is_directory=True)
+        via_alias = alias / "own.cdf"
+        assert str(via_alias) != str(own)
+        assert self._eligible(via_alias, own, tmp_path)[0]
+
+    def test_a_genuinely_different_file_is_still_refused_and_says_why(
+            self, tmp_path):
+        own, _, _ = self._own(tmp_path)
+        other = tmp_path / "other_vintage.cdf"
+        _write_direct(str(other), with_zeff_err=True, with_carbon=True)
+        ok, why = self._eligible(own, other, tmp_path)
+        assert not ok
+        assert "genuinely different file" in why
+        assert why, "a refusal must carry a reason, never be silent"
+
+    def test_a_non_cdf_profiles_file_is_refused_and_says_why(self, tmp_path):
+        own, _, _ = self._own(tmp_path)
+        ok, why = self._eligible(tmp_path / "p.peqdsk", own, tmp_path)
+        assert not ok and "not an IDA .cdf" in why
+
+    def test_no_ida_file_is_refused_and_says_why(self, tmp_path):
+        from bouquet.config import ReconstructionSource
+        own, _, _ = self._own(tmp_path)
+        ok, why = zeff_sigma_eligibility(
+            ReconstructionSource(geqdsk_path=str(tmp_path / "g.geqdsk"),
+                                 profiles_path=str(own), time=3.0), None)
+        assert not ok and "no IDA sigma file" in why
+
+    # ---- end to end: the tier that actually reaches the sampler ----------
+
+    def test_relative_spelling_keeps_the_carbon_tier_end_to_end(
+            self, tmp_path, monkeypatch):
+        from bouquet.baseline import resolve_uncertainty
+        from bouquet.config import UncertaintyConfig
+        own, psi, zeff = self._own(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        cfg = _mk_cfg("own.cdf", tmp_path,
+                      unc=UncertaintyConfig(ida_path=str(own)))
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")       # no fallback may occur
+            env = resolve_uncertainty(cfg, _mk_bl(psi))
+        np.testing.assert_allclose(env["aux_sigmas"]["zeff"],
+                                   self._expect_carbon(zeff), rtol=1e-6)
+        assert env["zeff_sigma_tier"]["tier"] == "carbon-propagated"
+        assert env["zeff_sigma_tier"]["skipped"] == []
+
+    def test_symlink_spelling_keeps_the_carbon_tier_end_to_end(self, tmp_path):
+        from bouquet.baseline import resolve_uncertainty
+        from bouquet.config import UncertaintyConfig
+        own, psi, zeff = self._own(tmp_path)
+        link = tmp_path / "link.cdf"
+        link.symlink_to(own)
+        cfg = _mk_cfg(str(own), tmp_path,
+                      unc=UncertaintyConfig(ida_path=str(link)))
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            env = resolve_uncertainty(cfg, _mk_bl(psi))
+        np.testing.assert_allclose(env["aux_sigmas"]["zeff"],
+                                   self._expect_carbon(zeff), rtol=1e-6)
+        assert env["zeff_sigma_tier"]["tier"] == "carbon-propagated"
+
+    def test_a_different_file_falls_back_loudly_and_is_recorded(
+            self, tmp_path):
+        """The refusal is correct -- but it must WARN and be RECORDED, not
+        silently hand the run an assumed 5 %-class envelope."""
+        from bouquet.baseline import resolve_uncertainty
+        from bouquet.config import UncertaintyConfig
+        own, psi, zeff = self._own(tmp_path)
+        other = tmp_path / "other_vintage.cdf"
+        _write_direct(str(other), with_zeff_err=True, with_carbon=True)
+        cfg = _mk_cfg(str(own), tmp_path,
+                      unc=UncertaintyConfig(ida_path=str(other)))
+        with pytest.warns(UserWarning, match="genuinely different file"):
+            env = resolve_uncertainty(cfg, _mk_bl(psi))
+        np.testing.assert_allclose(env["aux_sigmas"]["zeff"],
+                                   0.05 * np.abs(zeff), rtol=1e-6)
+        meta = env["zeff_sigma_tier"]
+        assert meta["tier"] == "scalar" and meta["warned"]
+        assert not meta["eligible"]
+        assert "genuinely different file" in meta["ineligible_reason"]
+        assert [s["tier"] for s in meta["skipped"]] == ["carbon-propagated",
+                                                        "VB-measured"]
+
+    def test_a_pfile_baseline_falls_back_loudly_and_is_recorded(
+            self, tmp_path):
+        from bouquet.baseline import resolve_uncertainty
+        from bouquet.config import UncertaintyConfig
+        own, psi, zeff = self._own(tmp_path)
+        cfg = _mk_cfg(str(tmp_path / "p.peqdsk"), tmp_path,
+                      unc=UncertaintyConfig(ida_path=str(own)))
+        with pytest.warns(UserWarning, match="not an IDA .cdf"):
+            env = resolve_uncertainty(cfg, _mk_bl(psi))
+        meta = env["zeff_sigma_tier"]
+        assert meta["tier"] == "scalar" and meta["warned"]
+        np.testing.assert_allclose(env["aux_sigmas"]["zeff"],
+                                   0.05 * np.abs(_mk_bl(psi).Zeff), rtol=1e-6)
+
+    def test_missing_dataset_fallback_is_warned_and_recorded(self, tmp_path):
+        """Falling back because the FILE lacks a tier is reported with a
+        different reason class than a path mismatch."""
+        from bouquet.baseline import resolve_uncertainty
+        own = tmp_path / "nocarb.cdf"
+        psi, zeff = _write_direct(str(own), with_zeff_err=True,
+                                  with_carbon=False)
+        cfg = _mk_cfg(str(own), tmp_path)
+        with pytest.warns(UserWarning, match="missing dataset"):
+            env = resolve_uncertainty(cfg, _mk_bl(psi))
+        meta = env["zeff_sigma_tier"]
+        assert meta["tier"] == "VB-measured"
+        assert meta["skipped"][0]["tier"] == "carbon-propagated"
+        assert "missing dataset" in meta["skipped"][0]["reason"]
+        assert "path" not in meta["skipped"][0]["reason"]

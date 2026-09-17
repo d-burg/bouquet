@@ -35,6 +35,7 @@ from .utils import (
     read_eqdsk_from_bytes,
     _scan_key,
     _group_path,
+    _read_coil_names,
 )
 from .io import read_geqdsk
 
@@ -258,17 +259,30 @@ def select_indices(h5path_or_header, scan_key=None, selection="selected"):
 # --------------------------------------------------------------------------
 #  the two filters
 # --------------------------------------------------------------------------
-def measured_coil_currents(dd_path, time_s):
+#: The nearest ``pf_active`` sample may sit this far [s] from the requested time
+#: before :func:`measured_coil_currents` warns that it is extrapolating.
+PF_ACTIVE_TIME_TOL_S = 0.05
+
+
+def measured_coil_currents(dd_path, time_s, time_tol_s=PF_ACTIVE_TIME_TOL_S):
     """``{name: (current_A, sigma_A)}`` from an IMAS ``pf_active`` at *time_s*.
 
     ``data_error_upper`` is read as the 1-sigma magnitude (FUSE writes the error
     itself there, not ``data + error``).
+
+    *time_s* is a time in SECONDS on the coil time base -- not a scan key. The
+    nearest sample is taken; when it is further than *time_tol_s* from the
+    request (e.g. a time outside the coil time base, which would otherwise
+    return the endpoint silently) a warning is emitted naming the offset.
+    ``time_tol_s=None`` disables the check.
     """
     import json
+    import warnings
 
     with open(dd_path) as fh:
         dd = json.load(fh)
-    out = {}
+    time_s = float(time_s)
+    out, worst = {}, (0.0, None)
     for c in dd.get("pf_active", {}).get("coil", []):
         name = c.get("name") or c.get("identifier")
         cur = c.get("current") or {}
@@ -280,14 +294,23 @@ def measured_coil_currents(dd_path, time_s):
         if e is None:
             continue
         e = np.abs(np.asarray(e, dtype=float))
-        j = int(np.argmin(np.abs(t - float(time_s))))
+        j = int(np.argmin(np.abs(t - time_s)))
+        dt = float(abs(t[j] - time_s))
+        if dt > worst[0]:
+            worst = (dt, name)
         out[name] = (float(d[j]), float(e[j]))
+    if time_tol_s is not None and worst[1] is not None and worst[0] > float(time_tol_s):
+        warnings.warn(
+            f"measured_coil_currents: nearest pf_active sample for {worst[1]!r} is "
+            f"{worst[0]:.4g} s from the requested t = {time_s:.4g} s (tolerance "
+            f"{float(time_tol_s):.4g} s). The requested time is probably outside the "
+            "coil time base; the endpoint sample is being used.", stacklevel=2)
     return out
 
 
 def filter_coil_chi2(h5path_or_header, dd_path=None, scan_key=None,
                      chi2_max=None, apply=True, sigma=None, device=None,
-                     shot=None, sigma_ref=None, z_max=None):
+                     era=None, sigma_ref=None, z_max=None, time_s=None):
     """Measurement-referenced coil filter (see :mod:`bouquet.coil_spec`).
 
     Scores each draw by ``chi2/nu`` of its coil currents against the baseline,
@@ -296,27 +319,45 @@ def filter_coil_chi2(h5path_or_header, dd_path=None, scan_key=None,
     measurement carries (E-coils included) and weights each by its own
     precision rather than a flat fractional band.
 
-    ``chi2_max=4.0`` is RMS |z| = 2 -- "within 2 sigma per coil on average" --
-    and reproduces the legacy filter's acceptance rate on the DIII-D 174823
-    ensemble (91%) while disagreeing on ~11% of individual draws.
+    The cut is NOT ``chi2_max=4.0``: that signature default is ``None``, which
+    resolves to the device's calibrated acceptance (DIII-D: 6.1 / 6.3) or, with
+    no device calibration, to the generic 4.0 / 5.0 rule of thumb.  The applied
+    numbers are reported in the summary and stamped on the scan group.
+
+    The acceptance thresholds are NOT dof-based: they are the chosen quantile of
+    what real machine states score under the same sigma model (see
+    :attr:`DeviceSpec.acceptance_provenance`), so they are tied to the coil set
+    they were calibrated over.  The number of coils actually judged (``nu``) and
+    the number the thresholds were calibrated at (``calibrated_nu``) are both
+    recorded in the stamped model, and a mismatch warns -- ``max|z|`` in
+    particular is an order statistic whose quantile moves with the coil count.
 
     A draw with no usable coil scores NaN and FAILS: unjudgeable is not a pass.
+    A draw carrying no ``coil_currents``/``coil_names`` at all is likewise
+    recorded as a FAILURE (and counted), never skipped.
 
     Per-coil sigma (see :func:`coil_spec.resolve_coil_sigma`): ``sigma`` explicit
     (``{"floor","fraction"}`` model, per-coil table, or callable), else the
     ``device`` model (named, or detected from the mesh coil names), else
     :class:`coil_spec.CoilSigmaUnavailable` is raised.  Needs no dd.
 
-    ``sigma_ref`` (legacy, dd-referenced; requires ``dd_path``): ``"d3d"`` uses the
-    digitizer table rescaled by |I_base|/|I_meas|; a dict ``{"F": A, "E": A}``
-    a custom per-family table; ``"dd"`` the dd's own ``data_error_upper``.
-    Raises :class:`ValueError` if given without ``dd_path``.
+    ``era`` names the device tolerance era (see :func:`devices.era_labels`) when
+    the device's floor is era-dependent.  It is never inferred from a file name:
+    pass it explicitly (``FilterConfig.coil_daq_era``, or via
+    :func:`devices.era_for_pulse` from an explicit pulse number).  ``None``
+    selects the device's strictest-documented default era and warns.
+
+    ``sigma_ref`` (legacy, dd-referenced; requires ``dd_path`` and ``time_s``):
+    ``"d3d"`` uses the digitizer table rescaled by |I_base|/|I_meas|; a dict
+    ``{"F": A, "E": A}`` a custom per-family table; ``"dd"`` the dd's own
+    ``data_error_upper``.  Raises :class:`ValueError` if given without them.
+    ``time_s`` is a time in seconds on the coil time base -- the scan key is a
+    label, not a time, and is never used as one.
 
     A draw passes when ``chi2/nu <= chi2_max`` AND its worst single coil has
     ``|z| <= z_max``: the pooled statistic alone lets one coil at 7 sigma hide
     behind seventeen quiet ones.  Both default (``None``) to the device's
-    empirically calibrated acceptance (:attr:`DeviceSpec.acceptance`, a chosen
-    quantile of what real machine states score under the same sigma) when the
+    empirically calibrated acceptance (:attr:`DeviceSpec.acceptance`) when the
     sigma came from a device model, else to :data:`devices.GENERIC_ACCEPTANCE`.
     Pass ``z_max=False`` to disable the guard.
 
@@ -324,58 +365,112 @@ def filter_coil_chi2(h5path_or_header, dd_path=None, scan_key=None,
     and ``coil_filter`` = "chi2" when ``apply`` is True.
     """
     import json
-    from .coil_spec import (coil_chi2, coil_sigma_in_base_units, with_sigma_ref,
+    import warnings
+    from .coil_spec import (CoilSigmaUnavailable, coil_chi2,
+                            coil_sigma_in_base_units, with_sigma_ref,
                             resolve_coil_sigma)
     if sigma_ref is not None and dd_path is None:
         raise ValueError("filter_coil_chi2: sigma_ref is dd-referenced and needs dd_path")
+    if sigma_ref is not None and time_s is None:
+        raise ValueError("filter_coil_chi2: sigma_ref is dd-referenced and needs an "
+                         "explicit time_s [s] on the coil time base (the scan key is "
+                         "a label, not a time)")
 
     h5path = _resolve(h5path_or_header)
     summary = {}
     for sv in _iter_scan_keys(h5path, scan_key):
+        bkey = _scan_key(sv)
+        idxs = list_equilibrium_indices(h5path, scan_key=sv)
+        no_coil_data = []
         with h5py.File(h5path, "r") as hf:
-            grp = hf["scan"][str(sv)]
+            # flat/legacy archives have no ``scan/`` group -- same idiom as
+            # ``_baseline_boundary``: the draws hang off the file root.
+            grp = hf[f"scan/{bkey}"] if bkey is not None else hf
             if "_baseline" not in grp:
                 continue
-            bn = [x.decode() if isinstance(x, bytes) else str(x)
-                  for x in grp["_baseline"]["coil_names"][()]]
+            bl = grp["_baseline"]
+            bn = _read_coil_names(bl)          # schema-v2 dataset; [] on a v1 archive
+            if not bn or "coil_currents" not in bl:
+                raise CoilSigmaUnavailable(
+                    "the archive baseline carries no coil_names/coil_currents (schema v1 "
+                    "or a run stored without coil data), so no draw can be judged against "
+                    "it. Re-run the generation with coil storage, or use the legacy "
+                    "coil filter (filtering.coil_filter = 'legacy').")
             baseline = dict(zip(bn, np.asarray(
-                grp["_baseline"]["coil_currents"][()], dtype=float).tolist()))
+                bl["coil_currents"][()], dtype=float).tolist()))
             if sigma_ref is not None:
-                meas = measured_coil_currents(dd_path, float(sv))
+                meas = measured_coil_currents(dd_path, float(time_s))
                 if sigma_ref != "dd":
                     meas = with_sigma_ref(meas, None if sigma_ref == "d3d" else sigma_ref)
-                sig, model = coil_sigma_in_base_units(baseline, meas), {"kind": "dd_referenced", "sigma_ref": str(sigma_ref)}
+                sig, model = coil_sigma_in_base_units(baseline, meas), {"kind": "dd_referenced", "sigma_ref": str(sigma_ref), "time_s": float(time_s)}
             else:
-                sig, model = resolve_coil_sigma(baseline, sigma=sigma, device=device, shot=shot)
+                sig, model = resolve_coil_sigma(baseline, sigma=sigma, device=device, era=era)
             # acceptance: explicit > device calibration (when sigma is the device model) > generic
             from .devices import GENERIC_ACCEPTANCE, get_device
-            acc = dict(GENERIC_ACCEPTANCE); acc_src = "generic"
-            if model.get("kind") == "device" and model.get("model") == "random":
+            acc = dict(GENERIC_ACCEPTANCE); acc_src = "generic"; cal_nu = None
+            if model.get("kind") == "device":
                 dacc = get_device(model["device"]).acceptance
-                if dacc:
-                    acc.update({k: dacc[k] for k in ("chi2_max", "z_max") if k in dacc}); acc_src = "device q%g" % (100 * dacc.get("quantile", float("nan")))
+                if model.get("model") == "random" and dacc:
+                    acc.update({k: dacc[k] for k in ("chi2_max", "z_max") if k in dacc})
+                    acc_src = "device q%g" % (100 * dacc.get("quantile", float("nan")))
+                    cal_nu = dacc.get("calibrated_nu")
+                elif dacc:
+                    # a named sigma model is a DIFFERENT random variable from the one the
+                    # device quantiles were measured on, so they are not reused -- but say so.
+                    warnings.warn(
+                        f"coil filter: sigma model {model.get('model')!r} has no calibrated "
+                        f"acceptance for device {model['device']!r}; falling back to the generic "
+                        f"chi2/nu <= {GENERIC_ACCEPTANCE['chi2_max']} / |z| <= "
+                        f"{GENERIC_ACCEPTANCE['z_max']} rule of thumb. The device's "
+                        "empirical quantiles were calibrated on the default 'random' model "
+                        "and do not transfer.", stacklevel=2)
             cm = float(acc["chi2_max"]) if chi2_max is None else float(chi2_max)
             zm = (acc["z_max"] if z_max is None else z_max)
             zm = None if zm is False else (None if zm is None else float(zm))
-            model = dict(model, acceptance={"chi2_max": cm, "z_max": zm, "source": acc_src})
+            model = dict(model, acceptance={"chi2_max": cm, "z_max": zm, "source": acc_src,
+                                            "calibrated_nu": cal_nu, "nu_sigma": len(sig)})
             rows = {}
-            for key in sorted((k for k in grp if k.isdigit()), key=int):
-                g = grp[key]
-                if "coil_currents" not in g:
+            for i in idxs:
+                gp = _group_path(sv, i)
+                if gp not in hf:
                     continue
-                names = [x.decode() if isinstance(x, bytes) else str(x)
-                         for x in g["coil_names"][()]]
+                g = hf[gp]
+                names = _read_coil_names(g)
+                if "coil_currents" not in g or not names:
+                    # unjudgeable: recorded as NaN so it FAILS below and is counted,
+                    # rather than silently skipped (which left it `selected`).
+                    rows[i] = {"chi2_nu": float("nan"), "chi2": float("nan"), "nu": 0,
+                               "max_abs_z": float("nan"), "worst_coil": None, "z": {}}
+                    no_coil_data.append(i)
+                    continue
                 draw = dict(zip(names, np.asarray(
                     g["coil_currents"][()], dtype=float).tolist()))
-                rows[int(key)] = coil_chi2(draw, baseline, sig)
+                rows[i] = coil_chi2(draw, baseline, sig)
         results = {i: bool(np.isfinite(r["chi2_nu"]) and r["chi2_nu"] <= cm
                            and (zm is None or r["max_abs_z"] <= zm))
                    for i, r in rows.items()}
+        if no_coil_data:
+            warnings.warn(
+                f"coil filter: {len(no_coil_data)} of {len(rows)} draws carry no coil "
+                f"currents (indices {no_coil_data[:8]}{'...' if len(no_coil_data) > 8 else ''}) "
+                "and were marked NOT selected -- unjudgeable is not a pass.", stacklevel=2)
+        nu_used = max((r["nu"] for r in rows.values()), default=0)
+        if cal_nu is not None and nu_used and int(nu_used) != int(cal_nu):
+            warnings.warn(
+                f"coil filter: acceptance chi2/nu <= {cm} and max|z| <= {zm} were calibrated "
+                f"over {int(cal_nu)} coils but are being applied over {int(nu_used)}. These are "
+                "empirical quantiles, not dof-based bounds: max|z| is an order statistic whose "
+                "quantile rises with the coil count, so the true false-rejection rate is ABOVE "
+                f"the nominal {100 * (1 - get_device(model['device']).acceptance.get('quantile', float('nan'))):.0f}%. "
+                "Thresholds are unchanged; recalibrate them over the judged coil set, or "
+                "restrict the metric to the calibrated set, before relying on the quantile.",
+                stacklevel=2)
+        model["acceptance"]["nu_used"] = int(nu_used)
         if apply:
             _write_filter_result(h5path, sv, results, "passes_coil_filter")
             with h5py.File(h5path, "a") as hf:
-                gp = f"scan/{sv}" if f"scan/{sv}" in hf else None
-                if gp is not None:
+                gp = f"scan/{bkey}" if bkey is not None else "/"
+                if gp in hf:
                     hf[gp].attrs["coil_filter"] = "chi2"
                     hf[gp].attrs["coil_sigma_model"] = json.dumps(model)
         n_pass = sum(results.values())
@@ -383,7 +478,7 @@ def filter_coil_chi2(h5path_or_header, dd_path=None, scan_key=None,
             "n_total": len(results), "n_pass": n_pass,
             "n_fail": len(results) - n_pass, "chi2_max": cm,
             "z_max": zm, "sigma_model": model,
-            "n_coils": (max((r["nu"] for r in rows.values()), default=0)),
+            "n_coils": nu_used, "n_no_coil_data": len(no_coil_data),
             "draws": {i: {"chi2_nu": r["chi2_nu"], "max_abs_z": r["max_abs_z"],
                           "worst_coil": r["worst_coil"], "nu": r["nu"],
                           "passes": results[i]} for i, r in rows.items()},

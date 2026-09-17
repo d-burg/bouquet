@@ -576,7 +576,205 @@ class GenerationConfig:
     #: extra GS solve, with at most ONE Newton correction after the closed-hybrid
     #: solve.  Where the recomputed bootstrap has negligible core content it
     #: reduces to "bootstrap" exactly.
+    #: "structured" replaces the scalar entirely: the multiplier on EACH source
+    #: becomes a smooth radial PROFILE, s_ind(psi) and s_bs(psi), on a small
+    #: basis (structured_basis below), and among all profiles that close Ip
+    #: exactly it returns the one that departs least from "trust the sources"
+    #: (s == 1) in a trust-weighted norm (structured_weights).  Motivation: the
+    #: MSE arbiter found the true correction is radially structured AND
+    #: shot-dependent -- core bootstrap EXCESS on one discharge, pedestal
+    #: bootstrap DEFICIT on another -- which no single number can represent.
+    #: Same constraints as the channels above (Ip exactly in the affine FSA
+    #: measure; the on-axis current row whenever the sawtooth gate admits, same
+    #: gate as "sawtooth_bootstrap"), solved in closed form through a small KKT
+    #: system, so it costs ZERO extra GS solves like the q0 predictor, with the
+    #: same at-most-ONE post-solve q0 correction.  It records effective scalar
+    #: equivalents (the Ip-weighted mean of each multiplier), which satisfy the
+    #: scalar closure equation exactly, so closure_health still applies.
+    #: Refuses when either multiplier leaves [0.2, 5] anywhere on the grid or
+    #: the KKT system is singular against a relative floor.
+    #: "structured" also takes a SECOND global measurement, l_i
+    #: (structured_li_target below), in either of two forms: HARD (imposed
+    #: exactly, one more KKT row) or SOFT (structured_soft=True: Ip and l_i
+    #: become Gaussian measurements with structured_ip_sigma / structured_li_sigma
+    #: and the answer is the posterior mode, 8 unknowns, Gauss-Newton, still no
+    #: GS solves).  Ip alone is ONE number against 2K coefficients and cannot
+    #: see radial redistribution; l_i can.  Both forms take at most ONE
+    #: post-solve correction, shared with the q0 corrector.
     closure_channel: str = "bootstrap"
+    #: closure_channel="structured": a NAMED one-switch configuration, resolved
+    #: at construction by ``utils.structured_preset_settings``.  ``None``
+    #: (default) = no preset; every structured field keeps its own default.
+    #:
+    #: ``"li_soft_onesided"`` is the recommended candidate configuration and
+    #: fills, in sigma terms, ``sigma_bs = (0.50, 0.30, 0.15, 0.10)``,
+    #: ``sigma_ind`` (down) ``= (0.10, 0.40, 0.40, 0.40)``, ``sigma_ind_up =
+    #: (0.10, 0.10, 0.10, 0.40)`` -- recorded as ``structured_weights``
+    #: (W = sigma^-2) and ``structured_sigma_ind_up`` -- together with
+    #: ``structured_soft=True``, ``structured_ip_sigma_frac=0.005`` and, ONLY
+    #: when ``structured_li_target`` is also set, ``structured_li_sigma=0.04``.
+    #: A preset with no l_i target simply omits the l_i term.
+    #:
+    #: EXPLICIT SETTINGS ALWAYS WIN: a preset fills only the fields still at
+    #: their dataclass default, so anything the caller set survives untouched.
+    #: The one asymmetry worth knowing is ``structured_soft``, whose default is
+    #: ``False`` and is therefore indistinguishable from an explicit ``False``
+    #: -- a caller who wants these ladders on the HARD solver should set the
+    #: sigma fields directly instead of naming the preset.  An unknown preset
+    #: name is refused at construction, never ignored.
+    #:
+    #: A preset is a PRIOR plus a claim about the data.  It contains no
+    #: acceptance criterion, convergence threshold or bound, and it does not
+    #: change ``closure_channel``, which stays ``"bootstrap"`` -- the structured
+    #: channel and every preset of it are opt-in.
+    structured_preset: Optional[str] = None
+    #: closure_channel="structured" basis, as a dict.  ``None`` selects the
+    #: shipped default ``utils.STRUCTURED_BASIS_DEFAULT`` -- four peak-normalised
+    #: Gaussians at psi_N = 0.15/0.45/0.75/0.95 with width 0.2, spanning core to
+    #: pedestal.  Override with e.g.
+    #: ``{"kind": "gaussian", "centres": [...], "widths": [...]}``;
+    #: ``{"kind": "constant"}`` collapses the channel back onto a single scalar
+    #: pair (that is how the tests prove it CONTAINS close_ip / close_ip_q0).
+    #: Peak-normalised, so a coefficient reads as "how far the multiplier moves
+    #: from 1 near this radius"; the basis need not be orthogonal, since with at
+    #: most two constraints on 2K unknowns the trust norm -- not the basis --
+    #: selects the answer.
+    structured_basis: Optional[dict] = None
+    #: closure_channel="structured" trust weights, as a dict
+    #: ``{"ind": (K,), "bs": (K,)}``.  ``None`` selects the shipped physics
+    #: prior ``utils.STRUCTURED_WEIGHTS_PHYSICS`` (ind 100/10/3/1, bs 1/3/10/100):
+    #: large W penalises deviation from 1, i.e. "trust this source here".
+    #:
+    #: The quantity to reason about is the WIDTH: ``W = 1/sigma^2``, with
+    #: ``utils.sigma_from_weights`` the bridge, so the hard and soft solvers are
+    #: handed the same prior.  ``sigma = 0`` (``W = inf``) hard-pins a
+    #: coefficient to 0; ``sigma = inf`` (``W = 0``) leaves it unpenalised.  The
+    #: two ladders run in OPPOSITE directions for different reasons: the
+    #: inductive core is tight because the on-axis current row already pins it
+    #: wherever the sawtooth gate admits one (mid-radius and mantle are left
+    #: looser -- that is where the closure is meant to work), while the
+    #: bootstrap is tight at the PEDESTAL, where Redl/Sauter is validated
+    #: against drift-kinetic (NEO) calculations, and loose in the CORE, where
+    #: the trapped fraction vanishes, the collisionality expansion is at its
+    #: worst and the bootstrap current is negligible anyway.  ``utils.STRUCTURED_WEIGHTS_UNIFORM``
+    #: (all 1) is the ONE documented alternative and exists to be run as a
+    #: sensitivity: the difference between the two answers is the part of the
+    #: result the prior -- not the data -- is holding up.  ``numpy.inf`` hard-pins
+    #: a coefficient to 0.  These are a PRIOR, not a tolerance: they change
+    #: which exactly-Ip-closing profile is chosen, never what "closed" means.
+    structured_weights: Optional[dict] = None
+    #: closure_channel="structured": the SECOND global measurement.  Ip is one
+    #: number against 2K coefficients and is blind to radial redistribution --
+    #: which is exactly what the campaign found the closure gets wrong.  l_i is
+    #: the other global number a magnetics reconstruction reports, and it sees
+    #: precisely that.  ``None`` (default) = no l_i constraint, i.e. the channel
+    #: behaves exactly as before.  Set it to the reconstruction's l_i for the
+    #: slice.  The value is a PLAIN INPUT: bouquet does not fetch it, does not
+    #: know which code produced it, and applies no definition offset -- whatever
+    #: cross-code offset the caller's l_i carries (a magnetics reconstruction's
+    #: l_i is li_1-like) must already be in this number.
+    structured_li_target: Optional[float] = None
+    #: closure_channel="structured": 1-sigma uncertainty on ``structured_li_target``
+    #: [dimensionless l_i].  Used ONLY by the soft solver
+    #: (``structured_soft=True``); the hard solver imposes the target exactly
+    #: and ignores it.  Required when ``structured_soft`` and a target are both
+    #: set -- a soft channel with no error bar is a hard channel with extra
+    #: steps, and bouquet refuses to guess one.
+    structured_li_sigma: Optional[float] = None
+    #: closure_channel="structured": which l_i normalisation the target is in,
+    #: spelled as TokaMaker's ``get_stats(li_normalization=...)``: ``"li_1"``
+    #: (the EFIT-like one: volume-averaged B_p^2 over the LCFS-perimeter mean
+    #: field) or ``"li_3"`` (ITER: 2 Bp_vol / (mu0 Ip)^2 R_axis).  Both are exact
+    #: discrete forms of the SAME poloidal-field-energy identity, differing only
+    #: by a geometric prefactor -- see utils' l_i module comment.
+    structured_li_kind: str = "li_1"
+    #: closure_channel="structured": 1-sigma uncertainty on Ip [A].  ``None``
+    #: (default) = Ip is imposed EXACTLY, as every channel has always done.  A
+    #: finite value turns Ip into a measurement in the soft solver (typical
+    #: choice: 0.5 % of Ip, the magnetics' own accuracy).  Ignored by the hard
+    #: solver, which cannot do anything but close Ip exactly.
+    #:
+    #: With a finite sigma the closed hybrid integrates to a POSTERIOR Ip a
+    #: little away from the measurement -- that is the channel working, not an
+    #: error, and the post-closure round-trip gate therefore checks the
+    #: assembly against that posterior (``structured_ip_posterior``), not
+    #: against Ip_target.  The distance from the measurement is recorded as
+    #: ``structured_ip_measured_residual_pct`` and, in sigma units, as
+    #: ``structured_residual_sigma_Ip``; beyond 1 sigma_Ip the slice picks up a
+    #: closure-health flag ("soft Ip beyond 1 sigma_Ip").  It is never refused
+    #: and never retried on that basis.
+    structured_ip_sigma: Optional[float] = None
+    #: closure_channel="structured": sigma_Ip as a FRACTION of |Ip_target|, for
+    #: callers who do not know Ip when they build the config (a campaign runner
+    #: reading a slice table, say).  Resolved to amps inside the closure, where
+    #: Ip_target is known.  Mutually exclusive with ``structured_ip_sigma``;
+    #: setting both is refused rather than silently resolved one way.
+    structured_ip_sigma_frac: Optional[float] = None
+    #: closure_channel="structured": use the POSTERIOR-MODE solver
+    #: (``utils.close_ip_structured_soft``) instead of the hard KKT one.  The
+    #: hard solver says "Ip and l_i are true"; the soft one says "they are
+    #: measurements with error bars" and minimises the trust-weighted prior plus
+    #: the squared z-scores.  The prior is the SAME (sigma = W^-1/2 of
+    #: structured_weights, via utils.sigma_from_weights), so a hard/soft pair
+    #: differs only in what is claimed about the data.  The on-axis-current row,
+    #: where the sawtooth gate admits it, stays HARD in both -- the q0 pin is a
+    #: topological statement, not a measurement with a sigma.
+    structured_soft: bool = False
+    #: closure_channel="structured": the UP side of a ONE-SIDED (asymmetric
+    #: Tikhonov) prior on the INDUCTIVE multipliers, as a list of K sigmas.
+    #: ``None`` (default) = the symmetric prior, byte-identical to every run
+    #: made before this field existed.  When set, basis coefficient ``a_k`` is
+    #: penalised with the ordinary ladder's width (``structured_weights``
+    #: ind, as sigma = W^-1/2) while it is NEGATIVE and with this list's
+    #: ``sigma_ind_up[k]`` while it is POSITIVE.  A tight up-side sigma
+    #: therefore lets ``s_ind`` FALL freely at that radius while resisting a
+    #: rise.  Applies to both solvers (hard KKT and soft posterior mode),
+    #: solved by sign iteration at zero extra GS solves; a sign pattern that
+    #: cycles is refused loudly, never returned.
+    #:
+    #: EMPIRICALLY MOTIVATED, with a supporting mechanism -- not derived from
+    #: one.  Empirically, over the closure cloud the l_i-informed channels win
+    #: on the over-shoot slices and LOSE on the under-shoot ones, because the
+    #: MSE chords penalise inductive current ADDED at mid-radius.  The
+    #: mechanism that makes that asymmetry expected: the transport model's edge
+    #: T_e collapses relative to the reference kinetics (ratios 2-40), so the
+    #: edge resistivity runs high, current diffuses inward faster than it
+    #: should, and the source's mid-radius inductive current is more likely
+    #: OVER- than under-estimated.
+    #: The asymmetry was tuned on the same MSE chords that then judge it, and
+    #: any result obtained with it carries that circularity caveat.
+    #:
+    #: This is a PRIOR, not a tolerance: it changes which closure is chosen,
+    #: never what "closed" means.  ``sigma = 0`` (pinned) and ``sigma = inf``
+    #: (unpenalised) decide which coefficients exist and must therefore match
+    #: the symmetric ladder entry for entry; a mismatch is refused.
+    structured_sigma_ind_up: Optional[list] = None
+    #: closure_channel="structured": absolute l_i acceptance for the post-solve
+    #: corrector -- the l_i analogue of q0_tol.  The predictor is EXACT in the
+    #: coefficient algebra but runs on the FROZEN anchor geometry; the solved
+    #: equilibrium's own l_i is the first time the real value is knowable.  If
+    #: it lands further than this from the target, ONE analytic step is taken and
+    #: its result accepted whatever it gives.  There is no iteration loop -- the
+    #: cost ceiling (at most one extra GS solve per slice, SHARED with the q0
+    #: corrector) is the point.  This is an acceptance threshold, not a
+    #: convergence tolerance: changing it does not change what "closed" means,
+    #: only how often the single correction gets spent.
+    structured_li_tol: float = 0.005
+    #: closure_channel="structured": how many l_i corrector steps may be spent
+    #: on a slice.  DEFAULT 1 -- the shipped cost ceiling of one extra GS solve
+    #: per slice, shared with the q0 corrector.
+    #:
+    #: Raising it to 2 enables a CONDITIONAL second step, taken only on slices
+    #: whose corrected l_i still misses ``structured_li_tol``.  The first step
+    #: uses the parameter-free log-gain ``utils.LI_GAIN_EXPONENT = 2``; after it
+    #: there are TWO measured (row, achieved) pairs on this slice, so the second
+    #: step reads the slice's OWN log-gain off them
+    #: (``utils.li_gain_exponent_secant``) instead of assuming one.  That is a
+    #: secant iteration with no fitted constant -- it changes the cost, never
+    #: the acceptance criterion (``structured_li_tol`` is untouched).  On the
+    #: campaign that motivated the gain law it would fire on ~18 % of hard
+    #: slices, i.e. ~+0.18 solves/slice.
+    structured_li_max_corrector_steps: int = 1
     #: closure_channel="sawtooth_bootstrap" gate: the q0 pin is only well-founded
     #: where sawteeth justify it.  Admitted when the source's sawtooth model is
     #: active at the slice (core_sources identifier index 701 carrying non-zero
@@ -702,6 +900,31 @@ class GenerationConfig:
     # <B_phi^2>~=<B^2> bracket (~<1%). Adds ~65 surface traces/draw; set False
     # to skip that cost (self-validated + graceful fallback either way).
     capture_exact_inv_R2: bool = True
+
+    def __post_init__(self):
+        """Resolve ``structured_preset`` into the individual structured fields.
+
+        Applied ONLY to fields still at their dataclass default, so an explicit
+        user setting always wins over the preset.  ``structured_li_sigma`` is
+        filled only when a ``structured_li_target`` was supplied -- a preset
+        with no l_i target simply omits the l_i term rather than recording a
+        sigma for a measurement that does not exist.  An unknown preset name
+        raises here, before any GS solve.
+
+        Nothing else is touched: in particular ``closure_channel`` keeps its
+        shipped ``"bootstrap"`` default, so naming a preset never silently
+        switches the channel on.
+        """
+        if self.structured_preset is None:
+            return
+        from .utils import structured_preset_settings
+        filled = structured_preset_settings(self.structured_preset)
+        if self.structured_li_target is None:
+            filled.pop("structured_li_sigma", None)
+        for field_name, value in filled.items():
+            default = GenerationConfig.__dataclass_fields__[field_name].default
+            if getattr(self, field_name) == default:
+                setattr(self, field_name, value)
 
 
 @dataclass

@@ -995,6 +995,778 @@ class Bouquet:
         return ohm_scale, bs_scale, extra, state
 
     @staticmethod
+    def _close_ip_structured_predictor(gc, bl, eq_snap, geom, probe, psi_N,
+                                       j_ind, j_BS_swb, j_fixed, FUSE_tot,
+                                       sgn, Ip_t, w_lin, c_signed,
+                                       ip_ind, ip_bs, ip_fix,
+                                       psi_pad=1e-3, pprime_sign=1.0):
+        """Solve-free multiplier PROFILES for ``closure_channel="structured"``.
+
+        Returns ``(s_ind, s_bs, ohm_eff, bs_eff, extra, state)``.  ``s_ind`` and
+        ``s_bs`` are arrays on the kinetic grid; ``ohm_eff``/``bs_eff`` are the
+        Ip-weighted means that go into ``Baseline.ohm_scale``/``bs_scale`` and
+        into :func:`~bouquet.utils.closure_health` (they satisfy the scalar
+        closure equation exactly -- see ``close_ip_structured``).  ``extra`` is
+        merged into ``Baseline.ip_closure``; ``state`` is what the post-solve
+        corrector needs, and is ``None`` when the sawtooth gate rejected the
+        slice (no axis row was imposed, so there is no q0 to correct).
+
+        ``c_signed`` is the P'-term constant ALREADY paired with the data's
+        current-direction convention (``utils.closure_sign_convention``): this
+        channel closes the SAME affine Ip identity as the scalar ones, so it
+        must not see the anchor's unsigned ``c``.
+
+        Everything about the reference and the gate is shared VERBATIM with the
+        ``sawtooth_bootstrap`` predictor -- same ``unrenormalise_q0``, same
+        ``q0_gate_admits``, same psi_pad-clipped axis sample -- so a
+        structured-vs-scalar comparison is a comparison of the CLOSURE and not
+        of two different q0 references.  The only difference is what absorbs
+        the deficit: two numbers there, two smooth profiles here.
+
+        Where the gate rejects, the Ip row alone is imposed and the answer is
+        the minimal-norm radial closure of Ip -- NOT a fallback to
+        ``"bootstrap"``.  That is deliberate and is the whole point of the
+        channel: the scalar channels fall back because a scalar has nothing
+        else to do, while here the trust weights still say where the deficit
+        belongs.  The rejection is printed and recorded either way.
+        """
+        import numpy as np
+
+        from .utils import (close_ip_structured, close_ip_structured_soft,
+                            li_closure_geometry, sigma_from_weights,
+                            structured_basis_eval, unrenormalise_q0,
+                            q0_gate_admits)
+
+        psi_q = np.ascontiguousarray(np.asarray(geom["psi_q"], dtype=float))
+        psi_geom = np.asarray(geom["psi_N"], dtype=float)
+        _ax = lambda j: float(np.interp(psi_q[0], psi_geom,
+                                        np.asarray(j, dtype=float)))
+        q0_anchor = float(np.asarray(eq_snap.get_q(psi=psi_q.copy())[1],
+                                     dtype=float)[0])
+        j_achieved0 = float(np.asarray(probe, dtype=float)[0])
+        j_requested0 = _ax(FUSE_tot)
+        q0_target = unrenormalise_q0(q0_anchor, j_achieved0, j_requested0)
+        j_ref0 = j_requested0
+        j_ind0, j_bs0, j_fix0 = _ax(j_ind), _ax(j_BS_swb), _ax(j_fixed)
+
+        saw = dict(getattr(bl, "sawtooth", None) or {})
+        q0_dd = saw.get("q0_dd")
+        saw_active = bool(saw.get("active"))
+        q0_gate = float(getattr(gc, "q0_gate", 1.1))
+        gated, gate_basis = q0_gate_admits(saw_active, q0_dd, q0_target,
+                                           q0_gate)
+        basis_spec = getattr(gc, "structured_basis", None)
+        wspec = getattr(gc, "structured_weights", None)
+        axis = (dict(psi=float(psi_q[0]), j_ind0=j_ind0, j_bs0=j_bs0,
+                     j_fix0=j_fix0, j_ref0=j_ref0) if gated else None)
+        print(f"[imas SWB-split:ohmic structured] q0_target={q0_target:.4f} "
+              f"(q0_anchor {q0_anchor:.4f} x j_achieved/j_requested "
+              f"{j_achieved0 / j_requested0:.4f}) | q0_dd="
+              f"{'n/a' if q0_dd is None else format(q0_dd, '.4f')} | "
+              f"sawtooth {'ACTIVE' if saw_active else 'idle/absent'} | "
+              f"gate {'ADMITS' if gated else 'REJECTS'} on {gate_basis} -> "
+              f"{'Ip + axis-current rows' if gated else 'Ip row only'}",
+              flush=True)
+
+        # ---- the second global measurement: l_i ----------------------------
+        # A PLAIN INPUT (GenerationConfig.structured_li_target): bouquet never
+        # fetches it, never guesses which code produced it and applies no
+        # definition offset -- whatever cross-code offset the caller's l_i
+        # carries must already be in the number handed in.
+        li_target = getattr(gc, "structured_li_target", None)
+        li_sigma = getattr(gc, "structured_li_sigma", None)
+        li_kind = str(getattr(gc, "structured_li_kind", "li_1"))
+        ip_sigma = getattr(gc, "structured_ip_sigma", None)
+        ip_sigma_frac = getattr(gc, "structured_ip_sigma_frac", None)
+        if ip_sigma is not None and ip_sigma_frac is not None:
+            raise RuntimeError(
+                "closure_channel='structured': structured_ip_sigma and "
+                "structured_ip_sigma_frac are mutually exclusive (got "
+                f"{ip_sigma!r} A and {ip_sigma_frac!r} x Ip); set one, so the "
+                "recorded sigma_Ip is unambiguous.")
+        if ip_sigma_frac is not None:
+            ip_sigma = float(ip_sigma_frac) * float(Ip_t)
+        soft = bool(getattr(gc, "structured_soft", False))
+        # The UP side of the one-sided inductive prior (None = symmetric, i.e.
+        # byte-identical to every run made before the field existed).  Both
+        # solvers take it; the sign iteration lives inside them.
+        sig_ind_up = getattr(gc, "structured_sigma_ind_up", None)
+        if sig_ind_up is not None:
+            sig_ind_up = [float(v) for v in sig_ind_up]
+        li_geom = None
+        if li_target is not None:
+            li_target = float(li_target)
+            li_geom = li_closure_geometry(eq_snap, geom,
+                                          convention="jphi-linterp",
+                                          pprime_sign=float(pprime_sign),
+                                          psi_pad=float(psi_pad))
+        if soft and li_target is not None and li_sigma is None:
+            raise RuntimeError(
+                "closure_channel='structured' with structured_soft=True and "
+                "structured_li_target set needs structured_li_sigma: the soft "
+                "channel weights l_i by its own error bar and bouquet will "
+                "not invent one.  Set the sigma, or use the hard channel "
+                "(structured_soft=False), which imposes the target exactly.")
+        if soft:
+            _K = structured_basis_eval(basis_spec, psi_geom).shape[0]
+            _sig = sigma_from_weights(wspec, _K)
+            out = close_ip_structured_soft(
+                psi_geom, w_lin, c_signed, sgn * Ip_t,
+                (None if ip_sigma is None else float(ip_sigma)),
+                j_ind, j_BS_swb, j_fixed,
+                basis=basis_spec, sigma_ind=_sig["ind"], sigma_bs=_sig["bs"],
+                sigma_ind_up=sig_ind_up,
+                li_target=li_target,
+                li_sigma=(None if li_sigma is None else float(li_sigma)),
+                li_kind=li_kind, li_geom=li_geom,
+                axis=axis, axis_sigma=None)   # the q0 pin stays HARD
+        else:
+            out = close_ip_structured(
+                psi_geom, w_lin, c_signed, sgn * Ip_t,
+                j_ind, j_BS_swb, j_fixed,
+                basis=basis_spec, weights=wspec, axis=axis,
+                li_target=li_target, li_kind=li_kind, li_geom=li_geom,
+                sigma_ind_up=sig_ind_up)
+
+        s_ind = np.asarray(out["s_ind"], dtype=float)
+        s_bs = np.asarray(out["s_bs"], dtype=float)
+        # s at a few named radii, so the record is readable without the arrays
+        _radii = (0.0, 0.2, 0.4, 0.6, 0.8, 0.95, 1.0)
+        _at = lambda s: {f"{r:.2f}": float(np.interp(r, psi_geom, s))
+                         for r in _radii}
+        extra = dict(
+            structured_basis=dict(out["basis"]),
+            structured_weights_name=out["weights_name"],
+            structured_weights_ind=[float(v) for v in out["weights_ind"]],
+            structured_weights_bs=[float(v) for v in out["weights_bs"]],
+            structured_sigma_ind_up=(
+                None if out.get("sigma_ind_up") is None
+                else [float(v) for v in out["sigma_ind_up"]]),
+            structured_one_sided_ind=bool(out.get("one_sided_ind", False)),
+            structured_sign_pattern=(
+                None if out.get("sign_pattern") is None
+                else "".join("+" if v else "-" for v in out["sign_pattern"])),
+            structured_n_sign_iter=int(out.get("n_sign_iter", 0) or 0),
+            structured_coeffs_a=[float(v) for v in out["a"]],
+            structured_coeffs_b=[float(v) for v in out["b"]],
+            structured_s_ind_at=_at(s_ind),
+            structured_s_bs_at=_at(s_bs),
+            structured_s_ind_profile=[float(v) for v in s_ind],
+            structured_s_bs_profile=[float(v) for v in s_bs],
+            structured_s_ind_min=float(s_ind.min()),
+            structured_s_ind_max=float(s_ind.max()),
+            structured_s_bs_min=float(s_bs.min()),
+            structured_s_bs_max=float(s_bs.max()),
+            structured_structure_ind=float(out["structure_ind"]),
+            structured_structure_bs=float(out["structure_bs"]),
+            structured_constraints=list(out["constraints"]),
+            structured_ip_residual=float(out["ip_residual"]),
+            structured_ip_residual_pct=float(out["ip_residual_pct"]),
+            # The closure's OWN Ip, as a magnitude [A].  On the HARD channel Ip
+            # is imposed exactly and this is Ip_target to machine precision; on
+            # the SOFT channel it is the POSTERIOR Ip, which differs from the
+            # measurement BY DESIGN (the measurement carries a sigma).  It is
+            # the reference the closed hybrid's round-trip gate compares
+            # against on the soft channel -- see that gate's comment.
+            structured_ip_posterior=abs(float(out["Ip_hybrid"])),
+            structured_axis_residual=(None if out["axis_residual"] is None
+                                      else float(out["axis_residual"])),
+            structured_kkt_cond=(None if out["kkt_cond"] is None
+                                 else float(out["kkt_cond"])),
+            structured_deficit=float(out["deficit"]),
+            structured_solver=out["solver"],
+            structured_soft=bool(soft),
+            structured_ohm_scale_eff_basis=out["ohm_scale_eff_basis"],
+            structured_bs_scale_eff_basis=out["bs_scale_eff_basis"],
+            ohm_scale_is_effective_mean=True,
+            q0_target=q0_target, q0_anchor=q0_anchor,
+            q0_target_source=(
+                "same reference as sawtooth_bootstrap: q0_anchor * "
+                "(j_achieved0/j_requested0), un-renormalised onto the source's "
+                "own current; get_q at the psi_pad-clipped axis"),
+            q0_target_psi_N=float(psi_q[0]),
+            q0_dd=q0_dd, q0_gate=q0_gate, q0_gate_basis=gate_basis,
+            sawtooth_active=saw_active,
+            sawtooth_present=bool(saw.get("present", False)),
+            sawtooth_j_par_max_abs=float(saw.get("j_par_max_abs", 0.0)),
+            j_ref0_achieved=j_achieved0, j_ref0_requested=j_requested0,
+            j_renorm_ratio=j_achieved0 / j_requested0,
+            j_ref0_used=j_ref0,
+            j_ind0=j_ind0, j_bs0=j_bs0, j_fix0=j_fix0,
+            n_extra_solves=0,
+            sawtooth_verdict=("gate admitted -> Ip + axis rows"
+                              if gated else
+                              "gate rejected -> Ip row only (minimal-norm "
+                              "radial closure; NOT a bootstrap fallback)"),
+        )
+        # ---- the l_i block of the record -----------------------------------
+        extra.update(
+            structured_li_kind=out["li_kind"],
+            structured_li_target=out["li_target"],
+            structured_li_anchor=out["li_anchor"],
+            structured_li_anchor_at_target_Ip=out["li_anchor_at_target_Ip"],
+            structured_li_predicted=out["li_predicted"],
+            structured_li_predictor_residual=out["li_predictor_residual"],
+            structured_li_sigma=(None if li_sigma is None else float(li_sigma)),
+            structured_ip_sigma=(None if ip_sigma is None else float(ip_sigma)),
+            structured_ip_sigma_frac=(None if ip_sigma_frac is None
+                                      else float(ip_sigma_frac)),
+            structured_li_tol=float(getattr(gc, "structured_li_tol", 0.005)),
+            structured_li_target_source=(
+                None if li_target is None else
+                "GenerationConfig.structured_li_target -- a plain caller input; "
+                "bouquet applies no cross-code definition offset to it"),
+            structured_li_geometry=(
+                None if li_geom is None else
+                dict(vol=float(li_geom["vol"]),
+                     perimeter=float(li_geom["perimeter"]),
+                     perimeter_source=li_geom["perimeter_source"],
+                     perimeter_get_stats_dl=float(
+                         li_geom["perimeter_get_stats_dl"]),
+                     perimeter_ratio_dl_over_L=float(
+                         li_geom["perimeter_ratio_dl_over_L"]),
+                     R_axis=float(li_geom["R_axis"]),
+                     dpsi_dpsiN=float(li_geom["dpsi_dpsiN"]),
+                     psi_pad=float(li_geom["psi_pad"]))),
+            # MODEL-space, predictor stage: the posterior mode's own fit to its
+            # own Ip row.  ``structured_residual_sigma_Ip`` (below, and
+            # refreshed by the corrector) is the ACHIEVED distance of the
+            # delivered closure's Ip from the MEASUREMENT, in sigma units --
+            # the same predictor/achieved split the l_i rows use.
+            structured_residual_sigma_Ip_model=out.get("residual_sigma_Ip"),
+            structured_residual_sigma_Ip=None,
+            # MODEL-space, predictor stage: the posterior mode's own fit to its
+            # own l_i row.  It is not what the solved equilibrium delivered --
+            # the posterior always fits its own row well, so it essentially
+            # never flags.  ``structured_residual_sigma_li`` is the ACHIEVED
+            # (post-corrector) residual in sigma units and is written by
+            # :meth:`_close_ip_structured_corrector`; see the l_i-bookkeeping
+            # note in that method's docstring.
+            structured_residual_sigma_li_model=out.get("residual_sigma_li"),
+            structured_residual_sigma_li=None,
+            structured_residual_sigma_axis=out.get("residual_sigma_axis"),
+            structured_objective=out.get("objective"),
+            structured_prior_chi2=out.get("prior_chi2"),
+            structured_gn_iterations=out.get("n_iter"),
+        )
+        if li_target is not None:
+            print("[imas SWB-split:ohmic structured] l_i row "
+                  f"({out['li_kind']}, {'SOFT sigma=' + format(float(li_sigma), '.4f') if soft else 'HARD'}"
+                  f"): anchor(s==1) {out['li_anchor']:.4f} -> predicted "
+                  f"{out['li_predicted']:.4f} vs target {out['li_target']:.4f} "
+                  f"(residual {out['li_predictor_residual']:+.2e}); geometry "
+                  f"vol={li_geom['vol']:.3f} m^3, LCFS perimeter="
+                  f"{li_geom['perimeter']:.3f} m, R_axis="
+                  f"{li_geom['R_axis']:.4f} m", flush=True)
+        if soft:
+            print("[imas SWB-split:ohmic structured] SOFT posterior mode: "
+                  f"sigma_Ip={'hard' if ip_sigma is None else format(float(ip_sigma), '.4g')} "
+                  f"| objective {out['objective']:.4e} (prior chi2 "
+                  f"{out['prior_chi2']:.4e}) in {out['n_iter']} "
+                  f"Gauss-Newton iteration(s); z_Ip="
+                  f"{'n/a' if out['residual_sigma_Ip'] is None else format(out['residual_sigma_Ip'], '+.3f')}"
+                  f" z_li="
+                  f"{'n/a' if out['residual_sigma_li'] is None else format(out['residual_sigma_li'], '+.3f')}",
+                  flush=True)
+        print(f"[imas SWB-split:ohmic structured] s_ind {s_ind.min():.3f}"
+              f"-{s_ind.max():.3f} (eff {out['ohm_scale_eff']:.4f}, structure "
+              f"{out['structure_ind']:.4f}) | s_bs {s_bs.min():.3f}"
+              f"-{s_bs.max():.3f} (eff {out['bs_scale_eff']:.4f}, structure "
+              f"{out['structure_bs']:.4f}) | weights={out['weights_name']} | "
+              f"Ip residual {out['ip_residual_pct']:+.2e}% | "
+              + ("KKT cond n/a (soft)" if out["kkt_cond"] is None
+                 else f"KKT cond {out['kkt_cond']:.2e}"), flush=True)
+
+        # The corrector state is built whenever there is ANYTHING to correct:
+        # the q0 row (gate admitted) or the l_i row.  Both corrections share
+        # the SAME single extra solve.
+        state = None
+        if gated or li_target is not None:
+            state = dict(
+                q0_target=q0_target, psi_q=psi_q, psi_geom=psi_geom,
+                j_ind=np.asarray(j_ind, dtype=float),
+                j_BS_swb=np.asarray(j_BS_swb, dtype=float),
+                j_fixed=np.asarray(j_fixed, dtype=float),
+                axis=(None if axis is None else dict(axis)),
+                w_lin=np.asarray(w_lin, dtype=float),
+                c_signed=float(c_signed), Ip_signed=float(sgn * Ip_t),
+                basis=basis_spec, weights=wspec,
+                q0_tol=float(getattr(gc, "q0_tol", 0.01)),
+                gated=bool(gated),
+                soft=bool(soft), ip_sigma=ip_sigma,
+                sigma_ind=(None if not soft else _sig["ind"]),
+                sigma_bs=(None if not soft else _sig["bs"]),
+                sigma_ind_up=sig_ind_up,
+                li_target=li_target, li_sigma=li_sigma, li_kind=li_kind,
+                li_geom=li_geom, psi_pad=float(psi_pad),
+                li_tol=float(getattr(gc, "structured_li_tol", 0.005)),
+                li_max_corrector_steps=int(
+                    getattr(gc, "structured_li_max_corrector_steps", 1) or 1),
+            )
+        return (s_ind, s_bs, float(out["ohm_scale_eff"]),
+                float(out["bs_scale_eff"]), extra, state)
+
+    @staticmethod
+    def _close_ip_structured_corrector(state, bl, mygs, solve_jphi):
+        """Correct q0 and/or l_i after the structured solve, at most 2 solves.
+
+        Same contract and (by default) the same cost ceiling as
+        :meth:`_close_ip_q0_corrector`: read the solved equilibrium off a
+        ``copy_eq()`` snapshot, accept the predictor if every constrained
+        quantity is inside its tolerance, otherwise take ONE step and accept
+        whatever that gives.  When BOTH the q0 row and the l_i row miss, they
+        are corrected TOGETHER in that single re-solve -- the cost ceiling is
+        one extra GS solve per slice, not one per constraint.
+
+        What moves is the constraint rows' right-hand sides, not the
+        coefficients.  The Ip-closed set is a (2K-1)-dimensional affine
+        manifold with no privileged direction on it, but each constraint has a
+        privileged row, and a model calibrated on the measured pair inverts
+        exactly:
+
+        .. code-block:: text
+
+            j_ref0' = j_ref0 * (q0_solved / q0_target)        (q0 ~ 1/j_phi(0))
+            li_row' = li_row * (li_target / li_solved)**(1/p) (achieved ~ row**p)
+
+        The first is the ``q0 ~ 1/j0`` frozen-geometry model (the scalar
+        corrector's Newton step is its first-order expansion).
+
+        The second is a LOG-GAIN model for l_i, with ``p =
+        utils.LI_GAIN_EXPONENT = 2``, applied identically in hard and soft
+        mode.  The predictor's row is EXACT in the coefficient algebra -- with
+        Ip pinned, l_i is linear in the coefficients and the row is satisfied
+        to machine precision -- so everything that survives into the solved
+        equilibrium is the frozen-anchor-geometry error.  That error is NOT a
+        level offset the proportional model could absorb: the frozen quantity
+        that actually moves is ``dpsi_dpsiN = |psi_axis - psi_bnd|``, and
+        ``li_achieved / li_model = Delta_psi_solved / Delta_psi_anchor`` to
+        ~1 %.  Since ``Delta_psi ~ sqrt(l_i)``, l_i enters the achieved
+        equilibrium twice -- through the shape integral the closure prescribes
+        AND through the flux range that responds to it -- so the achieved value
+        follows the row as ``row**2``, not linearly.  Taking the square root of
+        the ratio is therefore the parameter-free inverse; see
+        :data:`~bouquet.utils.LI_GAIN_EXPONENT` and, for the campaign
+        measurement behind it (gain 2.14 measured against the 0.96 the old
+        proportional update assumed, sign-flipping the residual on 133/133
+        hard slices), the out-of-tree closure-cloud corrector diagnosis.
+        Multiplicative rather than additive because l_i is a positive quantity
+        and the correction must stay scale-free.
+
+        **Optional second step.**  With
+        ``GenerationConfig.structured_li_max_corrector_steps = 2`` a second
+        corrector solve is taken, CONDITIONALLY, on slices whose corrected l_i
+        still misses ``structured_li_tol``.  After step 1 there are two
+        measured ``(row, achieved)`` pairs on this slice, so step 2 reads the
+        slice's own log-gain off them
+        (:func:`~bouquet.utils.li_gain_exponent_secant`) instead of assuming
+        one -- a secant iteration, no fitted constant, and it changes nothing
+        about what "converged" means.  It corrects l_i only; the axis row keeps
+        whatever step 1 gave it.  The default is 1, so the shipped behaviour
+        differs from the previous release only by the gain law.
+
+        **l_i bookkeeping.**  Three stages are recorded under unambiguous
+        names:
+
+        =================================== ==================================
+        ``structured_li_achieved_predictor``  achieved l_i after the PREDICTOR
+                                              solve
+        ``structured_li_residual_predictor``  that minus the target
+        ``structured_li_achieved_corrected``  achieved l_i after the LAST
+                                              corrector solve (== the
+                                              predictor's when no corrector
+                                              solve was taken -- that IS what
+                                              was delivered)
+        ``structured_li_residual_corrected``  that minus the target: the number
+                                              the run actually delivers
+        =================================== ==================================
+
+        The older names are kept as ALIASES of the CORRECTED values:
+        ``structured_li_solved`` and ``structured_li_residual`` always were,
+        and ``structured_li_solved_residual`` -- which used to be written once
+        at the predictor stage and never refreshed, so that the field whose
+        name read like the delivered residual was the one that was not -- now
+        is too.  ``structured_li_solved_predictor`` keeps its (already
+        unambiguous) predictor meaning.  ``structured_residual_sigma_li`` is
+        the ACHIEVED corrected residual in sigma units; the posterior mode's
+        own model-space fit to its own row, which is what that name used to
+        hold, is under ``structured_residual_sigma_li_model``.
+
+        **Ip bookkeeping.**  A corrector re-solve runs the SAME closure, so on
+        the soft channel the Ip row is still a measurement with ``sigma_Ip``
+        and the re-solve lands on a NEW posterior Ip.  It is recorded as such
+        -- ``structured_ip_posterior``, ``structured_ip_measured_residual_pct``
+        and the achieved ``structured_residual_sigma_Ip`` are all refreshed
+        from the delivered solve -- and the soft-Ip closure-health flag is
+        replaced rather than stacked.  Nothing here snaps Ip back to the
+        measurement; the posterior IS the answer the channel was asked for.
+
+        A corrected l_i still outside ``structured_li_tol`` on the hard channel
+        adds a reason to ``closure_limited_reasons`` -- a FLAG, never a retry:
+        the cost ceiling is the point, and the honest record of a missed hard
+        row is a flagged slice, not an unbounded loop.
+
+        A refusal from a re-solve (multipliers out of bounds, singular KKT, a
+        non-converged posterior mode) is caught: the last accepted equilibrium
+        is KEPT and the residuals recorded, exactly as the scalar corrector
+        keeps the predictor when its step would leave the scale bounds.
+        Returns the new ``nl_its`` when a corrector solve was taken, else
+        ``None``.
+        """
+        import numpy as np
+
+        from .utils import (LI_GAIN_EXPONENT, close_ip_structured,
+                            close_ip_structured_soft, li_achieved,
+                            li_corrector_row, li_gain_exponent_secant)
+
+        gated = bool(state.get("gated", state.get("axis") is not None))
+        soft = bool(state.get("soft"))
+        li_target = state.get("li_target")
+        li_kind = str(state.get("li_kind", "li_1"))
+        li_tol = float(state.get("li_tol", 0.005))
+        li_sigma = state.get("li_sigma")
+        psi_pad = float(state.get("psi_pad", 1e-3))
+        max_li_steps = max(1, int(state.get("li_max_corrector_steps", 1) or 1))
+        q0_target = state["q0_target"]
+        snap = mygs.copy_eq()
+
+        gain_law = (f"row' = row * (target/achieved)**(1/p), p = "
+                    f"{LI_GAIN_EXPONENT:g} (parameter-free: Delta_psi ~ "
+                    "sqrt(l_i), so achieved ~ row**2); step 2 (when enabled) "
+                    "uses this slice's own log-secant p")
+
+        rec = {}
+        reasons = []
+        # Soft-channel achieved z_Ip, refreshed by every corrector re-solve;
+        # None means "nothing new to say" and the predictor's flag stands.
+        ip_z_final = None
+        q0_tok = res = None
+        if gated:
+            q0_tok = float(np.asarray(snap.get_q(psi=state["psi_q"].copy())[1],
+                                      dtype=float)[0])
+            res = q0_tok - q0_target
+            rec.update(q0_solved_predictor=q0_tok, q0_predictor_residual=res,
+                       q0_tol=state["q0_tol"], q0_solved=q0_tok,
+                       q0_residual=res)
+        li_tok = li_res = None
+        li_perimeter = (None if state.get("li_geom") is None
+                        else float(state["li_geom"]["perimeter"]))
+        if li_target is not None:
+            # The solve's OWN l_i from TokaMaker's exact volume integrals
+            # (get_globals), normalised the SAME way the target is -- with the
+            # LCFS contour's perimeter, NOT get_stats' dl, which reads ~1 %
+            # high and would charge the closure ~2 % of l_i(1) it did not do.
+            # Reusing the predictor's own perimeter keeps target, predictor and
+            # readback on one convention; see utils.lcfs_perimeter.
+            li_tok, _li_info = li_achieved(snap, li_kind=li_kind,
+                                           psi_pad=psi_pad,
+                                           perimeter=li_perimeter)
+            li_res = li_tok - float(li_target)
+            rec.update(structured_li_solved_predictor=li_tok,
+                       structured_li_achieved_predictor=li_tok,
+                       structured_li_residual_predictor=li_res,
+                       # "corrected" starts as the predictor and is refreshed
+                       # after every corrector solve: with 0 extra solves the
+                       # predictor IS the delivered equilibrium.
+                       structured_li_achieved_corrected=li_tok,
+                       structured_li_residual_corrected=li_res,
+                       # aliases of the CORRECTED values (see the docstring)
+                       structured_li_solved=li_tok,
+                       structured_li_residual=li_res,
+                       structured_li_solved_residual=li_res,
+                       structured_residual_sigma_li=(
+                           None if li_sigma in (None, 0)
+                           else float(li_res) / float(li_sigma)),
+                       structured_li_tol=li_tol,
+                       structured_li_max_corrector_steps=max_li_steps,
+                       structured_li_gain_law=gain_law,
+                       structured_li_solved_get_stats=float(snap.get_stats(
+                           lcfs_pad=psi_pad,
+                           li_normalization=("std" if li_kind == "li_1"
+                                             else "iter"))["l_i"]),
+                       structured_li_estimator=(
+                           "utils.li_achieved: TokaMaker get_globals "
+                           "(Bp_vol, vol, Ip) in the target's normalisation, "
+                           f"perimeter={li_perimeter!r} m from the anchor's "
+                           "traced LCFS contour (NOT get_stats' dl)"))
+
+        q0_usable = (gated and np.isfinite(q0_tok) and np.isfinite(q0_target)
+                     and q0_target != 0.0)
+        li_usable = (li_target is not None and np.isfinite(li_tok)
+                     and li_tok > 0.0 and float(li_target) > 0.0)
+        want_q0 = bool(gated and abs(res) > state["q0_tol"])
+        want_li = bool(li_target is not None and abs(li_res) > li_tol)
+        if want_q0 and not q0_usable:
+            reasons.append("q0 reference unusable for a step")
+            want_q0 = False
+        if want_li and not li_usable:
+            reasons.append("l_i reference unusable for a step")
+            want_li = False
+
+        def _resolve(axis_now, li_row_now):
+            """One corrected minimal-norm / posterior-mode solve."""
+            if soft:
+                return close_ip_structured_soft(
+                    state["psi_geom"], state["w_lin"], state["c_signed"],
+                    state["Ip_signed"],
+                    (None if state.get("ip_sigma") is None
+                     else float(state["ip_sigma"])),
+                    state["j_ind"], state["j_BS_swb"], state["j_fixed"],
+                    basis=state["basis"], sigma_ind=state["sigma_ind"],
+                    sigma_bs=state["sigma_bs"],
+                    sigma_ind_up=state.get("sigma_ind_up"),
+                    li_target=li_row_now,
+                    li_sigma=(None if li_sigma is None else float(li_sigma)),
+                    li_kind=li_kind, li_geom=state.get("li_geom"),
+                    axis=axis_now, axis_sigma=None)
+            return close_ip_structured(
+                state["psi_geom"], state["w_lin"], state["c_signed"],
+                state["Ip_signed"], state["j_ind"], state["j_BS_swb"],
+                state["j_fixed"], basis=state["basis"],
+                weights=state["weights"], axis=axis_now,
+                li_target=li_row_now, li_kind=li_kind,
+                li_geom=state.get("li_geom"),
+                sigma_ind_up=state.get("sigma_ind_up"))
+
+        nl_out = None
+        if not (want_q0 or want_li):
+            verdict = "structured predictor (0 extra solves)"
+            if reasons:
+                verdict = "structured predictor kept (" + "; ".join(reasons) + ")"
+            rec.update(n_extra_solves=0, sawtooth_verdict=verdict)
+            _bits = []
+            if gated:
+                _bits.append(f"q0={q0_tok:.4f} vs {q0_target:.4f} "
+                             f"(residual {res:+.4f}, tol {state['q0_tol']:g})")
+            if li_target is not None:
+                _bits.append(f"l_i={li_tok:.4f} vs {float(li_target):.4f} "
+                             f"(residual {li_res:+.4f}, tol {li_tol:g})")
+            print("[imas SWB-split:ohmic structured] solved "
+                  + "; ".join(_bits or ["(no constrained quantity)"])
+                  + " -- predictor accepted, no extra solve", flush=True)
+        else:
+            axis = None if state.get("axis") is None else dict(state["axis"])
+            j_ref_new = ratio_q0 = ratio_li = None
+            # The predictor's own measured (row, achieved) pair: on the hard
+            # channel the predictor row IS the target, imposed exactly.
+            li_row = None if li_target is None else float(li_target)
+            li_pairs = ([] if li_target is None
+                        else [(float(li_row), float(li_tok))])
+            li_exponents = []
+            li_cur = li_tok
+            q0_cur = q0_tok
+            n_solves = 0
+            step = 0
+            while True:
+                step += 1
+                if want_q0 and step == 1:
+                    ratio_q0 = float(q0_cur / q0_target)
+                    j_ref_new = float(axis["j_ref0"] * ratio_q0)
+                    axis["j_ref0"] = j_ref_new
+                if want_li:
+                    if step == 1:
+                        p_use = float(LI_GAIN_EXPONENT)
+                        ratio_li = float(li_target) / float(li_cur)
+                    else:
+                        # Two measured pairs on THIS slice -> read the log-gain
+                        # off them rather than assuming it.  Falls back to the
+                        # parameter-free exponent if the secant is degenerate.
+                        p_sec = li_gain_exponent_secant(
+                            li_pairs[-2][0], li_pairs[-2][1],
+                            li_pairs[-1][0], li_pairs[-1][1])
+                        p_use = (float(LI_GAIN_EXPONENT) if p_sec is None
+                                 else float(p_sec))
+                    li_exponents.append(p_use)
+                    li_row = li_corrector_row(li_target, li_cur, row=li_row,
+                                              exponent=p_use)
+                try:
+                    out = _resolve(axis, li_row)
+                except RuntimeError as e:
+                    _kept = ("predictor" if n_solves == 0
+                             else f"corrector step {n_solves}")
+                    rec.update(structured_corrector_refusal=str(e)[:300])
+                    if n_solves == 0:
+                        rec.update(n_extra_solves=0,
+                                   sawtooth_verdict="structured predictor kept "
+                                                    "(corrector step refused)")
+                    print("[imas SWB-split:ohmic structured] corrector step "
+                          f"{step} REFUSED ({str(e)[:160]}) -- keeping the "
+                          f"{_kept} and recording the residuals", flush=True)
+                    break
+
+                s_ind = np.asarray(out["s_ind"], dtype=float)
+                s_bs = np.asarray(out["s_bs"], dtype=float)
+                # Overwrite the predictor's s-at-named-radii record too, not
+                # just the min/max: every structured field in ip_closure must
+                # describe the SAME (final) multiplier profiles, or a reader
+                # comparing s_ind_at against s_ind_min is comparing two
+                # different closures.
+                _pg = np.asarray(state["psi_geom"], dtype=float)
+                _at = lambda s: {f"{r:.2f}": float(np.interp(r, _pg, s))
+                                 for r in (0.0, 0.2, 0.4, 0.6, 0.8, 0.95, 1.0)}
+                bl.ohm_scale = float(out["ohm_scale_eff"])
+                bl.bs_scale = float(out["bs_scale_eff"])
+                bl.j_inductive = s_ind * state["j_ind"]
+                bl.j_BS = s_bs * state["j_BS_swb"]
+                bl.j_phi = bl.j_inductive + bl.j_BS + state["j_fixed"]
+                nl_out = solve_jphi(np.asarray(bl.j_phi, dtype=float))
+                snap2 = mygs.copy_eq()
+                n_solves += 1
+                rec.update(
+                    n_extra_solves=n_solves,
+                    structured_coeffs_a=[float(v) for v in out["a"]],
+                    structured_coeffs_b=[float(v) for v in out["b"]],
+                    structured_s_ind_min=float(s_ind.min()),
+                    structured_s_ind_max=float(s_ind.max()),
+                    structured_s_bs_min=float(s_bs.min()),
+                    structured_s_bs_max=float(s_bs.max()),
+                    structured_s_ind_profile=[float(v) for v in s_ind],
+                    structured_s_bs_profile=[float(v) for v in s_bs],
+                    structured_s_ind_at=_at(s_ind),
+                    structured_s_bs_at=_at(s_bs),
+                    structured_sign_pattern=(
+                        None if out.get("sign_pattern") is None else
+                        "".join("+" if v else "-"
+                                for v in out["sign_pattern"])),
+                    structured_n_sign_iter=int(out.get("n_sign_iter", 0) or 0),
+                    structured_structure_ind=float(out["structure_ind"]),
+                    structured_structure_bs=float(out["structure_bs"]),
+                    structured_ip_residual_pct=float(out["ip_residual_pct"]),
+                    structured_corrector_targets=[
+                        t for t, w in (("q0", want_q0), ("l_i", want_li)) if w])
+                # The corrector re-solves the SAME closure -- on the soft
+                # channel the Ip row is still the MEASUREMENT with its sigma,
+                # so the re-solve lands on a new POSTERIOR Ip and must not be
+                # read (or recorded) as snapping back to Ip_meas.  Refresh the
+                # Ip bookkeeping from the delivered solve, in the same
+                # model/achieved split the l_i rows use.
+                _ip_hyb = out.get("Ip_hybrid")
+                if _ip_hyb is not None and np.isfinite(_ip_hyb):
+                    _ip_meas = abs(float(state["Ip_signed"]))
+                    _ip_post = abs(float(_ip_hyb))
+                    _sig_ip = state.get("ip_sigma")
+                    _z = (None if not (soft and _sig_ip)
+                          else (_ip_post - _ip_meas) / float(_sig_ip))
+                    rec.update(
+                        structured_ip_posterior=_ip_post,
+                        structured_ip_residual=float(out.get(
+                            "ip_residual", _ip_hyb - float(state["Ip_signed"]))),
+                        structured_residual_sigma_Ip_model=out.get(
+                            "residual_sigma_Ip"))
+                    if soft:
+                        rec.update(
+                            structured_ip_measured_residual_pct=(
+                                100.0 * (_ip_post - _ip_meas) / _ip_meas),
+                            structured_residual_sigma_Ip=_z)
+                        ip_z_final = _z
+                if gated:
+                    q0_cur = float(np.asarray(
+                        snap2.get_q(psi=state["psi_q"].copy())[1],
+                        dtype=float)[0])
+                    rec.update(q0_solved=q0_cur,
+                               q0_residual=q0_cur - q0_target)
+                    if want_q0:
+                        rec.update(structured_corrector_j_ref0=j_ref_new,
+                                   structured_corrector_j_ref0_ratio=ratio_q0)
+                if li_target is not None:
+                    li_cur, _ = li_achieved(snap2, li_kind=li_kind,
+                                            psi_pad=psi_pad,
+                                            perimeter=li_perimeter)
+                    li_cur = float(li_cur)
+                    li_pairs.append((float(li_row), li_cur))
+                    _lres = li_cur - float(li_target)
+                    rec.update(
+                        structured_li_achieved_corrected=li_cur,
+                        structured_li_residual_corrected=_lres,
+                        structured_li_solved=li_cur,
+                        structured_li_residual=_lres,
+                        structured_li_solved_residual=_lres,
+                        structured_residual_sigma_li=(
+                            None if li_sigma in (None, 0)
+                            else _lres / float(li_sigma)),
+                        structured_li_corrector_row=li_row,
+                        structured_li_corrector_ratio=ratio_li,
+                        structured_li_corrector_row_factor=(
+                            None if li_row is None
+                            else float(li_row) / float(li_target)),
+                        structured_li_gain_exponents=[float(p)
+                                                      for p in li_exponents],
+                        structured_li_corrector_rows=[float(r)
+                                                      for r, _a in li_pairs],
+                        structured_li_corrector_achieved=[float(a)
+                                                          for _r, a in li_pairs],
+                        structured_li_predicted=out["li_predicted"])
+                if not (want_li and step < max_li_steps
+                        and abs(li_cur - float(li_target)) > li_tol):
+                    break
+
+            if n_solves:
+                _tgt = ", ".join([t for t, w in (("q0", want_q0),
+                                                 ("l_i", want_li)) if w])
+                rec["sawtooth_verdict"] = (
+                    f"structured predictor + {n_solves} corrector solve"
+                    + ("" if n_solves == 1 else "s") + f" ({_tgt})")
+                _msg = [f"[imas SWB-split:ohmic structured] {n_solves} "
+                        f"corrector solve{'' if n_solves == 1 else 's'}:"]
+                if want_q0:
+                    _msg.append(f" axis target x{ratio_q0:.4f}; q0 "
+                                f"{q0_tok:.4f}->{q0_cur:.4f} vs target "
+                                f"{q0_target:.4f} (residual "
+                                f"{q0_cur - q0_target:+.4f});")
+                if li_target is not None:
+                    _pstr = ", ".join(f"{p:.3f}" for p in li_exponents) or "n/a"
+                    _msg.append(f" l_i row x{li_row / float(li_target):.4f} "
+                                f"(gain p={_pstr}); l_i "
+                                f"{li_tok:.4f}->{li_cur:.4f} vs target "
+                                f"{float(li_target):.4f} (residual "
+                                f"{li_cur - float(li_target):+.4f});")
+                _msg.append(f" s_ind {s_ind.min():.3f}-{s_ind.max():.3f}, "
+                            f"s_bs {s_bs.min():.3f}-{s_bs.max():.3f}")
+                print("".join(_msg), flush=True)
+
+        # Hard-channel l_i acceptance: FLAG, never retry.  The corrected
+        # residual is the delivered one, so this is the first place in the
+        # record where a missed hard l_i row can be seen at all.
+        _lres_final = rec.get("structured_li_residual_corrected")
+        if (li_target is not None and not soft and _lres_final is not None
+                and np.isfinite(_lres_final)
+                and abs(float(_lres_final)) > li_tol):
+            _prev = getattr(bl, "ip_closure", None) or {}
+            _old = tuple(_prev.get("closure_limited_reasons", ()) or ())
+            _why = (f"l_i misses its hard row by {float(_lres_final):+.4f} "
+                    f"(> tol {li_tol:g}) after {rec.get('n_extra_solves', 0)} "
+                    "corrector solve(s)")
+            if _why not in _old:
+                rec["closure_limited_reasons"] = _old + (_why,)
+            rec["closure_limited"] = True
+            print("[imas SWB-split:ohmic structured] WARNING closure-limited: "
+                  + _why, flush=True)
+
+        # Soft-channel Ip acceptance: the same FLAG, on the DELIVERED posterior.
+        # The predictor already wrote one; a corrector re-solve moved the
+        # posterior, so replace it rather than letting two stale numbers stack.
+        if soft and ip_z_final is not None and np.isfinite(ip_z_final):
+            from .utils import SOFT_IP_FLAG_PREFIX
+            _prev = getattr(bl, "ip_closure", None) or {}
+            _keep = tuple(r for r in (_prev.get("closure_limited_reasons", ())
+                                      or ())
+                          if not str(r).startswith(SOFT_IP_FLAG_PREFIX))
+            if abs(float(ip_z_final)) > 1.0:
+                _why = (SOFT_IP_FLAG_PREFIX
+                        + f" (z_Ip = {float(ip_z_final):+.2f})")
+                _keep = _keep + (_why,)
+                print("[imas SWB-split:ohmic structured] WARNING "
+                      "closure-limited: " + _why, flush=True)
+            rec["closure_limited_reasons"] = _keep
+            rec["closure_limited"] = bool(_keep)
+
+        rec["ohm_scale"] = float(getattr(bl, "ohm_scale", 1.0))
+        rec["bs_scale"] = float(getattr(bl, "bs_scale", 1.0))
+        if getattr(bl, "ip_closure", None) is not None:
+            bl.ip_closure.update(rec)
+        return nl_out
+
+    @staticmethod
     def _close_ip_q0_corrector(state, bl, mygs, solve_jphi, ip_of=None,
                                roundtrip_gate=None):
         """At most ONE Newton step on q0 after the closed-hybrid solve.
@@ -1296,10 +2068,11 @@ class Bouquet:
         #   "rescale" -> rescale SWB by one factor so the proxy l_i matches the
         #                FUSE source; fully self-consistent (no fixed profile).
         # The SWB bootstrap is floored at 0 first (drops the inner negative lobe).
-        # closure_channel="sawtooth_bootstrap" carries state from the (solve-free)
-        # predictor to the at-most-one-solve corrector that runs AFTER the common
-        # tail's forward solve; None everywhere else.
+        # closure_channel="sawtooth_bootstrap" / "structured" carry state from
+        # their (solve-free) predictor to the at-most-one-solve corrector that
+        # runs AFTER the common tail's forward solve; None everywhere else.
         _q0_state = None
+        _structured_state = None
         if self.config.generation.recalculate_j_BS:
             from .TokaMaker_interface import (_swb_jbs_to_toroidal,
                                               smooth_jbs_transition)
@@ -1329,12 +2102,13 @@ class Bouquet:
                 warn_deprecated_channel(getattr(gc, "closure_channel",
                                                 "bootstrap"))
                 if str(getattr(gc, "closure_channel", "bootstrap")) \
-                        not in ("bootstrap", "ohmic", "sawtooth_bootstrap"):
+                        not in ("bootstrap", "ohmic", "sawtooth_bootstrap",
+                                "structured"):
                     raise ValueError(
                         f"unknown closure_channel "
                         f"{gc.closure_channel!r} "
-                        "(expected 'ohmic', 'bootstrap' or "
-                        "'sawtooth_bootstrap')")
+                        "(expected 'ohmic', 'bootstrap', "
+                        "'sawtooth_bootstrap' or 'structured')")
                 from .utils import fsa_current_geometry as _fcg
                 from .physics import capture_equilibrium_fsa as _cef
                 _anchor = {"eq": mygs.copy_eq()}
@@ -1579,8 +2353,18 @@ class Bouquet:
                 # exercise the SHIPPED formulas, not a re-derivation.
                 # "sawtooth_bootstrap" adds a SECOND target (q0) and so
                 # determines BOTH scales -- see the block below.
+                # "structured" replaces the two scalars with two smooth radial
+                # multiplier PROFILES and returns the minimal-norm one that
+                # closes the same constraints -- the MSE arbiter showed the
+                # true correction is radially structured and shot-dependent,
+                # which no scalar can be.  Its "ohm_scale"/"bs_scale" are the
+                # Ip-weighted MEANS of those profiles (recorded as such): they
+                # satisfy the scalar closure equation exactly, so every
+                # downstream consumer -- closure_health included -- keeps
+                # working, while j_inductive/j_BS carry the real structure.
                 _chan = str(getattr(gc, "closure_channel", "bootstrap"))
                 _q0_extra = {}
+                _s_ind = _s_bs = None
                 if _chan == "sawtooth_bootstrap":
                     # The q0 channel closes the SAME affine identity, so it
                     # gets the same sign-paired (target, constant) pair.
@@ -1590,37 +2374,73 @@ class Bouquet:
                             j_ind, j_BS_swb, j_fixed, FUSE_tot,
                             sgn, Ip_t, _c_signed, ip_ind, ip_bs, ip_fix,
                             close_ip)
+                elif _chan == "structured":
+                    _s_ind, _s_bs, ohm_scale, bs_scale, _q0_extra, \
+                        _structured_state = self._close_ip_structured_predictor(
+                            gc, bl, _eq_snap, _geom, _probe, psi_N,
+                            j_ind, j_BS_swb, j_fixed, FUSE_tot,
+                            sgn, Ip_t, _w_lin, _c_signed,
+                            ip_ind, ip_bs, ip_fix,
+                            psi_pad=psi_pad, pprime_sign=_pps)
                 else:
                     ohm_scale, bs_scale = close_ip(
                         _chan, _Ip_signed, _c_signed, ip_ind, ip_bs, ip_fix)
                 bl.jBS_diff = None
                 bl.bs_scale = float(bs_scale)
                 bl.ohm_scale = float(ohm_scale)
-                bl.j_BS = bs_scale * j_BS_swb
-                bl.j_inductive = ohm_scale * j_ind
+                bl.j_BS = (bs_scale if _s_bs is None else _s_bs) * j_BS_swb
+                bl.j_inductive = (ohm_scale if _s_ind is None
+                                  else _s_ind) * j_ind
                 bl.j_phi = bl.j_inductive + bl.j_BS + j_fixed
-                # Round-trip budget on the ASSEMBLY of the closed hybrid (a
-                # wrong component, a double-counted affine term, a misapplied
-                # sign) -- machine precision, not a physics acceptance.  One
-                # definition, used at BOTH assemblies: here, and again on
-                # whatever the q0 corrector delivers.  Non-finite is a refusal,
-                # not a pass: abs(nan) > tol is False, so the profile the gate
-                # exists to catch would otherwise sail through it.
-                def _ip_roundtrip_check(ip_closed):
-                    _e = 100.0 * (abs(float(ip_closed)) - Ip_t) / Ip_t
-                    if not np.isfinite(_e) or abs(_e) > 0.05:
-                        raise RuntimeError(
-                            f"ohmic mode: closed hybrid integrates to {_e:+.3f}% "
-                            "of Ip_target after closure -- algebra error, refusing")
-                    return _e
-                # ... and it is fed the SAME affine measure the closure solved:
-                # linear part + the SIGNED constant.  _ip() adds the unsigned
+                # GATE: the ALGEBRA of the assembly above.  It asks one
+                # question -- does the hybrid this method just built integrate
+                # to the current the closure said it would? -- so its reference
+                # is the CLOSURE'S OWN Ip, and the tolerance (0.05 %) is a
+                # machine-precision budget for the assembly, not a physics
+                # acceptance.
+                #
+                # On every HARD channel the closure's own Ip IS Ip_target (Ip is
+                # imposed exactly), so the reference is Ip_target and nothing
+                # about this gate changes.  On the SOFT structured channel it is
+                # not: Ip there is a Gaussian MEASUREMENT with sigma_Ip, so the
+                # posterior mode lands a little off it by design (0.02-0.1 % at
+                # sigma_Ip = 0.5 % of Ip -- well inside the 0.5 % the user set
+                # as reasonable for this channel, 2026-09-16).  Comparing the
+                # posterior against Ip_meas with the assembly's tolerance tested
+                # the DATA statement rather than the algebra and refused ~40 of
+                # 335 cloud slices for being exactly what the channel is for.
+                # The tolerance is UNCHANGED; only the reference moves, and the
+                # distance from the measurement is recorded (and flagged beyond
+                # 1 sigma_Ip) instead of being refused.
+                #
+                # It is fed the SAME affine measure the closure solved: linear
+                # part + the SIGNED constant.  _ip() adds the unsigned
                 # _c_affine, so on sgn=-1 data it would disagree with the
-                # closure by 2c and fail a correct result.  Identical to
-                # _ip(bl.j_phi) whenever sgn == +1.  The corrector is handed
-                # this same measure (ip_of below), not _ip.
+                # closure by 2c and fail a correct result (identical to
+                # _ip(bl.j_phi) whenever sgn == +1).  Both correctors are
+                # handed this same measure as ip_of, never _ip.
+                from .utils import ip_roundtrip_gate
                 _ip_signed = lambda _j: float(_lin(_j) + _c_signed)
-                _closed_err = _ip_roundtrip_check(_ip_signed(bl.j_phi))
+                _ip_closed = float(_ip_signed(bl.j_phi))
+                _soft_ip = bool(_chan == "structured"
+                                and _q0_extra.get("structured_soft"))
+                _gate = ip_roundtrip_gate(
+                    _ip_closed, Ip_t,
+                    posterior=(_q0_extra.get("structured_ip_posterior")
+                               if _soft_ip else None),
+                    sigma_Ip=(_q0_extra.get("structured_ip_sigma")
+                              if _soft_ip else None))
+                _closed_err = _gate["err_pct"]
+                _ip_meas_resid_pct = (_gate["measured_residual_pct"]
+                                      if _soft_ip else None)
+                _ip_z = _gate["residual_sigma_Ip"] if _soft_ip else None
+                if _soft_ip:
+                    print("[imas SWB-split:ohmic structured] SOFT Ip: posterior "
+                          f"{_gate['reference'] / 1e6:.4f} MA vs measured "
+                          f"{Ip_t / 1e6:.4f} MA ({_ip_meas_resid_pct:+.3f}%"
+                          + ("" if _ip_z is None else f", z_Ip={_ip_z:+.2f}")
+                          + "); round-trip of the assembled hybrid against the "
+                          f"posterior {_closed_err:+.3e}%", flush=True)
                 _jd = getattr(bl, "jphi_diff", None)
                 ip_jd = _lin(k2e(_jd)) if _jd is not None else 0.0
                 # Closure health, every channel: how much reconciliation one
@@ -1629,7 +2449,8 @@ class Bouquet:
                 # to be read as validated either.
                 from .utils import closure_health
                 _health = closure_health(ohm_scale, bs_scale, _Ip_signed,
-                                         _c_signed, ip_ind, ip_bs, ip_fix)
+                                         _c_signed, ip_ind, ip_bs, ip_fix,
+                                         soft_ip_residual_sigma=_ip_z)
                 if _health["closure_limited"]:
                     print("[imas SWB-split:ohmic] WARNING closure-limited: "
                           + "; ".join(_health["closure_limited_reasons"])
@@ -1689,6 +2510,17 @@ class Bouquet:
                                                        _cyl_fix, _cyl_ind))
                 if _q0_extra:
                     bl.ip_closure.update(_q0_extra)
+                if _soft_ip:
+                    # ACHIEVED (delivered-hybrid) Ip bookkeeping for the soft
+                    # channel, written AFTER _q0_extra so it is not overwritten
+                    # by the predictor's model-space value.  Refreshed by
+                    # :meth:`_close_ip_structured_corrector` when a corrector
+                    # solve is taken.
+                    bl.ip_closure.update(
+                        structured_ip_measured_residual_pct=_ip_meas_resid_pct,
+                        structured_residual_sigma_Ip=_ip_z,
+                        structured_ip_gate_reference=_gate["reference_name"],
+                        structured_ip_gate_err_pct=float(_closed_err))
                 print(f"[imas SWB-split:ohmic] channel={_chan} ohm_scale={ohm_scale:.4f} bs_scale={float(getattr(bl,'bs_scale',1.0)):.4f}  "
                       f"linear Ip parts: ohm={ip_ind/1e6:.3f} jBS={ip_bs/1e6:.3f} "
                       f"fixed={ip_fix/1e6:.3f} + P'-term c={_c_affine/1e6:+.4f} MA "
@@ -1751,11 +2583,24 @@ class Bouquet:
             # about what "bootstrap" costs, and a residual that is reported is
             # worth more than a residual that is iterated away invisibly.
             if _q0_state is not None:
+                # The same NAMED gate the predictor stage used, re-run on
+                # what the corrector delivers.  This channel is always HARD in
+                # Ip, so there is no posterior and the reference is Ip_target.
                 _nl_corr = self._close_ip_q0_corrector(
-                    _q0_state, bl, mygs, solve_jphi,
-                    ip_of=_ip_signed, roundtrip_gate=_ip_roundtrip_check)
+                    _q0_state, bl, mygs, solve_jphi, ip_of=_ip_signed,
+                    roundtrip_gate=lambda _ipc: ip_roundtrip_gate(
+                        _ipc, Ip_t)["err_pct"])
                 if _nl_corr is not None:
                     nl_its = _nl_corr    # the state l_i/coils are read from
+            # Same contract for closure_channel="structured" (present whenever
+            # there is something to correct: the sawtooth gate admitted an axis
+            # row, or an l_i target was given, or both -- and BOTH corrections
+            # then share the one extra solve).
+            if _structured_state is not None:
+                _nl_corr = self._close_ip_structured_corrector(
+                    _structured_state, bl, mygs, solve_jphi)
+                if _nl_corr is not None:
+                    nl_its = _nl_corr
 
         # Convergence sanity: the solve completed (it raises otherwise), so
         # verify it landed on the requested current before trusting its l_i.
@@ -2140,13 +2985,15 @@ class Bouquet:
                                 f"('diff','rescale','ohmic')")
             elif gc.jBS_baseline_mode == "ohmic":
                 if str(getattr(gc, "closure_channel", "bootstrap")) \
-                        not in ("bootstrap", "ohmic", "sawtooth_bootstrap"):
+                        not in ("bootstrap", "ohmic", "sawtooth_bootstrap",
+                                "structured"):
                     # catch the typo HERE: the run-time dispatch only reaches
                     # its unknown-channel refusal after the full SWB solve
                     problems.append(
                         f"closure_channel="
                         f"{gc.closure_channel!r} not in "
-                        f"('bootstrap','ohmic','sawtooth_bootstrap')")
+                        f"('bootstrap','ohmic','sawtooth_bootstrap',"
+                        f"'structured')")
                 # Baseline-only for now: the draw path's sigma=0 reproduction
                 # of an ohmic-closed baseline has not been verified, so the
                 # UQ ensemble refuses the mode -- UNLESS workflow='custom'

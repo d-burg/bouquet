@@ -69,6 +69,18 @@ class Baseline:
     j_RF: Optional["np.ndarray"] = None     # RF-driven current [A/m^2]
     p_fast: Optional["np.ndarray"] = None   # fast/beam pressure
 
+    # How p_fast was reduced from the source's anisotropic fields, and how that
+    # rule was chosen (IMAS path only; None on the g-file path, where the p-file
+    # supplies p_fast directly). Keys: "rule" (the reduction applied, or None if
+    # the user supplied p_fast outright), "basis" (explicit-argument /
+    # explicit-stamp / imas.jl-structure / producer-string /
+    # undetermined-fallback / user-override), "evidence" (the dd field and text
+    # the decision rests on), "requested" (what the caller asked for) and
+    # "warned". The two dd storage conventions differ by a FACTOR OF THREE, so
+    # the decision is recorded with the baseline rather than re-inferred later.
+    # See bouquet.io.imas.resolve_p_fast_reduction.
+    p_fast_meta: Optional[dict] = None
+
     # bootstrap amplitude factor applied when the j_BS/j_inductive split is
     # rebuilt against SWB and calibrated to the measured l_i (IMAS path's
     # _forward_solve_imas_baseline, mirroring the g-file fit_inductive_profile).

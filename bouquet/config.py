@@ -182,13 +182,24 @@ class FixedComponentsConfig:
 
     # How to collapse anisotropic fast-ion pressure (p_perp, p_par) to the scalar
     # p_fast that a scalar-pressure GS solver needs. See
-    # bouquet.physics.isotropize_fast_pressure.
-    #   "sum"   -> p_par + 2*p_perp         [DEFAULT; IMAS.jl stores per-degree-of-freedom
-    #                                       fields, pressa/3 each -- "trace" keeps 1/3 of p_fast]
-    #   "trace" -> (2*p_perp + p_par)/3   [tr(P)/3 for sources storing full p_perp/p_par]
+    # bouquet.physics.isotropize_fast_pressure and
+    # bouquet.io.imas.resolve_p_fast_reduction.
+    #
+    # The dd field pair is written with two incompatible meanings whose scalars
+    # differ by a FACTOR OF 3, and no dd field records which one is in use:
+    #   "sum"   -> p_par + 2*p_perp       for IMAS.jl/FUSE, which store the fields
+    #                                     PER DEGREE OF FREEDOM (pressa/3 each)
+    #   "trace" -> (2*p_perp + p_par)/3   tr(P)/3, for the IMAS data-dictionary
+    #                                     reading (full directional pressures) --
+    #                                     what OMAS-written dds carry
     #   "mean"  -> (p_perp + p_par)/2
     #   "perp"  -> p_perp                 (diamagnetic-dominant)
-    p_fast_reduction: str = "sum"
+    #   "auto"  -> [DEFAULT] pick "sum" or "trace" from the dd's own recorded
+    #              provenance; if that cannot be determined, fall back to "sum"
+    #              with a loud one-time warning. An explicit rule always wins and
+    #              is applied silently. The rule used and the grounds for it are
+    #              recorded on Baseline.p_fast_meta.
+    p_fast_reduction: str = "auto"
 
 
 # ---------------------------------------------------------------------------
@@ -545,9 +556,11 @@ class BouquetConfig:
                 f"{type(src).__name__}"
             )
 
-        if self.fixed_components.p_fast_reduction not in ("trace", "mean", "perp", "sum"):
+        if self.fixed_components.p_fast_reduction not in (
+                "auto", "trace", "mean", "perp", "sum"):
             raise ValueError(
-                "fixed_components.p_fast_reduction must be 'trace', 'mean', 'perp', or 'sum'"
+                "fixed_components.p_fast_reduction must be 'auto', 'trace', 'mean', "
+                "'perp', or 'sum'"
             )
         if self.uncertainty.sigma_mode not in ("auto", "direct", "ensemble"):
             raise ValueError("uncertainty.sigma_mode must be 'auto', 'direct', or 'ensemble'")

@@ -334,6 +334,150 @@ class TestStructureNumber:
 
 
 # ---------------------------------------------------------------------------
+class TestKKTScaling:
+    """The degeneracy test is about the CONSTRAINT ROWS, not about the prior.
+
+    The refusal used to be taken on the bordered matrix
+    ``[[2 diag(W/max W), Cn'], [Cn, 0]]``, whose smallest singular value is
+    bounded by the prior's own dynamic range -- so any ``W_max/W_min`` past
+    ~``1/cond_rtol`` was reported as "the constraint rows are degenerate".
+    That is a false refusal AND a false diagnosis, and it capped the branch's
+    asymmetric prior at a sigma ratio of a few hundred.
+
+    Three things are pinned here: genuinely degenerate rows are STILL refused
+    (at any weight range), a wide weight range is solved exactly, and the
+    answer on well-conditioned cases is the same minimiser the bordered system
+    gave.  ``cond_rtol`` itself is unchanged.
+    """
+
+    def _rows(self, psi, w, c, j_ind, j_bs, j_fix, Ip_s, ax):
+        """The SAME constraint rows close_ip_structured builds, from the
+        shipped basis evaluator -- so the reference below is a reference for
+        the SOLVE, not a second implementation of the rows."""
+        Phi = structured_basis_eval(dict(STRUCTURED_BASIS_DEFAULT), psi)
+        K = Phi.shape[0]
+        _lin = lambda y: float(trapezoid(w * np.asarray(y, float), psi))
+        A = np.array([_lin(Phi[k] * j_ind) for k in range(K)])
+        B = np.array([_lin(Phi[k] * j_bs) for k in range(K)])
+        deficit = Ip_s - c - _lin(j_ind) - _lin(j_bs) - _lin(j_fix)
+        phi0 = structured_basis_eval(dict(STRUCTURED_BASIS_DEFAULT),
+                                     np.array([ax["psi"]]))[:, 0]
+        C = np.array([np.concatenate([A, B]),
+                      np.concatenate([phi0 * ax["j_ind0"],
+                                      phi0 * ax["j_bs0"]])])
+        d = np.array([deficit,
+                      ax["j_ref0"] - ax["j_ind0"] - ax["j_bs0"] - ax["j_fix0"]])
+        return C, d
+
+    @pytest.mark.parametrize("wt", [
+        dict(name="a", ind=(1.0e2, 10.0, 3.0, 1.0), bs=(1.0, 1.0, 1.0, 1.0)),
+        dict(name="b", ind=(4.0, 4.0, 4.0, 4.0), bs=(4.0, 11.0, 44.0, 100.0)),
+        dict(name="c", ind=(100.0, 6.25, 6.25, 6.25),
+             bs=(4.0, 11.0, 44.0, 100.0)),
+    ])
+    def test_is_the_same_minimiser_the_bordered_system_gave(self, wt):
+        """``x = W^-1 C' (C W^-1 C')^-1 d`` is the closed-form stationary point
+        of the bordered KKT system.  The substituted solve must reproduce it --
+        this is the "unchanged on well-conditioned cases" evidence."""
+        psi, w, c, j_ind, j_bs, j_fix, lin, Ip_s = _parts()
+        ax = _axis(psi, j_ind, j_bs, j_fix)
+        out = close_ip_structured(psi, w, c, Ip_s, j_ind, j_bs, j_fix,
+                                  axis=ax, weights=wt)
+        C, d = self._rows(psi, w, c, j_ind, j_bs, j_fix, Ip_s, ax)
+        Wv = np.concatenate([np.asarray(wt["ind"], float),
+                             np.asarray(wt["bs"], float)])
+        Wi = np.diag(1.0 / Wv)
+        x_ref = Wi @ C.T @ np.linalg.solve(C @ Wi @ C.T, d)
+        x = np.concatenate([out["a"], out["b"]])
+        assert np.max(np.abs(x - x_ref)) <= 1.0e-12 * np.max(np.abs(x_ref))
+        # and it is a MINIMISER, not just a feasible point
+        assert float(x @ np.diag(Wv) @ x) <= float(
+            x_ref @ np.diag(Wv) @ x_ref) * (1.0 + 1.0e-12)
+
+    @pytest.mark.parametrize("ratio", [1.0e3, 1.0e6, 1.0e9, 1.0e12])
+    def test_a_wide_trust_weight_range_is_solved_not_refused(self, ratio):
+        """``W_max/W_min`` past ~1/cond_rtol used to be refused as a degenerate
+        constraint system.  The rows are independent at every ratio and the
+        constraints are met exactly.
+
+        The superseded test is rebuilt here and asserted to have refused the
+        wide cases -- so this is a regression test against the FIX, not just a
+        statement that the current code works."""
+        psi, w, c, j_ind, j_bs, j_fix, lin, Ip_s = _parts()
+        ax = _axis(psi, j_ind, j_bs, j_fix)
+        wt = dict(name="wide", ind=(1.0, 1.0, 1.0, ratio),
+                  bs=(1.0, 1.0, 1.0, 1.0))
+        out = close_ip_structured(psi, w, c, Ip_s, j_ind, j_bs, j_fix,
+                                  axis=ax, weights=wt)
+        C, d = self._rows(psi, w, c, j_ind, j_bs, j_fix, Ip_s, ax)
+        x = np.concatenate([out["a"], out["b"]])
+        resid = C @ x - d
+        assert np.all(np.abs(resid) <= 1.0e-12 * np.abs(d))
+        assert abs(out["ip_residual_pct"]) < 1.0e-9
+        # the row conditioning is a property of the ROWS: same at every ratio
+        flat = close_ip_structured(
+            psi, w, c, Ip_s, j_ind, j_bs, j_fix, axis=ax,
+            weights=dict(name="flat", ind=(1.0,) * 4, bs=(1.0,) * 4))
+        assert out["constraint_cond"] == pytest.approx(flat["constraint_cond"],
+                                                       rel=1e-12)
+        # what the bordered matrix would have said
+        Wv = np.concatenate([np.asarray(wt["ind"], float),
+                             np.asarray(wt["bs"], float)])
+        rn = np.max(np.abs(C), axis=1)
+        Cn = C / rn[:, None]
+        n, m = Cn.shape[1], Cn.shape[0]
+        M = np.zeros((n + m, n + m))
+        M[:n, :n] = 2.0 * np.diag(Wv / Wv.max())
+        M[:n, n:], M[n:, :n] = Cn.T, Cn
+        sv_old = np.linalg.svd(M, compute_uv=False)
+        would_have_refused = sv_old[-1] <= 1.0e-6 * sv_old[0]
+        assert would_have_refused == (ratio >= 1.0e6)
+
+    @pytest.mark.parametrize("ratio", [1.0, 1.0e4, 1.0e10])
+    def test_genuinely_degenerate_rows_are_still_refused_at_any_range(self,
+                                                                      ratio):
+        """The case the refusal is FOR: j_BS == j_ind makes the Ip row and the
+        axis row read the same combination.  A wide prior must not rescue it
+        and a narrow one must not be needed to catch it."""
+        psi, w, c, j_ind, j_bs, j_fix, lin, Ip_s = _parts()
+        j2 = j_ind.copy()
+        ax = _axis(psi, j_ind, j2, j_fix)
+        with pytest.raises(RuntimeError, match="degenerate on this basis"):
+            close_ip_structured(psi, w, c, Ip_s, j_ind, j2, j_fix,
+                                basis=_CONST, axis=ax,
+                                weights=dict(name="u", ind=(ratio,),
+                                             bs=(1.0,)))
+
+    def test_a_nearly_degenerate_pair_is_still_refused(self):
+        """Rows proportional to within cond_rtol -- the floor itself, not just
+        the exactly-singular case."""
+        psi, w, c, j_ind, j_bs, j_fix, lin, Ip_s = _parts()
+        j2 = j_ind * (1.0 + 1.0e-9)
+        ax = _axis(psi, j_ind, j2, j_fix)
+        with pytest.raises(RuntimeError, match="degenerate on this basis"):
+            close_ip_structured(psi, w, c, Ip_s, j_ind, j2, j_fix,
+                                basis=_CONST, axis=ax,
+                                weights=dict(name="u", ind=(1.0,), bs=(1.0,)))
+
+    def test_cond_rtol_default_is_unchanged(self):
+        """The fix must not move the acceptance value, only what it is
+        applied to."""
+        import inspect
+        from bouquet.utils import close_ip_structured_soft
+        for fn in (close_ip_structured, close_ip_structured_soft):
+            assert inspect.signature(fn).parameters["cond_rtol"].default \
+                == 1.0e-6
+
+    def test_the_row_conditioning_is_reported_separately(self):
+        psi, w, c, j_ind, j_bs, j_fix, lin, Ip_s = _parts()
+        out = close_ip_structured(psi, w, c, Ip_s, j_ind, j_bs, j_fix,
+                                  axis=_axis(psi, j_ind, j_bs, j_fix))
+        assert out["constraint_cond"] >= 1.0
+        assert len(out["constraint_singular_values"]) == 2
+        assert np.all(np.isfinite(out["constraint_singular_values"]))
+
+
+# ---------------------------------------------------------------------------
 class TestRefusals:
     def test_refuses_when_a_multiplier_leaves_the_scale_bounds(self):
         """A deficit far too large for the basis to absorb gently."""

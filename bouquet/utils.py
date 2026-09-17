@@ -1984,13 +1984,25 @@ def close_ip_structured(psi_N, w_lin, c_affine, Ip_target_signed,
     with that caveat attached.
 
     **Refusals** (``RuntimeError``, never a quiet clamp): a non-finite input;
-    a KKT system that is singular against the relative floor ``cond_rtol``
-    (smallest singular value below ``cond_rtol`` x largest, after
-    normalisation); a constraint row that is identically zero (the constraint
-    cannot be imposed on this split at all); or a resulting ``s_ind``/``s_bs``
-    that leaves ``scale_bounds`` ANYWHERE on the grid.  A structured closure
-    that has to drive a multiplier to 0.1 or 8 somewhere is telling you the
-    three sources do not add up, which is a finding to report.
+    constraint rows that are DEGENERATE against the relative floor
+    ``cond_rtol`` (the row-normalised constraint matrix's smallest singular
+    value below ``cond_rtol`` x its largest); a constraint row that is
+    identically zero (the constraint cannot be imposed on this split at all);
+    or a resulting ``s_ind``/``s_bs`` that leaves ``scale_bounds`` ANYWHERE on
+    the grid.  A structured closure that has to drive a multiplier to 0.1 or 8
+    somewhere is telling you the three sources do not add up, which is a
+    finding to report.
+
+    The degeneracy test is on the CONSTRAINT rows only, exactly as
+    :func:`close_ip_structured_soft` tests its hard rows.  It is not asked of
+    the bordered KKT matrix, whose smallest singular value is bounded by the
+    PRIOR's dynamic range: that version refused any ``W_max/W_min`` beyond
+    ~``1/cond_rtol``, i.e. a sigma ratio of a few hundred, and told the user
+    their constraints were degenerate when they were independent.  A tight
+    ``sigma_ind_up`` -- the whole point of the asymmetric prior -- is now an
+    ordinary request: the weighted system is solved in the substitution
+    ``y = W^(1/2) x``, which is the same minimiser in a scaling that does not
+    carry the prior.  ``cond_rtol`` itself is unchanged.
 
     Returns a dict carrying ``s_ind``/``s_bs`` (on *psi_N*), the coefficients,
     the effective scalar equivalents (see below), the constraint residuals and
@@ -2118,26 +2130,60 @@ def close_ip_structured(psi_N, w_lin, c_affine, Ip_target_signed,
     Cn = C / row_norm[:, None]
     dn = d / row_norm
 
+    # ---- are the CONSTRAINT rows independent on the free coefficients? -----
+    # This is the question the refusal below asks, and the only one it may
+    # answer.  It is a property of the rows and the basis ALONE -- the prior
+    # cannot make two independent constraints degenerate, and it must not be
+    # able to trip this test.  Same test, same relative floor, same
+    # `cond_rtol` value the soft solver uses on its hard rows.
+    #
+    # It used to be asked of the whole bordered matrix
+    # ``[[2 diag(W/max W), Cn'], [Cn, 0]]``, whose smallest singular value is
+    # bounded by the PRIOR's dynamic range: any W_max/W_min beyond ~1/cond_rtol
+    # was reported as "the constraint rows are degenerate", which was both
+    # false and the wrong diagnosis.  A tight one-sided `sigma_ind_up` -- the
+    # setting the asymmetric prior exists for -- hit it at a sigma ratio of a
+    # few hundred.
+    sv_c = np.linalg.svd(Cn, compute_uv=False)
+    _m = Cn.shape[0]
+    if not np.all(np.isfinite(sv_c)) or sv_c[-1] <= float(cond_rtol) * sv_c[0]:
+        raise RuntimeError(
+            f"close_ip_structured: singular KKT system (smallest constraint "
+            f"singular value {sv_c[-1]:.4e} <= relative floor "
+            f"{float(cond_rtol) * sv_c[0]:.4e} after normalisation) -- the "
+            f"{_m} constraint row(s) are degenerate on this basis; Ip and the "
+            "axis current cannot both be imposed on this split")
+
     def _kkt(Wf_now):
-        """The bordered solve for ONE fixed set of trust weights."""
-        Wn = Wf_now / float(np.max(Wf_now))
-        n, m = Cn.shape[1], Cn.shape[0]
-        M = np.zeros((n + m, n + m), dtype=float)
-        M[:n, :n] = 2.0 * np.diag(Wn)
-        M[:n, n:] = Cn.T
-        M[n:, :n] = Cn
-        sv = np.linalg.svd(M, compute_uv=False)
-        if not np.all(np.isfinite(sv)) or sv[-1] <= float(cond_rtol) * sv[0]:
+        """Minimal-norm solve for ONE fixed set of trust weights.
+
+        ``min x' W x  s.t.  Cn x = dn``, solved in the substitution
+        ``y = W^(1/2) x``, where the objective is the plain Euclidean norm and
+        the prior's dynamic range has been divided out exactly:
+
+        .. code-block:: text
+
+            minimise ||y||  subject to  (Cn W^(-1/2)) y = dn
+            y = pinv(Cn W^(-1/2)) dn                   (minimum-norm)
+            x = W^(-1/2) y
+
+        For full-row-rank ``Cn`` this is algebraically the bordered KKT
+        solution ``x = W^-1 Cn' (Cn W^-1 Cn')^-1 dn`` -- the same minimiser,
+        obtained in a scaling whose conditioning does not carry the prior.  A
+        weight ratio of 1e12 is then an ordinary request, not a refusal.
+        """
+        Wn = np.asarray(Wf_now, dtype=float) / float(np.max(Wf_now))
+        scal = 1.0 / np.sqrt(Wn)                 # W^(-1/2), all finite here
+        Aw = Cn * scal[None, :]
+        U, sv, Vt = np.linalg.svd(Aw, full_matrices=False)
+        if not np.all(np.isfinite(sv)) or sv[-1] <= 0.0:
             raise RuntimeError(
-                f"close_ip_structured: singular KKT system (smallest singular "
-                f"value {sv[-1]:.4e} <= relative floor "
-                f"{float(cond_rtol) * sv[0]:.4e} "
-                f"after normalisation) -- the {m} constraint row(s) are "
-                "degenerate on this basis; Ip and the axis current cannot "
-                "both be imposed on this split")
-        sol = np.linalg.solve(M, np.concatenate([np.zeros(n), dn]))
+                "close_ip_structured: the weighted constraint matrix "
+                f"Cn W^(-1/2) is rank deficient (singular values {sv}) -- the "
+                "free coefficients cannot carry these constraints")
+        y = Vt.T @ ((U.T @ dn) / sv)
         x_now = np.zeros(2 * K, dtype=float)
-        x_now[free] = sol[:n]
+        x_now[free] = scal * y
         return x_now, sv
 
     if W_ind_up is None:
@@ -2229,8 +2275,14 @@ def close_ip_structured(psi_N, w_lin, c_affine, Ip_target_signed,
         ip_residual=float(ip_resid),
         ip_residual_pct=100.0 * float(ip_resid) / Ip_t,
         axis_residual=axis_resid,
+        # The system actually inverted: Cn W^(-1/2).  Its conditioning carries
+        # the prior's dynamic range by construction and is a diagnostic, never
+        # an acceptance -- what IS tested is `constraint_cond` below, the
+        # prior-independent independence of the constraint rows.
         kkt_singular_values=sv,
         kkt_cond=float(sv[0] / sv[-1]),
+        constraint_singular_values=sv_c,
+        constraint_cond=float(sv_c[0] / sv_c[-1]),
         solver="hard-KKT",
         **li_rec,
     )
@@ -2742,6 +2794,7 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
         objective=float(F), prior_chi2=prior_chi2,
         n_iter=int(n_iter), lm_lambda=float(lam),
         kkt_singular_values=None, kkt_cond=None,
+        constraint_singular_values=None, constraint_cond=None,
         solver="soft-GaussNewton",
         **li_rec,
     )

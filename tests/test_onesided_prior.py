@@ -169,7 +169,10 @@ class TestDeficitSliceRedirected:
         assert np.all(base["a"] > 0.0)          # symmetric: it adds everywhere
         scale = float(np.max(np.abs(base["a"])))
         for k in MID:
-            assert one["a"][k] <= 1.0e-4 * scale, (
+            # abs(): the claim is "driven to numerical ZERO", so a coefficient
+            # that over-corrected into a large NEGATIVE value has to fail this
+            # too.  Without it the assertion passed for any undershoot.
+            assert abs(one["a"][k]) <= 1.0e-4 * scale, (
                 f"mid-radius basis {k} still carries {one['a'][k]:.3e} "
                 f"against a symmetric {base['a'][k]:.3e}")
         # and the deficit did not simply go unclosed
@@ -182,7 +185,7 @@ class TestDeficitSliceRedirected:
         assert np.all(base["a"] > 0.0)
         scale = float(np.max(np.abs(base["a"])))
         for k in MID:
-            assert one["a"][k] <= 1.0e-4 * scale
+            assert abs(one["a"][k]) <= 1.0e-4 * scale
 
     def test_the_multiplier_rise_is_cut_at_the_resisted_radius(self):
         """The statement in profile space, which is what the chords see.
@@ -216,7 +219,59 @@ class TestDeficitSliceRedirected:
             assert one["a"][k] < base["a"][k]
         assert one["a"][3] > base["a"][3]
         assert one["sign_pattern"] == (True, True, True, True)
-        assert 1 <= one["n_sign_iter"] <= SIGN_ITER_MAX
+        # exactly 2: the all-down start solves once, flips every coefficient
+        # up, and the second solve confirms the pattern.  The old
+        # `1 <= n <= SIGN_ITER_MAX` window admitted any behaviour the cap
+        # allows, including one that never consulted the up side at all.
+        assert one["n_sign_iter"] == 2
+
+    def test_an_arbitrarily_tight_up_ladder_is_solved_not_refused(self):
+        """"Resist a rise HARD" is the documented intent of ``sigma_ind_up``,
+        and it used to stop working past a sigma ratio of a few hundred: the
+        singularity test was taken on the whole bordered matrix, whose (1,1)
+        block is the prior, so a tight up side was refused as *degenerate
+        constraint rows*.  Nothing in the docs or the tests warned of it, and
+        the two rows here are manifestly independent.
+
+        The tightest ladder below is a trust-weight range of ~1e13.  Ip stays
+        exact throughout and the resisted coefficients go monotonically to
+        zero -- the limit the prior claims, reached rather than refused.
+        """
+        _psi, hard, _soft = _case("deficit")
+        base = close_ip_structured(**hard)
+        scale = float(np.max(np.abs(base["a"])))
+        prev = [abs(base["a"][k]) for k in MID]
+        for tighten in (1.0e-1, 1.0e-2, 1.0e-3, 1.0e-4, 1.0e-6):
+            one = close_ip_structured(
+                sigma_ind_up=[tighten * s for s in SIG_IND_DOWN], **hard)
+            assert abs(one["ip_residual_pct"]) < 1.0e-9
+            now = [abs(one["a"][k]) for k in MID]
+            assert all(n < p for n, p in zip(now, prev)), (
+                f"tightening to x{tighten:g} did not reduce {now} below "
+                f"{prev}")
+            prev = now
+        assert all(v <= 1.0e-4 * scale for v in prev)   # numerical zero
+
+    @pytest.mark.parametrize("up", ["campaign", "tight"])
+    def test_a_tight_up_ladder_still_hits_a_hard_li_target(self, up):
+        """The campaign ladder uses ``sigma_ind_up`` AND an l_i row, and the
+        sign iteration re-solves a KKT that CONTAINS that row -- nothing
+        checked the two together.  The l_i row is exact along the Ip-closed
+        manifold, so the one-sided prior must not cost any of that exactness:
+        it chooses among feasible points, it does not move the feasible set."""
+        from test_li_closure import _li_parts, _li_of_closure, _model
+        m, (psi, w, c, ji, jb, jf, lin, Ip_s, lg) = _model()
+        base = close_ip_structured(psi, w, c, Ip_s, ji, jb, jf, li_geom=lg,
+                                   weights=WEIGHTS)
+        target = _li_of_closure(base, m) * 1.02
+        ladder = SIG_IND_UP if up == "campaign" else SIG_IND_UP_TIGHT
+        out = close_ip_structured(psi, w, c, Ip_s, ji, jb, jf, li_geom=lg,
+                                  weights=WEIGHTS, li_target=target,
+                                  sigma_ind_up=ladder)
+        assert out["one_sided_ind"] is True
+        assert abs(out["ip_residual_pct"]) < 1.0e-9
+        assert out["li_predicted"] == pytest.approx(target, rel=1e-12)
+        assert _li_of_closure(out, m) == pytest.approx(target, rel=1e-12)
 
     def test_the_record_carries_the_ladder_and_the_pattern(self):
         _psi, hard, soft = _case("deficit")

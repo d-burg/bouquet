@@ -39,33 +39,69 @@ def q_ravg(ravgs, which: str):
     return ravgs[_GET_Q_RAVG_INDEX[which]]
 
 
-def isotropize_fast_pressure(p_perp, p_par, method: str = "sum"):
+#: Reduction rules :func:`isotropize_fast_pressure` accepts.  ``"sum"`` is the
+#: per-degree-of-freedom rule; the other three read the two fields as the full
+#: perpendicular/parallel pressures of a gyrotropic tensor.
+P_FAST_REDUCTIONS = ("trace", "mean", "perp", "sum")
+
+#: Which storage convention each rule assumes for
+#: ``pressure_fast_{parallel,perpendicular}``.  This is the factor-of-3 axis:
+#: "per_dof" fields hold a third of the fast pressure each, "total" fields hold
+#: the full directional pressures.
+P_FAST_CONVENTION_OF_RULE = {
+    "sum": "per_dof",
+    "trace": "total",
+    "mean": "total",
+    "perp": "total",
+}
+
+
+def isotropize_fast_pressure(p_perp, p_par, method: str):
     """Reduce anisotropic fast-ion pressure to a scalar for the scalar-p GS solve.
 
-    For a gyrotropic pressure tensor ``P = p_par b b + p_perp (I - b b)`` the
-    standard scalar pressure is one-third of the trace:
+    ``method`` is REQUIRED and has no default: the two families below differ by
+    a factor of three on the same input, so there is no value that is safe to
+    assume on a caller's behalf.  Readers that have a data dictionary to look at
+    should call :func:`bouquet.io.imas.resolve_p_fast_reduction`, which picks the
+    rule from the dd's recorded provenance.
+
+    **Fields stored as the FULL directional pressures** (the IMAS/OMAS data
+    dictionary reading of ``pressure_fast_parallel`` -- "fast (non-thermal)
+    parallel pressure").  For a gyrotropic tensor
+    ``P = p_par b b + p_perp (I - b b)``:
 
         method="trace"  ->  (2 * p_perp + p_par) / 3
         method="mean"   ->  (p_perp + p_par) / 2
         method="perp"   ->  p_perp
-        method="sum"    ->  p_par + 2 * p_perp             [DEFAULT]
 
-    ``"sum"`` is for sources that store the directional fields PER DEGREE OF
-    FREEDOM rather than as the full perpendicular/parallel pressures. IMAS.jl
-    (FUSE) does this: its ``pressure`` expression is
-    ``p_par + 2*p_perp`` and ``physics/fast.jl`` writes ``pressa/3`` into each
-    of ``pressure_fast_parallel`` and ``pressure_fast_perpendicular``. On such
-    a dd ``"trace"`` returns one third of the fast-ion pressure (verified on
-    DIII-D 150000/171317/173982/174823: the deficit is 8-35 % of the total
-    pressure and closes to <2 % with ``"sum"``).
-
-    ``"trace"`` is the textbook scalar pressure p = tr(P)/3 of
-    a gyrotropic distribution and it preserves the fast-ion energy density
+    ``"trace"`` is the textbook scalar pressure p = tr(P)/3 of a gyrotropic
+    distribution and it preserves the fast-ion energy density
     (w = (1/2)(p_par + 2 p_perp) = (3/2) p_scalar), consistent with how
     kinetic-EFIT constrains the total stored pressure
     (p_tot = p_e + p_i + p_Z + p_fast). Use ``"perp"`` only if matching the
     diamagnetic magnetic response specifically; the rigorous alternative is a
     modified anisotropic Grad-Shafranov solve (out of scope for a scalar solver).
+
+    **Fields stored PER DEGREE OF FREEDOM** (IMAS.jl / FUSE):
+
+        method="sum"    ->  p_par + 2 * p_perp
+
+    IMAS.jl's ``pressure`` expression is ``pressure_thermal +
+    pressure_fast_parallel + 2*pressure_fast_perpendicular``, and its
+    ``physics/fast.jl`` writes ``pressa/3`` into *each* of
+    ``pressure_fast_parallel`` and ``pressure_fast_perpendicular``.  So on an
+    IMAS.jl-written dd the two fields carry a third of the fast pressure each and
+    ``"sum"`` recovers ``pressa``; ``"trace"`` would return one third of it.
+    Measured on a set of beam-heated tokamak discharges reconstructed through
+    FUSE, that shortfall was 8-35 % of the total pressure and closed to <2 % with
+    ``"sum"``.  Conversely, ``"sum"`` on a dictionary-convention dd over-counts
+    the fast pressure by exactly 3x.
+
+    Note that ``"sum"`` is not a tensor reduction: on isotropic input it returns
+    ``3*p``, not ``p``, because the input is a third of the pressure per degree of
+    freedom rather than a directional pressure.  The invariant "every reduction
+    is the identity on isotropic input" holds for the three ``"total"``-convention
+    rules only.
 
     Inputs are per-species arrays on a common grid; the caller sums species.
 
@@ -75,6 +111,9 @@ def isotropize_fast_pressure(p_perp, p_par, method: str = "sum"):
     - Anisotropic Grad-Shafranov treatment: arXiv:1301.4714; J. Plasma Phys.,
       "Analysis of the isotropic and anisotropic Grad-Shafranov equation".
     - Kinetic-EFIT total-pressure constraint p_tot = p_e + p_i + p_Z + p_fast.
+    - IMAS.jl (ProjectTorreyPines): ``src/expressions/dynamic.jl`` (the
+      ``pressure`` expression) and ``src/physics/fast.jl`` (``pressa/3`` into
+      each directional field).
     """
     p_perp = np.asarray(p_perp, dtype=float)
     p_par = np.asarray(p_par, dtype=float)

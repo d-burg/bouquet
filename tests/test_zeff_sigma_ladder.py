@@ -372,6 +372,75 @@ class TestCarbonDataValidity:
         assert "cross-check skipped" in capsys.readouterr().out
 
 
+class TestEnsembleCarbonDataValidity:
+    """The same screen on the 3-D posterior layout -- the hazard is the file's.
+
+    ``_band`` is a percentile half-width, so it is always finite and
+    non-negative: an unscreened fill value in ONE sample at ONE radius gives a
+    ~1e17 carbon sigma that passes ``_usable`` and WINS the ladder as the
+    highest-fidelity tier, while the run completes normally.
+    """
+
+    @staticmethod
+    def _ensemble_with(path, mutate):
+        out = _write_ensemble(path)
+        with h5py.File(path, "a") as f:
+            mutate(f)
+        return out
+
+    def test_negative_carbon_samples_drop_the_tier(self, tmp_path, capsys):
+        p = str(tmp_path / "ens_negc.cdf")
+
+        def mutate(f):
+            nc = f["n_12C6"][0]
+            nc[:, -3:] = -2e17                   # SOL undershoot, every sample
+            f["n_12C6"][0] = nc
+        self._ensemble_with(p, mutate)
+        r = read_ida(p)
+        assert r.sigma_Zeff_carbon is None
+        assert r.sigma_Zeff_carbon_source == "none"
+        assert "carbon-tier sigma skipped" in capsys.readouterr().out
+        # the sample-spread VB tier is untouched and still wins 'auto'
+        assert r.sigma_Zeff is not None
+
+    def test_a_fill_value_in_a_single_sample_drops_the_tier(self, tmp_path,
+                                                            capsys):
+        p = str(tmp_path / "ens_fill.cdf")
+        nsamp = 64
+
+        def mutate(f):
+            nc = f["n_12C6"][0]
+            nc[3, 11] = 9.96921e36               # ONE sample at ONE radius
+            f["n_12C6"][0] = nc
+        self._ensemble_with(p, mutate)
+        r = read_ida(p)
+        assert r.sigma_Zeff_carbon is None
+        assert r.sigma_Zeff_carbon_source == "none"
+        out = capsys.readouterr().out
+        assert "carbon-tier sigma skipped" in out
+        assert f"1/{nsamp * _NPSI} sample points" in out
+
+    def test_nan_hole_drops_the_tier_instead_of_riding_through(self, tmp_path):
+        p = str(tmp_path / "ens_nan.cdf")
+
+        def mutate(f):
+            nc = f["n_12C6"][0]
+            nc[9, 7] = np.nan
+            f["n_12C6"][0] = nc
+        self._ensemble_with(p, mutate)
+        r = read_ida(p)
+        assert r.sigma_Zeff_carbon is None
+        assert r.sigma_Zeff_carbon_source == "none"
+
+    def test_a_clean_posterior_keeps_the_tier(self, tmp_path, capsys):
+        p = str(tmp_path / "ens_clean.cdf")
+        _write_ensemble(p)
+        r = read_ida(p)
+        assert r.sigma_Zeff_carbon is not None
+        assert r.sigma_Zeff_carbon_source == "ensemble-samples"
+        assert "carbon-tier sigma skipped" not in capsys.readouterr().out
+
+
 def _mk_bl(psi_kin):
     from bouquet.baseline import Baseline
     psi_N = np.linspace(0.0, 1.0, 33)
@@ -652,3 +721,21 @@ class TestSigmaPathSpelling:
         assert meta["skipped"][0]["tier"] == "carbon-propagated"
         assert "missing dataset" in meta["skipped"][0]["reason"]
         assert "path" not in meta["skipped"][0]["reason"]
+
+
+class TestConfigValidation:
+    """A typo in the knob is caught in __post_init__, not after the baseline
+    GS solve, exactly like the sibling sigma_mode / sigma_method checks."""
+
+    def test_a_bad_source_is_rejected_at_construction(self, tmp_path):
+        from bouquet.config import UncertaintyConfig
+        with pytest.raises(ValueError, match="zeff_sigma_source"):
+            _mk_cfg(str(tmp_path / "x.cdf"), tmp_path,
+                    unc=UncertaintyConfig(zeff_sigma_source="carbon_propagated"))
+
+    @pytest.mark.parametrize("src", ["auto", "carbon", "measured", "scalar"])
+    def test_every_documented_setting_is_accepted(self, src, tmp_path):
+        from bouquet.config import UncertaintyConfig
+        cfg = _mk_cfg(str(tmp_path / "x.cdf"), tmp_path,
+                      unc=UncertaintyConfig(zeff_sigma_source=src))
+        assert cfg.uncertainty.zeff_sigma_source == src

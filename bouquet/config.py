@@ -587,6 +587,14 @@ class BouquetConfig:
         if self.uncertainty.sigma_method not in ("percentile", "std"):
             raise ValueError(
                 "uncertainty.sigma_method must be 'percentile' or 'std'")
+        # Caught here rather than only in resolve_zeff_envelope, which runs
+        # inside Bouquet.generate() -- i.e. after prepare_baseline() has
+        # already paid for the baseline GS solve.
+        if self.uncertainty.zeff_sigma_source not in (
+                "auto", "carbon", "measured", "scalar"):
+            raise ValueError(
+                "uncertainty.zeff_sigma_source must be 'auto', 'carbon', "
+                "'measured', or 'scalar'")
         if self.generation.n_equils < 1:
             raise ValueError("generation.n_equils must be >= 1")
         if self.generation.workflow not in (

@@ -135,6 +135,39 @@ def _select_time_index(time_ms: np.ndarray, time_s: Optional[float]) -> int:
     return int(np.argmin(np.abs(time_ms / 1e3 - time_s)))
 
 
+def _carbon_tier_usable(nC, ne, sigma_nC=None, sigma_ne=None, *,
+                        unit="radii", datasets="n_12C6/n_12C6_err") -> bool:
+    """Is the carbon dilution data physical enough to carry the Zeff sigma tier?
+
+    Shared by both IDA layouts (the direct ``*_err`` one and the 3-D posterior),
+    because the hazard is the file's, not the layout's.  Negative nC (SOL spline
+    undershoot), netCDF fill values (~1e36) and NaN holes all survive the clip
+    floors downstream: a negative nC keeps its sign while its |value| is floored
+    out of the relative-error denominator, and a fill value scales straight
+    through, producing ~1e6-scale (direct) or ~1e17-scale (ensemble) sigmas that
+    pass every downstream guard -- finite, non-negative, some > 0 -- and silently
+    corrupt the Zeff ensemble while the run completes normally.
+
+    Any bad entry drops the whole tier, loudly and with a count, matching the
+    None-not-a-guessed-scalar rule elsewhere in this reader.  ``unit`` names what
+    the entries are ("radii", "sample points") for the printed reason.
+    """
+    ok = (np.isfinite(nC) & np.isfinite(ne) & (nC > 0) & (ne > 0)
+          & (np.abs(nC) < _CARBON_FILL) & (np.abs(ne) < _CARBON_FILL))
+    if sigma_nC is not None:
+        ok = ok & (np.isfinite(sigma_nC) & (sigma_nC >= 0)
+                   & (np.abs(sigma_nC) < _CARBON_FILL))
+    if sigma_ne is not None:
+        ok = ok & np.isfinite(sigma_ne)
+    bad = ~ok
+    if not np.any(bad):
+        return True
+    print(f"[read_ida] carbon-tier sigma skipped: {int(bad.sum())}/{bad.size} "
+          f"{unit} carry non-physical {datasets} (negative, non-finite, or fill "
+          f"values); the Zeff envelope falls back a tier")
+    return False
+
+
 def read_ida(
     path: str,
     time: Optional[float] = None,
@@ -224,10 +257,16 @@ def read_ida(
             sigma_Zeff_carbon, sigma_Zeff_carbon_source = None, "none"
             if "n_12C6" in f:
                 nc_s = _samples("n_12C6")
-                zc_s = (1.0 + impurity_Z * (impurity_Z - 1.0) * nc_s
-                        / np.clip(ne_s, 1e10, None))
-                sigma_Zeff_carbon = _band(zc_s)
-                sigma_Zeff_carbon_source = "ensemble-samples"
+                # Same screen as the direct layout, per SAMPLE: one fill value in
+                # one sample at one radius is enough to put ~1e17 into the band,
+                # and _band (a percentile half-width) is always finite and
+                # non-negative, so nothing downstream would catch it.
+                if _carbon_tier_usable(nc_s, ne_s, unit="sample points",
+                                       datasets="n_12C6/n_e samples"):
+                    zc_s = (1.0 + impurity_Z * (impurity_Z - 1.0) * nc_s
+                            / np.clip(ne_s, 1e10, None))
+                    sigma_Zeff_carbon = _band(zc_s)
+                    sigma_Zeff_carbon_source = "ensemble-samples"
         else:
             def col(key):       # one radial profile at the selected time
                 return np.asarray(f[key][t_idx], dtype=float)
@@ -249,26 +288,9 @@ def read_ida(
             if "n_12C6" in f and "n_12C6_err" in f:
                 _nc, _snc = col("n_12C6"), col("n_12C6_err")
                 # The propagation is only meaningful where the carbon data is
-                # physical.  Negative nC (SOL spline undershoot), netCDF fill
-                # values (~1e36) and NaN holes all survive the clip floors:
-                # a negative nC keeps its sign while its |value| is floored
-                # out of the relative-error denominator, producing ~1e6-scale
-                # sigmas that pass every downstream guard (finite, some > 0)
-                # and silently corrupt the Zeff ensemble.  Any garbage radius
-                # -> no carbon tier at all (loud fallback), matching the
-                # None-not-a-guessed-scalar rule above.
-                _bad = ~(np.isfinite(_nc) & np.isfinite(_snc)
-                         & np.isfinite(ne) & np.isfinite(sigma_ne)
-                         & (_nc > 0) & (_snc >= 0) & (ne > 0)
-                         & (np.abs(_nc) < _CARBON_FILL)
-                         & (np.abs(_snc) < _CARBON_FILL))
-                if np.any(_bad):
-                    print(f"[read_ida] carbon-tier sigma skipped: "
-                          f"{int(_bad.sum())}/{_bad.size} radii carry "
-                          f"non-physical n_12C6/n_12C6_err (negative, "
-                          f"non-finite, or fill values); the Zeff envelope "
-                          f"falls back a tier")
-                else:
+                # physical; see _carbon_tier_usable for what "physical" means
+                # here and why a single bad radius drops the tier.
+                if _carbon_tier_usable(_nc, ne, sigma_nC=_snc, sigma_ne=sigma_ne):
                     with np.errstate(divide="ignore", invalid="ignore"):
                         _dil = (impurity_Z * (impurity_Z - 1.0) * _nc
                                 / np.clip(ne, 1e10, None))

@@ -165,7 +165,12 @@ b.generation.seed = 1234
 | `generation.kinetic_source` | `"fuse"` | IMAS path; `"ida_hybrid"` takes ne/Te/Ti/ω_tor from IDA fits while keeping FUSE currents and equilibrium |
 | `generation.homotopy_passes` | `[(0.05,0.10), (0.02,0.05), (0.01,0.01)]` | Progressive `(F_tol, VSC_tol)` coil-bound schedule |
 | `generation.capture_live_eq` | `True` | Per-draw flux-surface-average capture — what enables `fidelity="exact"` IDS export |
-| `filtering.inspec_F_max` / `inspec_VSC_max` | `0.02` | Coil-drift spec for the `in_spec` flag |
+| `filtering.coil_filter` | `"chi2"` | Coil rule used by `Bouquet.filter()`. `"chi2"` = measurement-referenced χ²/ν + worst-\|z\| guard; `"legacy"` = the ±`inspec_*` band. **The default changed** — see [`docs/CHANGES_SUMMARY.md`](docs/CHANGES_SUMMARY.md) |
+| `filtering.chi2_max` / `z_max` | `None` | `None` → the device's calibrated acceptance (DIII-D: 6.1 / 6.3), else the generic 4 / 5. `z_max=False` disables the guard |
+| `filtering.coil_sigma` | `None` | Per-coil σ override; `None` → the device tolerance model (needs no dd) |
+| `filtering.coil_daq_era` | `None` | Acquisition era setting the σ **floor**; never guessed from a name or path |
+| `device` | `None` | Device name for the tolerance model (`bouquet.devices`); detected from the mesh coil names when they match exactly |
+| `filtering.inspec_F_max` / `inspec_VSC_max` | `0.02` | Coil-drift spec for the `in_spec` flag, and the band `coil_filter="legacy"` applies |
 | `filtering.rms_max_mm` | `5.0` | Boundary-RMS acceptance threshold |
 | `solver.nthreads` | `1` | Recommended to keep at 1; parallelise across time slices or discharges instead (`run_slices` / `parallel_generate`) |
 

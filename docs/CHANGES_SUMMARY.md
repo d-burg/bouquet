@@ -1,5 +1,80 @@
 # Bouquet — change summaries
 
+## Unreleased — the default coil acceptance criterion changed
+
+**`Bouquet.filter()` now judges coil currents with a measurement-referenced χ²
+test instead of the ±2% band.** `FilterConfig.coil_filter` is a new field and its
+default is `"chi2"`. This is a change to an **acceptance criterion**, so read the
+whole section before regenerating a figure from an existing archive.
+
+### What changed
+
+| | before | now (default) |
+|---|---|---|
+| Rule | `max_F_drift_pct ≤ inspec_F_max` (2%) and `max_VSC_drift_pct ≤ inspec_VSC_max` (2%) | χ²/ν ≤ `chi2_max` over every modelled coil, plus a worst-coil \|z\| ≤ `z_max` guard |
+| σ | none — a flat fraction of each coil's own baseline | per-coil, from the device tolerance model (floor + fractional part, floor set by the acquisition era) |
+| DIII-D thresholds | 2% / 2% | χ²/ν ≤ 6.1, \|z\| ≤ 6.3 (the 95th percentile of what real machine states score); generic 4 / 5 where no device calibration applies |
+
+Only **which draws are marked `selected`** moves. Generation, the baseline
+solve, sampling and the archive contents are untouched, and the per-draw
+`in_spec` attribute still carries the legacy verdict (see
+[`coil-constraints.md`](coil-constraints.md)).
+
+### This changes results you may already have
+
+- **Any `Bouquet.filter()` call, and any saved config replayed through
+  `load_config` that predates `FilterConfig.coil_filter`, now selects a
+  different subset of the same archive.** A config written before this release
+  has no `coil_filter` key, so it takes the new default; nothing about it looks
+  different. Re-running `filter()` on an archive you filtered last month can
+  legitimately give a different in-spec fraction, with no other input changed.
+- **The new default is not uniformly stricter — on some ensembles it is more
+  permissive than the band it replaces.** A flat ±2% is many σ on a high-current
+  F-coil and a fraction of one σ on a low-current coil, so it rejects a large
+  and state-dependent share of an L-mode ensemble for reasons that have nothing
+  to do with measurement precision. The χ² rule is calibrated instead to a 5%
+  nominal false-rejection rate against the machine's own residual distribution.
+  Better-founded, but **not** a conservative swap: quote which rule produced any
+  in-spec fraction you report.
+- **The calibration caveat is real and is already stated in the code.** The
+  quantiles were measured at ν = 18 coils; the shipped DIII-D signature judges
+  20. `max|z|` is an order statistic, so the true false-rejection rate is
+  **above** the nominal 5%, and it grows with ν. The thresholds were **not**
+  moved to compensate: `filter_coil_chi2` warns whenever ν ≠ the calibrated ν
+  and stamps both counts into `coil_sigma_model["acceptance"]`
+  (`calibrated_nu`, `nu_used`). See the "Scope of the calibration — READ BEFORE
+  TRUSTING THE QUANTILES" block in `bouquet/devices.py`.
+
+### Getting the old behaviour back
+
+One knob — **`filtering.coil_filter = "legacy"`**:
+
+```python
+config.filtering.coil_filter = "legacy"     # restores the ±percent band
+config.filtering.inspec_F_max = 0.02        # the band itself, unchanged
+config.filtering.inspec_VSC_max = 0.02
+```
+
+`"legacy"` is bit-identical to the pre-release rule; `inspec_F_max` /
+`inspec_VSC_max` keep their old meanings and defaults and are read by nothing
+else. The standalone `filtering.filter_coil_currents` is also unchanged and
+still applies the band directly.
+
+The χ² filter also falls back to the band **loudly** (a `UserWarning` naming the
+reason) when no per-coil σ can be resolved — a schema-v1 archive, an archive
+stored without coil data, or a mesh whose coil names match no registered device
+and no `filtering.coil_sigma` given.
+
+### New knobs
+
+`filtering.chi2_max`, `filtering.z_max`, `filtering.coil_sigma`,
+`filtering.coil_daq_era` and the top-level `device` field; all default to
+`None`, i.e. "use the device model". `coil_daq_era` chooses the σ **floor** and
+is therefore itself an acceptance criterion: it is never inferred from a run
+header, mesh name or file path, and `filter()` prints the era it resolved, the
+floor that buys and which route it came from, once per call. Full table in
+[`workflows.md`](workflows.md#configuration-reference).
+
 ## 1.3.0 — the seeded draw is now machine-independent; find_ida (2026-08-05)
 
 1.2.0 shipped the contract "same seed → bitwise-identical archives". True on

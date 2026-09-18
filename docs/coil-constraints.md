@@ -13,6 +13,17 @@ failure/rollback semantics are in
 This page is the user-facing summary plus the VSC drift metric, which is
 specific enough to warrant its own writeup.
 
+> **Which rule `Bouquet.filter()` applies changed.** The bounds and the
+> `in_spec` tag described on this page are unchanged, but the *postprocess*
+> acceptance is now the measurement-referenced χ² test by default
+> (`FilterConfig.coil_filter = "chi2"`), not the ±`inspec_*` band described
+> below. The band is still one setting away — `filtering.coil_filter =
+> "legacy"` — and `filter_coil_currents` still applies it directly. Read
+> [CHANGES_SUMMARY.md](CHANGES_SUMMARY.md) before comparing an in-spec fraction
+> against one produced before that release: the two rules select different
+> subsets of the same archive, and on an L-mode ensemble the χ² rule is often
+> the *more permissive* of the two.
+
 ## Three coil classes (DIII-D reference)
 
 | Class | Members | Baseline range | Spec interpretation |
@@ -133,6 +144,14 @@ without re-running anything:
 | `in_spec` | `max_F_drift_pct ≤ inspec_F_max` **and** `max_VSC_drift_pct ≤ inspec_VSC_max` |
 | `inspec_F_max`, `inspec_VSC_max` | The thresholds that were applied |
 
-`Bouquet.filter()` re-applies these thresholds (from `FilterConfig`) as
-non-destructive `passes_coil_filter` / `passes_boundary_filter` / `selected`
-flags; `filter_coil_currents` and `filter_boundaries` are the standalone forms.
+`in_spec` is the **legacy** verdict and stays that way whichever filter runs, so
+on a default (χ²) run it means something different from `selected`: `in_spec`
+answers "inside the ±`inspec_*` band", `selected` answers "χ²/ν ≤ `chi2_max` and
+worst \|z\| ≤ `z_max`". Say which one a quoted in-spec fraction came from.
+
+`Bouquet.filter()` writes the non-destructive `passes_coil_filter` /
+`passes_boundary_filter` / `selected` flags. Its coil rule is
+`filtering.coil_filter`: `"chi2"` (default) goes through `filter_coil_chi2` with
+the per-coil σ from `filtering.coil_sigma` / the device model, and `"legacy"`
+re-applies the thresholds in the table above. `filter_coil_currents`,
+`filter_coil_chi2` and `filter_boundaries` are the standalone forms.

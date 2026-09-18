@@ -41,7 +41,8 @@ import numpy as np
 __all__ = ["coil_sigma_in_base_units", "coil_sigma_fixed", "coil_chi2",
            "SIGMA_REF_D3D_A", "with_sigma_ref",
            "EFIT_RESIDUAL_FLOOR_AT", "EFIT_RESIDUAL_FRACTION", "coil_sigma_efit_residual",
-           "coil_sigma_floor_fraction", "resolve_coil_sigma", "CoilSigmaUnavailable"]
+           "coil_sigma_floor_fraction", "resolve_coil_sigma", "resolve_coil_acceptance",
+           "CoilSigmaUnavailable"]
 
 #: Below this measured current [A] the fractional precision is meaningless and
 #: the coil is dropped from the metric rather than allowed to dominate it.
@@ -156,6 +157,49 @@ def resolve_coil_sigma(baseline, sigma=None, device=None, era=None):
              "era": resolved_era, "era_given": era, "floor": floor,
              "fraction": fraction, "per_coil_floors": {c: v for c, v in by_coil.items() if c in baseline},
              "provenance": spec.sigma_provenance})
+
+
+def resolve_coil_acceptance(model, chi2_max=None, z_max=None):
+    """Acceptance thresholds for the chi2 coil test: ``(chi2_max, z_max,
+    source, calibrated_nu)``.
+
+    The ONE place the numbers are chosen, called by both
+    :func:`filtering.filter_coil_chi2` (postprocess) and
+    :func:`filtering.make_coil_predicate` (generate_bouquet's until-N loop),
+    so a run cannot stop on a count the postprocess disagrees with.
+
+    Precedence: an explicit ``chi2_max`` / ``z_max`` wins; otherwise the
+    device's empirically calibrated acceptance when *model* came from the
+    device's default (``"random"``) tolerance model; otherwise
+    :data:`devices.GENERIC_ACCEPTANCE`.  ``z_max=False`` disables the
+    worst-coil guard.  A named (non-default) sigma model is a DIFFERENT random
+    variable from the one the device quantiles were measured on, so they are
+    not reused -- and that is warned about rather than silently substituted.
+    """
+    import warnings
+
+    from .devices import GENERIC_ACCEPTANCE, get_device
+    acc = dict(GENERIC_ACCEPTANCE)
+    acc_src = "generic"
+    cal_nu = None
+    if model.get("kind") == "device":
+        dacc = get_device(model["device"]).acceptance
+        if model.get("model") == "random" and dacc:
+            acc.update({k: dacc[k] for k in ("chi2_max", "z_max") if k in dacc})
+            acc_src = "device q%g" % (100 * dacc.get("quantile", float("nan")))
+            cal_nu = dacc.get("calibrated_nu")
+        elif dacc:
+            warnings.warn(
+                f"coil filter: sigma model {model.get('model')!r} has no calibrated "
+                f"acceptance for device {model['device']!r}; falling back to the generic "
+                f"chi2/nu <= {GENERIC_ACCEPTANCE['chi2_max']} / |z| <= "
+                f"{GENERIC_ACCEPTANCE['z_max']} rule of thumb. The device's "
+                "empirical quantiles were calibrated on the default 'random' model "
+                "and do not transfer.", stacklevel=2)
+    cm = float(acc["chi2_max"]) if chi2_max is None else float(chi2_max)
+    zm = (acc["z_max"] if z_max is None else z_max)
+    zm = None if zm is False else (None if zm is None else float(zm))
+    return cm, zm, acc_src, cal_nu
 
 
 def with_sigma_ref(measured, table=None):

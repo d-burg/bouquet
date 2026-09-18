@@ -1364,6 +1364,16 @@ class Bouquet:
         the uncertainty envelope (kinetic sigmas, j_phi sigma, GPR lengths).
         ``n`` overrides ``config.generation.n_equils`` for a quick smaller run.
 
+        With ``config.generation.n_inspec_target`` set, the run keeps drawing
+        until that many draws pass the coil + boundary filters -- the SAME
+        filters, with the same settings, that :meth:`filter` then applies:
+        ``filtering.coil_filter`` (chi2 by default, with its per-coil sigma,
+        DAQ era and acceptance thresholds) and ``filtering.rms_max_mm``, so
+        the count matches what :meth:`filter` marks ``selected`` --
+        capped by ``max_total_draws``; ``n_equils`` is then
+        the initial allocation rather than the total, and ``n`` overrides that
+        allocation, not the target. Out-of-spec draws are still archived.
+
         Requires :meth:`prepare_baseline` first; raises if ``self.baseline`` is
         None.
         """
@@ -1383,6 +1393,31 @@ class Bouquet:
         gc = self.config.generation
         fc = self.config.filtering
         n_equils = int(n if n is not None else gc.n_equils)
+
+        # BouquetConfig validates in __post_init__, but the documented notebook
+        # idiom mutates fields afterwards (`bq.generation.n_equils = ...`), so
+        # re-check the until-N pair here -- the point where they take effect.
+        from .config import require_integer_count as _int_count
+        _int_count(gc.n_inspec_target, "generation.n_inspec_target")
+        _int_count(gc.max_total_draws, "generation.max_total_draws")
+        if gc.n_inspec_target is not None and int(gc.n_inspec_target) < 1:
+            raise ValueError("generation.n_inspec_target must be >= 1 or None")
+        if (gc.n_inspec_target is not None
+                and gc.max_total_draws is not None
+                and int(gc.max_total_draws) < int(gc.n_inspec_target)):
+            # the constructor validates this pair, but the documented
+            # notebook idiom mutates the fields afterwards -- catch it here
+            # rather than after minutes of baseline work inside generate
+            raise ValueError(
+                f"generation.max_total_draws ({int(gc.max_total_draws)}) is "
+                f"below n_inspec_target ({int(gc.n_inspec_target)}): the cap "
+                "would stop the run before the target could ever be met")
+        if gc.n_inspec_target is None and gc.max_total_draws is not None:
+            import warnings as _w
+            _w.warn(
+                "max_total_draws has no effect without n_inspec_target: "
+                f"this run draws exactly {n_equils} (max_total_draws="
+                f"{gc.max_total_draws} ignored).", UserWarning, stacklevel=2)
 
         env = resolve_uncertainty(self.config, bl)
         self._resolved_uncertainty = env
@@ -1464,6 +1499,25 @@ class Bouquet:
                 homotopy_passes=gc.homotopy_passes,
                 inspec_F_max=fc.inspec_F_max,
                 inspec_VSC_max=fc.inspec_VSC_max,
+                # until-N: the stopping rule reads its thresholds from the SAME
+                # FilterConfig that .filter() will later cut on, so the loop
+                # counts exactly what the postprocess marks 'selected'. An
+                # explicit n= override is an allocation, not a target, so it
+                # does not disable the target.
+                n_inspec_target=gc.n_inspec_target,
+                max_total_draws=gc.max_total_draws,
+                inspec_rms_max_mm=fc.rms_max_mm,
+                # ...including the COIL criterion: same filter, same sigma,
+                # same acceptance numbers and -- via _coil_daq_era() -- the
+                # same era floor .filter() will resolve. A loop still counting
+                # the legacy +/-2% band while .filter() cuts on chi2 would
+                # stop on one set of draws and select a different one.
+                coil_filter=fc.coil_filter,
+                coil_sigma=fc.coil_sigma,
+                coil_device=self.config.device,
+                coil_daq_era=self._coil_daq_era(),
+                coil_chi2_max=fc.chi2_max,
+                coil_z_max=fc.z_max,
                 seed=gc.seed,
                 # Fixed additive components, summed into every draw, never perturbed.
                 p_fast=bl.p_fast,
@@ -1499,6 +1553,31 @@ class Bouquet:
                 store_achieved_jphi=True,
             )
         self.generation_log = _cap["text"] or None
+
+        # until-N outcome, OUTSIDE the capture: on the default quiet path the
+        # in-loop prints and generate_bouquet's cap-missed RuntimeWarning were
+        # swallowed into generation_log (capture_native_output redirects
+        # stderr too), so a run that failed to deliver the requested ensemble
+        # returned with zero visible signal unless .filter() happened to run.
+        # A failure signal may not live only in a log attribute.
+        if gc.n_inspec_target is not None:
+            from .filtering import until_n_delivered
+            _tgt = int(gc.n_inspec_target)
+            _got = until_n_delivered(self.diagnostics)
+            _tries = len(self.diagnostics or [])
+            if _got < _tgt:
+                import warnings as _w
+                _msg = (f"until-N did not reach its target: {_got}/{_tgt} "
+                        f"in-spec draws after {_tries} attempts (cap "
+                        f"{gc.max_total_draws or 'default'}). The archive "
+                        "holds every attempt; raise max_total_draws, loosen "
+                        "the filter thresholds deliberately, or treat the "
+                        "low yield as a finding about this equilibrium.")
+                print(f"[until-N] WARNING: {_msg}")
+                _w.warn(_msg, RuntimeWarning, stacklevel=2)
+            else:
+                print(f"[until-N] target met: {_got}/{_tgt} in-spec draws "
+                      f"in {_tries} attempts.")
 
         # Stamp provenance (schema/version/timestamp + full config JSON) onto the
         # archive so the run is self-describing and load_config() can round-trip it.
@@ -1598,13 +1677,12 @@ class Bouquet:
                     )
             except CoilSigmaUnavailable as e:
                 import warnings
+                # one wording, shared with the until-N loop's own fallback, so
+                # "the loop falls back exactly where .filter() does" is a fact
+                # about one function rather than two copies of a message
+                from .filtering import _coil_fallback_message
                 warnings.warn(
-                    "COIL FILTER FALLBACK: chi2 coil filter disabled -- " + str(e) +
-                    f" Using the legacy rule (|dI/I| <= {fc.inspec_F_max:.0%} F-coils, "
-                    f"{fc.inspec_VSC_max:.0%} VSC), which is NOT a measurement-referenced "
-                    "criterion: it is a flat fractional band, so it is many sigma on a "
-                    "high-current coil and a fraction of one on a low-current coil, and it "
-                    "rejects a large and state-dependent share of an L-mode ensemble.",
+                    _coil_fallback_message(e, fc.inspec_F_max, fc.inspec_VSC_max),
                     stacklevel=2)
                 coil_filter_used = "legacy(fallback)"
                 coil_summary, coil_fig = filter_coil_currents(
@@ -1768,7 +1846,21 @@ class Bouquet:
         frac = 100.0 * n_sel / max(n_all, 1)
         print(f"\n=== Bouquet — {tag} {'=' * max(3, 34 - len(tag))}  "
               f"{n_sel}/{n_all} in-spec ({frac:.0f}%)")
-        print(f"  draws         {n_all} generated")
+        # getattr, not attribute access: .filter() is exercised with stub
+        # config objects (the coil-filter wrapper tests), and a summary line
+        # is not a thing a run may die on.
+        _gtarget = getattr(self.config.generation, "n_inspec_target", None)
+        if _gtarget is None:
+            print(f"  draws         {n_all} generated")
+        else:
+            # The delivered-vs-requested line is the point of until-N: state
+            # both, and whether the target was actually met, rather than
+            # letting a short bouquet read as a completed run.
+            _tgt = int(_gtarget)
+            _verdict = ("target met" if n_sel >= _tgt
+                        else f"SHORT of target by {_tgt - n_sel}")
+            print(f"  draws         {n_all} generated to deliver "
+                  f"{n_sel}/{_tgt} requested in-spec ({_verdict})")
         # name the criterion that was actually applied -- the chi2 filter reports
         # its own thresholds in the summary, the legacy rule the +/- band.
         if "chi2_max" in cs:

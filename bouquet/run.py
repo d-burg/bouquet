@@ -1890,10 +1890,19 @@ class Bouquet:
         if ip_of is not None:
             rec["Ip_hybrid"] = float(ip_of(bl.j_phi))
             if roundtrip_gate is not None:
+                # A REFUSED step delivers the last accepted solve, and ``rec``
+                # only carries a posterior once a corrector step has been
+                # accepted.  When none was, the delivered profile is the
+                # predictor's, so its posterior (already on bl.ip_closure) is
+                # the reference -- not Ip_target, which would judge a soft
+                # posterior on the hard channel's budget.
+                _post = rec.get("structured_ip_posterior")
+                if _post is None:
+                    _post = (getattr(bl, "ip_closure", None) or {}).get(
+                        "structured_ip_posterior")
                 _g2 = roundtrip_gate(
                     rec["Ip_hybrid"],
-                    posterior=(rec.get("structured_ip_posterior") if soft
-                               else None),
+                    posterior=(_post if soft else None),
                     sigma_Ip=(state.get("ip_sigma") if soft else None))
                 rec["structured_roundtrip_post_corrector_err_pct"] = float(
                     _g2["err_pct"])

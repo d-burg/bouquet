@@ -1646,6 +1646,42 @@ class TestTheGateProductionActuallyPasses:
             "the closure's own posterior Ip"
         assert abs(rec["structured_roundtrip_post_corrector_err_pct"]) < 1e-9
 
+    def test_a_refused_step_is_gated_against_the_predictors_posterior(
+            self, monkeypatch):
+        """A refused corrector step delivers the PREDICTOR, so ``rec`` never
+        gains a posterior of its own.  The re-gate used to fall back to
+        Ip_target there and call a 0.3 % soft posterior an algebra error on
+        the hard channel's 0.05 % budget; the predictor's posterior, already
+        on ``bl.ip_closure``, is the reference."""
+        post = self.IP * 1.003
+        bl = _FakeBaseline()
+        bl.ip_closure["structured_ip_posterior"] = post
+        bl.j_phi = np.ones(5)      # the predictor's assembly, still delivered
+        rec, world = _stub_corrector(
+            monkeypatch, 2.0, 0.9, li_sigma=0.04, soft=True,
+            ip_sigma=self.SIG, ip_of=lambda j: post, bl=bl,
+            solver_raises=RuntimeError("refused"),
+            roundtrip_gate=self._gate())
+        assert world["solves"] == 0
+        assert "structured_corrector_refusal" in rec
+        assert rec["structured_roundtrip_post_corrector_reference"] == \
+            "the closure's own posterior Ip"
+        assert abs(rec["structured_roundtrip_post_corrector_err_pct"]) < 1e-9
+
+    def test_a_refused_step_with_a_bad_assembly_is_still_refused(
+            self, monkeypatch):
+        """... and the fallback reference must not have softened the gate."""
+        post = self.IP * 1.003
+        bl = _FakeBaseline()
+        bl.ip_closure["structured_ip_posterior"] = post
+        bl.j_phi = np.ones(5)      # the predictor's assembly, still delivered
+        with pytest.raises(RuntimeError, match="algebra error"):
+            _stub_corrector(
+                monkeypatch, 2.0, 0.9, li_sigma=0.04, soft=True,
+                ip_sigma=self.SIG, ip_of=lambda j: post * 1.01, bl=bl,
+                solver_raises=RuntimeError("refused"),
+                roundtrip_gate=self._gate())
+
     def test_a_bad_assembly_is_still_refused_through_it(self, monkeypatch):
         """Binding the measurement must not have softened the gate."""
         with pytest.raises(RuntimeError, match="algebra error"):

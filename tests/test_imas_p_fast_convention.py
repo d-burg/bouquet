@@ -433,6 +433,11 @@ class TestReadImasBaselineEndToEnd:
             pytest.skip("example dd not present in this checkout")
         with warnings.catch_warnings():
             warnings.simplefilter("error")
+            # The example carries fast pressure but no density_fast, which the
+            # reader reports on its own account; that is a statement about the
+            # dilution correction, not about the pressure convention under test.
+            warnings.filterwarnings(
+                "always", message=".*fast-ion PRESSURE but no density_fast.*")
             bl = read_imas_baseline(ImasSource(ids_path=path, time=2.3043))
         assert bl.p_fast_meta["rule"] == "trace"
         assert bl.p_fast_meta["basis"] == "explicit-stamp"

@@ -155,6 +155,7 @@ b.generation.seed = 1234
 | `uncertainty.ne_scalar_sigma` / `te_` / `ni_` / `ti_` | `0.05` / `0.05` / `0.10` / `0.10` | Flat fractional envelopes, used when no IDA sigmas are supplied |
 | `uncertainty.jphi_scalar_sigma` | `0.10` | Inductive-current envelope; must be > 0 |
 | `uncertainty.zeff_scalar_sigma` | `0.05` | One Z_eff per draw; n_i / n_z follow from quasi-neutrality |
+| `uncertainty.zeff_sigma_source` | `"auto"` | Tier supplying the Z_eff envelope's magnitude — carbon-propagated > VB-measured > scalar. `"carbon"` / `"measured"` / `"scalar"` force one; every step down warns. See [workflows.md](docs/workflows.md#uncertaintyconfig-buncertainty) |
 | `uncertainty.ida_path` | `None` | IDA `.cdf` supplying measured sigma envelopes instead of the scalars. **Wins over the scalars above** — see the precedence note below |
 | `uncertainty.log_sigma_sources` | `True` | Log which source each kinetic sigma actually resolved from |
 | `generation.n_equils` | `20` | Draws to attempt |

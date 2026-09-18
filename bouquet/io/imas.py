@@ -39,6 +39,7 @@ from typing import Optional, TYPE_CHECKING
 import numpy as np
 
 from ..physics import (effective_impurity_charge, impurity_pressure,
+                       impurity_charge_with_fast_ions,
                        isotropize_fast_pressure, main_ion_density_from_zeff,
                        parallel_to_toroidal)
 
@@ -634,12 +635,23 @@ def read_imas_baseline(
     ti = None
     main_ion = None
     zeff_num = np.zeros(n)
+    z_fast = np.zeros(n)          # charge carried by fast ions
+    # pressure_fast_* and density_fast are independent fields: a dd can carry
+    # one without the other, and a species with fast pressure but no fast
+    # density gets the full p_fast treatment and ZERO dilution correction.
+    fast_p_no_n = []
     for ion in cp["ion"]:
         Z = float(ion["element"][0]["z_n"])
         n_s = np.asarray(ion["density_thermal"], dtype=float)
         zeff_num += n_s * Z * Z
-        p_fast = p_fast + _isotropic_fast_pressure(
+        if "density_fast" in ion:
+            z_fast += Z * np.asarray(ion["density_fast"], dtype=float)
+        p_fast_s = _isotropic_fast_pressure(
             ion, p_fast_rule, n, _no_par, str(ion.get("label", f"Z={Z:g}")))
+        if np.any(p_fast_s) and not np.any(
+                np.asarray(ion.get("density_fast", 0.0), dtype=float)):
+            fast_p_no_n.append(f"Z={Z:g}")
+        p_fast = p_fast + p_fast_s
         if Z == 1.0 and ni is None:        # main (hydrogenic) ion
             ni = n_s
             ti = np.asarray(ion["temperature"], dtype=float)
@@ -647,6 +659,17 @@ def read_imas_baseline(
     if ni is None:
         raise ValueError("no hydrogenic (Z=1) main ion found in core_profiles.ion")
     _warn_missing_parallel(_no_par, p_fast_rule)
+    if fast_p_no_n:
+        # Silence is the dangerous case here: the run looks exactly like an
+        # ohmic one while Z_imp / nz / p_imp keep the whole fast-ion bias the
+        # dilution correction exists to remove.
+        import warnings
+        warnings.warn(
+            "core_profiles carries fast-ion PRESSURE but no density_fast for "
+            f"ion species [{', '.join(fast_p_no_n)}]: p_fast is applied in "
+            "full while the fast-ion dilution correction for those species is "
+            "zero, so Z_imp / nz / p_imp retain the fast-ion bias. Fill "
+            "core_profiles.ion[].density_fast to enable the correction.")
     Zeff = zeff_num / ne
 
     # --- auxiliary source-provided profiles for the switchboard ---------------
@@ -719,8 +742,14 @@ def read_imas_baseline(
     _o = np.argsort(psiN_eq)
     p_equilibrium = np.interp(psi_N, psiN_eq[_o],
                               np.asarray(eqp1["pressure"], dtype=float)[_o])
-    Z_imp = effective_impurity_charge(ne, ni, Zeff)
-    p_imp = impurity_pressure(ne, ni, ti, Z_imp)
+    # Only ne - sum_s Z_s n_s^fast is neutralised by THERMAL ions; charging
+    # the fast-ion share to the impurity inflates nz.  The helper also
+    # renormalizes Zeff (defined over the FULL ne above) onto the thermal
+    # electrons -- without that the inversion recovers only half the bias
+    # (see impurity_charge_with_fast_ions).  The Zeff consumed by the
+    # bootstrap / forward solve deliberately stays the full-ne one.
+    Z_imp, ne_th = impurity_charge_with_fast_ions(ne, ni, Zeff, z_fast)
+    p_imp = impurity_pressure(ne_th, ni, ti, Z_imp)
     p_recon = _EC * (ne * te + ni * ti) + p_imp + p_fast
     # p_diff anchors the solve thermal pressure to the FUSE equilibrium.pressure.
     # Gated OFF by default: with IDA-hybrid kinetics we trust IDA's pressure and do
@@ -762,6 +791,7 @@ def read_imas_baseline(
         j_NBI=j_NBI,
         j_RF=j_RF,
         p_fast=p_fast,
+        z_fast=(z_fast if np.any(z_fast) else None),
         p_equilibrium=p_equilibrium,
         p_diff=p_diff,
         Z_imp=Z_imp,

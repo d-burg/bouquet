@@ -1687,6 +1687,7 @@ def perturb_kinetic_equilibrium(
     max_li_iter=_MAX_LI_ITER,
     psi_N_kinetic=None,
     p_fast=None,
+    z_fast=None,
     j_NBI=None,
     j_RF=None,
     aux_sigmas=None,
@@ -1778,6 +1779,18 @@ def perturb_kinetic_equilibrium(
     Zeff : ndarray
         Effective ion charge profile on ``psi_N`` (scalar accepted and
         broadcast). With the active zeff channel this is re-drawn per draw.
+        Assumed normalised to the FULL ``ne`` with a THERMAL-species
+        numerator; see ``z_fast``.
+    z_fast : ndarray or None
+        Fast-ion charge density :math:`\sum_s Z_s n_s^{fast}` [m^-3] on the
+        KINETIC grid (``psi_N_kinetic`` when given, else ``psi_N``).  Only
+        ``ne - z_fast`` is neutralised by thermal ions, so this is what
+        separates the thermal electron density from the total for the
+        impurity-charge inversion, the ``Zeff`` draw bounds and the impurity
+        pressure.  ``None`` (default) means no fast ions and reproduces the
+        pre-correction result bitwise.  It does NOT enter the pressure --
+        that is ``p_fast`` -- and the ``Zeff``/``ne`` handed to the bootstrap
+        solver deliberately stay the full-``ne`` pair.
     npsi : int
         Normalised poloidal flux grid size.
     p_thresh : float
@@ -1928,9 +1941,13 @@ def perturb_kinetic_equilibrium(
     _Z_imp = None
     _zeff_draw = None
     if _zeff_active:
-        from .physics import effective_impurity_charge
-        _Z_imp = effective_impurity_charge(
-            ne, ni, np.asarray(aux_baselines['zeff'], dtype=float))
+        # z_fast-aware: on the IMAS path the fast-ion charge must not be
+        # charged to the impurity (identical to the reader's own Z_imp).
+        from .physics import impurity_charge_with_fast_ions
+        _Z_imp, _ = impurity_charge_with_fast_ions(
+            ne, ni, np.asarray(aux_baselines['zeff'], dtype=float),
+            np.zeros_like(np.asarray(ne, dtype=float))
+            if z_fast is None else z_fast)
         if _Z_imp is None:
             print("  [zeff] baseline has no ne-ni dilution (ni ~= ne): Zeff "
                   "draws still drive the bootstrap, but ni remains an "
@@ -1969,9 +1986,17 @@ def perturb_kinetic_equilibrium(
                     psi_kin, _zb / _z0, _zs / _z0,
                     length_scale=(aux_length_scales or {}).get('zeff', 0.4),
                     n_samples=1, rng=rng)) * _z0, dtype=float))
-            # 1 <= Zeff <= Z_imp guarantees 0 <= ni <= ne and nz >= 0
-            _zeff_draw = np.clip(_zeff_draw, 1.0, _Z_imp * (1.0 - 1e-9))
-            ni_perturb = main_ion_density_from_zeff(ne_perturb, _zeff_draw, _Z_imp)
+            # ne_th/ne <= Zeff <= Z_imp*ne_th/ne guarantees 0 <= ni <= ne_th
+            # and nz >= 0 (reduces to the familiar [1, Z_imp] at z_fast=0)
+            if z_fast is None:
+                _zeff_draw = np.clip(_zeff_draw, 1.0, _Z_imp * (1.0 - 1e-9))
+            else:
+                _fth = np.clip((ne_perturb - np.asarray(z_fast, dtype=float))
+                               / np.clip(ne_perturb, 1e10, None), 0.0, 1.0)
+                _zeff_draw = np.clip(_zeff_draw, np.maximum(_fth, 1e-9),
+                                     _Z_imp * _fth * (1.0 - 1e-9))
+            ni_perturb = main_ion_density_from_zeff(ne_perturb, _zeff_draw,
+                                                    _Z_imp, z_fast=z_fast)
         else:
             ni_perturb = _draw_monotonic_perturbation(
                 psi_kin, ni / ni[0], sigma_ni / ni[0], n_ls, rng=rng
@@ -2003,7 +2028,9 @@ def perturb_kinetic_equilibrium(
     # loop above stays thermal-D-only. Single-ion e*(ne*Te + ni*Ti) omits this.
     if Z_imp:
         from .physics import impurity_pressure
-        pres_tmp = pres_tmp + impurity_pressure(ne_eq, ni_eq, ti_eq, Z_imp)
+        _ne_th_eq = (ne_eq if z_fast is None else np.maximum(
+            ne_eq - _kin_to_eq(np.asarray(z_fast, dtype=float)), 0.0))
+        pres_tmp = pres_tmp + impurity_pressure(_ne_th_eq, ni_eq, ti_eq, Z_imp)
     # Pressure-diff anchor: fixed offset (= equilibrium.pressure - reconstructed
     # baseline) added to baseline AND every draw, mirroring jBS_diff, so the solve
     # pressure anchors to FUSE exactly while the reconstructed thermal delta tracks
@@ -3413,6 +3440,7 @@ def generate_bouquet(
     seed=None,
     pin_jphi=False,
     p_fast=None,
+    z_fast=None,
     Z_imp=None,
     p_diff=None,
     jphi_diff=None,
@@ -3646,11 +3674,13 @@ def generate_bouquet(
     # `pressure` above is kept thermal-only for the perturbed-vs-baseline match.)
     if Z_imp:
         from .physics import impurity_pressure
+        _ne_bl = ne if z_fast is None else np.maximum(
+            ne - np.asarray(z_fast, dtype=float), 0.0)
         if psi_N_kinetic is not None:
-            _p_imp_eq = impurity_pressure(_kin2eq(ne), _kin2eq(ni),
+            _p_imp_eq = impurity_pressure(_kin2eq(_ne_bl), _kin2eq(ni),
                                           _kin2eq(ti), Z_imp)
         else:
-            _p_imp_eq = impurity_pressure(ne, ni, ti, Z_imp)
+            _p_imp_eq = impurity_pressure(_ne_bl, ni, ti, Z_imp)
     else:
         _p_imp_eq = np.zeros_like(psi_N)
     _p_diff_eq = (np.asarray(p_diff, dtype=float) if p_diff is not None
@@ -4643,10 +4673,12 @@ def generate_bouquet(
     # One-time notice for the Zeff-primary mode (the per-draw mechanics live
     # in perturb_kinetic_equilibrium; see physics.main_ion_density_from_zeff).
     if aux_sigmas and 'zeff' in aux_sigmas:
-        from .physics import effective_impurity_charge
-        _zimp_note = effective_impurity_charge(
+        from .physics import impurity_charge_with_fast_ions
+        _zimp_note, _ = impurity_charge_with_fast_ions(
             ne, ni, np.asarray((aux_baselines or {}).get('zeff', Zeff),
-                               dtype=float))
+                               dtype=float),
+            np.zeros_like(np.asarray(ne, dtype=float))
+            if z_fast is None else z_fast)
         if _zimp_note is not None:
             print(f"NOTE: zeff channel active -> ni is DERIVED per draw from "
                   f"(ne, Zeff) via quasineutrality (Z_imp = {_zimp_note:.2f}); "
@@ -4853,6 +4885,7 @@ def generate_bouquet(
                 diagnostic_plots=diagnostic_plots,
                 psi_N_kinetic=psi_N_kinetic,
                 p_fast=p_fast,
+                z_fast=z_fast,
                 j_NBI=j_NBI,
                 j_RF=j_RF,
                 aux_sigmas=aux_sigmas,

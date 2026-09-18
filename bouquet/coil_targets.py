@@ -239,7 +239,10 @@ def coil_reg_from_measured(measured: Dict[str, float],
         used.  There is no default -- another machine's turns table is a silent
         1x / 58x / 61x error in a regularisation target.  A coil with no entry
         converts at 1.0 (the mesh is assumed to carry its own turns, as the
-        shipped D3D mesh does for the E-coils).
+        shipped D3D mesh does for the E-coils).  That assumption is about a
+        MESH, not a device, so each term records the factor it was built with
+        under ``"turns"`` and :meth:`Bouquet._apply_coil_reg` checks it against
+        the mesh actually loaded, dropping the term if it cannot be confirmed.
     default_weight : float, optional
         DEPRECATED escape hatch for a flat weight; it bypasses the W0 floor and
         warns.  Prefer ``W0``.
@@ -264,15 +267,41 @@ def coil_reg_from_measured(measured: Dict[str, float],
                 "worse than none. Pass allow_weak=True for a deliberate study.")
         fallback = {k: float(W0) for k in measured}
     spec = []
+    unweighted = []
     for name, i_circuit in measured.items():
         if not np.isfinite(i_circuit):
             continue
         w = weights.get(name, fallback.get(name))
-        if w is None:                      # no sigma for this coil and none given
-            continue
+        if w is None:
+            # No usable sigma for this coil (sigma_from_pf_active omits any coil
+            # whose data_error_upper is missing or non-positive) and no explicit
+            # weight.  Dropping it here is NOT the safe option: every coil that no
+            # term names is given target=0 at weight 1 by _apply_coil_reg, i.e.
+            # precisely the pull toward zero these targets exist to remove, at a
+            # strength the weighting study calls indistinguishable from it.  What
+            # is missing is the coil's PRECISION, not its target -- so it is
+            # pinned at its measured current with the flat reference weight W0,
+            # the same rule every coil gets when no sigma is supplied at all.
+            w = float(W0)
+            unweighted.append(name)
         spec.append({
             "coils": {name: 1.0},
             "target": float(i_circuit) * float(turns.get(name, 1.0)),
             "weight": float(w),
+            # the turns convention this target assumes, for _apply_coil_reg to
+            # check against the mesh that is actually loaded (V50-2)
+            "turns": float(turns.get(name, 1.0)),
         })
+    if unweighted:
+        warnings.warn(
+            "coil_targets: %d coil(s) carry a measured current but no usable sigma "
+            "and no explicit weight: %s. They are pinned at their MEASURED current "
+            "with the flat reference weight W0 = %g rather than an inverse-variance "
+            "one, because the target is known and only its precision is not. They "
+            "are NOT dropped: a dropped coil reverts to the target=0, weight=1 "
+            "default, which is the pull toward zero these targets exist to remove. "
+            "Give them a sigma, or an explicit `weights` entry, to weight them by "
+            "their own precision."
+            % (len(unweighted), ", ".join(sorted(unweighted)), float(W0)),
+            stacklevel=2)
     return spec

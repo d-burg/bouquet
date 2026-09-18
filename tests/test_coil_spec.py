@@ -421,7 +421,7 @@ class TestArchiveShapes:
 class TestBouquetFilterWrapper:
     """Bouquet.filter()'s chi2 branch and its loud legacy fallback."""
 
-    def _run(self, tmp_path, **filt):
+    def _run(self, tmp_path, device=None, pulse=None, **filt):
         import h5py
         from bouquet.config import FilterConfig
         from bouquet.run import Bouquet
@@ -443,8 +443,8 @@ class TestBouquetFilterWrapper:
             output_header = header
             filtering = FilterConfig(**filt)
             generation = Gen()
-            device = None
-            source = type("S", (), {})()
+        Cfg.device = device
+        Cfg.source = type("S", (), {"pulse": pulse})()
         b_ = Bouquet.__new__(Bouquet); b_.config = Cfg()
         return b_.filter(plot=False)
 
@@ -460,3 +460,58 @@ class TestBouquetFilterWrapper:
             sel = self._run(tmp_path)
         assert sel["coil_filter_used"] == "legacy(fallback)"
         assert "chi2_max" not in sel["coil"]
+
+
+class TestEraIsAnnounced:
+    """The era sets the sigma floor, so filter() says which one it used and how.
+
+    The pulse number is only a date proxy for the acquisition upgrade, so a run
+    log that does not name the era hides an approximate acceptance criterion.
+    """
+
+    _run = TestBouquetFilterWrapper._run
+
+    def test_automatic_before_the_boundary(self, tmp_path, capsys):
+        self._run(tmp_path, device="DIII-D", pulse=147131)
+        out = capsys.readouterr().out
+        assert "coil chi2 filter: pulse 147131 < 165000 -> era 'pre2014'" in out
+        assert "(sigma floor 825 A-t)" in out
+        assert "[automatic:" in out and "date proxy" in out
+        assert "set filtering.coil_daq_era to override" in out
+        assert out.count("coil chi2 filter:") == 1      # once per call, not per draw
+
+    def test_automatic_at_and_after_the_boundary(self, tmp_path, capsys):
+        self._run(tmp_path, device="DIII-D", pulse=165000)
+        out = capsys.readouterr().out
+        assert "coil chi2 filter: pulse 165000 >= 165000 -> era 'modern'" in out
+        assert "(sigma floor 325 A-t)" in out and "[automatic:" in out
+
+    def test_explicit_setting_wins_and_is_labelled_as_such(self, tmp_path, capsys):
+        self._run(tmp_path, device="DIII-D", pulse=147131, coil_daq_era="modern")
+        out = capsys.readouterr().out
+        assert "coil chi2 filter: era 'modern' (sigma floor 325 A-t)" in out
+        assert "[explicit; filtering.coil_daq_era]" in out
+        assert "147131" not in out          # the proxy did not decide this run
+
+    def test_undeterminable_names_the_fallback_actually_used(self, tmp_path, capsys):
+        with pytest.warns(UserWarning, match="no era given"):
+            self._run(tmp_path, device="DIII-D")            # no pulse on the source
+        out = capsys.readouterr().out
+        assert "era undetermined (no pulse on source.pulse / source.shot)" in out
+        assert "default band 'modern' (sigma floor 325 A-t), the TIGHTEST floor" in out
+        assert "set filtering.coil_daq_era to state the era" in out
+
+    def test_undeterminable_without_a_named_device(self, tmp_path, capsys):
+        with pytest.warns(UserWarning, match="no era given"):
+            self._run(tmp_path)                             # device detected from the mesh
+        out = capsys.readouterr().out
+        assert "era undetermined (BouquetConfig.device is not set" in out
+        assert "TIGHTEST floor" in out
+
+    def test_explicit_sigma_says_the_era_does_not_apply(self, tmp_path, capsys):
+        self._run(tmp_path, device="DIII-D", pulse=147131,
+                  coil_sigma={"floor": 500.0, "fraction": 0.004})
+        out = capsys.readouterr().out
+        assert "per-coil sigma from filtering.coil_sigma" in out
+        assert "the acquisition era does not apply" in out
+        assert "pre2014" not in out

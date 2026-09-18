@@ -148,6 +148,18 @@ _D3D_F = [f"F{i}{s}" for i in range(1, 10) for s in "AB"]
 #: eras, not a discharge -- it is a number only because pulse index is the only
 #: monotone clock the archive carries.  Use :func:`era_for_pulse` to map an
 #: explicitly-known pulse onto an era label; nothing infers it from a file name.
+#:
+#: The pulse index is a DATE PROXY and only that: the upgrade happened on a date,
+#: and date -> pulse index is what turns it into a number here.  The boundary is
+#: therefore APPROXIMATE -- a pulse within a commissioning period either side of
+#: it may carry the other era's acquisition -- and it is a step standing in for a
+#: changeover.  What the era buys is the sigma FLOOR of the coil chi2 filter:
+#: 825 A-t below the boundary (``"pre2014"``), 325 A-t at or above it
+#: (``"modern"``), refined by the per-coil tables in ``sigma_floor_by_coil``.
+#: That is an acceptance criterion, so :meth:`bouquet.run.Bouquet.filter` prints
+#: the era it resolved and where it came from, once per call; set
+#: ``filtering.coil_daq_era`` to an era label to state it explicitly and bypass
+#: the proxy entirely.
 D3D_DAQ_UPGRADE_PULSE = 165000
 
 DEVICES: Dict[str, DeviceSpec] = {
@@ -214,6 +226,16 @@ def era_for_pulse(spec: DeviceSpec, pulse) -> Optional[str]:
     a number the caller actually knows (an explicit source field or config
     setting) -- never digits scraped out of a file name or run header, which is
     how a mesh resolution or a date used to buy a 2.5x looser tolerance floor.
+
+    The band bounds are DATE PROXIES: an acquisition upgrade happens on a date
+    and the pulse index is merely the monotone clock the archive carries, so a
+    boundary is approximate and a pulse close to one may belong to the other
+    era.  The era chooses the sigma floor of the coil chi2 filter (DIII-D:
+    825 A-t ``"pre2014"`` / 325 A-t ``"modern"``), i.e. an acceptance criterion,
+    so the caller is expected to state which era it resolved and how
+    (:meth:`bouquet.run.Bouquet.filter` prints exactly that, once per call).  A
+    user who knows better sets ``filtering.coil_daq_era``, which wins over this
+    mapping.
     """
     if pulse is None:
         return None

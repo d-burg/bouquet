@@ -1364,11 +1364,15 @@ class Bouquet:
         coil_filter_used = fc.coil_filter
         if fc.coil_filter == "chi2":
             from .coil_spec import CoilSigmaUnavailable
+            # the era sets the sigma floor, i.e. an acceptance criterion -- say
+            # which one was used and where it came from, once per filter call
+            era = self._coil_daq_era()
+            print(self._coil_era_note(era))
             try:
                 coil_summary = filter_coil_chi2(
                     header, None, scan_key=sk, chi2_max=fc.chi2_max,
                     apply=True, sigma=fc.coil_sigma, device=self.config.device,
-                    era=self._coil_daq_era(), z_max=fc.z_max,
+                    era=era, z_max=fc.z_max,
                 )
                 coil_fig = None
                 if plot:  # drift-distribution figure only; writes no flags
@@ -1421,6 +1425,15 @@ class Bouquet:
           2. an explicit ``source.pulse`` / ``source.shot`` field, mapped through
              the device's own era bands (:func:`devices.era_for_pulse`).
 
+        Route 2 uses the pulse number as a DATE PROXY for the coil-current
+        acquisition upgrade -- the upgrade has a date, and the pulse index is the
+        only monotone clock the archive carries -- so the band boundary is
+        approximate and a pulse near it may belong to the other era.  On DIII-D
+        the two floors it chooses between are 825 A-t (``"pre2014"``) and
+        325 A-t (``"modern"``), refined per coil; set ``filtering.coil_daq_era``
+        to override the proxy with a stated era.  Either way :meth:`filter`
+        prints the decision (:meth:`_coil_era_note`) once per call.
+
         Nothing is scraped out of a run header, mesh name or file path.  That
         fallback used to exist and was a silent tolerance relaxation: any six
         consecutive digits anywhere in the header matched, so naming a run after
@@ -1433,23 +1446,86 @@ class Bouquet:
         if getattr(fc, "coil_daq_era", None):
             return fc.coil_daq_era
         from .devices import era_for_pulse, resolve_device
-        src = self.config.source
-        pulse = None
-        for attr in ("pulse", "shot"):
-            v = getattr(src, attr, None)
-            if v is None:
-                continue
-            try:
-                pulse = int(v)
-                break
-            except (TypeError, ValueError):
-                continue
+        pulse = self._coil_source_pulse()
         if pulse is None or self.config.device is None:
             # without a named device there is no era table to map a pulse onto;
             # detection from the mesh happens later, inside resolve_coil_sigma.
             return None
         spec = resolve_device(self.config.device)
         return era_for_pulse(spec, pulse) if spec is not None else None
+
+    def _coil_source_pulse(self):
+        """Explicit ``source.pulse``/``source.shot`` as an int, else None."""
+        src = self.config.source
+        for attr in ("pulse", "shot"):
+            v = getattr(src, attr, None)
+            if v is None:
+                continue
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def _coil_era_note(self, era) -> str:
+        """One line naming the acquisition era the coil chi2 filter is about to
+        use, how it was arrived at, and the sigma floor it buys.
+
+        The era moves an acceptance threshold, so the decision belongs in the run
+        log and not only in a config field -- especially when it came from the
+        pulse number, which is a date proxy for the acquisition upgrade and so
+        puts an approximate boundary between two floors.  :meth:`filter` prints
+        this once per call (not per draw); when ``filtering.coil_sigma`` is set
+        the sigma bypasses the device model altogether and the line says so.
+        """
+        from .devices import resolve_device, tolerance_for
+        fc = self.config.filtering
+        lead = "  coil chi2 filter:"
+        if fc.coil_sigma is not None:
+            named = f" ({fc.coil_sigma!r})" if isinstance(fc.coil_sigma, str) else ""
+            return (f"{lead} per-coil sigma from filtering.coil_sigma{named}; "
+                    "the acquisition era does not apply")
+        spec = resolve_device(self.config.device) if self.config.device else None
+
+        def _floor(label):
+            """' (sigma floor F A-t)' for *label*, or '' if no device is named."""
+            if spec is None:
+                return ""
+            return f" (sigma floor {tolerance_for(spec, era=label)[0]:g} A-t)"
+
+        if era is not None:
+            if getattr(fc, "coil_daq_era", None):
+                return f"{lead} era {era!r}{_floor(era)}  [explicit; filtering.coil_daq_era]"
+            pulse, band = self._coil_source_pulse(), ""
+            for lo, hi, _fl, lab in (spec.sigma_floor_by_era if spec else ()):
+                if lab == era:
+                    if lo <= 0:
+                        band = f"pulse {pulse} < {hi:g} -> "
+                    elif hi == float("inf"):
+                        band = f"pulse {pulse} >= {lo:g} -> "
+                    else:
+                        band = f"pulse {pulse} in [{lo:g}, {hi:g}) -> "
+                    break
+            return (f"{lead} {band}era {era!r}{_floor(era)}  [automatic: the pulse "
+                    "number is a date proxy for the acquisition upgrade, so the "
+                    "boundary is approximate; set filtering.coil_daq_era to override]")
+        # era undetermined -> tolerance_for falls back to the device's last band
+        if spec is None:
+            why = ("BouquetConfig.device is not set, so no era table applies yet"
+                   if self.config.device is None else "no era table for this device")
+            return (f"{lead} era undetermined ({why}) -> the device detected from the "
+                    "mesh uses its default band, which carries the TIGHTEST floor  "
+                    "[set filtering.coil_daq_era to state the era]")
+        if not spec.sigma_floor_by_era:
+            return (f"{lead} device {spec.name!r} has no acquisition eras; sigma floor "
+                    f"{spec.sigma_floor:g} A-t")
+        pulse = self._coil_source_pulse()
+        why = ("no pulse on source.pulse / source.shot" if pulse is None
+               else f"pulse {pulse} falls in no era band of device {spec.name!r}")
+        default = spec.sigma_floor_by_era[-1][3]
+        return (f"{lead} era undetermined ({why}) -> default band {default!r}"
+                f"{_floor(None)}, the TIGHTEST floor  "
+                "[set filtering.coil_daq_era to state the era]")
 
     def _print_generation_summary(self, coil_summary, bnd_summary):
         """Concise post-generation summary (draws / coil spec / boundary / in-spec),

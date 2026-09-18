@@ -522,8 +522,12 @@ class FilterConfig:
     # Acquisition era whose tolerance floor applies (bouquet.devices.era_labels;
     # DIII-D: "pre2014" or "modern").  The era chooses the sigma FLOOR, so it is an
     # acceptance criterion and must be stated, never guessed: nothing infers it from
-    # a run header, mesh name or file path.  None -> the device's default band, which
-    # carries the tightest floor, and the filter says so out loud.
+    # a run header, mesh name or file path.  None -> the era is taken from an explicit
+    # source.pulse/source.shot through the device's era bands, where the pulse number
+    # is a DATE PROXY for the acquisition upgrade (so the boundary is approximate);
+    # failing that, the device's default band, which carries the tightest floor.
+    # Bouquet.filter() prints the era it resolved, the floor it buys and which of
+    # those three routes it came from, once per call.
     coil_daq_era: Optional[str] = None
     inspec_F_max: float = 0.02      # +/-2% coil-current spec (DIII-D); legacy only
     inspec_VSC_max: float = 0.02

@@ -591,7 +591,9 @@ class GenerationConfig:
     #: same at-most-ONE post-solve q0 correction.  It records effective scalar
     #: equivalents (the Ip-weighted mean of each multiplier), which satisfy the
     #: scalar closure equation exactly, so closure_health still applies.
-    #: Refuses when either multiplier leaves [0.2, 5] anywhere on the grid or
+    #: Refuses when either multiplier leaves 0.2 < s < 5 (STRICT, as in
+    #: close_ip/close_ip_q0: a multiplier landing exactly on a bound is
+    #: refused) anywhere on the grid or
     #: the KKT system is singular against a relative floor.
     #: "structured" also takes a SECOND global measurement, l_i
     #: (structured_li_target below), in either of two forms: HARD (imposed
@@ -909,12 +911,22 @@ class GenerationConfig:
     def __post_init__(self):
         """Resolve ``structured_preset`` into the individual structured fields.
 
-        Applied ONLY to fields still at their dataclass default, so an explicit
-        user setting always wins over the preset.  ``structured_li_sigma`` is
-        filled only when a ``structured_li_target`` was supplied -- a preset
-        with no l_i target simply omits the l_i term rather than recording a
-        sigma for a measurement that does not exist.  An unknown preset name
-        raises here, before any GS solve.
+        Applied ONLY to fields still HOLDING their dataclass default VALUE.
+
+        **The limitation this cannot see past:** a plain dataclass field that
+        was explicitly set to its own default value is indistinguishable from
+        one that was never set, so such a field IS overridden by the preset.
+        ``GenerationConfig(structured_preset="li_soft_onesided",
+        structured_soft=False)`` comes back with ``structured_soft=True``.
+        Every field a preset fills is therefore named in a warning, so the
+        override is visible in the log rather than only in the archive; a run
+        that wants a preset's priors with one field held against it should set
+        that field AFTER construction.
+
+        ``structured_li_sigma`` is filled only when a ``structured_li_target``
+        was supplied -- a preset with no l_i target simply omits the l_i term
+        rather than recording a sigma for a measurement that does not exist.
+        An unknown preset name raises here, before any GS solve.
 
         Nothing else is touched: in particular ``closure_channel`` keeps its
         shipped ``"bootstrap"`` default, so naming a preset never silently
@@ -926,10 +938,21 @@ class GenerationConfig:
         filled = structured_preset_settings(self.structured_preset)
         if self.structured_li_target is None:
             filled.pop("structured_li_sigma", None)
+        applied = []
         for field_name, value in filled.items():
             default = GenerationConfig.__dataclass_fields__[field_name].default
             if getattr(self, field_name) == default:
                 setattr(self, field_name, value)
+                applied.append(field_name)
+        if applied:
+            import warnings
+            warnings.warn(
+                f"structured_preset={self.structured_preset!r} filled "
+                + ", ".join(sorted(applied))
+                + " -- a field explicitly set to its own default value is "
+                  "indistinguishable from an unset one and is overridden "
+                  "here; set it after construction to hold it against the "
+                  "preset", stacklevel=2)
 
 
 @dataclass

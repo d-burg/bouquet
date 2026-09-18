@@ -1173,6 +1173,13 @@ class Bouquet:
                                       else float(out["axis_residual"])),
             structured_kkt_cond=(None if out["kkt_cond"] is None
                                  else float(out["kkt_cond"])),
+            # The prior-INDEPENDENT conditioning of the constraint rows --
+            # the number the refusal is actually taken on (structured_kkt_cond
+            # carries the prior's dynamic range and is only a diagnostic), so
+            # a post-hoc audit of why a slice was or was not refused has it.
+            structured_constraint_cond=(None if out.get("constraint_cond")
+                                        is None
+                                        else float(out["constraint_cond"])),
             structured_deficit=float(out["deficit"]),
             structured_solver=out["solver"],
             structured_soft=bool(soft),
@@ -1307,6 +1314,31 @@ class Bouquet:
             )
         return (s_ind, s_bs, float(out["ohm_scale_eff"]),
                 float(out["bs_scale_eff"]), extra, state)
+
+    @staticmethod
+    def _structured_roundtrip_gate(Ip_measured):
+        """The post-corrector round-trip gate, with the measurement bound.
+
+        :meth:`_close_ip_structured_corrector` calls its ``roundtrip_gate``
+        with ONE positional (the assembled Ip) plus the soft channel's
+        ``posterior``/``sigma_Ip``, so the measurement has to be closed over
+        HERE -- :func:`bouquet.utils.ip_roundtrip_gate` takes it as a REQUIRED
+        positional, and handing that function over raw is a ``TypeError`` at
+        the first corrector that runs.  Named rather than written inline at
+        the call site so that a test can pin the object production actually
+        passes against the contract the corrector actually uses.
+
+        Nothing about the acceptance moves: ``posterior``/``sigma_Ip`` pass
+        straight through, so the soft channel is still compared against its
+        own posterior and the hard channel against *Ip_measured*, on the one
+        unchanged ``IP_ROUNDTRIP_TOL_PCT`` budget.
+        """
+        from .utils import ip_roundtrip_gate
+
+        def _gate(ip_closed, posterior=None, sigma_Ip=None):
+            return ip_roundtrip_gate(ip_closed, Ip_measured,
+                                     posterior=posterior, sigma_Ip=sigma_Ip)
+        return _gate
 
     @staticmethod
     def _close_ip_structured_corrector(state, bl, mygs, solve_jphi,
@@ -1806,6 +1838,32 @@ class Bouquet:
                       f"(> tol {li_tol:g}) after "
                       f"{rec.get('n_extra_solves', 0)} corrector solve(s)")
 
+        # q0 acceptance: the SAME flag `_close_ip_q0_corrector` raises.  The
+        # residual was recorded here and read by nothing, so a slice whose
+        # axis row the corrector could not land was indistinguishable from one
+        # it did -- the asymmetry between the two channels' `closure_limited`
+        # contracts that the q0 channel closed.  Flag only: q0_tol is
+        # untouched and nothing retries.
+        if gated:
+            _q0res = rec.get("q0_residual")
+            _q0tol = float(state["q0_tol"])
+            if _q0res is None or not np.isfinite(float(_q0res)):
+                _flag("q0 residual is not finite after the corrector")
+            elif abs(float(_q0res)) > _q0tol:
+                _flag(f"q0 misses its row by {float(_q0res):+.4f} "
+                      f"(> q0_tol {_q0tol:g}) after "
+                      f"{rec.get('n_extra_solves', 0)} corrector solve(s)")
+
+        # A REFUSED corrector step is a flag whatever it was correcting.  With
+        # a hard l_i target the branch above already says so (the delivered
+        # residual is the predictor's and misses); the q0-only and soft cases
+        # recorded `structured_corrector_refusal` and then reported a clean
+        # closure on the predictor equilibrium.
+        if rec.get("structured_corrector_refusal") and (li_target is None
+                                                        or soft):
+            _flag("the corrector step was refused, keeping the predictor "
+                  f"({str(rec['structured_corrector_refusal'])[:120]})")
+
         # Soft-channel Ip acceptance: the same FLAG, on the DELIVERED
         # posterior.  closure_health already carries it when the corrector
         # re-solved (soft_ip_residual_sigma above); nothing stacks, because
@@ -1813,6 +1871,12 @@ class Bouquet:
         # predictor's block.
         rec["closure_limited_reasons"] = tuple(_reasons)
         rec["closure_limited"] = bool(_reasons)
+        if gated:
+            # the q0 bar this channel was just judged against, recorded
+            # alongside the health bars it was judged with
+            _health["closure_limited_thresholds"] = dict(
+                _health["closure_limited_thresholds"],
+                q0_tol=float(state["q0_tol"]))
         for _k, _v in _health.items():
             if _k not in ("closure_limited", "closure_limited_reasons"):
                 rec[_k] = _v
@@ -2668,11 +2732,13 @@ class Bouquet:
             # Same contract for closure_channel="structured" (present whenever
             # there is something to correct: the sawtooth gate admitted an axis
             # row, or an l_i target was given, or both -- and BOTH corrections
-            # then share the one extra solve).
+            # then share the one extra solve).  This channel can be SOFT in Ip,
+            # so the gate keeps its posterior/sigma_Ip pass-through and only
+            # the measurement is bound here.
             if _structured_state is not None:
                 _nl_corr = self._close_ip_structured_corrector(
-                    _structured_state, bl, mygs, solve_jphi,
-                    ip_of=_ip, roundtrip_gate=ip_roundtrip_gate)
+                    _structured_state, bl, mygs, solve_jphi, ip_of=_ip,
+                    roundtrip_gate=self._structured_roundtrip_gate(Ip_t))
                 if _nl_corr is not None:
                     nl_its = _nl_corr
 

@@ -20,9 +20,10 @@ What is proved here:
 * **the KKT solution IS the norm-minimiser** -- checked against
   ``scipy.optimize`` on a small case, and against a direct search over the
   constraint null space.
-* **the refusals fire**: multipliers outside [0.2, 5], a singular/degenerate
-  constraint system, a constraint row the basis cannot move, non-finite input,
-  bad weights and bad basis specs.
+* **the refusals fire**: multipliers outside 0.2 < s < 5 (strict), a
+  singular/degenerate constraint system (including more constraint rows than
+  free coefficients), a constraint row the basis cannot move, non-finite
+  input, bad weights and bad basis specs.
 
 No solver anywhere: the geometry is the same synthetic
 ``fsa_current_geometry``-shaped dict the ohmic-closure tests use.
@@ -483,7 +484,8 @@ class TestRefusals:
         """A deficit far too large for the basis to absorb gently."""
         psi, w, c, j_ind, j_bs, j_fix, lin, _ = _parts()
         raw = lin(j_ind) + lin(j_bs) + lin(j_fix) + c
-        with pytest.raises(RuntimeError, match="outside \\[0.2, 5\\]"):
+        # the bounds are STRICT, and the message now writes them that way
+        with pytest.raises(RuntimeError, match=r"outside 0\.2 < \w+ < 5"):
             close_ip_structured(psi, w, c, 6.0 * raw, j_ind, j_bs, j_fix)
 
     def test_refuses_a_degenerate_constraint_pair(self):

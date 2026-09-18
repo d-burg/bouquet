@@ -350,9 +350,12 @@ Two statements about the data, one prior:
   It is never refused and never retried on that basis. At σ_Ip = 0.5 % of I_p
   the posterior typically lands 0.02–0.1 % from the measurement.
 
-Both refuse — never clamp — when a multiplier would leave `[0.2, 5]` anywhere
-on the grid, when the constraint system is degenerate against a relative floor,
-or (soft) when the posterior mode does not converge.
+Both refuse — never clamp — when a multiplier would leave `0.2 < s < 5`
+(strictly: a multiplier landing exactly on a bound is refused) anywhere on the
+grid, when the constraint system is degenerate against a relative floor (which
+includes carrying more constraint rows than the basis has free coefficients —
+e.g. the `{"kind": "constant"}` one-liner with both an axis row and an l_i
+target), or (soft) when the posterior mode does not converge.
 
 ### One correction, shared
 
@@ -495,7 +498,7 @@ bound or test bound is touched by it.
 `utils.closure_health` records the per-slice honesty of the closure on every
 ohmic-mode channel and sets `closure_limited` with a tuple of reasons. It is a
 **flag**, never a retry and never a refusal — refusals (a multiplier outside
-`[0.2, 5]`, a singular constraint system, a cycling sign pattern) raise before
+`0.2 < s < 5`, a singular constraint system, a cycling sign pattern) raise before
 it is reached. Downstream consumers should treat a closure-limited slice as
 unvalidated.
 
@@ -561,11 +564,15 @@ The σ ladders are recorded as `structured_weights` (W = σ⁻²) and
 
 Three rules govern it:
 
-1. **Explicit settings always win.** A preset fills only fields still at their
-   dataclass default. The one asymmetry worth knowing is `structured_soft`,
-   whose default `False` is indistinguishable from an explicit `False` — a
-   caller who wants these ladders on the *hard* solver should set the σ fields
-   directly rather than naming the preset.
+1. **An explicit setting that differs from the default wins.** A preset fills
+   only fields still *holding* their dataclass default value — and a field
+   explicitly set to that same value is indistinguishable from an unset one,
+   so it is overridden too. `structured_soft=False` alongside a soft preset
+   comes back `True`; the same applies to any field set to its own default.
+   Every field a preset fills is named in a `UserWarning` at construction, so
+   the override is visible rather than silent. A caller who wants these
+   ladders on the *hard* solver should set the σ fields directly rather than
+   naming the preset, or set the held field **after** construction.
 2. **A preset with no l_i target simply omits the l_i term.** No σ is recorded
    for a measurement that was never supplied.
 3. **An unknown preset name is refused at construction**, never ignored: a

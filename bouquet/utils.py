@@ -1236,10 +1236,13 @@ def structured_preset_settings(name):
     left the shipped prior in place would be invisible in the record.
 
     The caller decides what to do with the settings; ``GenerationConfig``
-    applies them only to fields still at their dataclass default, so an
-    explicit user setting always wins, and it drops ``structured_li_sigma``
-    when there is no ``structured_li_target`` (a sigma on a measurement that
-    was not supplied would be recorded as if an l_i row existed).
+    applies them only to fields still holding their dataclass default VALUE --
+    which a field explicitly set to that same value also does, so such a field
+    is overridden (see :meth:`bouquet.config.GenerationConfig.__post_init__`,
+    which warns with the list of fields it filled) -- and it drops
+    ``structured_li_sigma`` when there is no ``structured_li_target`` (a sigma
+    on a measurement that was not supplied would be recorded as if an l_i row
+    existed).
     """
     key = str(name)
     if key not in STRUCTURED_PRESETS:
@@ -2215,15 +2218,28 @@ def close_ip_structured(psi_N, w_lin, c_affine, Ip_target_signed,
     # false and the wrong diagnosis.  A tight one-sided `sigma_ind_up` -- the
     # setting the asymmetric prior exists for -- hit it at a sigma ratio of a
     # few hundred.
+    # The test is on the RANK against the row count, not on the smallest
+    # returned singular value: `svd` returns only min(m, n) of them, so with
+    # MORE constraint rows than free coefficients (m > n -- e.g. the
+    # `{"kind": "constant"}` basis, K = 1, carrying Ip + an axis row + an l_i
+    # row) every returned value can be comfortably nonzero while the system is
+    # unsatisfiable.  `_kkt` would then hand back the LEAST-SQUARES answer and
+    # claim a hard KKT solve, with Ip no longer exact -- the one property this
+    # channel is built on.  `cond_rtol` and its meaning are unchanged; this is
+    # the same form the soft solver uses on its hard rows.
     sv_c = np.linalg.svd(Cn, compute_uv=False)
     _m = Cn.shape[0]
-    if not np.all(np.isfinite(sv_c)) or sv_c[-1] <= float(cond_rtol) * sv_c[0]:
+    _rank = int(np.sum(sv_c > float(cond_rtol) * sv_c[0]))
+    if not np.all(np.isfinite(sv_c)) or _rank < _m:
         raise RuntimeError(
-            f"close_ip_structured: singular KKT system (smallest constraint "
-            f"singular value {sv_c[-1]:.4e} <= relative floor "
-            f"{float(cond_rtol) * sv_c[0]:.4e} after normalisation) -- the "
-            f"{_m} constraint row(s) are degenerate on this basis; Ip and the "
-            "axis current cannot both be imposed on this split")
+            f"close_ip_structured: singular KKT system (rank {_rank} of the "
+            f"{_m} constraint row(s) against the relative floor "
+            f"{float(cond_rtol):g}; smallest returned singular value "
+            f"{sv_c[-1]:.4e} after normalisation) -- the {_m} constraint "
+            f"row(s) are degenerate on this basis, or there are more of them "
+            f"than the {int(np.count_nonzero(free))} free coefficient(s) can "
+            "carry; Ip and the axis current cannot both be imposed on this "
+            "split")
 
     def _kkt(Wf_now):
         """Minimal-norm solve for ONE fixed set of trust weights.
@@ -2288,8 +2304,10 @@ def close_ip_structured(psi_N, w_lin, c_affine, Ip_target_signed,
             i = int(np.argmax(np.abs(sp - 1.0)))
             raise RuntimeError(
                 f"close_ip_structured: {nm}(psi) reaches {float(sp[i]):.3f}, "
-                f"outside [{lo:g}, {hi:g}] -- no minimal-norm radial closure "
-                "exists within the scale bounds; the components do not add up "
+                f"outside {lo:g} < {nm} < {hi:g} (the bounds are STRICT, as "
+                f"in close_ip and close_ip_q0) -- no minimal-norm radial "
+                "closure exists within the scale bounds; the components do "
+                "not add up "
                 "to Ip and refusing to hide that behind a multiplier profile")
 
     # Effective scalar equivalents: the ONE number carrying the same current in
@@ -2809,7 +2827,8 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
             i = int(np.argmax(np.abs(sp - 1.0)))
             raise RuntimeError(
                 f"close_ip_structured_soft: {nm}(psi) reaches "
-                f"{float(sp[i]):.3f}, outside [{lo:g}, {hi:g}] -- the "
+                f"{float(sp[i]):.3f}, outside {lo:g} < {nm} < {hi:g} (STRICT, "
+                f"as everywhere in this module) -- the "
                 "posterior mode has to drive a multiplier off the scale "
                 "bounds to reconcile the measurements with the prior; that is "
                 "a finding, not something to clamp")

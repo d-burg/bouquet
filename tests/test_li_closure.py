@@ -342,6 +342,37 @@ class TestHardLiRow:
         assert abs(out["axis_residual"]) < 1e-6 * abs(ax["j_ref0"])
         assert _li_of_closure(out, m) == pytest.approx(target, rel=1e-12)
 
+    def test_more_rows_than_free_coefficients_is_refused(self):
+        """``svd`` returns only min(m, n) singular values, so a test on the
+        SMALLEST returned one cannot see an over-constrained system: the
+        documented ``{"kind": "constant"}`` one-liner (K = 1, so two
+        coefficients) carrying Ip + an axis row + an l_i row is m = 3 > n = 2,
+        every returned singular value is comfortably nonzero, and the solve
+        would hand back the LEAST-SQUARES answer labelled "hard-KKT" -- with
+        Ip no longer exact, which is the one property this channel is built
+        on.  Refused on RANK, against the unchanged ``cond_rtol``."""
+        m, (psi, w, c, ji, jb, jf, lin, Ip_s, lg) = _model(basis=_CONST)
+        ax = _axis(psi, ji, jb, jf, q0_pull=0.99)
+        target = structured_li_of(m)[0] * 1.01
+        with pytest.raises(RuntimeError, match="singular KKT system"):
+            close_ip_structured(psi, w, c, Ip_s, ji, jb, jf, axis=ax,
+                                li_target=target, li_geom=lg, basis=_CONST)
+
+    def test_the_same_three_rows_on_a_basis_that_can_carry_them_still_solve(
+            self):
+        """The well-posed twin of the refusal above: m = 3 <= n = 8 on the
+        shipped basis solves, with Ip exact to the bar this module already
+        uses."""
+        m, (psi, w, c, ji, jb, jf, lin, Ip_s, lg) = _model()
+        ax = _axis(psi, ji, jb, jf, q0_pull=0.99)
+        plain = close_ip_structured(psi, w, c, Ip_s, ji, jb, jf, axis=ax)
+        target = _li_of_closure(plain, m) * 1.01
+        out = close_ip_structured(psi, w, c, Ip_s, ji, jb, jf, axis=ax,
+                                  li_target=target, li_geom=lg)
+        assert len(out["constraints"]) == 3
+        assert abs(out["ip_residual_pct"]) < 1e-10
+        assert _li_of_closure(out, m) == pytest.approx(target, rel=1e-12)
+
     def test_no_li_target_is_bit_identical_to_the_previous_channel(self):
         """The l_i row is opt-in; a caller who does not set it must get the
         SAME answer the channel gave before it existed."""
@@ -1082,6 +1113,11 @@ class _FakeBaseline:
         self.bs_scale = 1.0
 
 
+#: an admitted sawtooth axis row, as run.py's predictor builds it -- needed by
+#: any case where the corrector actually takes its q0 step
+_AXIS_ROW = dict(psi=0.0, j_ind0=7.0e5, j_bs0=3.0e5, j_fix0=0.0, j_ref0=9.7e5)
+
+
 def _stub_corrector(monkeypatch, p_true, target, C=None, li_sigma=None,
                     max_steps=1, soft=False, ip_sigma=None, ip_post=None,
                     state_extra=None, ip_of=None, roundtrip_gate=None,
@@ -1366,6 +1402,48 @@ class TestCorrectorRefusalAndHealthPaths:
         assert rec["closure_limited"] is False
         assert rec["closure_limited_reasons"] == ()
 
+    # ---- A2, on this channel: a missed q0 is a FLAG -----------------------
+    def test_a_missed_q0_is_flagged_after_the_corrector(self, monkeypatch):
+        """The q0 corrector has flagged this since the A2 fix; here the
+        residual was recorded and read by nothing, so a slice the corrector
+        could not land on q0 was indistinguishable from one it did."""
+        T = 0.9
+        rec, world = _stub_corrector(
+            monkeypatch, 2.0, T, C=T / T ** 2.0, q0=1.10,
+            state_extra=dict(gated=True, axis=_AXIS_ROW))
+        assert world["solves"] == 1          # it did take its one step
+        assert rec["closure_limited"] is True
+        assert any("q0 misses its row" in str(r)
+                   for r in rec["closure_limited_reasons"])
+        # flag only: the bar itself is untouched and recorded
+        assert rec["closure_limited_thresholds"]["q0_tol"] == 0.01
+
+    def test_a_non_finite_q0_residual_is_flagged_after_the_corrector(
+            self, monkeypatch):
+        T = 0.9
+        rec, _ = _stub_corrector(monkeypatch, 2.0, T, C=T / T ** 2.0,
+                                 q0=np.nan, state_extra=dict(gated=True))
+        assert rec["closure_limited"] is True
+        assert any("q0 residual is not finite" in str(r)
+                   for r in rec["closure_limited_reasons"])
+
+    def test_a_q0_only_corrector_refusal_is_flagged(self, monkeypatch):
+        """With no l_i target the refusal was recorded in
+        ``structured_corrector_refusal`` and the run then reported a clean
+        closure on the predictor equilibrium."""
+        rec, world = _stub_corrector(
+            monkeypatch, 2.0, 0.9,
+            q0=1.10,                      # the miss that asks for the step
+            solver_raises=RuntimeError("close_ip_structured: singular KKT "
+                                       "system"),
+            state_extra=dict(gated=True, axis=_AXIS_ROW,
+                             li_target=None))
+        assert world["solves"] == 0
+        assert "refused" in rec["sawtooth_verdict"]
+        assert rec["closure_limited"] is True
+        assert any("the corrector step was refused" in str(r)
+                   for r in rec["closure_limited_reasons"])
+
     # ---- B8 / "keep the predictor" ---------------------------------------
     @pytest.mark.parametrize("exc", [
         RuntimeError("close_ip_structured: singular KKT system"),
@@ -1506,6 +1584,85 @@ class TestCorrectorRefusalAndHealthPaths:
                             sigma_Ip=None: ip_roundtrip_gate(
                                 ip, self.IP, posterior=posterior,
                                 sigma_Ip=sigma_Ip))
+
+
+# ---------------------------------------------------------------------------
+class TestTheGateProductionActuallyPasses:
+    """The WIRING, not a wrapper written for the test.
+
+    Every test above builds its own one-positional closure over the
+    measurement, so the suite pinned the corrector's contract and never the
+    object ``run.py`` hands it.  Production passed
+    ``utils.ip_roundtrip_gate`` itself -- whose ``Ip_measured`` is a REQUIRED
+    positional -- so the first corrector that ran died with a ``TypeError``
+    after paying for its solves, on the channel's headline configuration.
+    These tests use ``Bouquet._structured_roundtrip_gate``, which is what the
+    call site now builds, with no wrapper in between.
+    """
+
+    IP = 1.0e6
+    SIG = 0.005 * 1.0e6
+
+    def _gate(self):
+        from bouquet.run import Bouquet
+        return Bouquet._structured_roundtrip_gate(self.IP)
+
+    def test_the_raw_utils_gate_does_not_satisfy_the_correctors_contract(self):
+        """Why the helper exists: binding the corrector's call against the
+        unbound function is the TypeError, and a signature check says so
+        without paying for a solve."""
+        import inspect
+        from bouquet.utils import ip_roundtrip_gate
+
+        with pytest.raises(TypeError):
+            inspect.signature(ip_roundtrip_gate).bind(
+                self.IP, posterior=None, sigma_Ip=None)
+        # ... and the bound helper does satisfy it
+        inspect.signature(self._gate()).bind(
+            self.IP, posterior=None, sigma_Ip=None)
+
+    def test_the_hard_channel_re_gates_through_the_production_object(
+            self, monkeypatch):
+        rec, world = _stub_corrector(monkeypatch, 2.0, 0.9,
+                                     ip_of=lambda j: self.IP,
+                                     roundtrip_gate=self._gate())
+        assert world["solves"] == 1
+        assert rec["structured_roundtrip_post_corrector_reference"] == \
+            "Ip_target"
+        assert abs(rec["structured_roundtrip_post_corrector_err_pct"]) < 1e-9
+
+    def test_the_soft_channel_re_gates_against_its_own_posterior(
+            self, monkeypatch):
+        """The pass-through the one-line q0-style closure would have lost: the
+        soft channel's reference is the posterior, not the measurement, and
+        the tolerance is the same one."""
+        post = self.IP * 1.003            # 0.3 %: outside the 0.05 % budget
+        rec, world = _stub_corrector(          # if the reference were Ip
+            monkeypatch, 2.0, 0.9, li_sigma=0.04, soft=True,
+            ip_sigma=self.SIG, ip_post=post, ip_of=lambda j: post,
+            roundtrip_gate=self._gate())
+        assert world["solves"] == 1
+        assert rec["structured_roundtrip_post_corrector_reference"] == \
+            "the closure's own posterior Ip"
+        assert abs(rec["structured_roundtrip_post_corrector_err_pct"]) < 1e-9
+
+    def test_a_bad_assembly_is_still_refused_through_it(self, monkeypatch):
+        """Binding the measurement must not have softened the gate."""
+        with pytest.raises(RuntimeError, match="algebra error"):
+            _stub_corrector(monkeypatch, 2.0, 0.9,
+                            ip_of=lambda j: self.IP * 1.01,
+                            roundtrip_gate=self._gate())
+
+    def test_the_call_site_builds_its_gate_with_that_helper(self):
+        """The one mechanical link the tests above cannot reach: the helper is
+        only worth having if the structured call site uses it.  Driving that
+        line needs a full IMAS forward solve, so this reads it."""
+        import inspect
+        from bouquet.run import Bouquet
+
+        src = inspect.getsource(Bouquet)
+        i = src.index("self._close_ip_structured_corrector(")
+        assert "_structured_roundtrip_gate(" in src[i:i + 400]
 
 
 # ---------------------------------------------------------------------------

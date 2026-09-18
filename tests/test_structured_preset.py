@@ -128,7 +128,10 @@ class TestPresetTouchesNoCriterion:
 
 
 class TestOverridePrecedence:
-    """Every field the preset fills must yield to an explicit setting."""
+    """Every field the preset fills must yield to an explicit setting that
+    DIFFERS from the field's own default -- which is as far as a plain
+    dataclass can see (see the limitation pinned at the end of this class).
+    """
 
     @pytest.mark.parametrize("name,value", [
         ("structured_weights", dict(name="uniform", ind=(1.0, 1.0, 1.0, 1.0),
@@ -160,6 +163,28 @@ class TestOverridePrecedence:
                              structured_ip_sigma=1.0e5)
         assert g.structured_ip_sigma == pytest.approx(1.0e5)
         assert g.structured_ip_sigma_frac == pytest.approx(0.005)
+
+    def test_a_field_set_to_its_own_default_is_overridden_and_warns(self):
+        """The limitation the docstrings used to deny: a plain dataclass
+        cannot tell "left at the default" from "explicitly set to the default
+        value", so the preset overrides the second one too.  Pinned here
+        rather than redesigned -- what is required is that the override is
+        NAMED, so it is visible instead of silent."""
+        default_soft = GenerationConfig.__dataclass_fields__[
+            "structured_soft"].default
+        assert default_soft is False
+        with pytest.warns(UserWarning, match="structured_soft"):
+            g = GenerationConfig(structured_preset=PRESET,
+                                 structured_soft=default_soft)
+        assert g.structured_soft is True          # the preset won
+
+    def test_the_warning_names_every_field_the_preset_filled(self):
+        with pytest.warns(UserWarning) as rec:
+            GenerationConfig(structured_preset=PRESET)
+        msg = str(rec[0].message)
+        for name in ("structured_weights", "structured_sigma_ind_up",
+                     "structured_soft", "structured_ip_sigma_frac"):
+            assert name in msg
 
 
 class TestRefusals:

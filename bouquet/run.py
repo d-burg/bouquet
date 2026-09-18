@@ -1188,6 +1188,9 @@ class Bouquet:
         # BouquetConfig validates in __post_init__, but the documented notebook
         # idiom mutates fields afterwards (`bq.generation.n_equils = ...`), so
         # re-check the until-N pair here -- the point where they take effect.
+        from .config import require_integer_count as _int_count
+        _int_count(gc.n_inspec_target, "generation.n_inspec_target")
+        _int_count(gc.max_total_draws, "generation.max_total_draws")
         if gc.n_inspec_target is not None and int(gc.n_inspec_target) < 1:
             raise ValueError("generation.n_inspec_target must be >= 1 or None")
         if (gc.n_inspec_target is not None

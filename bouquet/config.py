@@ -28,6 +28,24 @@ if TYPE_CHECKING:
     import numpy as np
 
 
+def require_integer_count(value, name):
+    """``int(value)`` for an optional count, refusing bool and non-integral input.
+
+    ``int()`` accepts both silently -- ``7.9`` becomes 7 and ``True`` becomes 1 --
+    and these counts decide how many draws a run makes and when it stops, so a
+    truncated one is a quietly different run. Shared by
+    :meth:`BouquetConfig.__post_init__` and the re-check in ``Bouquet.generate``
+    (the documented notebook idiom mutates the fields after construction).
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or float(value) != int(value):
+        raise ValueError(
+            f"{name}={value!r} must be an integer count (or None); bool and "
+            "fractional values are refused rather than truncated")
+    return int(value)
+
+
 # ---------------------------------------------------------------------------
 # Solver (common to every baseline source -- perturbed draws are always solved
 # with TokaMaker, regardless of where the baseline came from)
@@ -702,17 +720,19 @@ class BouquetConfig:
                 "'measured', or 'scalar'")
         if self.generation.n_equils < 1:
             raise ValueError("generation.n_equils must be >= 1")
-        _tgt = self.generation.n_inspec_target
-        _cap = self.generation.max_total_draws
+        _tgt = require_integer_count(
+            self.generation.n_inspec_target, "generation.n_inspec_target")
+        _cap = require_integer_count(
+            self.generation.max_total_draws, "generation.max_total_draws")
         if _tgt is not None:
-            if int(_tgt) < 1:
+            if _tgt < 1:
                 raise ValueError(
                     "generation.n_inspec_target must be >= 1 (or None to draw "
                     "exactly n_equils)")
-            if _cap is not None and int(_cap) < int(_tgt):
+            if _cap is not None and _cap < _tgt:
                 raise ValueError(
-                    f"generation.max_total_draws ({int(_cap)}) is below "
-                    f"n_inspec_target ({int(_tgt)}): the cap would stop the "
+                    f"generation.max_total_draws ({_cap}) is below "
+                    f"n_inspec_target ({_tgt}): the cap would stop the "
                     f"run before the target could ever be met")
         elif _cap is not None:
             raise ValueError(

@@ -3400,6 +3400,14 @@ def _resolve_attempt_budget(n_equils, n_inspec_target, max_total_draws):
         raise ValueError(
             f"n_inspec_target={until_n} must be >= 1 (or None to draw "
             "exactly n_equils)")
+    if max_total_draws is not None and (
+            isinstance(max_total_draws, bool)
+            or float(max_total_draws) != int(max_total_draws)):
+        # the same rule the target gets: int() silently truncated 60.9 to 60 and
+        # turned True into 1, and an attempt cap is not a place to guess
+        raise ValueError(
+            f"max_total_draws={max_total_draws!r} must be an integer number of "
+            "attempts (or None)")
     max_attempts = (int(max_total_draws) if max_total_draws is not None
                     else max(int(n_equils), 5 * until_n))
     if max_attempts < until_n:

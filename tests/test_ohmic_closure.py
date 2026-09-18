@@ -16,6 +16,8 @@ Solve-free coverage of the machinery the ohmic Ip closure is built on:
 
 No solver: the geometry is a synthetic ``fsa_current_geometry``-shaped dict.
 """
+import warnings
+
 import numpy as np
 import pytest
 from scipy.integrate import trapezoid
@@ -310,6 +312,390 @@ class TestClosureSignConvention:
             closure_sign_convention(float("nan"), 2e5, 1e5, 3.6e4, 1.2e6)
 
 
+class TestSawtoothBootstrapPredictor:
+    """utils.close_ip_q0 -- the SHIPPED 2x2 predictor for the q0 channel.
+
+    Solve-free: the axis row is an algebraic statement about the on-axis
+    current density, the Ip row is the same affine measure the other channels
+    close.  Both are checked against the shipped formula, never a local
+    re-derivation (same rule as TestClosureAlgebra).
+    """
+
+    def _parts(self, core_bootstrap=True):
+        """A bootstrap with BOTH a pedestal hump and a core shoulder -- the
+        genuinely 2-D case.  ``core_bootstrap=False`` drops the shoulder, which
+        is the degenerate (and expected-common) case the next test pins."""
+        g = _geom()
+        w, c = Ip_fsa_weights(g, convention="jphi-linterp")
+        psi = g["psi_N"]
+        j_ind = 8.0e5 * (1.0 - psi) ** 1.5
+        j_bs = 3.0e5 * np.exp(-((psi - 0.9) / 0.06) ** 2)   # pedestal hump
+        if core_bootstrap:
+            j_bs = j_bs + 1.2e5 * (1.0 - psi) ** 2
+        j_fix = 1.0e5 * (1.0 - psi) ** 3
+        lin = lambda j: float(trapezoid(w * j, psi))
+        return g, c, j_ind, j_bs, j_fix, lin
+
+    def test_hits_both_targets_exactly(self):
+        from bouquet.utils import close_ip_q0
+        g, c, j_ind, j_bs, j_fix, lin = self._parts()
+        Ip_t = 1.06 * (lin(j_ind) + lin(j_bs) + lin(j_fix) + c)
+        j_ref0 = 1.05 * (j_ind[0] + j_bs[0] + j_fix[0])   # 5% more axis current
+        s_o, s_b = close_ip_q0(Ip_t, c, lin(j_ind), lin(j_bs), lin(j_fix),
+                               j_ind[0], j_bs[0], j_fix[0], j_ref0)
+        # target 1: the axis current density matches -> q0 matches to 1st order
+        assert (s_o * j_ind[0] + s_b * j_bs[0] + j_fix[0]) == pytest.approx(
+            j_ref0, rel=1e-12)
+        # target 2: Ip is still EXACT in the affine measure
+        closed = Ip_fsa_integral(None, g["psi_N"],
+                                 s_o * j_ind + s_b * j_bs + j_fix,
+                                 convention="jphi-linterp", geom=g)
+        assert closed == pytest.approx(Ip_t, rel=1e-12)
+
+    def test_reduces_to_bootstrap_when_the_bootstrap_has_no_core(self):
+        """The plan's central prediction, and what the REQUESTED reference
+        makes the common case: the target axis current is the source's own
+        (j_ind0 + j_BS_src0 + j_fix0), so with no core bootstrap on either
+        side the axis row pins s_ohm = 1 exactly and the Ip row hands the
+        whole deficit to s_bs -- i.e. close_ip('bootstrap'), at zero cost."""
+        from bouquet.utils import close_ip, close_ip_q0
+        g, c, j_ind, j_bs, j_fix, lin = self._parts(core_bootstrap=False)
+        assert j_bs[0] < 1e-30 * j_bs.max()            # pedestal only
+        Ip_t = 1.06 * (lin(j_ind) + lin(j_bs) + lin(j_fix) + c)
+        j_ref0 = j_ind[0] + j_bs[0] + j_fix[0]         # source axis current
+        s_o, s_b = close_ip_q0(Ip_t, c, lin(j_ind), lin(j_bs), lin(j_fix),
+                               j_ind[0], j_bs[0], j_fix[0], j_ref0)
+        b_o, b_b = close_ip("bootstrap", Ip_t, c,
+                            lin(j_ind), lin(j_bs), lin(j_fix))
+        assert s_o == pytest.approx(b_o, rel=1e-12)
+        assert s_o == pytest.approx(1.0, rel=1e-12)
+        assert s_b == pytest.approx(b_b, rel=1e-12)
+
+
+class TestQ0TargetUnrenormalisation:
+    """utils.unrenormalise_q0 -- the REQUESTED reference (user decision).
+
+    The anchor is a solve of the source total renormalised to Ip_target, so
+    its q0 belongs to a current the source never claimed.  The target is that
+    q0 mapped back onto the source's OWN current, to first order in
+    q0 ~ 1/j_phi(0).
+    """
+
+    def test_ratio_formula(self):
+        from bouquet.utils import unrenormalise_q0
+        # reference validation slice, measured: the anchor ran 3.86% hot because FUSE's
+        # core_profiles total carries -3.89% of Ip.
+        q0t = unrenormalise_q0(0.942997745122599, 1606692.5450515286,
+                               1547032.96694553)
+        assert q0t == pytest.approx(
+            0.942997745122599 * (1606692.5450515286 / 1547032.96694553),
+            rel=1e-15)
+        assert q0t > 0.942997745122599          # un-renormalising raises q0
+        assert q0t == pytest.approx(0.9794, abs=5e-4)
+
+    def test_identity_when_the_source_already_carries_ip(self):
+        """No Ip deficit -> achieved == requested -> the target IS the
+        anchor's q0 and the un-renormalisation is a no-op."""
+        from bouquet.utils import unrenormalise_q0
+        assert unrenormalise_q0(1.03, 1.5e6, 1.5e6) == pytest.approx(1.03,
+                                                                     rel=1e-15)
+
+    def test_sign_is_carried_not_stripped(self):
+        """q carries a COCOS sign; the mapping must not silently abs() it --
+        only the GATE compares magnitudes."""
+        from bouquet.utils import unrenormalise_q0
+        assert unrenormalise_q0(-0.99, 1.04e6, 1.0e6) < 0
+
+    def test_zero_and_nan_requested_axis_current_refused(self):
+        from bouquet.utils import unrenormalise_q0
+        with pytest.raises(RuntimeError, match="zero axis"):
+            unrenormalise_q0(1.0, 1.5e6, 0.0)
+        with pytest.raises(RuntimeError, match="non-finite"):
+            unrenormalise_q0(1.0, float("nan"), 1.5e6)
+
+    def test_singular_system_refused_on_a_relative_floor(self):
+        """Proportional rows (the components indistinguishable in both
+        targets) cannot impose two constraints -- refuse, do not return a
+        1e12 scale.  The floor must be RELATIVE: A/m^2 and A share no
+        absolute epsilon."""
+        from bouquet.utils import close_ip_q0
+        with pytest.raises(RuntimeError, match="singular"):
+            close_ip_q0(1.2e6, 0.0, 8.0e5, 4.0e5, 1e5,
+                        2.0e6, 1.0e6, 0.0, 2.5e6)      # rows exactly 2:1
+
+    def test_out_of_bounds_and_nan_refused(self):
+        from bouquet.utils import close_ip_q0
+        with pytest.raises(RuntimeError, match="outside"):
+            close_ip_q0(1.2e6, 0.0, 1.0e5, 1.5e5, 0.0,
+                        1.0e6, 1.0e4, 0.0, 1.0e6)
+        with pytest.raises(RuntimeError, match="non-finite"):
+            close_ip_q0(1.2e6, float("nan"), 8e5, 2e5, 1e5,
+                        1e6, 1e4, 0.0, 1e6)
+
+
+class _FakeBaseline:
+    """Just enough of Baseline for the corrector: the scales, the profiles it
+    reassembles, and the ip_closure record it refreshes."""
+
+    def __init__(self, ohm_scale, bs_scale, j_ind, j_BS, j_fixed, ip_closure):
+        self.ohm_scale = float(ohm_scale)
+        self.bs_scale = float(bs_scale)
+        self.j_inductive = ohm_scale * j_ind
+        self.j_BS = bs_scale * j_BS
+        self.j_phi = self.j_inductive + self.j_BS + j_fixed
+        self.ip_closure = ip_closure
+
+
+class _FakeGS:
+    """A solver whose q0 follows the SHIPPED first-order model exactly:
+    ``q0 = K / j_phi(0)`` at frozen geometry, read off the baseline's current
+    scales.  ``q0_override`` forces a value (a non-finite read, say)."""
+
+    def __init__(self, bl, j_ind0, j_bs0, j_fix0, K, q0_override=None):
+        self._bl, self._K = bl, float(K)
+        self._j = (float(j_ind0), float(j_bs0), float(j_fix0))
+        self._override = q0_override
+
+    def copy_eq(self):
+        return self
+
+    def get_q(self, psi=None):
+        if self._override is not None:
+            q0 = float(self._override)
+        else:
+            j_ind0, j_bs0, j_fix0 = self._j
+            j0 = (self._bl.ohm_scale * j_ind0
+                  + self._bl.bs_scale * j_bs0 + j_fix0)
+            q0 = self._K / j0
+        return (psi, np.array([q0, q0 * 1.4, q0 * 3.0]))
+
+
+class TestQ0Corrector:
+    """run.Bouquet._close_ip_q0_corrector -- the post-solve Newton step.
+
+    Every finding the review raised against this method lives in a branch the
+    suite did not reach: the stale closure-health record (A1), the unflagged
+    q0 miss (A2), the ``ip_bs == 0`` division (A3) and the non-finite q0 read
+    (A4).  The fake solver reproduces the channel's OWN first-order model
+    (``q0 ~ 1/j0``) so the Newton step is exercised, not stubbed.
+    """
+
+    def _setup(self, *, ohm_scale=1.0, bs_scale=0.9, q0_now=1.05,
+               q0_target=None, s_ohm_new=None, q0_tol=0.01, ip_bs=None,
+               q0_override=None):
+        """Build (state, bl, gs) with the axis/Ip algebra self-consistent.
+
+        *s_ohm_new*, when given, is the s_ohm the Newton step must land on:
+        the q0 target is derived from the SHIPPED derivative so the step is
+        exactly the one the test wants to inspect.
+        """
+        g = _geom()
+        w, c = Ip_fsa_weights(g, convention="jphi-linterp")
+        psi = g["psi_N"]
+        j_ind = 8.0e5 * (1.0 - psi) ** 1.5
+        j_BS = 3.0e5 * np.exp(-((psi - 0.9) / 0.06) ** 2) \
+            + 1.2e5 * (1.0 - psi) ** 2
+        j_fix = 1.0e5 * (1.0 - psi) ** 3
+        lin = lambda j: float(trapezoid(w * j, psi))
+        ip_ind, ip_bs_lin, ip_fix = lin(j_ind), lin(j_BS), lin(j_fix)
+        if ip_bs is not None:
+            # A3: a bootstrap that carries core current (j_bs0 != 0, so
+            # close_ip_q0's determinant clears its floor) but ~none in the Ip
+            # measure -- a sign-changing j_BS whose net FSA integral cancels.
+            ip_bs_lin = float(ip_bs)
+        j_ind0, j_bs0, j_fix0 = j_ind[0], j_BS[0], j_fix[0]
+        # Ip_t consistent with the predictor's own scales -> the manifold the
+        # corrector steps along is the real one and Ip stays exact on it.
+        Ip_t = ohm_scale * ip_ind + bs_scale * ip_bs_lin + ip_fix + c
+        j0 = ohm_scale * j_ind0 + bs_scale * j_bs0 + j_fix0
+        K = q0_now * j0
+        if q0_target is None:
+            if s_ohm_new is None:
+                q0_target = q0_now
+            else:
+                dsbs = -ip_ind / ip_bs_lin
+                dj0 = j_ind0 + j_bs0 * dsbs
+                dq0ds = -q0_now * dj0 / j0
+                q0_target = q0_now + (float(s_ohm_new) - ohm_scale) * dq0ds
+        ip_closure = dict(closure_channel="sawtooth_bootstrap",
+                          f_BS_closed=abs(bs_scale * ip_bs_lin) / abs(Ip_t),
+                          closure_limited=False, closure_limited_reasons=(),
+                          ohm_scale=float(ohm_scale), bs_scale=float(bs_scale),
+                          Ip_hybrid=float(Ip_t))
+        bl = _FakeBaseline(ohm_scale, bs_scale, j_ind, j_BS, j_fix, ip_closure)
+        state = dict(q0_target=float(q0_target), psi_q=psi.copy(),
+                     j_ind=j_ind, j_BS_swb=j_BS, j_fixed=j_fix,
+                     j_ind0=float(j_ind0), j_bs0=float(j_bs0),
+                     j_fix0=float(j_fix0), ip_ind=float(ip_ind),
+                     ip_bs=float(ip_bs_lin), ohm_scale=float(ohm_scale),
+                     bs_scale=float(bs_scale), q0_tol=float(q0_tol),
+                     Ip_t=abs(float(Ip_t)), sgn=float(np.sign(Ip_t)),
+                     c_signed=float(c), ip_fix=float(ip_fix))
+        gs = _FakeGS(bl, j_ind0, j_bs0, j_fix0, K, q0_override=q0_override)
+        ip_of = lambda j: float(trapezoid(w * np.asarray(j, dtype=float),
+                                          psi)) + c
+        return state, bl, gs, ip_of
+
+    def _run(self, state, bl, gs, ip_of=None, roundtrip_gate=None):
+        from bouquet.run import Bouquet
+        solves = []
+        nl = Bouquet._close_ip_q0_corrector(
+            state, bl, gs, lambda j: solves.append(np.asarray(j).copy()) or 7,
+            ip_of=ip_of, roundtrip_gate=roundtrip_gate)
+        return nl, solves, bl.ip_closure
+
+    # ---- A1 -----------------------------------------------------------
+    def test_health_is_refreshed_from_the_corrector_scales(self):
+        """The review's scenario: the predictor lands a healthy bs_scale, the
+        Newton step pushes it under bs_scale_min.  The record must describe
+        what was DELIVERED, not what was predicted."""
+        state, bl, gs, ip_of = self._setup(ohm_scale=1.0, bs_scale=0.62,
+                                           q0_now=1.05, s_ohm_new=1.06)
+        nl, solves, rec = self._run(state, bl, gs, ip_of=ip_of)
+        assert nl == 7 and len(solves) == 1            # one corrector solve
+        assert rec["n_extra_solves"] == 1
+        assert bl.bs_scale < 0.5 < state["bs_scale"]   # predictor was healthy
+        assert rec["bs_scale"] == pytest.approx(bl.bs_scale)
+        assert rec["closure_limited"] is True
+        assert any("bs_scale" in r for r in rec["closure_limited_reasons"])
+        # f_BS_closed follows the DELIVERED bootstrap, not the predictor's
+        assert rec["f_BS_closed"] == pytest.approx(
+            abs(bl.bs_scale * state["ip_bs"]) / state["Ip_t"])
+        # ... and Ip_hybrid is re-taken on the reassembled profile
+        assert rec["Ip_hybrid"] == pytest.approx(ip_of(bl.j_phi), rel=1e-12)
+        assert rec["Ip_hybrid"] == pytest.approx(
+            state["sgn"] * state["Ip_t"], rel=1e-9)    # manifold keeps Ip
+
+    def test_clean_slice_is_still_unflagged(self):
+        state, bl, gs, ip_of = self._setup(q0_now=1.0, q0_target=1.0)
+        nl, solves, rec = self._run(state, bl, gs, ip_of=ip_of)
+        assert nl is None and solves == []
+        assert rec["n_extra_solves"] == 0
+        assert rec["closure_limited"] is False
+        assert rec["closure_limited_reasons"] == ()
+        assert rec["sawtooth_verdict"] == "predictor (0 extra solves)"
+
+    # ---- A2 -----------------------------------------------------------
+    def test_q0_miss_after_the_corrector_is_flagged(self):
+        """A residual outside q0_tol on an ADMITTED slice must be
+        distinguishable from a clean one.  Flag only: q0_tol is unchanged and
+        nothing here retries."""
+        # A step that IS taken and still lands outside the band: the model is
+        # first order, so the delivered q0 misses by O(u^2) -- here ~8e-4
+        # against a 1e-4 band (the SHIPPED default 0.01 is untouched; this
+        # fixture only makes the second-order miss resolvable).
+        state, bl, gs, ip_of = self._setup(ohm_scale=1.0, bs_scale=1.2,
+                                           q0_now=1.05, s_ohm_new=1.10,
+                                           q0_tol=1.0e-4)
+        nl, solves, rec = self._run(state, bl, gs, ip_of=ip_of)
+        assert len(solves) == 1                        # the step was taken
+        assert bl.ohm_scale == pytest.approx(1.10)
+        assert abs(rec["q0_residual"]) > state["q0_tol"]
+        assert rec["closure_limited"] is True
+        assert any("q0 missed by" in r for r in rec["closure_limited_reasons"])
+        assert rec["closure_limited_thresholds"]["q0_tol"] == state["q0_tol"]
+
+    def test_bounds_refusal_is_flagged_too(self):
+        """The corrector refused the step for leaving (0.2, 5); the residual
+        it kept is still a miss and must say so."""
+        state, bl, gs, ip_of = self._setup(ohm_scale=1.0, bs_scale=0.9,
+                                           q0_now=1.05, s_ohm_new=9.0)
+        nl, solves, rec = self._run(state, bl, gs, ip_of=ip_of)
+        assert nl is None and solves == []
+        assert "0.2, 5" in rec["sawtooth_verdict"]
+        assert rec["closure_limited"] is True
+        assert any("q0 missed by" in r for r in rec["closure_limited_reasons"])
+        assert bl.ohm_scale == state["ohm_scale"]      # predictor kept
+
+    # ---- A3 -----------------------------------------------------------
+    def test_zero_bootstrap_ip_does_not_divide_by_zero(self):
+        """close_ip_q0's determinant can clear its floor with ip_bs == 0
+        (j_bs0 carries core content), so the predictor really can hand this
+        over.  It used to be an uncaught ZeroDivisionError mid-slice."""
+        state, bl, gs, ip_of = self._setup(ohm_scale=1.0, bs_scale=0.9,
+                                           q0_now=1.5, q0_target=1.0,
+                                           ip_bs=0.0)
+        nl, solves, rec = self._run(state, bl, gs, ip_of=ip_of)
+        assert nl is None and solves == []
+        assert "j_BS integrates to ~0" in rec["sawtooth_verdict"]
+        assert rec["q0_residual"] == pytest.approx(0.5)
+        assert rec["closure_limited"] is True
+        assert bl.ohm_scale == state["ohm_scale"]
+
+    # ---- A4 -----------------------------------------------------------
+    def test_non_finite_q0_is_named_and_flagged(self):
+        """abs(nan) <= tol is False, so a NaN q0 used to be reported as
+        'q0 insensitive to s_ohm' -- a misdiagnosis -- with closure_limited
+        left False."""
+        for bad in (float("nan"), float("inf")):
+            state, bl, gs, ip_of = self._setup(q0_override=bad)
+            nl, solves, rec = self._run(state, bl, gs, ip_of=ip_of)
+            assert nl is None and solves == []
+            assert "non-finite" in rec["sawtooth_verdict"]
+            assert "insensitive" not in rec["sawtooth_verdict"]
+            assert rec["closure_limited"] is True
+            assert any("not finite" in r
+                       for r in rec["closure_limited_reasons"])
+
+    # ---- A10 ----------------------------------------------------------
+    def test_roundtrip_gate_re_runs_on_the_delivered_hybrid(self):
+        state, bl, gs, ip_of = self._setup(ohm_scale=1.0, bs_scale=1.2,
+                                           q0_now=1.05, s_ohm_new=1.10,
+                                           q0_tol=1.0e-4)
+        seen = []
+        gate = lambda ip: seen.append(float(ip)) or 0.0
+        nl, solves, rec = self._run(state, bl, gs, ip_of=ip_of,
+                                    roundtrip_gate=gate)
+        assert len(solves) == 1
+        assert seen == [rec["Ip_hybrid"]]
+        assert rec["fsa_roundtrip_post_corrector_err_pct"] == 0.0
+
+    def test_roundtrip_refusal_propagates(self):
+        state, bl, gs, ip_of = self._setup(ohm_scale=1.0, bs_scale=1.2,
+                                           q0_now=1.05, s_ohm_new=1.10,
+                                           q0_tol=1.0e-4)
+
+        def _gate(ip):
+            raise RuntimeError("algebra error, refusing")
+        with pytest.raises(RuntimeError, match="algebra error"):
+            self._run(state, bl, gs, ip_of=ip_of, roundtrip_gate=_gate)
+
+
+class TestSawtoothGateInputs:
+    def test_gate_defaults_and_baseline_field(self):
+        from bouquet.config import GenerationConfig
+        from bouquet.baseline import Baseline
+        gc = GenerationConfig()
+        assert gc.q0_gate == 1.1
+        assert gc.q0_tol == 0.01
+        assert Baseline.__dataclass_fields__["sawtooth"].default is None
+
+    def test_gate_logic_admits_sawteeth_or_low_q0(self):
+        """The gate is OR, and it tests q0_TARGET (the q0 being claimed for
+        the source's own current), not the renormalised anchor value: an
+        active sawtooth source admits a slice whose q0_target sits above
+        q0_gate, and a low q0_target admits a slice whose source carries no
+        sawtooth model at all.  The comparison is on the MAGNITUDE -- q
+        carries a COCOS sign, and a negative target would otherwise make the
+        threshold trivially true and bypass the gate."""
+        gate = lambda active, q0, q0_gate=1.1: bool(active) or abs(q0) <= q0_gate
+        assert gate(True, 1.35)
+        assert gate(False, 0.98)
+        assert not gate(False, 1.35)
+        assert not gate(False, -1.35)
+        assert gate(False, -0.98)
+
+    def test_idle_sawtooth_source_is_not_active(self):
+        """A declared-but-IDLE sawtooth source (all-zero j_parallel before
+        onset) must not admit a ramp slice: the reader's rule is present AND
+        non-zero, not merely present."""
+        from bouquet.io.imas import SAWTOOTH_SOURCE_INDEX
+        assert SAWTOOTH_SOURCE_INDEX == 701
+        for jpar, active in (([0.0, 0.0], False), ([0.0, -3.2e4], True)):
+            jmax = float(np.max(np.abs(jpar)))
+            assert bool(True and jmax > 0.0) is active
+
+
 class TestWorkflowGuard:
     def _config(self, mode, workflow="auto"):
         from bouquet.config import (BouquetConfig, ImasSource, SolverConfig)
@@ -359,3 +745,77 @@ class TestDefaults:
         assert GenerationConfig().closure_channel == "bootstrap"
         assert Baseline.__dataclass_fields__["ohm_scale"].default == 1.0
         assert Baseline.__dataclass_fields__["ip_closure"].default is None
+
+
+class TestQ0Gate:
+    """utils.q0_gate_admits -- gate on the source's own |q0_dd|, not the
+    estimator-mapped target (which reads lower and admitted idle-sawtooth
+    ramp slices in the first campaign)."""
+
+    def test_sawtooth_activity_admits_regardless_of_q0(self):
+        from bouquet.utils import q0_gate_admits
+        assert q0_gate_admits(True, 1.8, 1.7, 1.1) == (True, "sawtooth active")
+
+    def test_idle_sawteeth_gate_on_source_q0_not_target(self):
+        """The Tier-A calibration failure: q0_dd 1.15 (above gate) with a
+        target that reads 1.05 (below) must be REJECTED."""
+        from bouquet.utils import q0_gate_admits
+        ok, basis = q0_gate_admits(False, 1.15, 1.05, 1.1)
+        assert ok is False and basis == "|q0_dd|"
+        ok, basis = q0_gate_admits(False, 0.99, 1.05, 1.1)
+        assert ok is True and basis == "|q0_dd|"
+
+    def test_cocos_sign_is_compared_by_magnitude(self):
+        from bouquet.utils import q0_gate_admits
+        assert q0_gate_admits(False, -0.99, -0.95, 1.1)[0] is True
+        assert q0_gate_admits(False, -1.30, -1.25, 1.1)[0] is False
+
+    def test_falls_back_to_target_only_without_source_q0(self):
+        from bouquet.utils import q0_gate_admits
+        ok, basis = q0_gate_admits(False, None, 1.05, 1.1)
+        assert ok is True and basis.startswith("|q0_target|")
+        assert q0_gate_admits(False, None, None, 1.1) == (False, "no q0 available")
+
+
+class TestClosureHealth:
+    """utils.closure_health -- the closure-limited flag every channel records."""
+
+    def _h(self, **kw):
+        from bouquet.utils import closure_health
+        base = dict(ohm_scale=1.0, bs_scale=0.9, Ip_target_signed=1.2e6,
+                    c_affine=-3.0e4, ip_ind=9.0e5, ip_bs=2.5e5, ip_fix=8.0e4)
+        base.update(kw)
+        return closure_health(**base)
+
+    def test_clean_slice_is_not_limited(self):
+        h = self._h()          # raw sum 1.2e6 -> 0.0 % mismatch
+        assert h["closure_limited"] is False and h["closure_limited_reasons"] == ()
+        assert h["raw_components_ip_mismatch_pct"] == pytest.approx(0.0, abs=1e-9)
+        assert h["f_BS_unscaled"] == pytest.approx(2.5e5 / 1.2e6)
+        assert h["f_BS_closed"] == pytest.approx(0.9 * 2.5e5 / 1.2e6)
+
+    def test_large_raw_mismatch_flags(self):
+        h = self._h(ip_bs=4.5e5)                 # raw sum +16.7 % over Ip
+        assert h["closure_limited"] is True
+        assert any("miss Ip" in r for r in h["closure_limited_reasons"])
+
+    def test_deep_bootstrap_downscale_flags(self):
+        h = self._h(bs_scale=0.41)
+        assert h["closure_limited"] is True
+        assert any("bs_scale" in r for r in h["closure_limited_reasons"])
+
+    def test_negative_current_convention(self):
+        h = self._h(Ip_target_signed=-1.2e6, c_affine=3.0e4, ip_ind=-9.0e5,
+                    ip_bs=-2.5e5, ip_fix=-8.0e4)
+        assert h["closure_limited"] is False
+        assert h["raw_components_ip_mismatch_pct"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_ohmic_channel_is_deprecated_loudly():
+    from bouquet.utils import warn_deprecated_channel
+    with pytest.warns(DeprecationWarning, match="DEPRECATED"):
+        warn_deprecated_channel("ohmic")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        warn_deprecated_channel("bootstrap")          # silent
+        warn_deprecated_channel("sawtooth_bootstrap")

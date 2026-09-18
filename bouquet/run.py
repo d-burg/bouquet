@@ -793,6 +793,392 @@ class Bouquet:
                   f"(target {m['li']:.5f} = step-6 matched, {_dp:+.3f}%, "
                   f"band ±{_bp:.2f}%){_flag}")
 
+    @staticmethod
+    def _close_ip_q0_predictor(gc, bl, eq_snap, geom, probe, psi_N,
+                               j_ind, j_BS_swb, j_fixed, FUSE_tot,
+                               sgn, Ip_t, c_signed, ip_ind, ip_bs, ip_fix,
+                               close_ip):
+        """Solve-free (s_ohm, s_bs) for ``closure_channel="sawtooth_bootstrap"``.
+
+        ``c_signed`` is the P'-term constant ALREADY paired with the data's
+        current-direction convention (``utils.closure_sign_convention``), the
+        same pair the plain channels close on: the 2x2 here solves the same
+        affine Ip identity, so it must not see the anchor's unsigned ``c``.
+
+        Returns ``(ohm_scale, bs_scale, extra, state)`` -- ``extra`` is merged
+        into ``Baseline.ip_closure``; ``state`` is what the post-solve corrector
+        needs (``None`` when the gate rejected the slice and the plain bootstrap
+        channel took over, since there is then nothing to correct).
+
+        **The reference is FUSE's own total at its OWN current -- the
+        REQUESTED profile, not the renormalised anchor.**  The anchor snapshot
+        handed in here is, by construction, the converged forward solve of the
+        source's own total (``_forward_solve_imas_baseline`` does
+        ``solve_jphi(bl.j_phi)`` and only then takes ``copy_eq()``, before
+        ``solve_with_bootstrap`` moves the equilibrium), so ``q0_anchor`` --
+        TokaMaker's own q for that solve, never the dd's q estimator (issue
+        #20) -- costs no dedicated solve.  But ``solve_jphi`` hands TokaMaker a
+        jphi-linterp SHAPE and TokaMaker renormalises it to Ip_target, and
+        FUSE's ``core_profiles`` total does not carry Ip (-3.89 % on the
+        reference validation slice), so the anchor actually ran on ~1.039x the
+        requested profile.  ``q0_anchor`` therefore belongs to a rescaled
+        current that FUSE never claimed.
+
+        Pinning to it would propagate that known DATA artefact into the current
+        split -- every other channel absorbs the Ip deficit into ONE scale and
+        leaves the shape alone.  So the target is un-renormalised back to
+        FUSE's own current, to the same first order the whole predictor uses
+        (``q0 ~ 1/j_phi(0)`` at frozen geometry):
+
+        .. code-block:: text
+
+            q0_target = q0_anchor * (j_achieved(0) / j_requested(0))
+
+        and the axis row is matched against ``j_requested(0)`` = the source
+        total at the clipped axis.  Both axis currents and their ratio are
+        recorded so the un-renormalisation is auditable.
+
+        **What the gate actually tests** (``utils.q0_gate_admits``): the slice
+        is admitted when the source's sawtooth model is ACTIVE there, or, when
+        it is not, when the source's OWN axis safety factor ``|q0_dd|`` is at
+        or below ``q0_gate``.  ``|q0_target|`` -- the estimator mapping
+        un-renormalised above -- is the fallback basis, used ONLY when the
+        source carries no axis q at all; it reads systematically lower than
+        ``q0_dd``, and gating on it admitted idle-sawtooth ramp slices whose
+        own ``q0_dd`` sat above the threshold.  The basis actually used is
+        recorded as ``q0_gate_basis``.  Magnitudes throughout: q carries a
+        COCOS sign and a negative value would pass ``<= q0_gate`` trivially.
+
+        Consequence, and the point of the channel: where the recomputed
+        bootstrap has negligible core content this drives ``s_ohm -> ~1`` and
+        the mode reduces to ``"bootstrap"``, as the plan predicts (measured
+        0.9977 on the reference validation slice).  It diverges only where the
+        bootstrap carries real core current, which is exactly the regime the
+        q0 pin exists for.
+
+        **Measured accuracy of the first-order model.**  Matching the axis
+        current exactly (it IS exact by construction, to 1e-15) still left
+        q0 = 0.9871 against a target of 0.9794 on the reference slice -- an
+        0.8 % model error, comparable to the ~0.9 % scale adjustment being
+        made.  The Ip-closed hybrid reproduces its requested current as an
+        INTEGRAL but not pointwise on axis: the single-pass jphi-linterp solve
+        lands the achieved j_phi a fraction of a percent off the request, and
+        the re-converged geometry is not quite the frozen anchor either.  So
+        ``q0_tol`` is not a numerical nicety -- it is the band inside which
+        this linearisation is trustworthy, and a slice whose residual exceeds
+        it needs the corrector's MEASURED ``dq0/ds_ohm``, not a wider band.
+        """
+        import numpy as np
+
+        from .utils import close_ip_q0, unrenormalise_q0
+
+        psi_q = np.ascontiguousarray(np.asarray(geom["psi_q"], dtype=float))
+        psi_geom = np.asarray(geom["psi_N"], dtype=float)
+        # Every axis value at the SAME sample: psi_q[0], the psi_pad-clipped
+        # axis. Never psi_N = 0 exactly -- get_q silently collapses the surface
+        # tracer onto the magnetic axis there (fsa_current_geometry docstring).
+        _ax = lambda j: float(np.interp(psi_q[0], psi_geom,
+                                        np.asarray(j, dtype=float)))
+        q0_anchor = float(np.asarray(eq_snap.get_q(psi=psi_q.copy())[1],
+                                     dtype=float)[0])
+        # ACHIEVED: the anchor's GS-reconstructed own profile (round-trips to
+        # its achieved Ip).  REQUESTED: the source total that was handed in.
+        # Their ratio IS TokaMaker's Ip renormalisation of the anchor.
+        j_achieved0 = float(np.asarray(probe, dtype=float)[0])
+        j_requested0 = _ax(FUSE_tot)
+        # The algebra lives in utils.unrenormalise_q0 so the tests exercise
+        # the SHIPPED formula, not a re-derivation (same rule as close_ip).
+        q0_target = unrenormalise_q0(q0_anchor, j_achieved0, j_requested0)
+        j_renorm_ratio = j_achieved0 / j_requested0
+        j_ref0 = j_requested0
+        j_ind0, j_bs0, j_fix0 = _ax(j_ind), _ax(j_BS_swb), _ax(j_fixed)
+
+        saw = dict(getattr(bl, "sawtooth", None) or {})
+        q0_dd = saw.get("q0_dd")
+        saw_active = bool(saw.get("active"))
+        q0_gate = float(getattr(gc, "q0_gate", 1.1))
+        # The fallback basis is q0_TARGET -- the q0 actually being claimed
+        # for FUSE's own current -- not the renormalised anchor value, which
+        # on a slice with a large Ip deficit can sit on the other side of the
+        # threshold.  abs(): q carries a COCOS sign (this dd's own q[0] reads -0.99), and a
+        # negative target would make "q0 <= q0_gate" trivially true and bypass
+        # the gate silently.  Only the COMPARISON is on the magnitude -- the
+        # raw signed values are what get recorded, and the residual/Newton
+        # algebra is sign-agnostic because target and solved q share the
+        # estimator.
+        # Gate on the SOURCE's own |q0_dd| (physically clamped on a sawtoothing
+        # discharge) OR sawtooth activity; q0_target is the estimator mapping
+        # and reads lower -- gating on it admitted idle-sawtooth ramp slices.
+        from .utils import q0_gate_admits
+        gated, gate_basis = q0_gate_admits(saw_active, q0_dd, q0_target,
+                                           q0_gate)
+        print(f"[imas SWB-split:ohmic q0] q0_target={q0_target:.4f} "
+              f"(= q0_anchor {q0_anchor:.4f} x j_achieved/j_requested "
+              f"{j_renorm_ratio:.4f}, un-renormalised onto FUSE's own current; "
+              f"psi_N={psi_q[0]:.1e}) | "
+              f"q0_dd={'n/a' if q0_dd is None else format(q0_dd, '.4f')} | "
+              f"sawtooth source {'ACTIVE' if saw_active else ('idle' if saw.get('present') else 'absent')}"
+              f" (index {saw.get('source_index')}, max|j_par|="
+              f"{saw.get('j_par_max_abs', 0.0):.3e} A/m^2) | q0_gate={q0_gate:g} "
+              f"on {gate_basis}", flush=True)
+
+        extra = dict(
+            q0_target=q0_target,
+            q0_anchor=q0_anchor,
+            q0_target_source=(
+                "q0_anchor * (j_achieved0/j_requested0): the anchor copy_eq "
+                "snapshot is the converged forward solve of the source total, "
+                "but solve_jphi renormalises that SHAPE to Ip_target, so its "
+                "q0 belongs to a current FUSE never claimed; the ratio undoes "
+                "that to first order (q0 ~ 1/j_phi(0) at frozen geometry). "
+                "get_q at the psi_pad-clipped axis; never the dd's own q "
+                "estimator (issue #20)"),
+            q0_target_psi_N=float(psi_q[0]),
+            q0_dd=q0_dd,
+            q0_gate=q0_gate,
+            q0_gate_basis=gate_basis,
+            sawtooth_active=saw_active,
+            sawtooth_present=bool(saw.get("present", False)),
+            sawtooth_j_par_max_abs=float(saw.get("j_par_max_abs", 0.0)),
+            j_ref0_achieved=j_achieved0,
+            j_ref0_requested=j_requested0,
+            j_renorm_ratio=j_renorm_ratio,
+            j_ref0_used=j_ref0,
+            j_ind0=j_ind0, j_bs0=j_bs0, j_fix0=j_fix0,
+            n_extra_solves=0,
+        )
+        if not gated:
+            _gq = q0_dd if gate_basis.startswith("|q0_dd|") else q0_target
+            print("[imas SWB-split:ohmic q0] GATE REJECTED: no active sawtooth "
+                  f"source and {gate_basis} {abs(float(_gq)):.4f} > q0_gate {q0_gate:g} -- the "
+                  "q0 pin is not physically justified here (reversed shear / "
+                  "early ramp: the source's own q0 is model-dependent). "
+                  "Falling back to closure_channel='bootstrap'.", flush=True)
+            ohm_scale, bs_scale = close_ip(
+                "bootstrap", sgn * Ip_t, c_signed, ip_ind, ip_bs, ip_fix)
+            extra["sawtooth_verdict"] = "gate rejected -> bootstrap fallback"
+            return ohm_scale, bs_scale, extra, None
+
+        ohm_scale, bs_scale = close_ip_q0(
+            sgn * Ip_t, c_signed, ip_ind, ip_bs, ip_fix,
+            j_ind0, j_bs0, j_fix0, j_ref0)
+        j0_pred = ohm_scale * j_ind0 + bs_scale * j_bs0 + j_fix0
+        # First-order predicted q0 of the closed hybrid: q0 ~ 1/j0 at frozen
+        # geometry, so q0_pred = q0_target * j_ref0/j0_pred -- identically
+        # q0_target when the 2x2 solved exactly.  Kept as an explicit record
+        # because a bounds-clipped or degenerate solve shows up here first.
+        extra.update(
+            sawtooth_verdict="gate admitted -> predictor",
+            q0_predictor_ohm_scale=float(ohm_scale),
+            q0_predictor_bs_scale=float(bs_scale),
+            q0_axis_current_target=j_ref0,
+            q0_axis_current_predicted=float(j0_pred),
+            q0_predicted=float(q0_target * j_ref0 / j0_pred) if j0_pred else None,
+        )
+        print(f"[imas SWB-split:ohmic q0] predictor 2x2 (0 extra solves): "
+              f"s_ohm={ohm_scale:.4f} s_bs={bs_scale:.4f}; axis j "
+              f"{j0_pred/1e6:.4f} -> target {j_ref0/1e6:.4f} MA/m^2 "
+              f"(= FUSE's own requested axis j; the anchor's ACHIEVED was "
+              f"{j_achieved0/1e6:.4f}, ratio {j_renorm_ratio:.4f})", flush=True)
+        state = dict(
+            q0_target=q0_target, psi_q=psi_q,
+            j_ind=np.asarray(j_ind, dtype=float),
+            j_BS_swb=np.asarray(j_BS_swb, dtype=float),
+            j_fixed=np.asarray(j_fixed, dtype=float),
+            j_ind0=j_ind0, j_bs0=j_bs0, j_fix0=j_fix0,
+            ip_ind=float(ip_ind), ip_bs=float(ip_bs),
+            ohm_scale=float(ohm_scale), bs_scale=float(bs_scale),
+            q0_tol=float(getattr(gc, "q0_tol", 0.01)),
+            Ip_t=float(Ip_t), sgn=float(sgn), c_signed=float(c_signed),
+            ip_fix=float(ip_fix),
+        )
+        return ohm_scale, bs_scale, extra, state
+
+    @staticmethod
+    def _close_ip_q0_corrector(state, bl, mygs, solve_jphi, ip_of=None,
+                               roundtrip_gate=None):
+        """At most ONE Newton step on q0 after the closed-hybrid solve.
+
+        Returns the new ``nl_its`` when a corrector solve was taken, else
+        ``None``.  Never loops -- see the call site.  Ip stays exact by
+        construction (the step moves along the Ip-closed manifold
+        ``s_bs(s_ohm) = (sgn*Ip - c_signed - s_ohm*lin(ohm) - lin(fix))/lin(bs)``),
+        on the same sign-paired constant the predictor closed on, so
+        the achieved-Ip error is recorded rather than defended.
+
+        **Every exit re-derives the closure-health record from the scales this
+        method actually delivered.**  The predictor's block is computed before
+        any of this runs; leaving it in place let a corrector that halved
+        ``bs_scale`` be recorded as unflagged, with the predictor's
+        ``f_BS_closed``.  ``Ip_hybrid`` and the assembly round-trip are
+        likewise re-taken on the delivered profile when *ip_of* /
+        *roundtrip_gate* are supplied (the corrector IS an assembly, and the
+        gate exists to check assemblies).
+
+        **A missed q0 is flagged, never retried.**  ``q0_tol`` is unchanged and
+        no branch here loops: a residual outside it on an admitted slice adds a
+        ``closure_limited`` reason so the Delta' consumer sees the same kind of
+        flag a missed l_i or an over-stretched ``bs_scale`` raises.
+
+        **Non-finite and degenerate inputs get their own named exits.**  A
+        non-finite solved q0 used to fall through ``abs(nan) <= tol`` into the
+        Newton branch and be reported as "q0 insensitive to s_ohm"; a bootstrap
+        with ~no current in the Ip measure used to raise ZeroDivisionError from
+        ``-ip_ind/ip_bs``.  Both now keep the predictor, say so by name, and are
+        flagged -- the same shape as the other two refusal branches, and the
+        same relative floor (``1e-6 * Ip_t``) :func:`~bouquet.utils.close_ip`
+        uses for the component it divides by.
+        """
+        import numpy as np
+
+        from .utils import closure_health
+
+        q0_target = state["q0_target"]
+        # Read q off a copy_eq() SNAPSHOT, never the live solver: the geqdsk
+        # save path already carries a suspected live-state mutation by the q
+        # tracer, and a diagnostic read must not be able to move the
+        # equilibrium the baseline is about to be archived from.
+        q0_tok = float(np.asarray(mygs.copy_eq().get_q(psi=state["psi_q"].copy())[1],
+                                  dtype=float)[0])
+        res = q0_tok - q0_target
+        rec = dict(q0_solved_predictor=q0_tok,
+                   q0_predictor_residual=res,
+                   q0_tol=state["q0_tol"])
+        nl_out = None
+        if not (np.isfinite(q0_tok) and np.isfinite(res)):
+            # BEFORE the tolerance test: abs(nan) <= tol is False, so a
+            # non-finite q0 otherwise reaches the Newton branch and is
+            # mis-reported as an insensitivity.  An unreadable q0 is not a
+            # small residual -- it is no residual at all.
+            rec.update(n_extra_solves=0, q0_solved=q0_tok, q0_residual=res,
+                       sawtooth_verdict="predictor kept (q0 unreadable: "
+                                        "non-finite solved q0)")
+            print(f"[imas SWB-split:ohmic q0] solved q0={q0_tok} is NOT FINITE "
+                  "-- no residual and no Newton direction; keeping the "
+                  "predictor and flagging the slice closure-limited",
+                  flush=True)
+        elif abs(res) <= state["q0_tol"]:
+            rec.update(n_extra_solves=0,
+                       sawtooth_verdict="predictor (0 extra solves)",
+                       q0_solved=q0_tok, q0_residual=res)
+            print(f"[imas SWB-split:ohmic q0] solved q0={q0_tok:.4f} vs "
+                  f"q0_target={q0_target:.4f} (residual {res:+.4f}, tol "
+                  f"{state['q0_tol']:g}) -- predictor accepted, no extra solve",
+                  flush=True)
+        elif abs(state["ip_bs"]) < 1e-6 * state["Ip_t"]:
+            # The Newton step moves along the Ip-closed manifold
+            # s_bs(s_ohm) = (sgn*Ip - c - s_ohm*lin(ohm) - lin(fix))/lin(bs),
+            # which does not exist when the bootstrap carries ~no current in
+            # the Ip measure.  close_ip's own relative floor, by name, instead
+            # of a ZeroDivisionError two lines down.  (close_ip_q0's
+            # determinant can clear its floor with ip_bs == 0 whenever j_bs0
+            # has core content, so the predictor really can hand this over.)
+            rec.update(n_extra_solves=0, q0_solved=q0_tok, q0_residual=res,
+                       sawtooth_verdict="predictor kept (j_BS integrates to "
+                                        "~0; no Ip-closed manifold to step "
+                                        "along)")
+            print("[imas SWB-split:ohmic q0] j_BS integrates to "
+                  f"{state['ip_bs']:.3e} A (< 1e-6 x Ip_target) -- the "
+                  "Ip-closed manifold is degenerate in s_bs; keeping the "
+                  f"predictor and recording the residual {res:+.4f}",
+                  flush=True)
+        else:
+            # dq0/ds_ohm along the Ip-closed manifold, from q0 ~ 1/j0:
+            #   ds_bs/ds_ohm = -lin(ohm)/lin(bs)
+            #   dj0/ds_ohm   = j_ind0 + j_bs0 * ds_bs/ds_ohm
+            #   dq0/ds_ohm   = -q0 * (dj0/ds_ohm) / j0
+            dsbs = -state["ip_ind"] / state["ip_bs"]
+            dj0 = state["j_ind0"] + state["j_bs0"] * dsbs
+            j0 = (state["ohm_scale"] * state["j_ind0"]
+                  + state["bs_scale"] * state["j_bs0"] + state["j_fix0"])
+            dq0ds = -q0_tok * dj0 / j0 if j0 else 0.0
+            if not np.isfinite(dq0ds) or abs(dq0ds) < 1e-9:
+                rec.update(n_extra_solves=0, q0_solved=q0_tok, q0_residual=res,
+                           sawtooth_verdict="predictor kept (q0 insensitive to "
+                                            "s_ohm along the Ip-closed manifold)")
+                print("[imas SWB-split:ohmic q0] dq0/ds_ohm ~ 0 -- no usable "
+                      "Newton direction; keeping the predictor and recording "
+                      f"the residual {res:+.4f}", flush=True)
+            else:
+                s_new = state["ohm_scale"] + (q0_target - q0_tok) / dq0ds
+                sbs_new = (state["sgn"] * state["Ip_t"] - state["c_signed"]
+                           - s_new * state["ip_ind"]
+                           - state["ip_fix"]) / state["ip_bs"]
+                if not (0.2 < s_new < 5.0 and 0.2 < sbs_new < 5.0):
+                    rec.update(n_extra_solves=0, q0_solved=q0_tok,
+                               q0_residual=res,
+                               q0_corrector_ohm_scale=float(s_new),
+                               q0_corrector_bs_scale=float(sbs_new),
+                               sawtooth_verdict="predictor kept (corrector step "
+                                                "leaves the (0.2, 5) scale bounds)")
+                    print(f"[imas SWB-split:ohmic q0] Newton step would give "
+                          f"s_ohm={s_new:.3f} s_bs={sbs_new:.3f}, outside "
+                          "(0.2, 5) -- keeping the predictor and recording the "
+                          f"residual {res:+.4f}", flush=True)
+                else:
+                    bl.ohm_scale = float(s_new)
+                    bl.bs_scale = float(sbs_new)
+                    bl.j_inductive = s_new * state["j_ind"]
+                    bl.j_BS = sbs_new * state["j_BS_swb"]
+                    bl.j_phi = bl.j_inductive + bl.j_BS + state["j_fixed"]
+                    nl_out = solve_jphi(np.asarray(bl.j_phi, dtype=float))
+                    q0_new = float(np.asarray(
+                        mygs.copy_eq().get_q(psi=state["psi_q"].copy())[1],
+                        dtype=float)[0])
+                    rec.update(n_extra_solves=1,
+                               q0_corrector_ohm_scale=float(s_new),
+                               q0_corrector_bs_scale=float(sbs_new),
+                               q0_dq0_ds_ohm=float(dq0ds),
+                               q0_solved=q0_new, q0_residual=q0_new - q0_target,
+                               sawtooth_verdict="predictor + 1 corrector solve")
+                    print(f"[imas SWB-split:ohmic q0] 1 corrector solve: "
+                          f"s_ohm {state['ohm_scale']:.4f}->{s_new:.4f}, "
+                          f"s_bs {state['bs_scale']:.4f}->{sbs_new:.4f}; "
+                          f"q0 {q0_tok:.4f}->{q0_new:.4f} vs target {q0_target:.4f} "
+                          f"(residual {q0_new - q0_target:+.4f})", flush=True)
+        rec["ohm_scale"] = float(getattr(bl, "ohm_scale", 1.0))
+        rec["bs_scale"] = float(getattr(bl, "bs_scale", 1.0))
+        # ---- closure health, re-derived from the DELIVERED scales ----------
+        # The predictor's block was computed from the predictor's scales; a
+        # corrector step replaces both, so f_BS_closed, closure_limited and
+        # its reasons all have to be re-taken or they describe an equilibrium
+        # this run did not deliver.  Same function, same thresholds.
+        _health = closure_health(rec["ohm_scale"], rec["bs_scale"],
+                                 state["sgn"] * state["Ip_t"],
+                                 state["c_signed"], state["ip_ind"],
+                                 state["ip_bs"], state["ip_fix"])
+        _reasons = list(_health["closure_limited_reasons"])
+        _q0_res = rec.get("q0_residual")
+        _q0_tol = float(state["q0_tol"])
+        if _q0_res is None or not np.isfinite(float(_q0_res)):
+            _reasons.append("q0 residual is not finite after the corrector")
+        elif abs(float(_q0_res)) > _q0_tol:
+            # Flag only -- never a retry, and q0_tol itself is untouched.  The
+            # channel deliberately spends at most one extra solve; what it owes
+            # the consumer is that a slice it could not land on q0 is not
+            # indistinguishable from one it did.
+            _reasons.append(f"q0 missed by {float(_q0_res):+.4f} "
+                            f"(> q0_tol {_q0_tol:g}) after the corrector")
+        _health["closure_limited_reasons"] = tuple(_reasons)
+        _health["closure_limited"] = bool(_reasons)
+        _health["closure_limited_thresholds"] = dict(
+            _health["closure_limited_thresholds"], q0_tol=_q0_tol)
+        rec.update(_health)
+        if _health["closure_limited"]:
+            print("[imas SWB-split:ohmic q0] WARNING closure-limited after the "
+                  "corrector: " + "; ".join(_reasons)
+                  + " -- treat this slice's current split (and any Delta' "
+                    "built on it) as unvalidated", flush=True)
+        # ---- the assembly gates, re-taken on the delivered profile ---------
+        if ip_of is not None:
+            rec["Ip_hybrid"] = float(ip_of(bl.j_phi))
+            if roundtrip_gate is not None:
+                rec["fsa_roundtrip_post_corrector_err_pct"] = float(
+                    roundtrip_gate(rec["Ip_hybrid"]))
+        if getattr(bl, "ip_closure", None) is not None:
+            bl.ip_closure.update(rec)
+        return nl_out
+
     def _forward_solve_imas_baseline(self):
         """Forward GS solve of the IMAS baseline (j_phi + pressure) on mygs.
 
@@ -910,6 +1296,10 @@ class Bouquet:
         #   "rescale" -> rescale SWB by one factor so the proxy l_i matches the
         #                FUSE source; fully self-consistent (no fixed profile).
         # The SWB bootstrap is floored at 0 first (drops the inner negative lobe).
+        # closure_channel="sawtooth_bootstrap" carries state from the (solve-free)
+        # predictor to the at-most-one-solve corrector that runs AFTER the common
+        # tail's forward solve; None everywhere else.
+        _q0_state = None
         if self.config.generation.recalculate_j_BS:
             from .TokaMaker_interface import (_swb_jbs_to_toroidal,
                                               smooth_jbs_transition)
@@ -935,12 +1325,16 @@ class Bouquet:
                 # Validate the channel BEFORE solve_with_bootstrap: the
                 # run-time dispatch would otherwise burn the full SWB
                 # iteration sequence and only then refuse a typo.
+                from .utils import warn_deprecated_channel
+                warn_deprecated_channel(getattr(gc, "closure_channel",
+                                                "bootstrap"))
                 if str(getattr(gc, "closure_channel", "bootstrap")) \
-                        not in ("bootstrap", "ohmic"):
+                        not in ("bootstrap", "ohmic", "sawtooth_bootstrap"):
                     raise ValueError(
                         f"unknown closure_channel "
                         f"{gc.closure_channel!r} "
-                        "(expected 'ohmic' or 'bootstrap')")
+                        "(expected 'ohmic', 'bootstrap' or "
+                        "'sawtooth_bootstrap')")
                 from .utils import fsa_current_geometry as _fcg
                 from .physics import capture_equilibrium_fsa as _cef
                 _anchor = {"eq": mygs.copy_eq()}
@@ -1183,28 +1577,64 @@ class Bouquet:
                 # run both to bracket the closure uncertainty.  The algebra
                 # and its refusals live in utils.close_ip so the tests
                 # exercise the SHIPPED formulas, not a re-derivation.
+                # "sawtooth_bootstrap" adds a SECOND target (q0) and so
+                # determines BOTH scales -- see the block below.
                 _chan = str(getattr(gc, "closure_channel", "bootstrap"))
-                ohm_scale, bs_scale = close_ip(
-                    _chan, _Ip_signed, _c_signed, ip_ind, ip_bs, ip_fix)
+                _q0_extra = {}
+                if _chan == "sawtooth_bootstrap":
+                    # The q0 channel closes the SAME affine identity, so it
+                    # gets the same sign-paired (target, constant) pair.
+                    ohm_scale, bs_scale, _q0_extra, _q0_state = \
+                        self._close_ip_q0_predictor(
+                            gc, bl, _eq_snap, _geom, _probe, psi_N,
+                            j_ind, j_BS_swb, j_fixed, FUSE_tot,
+                            sgn, Ip_t, _c_signed, ip_ind, ip_bs, ip_fix,
+                            close_ip)
+                else:
+                    ohm_scale, bs_scale = close_ip(
+                        _chan, _Ip_signed, _c_signed, ip_ind, ip_bs, ip_fix)
                 bl.jBS_diff = None
                 bl.bs_scale = float(bs_scale)
                 bl.ohm_scale = float(ohm_scale)
                 bl.j_BS = bs_scale * j_BS_swb
                 bl.j_inductive = ohm_scale * j_ind
                 bl.j_phi = bl.j_inductive + bl.j_BS + j_fixed
-                # Self-check on the SAME affine measure the closure solved:
+                # Round-trip budget on the ASSEMBLY of the closed hybrid (a
+                # wrong component, a double-counted affine term, a misapplied
+                # sign) -- machine precision, not a physics acceptance.  One
+                # definition, used at BOTH assemblies: here, and again on
+                # whatever the q0 corrector delivers.  Non-finite is a refusal,
+                # not a pass: abs(nan) > tol is False, so the profile the gate
+                # exists to catch would otherwise sail through it.
+                def _ip_roundtrip_check(ip_closed):
+                    _e = 100.0 * (abs(float(ip_closed)) - Ip_t) / Ip_t
+                    if not np.isfinite(_e) or abs(_e) > 0.05:
+                        raise RuntimeError(
+                            f"ohmic mode: closed hybrid integrates to {_e:+.3f}% "
+                            "of Ip_target after closure -- algebra error, refusing")
+                    return _e
+                # ... and it is fed the SAME affine measure the closure solved:
                 # linear part + the SIGNED constant.  _ip() adds the unsigned
                 # _c_affine, so on sgn=-1 data it would disagree with the
                 # closure by 2c and fail a correct result.  Identical to
-                # _ip(bl.j_phi) whenever sgn == +1.
-                _closed_err = 100.0 * (
-                    abs(_lin(bl.j_phi) + _c_signed) - Ip_t) / Ip_t
-                if abs(_closed_err) > 0.05:
-                    raise RuntimeError(
-                        f"ohmic mode: closed hybrid integrates to {_closed_err:+.3f}% "
-                        "of Ip_target after closure -- algebra error, refusing")
+                # _ip(bl.j_phi) whenever sgn == +1.  The corrector is handed
+                # this same measure (ip_of below), not _ip.
+                _ip_signed = lambda _j: float(_lin(_j) + _c_signed)
+                _closed_err = _ip_roundtrip_check(_ip_signed(bl.j_phi))
                 _jd = getattr(bl, "jphi_diff", None)
                 ip_jd = _lin(k2e(_jd)) if _jd is not None else 0.0
+                # Closure health, every channel: how much reconciliation one
+                # scale was asked to do.  closure-limited slices are flagged
+                # for downstream (Delta') consumers -- not refused, but not
+                # to be read as validated either.
+                from .utils import closure_health
+                _health = closure_health(ohm_scale, bs_scale, _Ip_signed,
+                                         _c_signed, ip_ind, ip_bs, ip_fix)
+                if _health["closure_limited"]:
+                    print("[imas SWB-split:ohmic] WARNING closure-limited: "
+                          + "; ".join(_health["closure_limited_reasons"])
+                          + " -- treat this slice's current split (and any "
+                          "Delta' built on it) as unvalidated", flush=True)
                 _oft_tot, _oft_bs = _ip_oft(FUSE_tot), _ip_oft(j_BS_swb)
                 _oft_fix, _oft_ind = _ip_oft(j_fixed), _ip_oft(j_ind)
                 _cyl_tot, _cyl_bs = _ip_cyl(FUSE_tot), _ip_cyl(j_BS_swb)
@@ -1230,6 +1660,7 @@ class Bouquet:
                     fuse_total_err_pct=fuse_tot_err_pct,
                     Ip_ohmic_unscaled=ip_ind, Ip_jBS_swb=ip_bs, Ip_fixed=ip_fix,
                     closure_channel=_chan,
+                    **_health,
                     ohm_scale=float(ohm_scale), bs_scale=float(getattr(bl, 'bs_scale', 1.0)),
                     # On the same signed affine measure the closure solved
                     # (identical to _ip(bl.j_phi) for the positive convention).
@@ -1256,6 +1687,8 @@ class Bouquet:
                     proxy_fuse_total_err_pct=100.0 * (abs(_cyl_tot) - Ip_t) / Ip_t,
                     proxy_ohm_scale_would_be=_would_be(_cyl_tot, _cyl_bs,
                                                        _cyl_fix, _cyl_ind))
+                if _q0_extra:
+                    bl.ip_closure.update(_q0_extra)
                 print(f"[imas SWB-split:ohmic] channel={_chan} ohm_scale={ohm_scale:.4f} bs_scale={float(getattr(bl,'bs_scale',1.0)):.4f}  "
                       f"linear Ip parts: ohm={ip_ind/1e6:.3f} jBS={ip_bs/1e6:.3f} "
                       f"fixed={ip_fix/1e6:.3f} + P'-term c={_c_affine/1e6:+.4f} MA "
@@ -1307,6 +1740,23 @@ class Bouquet:
                     damping=0.5, protect_state=True)
                 print(f"[imas corrective-jphi] converged in {_n_corr} iteration(s)")
 
+            # ---- q0 corrector (closure_channel="sawtooth_bootstrap") --------
+            # The predictor above is FIRST ORDER (q0 ~ 1/j_phi(0) at the frozen
+            # anchor geometry).  The closed-hybrid solve that just ran is the
+            # first time the real q0 is knowable, and it costs nothing extra to
+            # read it.  If the predictor already landed inside q0_tol we are
+            # done at ZERO extra solves; otherwise ONE analytic Newton step
+            # along the Ip-closed manifold and whatever that gives is accepted
+            # and recorded.  Deliberately no loop: this channel exists to cost
+            # about what "bootstrap" costs, and a residual that is reported is
+            # worth more than a residual that is iterated away invisibly.
+            if _q0_state is not None:
+                _nl_corr = self._close_ip_q0_corrector(
+                    _q0_state, bl, mygs, solve_jphi,
+                    ip_of=_ip_signed, roundtrip_gate=_ip_roundtrip_check)
+                if _nl_corr is not None:
+                    nl_its = _nl_corr    # the state l_i/coils are read from
+
         # Convergence sanity: the solve completed (it raises otherwise), so
         # verify it landed on the requested current before trusting its l_i.
         Ip_achieved = float(mygs.get_globals()[0])
@@ -1331,6 +1781,21 @@ class Bouquet:
                        ohm_scale=float(getattr(bl, "ohm_scale", 1.0)))
         if getattr(bl, "ip_closure", None):
             metrics["ip_closure"] = dict(bl.ip_closure)
+            metrics["closure_limited"] = bool(
+                bl.ip_closure.get("closure_limited", False))
+        # Sawtooth gate inputs travel with EVERY IMAS baseline, not just the
+        # runs that used closure_channel="sawtooth_bootstrap": a fan-out
+        # needs to see which slices the gate would admit or reject without
+        # re-reading a 100s-of-MB dd per slice, and the q0-channel run is
+        # exactly the run you do not have yet when you are choosing slices.
+        # q0_target lands here too when the channel computed one.
+        if getattr(bl, "sawtooth", None):
+            _sw = dict(bl.sawtooth)
+            _icl = getattr(bl, "ip_closure", None) or {}
+            if "q0_target" in _icl:
+                _sw["q0_target"] = _icl["q0_target"]
+                _sw["q0_anchor"] = _icl.get("q0_anchor")
+            metrics["sawtooth"] = _sw
         bl.li_metrics = metrics
         # Target TokaMaker li_3 ('iter').  The IMAS path is not itself affected
         # by the geqdsk estimator mismatch (both sides come from TokaMaker),
@@ -1675,13 +2140,13 @@ class Bouquet:
                                 f"('diff','rescale','ohmic')")
             elif gc.jBS_baseline_mode == "ohmic":
                 if str(getattr(gc, "closure_channel", "bootstrap")) \
-                        not in ("bootstrap", "ohmic"):
+                        not in ("bootstrap", "ohmic", "sawtooth_bootstrap"):
                     # catch the typo HERE: the run-time dispatch only reaches
                     # its unknown-channel refusal after the full SWB solve
                     problems.append(
                         f"closure_channel="
                         f"{gc.closure_channel!r} not in "
-                        f"('bootstrap','ohmic')")
+                        f"('bootstrap','ohmic','sawtooth_bootstrap')")
                 # Baseline-only for now: the draw path's sigma=0 reproduction
                 # of an ohmic-closed baseline has not been verified, so the
                 # UQ ensemble refuses the mode -- UNLESS workflow='custom'

@@ -2369,15 +2369,41 @@ def perturb_kinetic_equilibrium(
         # recon (verified 2026-05: identical state+kinetics converge with
         # weak reg, diverge with 1e4 reg).  Stash the strong reg, install a
         # weak recon-like reg for the whole SWB block, restore in finally.
+        #
+        # "Weak" must mean "the same place, held loosely" -- not "pulled toward
+        # zero".  Hard-coding target=0 stopped being the recon setup the moment
+        # SolverConfig.coil_reg could carry measured-current targets: the
+        # exploratory solve was then pulled along the very coil null space the
+        # targets exist to remove, and it went (measured on a D3D case: the
+        # recon-anchor coil carrying that null space sat tens of kA-turn, of
+        # order 100 sigma of the coil measurement precision, away from where the
+        # derived reg puts it, on half the draws).  So when the targets exist,
+        # Bouquet._apply_coil_reg publishes mygs._weak_coil_reg -- the SAME
+        # terms, at this same weak magnitude -- and it is used here.  A caller
+        # that reaches perturb_kinetic_equilibrium without that stash (no
+        # coil_reg, or not via the Bouquet class) keeps the historical
+        # toward-zero build below, bit-identically.
+        #
+        # The weight stays 1.0 on purpose: the targets are nearly free (converged
+        # coil currents move by at most ~0.2 sigma, boundary RMS by ~0.03 mm,
+        # with yield and failure rate unchanged), while raising the weight
+        # tripled that endpoint shift and cost up to +0.5 mm of boundary RMS for
+        # no measured benefit.  Note the endpoint IS touched, slightly: the
+        # strong reg restored in the finally targets _initial_coils and the
+        # constrained phase runs under it, but the exploratory path feeds the
+        # state that phase starts from, so "unaffected" is only true to well
+        # inside the coil measurement precision -- not bitwise.
         _stashed_reg = getattr(mygs, '_strong_coil_reg', None)
         if _stashed_reg is not None:
             try:
-                _weak_rt = []
-                for _rn in mygs.coil_sets:
+                _weak_rt = getattr(mygs, '_weak_coil_reg', None)
+                if _weak_rt is None:
+                    _weak_rt = []
+                    for _rn in mygs.coil_sets:
+                        _weak_rt.append(mygs.coil_reg_term(
+                            {_rn: 1.0}, target=0.0, weight=1.0))
                     _weak_rt.append(mygs.coil_reg_term(
-                        {_rn: 1.0}, target=0.0, weight=1.0))
-                _weak_rt.append(mygs.coil_reg_term(
-                    {'#VSC': 1.0}, target=0.0, weight=1e-2))
+                        {'#VSC': 1.0}, target=0.0, weight=1e-2))
                 mygs.set_coil_reg(reg_terms=_weak_rt)
             except Exception as _wreg_exc:
                 print(f"  [SWB-hygiene] weak-reg install failed "
@@ -3994,9 +4020,13 @@ def generate_bouquet(
         # measure drift relative to -- not the inverse-mode recon
         # coils, which differ slightly from forward-mode equilibrium.
         # Step 2: install soft regularization targeting the post-q-check
-        # forward-mode coils.  Replaces whatever soft reg the user
-        # installed before generate_bouquet (typically target=0 weight=1.0
-        # from the recon setup, which is too loose for perturbed solves).
+        # forward-mode coils.  Replaces whatever soft reg was installed before
+        # generate_bouquet -- target=0 weight=1.0 ONLY when SolverConfig.coil_reg
+        # is empty; with coil_reg populated it is the measured-current targets
+        # instead.  Either way it is too loose for perturbed solves.  This step
+        # is indifferent to which it was: the target installed here is
+        # _initial_coils, the baseline's OWN converged currents, so a baseline
+        # pinned to the measured currents is carried through to every draw.
         _rt = []
         for _name in mygs.coil_sets:
             _target = float(_initial_coils.get(_name, 0.0))

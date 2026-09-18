@@ -347,11 +347,10 @@ class Bouquet:
                    if sc.saddle_weights is not None else None)
             mygs.set_saddle_constraints(_sad, weights=_sw)
 
-        # Weak coil regularisation toward zero + small VSC freedom
-        reg_terms = [mygs.coil_reg_term({name: 1.0}, target=0.0, weight=1.0)
-                     for name in mygs.coil_sets]
-        reg_terms.append(mygs.coil_reg_term({"#VSC": 1.0}, target=0.0, weight=1e-2))
-        mygs.set_coil_reg(reg_terms=reg_terms)
+        # Coil regularisation: SolverConfig.coil_reg targets when given, else
+        # the historical pull toward zero + small VSC freedom.  Also publishes
+        # the WEAK exploratory reg the draw path swaps in for the SWB phase.
+        self._apply_coil_reg(mygs)
 
         self.mygs = mygs
         self._myOFT = myOFT          # keep the env alive
@@ -364,6 +363,216 @@ class Bouquet:
         self._clean_eq = mygs.copy_eq() if hasattr(mygs, "copy_eq") else None
         return self
 
+    def _apply_coil_reg(self, mygs):
+        """Install the coil regularisation: configured targets, else toward zero.
+
+        ``SolverConfig.coil_reg`` is a list of
+        ``{"coils": {name: coeff}, "target": float, "weight": float}``. When it
+        is empty the historical behaviour is used unchanged -- every coil pulled
+        toward ZERO at unit weight, plus a weak VSC term.
+
+        Also publishes ``mygs._weak_coil_reg``: the SAME terms at the historical
+        WEAK magnitude (weight 1.0 on every coil term, the VSC channel at 1e-2),
+        which the draw path swaps in for the exploratory SWB phase in place of
+        the strong reg. The point is the TARGETS: once coil_reg carries
+        measured-current targets, a weak reg aimed at zero is not "the recon
+        setup held loosely", it is a pull along the very coil null space the
+        targets exist to remove, and the exploratory solve follows it (measured:
+        the recon-anchor moved tens of kA-turn, of order 100 sigma of the coil
+        measurement precision, on the coil carrying that null space). The weight
+        is deliberately NOT raised: at weight 1.0 the converged coil currents
+        move by at most ~0.2 sigma and boundary RMS by ~0.03 mm, with yield and
+        failure rate unchanged, whereas raising it tripled the endpoint shift
+        and cost up to half a millimetre of boundary RMS for no measured gain.
+        With ``coil_reg`` empty nothing is published and the draw path builds
+        its historical toward-zero weak reg, so that case is bit-identical.
+
+        Called from BOTH :meth:`setup_solver` and :meth:`_reset_solver_state`.
+        That matters: ``_repoint_imas_geometry`` resets the solver immediately
+        before the IMAS baseline solve, so targets installed only at setup were
+        silently discarded and the solve ran on the zero-target default. A
+        1e8-weight target moved its coil by 0.2 % for exactly that reason.
+        """
+        spec = list(getattr(self.config.solver, "coil_reg", None) or [])
+        if spec:
+            # Drop terms naming coils this MESH does not model. A measurement
+            # source is not mesh-specific: DIII-D pf_active carries all 24
+            # circuits while the shipped D3D mesh models 20 coil sets (no
+            # E567UP/E567DN/E89UP/E89DN), and coil_reg_term raises KeyError on
+            # an unknown name -- which would kill setup_solver outright.
+            known = set(mygs.coil_sets) | {"#VSC"}
+            dropped = [t for t in spec if not set(t["coils"]) <= known]
+            spec = [t for t in spec if set(t["coils"]) <= known]
+            if dropped:
+                # Report the whole TERM, not just the off-mesh coil. A term is
+                # dropped WHOLE, so a difference constraint like
+                # {"F1A": 1.0, "E567UP": -1.0} also releases F1A, which then falls
+                # through to the target=0, weight=1 default -- the opposite of what
+                # was asked. Naming only E567UP would leave the operator unaware
+                # that F1A moved too.
+                import warnings
+                warnings.warn(
+                    "coil_reg: dropping %d term(s) that name coil(s) absent from this "
+                    "mesh. EVERY coil in a dropped term loses its target and reverts "
+                    "to the target=0, weight=1 default: %s"
+                    % (len(dropped),
+                       "; ".join("{%s} (absent: %s)"
+                                 % (", ".join(sorted(t["coils"])),
+                                    ", ".join(sorted(set(t["coils"]) - known)))
+                                 for t in dropped)))
+            spec = self._check_coil_reg_turns(mygs, spec)
+            named = {c for t in spec for c in t["coils"]}
+
+            def _build(exploratory):
+                """The term list: configured weights, or the weak exploratory one.
+
+                Same terms and same targets either way -- ``exploratory`` only
+                drops every coil term to the historical weak weight of 1.0 and
+                leaves the VSC channel its own weak term (a #VSC term in the
+                config is a constraint for the CONSTRAINED phase; carrying it at
+                weight 1.0 into the exploration would clamp the vertical-stability
+                channel the exploration needs).  Coils no term names keep the
+                zero target they have always had -- there is no measured target
+                for them to be held at.
+                """
+                out = [mygs.coil_reg_term(
+                           dict(t["coils"]), target=float(t.get("target", 0.0)),
+                           weight=1.0 if exploratory else float(t.get("weight", 1.0)))
+                       for t in spec
+                       if not (exploratory and set(t["coils"]) == {"#VSC"})]
+                out += [mygs.coil_reg_term({n: 1.0}, target=0.0, weight=1.0)
+                        for n in mygs.coil_sets if n not in named]
+                if exploratory or "#VSC" not in named:
+                    out.append(
+                        mygs.coil_reg_term({"#VSC": 1.0}, target=0.0, weight=1e-2))
+                return out
+
+            reg_terms = _build(False)
+            mygs._weak_coil_reg = _build(True)
+        else:
+            reg_terms = [mygs.coil_reg_term({name: 1.0}, target=0.0, weight=1.0)
+                         for name in mygs.coil_sets]
+            reg_terms.append(
+                mygs.coil_reg_term({"#VSC": 1.0}, target=0.0, weight=1e-2))
+            # no measured targets -> nothing to publish, and an earlier slice's
+            # stash must not survive into a run that has none
+            if hasattr(mygs, "_weak_coil_reg"):
+                del mygs._weak_coil_reg
+        mygs.set_coil_reg(reg_terms=reg_terms)
+        return reg_terms
+
+    @staticmethod
+    def _mesh_net_turns(mygs, name):
+        """Turns this MESH carries for coil set *name*, or None if unknowable.
+
+        TokaMaker sums ``nturns`` over a coil set's sub-coils into
+        ``coil_sets[name]["net_turns"]``. A stub/mesh-less solver object (or an
+        older build) may expose only the names, in which case the convention
+        cannot be confirmed and the caller must treat it as unconfirmed.
+        """
+        sets = getattr(mygs, "coil_sets", None)
+        info = sets.get(name) if isinstance(sets, dict) else None
+        try:
+            return float(info["net_turns"])
+        except (TypeError, KeyError, ValueError):
+            return None
+
+    def _check_coil_reg_turns(self, mygs, spec):
+        """Drop terms whose circuit-amps -> ampere-turns factor the mesh contradicts.
+
+        ``coil_targets`` converts a measured circuit current with the DEVICE's
+        turn table, but which side carries the turns is a property of the MESH:
+        the shipped D3D mesh gives its F-coil sets ``net_turns = 1``, so the
+        x58/x55 factor supplies them, and gives ECOILA/ECOILB ``net_turns = 61``,
+        so those convert at x1.0. Keyed by device, that x1.0 is an ASSUMPTION
+        about one mesh -- a second registered mesh of the same machine (e.g. one
+        that splits the E-coil into E567UP/E567DN/E89UP/E89DN) would take the
+        same implicit 1.0 and, if it does not carry the turns either, be pinned
+        to a target wrong by its whole turn count at W0 = 100, i.e. a strong,
+        confidently wrong constraint.
+
+        Exactly one side must carry the turns, which is checkable without
+        knowing the physical count: a factor != 1 needs ``net_turns == 1``, and
+        a factor of 1 needs ``net_turns != 1``. Both-1 (turns nowhere) and
+        neither-1 (turns twice) are refused, as is a mesh that cannot report
+        ``net_turns`` at all. A refused term is dropped with the same warning
+        the off-mesh drop gives -- its coils revert to target=0, weight=1, which
+        is the historical behaviour rather than a wrong strong target.
+
+        Only terms carrying a ``"turns"`` key are checked: that key is the
+        conversion CLAIM stamped by :func:`coil_targets.coil_reg_from_measured`.
+        A hand-built term makes no claim and is left alone.
+        """
+        bad = []
+        for t in spec:
+            f = t.get("turns")
+            if f is None:
+                continue
+            for c in t["coils"]:
+                if c == "#VSC":
+                    continue
+                nt = self._mesh_net_turns(mygs, c)
+                if nt is None:
+                    bad.append((t, c, f, "this mesh does not report net_turns"))
+                elif (float(f) == 1.0) == (nt == 1.0):
+                    bad.append((t, c, f, "mesh net_turns = %g" % nt))
+        if not bad:
+            return spec
+        import warnings
+        drop = {id(t) for t, _c, _f, _w in bad}
+        warnings.warn(
+            "coil_reg: dropping %d term(s) whose turns convention this mesh does not "
+            "confirm. The circuit-amps -> ampere-turns factor is a property of the "
+            "MESH, not of the device, so an unconfirmed factor would pin the coil to a "
+            "target wrong by its whole turn count -- at the configured weight. EVERY "
+            "coil in a dropped term reverts to the target=0, weight=1 default: %s. "
+            "Pass `turns` explicitly to coil_reg_from_measured for this mesh, or build "
+            "the term by hand (a term with no 'turns' key claims nothing and is not "
+            "checked)."
+            % (len(drop),
+               "; ".join("{%s} (%s: factor %g, %s)"
+                         % (", ".join(sorted(t["coils"])), c, float(f), why)
+                         for t, c, f, why in bad)))
+        return [t for t in spec if id(t) not in drop]
+
+    def _seed_coil_init(self, mygs):
+        """Seed the inverse iterate from ``SolverConfig.coil_init`` ({name: A-t}).
+
+        Distinct from ``coil_reg``: this sets a STARTING POINT on the degenerate
+        coil manifold without adding a term that fights the boundary.  Coils the
+        mesh does not model are dropped (a measurement covers more circuits than
+        a mesh models); coils the setting does not name keep whatever ``init_psi``
+        left them at.
+
+        Must run AFTER ``init_psi``, which reinitialises coil currents from the
+        regularisation and would overwrite an earlier set.
+
+        KNOWN NO-OP for the shipped inverse baseline solve: the inverse solver
+        re-solves every coil current at each Picard step, so the seed is
+        discarded before it can influence the converged answer.  It is kept
+        because it is the only hook for choosing a basin if a forward-mode or
+        warm-started baseline path is ever added, and because a silent
+        `set_coil_currents` buried in the hot baseline solve was itself the trap
+        -- it now lives in one named place.  Do not reach for it expecting the
+        baseline to move; use ``coil_reg`` (see :mod:`bouquet.coil_targets`).
+
+        Returns the dict that was installed, or None when the setting is unset.
+        """
+        ci = getattr(self.config.solver, "coil_init", None)
+        if not ci:
+            return None
+        if not hasattr(ci, "items"):
+            raise TypeError(
+                "solver.coil_init must be a {coil_name: current_A_turns} mapping, "
+                f"got {type(ci).__name__}")
+        known = set(mygs.coil_sets)
+        use = {k: float(v) for k, v in ci.items() if k in known}
+        cur, _ = mygs.get_coil_currents()
+        cur = dict(cur)
+        cur.update(use)
+        mygs.set_coil_currents(cur)
+        return cur
+
     def _reset_solver_state(self):
         """Restore the clean post-:meth:`setup_solver` coil state.
 
@@ -373,17 +582,16 @@ class Bouquet:
         leaves the coil currents at the last draw's drifted values. A
         subsequent slice in a :meth:`set_slice` sweep must inherit none of that.
         Restore the pristine post-setup equilibrium (zero coils) captured in
-        :meth:`setup_solver`, then re-apply the weak toward-zero reg and clear
-        any stashed drift bounds.
+        :meth:`setup_solver`, then re-apply the setup-time reg (the configured
+        targets, or the toward-zero default when there are none -- which also
+        refreshes the weak exploratory stash for THIS slice) and clear any
+        stashed drift bounds.
         """
         mygs = self.mygs
         # full reset of the equilibrium + coil currents to the post-setup state
         if getattr(self, "_clean_eq", None) is not None:
             mygs.replace_eq(source_eq=self._clean_eq)
-        reg_terms = [mygs.coil_reg_term({name: 1.0}, target=0.0, weight=1.0)
-                     for name in mygs.coil_sets]
-        reg_terms.append(mygs.coil_reg_term({"#VSC": 1.0}, target=0.0, weight=1e-2))
-        mygs.set_coil_reg(reg_terms=reg_terms)
+        self._apply_coil_reg(mygs)
         if hasattr(mygs, "_coil_drift_bounds"):
             mygs.set_coil_bounds(None)        # widen: prior slice had bounds set
             delattr(mygs, "_coil_drift_bounds")
@@ -615,6 +823,7 @@ class Bouquet:
         # init psi from the LCFS shape parameters
         R0, Z0, a, kappa, delta = _shape_from_boundary(self._boundary_RZ)
         mygs.init_psi(R0, Z0, a, kappa, delta)
+        self._seed_coil_init(mygs)
 
         # kinetic profiles + total pressure on the equilibrium grid (IMAS shares
         # psi_N between the kinetic and current grids).

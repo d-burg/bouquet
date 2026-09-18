@@ -63,8 +63,71 @@ class SolverConfig:
     saddle_targets: Optional["np.ndarray"] = None    # (N, 2) X-point pins
     saddle_weights: Optional["np.ndarray"] = None    # (N,); default 1.0 each
     coil_vsc: dict = field(default_factory=lambda: {"F9A": 1.0, "F9B": -1.0})
+    # Coil-current regularisation terms, each
+    #   {"coils": {name: coeff}, "target": float, "weight": float}
+    # Empty (default) => every coil pulled toward ZERO at unit weight, the
+    # historical behaviour. Populate to pin coils to measured currents; see
+    # bouquet.coil_targets.coil_reg_from_measured. Applied by
+    # Bouquet._apply_coil_reg at BOTH setup_solver and _reset_solver_state --
+    # the reset runs immediately before the IMAS baseline solve, so anything
+    # installed only at setup is discarded.
+    # When populated, these targets are also what the draw path's WEAK
+    # exploratory regularisation aims at (same targets, historical weight 1.0)
+    # instead of zero -- otherwise the exploration is pulled along the very coil
+    # null space the targets exist to remove. Empty => that path is unchanged.
     coil_reg: list = field(default_factory=list)
+    # Initial coil currents {name: A-t} for the IMAS baseline inverse solve --
+    # seeds the iteration in a chosen basin; does NOT constrain the answer.
+    # Applied by Bouquet._seed_coil_init, after init_psi. Unset => coils start
+    # where init_psi left them (historical behaviour).
+    # KNOWN NO-OP on the shipped path: the inverse solver re-solves every coil
+    # current at each Picard step, so the seed is discarded before it can change
+    # the converged baseline. It is retained as the single named hook for basin
+    # selection if a forward-mode or warm-started baseline is ever added. To move
+    # the baseline's coils use coil_reg (see bouquet.coil_targets), not this.
+    coil_init: Optional[dict] = None
     region_overrides: Optional[dict] = None          # special-case cond/coil dict edits
+
+    def __post_init__(self):
+        """Validate the coil settings here, not inside ``setup_solver``.
+
+        A malformed ``coil_reg`` entry used to die on ``set(t["coils"])`` with a
+        bare ``KeyError``/``TypeError`` naming neither the entry nor the field,
+        after the mesh had been loaded; ``coil_init`` was only type-checked when
+        ``_seed_coil_init`` ran. Both mistakes are config typos and both checks
+        are free, so they happen at construction.
+        """
+        if self.coil_reg is None:
+            self.coil_reg = []
+        if not isinstance(self.coil_reg, (list, tuple)):
+            raise TypeError(
+                "solver.coil_reg must be a list of "
+                "{'coils': {name: coeff}, 'target': float, 'weight': float} terms, got "
+                f"{type(self.coil_reg).__name__}")
+        for i, term in enumerate(self.coil_reg):
+            where = f"solver.coil_reg[{i}]"
+            if not isinstance(term, dict):
+                raise TypeError(f"{where} must be a dict, got {type(term).__name__}")
+            if "coils" not in term:
+                raise ValueError(
+                    f"{where} has no 'coils' key; every term names the coils it "
+                    "constrains as {name: coefficient}")
+            if not isinstance(term["coils"], dict) or not term["coils"]:
+                raise TypeError(
+                    f"{where}['coils'] must be a non-empty {{name: coefficient}} dict, "
+                    f"got {type(term['coils']).__name__}")
+            for key in ("target", "weight"):
+                if key in term:
+                    try:
+                        float(term[key])
+                    except (TypeError, ValueError):
+                        raise TypeError(
+                            f"{where}[{key!r}] must be a number, got "
+                            f"{type(term[key]).__name__}") from None
+        if self.coil_init is not None and not hasattr(self.coil_init, "items"):
+            raise TypeError(
+                "solver.coil_init must be a {coil_name: current_A_turns} mapping, got "
+                f"{type(self.coil_init).__name__}")
 
 
 # ---------------------------------------------------------------------------

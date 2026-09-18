@@ -708,6 +708,17 @@ def _pressure_components(bl, psi_eq=None):
     grid ``psi_eq``. The impurity term -- recomputed from the kinetics -- is
     regridded onto the total's grid before differencing. Single-grid archives
     (OMAS) skip this since the shapes already match.
+
+    KNOWN LIMITATION with fast ions.  The solve path derives ``Z_imp`` and
+    ``p_imp`` on the THERMAL electron density ``ne - z_fast``; this display
+    path cannot, because ``z_fast`` is not written to the archive (only
+    ``p_fast`` rides in the total).  So on a fast-ion source the impurity
+    term recomputed here is the uncorrected, inflated one, and the
+    impurity/fast split shown is NOT the split the GS solve used -- the
+    plotted impurity is too large and the fast remainder correspondingly too
+    small.  Thermal and total are unaffected, as is every solve-path
+    consumer.  Archiving ``z_fast`` is what would close this; until then the
+    decomposition is diagnostic only.
     """
     if "pressure" not in bl or "pressure_thermal" not in bl:
         return None

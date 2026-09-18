@@ -1705,6 +1705,18 @@ def perturb_kinetic_equilibrium(
     Zeff : ndarray
         Effective ion charge profile on ``psi_N`` (scalar accepted and
         broadcast). With the active zeff channel this is re-drawn per draw.
+        Assumed normalised to the FULL ``ne`` with a THERMAL-species
+        numerator; see ``z_fast``.
+    z_fast : ndarray or None
+        Fast-ion charge density :math:`\sum_s Z_s n_s^{fast}` [m^-3] on the
+        KINETIC grid (``psi_N_kinetic`` when given, else ``psi_N``).  Only
+        ``ne - z_fast`` is neutralised by thermal ions, so this is what
+        separates the thermal electron density from the total for the
+        impurity-charge inversion, the ``Zeff`` draw bounds and the impurity
+        pressure.  ``None`` (default) means no fast ions and reproduces the
+        pre-correction result bitwise.  It does NOT enter the pressure --
+        that is ``p_fast`` -- and the ``Zeff``/``ne`` handed to the bootstrap
+        solver deliberately stay the full-``ne`` pair.
     npsi : int
         Normalised poloidal flux grid size.
     p_thresh : float

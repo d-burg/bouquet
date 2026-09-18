@@ -54,6 +54,51 @@ def test_correction_is_inert_without_fast_ions():
     np.testing.assert_array_equal(ne_th, ne)
 
 
+def _no_fast_ion_sample(n=4096):
+    """A spread of realistic (ne, Zeff) with a consistent C6 main-ion density.
+
+    Deliberately wider and less round than ``_case``: the round-trip defect
+    below only shows on values that are not exact powers of two.
+    """
+    rng = np.random.default_rng(4096)
+    ne = rng.uniform(1.0e18, 1.0e20, n)
+    zeff = rng.uniform(1.0 + 1e-6, 6.0 - 1e-6, n)
+    ni = ne * (6.0 - zeff) / 5.0
+    return ne, ni, zeff
+
+
+def test_no_fast_ions_is_bit_identical_to_the_plain_inversion():
+    """BIT-identical, not approx.  ``z_fast`` absent or all-zero must
+    short-circuit to the plain inversion, so a source that carried no fast
+    ions before this change regenerates its archive unchanged."""
+    ne, ni, zeff = _no_fast_ion_sample()
+    plain = effective_impurity_charge(ne, ni, zeff)
+    for z_fast in (None, np.zeros_like(ne), np.zeros(ne.size)):
+        z, ne_th = impurity_charge_with_fast_ions(ne, ni, zeff, z_fast)
+        assert z == plain              # exact float equality, no tolerance
+        np.testing.assert_array_equal(ne_th, ne)
+
+
+def test_z_fast_defaults_to_none():
+    """The 4th argument is optional (it is a correction, not a requirement),
+    and omitting it is the no-fast-ion path."""
+    ne, ni, zeff = _no_fast_ion_sample(256)
+    z, ne_th = impurity_charge_with_fast_ions(ne, ni, zeff)
+    assert z == effective_impurity_charge(ne, ni, zeff)
+    np.testing.assert_array_equal(ne_th, ne)
+
+
+def test_the_renormalisation_round_trip_is_not_exact():
+    """Why the short-circuit is load-bearing: the general branch computes
+    ``zeff * ne / ne_th``, and with ne_th == ne that is NOT a floating-point
+    identity.  Z_imp is a float feeding impurity_pressure and the GS solve,
+    so without the short-circuit a no-fast-ion run could shift by ~1 ulp."""
+    ne, _ni, zeff = _no_fast_ion_sample()
+    round_trip = zeff * ne / ne
+    assert np.any(round_trip != zeff)
+    assert np.max(np.abs(round_trip - zeff)) < 1e-14   # ulp-scale, not physics
+
+
 def test_raw_bias_grows_with_fast_fraction():
     """Documents why the correction exists: the uncorrected call drifts
     monotonically off the true charge as the beam fraction rises."""
@@ -84,12 +129,20 @@ def test_imas_wiring_uses_the_helper():
 
 
 class TestThermalDrawPathConsistency:
-    """(b) follow-up: every impurity consumer must run on ne - z_fast.
+    """(b) follow-up: every SOLVE-PATH impurity consumer runs on ne - z_fast.
 
     The baseline reader derived Z_imp/p_imp on thermal ne while run.py's
     forward solves and the per-draw assembly still used the full ne with
     the thermal-derived Z_imp -- a sigma=0 pressure skew of
     e*z_fast*ti/Z_imp between reader and solver.
+
+    Scope, stated exactly rather than as "every consumer": this covers the
+    consumers that feed the GS solve.  The archive DISPLAY path
+    (``plotting._pressure_components``) is deliberately NOT covered and
+    stays uncorrected -- it recomputes the impurity term from archived
+    kinetics and ``z_fast`` is not archived, so it cannot subtract it.  The
+    limitation is documented on that function; its impurity/fast split is
+    diagnostic, not the split the solve used.
     """
 
     def _plasma(self, fast_frac=0.25):

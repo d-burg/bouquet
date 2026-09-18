@@ -497,7 +497,7 @@ def effective_impurity_charge(ne, ni, zeff, min_dilution=1e-3):
     return float(np.median(z[ok]))
 
 
-def impurity_charge_with_fast_ions(ne, ni, zeff, z_fast):
+def impurity_charge_with_fast_ions(ne, ni, zeff, z_fast=None):
     """``(Z_imp, ne_th)`` when fast ions carry part of the neutralization.
 
     With a beam population, quasineutrality reads
@@ -510,9 +510,32 @@ def impurity_charge_with_fast_ions(ne, ni, zeff, z_fast):
     half-applied 3.19, true 6.00 for C6 at 25 % fast fraction).  Surfaces
     where ``z_fast >= ne`` get a non-finite renormalized zeff and are
     excluded by :func:`effective_impurity_charge`'s own validity mask.
+
+    ``z_fast`` is optional.  ``None`` or an all-zero profile short-circuits
+    to the plain :func:`effective_impurity_charge` inversion on the full
+    ``ne``, so a source with no fast ions reproduces the pre-fast-ion result
+    BIT-FOR-BIT.  The general branch would not: ``zeff * ne / ne`` is not an
+    exact identity in floating point (~8 % of realistic values differ, at
+    ~1 ulp), which is far below any physics scale but enough to move an
+    archive that the repo's regeneration contract says must be reproducible.
+
+    ASSUMPTION (load-bearing, not verified here): the source's ``zeff`` is
+    normalized to the FULL ``ne`` with only THERMAL species in its numerator
+    -- i.e. ``zeff = sum_thermal(n_s Z_s^2) / ne``.  That is what the
+    ``zeff * ne / ne_th`` renormalization assumes and what the local
+    fallback numerator in :mod:`bouquet.io.imas` builds.  If a producer's
+    ``zeff`` already carries the fast-ion contribution in its numerator, the
+    fast-ion charge is counted twice and ``Z_imp`` comes out too high.  The
+    convention of any given producer has not been confirmed against a real
+    data file; treat a source whose documented convention differs as out of
+    scope for this helper.
     """
     ne = np.asarray(ne, dtype=float)
+    if z_fast is None:
+        return effective_impurity_charge(ne, ni, zeff), ne
     z_fast = np.asarray(z_fast, dtype=float)
+    if not np.any(z_fast):
+        return effective_impurity_charge(ne, ni, zeff), ne
     ne_th = np.maximum(ne - z_fast, 0.0)
     with np.errstate(divide="ignore", invalid="ignore"):
         zeff_th = np.where(ne_th > 0.0,

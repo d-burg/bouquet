@@ -316,19 +316,38 @@ def read_imas_baseline(
     main_ion = None
     zeff_num = np.zeros(n)
     z_fast = np.zeros(n)          # charge carried by fast ions
+    # pressure_fast_* and density_fast are independent fields: a dd can carry
+    # one without the other, and a species with fast pressure but no fast
+    # density gets the full p_fast treatment and ZERO dilution correction.
+    fast_p_no_n = []
     for ion in cp["ion"]:
         Z = float(ion["element"][0]["z_n"])
         n_s = np.asarray(ion["density_thermal"], dtype=float)
         zeff_num += n_s * Z * Z
         if "density_fast" in ion:
             z_fast += Z * np.asarray(ion["density_fast"], dtype=float)
-        p_fast = p_fast + _isotropic_fast_pressure(ion, p_fast_reduction, n)
+        p_fast_s = _isotropic_fast_pressure(ion, p_fast_reduction, n)
+        if np.any(p_fast_s) and not np.any(
+                np.asarray(ion.get("density_fast", 0.0), dtype=float)):
+            fast_p_no_n.append(f"Z={Z:g}")
+        p_fast = p_fast + p_fast_s
         if Z == 1.0 and ni is None:        # main (hydrogenic) ion
             ni = n_s
             ti = np.asarray(ion["temperature"], dtype=float)
             main_ion = ion
     if ni is None:
         raise ValueError("no hydrogenic (Z=1) main ion found in core_profiles.ion")
+    if fast_p_no_n:
+        # Silence is the dangerous case here: the run looks exactly like an
+        # ohmic one while Z_imp / nz / p_imp keep the whole fast-ion bias the
+        # dilution correction exists to remove.
+        import warnings
+        warnings.warn(
+            "core_profiles carries fast-ion PRESSURE but no density_fast for "
+            f"ion species [{', '.join(fast_p_no_n)}]: p_fast is applied in "
+            "full while the fast-ion dilution correction for those species is "
+            "zero, so Z_imp / nz / p_imp retain the fast-ion bias. Fill "
+            "core_profiles.ion[].density_fast to enable the correction.")
     Zeff = zeff_num / ne
 
     # --- auxiliary source-provided profiles for the switchboard ---------------

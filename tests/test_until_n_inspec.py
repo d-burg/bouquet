@@ -488,6 +488,63 @@ class TestAttemptBudget:
             self._budget(20, True, None)
         assert self._budget(20, 3.0, None)[0] == 3   # int-valued float is fine
 
+    def test_non_integral_and_bool_caps_raise_too(self):
+        """int(60.9) -> 60 silently shortened the attempt budget, and
+        int(True) -> 1 turned a cap into 'stop after one attempt'."""
+        with pytest.raises(ValueError, match="max_total_draws"):
+            self._budget(20, 10, 60.9)
+        with pytest.raises(ValueError, match="max_total_draws"):
+            self._budget(20, 10, True)
+        assert self._budget(20, 10, 60.0)[1] == 60   # int-valued float is fine
+
+
+class TestConfigLayerRejectsTheSameThings:
+    """Copilot's comment was about the CONSTRUCTION layer: the budget resolver
+    already refused a non-integral target, but only once generate_bouquet ran."""
+
+    def _gen(self, **kw):
+        from bouquet.config import GenerationConfig
+        return GenerationConfig(**kw)
+
+    def _cfg(self, **kw):
+        from bouquet.config import (BouquetConfig, ReconstructionSource,
+                                    SolverConfig)
+        return BouquetConfig(
+            source=ReconstructionSource(geqdsk_path="g", profiles_path="p"),
+            solver=SolverConfig(mesh_path="m.h5"),
+            output_header="hdr",
+            generation=self._gen(**kw))
+
+    def test_a_non_integral_target_is_refused_at_construction(self):
+        with pytest.raises(ValueError, match="n_inspec_target"):
+            self._cfg(n_inspec_target=7.9)
+
+    def test_a_bool_target_is_refused_at_construction(self):
+        with pytest.raises(ValueError, match="n_inspec_target"):
+            self._cfg(n_inspec_target=True)
+
+    def test_a_non_integral_or_bool_cap_is_refused_at_construction(self):
+        with pytest.raises(ValueError, match="max_total_draws"):
+            self._cfg(n_inspec_target=5, max_total_draws=60.9)
+        with pytest.raises(ValueError, match="max_total_draws"):
+            self._cfg(n_inspec_target=5, max_total_draws=True)
+
+    def test_integer_valued_floats_still_pass(self):
+        c = self._cfg(n_inspec_target=5.0, max_total_draws=60.0)
+        assert c.generation.n_inspec_target == 5.0     # not coerced in place
+
+    def test_generate_rechecks_after_the_notebook_mutation_idiom(self):
+        """The fields are mutated after __post_init__ in the documented idiom,
+        so the same refusal must exist at generate()."""
+        from bouquet.config import require_integer_count
+        import inspect as _i
+        from bouquet.run import Bouquet
+        src = _i.getsource(Bouquet.generate)
+        assert "require_integer_count" in src
+        with pytest.raises(ValueError, match="integer count"):
+            require_integer_count(7.9, "generation.n_inspec_target")
+        assert require_integer_count(None, "x") is None
+
 
 class TestUntilNVerdict:
     """The verdict glue, on the LEGACY coil predicate.
@@ -656,8 +713,32 @@ class TestConfiguredCoilPredicate:
                      "coil_daq_era=self._coil_daq_era()",
                      "coil_chi2_max=fc.chi2_max", "coil_z_max=fc.z_max"):
             assert frag in gen, frag
-        # the postprocess resolves the era through the same accessor
-        assert "era=self._coil_daq_era()" in inspect.getsource(Bouquet.filter)
+
+    def test_the_postprocess_resolves_the_era_through_the_same_accessor(
+            self, tmp_path, monkeypatch):
+        """Behavioural form of the last line of the wiring above.
+
+        ``generate`` hands the loop ``self._coil_daq_era()``; whatever that
+        accessor returns must also be what ``.filter()`` hands the postprocess,
+        or the two sides resolve different sigma FLOORS -- an acceptance
+        criterion -- and the identity dies without a symptom.  Checked by
+        driving a real ``.filter()`` rather than by matching its source text,
+        which broke the moment the era announcement split the call in two.
+        """
+        from bouquet import filtering, run
+        seen = {}
+        real = filtering.filter_coil_chi2
+
+        def spy(*a, **kw):
+            seen.update(kw)
+            return real(*a, **kw)
+
+        monkeypatch.setattr(filtering, "filter_coil_chi2", spy)
+        monkeypatch.setattr(run.Bouquet, "_coil_daq_era", lambda self: "pre2014")
+        header = str(tmp_path / "era")
+        _write_coil_archive(header + ".h5", [dict(TestConfiguredCoilPredicate.COILS)])
+        _filter_selected(header)
+        assert seen["era"] == "pre2014"
 
     def test_the_postprocess_cuts_with_the_shared_predicate(self):
         from bouquet import filtering

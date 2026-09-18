@@ -836,8 +836,18 @@ class Bouquet:
 
         and the axis row is matched against ``j_requested(0)`` = the source
         total at the clipped axis.  Both axis currents and their ratio are
-        recorded so the un-renormalisation is auditable, and the gate tests
-        ``|q0_target|`` -- the physical q0 being claimed -- not the anchor's.
+        recorded so the un-renormalisation is auditable.
+
+        **What the gate actually tests** (``utils.q0_gate_admits``): the slice
+        is admitted when the source's sawtooth model is ACTIVE there, or, when
+        it is not, when the source's OWN axis safety factor ``|q0_dd|`` is at
+        or below ``q0_gate``.  ``|q0_target|`` -- the estimator mapping
+        un-renormalised above -- is the fallback basis, used ONLY when the
+        source carries no axis q at all; it reads systematically lower than
+        ``q0_dd``, and gating on it admitted idle-sawtooth ramp slices whose
+        own ``q0_dd`` sat above the threshold.  The basis actually used is
+        recorded as ``q0_gate_basis``.  Magnitudes throughout: q carries a
+        COCOS sign and a negative value would pass ``<= q0_gate`` trivially.
 
         Consequence, and the point of the channel: where the recomputed
         bootstrap has negligible core content this drives ``s_ohm -> ~1`` and
@@ -887,10 +897,10 @@ class Bouquet:
         q0_dd = saw.get("q0_dd")
         saw_active = bool(saw.get("active"))
         q0_gate = float(getattr(gc, "q0_gate", 1.1))
-        # The gate tests q0_TARGET -- the q0 actually being claimed for FUSE's
-        # own current -- not the renormalised anchor value, which on a slice
-        # with a large Ip deficit can sit on the other side of the threshold.
-        # abs(): q carries a COCOS sign (this dd's own q[0] reads -0.99), and a
+        # The fallback basis is q0_TARGET -- the q0 actually being claimed
+        # for FUSE's own current -- not the renormalised anchor value, which
+        # on a slice with a large Ip deficit can sit on the other side of the
+        # threshold.  abs(): q carries a COCOS sign (this dd's own q[0] reads -0.99), and a
         # negative target would make "q0 <= q0_gate" trivially true and bypass
         # the gate silently.  Only the COMPARISON is on the magnitude -- the
         # raw signed values are what get recorded, and the residual/Newton
@@ -1100,10 +1110,10 @@ class Bouquet:
                                q0_corrector_ohm_scale=float(s_new),
                                q0_corrector_bs_scale=float(sbs_new),
                                sawtooth_verdict="predictor kept (corrector step "
-                                                "leaves the [0.2, 5] scale bounds)")
+                                                "leaves the (0.2, 5) scale bounds)")
                     print(f"[imas SWB-split:ohmic q0] Newton step would give "
                           f"s_ohm={s_new:.3f} s_bs={sbs_new:.3f}, outside "
-                          "[0.2, 5] -- keeping the predictor and recording the "
+                          "(0.2, 5) -- keeping the predictor and recording the "
                           f"residual {res:+.4f}", flush=True)
                 else:
                     bl.ohm_scale = float(s_new)

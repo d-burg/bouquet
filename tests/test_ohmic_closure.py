@@ -596,7 +596,7 @@ class TestQ0Corrector:
         assert rec["closure_limited_thresholds"]["q0_tol"] == state["q0_tol"]
 
     def test_bounds_refusal_is_flagged_too(self):
-        """The corrector refused the step for leaving [0.2, 5]; the residual
+        """The corrector refused the step for leaving (0.2, 5); the residual
         it kept is still a miss and must say so."""
         state, bl, gs, ip_of = self._setup(ohm_scale=1.0, bs_scale=0.9,
                                            q0_now=1.05, s_ohm_new=9.0)

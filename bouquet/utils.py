@@ -840,7 +840,7 @@ def closure_health(ohm_scale, bs_scale, Ip_target_signed, c_affine,
     components miss Ip, the unscaled and closed bootstrap fractions, and flag
     the slice **closure-limited** when the reconciliation asked of one scale
     is large: raw mismatch beyond ``mismatch_max_pct`` of Ip, or the bootstrap
-    scaled below ``bs_scale_min``.  A refusal (scale outside [0.2, 5], or a
+    scaled below ``bs_scale_min``.  A refusal (scale outside (0.2, 5), or a
     singular q0 system) is closure-limited by construction and raises before
     this is reached.  Downstream consumers (Delta' pipelines) should treat
     closure-limited slices as unvalidated regardless of channel -- that is
@@ -925,7 +925,9 @@ def close_ip_q0(Ip_target_signed, c_affine, ip_ind, ip_bs, ip_fix,
     Raises ``RuntimeError`` on a singular system, on non-finite inputs, or when
     either scale leaves ``scale_bounds`` -- the three sources then simply do not
     admit a common (Ip, q0) solution, which is a finding to report, not
-    something to hide behind a rescale.  Returns ``(ohm_scale, bs_scale)``.
+    something to hide behind a rescale.  The bounds are STRICTLY exclusive, as
+    in :func:`close_ip`: a scale of exactly ``lo`` or ``hi`` is refused.
+    Returns ``(ohm_scale, bs_scale)``.
     """
     vals = (Ip_target_signed, c_affine, ip_ind, ip_bs, ip_fix,
             j_ind0, j_bs0, j_fix0, j_ref0)
@@ -949,7 +951,7 @@ def close_ip_q0(Ip_target_signed, c_affine, ip_ind, ip_bs, ip_fix,
     for name, s in (("ohm_scale", ohm_scale), ("bs_scale", bs_scale)):
         if not (lo < s < hi):
             raise RuntimeError(
-                f"close_ip_q0: {name} {s:.3f} is outside [{lo:g}, {hi:g}] -- "
+                f"close_ip_q0: {name} {s:.3f} is outside ({lo:g}, {hi:g}) -- "
                 "no (Ip, q0)-consistent split exists within the scale bounds; "
                 "refusing to hide that behind a rescale")
     return ohm_scale, bs_scale

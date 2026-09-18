@@ -2737,7 +2737,8 @@ class Bouquet:
             # the measurement is bound here.
             if _structured_state is not None:
                 _nl_corr = self._close_ip_structured_corrector(
-                    _structured_state, bl, mygs, solve_jphi, ip_of=_ip,
+                    _structured_state, bl, mygs, solve_jphi,
+                    ip_of=_ip_signed,
                     roundtrip_gate=self._structured_roundtrip_gate(Ip_t))
                 if _nl_corr is not None:
                     nl_its = _nl_corr

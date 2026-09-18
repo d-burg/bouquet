@@ -16,8 +16,6 @@ Solve-free coverage of the machinery the ohmic Ip closure is built on:
 
 No solver: the geometry is a synthetic ``fsa_current_geometry``-shaped dict.
 """
-import warnings
-
 import numpy as np
 import pytest
 from scipy.integrate import trapezoid
@@ -185,6 +183,131 @@ class TestClosureAlgebra:
         from bouquet.utils import close_ip
         with pytest.raises(ValueError, match="closure_channel"):
             close_ip("bootstap", 1.2e6, 0.0, 8e5, 2e5, 1e5)
+
+    def test_zero_target_is_refused_not_divided_by(self):
+        """|Ip target| == 0 made the relative zero-divisor guard
+        (`< 1e-6 * Ip_t`) unfireable and left the division to raise
+        ZeroDivisionError from inside the algebra."""
+        from bouquet.utils import close_ip
+        with pytest.raises(RuntimeError, match="zero"):
+            close_ip("bootstrap", 0.0, 0.0, 1.0e5, 0.0, 1.0e4)
+
+    def test_non_finite_target_is_refused_by_name(self):
+        from bouquet.utils import close_ip
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with pytest.raises(RuntimeError, match="non-finite"):
+                close_ip("bootstrap", bad, 0.0, 8e5, 2e5, 1e5)
+
+    def test_nan_component_blames_the_component_not_the_bounds(self):
+        """A NaN part used to fall through to the scale-range check, whose
+        message blames the hybrid components for not adding up to Ip."""
+        from bouquet.utils import close_ip
+        with pytest.raises(RuntimeError, match="non-finite"):
+            close_ip("bootstrap", 1.2e6, 0.0, float("nan"), 2e5, 1e5)
+
+    def test_bounds_message_reports_the_open_interval(self):
+        """The check is strictly exclusive; the message must not claim a
+        closed interval."""
+        from bouquet.utils import close_ip
+        with pytest.raises(RuntimeError, match=r"outside \(0\.2, 5\)"):
+            close_ip("bootstrap", 1.2e6, 0.0, 1.0e5, 1.5e5, 0.0)
+
+    def test_scale_exactly_on_the_bound_is_refused(self):
+        """s == 5.0 exactly: refused, as the (exclusive) check says."""
+        from bouquet.utils import close_ip
+        with pytest.raises(RuntimeError, match="outside"):
+            close_ip("bootstrap", 1.0e6, 0.0, 0.0, 2.0e5, 0.0)
+
+
+class TestClosureSignConvention:
+    """The pairing run.py needs: ``c`` must carry the DATA's current
+    direction, not the anchor's.
+
+    ``_c_affine`` is built on the anchor equilibrium, which is always solved
+    to ``abs(Ip)``, so it comes back positive-oriented whatever the data
+    does, while the ``ip_*`` linear parts carry the data's own sign.  run.py
+    signed only the target, so on ``sgn = -1`` data the closure ran against
+    ``+c`` instead of ``-c`` -- wrong by ``2c`` (~6 % of Ip) -- and the
+    post-closure self-check reused the same unpaired ``c``, so it was
+    satisfied identically and could not catch it.
+
+    The pairing is factored into ``utils.closure_sign_convention`` so these
+    exercise the SHIPPED logic rather than a re-derivation of it.
+    """
+
+    def _parts(self):
+        return TestClosureAlgebra()._parts()
+
+    def test_positive_convention_passes_through_unchanged(self):
+        from bouquet.utils import closure_sign_convention
+        sgn, tgt, c_signed = closure_sign_convention(8e5, 2e5, 1e5, 3.6e4,
+                                                     1.2e6)
+        assert sgn == 1.0
+        assert tgt == 1.2e6
+        assert c_signed == 3.6e4
+
+    def test_negative_convention_signs_target_and_constant_together(self):
+        from bouquet.utils import closure_sign_convention
+        sgn, tgt, c_signed = closure_sign_convention(-8e5, -2e5, -1e5, 3.6e4,
+                                                     1.2e6)
+        assert sgn == -1.0
+        assert tgt == -1.2e6
+        assert c_signed == -3.6e4
+
+    def test_sign_comes_from_the_linear_total_not_from_c(self):
+        """A large affine term must not out-vote the data on a low-current
+        slice -- that is why the sign is read off the linear parts."""
+        from bouquet.utils import closure_sign_convention
+        sgn, _tgt, _c = closure_sign_convention(1.0e4, 5.0e3, 1.0e3,
+                                                -9.0e9, 1.2e6)
+        assert sgn == 1.0
+
+    def test_sign_flipped_data_closes_to_the_same_scales(self):
+        """The regression F42-1 would have shown: negating every current
+        component (the DIII-D-sign convention) must not move the closure,
+        because the anchor's c is unchanged by the data's convention."""
+        from bouquet.utils import close_ip, closure_sign_convention
+        g, w, c, j_ind, j_bs, j_fix, lin = self._parts()
+        Ip_abs = 1.05 * (lin(j_ind) + lin(j_bs) + lin(j_fix) + c)
+
+        def _close(ii, ib, ifx):
+            # c is the ANCHOR's: positive-oriented in both calls, exactly as
+            # run.py receives it.
+            sgn, tgt, c_signed = closure_sign_convention(ii, ib, ifx, c,
+                                                         Ip_abs)
+            return sgn, close_ip("bootstrap", tgt, c_signed, ii, ib, ifx)
+
+        sgn_p, (ohm_p, bs_p) = _close(lin(j_ind), lin(j_bs), lin(j_fix))
+        sgn_n, (ohm_n, bs_n) = _close(-lin(j_ind), -lin(j_bs), -lin(j_fix))
+        assert (sgn_p, sgn_n) == (1.0, -1.0)
+        assert ohm_p == 1.0 and ohm_n == 1.0
+        assert bs_n == pytest.approx(bs_p, rel=1e-12)
+
+    def test_the_unpaired_constant_is_off_by_two_c(self):
+        """Pins the size of the defect, so a future 'simplification' back to
+        the unpaired form fails loudly instead of drifting."""
+        from bouquet.utils import close_ip, closure_sign_convention
+        g, w, c, j_ind, j_bs, j_fix, lin = self._parts()
+        Ip_abs = 1.05 * (lin(j_ind) + lin(j_bs) + lin(j_fix) + c)
+        _sgn, tgt, c_signed = closure_sign_convention(
+            -lin(j_ind), -lin(j_bs), -lin(j_fix), c, Ip_abs)
+        bs_right = close_ip("bootstrap", tgt, c_signed,
+                            -lin(j_ind), -lin(j_bs), -lin(j_fix))[1]
+        try:            # the pre-fix pairing: signed target, unsigned c
+            bs_unpaired = close_ip("bootstrap", tgt, c,
+                                   -lin(j_ind), -lin(j_bs), -lin(j_fix))[1]
+        except RuntimeError:
+            bs_unpaired = None      # refused outright -- also not bs_right
+        assert c != 0.0, "degenerate geometry: the defect is invisible at c=0"
+        if bs_unpaired is not None:
+            assert bs_unpaired != pytest.approx(bs_right, rel=1e-9)
+            assert bs_unpaired - bs_right == pytest.approx(
+                2.0 * c / lin(j_bs), rel=1e-9)
+
+    def test_non_finite_components_refuse_the_sign_read(self):
+        from bouquet.utils import closure_sign_convention
+        with pytest.raises(RuntimeError, match="non-finite"):
+            closure_sign_convention(float("nan"), 2e5, 1e5, 3.6e4, 1.2e6)
 
 
 class TestWorkflowGuard:

@@ -656,6 +656,42 @@ def _trapezoid(y, x):
                            np.asarray(x, dtype=float)))
 
 
+def closure_sign_convention(ip_ind, ip_bs, ip_fix, c_affine, Ip_abs):
+    """Sign-consistent ``(target, affine term)`` pair for :func:`close_ip`.
+
+    ``close_ip`` solves an AFFINE identity, so the P'-term constant has to
+    carry the same current-direction convention as the target and the linear
+    parts -- that is the contract
+    ``test_negative_current_convention_closes_too`` states, by negating all
+    three together.
+
+    The production caller cannot read that convention off ``c_affine``: the
+    anchor equilibrium is always solved to ``abs(Ip)``, so ``c_affine``
+    comes back in the POSITIVE orientation whatever the data does, while the
+    ``ip_*`` linear parts carry the data's own sign.  Pairing them means
+    taking the sign from the linear total (NOT from an affine integral,
+    whose ``c`` could out-vote the linear part on a low-current slice) and
+    applying it to the target AND the constant.
+
+    Without this, negative-current data closes against ``+c`` instead of
+    ``-c`` and the scales come out wrong by ``2c`` -- ~6 % of Ip at the
+    measured c/Ip ~ 3 % -- and the post-closure self-check cannot catch it,
+    because it reuses the same unpaired ``c`` and is satisfied identically.
+
+    Returns ``(sgn, Ip_target_signed, c_signed)``.  For the ordinary
+    positive convention ``sgn`` is ``+1`` and both values pass through
+    unchanged.
+    """
+    _lin_total = float(ip_ind) + float(ip_bs) + float(ip_fix)
+    if not np.isfinite(_lin_total):
+        raise RuntimeError(
+            "closure_sign_convention: the linear component total is "
+            "non-finite; the current-direction convention cannot be read "
+            "from it")
+    sgn = float(np.sign(_lin_total) or 1.0)
+    return sgn, sgn * abs(float(Ip_abs)), sgn * float(c_affine)
+
+
 def close_ip(channel, Ip_target_signed, c_affine, ip_ind, ip_bs, ip_fix,
              scale_bounds=(0.2, 5.0)):
     """Channel scales closing the affine Ip measure on a hybrid baseline.
@@ -668,13 +704,36 @@ def close_ip(channel, Ip_target_signed, c_affine, ip_ind, ip_bs, ip_fix,
     ``"ohmic"`` keeps ``s_bs = 1`` and rescales the inductive.  Returns
     ``(ohm_scale, bs_scale)``.
 
-    Refuses (``RuntimeError``) when the rescaled component's linear part is
-    ~0 relative to the target (the closure would be a division by noise) or
-    when the resulting scale falls outside ``scale_bounds`` -- the hybrid
-    components then simply do not add up to Ip and hiding that behind a
-    rescale would be a lie.  Unknown channels raise ``ValueError``.
+    ``Ip_target_signed`` and ``c_affine`` must carry the SAME
+    current-direction convention as the ``ip_*`` linear parts; see
+    :func:`closure_sign_convention`, which is how the production caller
+    pairs them.
+
+    Refuses (``RuntimeError``) when the target is non-finite or its
+    magnitude is zero (there is nothing to close onto, and the relative
+    zero-divisor guards below would degenerate), when the rescaled
+    component's linear part is ~0 relative to the target (the closure would
+    be a division by noise), or when the resulting scale falls outside
+    ``scale_bounds`` -- the hybrid components then simply do not add up to
+    Ip and hiding that behind a rescale would be a lie.  The bounds are
+    STRICTLY exclusive: a scale of exactly ``lo`` or ``hi`` is refused.
+    Unknown channels raise ``ValueError``.
     """
+    if not np.isfinite(float(Ip_target_signed)):
+        raise RuntimeError(
+            f"close_ip: Ip target is non-finite ({Ip_target_signed!r}); "
+            "the measure or the baseline carries bad values, refusing to "
+            "close on it")
     Ip_t = abs(float(Ip_target_signed))
+    if Ip_t <= 0.0:
+        raise RuntimeError(
+            "close_ip: |Ip target| is zero; there is no current to close "
+            "the hybrid components onto")
+    if not (np.isfinite(float(c_affine)) and np.isfinite(float(ip_ind))
+            and np.isfinite(float(ip_bs)) and np.isfinite(float(ip_fix))):
+        raise RuntimeError(
+            "close_ip: a non-finite affine term or component integral "
+            "(c_affine/ip_ind/ip_bs/ip_fix); refusing to close on it")
     deficit = float(Ip_target_signed) - float(c_affine) - float(ip_fix)
     if channel == "bootstrap":
         if abs(ip_bs) < 1e-6 * Ip_t:
@@ -692,9 +751,12 @@ def close_ip(channel, Ip_target_signed, c_affine, ip_ind, ip_bs, ip_fix,
     lo, hi = scale_bounds
     for name, s in zip(("ohm_scale", "bs_scale"), scales):
         if not (lo < s < hi):
+            # The test is strict on both ends, so the message says so: the
+            # accepted set is the OPEN interval, and a scale of exactly lo or
+            # hi is refused.
             raise RuntimeError(
                 f"close_ip/{channel} channel: {name} {s:.3f} is outside "
-                f"[{lo:g}, {hi:g}] -- the hybrid components do not add up "
+                f"({lo:g}, {hi:g}) -- the hybrid components do not add up "
                 "to Ip; refusing to hide that behind a rescale")
     return scales
 

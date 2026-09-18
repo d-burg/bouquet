@@ -736,9 +736,27 @@ class Bouquet:
                 _anchor["geom"] = _fcg(_anchor["eq"], np.asarray(psi_N, dtype=float), psi_pad=psi_pad)
                 _anchor["inv_r2_src"] = "get_q ravgs dict"
                 if _anchor["geom"]["inv_R2"] is None:
+                    # BQ_FSA_NPSI overrides the contour-quadrature resolution.
+                    # A bare int() turned a typo into a ValueError from deep
+                    # inside the quadrature, and accepted "0"/negatives --
+                    # which bypass the max(257, ...) floor and hand npsi=0 to
+                    # capture_equilibrium_fsa.  Refuse both, by name.
                     _npsi_env = __import__("os").environ.get("BQ_FSA_NPSI")
-                    _cap = _cef(mygs,
-                                npsi=int(_npsi_env) if _npsi_env else max(257, psi_N.size),
+                    _npsi = max(257, psi_N.size)
+                    if _npsi_env is not None and _npsi_env.strip():
+                        try:
+                            _npsi = int(_npsi_env)
+                        except ValueError:
+                            raise ValueError(
+                                f"BQ_FSA_NPSI={_npsi_env!r} is not an "
+                                "integer; unset it or set a positive "
+                                "flux-grid size") from None
+                        if _npsi < 2:
+                            raise ValueError(
+                                f"BQ_FSA_NPSI={_npsi} is not a usable "
+                                "flux-grid size (need >= 2; the default is "
+                                f"{max(257, psi_N.size)})")
+                    _cap = _cef(mygs, npsi=_npsi,
                                 psi_pad=psi_pad, exact_inv_R2=True)
                     if _cap.get("avg_inv_R2") is None:
                         raise RuntimeError("ohmic mode: <1/R^2> unavailable on the anchor geometry")
@@ -811,8 +829,9 @@ class Bouquet:
                 # l_i proxy (1/<R> for <1/R>; +7.75% on the FUSE validation
                 # case). Both are still
                 # evaluated and RECORDED below so the biases stay visible.
-                from .utils import (fsa_current_geometry, Ip_fsa_integral,
-                                    Ip_fsa_weights, eq_jphi_profile, close_ip)
+                from .utils import (Ip_fsa_integral, Ip_fsa_weights,
+                                    eq_jphi_profile, close_ip,
+                                    closure_sign_convention)
                 from .sampling import get_li_proxy_geometry
                 from scipy import integrate as _integ
                 _psi_ip = np.asarray(psi_N, dtype=float)
@@ -933,8 +952,17 @@ class Bouquet:
                 # The data's current-direction convention: sign of the LINEAR
                 # total.  (Taking it from _ip(FUSE_tot) folded the anchor's c
                 # into the vote, which could flip it on a low-Ip ramp slice
-                # where |lin| < |c|.)
-                sgn = float(np.sign(ip_ind + ip_bs + ip_fix) or 1.0)
+                # where |lin| < |c|.)  The affine term MUST be signed with it:
+                # _c_affine is built on the anchor, which is always solved to
+                # abs(Ip), so it carries the positive orientation whatever the
+                # data does, while ip_* carry the data's sign.  Pairing them
+                # (closure_sign_convention) is the contract close_ip's own
+                # test_negative_current_convention_closes_too states; the
+                # unpaired version was off by 2c (~6% of Ip) on sgn=-1 data,
+                # and the self-check below could not see it because it reused
+                # the same unpaired c.
+                sgn, _Ip_signed, _c_signed = closure_sign_convention(
+                    ip_ind, ip_bs, ip_fix, _c_affine, Ip_t)
                 # Which channel absorbs the Ip closure -- "bootstrap"
                 # (default): keep j_ohmic exactly as FUSE diffused it,
                 #   lin(ohm) + s_BS * lin(bs) + lin(fix) + c = Ip_target;
@@ -946,14 +974,20 @@ class Bouquet:
                 # exercise the SHIPPED formulas, not a re-derivation.
                 _chan = str(getattr(gc, "closure_channel", "bootstrap"))
                 ohm_scale, bs_scale = close_ip(
-                    _chan, sgn * Ip_t, _c_affine, ip_ind, ip_bs, ip_fix)
+                    _chan, _Ip_signed, _c_signed, ip_ind, ip_bs, ip_fix)
                 bl.jBS_diff = None
                 bl.bs_scale = float(bs_scale)
                 bl.ohm_scale = float(ohm_scale)
                 bl.j_BS = bs_scale * j_BS_swb
                 bl.j_inductive = ohm_scale * j_ind
                 bl.j_phi = bl.j_inductive + bl.j_BS + j_fixed
-                _closed_err = 100.0 * (abs(_ip(bl.j_phi)) - Ip_t) / Ip_t
+                # Self-check on the SAME affine measure the closure solved:
+                # linear part + the SIGNED constant.  _ip() adds the unsigned
+                # _c_affine, so on sgn=-1 data it would disagree with the
+                # closure by 2c and fail a correct result.  Identical to
+                # _ip(bl.j_phi) whenever sgn == +1.
+                _closed_err = 100.0 * (
+                    abs(_lin(bl.j_phi) + _c_signed) - Ip_t) / Ip_t
                 if abs(_closed_err) > 0.05:
                     raise RuntimeError(
                         f"ohmic mode: closed hybrid integrates to {_closed_err:+.3f}% "
@@ -973,6 +1007,10 @@ class Bouquet:
                     inv_R2_source=_inv_r2_src,
                     affine_pprime_term_c=float(_c_affine),
                     affine_pprime_term_pct_of_Ip=100.0 * float(_c_affine) / Ip_t,
+                    # The data's current-direction convention, and the affine
+                    # constant as it was actually paired with the target.
+                    current_direction_sign=float(sgn),
+                    affine_pprime_term_c_signed=float(_c_signed),
                     fsa_roundtrip_Ip=_ip_roundtrip,
                     fsa_roundtrip_err_pct=_rt_err,
                     Ip_anchor=float(_ip_solved),
@@ -982,7 +1020,9 @@ class Bouquet:
                     Ip_ohmic_unscaled=ip_ind, Ip_jBS_swb=ip_bs, Ip_fixed=ip_fix,
                     closure_channel=_chan,
                     ohm_scale=float(ohm_scale), bs_scale=float(getattr(bl, 'bs_scale', 1.0)),
-                    Ip_hybrid=_ip(bl.j_phi),
+                    # On the same signed affine measure the closure solved
+                    # (identical to _ip(bl.j_phi) for the positive convention).
+                    Ip_hybrid=float(_lin(bl.j_phi) + _c_signed),
                     jphi_diff_dropped_Ip=ip_jd,
                     jphi_diff_dropped_pct_of_Ip=100.0 * ip_jd / Ip_t,
                     swb_over_fuse_jBS_peak=float(ratio),
@@ -1429,8 +1469,12 @@ class Bouquet:
                         f"('bootstrap','ohmic')")
                 # Baseline-only for now: the draw path's sigma=0 reproduction
                 # of an ohmic-closed baseline has not been verified, so the
-                # UQ ensemble refuses the mode rather than silently drawing
-                # around an unvalidated split.
+                # UQ ensemble refuses the mode -- UNLESS workflow='custom'
+                # (or allow_unsafe_workflow), which downgrades every problem
+                # below to a printed WARN, this one included.  So the
+                # unvalidated draw path IS reachable, deliberately, behind
+                # that opt-out; test_custom_workflow_downgrades_to_warning
+                # pins the downgrade.  Nothing here makes it unreachable.
                 problems.append(
                     "jBS_baseline_mode='ohmic' is baseline-only for now "
                     "(draw-path sigma=0 reproduction unverified); run the "

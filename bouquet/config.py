@@ -22,7 +22,7 @@ and a documented home for every knob -- a typo fails immediately in
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional, Union, TYPE_CHECKING
+from typing import Any, Optional, Union, TYPE_CHECKING
 
 if TYPE_CHECKING:
     import numpy as np
@@ -547,8 +547,51 @@ class FilterConfig:
     """Postprocessing selection of the machine-realizable subset."""
 
     rms_max_mm: float = 5.0
-    inspec_F_max: float = 0.02      # +/-2% coil-current spec (DIII-D)
+    # Coil filter used by Bouquet.filter():
+    #   "chi2"   -> measurement-referenced chi2/nu <= chi2_max, with the per-coil
+    #               sigma resolved from `coil_sigma` below (default: the device's
+    #               own tolerance model; needs no dd)                   [DEFAULT]
+    #   "legacy" -> +/-inspec_F_max on F-coils, +/-inspec_VSC_max on the VSC pair
+    coil_filter: str = "chi2"
+    # Acceptance: None -> the device's empirically calibrated thresholds (DIII-D:
+    # chi2/nu <= 6.1 and worst-coil |z| <= 6.3, the 95th percentile of what real
+    # machine states score), or the generic 4 / 5 when no device calibration
+    # applies. Give numbers to override; z_max=False disables the guard.
+    chi2_max: Optional[float] = None
+    z_max: Optional[Any] = None
+    # Per-coil tolerance for the chi2 filter. None -> the device model (device named
+    # in BouquetConfig.device or detected from the mesh coil names); if neither is
+    # available Bouquet.filter() falls back LOUDLY to the legacy rule.
+    #   {"floor": A-t, "fraction": f} -> sigma_i = hypot(floor, fraction*|I_i|)
+    #   {coil_name: sigma_A-t, ...}   -> per-coil table
+    #   callable(baseline) -> {coil: sigma}
+    #   "<model name>"                -> a named model of the device (e.g. "rms_incl_offset")
+    coil_sigma: Optional[Any] = None
+    # Acquisition era whose tolerance floor applies (bouquet.devices.era_labels;
+    # DIII-D: "pre2014" or "modern").  The era chooses the sigma FLOOR, so it is an
+    # acceptance criterion and must be stated, never guessed: nothing infers it from
+    # a run header, mesh name or file path.  None -> the era is taken from an explicit
+    # source.pulse/source.shot through the device's era bands, where the pulse number
+    # is a DATE PROXY for the acquisition upgrade (so the boundary is approximate);
+    # failing that, the device's default band, which carries the tightest floor.
+    # Bouquet.filter() prints the era it resolved, the floor it buys and which of
+    # those three routes it came from, once per call.
+    coil_daq_era: Optional[str] = None
+    inspec_F_max: float = 0.02      # +/-2% coil-current spec (DIII-D); legacy only
     inspec_VSC_max: float = 0.02
+
+    def __post_init__(self):
+        if self.coil_filter not in ("chi2", "legacy"):
+            raise ValueError("filtering.coil_filter must be 'chi2' or 'legacy'")
+        if self.coil_daq_era is not None and not isinstance(self.coil_daq_era, str):
+            raise ValueError("filtering.coil_daq_era must be None or an era label string")
+        cs = self.coil_sigma
+        if cs is not None and not callable(cs) and not isinstance(cs, (dict, str)):
+            raise ValueError("filtering.coil_sigma must be None, a {'floor','fraction'} dict, "
+                             "a {coil: sigma} dict, or a callable(baseline)")
+        if isinstance(cs, dict) and {"floor", "fraction"} <= set(cs):
+            if float(cs["floor"]) < 0 or not (0 <= float(cs["fraction"]) < 1):
+                raise ValueError("filtering.coil_sigma: floor must be >= 0 A-t and 0 <= fraction < 1")
 
 
 # ---------------------------------------------------------------------------
@@ -565,6 +608,11 @@ class BouquetConfig:
     generation: GenerationConfig = field(default_factory=GenerationConfig)
     filtering: FilterConfig = field(default_factory=FilterConfig)
     fixed_components: FixedComponentsConfig = field(default_factory=FixedComponentsConfig)
+    # Device name (bouquet.devices.DEVICES). Optional: detected from the mesh coil
+    # names when they match a registered device exactly; required only when the
+    # chi2 coil filter needs a device tolerance model and no filtering.coil_sigma
+    # is given -- Bouquet.filter() then falls back loudly to the legacy rule.
+    device: Optional[str] = None
     # When False (default) the verbose TokaMaker solver chatter emitted during
     # baseline reconstruction (DLSODE / gs_get_qprof / li-match iteration) is
     # captured to baseline.reconstruction_log and only a curated quality summary
@@ -597,6 +645,20 @@ class BouquetConfig:
                 "fixed_components.p_fast_reduction must be 'auto', 'trace', 'mean', "
                 "'perp', or 'sum'"
             )
+        if self.device is not None:
+            # fail here, not after a whole ensemble has been solved: the device is
+            # only consulted by Bouquet.filter(), at the very end of a run.
+            from .devices import DEVICES, era_labels, get_device
+            if self.device not in DEVICES:
+                raise ValueError(
+                    f"unknown device {self.device!r}; registered: {sorted(DEVICES)}")
+            era = self.filtering.coil_daq_era
+            if era is not None:
+                known = era_labels(get_device(self.device))
+                if era not in known:
+                    raise ValueError(
+                        f"filtering.coil_daq_era {era!r} is not an era of device "
+                        f"{self.device!r}; available: {sorted(known)}")
         if self.uncertainty.sigma_mode not in ("auto", "direct", "ensemble"):
             raise ValueError("uncertainty.sigma_mode must be 'auto', 'direct', or 'ensemble'")
         if self.uncertainty.sigma_method not in ("percentile", "std"):

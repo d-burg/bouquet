@@ -214,8 +214,21 @@ as an enormous sigma.
 | Knob | Default | Meaning |
 |---|---|---|
 | `rms_max_mm` | `5.0` | Boundary-RMS acceptance threshold |
+| `coil_filter` | `"chi2"` | `"chi2"` = measurement-referenced coil filter; `"legacy"` = the ±`inspec_*` band |
+| `chi2_max`, `z_max` | `None` | `None` → the device's calibrated thresholds (DIII-D: χ²/ν ≤ 6.1, worst-coil \|z\| ≤ 6.3), else the generic 4 / 5 |
+| `coil_sigma` | `None` | Per-coil σ override (`{"floor","fraction"}`, `{coil: σ}`, callable, or a named device model); `None` → the device model |
+| `coil_daq_era` | `None` | Acquisition era whose σ **floor** applies (DIII-D: `"pre2014"` 825 A-t / `"modern"` 325 A-t). `None` → mapped from an explicit `source.pulse`/`source.shot`, else the device's default (tightest) band |
 | `inspec_F_max` | `0.02` | Max non-VSC F-coil drift (fraction) for `in_spec` |
 | `inspec_VSC_max` | `0.02` | Max VSC-channel drift (fraction) for `in_spec` |
+
+> **The era is an acceptance criterion, so `filter()` states it out loud.** The
+> pulse number is only a *date proxy* for the coil-current acquisition upgrade,
+> so the band boundary is approximate. `Bouquet.filter()` prints one line per
+> call naming the era, the floor it buys and the route it came from: an
+> `[automatic: ... set filtering.coil_daq_era to override]` line for the pulse
+> mapping, an `[explicit; filtering.coil_daq_era]` line when it was stated, and
+> an `era undetermined (...) -> default band ..., the TIGHTEST floor` line when
+> none could be resolved.
 
 ### `FixedComponentsConfig` (`b.fixed_components`)
 

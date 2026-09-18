@@ -1361,28 +1361,178 @@ class Bouquet:
         produced and returned under ``summary["figures"] = (coil_fig, bnd_fig)``
         (F7 -- the notebooks re-called the module filters just to get these).
         """
-        from .filtering import filter_coil_currents, filter_boundaries
+        from .filtering import filter_coil_currents, filter_boundaries, filter_coil_chi2
 
         header = self.config.output_header
         fc = self.config.filtering
         rms = fc.rms_max_mm if rms_max_mm is None else rms_max_mm
 
         sk = self.config.generation.scan_key
-        coil_summary, coil_fig = filter_coil_currents(
-            header, scan_key=sk,
-            F_max_pct=fc.inspec_F_max * 100.0,
-            VSC_max_pct=fc.inspec_VSC_max * 100.0,
-            apply=True, plot=plot,
-        )
+        coil_filter_used = fc.coil_filter
+        if fc.coil_filter == "chi2":
+            from .coil_spec import CoilSigmaUnavailable
+            # the era sets the sigma floor, i.e. an acceptance criterion -- say
+            # which one was used and where it came from, once per filter call
+            era = self._coil_daq_era()
+            print(self._coil_era_note(era))
+            try:
+                coil_summary = filter_coil_chi2(
+                    header, None, scan_key=sk, chi2_max=fc.chi2_max,
+                    apply=True, sigma=fc.coil_sigma, device=self.config.device,
+                    era=era, z_max=fc.z_max,
+                )
+                coil_fig = None
+                if plot:  # drift-distribution figure only; writes no flags
+                    _, coil_fig = filter_coil_currents(
+                        header, scan_key=sk, F_max_pct=fc.inspec_F_max * 100.0,
+                        VSC_max_pct=fc.inspec_VSC_max * 100.0, apply=False, plot=True,
+                    )
+            except CoilSigmaUnavailable as e:
+                import warnings
+                warnings.warn(
+                    "COIL FILTER FALLBACK: chi2 coil filter disabled -- " + str(e) +
+                    f" Using the legacy rule (|dI/I| <= {fc.inspec_F_max:.0%} F-coils, "
+                    f"{fc.inspec_VSC_max:.0%} VSC), which is NOT a measurement-referenced "
+                    "criterion: it is a flat fractional band, so it is many sigma on a "
+                    "high-current coil and a fraction of one on a low-current coil, and it "
+                    "rejects a large and state-dependent share of an L-mode ensemble.",
+                    stacklevel=2)
+                coil_filter_used = "legacy(fallback)"
+                coil_summary, coil_fig = filter_coil_currents(
+                    header, scan_key=sk,
+                    F_max_pct=fc.inspec_F_max * 100.0,
+                    VSC_max_pct=fc.inspec_VSC_max * 100.0,
+                    apply=True, plot=plot,
+                )
+        else:
+            coil_summary, coil_fig = filter_coil_currents(
+                header, scan_key=sk,
+                F_max_pct=fc.inspec_F_max * 100.0,
+                VSC_max_pct=fc.inspec_VSC_max * 100.0,
+                apply=True, plot=plot,
+            )
         bnd_summary, bnd_fig = filter_boundaries(
             header, scan_key=sk, rms_max_mm=rms, apply=True, plot=plot,
         )
         # one scan key -> each summary is a single {counts, draws} dict
-        self._selection = {"coil": coil_summary, "boundary": bnd_summary}
+        self._selection = {"coil": coil_summary, "boundary": bnd_summary,
+                           "coil_filter_used": coil_filter_used}
         if plot:
             self._selection["figures"] = (coil_fig, bnd_fig)
         self._print_generation_summary(coil_summary, bnd_summary)
         return self._selection
+
+    def _coil_daq_era(self):
+        """Acquisition era label for the era-dependent coil tolerance floor, or None.
+
+        The era selects the sigma FLOOR, i.e. an acceptance criterion, so it is
+        only ever taken from something the user actually stated:
+
+          1. ``filtering.coil_daq_era`` -- the explicit override;
+          2. an explicit ``source.pulse`` / ``source.shot`` field, mapped through
+             the device's own era bands (:func:`devices.era_for_pulse`).
+
+        Route 2 uses the pulse number as a DATE PROXY for the coil-current
+        acquisition upgrade -- the upgrade has a date, and the pulse index is the
+        only monotone clock the archive carries -- so the band boundary is
+        approximate and a pulse near it may belong to the other era.  On DIII-D
+        the two floors it chooses between are 825 A-t (``"pre2014"``) and
+        325 A-t (``"modern"``), refined per coil; set ``filtering.coil_daq_era``
+        to override the proxy with a stated era.  Either way :meth:`filter`
+        prints the decision (:meth:`_coil_era_note`) once per call.
+
+        Nothing is scraped out of a run header, mesh name or file path.  That
+        fallback used to exist and was a silent tolerance relaxation: any six
+        consecutive digits anywhere in the header matched, so naming a run after
+        a mesh resolution or a date handed every coil a 2.5x looser floor.
+
+        ``None`` (era unknown) leaves the device default -- the tightest floor --
+        in force, and the filter warns that it is doing so.
+        """
+        fc = self.config.filtering
+        if getattr(fc, "coil_daq_era", None):
+            return fc.coil_daq_era
+        from .devices import era_for_pulse, resolve_device
+        pulse = self._coil_source_pulse()
+        if pulse is None or self.config.device is None:
+            # without a named device there is no era table to map a pulse onto;
+            # detection from the mesh happens later, inside resolve_coil_sigma.
+            return None
+        spec = resolve_device(self.config.device)
+        return era_for_pulse(spec, pulse) if spec is not None else None
+
+    def _coil_source_pulse(self):
+        """Explicit ``source.pulse``/``source.shot`` as an int, else None."""
+        src = self.config.source
+        for attr in ("pulse", "shot"):
+            v = getattr(src, attr, None)
+            if v is None:
+                continue
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def _coil_era_note(self, era) -> str:
+        """One line naming the acquisition era the coil chi2 filter is about to
+        use, how it was arrived at, and the sigma floor it buys.
+
+        The era moves an acceptance threshold, so the decision belongs in the run
+        log and not only in a config field -- especially when it came from the
+        pulse number, which is a date proxy for the acquisition upgrade and so
+        puts an approximate boundary between two floors.  :meth:`filter` prints
+        this once per call (not per draw); when ``filtering.coil_sigma`` is set
+        the sigma bypasses the device model altogether and the line says so.
+        """
+        from .devices import resolve_device, tolerance_for
+        fc = self.config.filtering
+        lead = "  coil chi2 filter:"
+        if fc.coil_sigma is not None:
+            named = f" ({fc.coil_sigma!r})" if isinstance(fc.coil_sigma, str) else ""
+            return (f"{lead} per-coil sigma from filtering.coil_sigma{named}; "
+                    "the acquisition era does not apply")
+        spec = resolve_device(self.config.device) if self.config.device else None
+
+        def _floor(label):
+            """' (sigma floor F A-t)' for *label*, or '' if no device is named."""
+            if spec is None:
+                return ""
+            return f" (sigma floor {tolerance_for(spec, era=label)[0]:g} A-t)"
+
+        if era is not None:
+            if getattr(fc, "coil_daq_era", None):
+                return f"{lead} era {era!r}{_floor(era)}  [explicit; filtering.coil_daq_era]"
+            pulse, band = self._coil_source_pulse(), ""
+            for lo, hi, _fl, lab in (spec.sigma_floor_by_era if spec else ()):
+                if lab == era:
+                    if lo <= 0:
+                        band = f"pulse {pulse} < {hi:g} -> "
+                    elif hi == float("inf"):
+                        band = f"pulse {pulse} >= {lo:g} -> "
+                    else:
+                        band = f"pulse {pulse} in [{lo:g}, {hi:g}) -> "
+                    break
+            return (f"{lead} {band}era {era!r}{_floor(era)}  [automatic: the pulse "
+                    "number is a date proxy for the acquisition upgrade, so the "
+                    "boundary is approximate; set filtering.coil_daq_era to override]")
+        # era undetermined -> tolerance_for falls back to the device's last band
+        if spec is None:
+            why = ("BouquetConfig.device is not set, so no era table applies yet"
+                   if self.config.device is None else "no era table for this device")
+            return (f"{lead} era undetermined ({why}) -> the device detected from the "
+                    "mesh uses its default band, which carries the TIGHTEST floor  "
+                    "[set filtering.coil_daq_era to state the era]")
+        if not spec.sigma_floor_by_era:
+            return (f"{lead} device {spec.name!r} has no acquisition eras; sigma floor "
+                    f"{spec.sigma_floor:g} A-t")
+        pulse = self._coil_source_pulse()
+        why = ("no pulse on source.pulse / source.shot" if pulse is None
+               else f"pulse {pulse} falls in no era band of device {spec.name!r}")
+        default = spec.sigma_floor_by_era[-1][3]
+        return (f"{lead} era undetermined ({why}) -> default band {default!r}"
+                f"{_floor(None)}, the TIGHTEST floor  "
+                "[set filtering.coil_daq_era to state the era]")
 
     def _print_generation_summary(self, coil_summary, bnd_summary):
         """Concise post-generation summary (draws / coil spec / boundary / in-spec),
@@ -1410,9 +1560,18 @@ class Bouquet:
         print(f"\n=== Bouquet — {tag} {'=' * max(3, 34 - len(tag))}  "
               f"{n_sel}/{n_all} in-spec ({frac:.0f}%)")
         print(f"  draws         {n_all} generated")
+        # name the criterion that was actually applied -- the chi2 filter reports
+        # its own thresholds in the summary, the legacy rule the +/- band.
+        if "chi2_max" in cs:
+            zm = cs.get("z_max")
+            crit = (f"chi2/nu <= {cs['chi2_max']:g}"
+                    + (f", |z| <= {zm:g}" if zm is not None else "")
+                    + f" [{cs.get('sigma_model', {}).get('acceptance', {}).get('source', '?')}"
+                    + f", {cs.get('n_coils', '?')} coils]")
+        else:
+            crit = f"within ±{fc.inspec_F_max * 100:.0f}%"
         print(f"  coil spec     {cs.get('n_pass', '?')}/{cs.get('n_total', '?')} "
-              f"within ±{fc.inspec_F_max * 100:.0f}%   "
-              f"({cs.get('n_fail', '?')} out-of-spec)")
+              f"{crit}   ({cs.get('n_fail', '?')} out-of-spec)")
         if rs:
             print(f"  boundary      RMS median {rs.get('median', float('nan')):.2f} mm"
                   f"   max {rs.get('max', float('nan')):.2f} mm")

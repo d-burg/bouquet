@@ -1,5 +1,62 @@
 # Bouquet — change summaries
 
+## Unreleased — the Z_eff envelope is measured, not assumed
+
+**Behaviour change on the reconstruction/IDA path.** The Z_eff perturbation
+width used to be `zeff_scalar_sigma · |Z_eff|` — an *assumed* 5 % — even when
+the IDA `.cdf` carried a measured uncertainty. It is now taken from the file
+wherever the file supports it, through a three-tier ladder selected by the new
+`UncertaintyConfig.zeff_sigma_source` (default `"auto"`):
+
+| Tier | Source | Typical width |
+|---|---|---|
+| carbon-propagated | `n_12C6_err` (direct) or the dilution posterior (ensemble), propagated with `sigma_ne` | ~2 % of Z_eff in-core |
+| VB-measured | `Zeff_err` (direct) or the `Zeff` sample spread (ensemble) | ~8–9 % in-core, much wider in the SOL |
+| scalar | `zeff_scalar_sigma` × abs(Z_eff) | the assumed 5 % |
+
+Because Z_eff is the primary density channel, this rescales **every `n_i` /
+`n_z` band in the ensemble** — by up to a factor of ~4 either way, depending on
+which tier a given file reaches. Runs before and after this change are not
+comparable on the recon+IDA path unless `zeff_sigma_source="scalar"` was set.
+Users with no IDA file, or with `zeff_sigma_source="scalar"`, are bit-identical
+to ≤1.3.1: the scalar expression is unchanged and no channel is added or
+removed, so the sampler sees the same `user_sigmas` in the same order.
+
+* **Both measured tiers are eligible only when the Z_eff baseline is itself the
+  IDA one** — the recon path, and the *same* file that supplies the sigmas.
+  Pairing a FUSE (IMAS/`ida_hybrid`) or p-file baseline with an IDA envelope
+  would mix channels, so it falls back to the scalar. The file test compares
+  **resolved** paths (`expandvars` → `expanduser` → `abspath` → `realpath`, then
+  `os.path.samefile`), so a relative, `~`-prefixed, trailing-separator or
+  symlinked spelling of the same file stays eligible.
+* **No step down the ladder is silent.** Each emits a single `UserWarning`
+  naming the tier chosen, every tier skipped, and the reason class (*source
+  ineligible* / *missing dataset* / *invalid data*); the same record comes back
+  as `resolve_uncertainty()`'s `"zeff_sigma_tier"` metadata and is printed under
+  `[sigma]`.
+* **Non-physical carbon data drops the carbon tier rather than corrupting it**,
+  in **both** IDA layouts. Negative `n_12C6` (SOL spline undershoot), netCDF
+  fill values (~1e36) and NaN holes all survive the downstream clip floors and
+  produce enormous-but-valid-looking sigmas, so any bad radius (direct) or bad
+  sample point (ensemble) drops the tier with a counted, printed reason.
+* A 1-sigma array with **negative entries** is refused as corrupt rather than
+  read as a wide band, with a counted reason; shape, non-finite, negative and
+  all-zero are four distinct recorded refusals.
+* `uncertainty.zeff_sigma_source` is validated in `BouquetConfig.__post_init__`,
+  so a typo raises at construction rather than after the baseline GS solve.
+
+### Also in this change: `impurity_Z` now reaches the IDA reader
+
+`resolve_uncertainty` previously called `read_ida()` without `impurity_Z`, so
+the sigma read always used the default **Z = 6** regardless of the source's own
+`impurity_Z`. It now passes `source.impurity_Z` through, matching what the
+kinetics loader has always done.
+
+**This moves `sigma_ni`, not only the new Z_eff channel**, for any user whose
+source sets `impurity_Z != 6.0`: `ni = n_e − Z·n_C` is re-derived at the
+source's real charge, and the ion-density sigma follows. Users on the default
+carbon `impurity_Z = 6.0` are unaffected.
+
 ## 1.3.0 — the seeded draw is now machine-independent; find_ida (2026-08-05)
 
 1.2.0 shipped the contract "same seed → bitwise-identical archives". True on

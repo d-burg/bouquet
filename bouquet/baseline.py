@@ -189,6 +189,275 @@ def resolve_baseline(config: "BouquetConfig", mygs=None) -> Baseline:
     raise TypeError(f"unknown baseline source type: {type(source).__name__}")
 
 
+def _norm_path(p) -> str:
+    """Normalise a path spelling for identity comparison.
+
+    ``expandvars`` + ``expanduser`` + ``abspath`` + ``realpath``: resolves
+    ``~``, environment variables, relative prefixes, ``.``/``..`` segments,
+    trailing separators and symlinks (including symlinked parent
+    directories).  ``realpath`` is defined for paths that do NOT exist -- it
+    normalises the part it can and leaves the rest -- so this doubles as the
+    tolerant fallback for a file that has not been written yet.  Returns
+    ``""`` for an empty/None input.
+    """
+    import os
+
+    s = str(p or "")
+    if not s:
+        return ""
+    return os.path.realpath(os.path.abspath(os.path.expanduser(
+        os.path.expandvars(s))))
+
+
+def _same_path(a, b) -> bool:
+    """True when two path spellings denote the SAME FILE.
+
+    **Never compare raw path strings when deciding sigma eligibility.**
+    ``a == b`` on the raw strings answers "different file" for every one of:
+    relative vs absolute, a ``~`` prefix, a trailing slash or ``./``
+    segment, and a symlink (or a symlinked parent directory).  In the first
+    version of the Z_eff gate each of those silently disabled both measured
+    tiers and dropped the run to the ASSUMED scalar envelope -- the same
+    failure class this feature's own end-to-end A/B originally caught.
+
+    Uses ``os.path.samefile`` (inode identity, so hardlinks and bind mounts
+    also compare equal) when both paths exist, and normalised-absolute
+    equality otherwise.  A genuinely different file is refused by both
+    tests.
+    """
+    import os
+
+    if not a or not b:
+        return False
+    na, nb = _norm_path(a), _norm_path(b)
+    if na == nb:
+        return True
+    try:
+        return os.path.samefile(na, nb)
+    except OSError:          # one or both do not exist -> not the same file
+        return False
+
+
+def zeff_sigma_eligibility(source, ida_path):
+    """May a measured Z_eff envelope be paired with this baseline?
+
+    Returns ``(eligible, reason)``.  ``reason`` is ``""`` when eligible and a
+    human-readable explanation otherwise, so a refusal can be WARNED about
+    and RECORDED instead of silently costing the run its measured tiers.
+
+    The measured tiers are ABSOLUTE sigma profiles read out of one IDA
+    ``.cdf``; they may only be paired with a Z_eff baseline that came from
+    that same file.  Three refusals:
+
+    * no IDA sigma file is configured at all -- there is no ladder;
+    * the baseline is the IMAS/FUSE one (``ImasSource``, including the
+      ``ida_hybrid`` path, whose Z_eff deliberately stays FUSE's);
+    * a reconstruction source whose own profiles file is not that ``.cdf``
+      -- a p-file Z_eff baseline, or ``unc.ida_path`` naming a different
+      file or vintage.
+
+    The file-identity test compares RESOLVED paths (:func:`_same_path`),
+    never raw strings.
+    """
+    import os
+
+    from .config import ReconstructionSource
+
+    if ida_path is None:
+        return False, "no IDA sigma file is configured (no ladder applies)"
+    ida_name = os.path.basename(_norm_path(ida_path)) or str(ida_path)
+    if not isinstance(source, ReconstructionSource):
+        return False, (
+            "the Z_eff baseline comes from the IMAS/FUSE source rather than "
+            f"from {ida_name}; pairing a FUSE Z_eff with an IDA-measured "
+            "envelope would mix channels")
+    src_profiles = str(getattr(source, "profiles_path", "") or "")
+    src_norm = _norm_path(src_profiles)
+    if not src_norm.endswith(".cdf"):
+        return False, (
+            f"the source's own profiles file is not an IDA .cdf "
+            f"({os.path.basename(src_norm) or '<unset>'}), so its Z_eff "
+            f"baseline did not come from {ida_name}")
+    if not _same_path(ida_path, src_profiles):
+        return False, (
+            f"the sigma file ({ida_name}) is a genuinely different file "
+            f"from the source's own profiles file "
+            f"({os.path.basename(src_norm)}) -- compared after expanduser + "
+            f"realpath, so this is a real mismatch, not a path spelling")
+    return True, ""
+
+
+def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
+                          zeff_is_ida, measured_sigma, measured_source,
+                          carbon_sigma=None, carbon_source="none",
+                          ineligible_reason="", ida_in_play=False):
+    """The Z_eff envelope ladder: highest-fidelity tier available per file.
+
+    Returns ``(sigma_array, label, meta)``.  Tiers, in fidelity order:
+
+    1. **carbon-propagated** (``sigma_Zeff_carbon``: n_12C6_err on the direct
+       layout, the dilution's own posterior on the ensemble layout).  The
+       Zeff-primary scheme perturbs Zeff precisely to move the DILUTION
+       ``ni = ne - Z nC``, and CER carbon density is that dilution's direct
+       measurement; drawing Zeff with this sigma IS error propagation
+       through ``ni = ne - Z nC``.  Measured on the demo shots it is 1.9-5.8
+       % of Zeff in-core and stays sane in the SOL (4-19 %).
+    2. **VB-measured** (``sigma_Zeff``: the file's Zeff_err / Zeff sample
+       spread).  Conservative -- the visible-bremsstrahlung inversion's own
+       error, which carries n_e^2 sqrt(T_e) propagation, calibration and
+       mantle-subtraction systematics: 8-9 % core but 44-130 % in the SOL
+       on the demo direct files, and grand means up to ~90 % on some shots.
+    3. the flat ``zeff_scalar_sigma`` fraction of ``|Z_eff|`` -- the
+       pre-1.3.2 behaviour, the "scalar" setting, and the loud fallback.
+
+    Both measured tiers are eligible only when the Z_eff baseline itself is
+    the IDA one (``zeff_is_ida``, decided by
+    :func:`zeff_sigma_eligibility`); a FUSE baseline (IMAS/ida_hybrid path)
+    must not be paired with an IDA envelope.  ``zeff_sigma_source`` picks:
+    "auto" (carbon > VB > scalar), "carbon", "measured" (VB), "scalar".
+
+    **No fallback down this ladder is silent.**  Every skipped tier is
+    recorded in ``meta["skipped"]`` as ``{"tier", "reason"}`` -- and the
+    reason distinguishes an ineligible source (path mismatch / wrong source
+    type) from a missing dataset from invalid data -- and a SINGLE
+    ``UserWarning`` names the tier chosen, the tiers skipped and why.  That
+    warning fires whenever an IDA file was in play at all (so a path
+    mismatch cannot pass unnoticed) or whenever a forced ``"carbon"`` /
+    ``"measured"`` could not be honoured.  The one case with no warning is
+    the one with no ladder: no IDA file configured, or ``"scalar"`` asked
+    for explicitly -- both still recorded in ``meta``.
+
+    A chosen envelope whose median fraction of |Zeff| exceeds 25 % draws a
+    separate report-only warning naming the alternatives.
+    """
+    import warnings
+
+    import numpy as np
+
+    if zeff_sigma_source not in ("auto", "carbon", "measured", "scalar"):
+        raise ValueError(
+            f"zeff_sigma_source={zeff_sigma_source!r} is not one of "
+            "'auto', 'carbon', 'measured', 'scalar'")
+    base = np.abs(np.asarray(base_zeff, dtype=float))
+    scalar_env = float(zeff_scalar_sigma) * base
+    scalar_label = f"scalar zeff_scalar_sigma={float(zeff_scalar_sigma):g}"
+
+    skipped = []                      # [(tier, reason)], in ladder order
+
+    def _usable(m, tier):
+        """Validated tier array, or None with the reason recorded."""
+        if m is None:
+            return None
+        a = np.asarray(m, dtype=float)
+        if a.shape != base.shape:
+            skipped.append((tier, f"invalid data: shape {a.shape} does not "
+                                  f"match the Z_eff baseline {base.shape}"))
+            return None
+        if not np.all(np.isfinite(a)):
+            skipped.append((tier, "invalid data: non-finite entries"))
+            return None
+        if np.any(a < 0.0):
+            # These are 1-sigma MAGNITUDES.  A negative entry is not a wide
+            # band, it is corrupt data, and it propagates a sign into the
+            # draw scales -- so `all finite and any > 0` was too weak: it
+            # admitted an array with negative entries as long as one entry
+            # was positive.
+            skipped.append((tier, f"invalid data: {int(np.sum(a < 0.0))} of "
+                                  f"{a.size} entries are negative (these are "
+                                  f"1-sigma magnitudes)"))
+            return None
+        if not np.any(a > 0.0):
+            skipped.append((tier, "invalid data: all-zero"))
+            return None
+        return a
+
+    env = label = provenance = None
+    tier = None
+    if not zeff_is_ida:
+        _why = ineligible_reason or (
+            "the Z_eff baseline does not come from the IDA file supplying "
+            "the sigmas")
+        _attempted = {"auto": ("carbon-propagated", "VB-measured"),
+                      "carbon": ("carbon-propagated", "VB-measured"),
+                      "measured": ("VB-measured",),
+                      "scalar": ()}[zeff_sigma_source]
+        for _t in _attempted:
+            skipped.append((_t, f"source ineligible: {_why}"))
+    else:
+        if zeff_sigma_source in ("auto", "carbon"):
+            c = _usable(carbon_sigma, "carbon-propagated")
+            if c is not None:
+                env, tier = c, "carbon-propagated"
+                provenance = str(carbon_source)
+                label = f"carbon-propagated ({carbon_source})"
+            elif carbon_sigma is None:
+                skipped.append(("carbon-propagated",
+                                "missing dataset: this file provides no "
+                                "n_12C6 uncertainty"))
+        if env is None and zeff_sigma_source in ("auto", "carbon", "measured"):
+            m = _usable(measured_sigma, "VB-measured")
+            if m is not None:
+                env, tier = m, "VB-measured"
+                provenance = str(measured_source)
+                label = f"measured IDA ({measured_source})"
+            elif measured_sigma is None:
+                skipped.append(("VB-measured",
+                                "missing dataset: this IDA file carries no "
+                                "Zeff uncertainty (older direct vintage)"))
+
+    if env is None:
+        env, tier = scalar_env, "scalar"
+        provenance = f"zeff_scalar_sigma={float(zeff_scalar_sigma):g}"
+        label = scalar_label + ("" if zeff_sigma_source == "scalar"
+                                else " (FALLBACK -- an ASSUMED width)")
+
+    # ONE warning, naming the tier chosen, the tiers skipped and why.  It
+    # fires whenever an IDA file was actually in play (so a path mismatch or
+    # a missing dataset can never drop the run to the assumed scalar
+    # unnoticed) and whenever a forced measured mode could not be honoured.
+    warned = bool(skipped) and (bool(ida_in_play)
+                                or zeff_sigma_source in ("carbon", "measured"))
+    if warned:
+        warnings.warn(
+            "resolve_zeff_envelope: Z_eff envelope resolved to the "
+            f"{tier.upper()} tier ({label}) with "
+            f"zeff_sigma_source={zeff_sigma_source!r}; "
+            + "; ".join(f"{_t} skipped -- {_r}" for _t, _r in skipped)
+            + ("."
+               if tier != "scalar" else
+               ".  The scalar envelope is an ASSUMED width, not a measured "
+               "one: the resulting ni bands are not error propagation "
+               "through ni = ne - Z nC."),
+            stacklevel=2)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        _frac = float(np.median(env / np.clip(base, 1e-3, None)))
+    if _frac > 0.25:
+        warnings.warn(
+            f"resolve_zeff_envelope: the chosen Z_eff envelope "
+            f"({label}) has median fraction {100 * _frac:.0f} % of |Zeff| -- "
+            f"implausibly large for a 1-sigma dilution uncertainty (VB "
+            f"Zeff_err is known to blow up in the SOL and on some shots; "
+            f"grand means near 90 % have been observed).  Report-only: "
+            f"consider zeff_sigma_source='carbon' (direct dilution "
+            f"measurement) or 'scalar'.", stacklevel=2)
+
+    meta = {
+        "requested": str(zeff_sigma_source),
+        "tier": tier,
+        "label": label,
+        "provenance": provenance,
+        "eligible": bool(zeff_is_ida),
+        "ineligible_reason": str(ineligible_reason or ""),
+        "skipped": [{"tier": _t, "reason": _r} for _t, _r in skipped],
+        "fell_back": bool(skipped),
+        "warned": bool(warned),
+        "median_fraction_of_zeff": _frac,
+    }
+    return env, label, meta
+
+
+
 def resolve_uncertainty(config, baseline) -> dict:
     """Resolve the perturbation envelope for :func:`generate_bouquet`.
 
@@ -234,12 +503,18 @@ def resolve_uncertainty(config, baseline) -> dict:
 
     # IDA arrays (read once) available as a fallback below
     ida_sig = None
+    _ida_zeff_sigma, _ida_zeff_source = None, "none"
+    _ida_zeff_carbon, _ida_zeff_carbon_source = None, "none"
     if ida_path is not None:
         from .io.ida import read_ida
         ida = read_ida(
             ida_path, time=getattr(src, "time", None),
             sigma_mode=unc.sigma_mode, sigma_method=unc.sigma_method,
             sigma_ni_from_ne=unc.sigma_ni_from_ne,
+            # the carbon tier's Z(Z-1) propagation is quadratically
+            # Z-sensitive; the kinetics loader already passes this, and
+            # omitting it here silently pinned the sigma math to carbon
+            impurity_Z=float(getattr(src, "impurity_Z", 6.0)),
         )
 
         def _to_kin(arr):
@@ -247,6 +522,13 @@ def resolve_uncertainty(config, baseline) -> dict:
 
         ida_sig = {"ne": _to_kin(ida.sigma_ne), "te": _to_kin(ida.sigma_te),
                    "ni": _to_kin(ida.sigma_ni), "ti": _to_kin(ida.sigma_ti)}
+        if getattr(ida, "sigma_Zeff", None) is not None:
+            _ida_zeff_sigma = _to_kin(ida.sigma_Zeff)
+            _ida_zeff_source = str(getattr(ida, "sigma_Zeff_source", "?"))
+        if getattr(ida, "sigma_Zeff_carbon", None) is not None:
+            _ida_zeff_carbon = _to_kin(ida.sigma_Zeff_carbon)
+            _ida_zeff_carbon_source = str(
+                getattr(ida, "sigma_Zeff_carbon_source", "?"))
 
     # Per-channel resolution: explicit profile > IDA > flat scalar fraction.
     _profiles = unc.sigma_profiles or {}
@@ -326,14 +608,49 @@ def resolve_uncertainty(config, baseline) -> dict:
     # The baseline Z_eff is source-provided (baseline.aux['zeff'] for IMAS,
     # else baseline.Zeff for the reconstruction path), on the kinetic grid.
     user_sigmas = dict(unc.aux_sigmas or {})
+    # Provenance of the Z_eff envelope, always present: None when the ladder
+    # never ran (an explicit aux_sigmas['zeff'], or the channel disabled),
+    # else the full tier record -- chosen tier, skipped tiers and why.
+    out["zeff_sigma_tier"] = None
     if "zeff" not in user_sigmas and float(getattr(unc, "zeff_scalar_sigma", 0.0)) > 0:
         base_zeff = src_aux.get("zeff")
         if base_zeff is None:
             base_zeff = np.asarray(baseline.Zeff, dtype=float)
         if "zeff" not in man_base:
             man_base["zeff"] = np.asarray(base_zeff, dtype=float)
-        user_sigmas["zeff"] = unc.zeff_scalar_sigma * np.abs(
-            np.asarray(man_base["zeff"], dtype=float))
+        # Measured-tier eligibility is decided by the SOURCE TYPE and by FILE
+        # IDENTITY, not by whether baseline.aux carries a 'zeff' entry: the
+        # reconstruction path also populates aux['zeff'] (it IS the IDA
+        # Zeff, stored for the aux plots), so testing the aux dict wrongly
+        # disqualified every recon-path run -- caught by an end-to-end A/B,
+        # where the 'auto' arm silently resolved to the scalar.  The file
+        # test lives in zeff_sigma_eligibility() and compares RESOLVED paths
+        # (expanduser + realpath, samefile when both exist): a raw string
+        # comparison re-introduces exactly the same silent drop for a
+        # relative-vs-absolute, '~'-prefixed, trailing-slash or symlinked
+        # spelling of the very same file.  It returns the REASON as well as
+        # the verdict so the fallback can be warned about and recorded.
+        _zeff_baseline_is_ida, _zeff_inelig = zeff_sigma_eligibility(
+            src, ida_path)
+        _z_env, _z_label, _z_meta = resolve_zeff_envelope(
+            getattr(unc, "zeff_sigma_source", "auto"),
+            unc.zeff_scalar_sigma,
+            man_base["zeff"],
+            zeff_is_ida=_zeff_baseline_is_ida,
+            measured_sigma=_ida_zeff_sigma,
+            measured_source=_ida_zeff_source,
+            carbon_sigma=_ida_zeff_carbon,
+            carbon_source=_ida_zeff_carbon_source,
+            ineligible_reason=_zeff_inelig,
+            ida_in_play=ida_path is not None,
+        )
+        user_sigmas["zeff"] = _z_env
+        out["zeff_sigma_tier"] = _z_meta
+        if getattr(unc, "log_sigma_sources", True):
+            print(f"[sigma] zeff envelope <- {_z_label}")
+            for _sk in _z_meta["skipped"]:
+                print(f"[sigma]   {_sk['tier']} tier skipped: "
+                      f"{_sk['reason']}")
 
     resolved_sigma, resolved_base = {}, {}
     for name, sig in user_sigmas.items():

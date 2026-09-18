@@ -221,6 +221,61 @@ source sets `impurity_Z != 6.0`: `ni = n_e − Z·n_C` is re-derived at the
 source's real charge, and the ion-density sigma follows. Users on the default
 carbon `impurity_Z = 6.0` are unaffected.
 
+## Unreleased — the structured closure defaults to its validated preset
+
+### The structured closure's default prior is now the validated one
+
+`closure_channel="structured"` with no `structured_preset` used to resolve to
+the raw shipped fields — the symmetric physics ladder (`W_ind` 100/10/3/1,
+`W_bs` 1/3/10/100) on the hard KKT solver, I_p imposed exactly. That is the
+configuration this channel's own l_i study **superseded**, and the validated one
+was reachable only by naming `structured_preset="li_soft_onesided"`. A default
+nobody is expected to want is a trap, so the validated preset **is** the default
+of the channel now.
+
+* **Default.** `closure_channel="structured"` and no preset → `li_soft_onesided`
+  (`utils.STRUCTURED_PRESET_DEFAULT`): σ_bs `(0.50, 0.30, 0.15, 0.10)`,
+  σ_ind,down `(0.10, 0.40, 0.40, 0.40)`, σ_ind,up `(0.10, 0.10, 0.10, 0.40)`,
+  `structured_soft=True`, `structured_ip_sigma_frac=0.005`, and σ_li `0.04`
+  **only** when `structured_li_target` is set. Without an l_i target it degrades
+  exactly as the named preset always has: soft I_p plus the one-sided prior, no
+  l_i row. The `UserWarning` names every field filled and says `BY DEFAULT`.
+* **Opt-out: `structured_preset="none"`** (`utils.STRUCTURED_PRESET_NONE`) —
+  declines the default and leaves every structured field as shipped, reproducing
+  the previous behaviour exactly. Every explicit configuration that worked
+  before still works, unchanged.
+* **Nothing changes off the structured channel.** The code-wide default is still
+  `closure_channel="bootstrap"`; with any other channel and no preset named, no
+  field is touched and no warning fires.
+* **Explicit settings still win**, by the same rule as for a named preset (a
+  field set to its own default value remains indistinguishable from an unset
+  one, and is still named in the warning). Two guards keep a *default* from
+  breaking a configuration that ran before: an explicit `structured_basis`
+  declines the default outright (the ladders are widths at the shipped basis's
+  radii, meaningless on another basis), and an explicit absolute
+  `structured_ip_sigma` suppresses the `structured_ip_sigma_frac` fill it would
+  otherwise clash with. A preset named explicitly behaves as it always did in
+  both cases.
+* **Recorded.** `structured_preset_in_force` / `structured_preset_source` /
+  `structured_preset_fields` on the config, and `structured_preset`,
+  `structured_preset_source` (`default` | `explicit` | `opt-out` |
+  `default-declined-custom-basis` | `unset`) and `structured_preset_filled` in
+  `Baseline.ip_closure`. Resolution happens at construction **and** at the
+  closure's entry point (`config.resolve_structured_preset`, idempotent), so a
+  `closure_channel` set after the config was built is resolved too.
+
+**Scope, stated honestly.** These σ values were set from a study on **one device
+with one integrated-modelling source** for the inductive current. They are
+**priors in relative units** — fractions of the component profiles, on
+normalised flux — not device constants; that is why they transfer at all, and it
+is not a claim that they are right elsewhere. On another device or another
+`j_ind` source they are a **starting point**: check the recorded closure-health
+flags (the `0.2 < s < 5` scale bounds, `|s_bs − 1| > 0.5`, the q0 miss, the l_i
+z-score), and run `STRUCTURED_WEIGHTS_UNIFORM` as the no-prior sensitivity.
+
+No tolerance, bound, gate or acceptance criterion moved. A preset is a prior: it
+changes which exactly-closing profile is chosen, never what "closed" means.
+
 ## 1.3.0 — the seeded draw is now machine-independent; find_ida (2026-08-05)
 
 1.2.0 shipped the contract "same seed → bitwise-identical archives". True on

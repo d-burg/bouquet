@@ -1223,6 +1223,34 @@ STRUCTURED_PRESETS = {
     ),
 }
 
+#: The preset the structured channel uses when the caller names none.
+#: ``closure_channel="structured"`` with ``structured_preset=None`` resolves to
+#: this preset, because the raw shipped fields (the symmetric physics ladder on
+#: the hard solver) are the configuration the l_i study SUPERSEDED, and a
+#: default that nobody is expected to want is a trap, not a default.  The
+#: channel itself stays opt-in: nothing here changes ``closure_channel``, whose
+#: shipped default is still ``"bootstrap"``.
+#:
+#: SCOPE, honestly stated: these sigmas were set from a study on ONE device
+#: with ONE integrated-modelling source for the inductive current.  They are
+#: PRIORS in RELATIVE units -- fractions of the component profiles themselves,
+#: on normalised flux -- not device constants, which is why they transfer at
+#: all; but they are a starting point elsewhere, not a validated setting.  On
+#: another device or another source, run it and read the recorded
+#: closure-health flags (the 0.2 < s < 5 scale bounds, |s_bs - 1| > 0.5, the q0
+#: miss, the l_i z-score) before trusting the answer, and consider
+#: :data:`STRUCTURED_WEIGHTS_UNIFORM` as the no-prior sensitivity.
+STRUCTURED_PRESET_DEFAULT = "li_soft_onesided"
+
+#: The ``structured_preset`` spelling that DECLINES the default preset and
+#: leaves every structured field at its own shipped default (the symmetric
+#: physics ladder, hard solver, Ip imposed exactly) -- the behaviour a bare
+#: ``closure_channel="structured"`` had before :data:`STRUCTURED_PRESET_DEFAULT`
+#: became the default.  It is spelled as a NAME rather than as ``None`` because
+#: ``None`` now means "the caller expressed no preference", and the two have to
+#: be distinguishable or the old default is unreachable.
+STRUCTURED_PRESET_NONE = "none"
+
 
 def structured_preset_settings(name):
     """Resolved :class:`~bouquet.config.GenerationConfig` settings for a preset.
@@ -1235,6 +1263,11 @@ def structured_preset_settings(name):
     ignored: a preset that does not exist is a typo, and a typo that quietly
     left the shipped prior in place would be invisible in the record.
 
+    :data:`STRUCTURED_PRESET_NONE` (``"none"``) is accepted and returns an
+    EMPTY dict: it is the opt-out spelling, i.e. "fill nothing, leave every
+    structured field at its shipped default".  It is handled here, rather than
+    only in the config, so that the same one refusal covers every spelling.
+
     The caller decides what to do with the settings; ``GenerationConfig``
     applies them only to fields still holding their dataclass default VALUE --
     which a field explicitly set to that same value also does, so such a field
@@ -1245,10 +1278,14 @@ def structured_preset_settings(name):
     existed).
     """
     key = str(name)
+    if key == STRUCTURED_PRESET_NONE:
+        return {}
     if key not in STRUCTURED_PRESETS:
         raise ValueError(
             f"unknown structured_preset {key!r}; known presets: "
-            + ", ".join(sorted(STRUCTURED_PRESETS)))
+            + ", ".join(sorted(STRUCTURED_PRESETS))
+            + f" (or {STRUCTURED_PRESET_NONE!r} to decline the default preset "
+              "and keep every structured field at its shipped default)")
     spec = STRUCTURED_PRESETS[key]
     return {
         "structured_weights": dict(

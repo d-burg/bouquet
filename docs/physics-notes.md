@@ -537,18 +537,66 @@ flagged past 1 σ. Nothing anywhere snaps I_p back to the measurement.
 ### Recommended configuration
 
 The shipped default remains `closure_channel="bootstrap"`. The structured
-channel and every preset of it are **opt-in** — naming a preset does not switch
-the channel on.
+channel is **opt-in** — naming a preset does not switch the channel on.
 
-The configuration this work converged on is one switch:
+The configuration this work converged on **is the default of that channel**:
 
 ```python
-cfg.generation.closure_channel = "structured"
-cfg.generation.structured_preset = "li_soft_onesided"
+cfg.generation.closure_channel = "structured"       # -> preset li_soft_onesided
 cfg.generation.structured_li_target = li_from_the_reconstruction   # optional
 ```
 
-`structured_preset="li_soft_onesided"` fills, in σ terms:
+Selecting the structured channel with no `structured_preset` resolves to
+`li_soft_onesided` (`utils.STRUCTURED_PRESET_DEFAULT`), because the raw shipped
+fields — the symmetric physics ladder on the hard solver — are the configuration
+this study *superseded*, and a default nobody is expected to want is a trap
+rather than a default. Naming the preset explicitly does exactly the same thing;
+the record says which of the two happened (`structured_preset_source`:
+`"default"` or `"explicit"`).
+
+**The opt-out is `structured_preset="none"`** (`utils.STRUCTURED_PRESET_NONE`):
+it declines the default and leaves every structured field at its shipped value,
+which reproduces, exactly, what a bare `closure_channel="structured"` did before
+the default existed. Every explicit configuration that worked before remains
+reachable, and the old default is one spelling away.
+
+```python
+cfg.generation.closure_channel = "structured"
+cfg.generation.structured_preset = "none"           # the raw shipped fields
+```
+
+**Scope — read this before carrying the σ values elsewhere.** They were set from
+a study on **one device with one integrated-modelling source** for the inductive
+current. They are **priors in relative units** — fractions of the component
+profiles themselves, on normalised flux — not device constants, which is why
+they transfer at all; that is not a claim that they are right anywhere else. On
+another device, or another source of `j_ind`, treat them as a **starting
+point**: run the channel, then read the recorded closure-health flags before
+trusting the answer —
+
+* the scale bounds (a multiplier leaving `0.2 < s < 5` anywhere is refused);
+* `|s_bs − 1| > 0.5`, i.e. the bootstrap rescaled past its own ±50 % uncertainty
+  prior, which is a closure failure and not a finding;
+* the q0 miss against `q0_tol`, where the sawtooth gate admits an axis row;
+* the l_i z-score (`structured_residual_sigma_li`) and the σ_Ip residual.
+
+`STRUCTURED_WEIGHTS_UNIFORM` is the no-prior sensitivity: the difference between
+the two answers is the part of the result the prior, not the data, is holding
+up, and off the original device it is the first thing to run.
+
+Two guards keep the default from being worse than no default:
+
+* an explicit `structured_basis` **declines** it, with a warning and no fills —
+  the ladders are widths at the shipped basis's radii and mean nothing on
+  another basis (`structured_preset_source="default-declined-custom-basis"`);
+  naming the preset applies it anyway, since then the caller asked;
+* an explicit absolute `structured_ip_sigma` suppresses the default's
+  `structured_ip_sigma_frac` fill, because the two are mutually exclusive
+  downstream and a *default* may not turn a configuration that ran yesterday
+  into a refusal. A preset **named** explicitly still fills the fraction and
+  lets the closure refuse the clash loudly.
+
+The preset — named, or applied by default — fills, in σ terms:
 
 | field | value |
 |---|---|
@@ -572,13 +620,26 @@ Three rules govern it:
    Every field a preset fills is named in a `UserWarning` at construction, so
    the override is visible rather than silent. A caller who wants these
    ladders on the *hard* solver should set the σ fields directly rather than
-   naming the preset, or set the held field **after** construction.
+   naming the preset, or set the held field **after** construction. This holds
+   identically for the preset applied *by default* — the warning then says
+   `applied BY DEFAULT`, names the same fields and gives the opt-out.
 2. **A preset with no l_i target simply omits the l_i term.** No σ is recorded
-   for a measurement that was never supplied.
+   for a measurement that was never supplied — so a default-preset run without
+   an l_i target degrades to exactly what naming the preset without one gives:
+   soft I_p plus the one-sided prior, no l_i row.
 3. **An unknown preset name is refused at construction**, never ignored: a
    preset that does not exist is a typo, and a typo that quietly left the
-   shipped prior in place would be invisible in the record.
+   shipped prior in place would be invisible in the record. `"none"` is the one
+   extra spelling accepted, and it is the opt-out above.
 
 `utils.STRUCTURED_PRESETS` is the registry and
 `utils.structured_preset_settings` resolves one; it returns a fresh dict, so a
 campaign runner's edit cannot reconfigure the next slice.
+`config.resolve_structured_preset` applies the rules, at construction and again
+at the closure's own entry point — so a config whose `closure_channel` is set
+*after* the `GenerationConfig` was built (the one-liner above does exactly that)
+is resolved too, rather than being left silently on the superseded fields. It is
+idempotent, and it records `structured_preset_in_force`,
+`structured_preset_source` and the fields it filled onto the config and into the
+closure record (`structured_preset`, `structured_preset_source`,
+`structured_preset_filled` in `Baseline.ip_closure`).

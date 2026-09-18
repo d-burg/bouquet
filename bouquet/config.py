@@ -605,8 +605,31 @@ class GenerationConfig:
     #: post-solve correction, shared with the q0 corrector.
     closure_channel: str = "bootstrap"
     #: closure_channel="structured": a NAMED one-switch configuration, resolved
-    #: at construction by ``utils.structured_preset_settings``.  ``None``
-    #: (default) = no preset; every structured field keeps its own default.
+    #: at construction by ``utils.structured_preset_settings``.
+    #:
+    #: ``None`` (the field default) means "the caller expressed no preference".
+    #: With ``closure_channel="structured"`` that resolves to the DEFAULT preset
+    #: ``utils.STRUCTURED_PRESET_DEFAULT`` = ``"li_soft_onesided"``: the raw
+    #: shipped fields are the configuration the l_i study superseded, so a bare
+    #: structured channel now gets the validated one.  ``"none"``
+    #: (``utils.STRUCTURED_PRESET_NONE``) DECLINES it and reproduces those raw
+    #: fields exactly -- the symmetric physics ladder on the hard solver, Ip
+    #: imposed exactly -- which is what a bare structured channel did before.
+    #: With any other ``closure_channel`` nothing is applied unless a preset is
+    #: named explicitly (naming one still fills the fields, and still does not
+    #: switch the channel on).
+    #:
+    #: The default application is DECLINED, with a warning and no fills, when
+    #: ``structured_basis`` is set: the preset's ladders are widths at the
+    #: shipped basis's radii and have no meaning on another basis (the same
+    #: reason ``utils.structured_default_weights`` falls back to uniform).  A
+    #: preset NAMED explicitly is applied regardless -- the caller asked.
+    #:
+    #: The sigmas are PRIORS in relative units (fractions of the component
+    #: profiles, on normalised flux), set from a study on one device with one
+    #: integrated-modelling source for the inductive current.  They are not
+    #: device constants; elsewhere they are a starting point, and the recorded
+    #: closure-health flags are what says whether they held.
     #:
     #: ``"li_soft_onesided"`` is the recommended candidate configuration and
     #: fills, in sigma terms, ``sigma_bs = (0.50, 0.30, 0.15, 0.10)``,
@@ -630,6 +653,16 @@ class GenerationConfig:
     #: change ``closure_channel``, which stays ``"bootstrap"`` -- the structured
     #: channel and every preset of it are opt-in.
     structured_preset: Optional[str] = None
+    #: RECORDED, not set: which preset is in force after resolution (``None``
+    #: when none is), written by :func:`resolve_structured_preset`.
+    structured_preset_in_force: Optional[str] = field(init=False, default=None)
+    #: RECORDED, not set: HOW that preset got there -- ``"explicit"`` (named),
+    #: ``"default"`` (the structured channel's default preset), ``"opt-out"``
+    #: (``structured_preset="none"``), ``"default-declined-custom-basis"``, or
+    #: ``"unset"`` (no preset named and the channel is not structured).
+    structured_preset_source: str = field(init=False, default="unset")
+    #: RECORDED, not set: the config fields the preset actually filled.
+    structured_preset_fields: list = field(init=False, default_factory=list)
     #: closure_channel="structured" basis, as a dict.  ``None`` selects the
     #: shipped default ``utils.STRUCTURED_BASIS_DEFAULT`` -- four peak-normalised
     #: Gaussians at psi_N = 0.15/0.45/0.75/0.95 with width 0.2, spanning core to
@@ -911,6 +944,10 @@ class GenerationConfig:
     def __post_init__(self):
         """Resolve ``structured_preset`` into the individual structured fields.
 
+        Thin wrapper over :func:`resolve_structured_preset`, which carries the
+        rules (and is called again at the closure's own entry point, where it
+        is a no-op for a config that was built with its channel already set).
+
         Applied ONLY to fields still HOLDING their dataclass default VALUE.
 
         **The limitation this cannot see past:** a plain dataclass field that
@@ -930,29 +967,136 @@ class GenerationConfig:
 
         Nothing else is touched: in particular ``closure_channel`` keeps its
         shipped ``"bootstrap"`` default, so naming a preset never silently
-        switches the channel on.
+        switches the channel on -- ``structured_preset=None`` resolves to the
+        DEFAULT preset only when the channel is already ``"structured"``.
         """
-        if self.structured_preset is None:
-            return
-        from .utils import structured_preset_settings
-        filled = structured_preset_settings(self.structured_preset)
-        if self.structured_li_target is None:
-            filled.pop("structured_li_sigma", None)
-        applied = []
-        for field_name, value in filled.items():
-            default = GenerationConfig.__dataclass_fields__[field_name].default
-            if getattr(self, field_name) == default:
-                setattr(self, field_name, value)
-                applied.append(field_name)
-        if applied:
-            import warnings
+        resolve_structured_preset(self, stacklevel=4)
+
+
+def resolve_structured_preset(gc, warn: bool = True, stacklevel: int = 3):
+    """Resolve ``gc.structured_preset`` onto *gc*, in place.  Idempotent.
+
+    The one place the preset rules live, called both from
+    :meth:`GenerationConfig.__post_init__` and from the structured closure's
+    own entry point (so a config whose ``closure_channel`` was set AFTER
+    construction is not silently left on the superseded raw fields).  It works
+    on any object carrying the ``GenerationConfig`` attribute names, and reads
+    every default from ``GenerationConfig.__dataclass_fields__``.
+
+    The rules, in order:
+
+    * ``structured_preset=None`` and ``closure_channel != "structured"`` --
+      nothing is applied, exactly as before this function existed.
+    * ``structured_preset=None`` and ``closure_channel == "structured"`` -- the
+      DEFAULT preset (``utils.STRUCTURED_PRESET_DEFAULT``) is applied, and the
+      warning says BY DEFAULT and how to decline it.  Declined outright, with a
+      warning and no fills, when ``structured_basis`` is set: the preset's
+      ladders are widths at the shipped basis's radii and mean nothing on
+      another basis.  Declined for ``structured_ip_sigma_frac`` alone when the
+      caller set an absolute ``structured_ip_sigma``, because the two are
+      mutually exclusive downstream and a DEFAULT may not turn a configuration
+      that ran yesterday into a refusal.  (A preset NAMED explicitly still
+      fills the frac and lets the closure refuse the clash: there the caller
+      asked for the preset, so the ambiguity is theirs to resolve.)
+    * ``structured_preset="none"`` (``utils.STRUCTURED_PRESET_NONE``) -- the
+      opt-out: nothing is applied, every structured field keeps its shipped
+      default.  This reproduces, exactly, what a bare structured channel did
+      before the default preset existed.
+    * any other name -- applied as it always was, whatever the channel.
+
+    In every case a preset fills ONLY fields still holding their dataclass
+    default VALUE, which a field explicitly set to that same value also does
+    (the limitation :meth:`GenerationConfig.__post_init__` documents); the
+    fields it filled are named in a ``UserWarning`` and recorded.
+
+    Returns, and writes onto *gc* as ``structured_preset_in_force`` /
+    ``structured_preset_source`` / ``structured_preset_fields``,
+    ``{"name", "source", "fields"}``: which preset is in force, whether it was
+    chosen ``"explicit"``-ly or by ``"default"`` (or ``"opt-out"`` /
+    ``"default-declined-custom-basis"`` / ``"unset"``), and the fields it
+    filled.  The closure record copies these, so the archive says not just
+    which prior was used but who chose it.
+    """
+    import warnings
+
+    from .utils import (STRUCTURED_PRESET_DEFAULT, STRUCTURED_PRESET_NONE,
+                        structured_preset_settings)
+
+    specs = GenerationConfig.__dataclass_fields__
+
+    def _get(name):
+        return getattr(gc, name, specs[name].default)
+
+    def _record(name, source, applied):
+        applied = sorted(applied)
+        if (getattr(gc, "structured_preset_in_force", None) == name
+                and getattr(gc, "structured_preset_source", None) == source):
+            # An idempotent re-resolution fills nothing; keep the field list
+            # written by the first pass rather than blanking the record.
+            applied = sorted(set(applied)
+                             | set(getattr(gc, "structured_preset_fields", [])
+                                   or []))
+        gc.structured_preset_in_force = name
+        gc.structured_preset_source = source
+        gc.structured_preset_fields = list(applied)
+        return dict(name=name, source=source, fields=list(applied))
+
+    name = _get("structured_preset")
+    by_default = False
+    if name is None:
+        if str(_get("closure_channel")) != "structured":
+            return _record(None, "unset", ())
+        name, by_default = STRUCTURED_PRESET_DEFAULT, True
+        if _get("structured_basis") is not None:
+            if warn:
+                warnings.warn(
+                    "closure_channel='structured' with an explicit "
+                    "structured_basis and no structured_preset: the default "
+                    f"preset {name!r} is a ladder of prior WIDTHS at the "
+                    "shipped basis's radii and has no meaning on another "
+                    "basis, so it is NOT applied -- every structured field "
+                    "keeps its own default (the uniform, no-prior ladder for a "
+                    "basis of a different length).  Name the preset explicitly "
+                    "to apply it anyway, or set structured_weights / "
+                    "structured_sigma_ind_up for this basis.",
+                    stacklevel=stacklevel)
+            return _record(None, "default-declined-custom-basis", ())
+
+    key = str(name)
+    filled = structured_preset_settings(key)     # refuses an unknown name
+    if not filled:                               # the "none" opt-out
+        return _record(None, "opt-out", ())
+    if _get("structured_li_target") is None:
+        filled.pop("structured_li_sigma", None)
+    if by_default and _get("structured_ip_sigma") is not None:
+        filled.pop("structured_ip_sigma_frac", None)
+
+    applied = []
+    for field_name, value in filled.items():
+        if _get(field_name) == specs[field_name].default:
+            setattr(gc, field_name, value)
+            applied.append(field_name)
+    if applied and warn:
+        if by_default:
             warnings.warn(
-                f"structured_preset={self.structured_preset!r} filled "
+                "closure_channel='structured' with no structured_preset: the "
+                f"validated preset {key!r} is applied BY DEFAULT and filled "
                 + ", ".join(sorted(applied))
                 + " -- a field explicitly set to its own default value is "
                   "indistinguishable from an unset one and is overridden "
                   "here; set it after construction to hold it against the "
-                  "preset", stacklevel=2)
+                  "preset, or pass structured_preset='none' to decline the "
+                  "default and keep every structured field as shipped",
+                stacklevel=stacklevel)
+        else:
+            warnings.warn(
+                f"structured_preset={key!r} filled "
+                + ", ".join(sorted(applied))
+                + " -- a field explicitly set to its own default value is "
+                  "indistinguishable from an unset one and is overridden "
+                  "here; set it after construction to hold it against the "
+                  "preset", stacklevel=stacklevel)
+    return _record(key, "default" if by_default else "explicit", applied)
 
 
 @dataclass
@@ -1191,6 +1335,11 @@ def _decode(v):
 
 
 def _build(cls, d):
-    """Instantiate dataclass ``cls`` from decoded dict ``d`` (unknown keys dropped)."""
-    names = {f.name for f in _dc.fields(cls)}
+    """Instantiate dataclass ``cls`` from decoded dict ``d`` (unknown keys dropped).
+
+    ``init=False`` fields (the recorded preset provenance) are dropped too:
+    they are outputs of ``__post_init__``, not constructor arguments, and are
+    recomputed identically on the rebuilt config.
+    """
+    names = {f.name for f in _dc.fields(cls) if f.init}
     return cls(**{k: v for k, v in d.items() if k in names})

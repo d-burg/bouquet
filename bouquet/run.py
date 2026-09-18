@@ -1032,10 +1032,37 @@ class Bouquet:
         """
         import numpy as np
 
+        from .config import resolve_structured_preset
         from .utils import (close_ip_structured, close_ip_structured_soft,
                             li_closure_geometry, sigma_from_weights,
                             structured_basis_eval, unrenormalise_q0,
                             q0_gate_admits)
+
+        # Resolve the preset HERE as well as at construction: a config whose
+        # closure_channel was set after the GenerationConfig was built has not
+        # been through __post_init__ with the channel visible, and would
+        # otherwise run on the raw shipped fields -- the configuration this
+        # channel's own study superseded.  Idempotent: for the ordinary case
+        # (channel set at construction) it fills nothing and warns not at all.
+        preset_rec = resolve_structured_preset(gc)
+        if preset_rec["source"] == "default":
+            print("[imas SWB-split:ohmic structured] prior: preset "
+                  f"{preset_rec['name']!r} applied BY DEFAULT (no "
+                  "structured_preset given)"
+                  + (" -- filled " + ", ".join(preset_rec["fields"])
+                     if preset_rec["fields"] else "")
+                  + " | its sigmas are relative-unit PRIORS from a study on "
+                    "one device with one integrated-modelling source for the "
+                    "inductive current, not device constants: read the "
+                    "closure-health flags below before trusting them, and "
+                    "pass structured_preset='none' to decline the default",
+                  flush=True)
+        elif preset_rec["source"] == "default-declined-custom-basis":
+            print("[imas SWB-split:ohmic structured] prior: the default "
+                  "preset was DECLINED (an explicit structured_basis is set "
+                  "and the preset's ladders are widths at the shipped basis's "
+                  "radii); every structured field keeps its own default",
+                  flush=True)
 
         psi_q = np.ascontiguousarray(np.asarray(geom["psi_q"], dtype=float))
         psi_geom = np.asarray(geom["psi_N"], dtype=float)
@@ -1136,6 +1163,14 @@ class Bouquet:
                          for r in _radii}
         extra = dict(
             structured_basis=dict(out["basis"]),
+            # WHICH prior configuration was in force, and WHO chose it: a
+            # preset applied by default and one named by the caller are the
+            # same numbers and not the same statement, and only the record can
+            # tell them apart afterwards.
+            structured_preset=(preset_rec["name"] or "none"),
+            structured_preset_source=preset_rec["source"],
+            structured_preset_filled=(", ".join(preset_rec["fields"])
+                                      or "none"),
             structured_weights_name=out["weights_name"],
             structured_weights_ind=[float(v) for v in out["weights_ind"]],
             structured_weights_bs=[float(v) for v in out["weights_bs"]],

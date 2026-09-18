@@ -125,7 +125,8 @@ is a navigational summary of the defaults.
 | `ni_scalar_sigma` | `0.10` | " |
 | `ti_scalar_sigma` | `0.10` | " |
 | `jphi_scalar_sigma` | `0.10` | Inductive-current envelope. **Must be > 0** — setting it to 0 freezes `j_inductive` and trips the workflow guard |
-| `zeff_scalar_sigma` | `0.05` | One Z_eff perturbation per draw; n_i / n_z follow from quasi-neutrality |
+| `zeff_scalar_sigma` | `0.05` | One Z_eff perturbation per draw; n_i / n_z follow from quasi-neutrality. Also the width of the bottom tier below |
+| `zeff_sigma_source` | `"auto"` | Which tier supplies the Z_eff envelope's **magnitude**: `"auto"` / `"carbon"` / `"measured"` / `"scalar"` — see the ladder below |
 | `sigma_profiles` | `{}` | Explicit `{name: sigma(psi_N)}` envelopes, highest precedence |
 | `n_ls` / `t_ls` / `j_ls` | `0.5` / `0.4` / `0.25` | GPR correlation lengths for density / temperature / current |
 | `aux_sigmas`, `aux_baselines`, `aux_length_scales` | `{}` | The passive switchboard: any extra channel gets perturbed and archived alongside the physics |
@@ -149,6 +150,34 @@ b.uncertainty.sigma_profiles = {ch: np.zeros(n_kin)
 `log_sigma_sources=False`) and warns when a scalar you moved off its default is
 being ignored. `sigma_jphi` and the aux channels have no `.cdf` branch, so
 their scalars always apply.
+
+**The Z_eff envelope has its own ladder (`zeff_sigma_source`).** Z_eff is the
+primary density channel — each draw perturbs it and *derives* n_i / n_z — so the
+width of its envelope sets the width of every dilution band in the ensemble.
+`"auto"` takes the highest-fidelity tier the file supports:
+
+| Tier | Where the magnitude comes from | Forced by |
+|---|---|---|
+| carbon-propagated | `n_12C6_err` + `n_e_err` (direct layout) or the dilution posterior (ensemble), propagated through `Z_eff = 1 + Z(Z−1)·n_C/n_e` | `"carbon"` |
+| VB-measured | the file's own `Zeff_err` (direct) or `Zeff` sample spread (ensemble) | `"measured"` |
+| scalar | `zeff_scalar_sigma` × abs(Z_eff) — an **assumed** width, not a measured one | `"scalar"` |
+
+CER carbon is the direct measurement of the dilution the draw actually moves,
+which is why it outranks the visible-bremsstrahlung sigma. Both measured tiers
+require the Z_eff baseline to be the IDA one — the reconstruction path, and the
+**same** file that supplies the sigmas (compared as resolved paths, so a
+relative, `~`-prefixed or symlinked spelling is still the same file). An
+IMAS/`ida_hybrid` or p-file baseline therefore always gets the scalar: pairing a
+FUSE Z_eff with an IDA envelope would mix channels.
+
+**No step down this ladder is silent.** Each one emits a single warning naming
+the tier chosen, each tier skipped and its reason class (*source ineligible* /
+*missing dataset* / *invalid data*), and the same record is returned as
+`resolve_uncertainty()`'s `"zeff_sigma_tier"`. A forced `"carbon"` or
+`"measured"` that cannot be honoured falls back **loudly** rather than raising.
+Non-physical carbon data (negative `n_12C6`, netCDF fill values, NaN holes) drops
+the carbon tier with a counted reason in both layouts rather than riding through
+as an enormous sigma.
 
 ### `GenerationConfig` (`b.generation`)
 

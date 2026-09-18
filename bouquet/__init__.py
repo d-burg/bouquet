@@ -126,7 +126,8 @@ from .physics import (
 from .paths import add_oft_to_path, find_mesh, find_ida
 from .io.ida import read_ida, read_ida_cer, IDAProfiles, IDACERProfiles
 from .io.imas import (read_imas_baseline, read_imas_geometry,
-                      write_imas_draw, export_imas_drawset)
+                      write_imas_draw, export_imas_drawset,
+                      detect_p_fast_convention, resolve_p_fast_reduction)
 from .run import Bouquet
 from .archive import BouquetArchive, ScanView, DrawView
 from .parallel import (parallel_generate, run_shard, merge_archives,
@@ -150,6 +151,7 @@ __all__ = [
     "read_ida", "read_ida_cer", "IDAProfiles", "IDACERProfiles",
     "read_imas_baseline", "read_imas_geometry",
     "write_imas_draw", "export_imas_drawset",
+    "detect_p_fast_convention", "resolve_p_fast_reduction",
     "read_eqdsk_from_bytes",
     # ---- archive readers ----
     "initialize_equilibrium_database",

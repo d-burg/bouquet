@@ -485,10 +485,10 @@
   {
    "id": "cfg.fixedcomponentsconfig.p_fast_reduction",
    "type": "knob",
-   "label": "p_fast_reduction: str = \"trace\"",
+   "label": "p_fast_reduction: str = \"auto\"",
    "file": "bouquet/config.py",
-   "line": 186,
-   "desc": "Collapse anisotropic fast pressure: trace/mean/perp",
+   "line": 193,
+   "desc": "Collapse anisotropic fast pressure: auto (from dd provenance) / sum / trace / mean / perp",
    "subsystem": "Configuration"
   },
   {
@@ -576,8 +576,8 @@
    "type": "knob",
    "label": "p_fast isotropization method",
    "file": "bouquet/io/imas.py",
-   "line": 246,
-   "desc": "'trace' (default, 2*p_perp+p_par)/3 | 'mean' (p_perp+p_par)/2 | 'perp' p_perp",
+   "line": 419,
+   "desc": "'auto' (default; dd provenance picks sum or trace) | 'sum' p_par+2*p_perp (IMAS.jl per-dof) | 'trace' (2*p_perp+p_par)/3 | 'mean' | 'perp'",
    "subsystem": "IMAS/OMAS reader"
   },
   {

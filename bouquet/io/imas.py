@@ -71,13 +71,291 @@ def _nearest_index(time_array, t: Optional[float], what: str) -> int:
     return int(np.argmin(np.abs(ta - t)))
 
 
-def _isotropic_fast_pressure(species: dict, method: str, n: int):
-    """Isotropized fast pressure for one species, or zeros if it carries none."""
+# ===========================================================================
+#  Fast-pressure storage convention
+#
+#  ``pressure_fast_parallel`` / ``pressure_fast_perpendicular`` are written with
+#  two incompatible meanings, and the scalar p_fast they reduce to differs by a
+#  factor of THREE:
+#
+#    * IMAS.jl / FUSE store the PER-DEGREE-OF-FREEDOM pressure -- ``pressa/3``
+#      in each field -- so the scalar is ``p_par + 2*p_perp``  ("sum").
+#    * The IMAS data dictionary (and OMAS-written dds) define
+#      ``pressure_fast_parallel`` as the FULL fast parallel pressure, so the
+#      scalar is the trace ``(p_par + 2*p_perp)/3``            ("trace").
+#
+#  Neither convention is recorded in a dedicated dd field, so bouquet infers it
+#  from the dd's recorded provenance (:func:`detect_p_fast_convention`) and says
+#  loudly when it cannot.  An explicit ``p_fast_reduction`` always wins.
+# ===========================================================================
+
+#: Where a producer records who wrote an IDS.  Only these slots are inspected --
+#: deliberately NOT every IDS, because sub-IDSes are routinely imported from
+#: other codes (a FUSE dd carries an OMFIT-sourced ``nbi.ids_properties.comment``)
+#: and would otherwise vote on a convention they do not set.
+_PROVENANCE_IDS = ("dataset_description", "core_profiles", "equilibrium", "summary")
+_PROVENANCE_SLOTS = (
+    ("ids_properties", "comment"),
+    ("ids_properties", "provider"),
+    ("ids_properties", "source"),
+    ("code", "name"),
+    ("code", "description"),
+    ("code", "repository"),
+)
+
+#: Top-level keys that only IMASdd.jl / FUSE write (they are not IMAS DD IDSes).
+#: Verified present in FUSE ``dd_sim.json`` output.
+_IMASJL_TOPLEVEL_MARKERS = (
+    "global_time", "requirements", "build", "balance_of_plant",
+    "solid_mechanics", "costing",
+)
+
+#: Producer name fragments (matched case-insensitively in the slots above).
+_FUSE_PRODUCER_TOKENS = ("fuse", "imas.jl", "imasdd", "torreypines")
+_DD_PRODUCER_TOKENS = ("omas", "omfit", "imaspy", "imas-python", "imas_core",
+                       "access-layer", "access layer")
+
+#: Explicit stamp a producer (or a hand-built fixture) can put in any of the
+#: provenance slots above to state its convention outright, e.g.
+#: ``"comment": "... p_fast_reduction=trace ..."``.
+_EXPLICIT_STAMP_RE = (
+    r"(?:p_fast_reduction|pressure_fast_convention|fast_pressure_convention)"
+    r"\s*[:=]\s*([A-Za-z_-]+)"
+)
+#: Values the stamp may carry -> the reduction rule they select.
+_STAMP_VALUES = {
+    "sum": "sum", "per_dof": "sum", "per-dof": "sum",
+    "per_degree_of_freedom": "sum",
+    "trace": "trace", "total": "trace", "full": "trace",
+    "mean": "mean", "perp": "perp",
+}
+
+
+def _provenance_strings(dd: dict):
+    """``(location, text)`` for every recorded producer string in ``dd``.
+
+    Only the slots in ``_PROVENANCE_IDS`` x ``_PROVENANCE_SLOTS`` are read.
+    """
+    out = []
+    for ids in _PROVENANCE_IDS:
+        node = dd.get(ids)
+        if not isinstance(node, dict):
+            continue
+        for grp, key in _PROVENANCE_SLOTS:
+            sub = node.get(grp)
+            if not isinstance(sub, dict):
+                continue
+            val = sub.get(key)
+            if isinstance(val, str) and val.strip():
+                out.append((f"{ids}.{grp}.{key}", val.strip()))
+            elif isinstance(val, (list, tuple)):
+                for v in val:
+                    if isinstance(v, str) and v.strip():
+                        out.append((f"{ids}.{grp}.{key}", v.strip()))
+    return out
+
+
+def detect_p_fast_convention(dd: dict) -> dict:
+    """Infer the fast-pressure storage convention of a loaded dd.
+
+    Returns ``{"rule": <"sum"|"trace"|"mean"|"perp"|None>, "basis": str,
+    "evidence": str}``.  ``rule`` is ``None`` when the dd records nothing that
+    identifies its producer -- the caller then has to choose a fallback and warn.
+
+    Precedence, most specific first:
+
+    1. **explicit stamp** -- ``p_fast_reduction=<rule>`` (or
+       ``pressure_fast_convention=<per_dof|total>``) in any provenance slot;
+    2. **IMAS.jl structure** -- a top-level key only IMASdd.jl/FUSE writes
+       (``global_time``, ``requirements``, ``build``, ``balance_of_plant``,
+       ``solid_mechanics``, ``costing``).  This identifies the *writer of the
+       file*, which is what sets the convention, so it outranks per-IDS producer
+       strings: a FUSE dd legitimately carries IDSes imported from other codes.
+    3. **producer strings** -- a FUSE/IMAS.jl name in a provenance slot selects
+       ``"sum"``; an OMAS/OMFIT/IMASPy (data-dictionary) name selects ``"trace"``.
+    """
+    import re
+
+    prov = _provenance_strings(dd)
+
+    # 1. explicit stamp
+    for where, text in prov:
+        m = re.search(_EXPLICIT_STAMP_RE, text, flags=re.IGNORECASE)
+        if m:
+            val = m.group(1).strip().lower()
+            if val in _STAMP_VALUES:
+                return {"rule": _STAMP_VALUES[val], "basis": "explicit-stamp",
+                        "evidence": f"{where} = {text!r}"}
+            # A dd that states its own convention and is then misread is exactly
+            # what the stamp exists to prevent -- never discard one silently.
+            import warnings
+            warnings.warn(
+                f"{where} carries a fast-pressure convention stamp whose value "
+                f"{m.group(1)!r} is not recognised; expected one of "
+                + ", ".join(repr(v) for v in sorted(_STAMP_VALUES))
+                + ". The stamp is ignored and the convention is inferred from the "
+                "dd's structure/producer instead.",
+                stacklevel=2,
+            )
+
+    # 2. IMAS.jl / FUSE structural markers
+    found = [k for k in _IMASJL_TOPLEVEL_MARKERS if k in dd]
+    if found:
+        return {"rule": "sum", "basis": "imas.jl-structure",
+                "evidence": ("top-level key(s) only IMASdd.jl/FUSE write: "
+                             + ", ".join(sorted(found)))}
+
+    # 3. producer strings
+    for where, text in prov:
+        low = text.lower()
+        for tok in _FUSE_PRODUCER_TOKENS:
+            if tok in low:
+                return {"rule": "sum", "basis": "producer-string",
+                        "evidence": f"{where} = {text!r} (matched {tok!r})"}
+    for where, text in prov:
+        low = text.lower()
+        for tok in _DD_PRODUCER_TOKENS:
+            if tok in low:
+                return {"rule": "trace", "basis": "producer-string",
+                        "evidence": f"{where} = {text!r} (matched {tok!r})"}
+
+    return {"rule": None, "basis": "undetermined",
+            "evidence": ("no IMASdd.jl top-level key and no producer recorded in "
+                         "{dataset_description,core_profiles,equilibrium,summary}"
+                         ".{ids_properties.{comment,provider,source},"
+                         "code.{name,description,repository}}")}
+
+
+#: Rule used when provenance is undeterminable.  "sum" is the majority case for
+#: the dds bouquet reads (FUSE), so it is the safer bet -- but it is never
+#: applied silently; see :func:`resolve_p_fast_reduction`.
+P_FAST_UNDETERMINED_FALLBACK = "sum"
+
+
+def warn_p_fast_undetermined(rule: str = P_FAST_UNDETERMINED_FALLBACK,
+                             stacklevel: int = 2) -> None:
+    """The factor-of-3 warning for a dd whose convention cannot be determined.
+
+    Split out of :func:`resolve_p_fast_reduction` so a caller that resolves the
+    rule eagerly can hold the warning back until it knows the choice moved a
+    number -- see :func:`read_imas_baseline`.
+    """
+    import warnings
+    warnings.warn(
+        "p_fast_reduction='auto': this data dictionary records no producer, so the "
+        "storage convention of pressure_fast_parallel/perpendicular cannot be "
+        "determined. The two conventions differ by a FACTOR OF 3 in the fast-ion "
+        "pressure (and hence in beta_N, W_MHD and p'):\n"
+        "  'sum'   -- IMAS.jl/FUSE write the pressure PER DEGREE OF FREEDOM "
+        "(pressa/3 in each field); scalar p_fast = p_par + 2*p_perp.\n"
+        "  'trace' -- the IMAS data dictionary (and OMAS-written dds) define "
+        "pressure_fast_parallel as the FULL parallel pressure; scalar "
+        "p_fast = (p_par + 2*p_perp)/3.\n"
+        f"Falling back to {rule!r} (the majority case for the dds bouquet reads). "
+        "Set it explicitly to silence this: "
+        "BouquetConfig.fixed_components.p_fast_reduction = 'sum' | 'trace' (or "
+        "read_imas_baseline(..., p_fast_reduction=...)); alternatively stamp the dd "
+        "itself, e.g. core_profiles.ids_properties.comment = "
+        "'... p_fast_reduction=trace ...'.",
+        stacklevel=stacklevel + 1,
+    )
+
+
+def resolve_p_fast_reduction(dd: dict, requested: str = "auto",
+                             warn: bool = True) -> dict:
+    """Resolve the fast-pressure reduction rule for ``dd``.
+
+    ``requested`` is ``"auto"`` (inspect the dd's provenance) or one of the
+    explicit rules, which always wins and is applied silently.
+
+    Returns the metadata dict recorded on :attr:`bouquet.baseline.Baseline.p_fast_meta`::
+
+        {"rule": str, "basis": str, "evidence": str, "requested": str,
+         "warned": bool}
+
+    When ``requested == "auto"`` and the dd's provenance is undeterminable the
+    rule falls back to :data:`P_FAST_UNDETERMINED_FALLBACK` and a single
+    ``UserWarning`` is raised naming both conventions and the factor-of-3 stake.
+    ``warn=False`` resolves the metadata without raising it; the caller then owns
+    the warning and can key on ``basis == "undetermined-fallback"``.
+    """
+    from ..physics import P_FAST_REDUCTIONS
+
+    if requested != "auto":
+        if requested not in P_FAST_REDUCTIONS:
+            raise ValueError(
+                f"unknown p_fast_reduction {requested!r}; expected 'auto' or one of "
+                + ", ".join(repr(r) for r in P_FAST_REDUCTIONS))
+        return {"rule": requested, "basis": "explicit-argument",
+                "evidence": f"p_fast_reduction={requested!r} supplied by the caller",
+                "requested": requested, "warned": False}
+
+    det = detect_p_fast_convention(dd)
+    if det["rule"] is not None:
+        return {**det, "requested": "auto", "warned": False}
+
+    rule = P_FAST_UNDETERMINED_FALLBACK
+    if warn:
+        warn_p_fast_undetermined(rule, stacklevel=2)
+    return {"rule": rule, "basis": "undetermined-fallback",
+            "evidence": det["evidence"], "requested": "auto",
+            "warned": bool(warn)}
+
+
+def _isotropic_fast_pressure(species: dict, method: str, n: int,
+                             missing_parallel=None, label: str = ""):
+    """Isotropized fast pressure for one species, or zeros if it carries none.
+
+    When ``pressure_fast_parallel`` is absent the reader closes the tensor with
+    ``p_par := p_perp``.  The closure is the same for every rule; what it MEANS
+    is not:
+
+      * ``"trace"`` / ``"mean"`` / ``"perp"`` (full directional pressures):
+        ``p_par = p_perp`` is the isotropic fast-ion assumption and the scalar
+        comes out as ``p_perp`` -- identical to reading a fully isotropic dd.
+      * ``"sum"`` (per-degree-of-freedom fields): the same closure gives
+        ``3*p_perp``.  That is the literal per-dof reading, but it is ambiguous --
+        a writer that simply omitted an all-zero parallel field means
+        ``2*p_perp``, and a dictionary-convention dd means ``p_perp``.  The
+        caller is warned rather than left with a silent 3x.
+
+    Species whose parallel field is missing while the perpendicular field is
+    non-zero are appended to ``missing_parallel`` so the caller warns once.
+    """
     if "pressure_fast_perpendicular" not in species:
         return np.zeros(n)
     p_perp = np.asarray(species["pressure_fast_perpendicular"], dtype=float)
-    p_par = np.asarray(species.get("pressure_fast_parallel", p_perp), dtype=float)
+    if "pressure_fast_parallel" in species:
+        p_par = np.asarray(species["pressure_fast_parallel"], dtype=float)
+    else:
+        p_par = p_perp
+        if missing_parallel is not None and float(np.max(np.abs(p_perp))) > 0.0:
+            missing_parallel.append(label or species.get("label", "?"))
     return isotropize_fast_pressure(p_perp, p_par, method=method)
+
+
+def _warn_missing_parallel(species_labels, rule: str):
+    """Single warning for species that carry only the perpendicular fast field."""
+    if not species_labels:
+        return
+    import warnings
+    who = ", ".join(str(s) for s in species_labels)
+    if rule == "sum":
+        detail = (
+            "Under p_fast_reduction='sum' the two fields are per-degree-of-freedom, "
+            "so the closure p_par := p_perp yields 3*p_perp for these species. If "
+            "the producer instead omitted an all-zero parallel field the correct "
+            "scalar is 2*p_perp (1.5x less); if the dd follows the IMAS data "
+            "dictionary it is p_perp (3x less). Supply pressure_fast_parallel, or "
+            "set p_fast_reduction explicitly.")
+    else:
+        detail = (
+            f"Under p_fast_reduction={rule!r} the two fields are the full "
+            "directional pressures, so the closure p_par := p_perp is the isotropic "
+            "fast-ion assumption and the scalar is p_perp.")
+    warnings.warn(
+        f"core_profiles species [{who}] carry pressure_fast_perpendicular but no "
+        f"pressure_fast_parallel. {detail}", stacklevel=3)
 
 
 def _override(arr, src_psi, dst_psi):
@@ -132,7 +410,8 @@ def read_imas_geometry(source: "ImasSource"):
 
 
 def _validate_pressure_completeness(cp, ne, te, ni, ti, p_fast, p_imp,
-                                    p_equilibrium, allow_incomplete):
+                                    p_equilibrium, allow_incomplete,
+                                    anchor_pressure=False, p_fast_meta=None):
     """Fail-fast when the IMAS source carries pressure the reconstruction omits.
 
     Hard fails (raise, or warn if ``allow_incomplete``) on DROPPED reconstructable
@@ -171,24 +450,48 @@ def _validate_pressure_completeness(cp, ne, te, ni, ti, p_fast, p_imp,
             f"fast pressure present in source (max {avail_fast/1e3:.1f} kPa) but "
             f"assembled p_fast ~ 0 -- fast-ion channel dropped.")
     # 3. backstop vs authoritative equilibrium pressure -- WARNING only, not a
-    #    hard fail. The equilibrium.pressure routinely exceeds the core_profiles
-    #    thermal+fast reconstruction (anisotropic/beam pressure that is large early
-    #    in a beam-heavy discharge, plus the equilibrium-vs-transport inconsistency
-    #    -- the pressure analogue of the j_tor gap). p_diff anchors the baseline to
-    #    equilibrium.pressure EXACTLY regardless; this residual just rides fixed
-    #    (it is fast/non-thermal, which the thermal perturbation should hold fixed
-    #    anyway). So inform, don't block. Dropped *reconstructable* thermal/fast
-    #    components are the hard fails (#1/#2 above).
+    #    hard fail. The equilibrium.pressure routinely differs from the
+    #    core_profiles thermal+fast reconstruction (anisotropic/beam pressure that
+    #    is large early in a beam-heavy discharge, plus the
+    #    equilibrium-vs-transport inconsistency -- the pressure analogue of the
+    #    j_tor gap). When anchor_pressure_to_equilibrium is ON, p_diff absorbs the
+    #    residual exactly and it rides fixed; when it is OFF (the default) nothing
+    #    absorbs it and the gap propagates straight into the baseline pressure, so
+    #    the message must not promise otherwise. Dropped *reconstructable*
+    #    thermal/fast components are the hard fails (#1/#2 above).
+    #
+    #    This is also the one guard that can catch a wrong fast-pressure
+    #    convention, whose signature is a ~3x (or ~1/3x) p_fast -- so report the
+    #    SIGNED direction and name the rule in force.
     recon_total = recon_thermal + p_fast
     pe = float(np.mean(np.abs(p_equilibrium))) or 1.0
+    signed = float(np.mean(recon_total - p_equilibrium)) / pe
     bk = float(np.mean(np.abs(recon_total - p_equilibrium))) / pe
     if bk > 0.05:
         import warnings
+        direction = "above" if signed > 0 else "below"
+        if anchor_pressure:
+            remedy = ("anchor_pressure_to_equilibrium is ON, so the p_diff anchor "
+                      "absorbs this exactly (the baseline still matches the dd "
+                      "equilibrium.pressure) and the residual rides fixed -- it is "
+                      "not perturbed in the UQ.")
+        else:
+            remedy = ("anchor_pressure_to_equilibrium is OFF (the default), so "
+                      "p_diff is None and NOTHING absorbs this -- the gap "
+                      "propagates into the baseline pressure and every downstream "
+                      "beta_N / W_MHD / p'. Set "
+                      "GenerationConfig.anchor_pressure_to_equilibrium=True to "
+                      "anchor it.")
+        meta = p_fast_meta or {}
+        conv = ""
+        if meta.get("rule") is not None:
+            conv = (f" Fast-pressure reduction in force: {meta['rule']!r} "
+                    f"(chosen by {meta.get('basis', '?')}). A wrong "
+                    "pressure_fast_* convention shows up here as a ~3x / ~1/3x "
+                    "p_fast -- check it before the anchor.")
         warnings.warn(
-            f"reconstructed total pressure is {bk*100:.1f}% below dd "
-            f"equilibrium.pressure; the p_diff anchor absorbs it (baseline still "
-            f"matches FUSE), so this fraction rides fixed (mostly fast/anisotropic "
-            f"pressure). Not perturbed in the UQ.")
+            f"reconstructed total pressure is {abs(signed)*100:.1f}% {direction} "
+            f"dd equilibrium.pressure (mean |gap| {bk*100:.1f}%). {remedy}{conv}")
     if problems:
         msg = ("IMAS pressure completeness check failed:\n  - "
                + "\n  - ".join(problems)
@@ -244,7 +547,7 @@ def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impu
 def read_imas_baseline(
     source: "ImasSource",
     fixed: Optional["FixedComponentsConfig"] = None,
-    p_fast_reduction: str = "trace",
+    p_fast_reduction: str = "auto",
     allow_incomplete_pressure: bool = False,
     anchor_jtor_to_equilibrium: bool = True,
     kinetic_source: str = "fuse",
@@ -253,6 +556,13 @@ def read_imas_baseline(
     """Read a FUSE ``dd_sim.json`` IDS and return a separated :class:`Baseline`.
 
     No Grad-Shafranov reconstruction is performed -- provenance is "imas".
+
+    ``p_fast_reduction`` defaults to ``"auto"``: the fast-pressure storage
+    convention is taken from the dd's own recorded provenance
+    (:func:`resolve_p_fast_reduction`), with a loud warning if it cannot be
+    determined.  An explicit ``"sum"`` / ``"trace"`` / ``"mean"`` / ``"perp"``
+    always wins and is applied silently.  The rule that was used, and how it was
+    chosen, are recorded on :attr:`Baseline.p_fast_meta`.
     """
     import json
     from ..baseline import Baseline
@@ -261,6 +571,15 @@ def read_imas_baseline(
         raw_bytes = fh.read()
     dd = json.loads(raw_bytes)
     T = source.time
+
+    # Which fast-pressure convention this dd was written in (factor of 3).
+    # The metadata is resolved eagerly -- the reduction rule is needed to read the
+    # fields and the completeness message quotes it -- but the loud undetermined
+    # warning is held back until we know the choice actually moved a number: it
+    # says nothing on a dd whose fast pressure is absent or identically zero, and
+    # nothing on a run whose p_fast comes from FixedComponentsConfig instead.
+    p_fast_meta = resolve_p_fast_reduction(dd, p_fast_reduction, warn=False)
+    p_fast_rule = p_fast_meta["rule"]
 
     # --- targets from the equilibrium IDS ---
     eq = dd["equilibrium"]
@@ -309,7 +628,8 @@ def read_imas_baseline(
     el = cp["electrons"]
     ne = np.asarray(el["density_thermal"], dtype=float)
     te = np.asarray(el["temperature"], dtype=float)   # eV
-    p_fast = _isotropic_fast_pressure(el, p_fast_reduction, n)
+    _no_par = []
+    p_fast = _isotropic_fast_pressure(el, p_fast_rule, n, _no_par, "electrons")
 
     ni = None
     ti = None
@@ -326,7 +646,8 @@ def read_imas_baseline(
         zeff_num += n_s * Z * Z
         if "density_fast" in ion:
             z_fast += Z * np.asarray(ion["density_fast"], dtype=float)
-        p_fast_s = _isotropic_fast_pressure(ion, p_fast_reduction, n)
+        p_fast_s = _isotropic_fast_pressure(
+            ion, p_fast_rule, n, _no_par, str(ion.get("label", f"Z={Z:g}")))
         if np.any(p_fast_s) and not np.any(
                 np.asarray(ion.get("density_fast", 0.0), dtype=float)):
             fast_p_no_n.append(f"Z={Z:g}")
@@ -337,6 +658,7 @@ def read_imas_baseline(
             main_ion = ion
     if ni is None:
         raise ValueError("no hydrogenic (Z=1) main ion found in core_profiles.ion")
+    _warn_missing_parallel(_no_par, p_fast_rule)
     if fast_p_no_n:
         # Silence is the dangerous case here: the run looks exactly like an
         # ohmic one while Z_imp / nz / p_imp keep the whole fast-ion bias the
@@ -386,10 +708,21 @@ def read_imas_baseline(
     if fixed is not None:
         if fixed.p_fast is not None:
             p_fast = _override(fixed.p_fast, fixed.psi_N, psi_N)
+            p_fast_meta = {**p_fast_meta, "rule": None, "basis": "user-override",
+                           "evidence": "FixedComponentsConfig.p_fast supplied; the "
+                                       "dd fast-pressure fields were not read"}
         if fixed.j_NBI is not None:
             j_NBI = _override(fixed.j_NBI, fixed.psi_N, psi_N)
         if fixed.j_RF is not None:
             j_RF = _override(fixed.j_RF, fixed.psi_N, psi_N)
+
+    # The deferred factor-of-3 warning: the convention was undeterminable AND the
+    # fast pressure it scales is non-zero AND it came from the dd (a user-supplied
+    # p_fast has already rewritten the basis to "user-override").
+    if (p_fast_meta["basis"] == "undetermined-fallback"
+            and float(np.max(np.abs(np.asarray(p_fast, dtype=float)))) > 0.0):
+        warn_p_fast_undetermined(p_fast_meta["rule"])
+        p_fast_meta = {**p_fast_meta, "warned": True}
 
     # Authoritative toroidal total; inductive absorbs the residual so the
     # decomposition sums exactly and Ip is preserved.
@@ -426,7 +759,9 @@ def read_imas_baseline(
     # equilibrium.pressure; it is meaningless once ne/Te/Ti are swapped to IDA.
     if kinetic_source != "ida_hybrid":
         _validate_pressure_completeness(cp, ne, te, ni, ti, p_fast, p_imp,
-                                        p_equilibrium, allow_incomplete_pressure)
+                                        p_equilibrium, allow_incomplete_pressure,
+                                        anchor_pressure=anchor_pressure_to_equilibrium,
+                                        p_fast_meta=p_fast_meta)
 
     # --- total-current anchor: equilibrium.j_tor vs core_profiles.j_tor --------
     # core_profiles.j_tor (== j_phi here) is the transport parallel-current sum
@@ -468,6 +803,7 @@ def read_imas_baseline(
         pfile_bytes=None,
         li_metrics={"ids_li_1": ids_li_1, "ids_li_3": ids_li_3},
         aux=aux,
+        p_fast_meta=p_fast_meta,
     )
 
 

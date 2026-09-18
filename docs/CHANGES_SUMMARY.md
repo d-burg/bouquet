@@ -1,5 +1,94 @@
 # Bouquet — change summaries
 
+## Unreleased — fast-ion pressure: the reduction rule now comes from dd provenance
+
+**Behaviour change on the IMAS path.** `FixedComponentsConfig.p_fast_reduction`
+and `read_imas_baseline(..., p_fast_reduction=...)` now default to `"auto"`
+instead of `"trace"`. On a FUSE/IMAS.jl-written dd this makes `p_fast` **3×
+larger** than ≤1.3.1 produced; on a dictionary-convention dd it is unchanged.
+Every downstream `beta_N`, `W_MHD` and `p'` on the IMAS path moves with it. The
+g-file / `ReconstructionSource` path is untouched — `p_fast_reduction` is read
+only on the IMAS path.
+
+### What was wrong
+
+`pressure_fast_parallel` / `pressure_fast_perpendicular` are written with two
+incompatible meanings, and no dd field records which one is in use:
+
+| producer | what the two fields hold | scalar `p_fast` | rule |
+|---|---|---|---|
+| IMAS.jl / FUSE | the pressure **per degree of freedom** (`pressa/3` in each) | `p_par + 2·p_perp` | `"sum"` |
+| IMAS data dictionary, OMAS-written dds | the **full** directional pressures | `(p_par + 2·p_perp)/3` | `"trace"` |
+
+Verified upstream: IMAS.jl's `pressure` expression is `pressure_thermal +
+pressure_fast_parallel + 2·pressure_fast_perpendicular`
+(`src/expressions/dynamic.jl`) and its `src/physics/fast.jl` adds `pressa/3` to
+*each* directional field. So the old fixed `"trace"` default returned **one
+third** of the fast-ion pressure on every FUSE dd — a shortfall measured at
+8–35 % of the total pressure across a set of beam-heated discharges, closing to
+<2 % under `"sum"`. A fixed `"sum"` default would have been wrong the other way,
+by exactly 3×, on any standards-compliant dd — including this repo's own
+synthetic `examples/D3D-like/D3Dlike_baseline_omas.json`.
+
+### What changed
+
+* **`p_fast_reduction="auto"` (new default)** picks the rule from the dd's own
+  recorded provenance, most specific first:
+  1. an explicit convention stamp in a provenance comment, e.g.
+     `core_profiles.ids_properties.comment = "... p_fast_reduction=trace ..."`;
+  2. IMASdd.jl-only top-level keys (`global_time`, `requirements`, `build`,
+     `balance_of_plant`, `solid_mechanics`, `costing`) ⇒ `"sum"`. This
+     identifies the *writer of the file*, which is what sets the convention, so
+     it outranks per-IDS producer names — a FUSE dd legitimately carries IDSes
+     imported from other codes;
+  3. producer names in `{dataset_description, core_profiles, equilibrium,
+     summary}` × `{ids_properties.{comment,provider,source},
+     code.{name,description,repository}}` — FUSE/IMAS.jl ⇒ `"sum"`,
+     OMAS/OMFIT/IMASPy ⇒ `"trace"`.
+* **Undeterminable provenance falls back to `"sum"` and warns loudly, once**,
+  naming both conventions, the factor-of-3 stake, and how to set the rule
+  explicitly. It is never applied silently. The warning is raised only where the
+  choice actually moved a number: it is held back when the dd's fast pressure is
+  absent or identically zero, and when `FixedComponentsConfig.p_fast` supplies
+  `p_fast` instead of the dd. `Baseline.p_fast_meta` records the resolution
+  either way (`basis="undetermined-fallback"`, `warned=False`).
+* **A convention stamp whose value is unrecognised warns**, naming the slot and
+  the value, and the convention is inferred from structure/producer instead — a
+  typo in a stamp is no longer silently discarded.
+* **An explicit `"sum"` / `"trace"` / `"mean"` / `"perp"` always wins and is
+  silent.**
+* The rule used, the basis for it and the evidence are recorded on the new
+  **`Baseline.p_fast_meta`**.
+* **The missing-`pressure_fast_parallel` fallback is explicit.** The reader still
+  closes with `p_par := p_perp`, but now warns and states what that means under
+  the rule in force: `p_perp` under the full-pressure rules (unchanged from
+  ≤1.3.1), `3·p_perp` under `"sum"` — where `2·p_perp` is the competing reading
+  if the producer simply omitted an all-zero parallel field. Under a bare `"sum"`
+  default this path would have tripled silently.
+* **`physics.isotropize_fast_pressure(p_perp, p_par, method)` now requires
+  `method`.** No default is safe for both conventions; a direct caller gets a
+  `TypeError` rather than a silent 3×.
+* The completeness backstop (`equilibrium.pressure` vs the reconstruction) now
+  reports the **signed** direction, names the reduction rule in force, and claims
+  the `p_diff` anchor absorbs the gap only when
+  `anchor_pressure_to_equilibrium` is actually on (it is off by default).
+
+### What this changes for you
+
+* **Configs that omit `p_fast_reduction`** resolve to `"auto"`. On a FUSE dd that
+  is `"sum"` — 3× the ≤1.3.1 `p_fast`. Results produced before and after this
+  change are not comparable on the IMAS path unless the rule was pinned.
+* **Configs that pin `"trace"`** keep `"trace"`. The shipped
+  `examples/D3D-like/slurm_jobs/bouquet_2000ms_bundle.json` pins it on purpose —
+  it runs against the synthetic dictionary-convention dd — and now says so in a
+  `_p_fast_note`.
+* **A dd with no recorded provenance warns once per process**, on reads where
+  its own fast pressure is non-zero, until the rule is pinned or the dd is
+  stamped. Stamping is one line:
+  `core_profiles.ids_properties.comment = "... p_fast_reduction=sum ..."`.
+* `examples/D3D-like/D3Dlike_baseline_omas.json` carries that stamp now. The
+  local (gitignored) generator that produces it should emit it too.
+
 ## Unreleased — the Z_eff envelope is measured, not assumed
 
 **Behaviour change on the reconstruction/IDA path.** The Z_eff perturbation

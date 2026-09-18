@@ -128,6 +128,16 @@ Current-convention conversions are in `bouquet.physics`:
 `isotropize_fast_pressure()`, `fast_pressure_residual()`,
 `infer_fast_pressure()`.
 
+`read_imas_baseline()` also has to decide which **fast-pressure storage
+convention** a dd uses: IMAS.jl/FUSE write `pressure_fast_parallel` and
+`pressure_fast_perpendicular` per degree of freedom, the IMAS data dictionary
+defines them as the full directional pressures, and the scalar `p_fast` that
+follows differs by a factor of 3. `p_fast_reduction` defaults to `"auto"`, which
+reads the dd's own recorded provenance (`detect_p_fast_convention()`), warns
+loudly when that is undeterminable, and records the decision on
+`Baseline.p_fast_meta`. See
+[workflows.md](workflows.md#fixedcomponentsconfig-bfixed_components).
+
 ## Plotting
 
 All plotting functions return `(fig, axes)` and accept a `Bouquet`, a

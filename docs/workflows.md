@@ -220,8 +220,34 @@ as an enormous sigma.
 ### `FixedComponentsConfig` (`b.fixed_components`)
 
 `p_fast`, `j_NBI`, `j_RF` on their own `psi_N` grid — additive components that
-are never perturbed. `p_fast_reduction` (default `"trace"`) selects the
+are never perturbed. `p_fast_reduction` (default `"auto"`) selects the
 anisotropic fast-pressure reduction applied before the isotropic GS solve.
+
+> **`p_fast_reduction` — a factor-of-3 convention, chosen from dd provenance.**
+> `pressure_fast_parallel` / `pressure_fast_perpendicular` are written with two
+> incompatible meanings and no dd field records which one is in use:
+>
+> | producer | what the two fields hold | scalar `p_fast` | rule |
+> |---|---|---|---|
+> | IMAS.jl / FUSE | the pressure **per degree of freedom** (`pressa/3` in each) | `p_par + 2·p_perp` | `"sum"` |
+> | IMAS data dictionary, OMAS-written dds | the **full** directional pressures | `(p_par + 2·p_perp)/3` | `"trace"` |
+>
+> Getting it wrong is a clean 3× (or ⅓×) error in `p_fast`, and therefore in
+> `beta_N`, `W_MHD` and `p'`. `"auto"` reads the dd's own recorded provenance, in
+> this order: an explicit convention stamp in an `ids_properties.comment`
+> (`... p_fast_reduction=trace ...`); then IMASdd.jl-only top-level keys
+> (`global_time`, `requirements`, `build`, `balance_of_plant`, `solid_mechanics`,
+> `costing`); then producer names in
+> `{dataset_description,core_profiles,equilibrium,summary}` ×
+> `{ids_properties.{comment,provider,source}, code.{name,description,repository}}`.
+> If nothing identifies the producer it falls back to `"sum"` **and warns loudly,
+> once**. An explicit `"sum"` / `"trace"` / `"mean"` / `"perp"` always wins and is
+> silent. The rule used and the grounds for it are recorded on
+> `Baseline.p_fast_meta`.
+>
+> `bouquet.physics.isotropize_fast_pressure(p_perp, p_par, method)` takes
+> `method` as a **required** argument for the same reason — no default is safe
+> for both conventions.
 
 > **Tolerances are fractions, not percentages.** `l_i_tolerance=0.05` means
 > 5%. This applies to every tolerance argument in the package.

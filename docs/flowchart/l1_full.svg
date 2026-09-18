@@ -260,11 +260,11 @@
 <!-- cfg.fixedcomponentsconfig.p_fast_reduction -->
 <g id="node7" class="node">
 <title>cfg.fixedcomponentsconfig.p_fast_reduction</title>
-<g id="a_node7"><a xlink:href="#" xlink:title="bouquet/config.py:186 — Collapse anisotropic fast pressure: trace/mean/perp">
-<polygon fill="#8ecae6" stroke="black" points="1538.76,-6633.79 1398.26,-6633.79 1398.26,-6597.79 1544.76,-6597.79 1544.76,-6627.79 1538.76,-6633.79"/>
-<polyline fill="none" stroke="black" points="1538.76,-6633.79 1538.76,-6627.79"/>
-<polyline fill="none" stroke="black" points="1544.76,-6627.79 1538.76,-6627.79"/>
-<text xml:space="preserve" text-anchor="middle" x="1471.51" y="-6611.92" font-family="Helvetica,sans-Serif" font-size="10.00">p_fast_reduction: str = &quot;trace&quot;</text>
+<g id="a_node7"><a xlink:href="#" xlink:title="bouquet/config.py:193 — Collapse anisotropic fast pressure: auto (from dd provenance) / sum / trace / mean / perp">
+<polygon fill="#8ecae6" stroke="black" points="1537.26,-6633.79 1399.76,-6633.79 1399.76,-6597.79 1543.26,-6597.79 1543.26,-6627.79 1537.26,-6633.79"/>
+<polyline fill="none" stroke="black" points="1537.26,-6633.79 1537.26,-6627.79"/>
+<polyline fill="none" stroke="black" points="1543.26,-6627.79 1537.26,-6627.79"/>
+<text xml:space="preserve" text-anchor="middle" x="1471.51" y="-6611.92" font-family="Helvetica,sans-Serif" font-size="10.00">p_fast_reduction: str = &quot;auto&quot;</text>
 </a>
 </g>
 </g>
@@ -281,8 +281,8 @@
 <g id="edge70" class="edge">
 <title>cfg.fixedcomponentsconfig.p_fast_reduction&#45;&gt;fn.physics.isotropize_fast_pressure</title>
 <g id="a_edge70"><a xlink:title="Controls p_fast_reduction">
-<path fill="none" stroke="#666666" d="M1544.91,-6615.79C1619.29,-6615.79 1734.17,-6615.79 1806.9,-6615.79"/>
-<polygon fill="#666666" stroke="#666666" points="1806.73,-6617.89 1812.73,-6615.79 1806.73,-6613.69 1806.73,-6617.89"/>
+<path fill="none" stroke="#666666" d="M1543.52,-6615.79C1617.9,-6615.79 1733.88,-6615.79 1807.05,-6615.79"/>
+<polygon fill="#666666" stroke="#666666" points="1806.92,-6617.89 1812.92,-6615.79 1806.92,-6613.69 1806.92,-6617.89"/>
 </a>
 </g>
 </g>
@@ -3404,7 +3404,7 @@
 <!-- cfg.generation.p_fast_reduction -->
 <g id="node182" class="node">
 <title>cfg.generation.p_fast_reduction</title>
-<g id="a_node182"><a xlink:href="#" xlink:title="bouquet/io/imas.py:246 — &#39;trace&#39; (default, 2*p_perp+p_par)/3 | &#39;mean&#39; (p_perp+p_par)/2 | &#39;perp&#39; p_perp">
+<g id="a_node182"><a xlink:href="#" xlink:title="bouquet/io/imas.py:419 — &#39;auto&#39; (default; dd provenance picks sum or trace) | &#39;sum&#39; p_par+2*p_perp (IMAS.jl per&#45;dof) | &#39;trace&#39; (2*p_perp+p_par)/3 | &#39;mean&#39; | &#39;perp&#39;">
 <polygon fill="#8ecae6" stroke="black" points="2294.3,-10116.79 2161.3,-10116.79 2161.3,-10080.79 2300.3,-10080.79 2300.3,-10110.79 2294.3,-10116.79"/>
 <polyline fill="none" stroke="black" points="2294.3,-10116.79 2294.3,-10110.79"/>
 <polyline fill="none" stroke="black" points="2300.3,-10110.79 2294.3,-10110.79"/>

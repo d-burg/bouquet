@@ -21,6 +21,7 @@ Provides:
 import os
 import tempfile
 import time
+import warnings
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -98,13 +99,72 @@ def sigma0_reference_scale(jBS_scale_range):
 
     The cached reference must sit at the CENTER of the per-draw scale
     distribution so the delta composition telescopes at sigma=0: the
-    midpoint of ``jBS_scale_range`` (uniform draws -> mean == midpoint;
-    run.py has already re-centred the range on ``bl.bs_scale``), and 1.0
-    when no range is configured (every draw then runs at scale 1.0).
+    midpoint of ``jBS_scale_range`` (uniform draws -> mean == midpoint),
+    and 1.0 when no range is configured (every draw then runs at scale
+    1.0).  The reference follows whatever the draws are actually sampled
+    from.
+
+    The range this receives is NOT the configured one: run.py MULTIPLIES
+    both endpoints of ``gc.jBS_scale_range`` by ``bl.bs_scale``, so the
+    midpoint returned here is ``bs_scale * mid(gc.jBS_scale_range)``.
+    That equals ``bl.bs_scale`` only for a configured range symmetric
+    about 1.0 (the default ``(0.99, 1.01)`` is); for an asymmetric
+    configured range it does not, which is what
+    ``test_asymmetric_range_uses_its_own_mean`` pins.
+
+    Telescoping is exact only IN EXPECTATION, not per draw: the
+    ``jBS_scales`` samples are drawn independently of the kinetic sigmas,
+    so a sigma=0 draw keeps a residual ``(s_draw - s_ref) * SWB_iso``.
+    That is +-1 % of the bootstrap spike at the default range, but +-20 %
+    if the range is widened to e.g. ``(0.8, 1.2)`` for a bootstrap-model
+    uncertainty study.  Exact per-draw telescoping would need the cache
+    taken at ``scale_jBS=1.0`` and rescaled per draw, and even that is
+    only approximate, because SWB iterates its own GS solves so its
+    output is not exactly linear in ``scale_jBS``.
+
+    Scope: the cached SWB call this centres is shared by
+    ``jbs_delta_mode`` AND by the env-gated ``DIFF_BS=1`` path, whose
+    per-draw reference is the smoothed form of the same cache.  BOTH
+    modes' sigma=0 references move with this function.
     """
     if jBS_scale_range is None:
         return 1.0
     return 0.5 * (float(jBS_scale_range[0]) + float(jBS_scale_range[1]))
+
+
+def delta_mode_activation(jbs_delta_mode, have_reference, have_baseline_j_BS):
+    """Whether ``jbs_delta_mode`` is ACTUALLY in force, warning if it is not.
+
+    Delta composition needs both the cached sigma=0 reference spike and a
+    baseline ``j_BS``.  Either can go missing at run time -- the sigma=0
+    cache sits under a blanket ``except Exception`` -- and the draws then
+    silently revert to the old shared-smoothing spike treatment, producing
+    an archive indistinguishable from a good one (issue #44).
+
+    Every degradation is reported through ``warnings.warn``, NOT ``print``:
+    run.py wraps ``generate_bouquet`` in ``capture_native_output(enabled=not
+    verbose)`` with ``verbose`` defaulting to False, so a printed warning is
+    swallowed into a log string, while a warning still reaches the operator.
+
+    Returns
+    -------
+    bool
+        True only when the mode was requested and both inputs are present.
+        The caller archives this per draw (``jbs_delta_active``).
+    """
+    if not jbs_delta_mode:
+        return False
+    reasons = []
+    if not have_reference:
+        reasons.append("sigma=0 reference unavailable")
+    if not have_baseline_j_BS:
+        reasons.append("baseline_j_BS not provided")
+    for _reason in reasons:
+        warnings.warn(
+            f"[jBS-delta] {_reason}; draws fall back to the "
+            f"shared-smoothing spike treatment",
+            RuntimeWarning, stacklevel=2)
+    return not reasons
 
 
 def _count_masked_anchor_failure(site, exc):
@@ -4438,6 +4498,10 @@ def generate_bouquet(
     _diff_recon_eq_snap = None
     _diff_spike_recon = None
     _delta_spike0_raw = None
+    # The scale the sigma=0 reference was actually cached at (None when the
+    # cache never ran or failed).  Recorded per draw so an archive can be
+    # audited for which reference its deltas were composed against.
+    _scale_ref = None
     if (_diff_bs_env or jbs_delta_mode) and recalculate_j_BS:
         print("\n" + "=" * 60)
         print("  [%s] Pre-loop setup: caching SWB(recon kinetics)"
@@ -4504,6 +4568,11 @@ def generate_bouquet(
                 # is bound inside the draw loop below); referencing it raises
                 # UnboundLocalError, which the enclosing except used to
                 # swallow into a silent cache-disable fallback.
+                # SCOPE: this one cache feeds BOTH modes -- `_delta_spike0_raw`
+                # (jbs_delta_mode) and `_diff_spike_recon` (the env-gated
+                # DIFF_BS=1 path) are the raw and smoothed forms of the SAME
+                # SWB call, so DIFF_BS's sigma=0 reference moves off 1.0 with
+                # this change too, for the same reason and by the same amount.
                 _scale_ref = sigma0_reference_scale(jBS_scale_range)
                 _cache_results = _swb(
                     mygs, ne_cache, te_cache, ni_cache, ti_cache, Zeff,
@@ -4533,20 +4602,35 @@ def generate_bouquet(
                 if _cache_stash is not None:
                     mygs.set_coil_bounds(_cache_stash)
         except Exception as _cache_exc:
-            print(f"  [DIFF_BS] WARNING: cache setup failed ({_cache_exc}); "
-                  f"falling back to standard SWB per draw")
+            # warnings.warn, NOT print: run.py wraps generate_bouquet in
+            # capture_native_output(enabled=not verbose) and verbose defaults
+            # to False, so a print here lands in a captured log string the
+            # operator never reads -- and the resulting archive is
+            # indistinguishable from a good one (issue #44).  A warning
+            # survives the capture and reaches stderr.
+            warnings.warn(
+                f"[DIFF_BS] cache setup failed ({type(_cache_exc).__name__}: "
+                f"{_cache_exc}); falling back to standard SWB per draw -- "
+                f"jbs_delta_mode/DIFF_BS deltas are NOT composed against the "
+                f"sigma=0 reference in this run",
+                RuntimeWarning, stacklevel=2)
             import traceback as _tb
             _tb.print_exc()
             _diff_recon_eq_snap = None
             _diff_spike_recon = None
             _delta_spike0_raw = None
-    if jbs_delta_mode and _delta_spike0_raw is None:
-        print("  [jBS-delta] WARNING: sigma=0 reference unavailable; draws "
-              "fall back to the shared-smoothing spike treatment")
-    if jbs_delta_mode and baseline_j_BS is None:
-        print("  [jBS-delta] WARNING: baseline_j_BS not provided; draws "
-              "fall back to the shared-smoothing spike treatment")
+            _scale_ref = None
+    # Whether delta composition is ACTUALLY in force for the draws below --
+    # requested mode AND both of its inputs.  Archived per draw so a silent
+    # degradation cannot hide inside a normal-looking .h5.
+    _jbs_delta_active = delta_mode_activation(
+        jbs_delta_mode, _delta_spike0_raw is not None,
+        baseline_j_BS is not None)
+    if jbs_delta_mode and not _jbs_delta_active:
+        # Degraded: the draws take the shared-smoothing path, so the
+        # reference must not be handed to them half-configured.
         _delta_spike0_raw = None
+        _scale_ref = None
 
     # Tracks the cylindrical-proxy / real-l_i ratio observed at the
     # end of the most recent successful draw.  Passed into the next
@@ -5305,6 +5389,16 @@ def generate_bouquet(
         # Not archived -- it is a sampler input, recorded here so a run can be
         # audited against its seed without re-deriving the draw stream.
         diagnostics['scale_jBS']         = float(scale_jBS)
+        # Delta-mode provenance, alongside the scale it is composed against.
+        # `jbs_delta_active` is False whenever the mode was requested but the
+        # sigma=0 cache did not survive (blanket-except fallback, or no
+        # baseline_j_BS) -- without it a degraded run's diagnostics are
+        # indistinguishable from a good one.  `sigma0_reference_scale` is the
+        # scale the cached reference was taken at (None when no cache).
+        diagnostics['jbs_delta_requested'] = bool(jbs_delta_mode)
+        diagnostics['jbs_delta_active']    = bool(_jbs_delta_active)
+        diagnostics['sigma0_reference_scale'] = (
+            None if _scale_ref is None else float(_scale_ref))
 
         # ---- save geqdsk to a temporary file, archive, delete -------
         eqdsk_filename = f"{header}_count={count}.geqdsk"

@@ -7,14 +7,25 @@ block's blanket ``except Exception`` swallowed into a silent
 cache-disable fallback: jbs_delta_mode never used its reference again and
 nothing went red.  These tests pin both the correct center semantics and
 the scoping property that failed.
+
+They also pin the OBSERVABILITY of that same failure class: a degraded
+delta mode must announce itself through ``warnings.warn`` (which survives
+run.py's ``capture_native_output``) and must be recorded per draw, so a
+run that silently reverted to the shared-smoothing spike treatment cannot
+pass for a good one.
 """
 import ast
 import inspect
+import warnings
 
 import pytest
 
 import bouquet.TokaMaker_interface as tmi
-from bouquet.TokaMaker_interface import sigma0_reference_scale
+from bouquet.TokaMaker_interface import (
+    delta_mode_activation,
+    sigma0_reference_scale,
+)
+from bouquet.utils import capture_native_output
 
 
 class TestReferenceScale:
@@ -40,6 +51,68 @@ class TestReferenceScale:
         sigma0_reference_scale, not from any per-draw local."""
         src = inspect.getsource(tmi)
         assert "_scale_ref = sigma0_reference_scale(jBS_scale_range)" in src
+
+
+class TestDegradationIsLoudAndRecorded:
+    """Issue #44's failure class is invisible, not wrong: the cache block's
+    blanket ``except Exception`` degrades delta mode to the old
+    shared-smoothing composition, and the notice used to be a ``print`` that
+    run.py's output capture swallows."""
+
+    def test_missing_reference_warns(self):
+        with pytest.warns(RuntimeWarning, match="sigma=0 reference"):
+            active = delta_mode_activation(True, False, True)
+        assert active is False
+
+    def test_missing_baseline_jbs_warns(self):
+        with pytest.warns(RuntimeWarning, match="baseline_j_BS"):
+            active = delta_mode_activation(True, True, False)
+        assert active is False
+
+    def test_warning_survives_the_output_capture(self):
+        """The reason this is a warning and not a print: run.py wraps
+        generate_bouquet in capture_native_output(enabled=not verbose) and
+        verbose defaults to False, so a print goes into a log string the
+        operator never sees.  A warning must still get out."""
+        with capture_native_output(enabled=True):
+            with pytest.warns(RuntimeWarning, match=r"\[jBS-delta\]"):
+                delta_mode_activation(True, False, False)
+
+    def test_healthy_mode_is_active_and_silent(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            assert delta_mode_activation(True, True, True) is True
+
+    def test_mode_off_is_inactive_and_silent(self):
+        """Not requesting delta mode is not a degradation -- no warning."""
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            assert delta_mode_activation(False, False, False) is False
+
+    def test_draw_diagnostics_record_delta_provenance(self):
+        """The per-draw diagnostics must carry whether delta mode was
+        ACTUALLY active and which reference scale it composed against --
+        without them a degraded archive is indistinguishable from a good
+        one."""
+        src = inspect.getsource(tmi.generate_bouquet)
+        for key in ("jbs_delta_requested", "jbs_delta_active",
+                    "sigma0_reference_scale"):
+            assert f"diagnostics['{key}']" in src
+
+    def test_cache_failure_path_does_not_rely_on_print(self):
+        """The blanket ``except Exception`` around the sigma=0 cache must
+        reach the operator through the warnings channel."""
+        tree = ast.parse(inspect.getsource(tmi))
+        gb = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef)
+                  and n.name == "generate_bouquet")
+        handlers = [h for h in ast.walk(gb) if isinstance(h, ast.ExceptHandler)
+                    and any(isinstance(c, ast.Call)
+                            and getattr(c.func, "attr", None) == "warn"
+                            and getattr(c.func.value, "id", None) == "warnings"
+                            for c in ast.walk(h))]
+        assert handlers, ("no except handler in generate_bouquet routes its "
+                          "failure through warnings.warn")
 
 
 class TestNoLoadBeforeStore:

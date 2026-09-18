@@ -337,16 +337,17 @@ class TestArchiveShapes:
            "ECOILA": 2e4, "ECOILB": 2e4}
 
     def _write(self, path, *, flat=False, draws=(("0", "ok"), ("1", "ok")),
-               baseline_names=True):
+               baseline_names=True, baseline=True):
         import h5py
         names = list(self.D3D)
         base = np.array([self.D3D[n] for n in names])
         with h5py.File(path, "w") as hf:
             root = hf if flat else hf.create_group("scan/1")
-            b = root.create_group("_baseline")
-            if baseline_names:
-                b.create_dataset("coil_names", data=np.array(names, dtype="S"))
-            b.create_dataset("coil_currents", data=base)
+            if baseline:
+                b = root.create_group("_baseline")
+                if baseline_names:
+                    b.create_dataset("coil_names", data=np.array(names, dtype="S"))
+                b.create_dataset("coil_currents", data=base)
             for key, kind in draws:
                 g = root.create_group(key)
                 if kind == "no_coils":                  # nothing stored at all
@@ -392,6 +393,23 @@ class TestArchiveShapes:
         self._write(h5, baseline_names=False)
         with pytest.raises(CoilSigmaUnavailable, match="no coil_names"):
             filter_coil_chi2(h5, None, scan_key=1, apply=False, era="modern")
+
+    def test_a_scan_without_a_baseline_group_is_loud(self, tmp_path):
+        """No ``_baseline`` = no machine state to judge against, which is the same
+        failure as the v1 baseline above and takes the same loud exit.  It used to
+        be `continue`d past, and an explicit ``scan_key`` then made
+        ``_finalize_scan_result`` raise a bare ``StopIteration`` on the empty dict."""
+        from bouquet.coil_spec import CoilSigmaUnavailable
+        from bouquet.filtering import filter_coil_chi2
+        h5 = str(tmp_path / "nobl.h5")
+        self._write(h5, baseline=False)
+        with pytest.raises(CoilSigmaUnavailable, match="no _baseline group"):
+            filter_coil_chi2(h5, None, scan_key=1, apply=False, era="modern")
+        # and the same on the flat layout, where the message names the root
+        h5f = str(tmp_path / "nobl_flat.h5")
+        self._write(h5f, flat=True, baseline=False)
+        with pytest.raises(CoilSigmaUnavailable, match="archive root"):
+            filter_coil_chi2(h5f, None, apply=False, era="modern")
 
     def test_flat_legacy_archive_has_no_scan_group(self, tmp_path):
         """``discover_scan_keys`` returns None for a flat file, so the filter must

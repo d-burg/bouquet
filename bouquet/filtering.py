@@ -387,7 +387,17 @@ def filter_coil_chi2(h5path_or_header, dd_path=None, scan_key=None,
             # ``_baseline_boundary``: the draws hang off the file root.
             grp = hf[f"scan/{bkey}"] if bkey is not None else hf
             if "_baseline" not in grp:
-                continue
+                # same class of failure as the v1 baseline below -- there is no
+                # machine state to judge the draws against -- so it takes the
+                # same loud exit.  Skipping it silently left the summary empty,
+                # and an explicit ``scan_key`` then turned that into a bare
+                # ``StopIteration`` out of ``_finalize_scan_result``.
+                where = f"scan/{bkey}" if bkey is not None else "the archive root"
+                raise CoilSigmaUnavailable(
+                    f"{where} carries no _baseline group, so no draw can be judged "
+                    "against the reconstructed machine state. Re-run the generation "
+                    "(the baseline is written at the start of a scan), or use the "
+                    "legacy coil filter (filtering.coil_filter = 'legacy').")
             bl = grp["_baseline"]
             bn = _read_coil_names(bl)          # schema-v2 dataset; [] on a v1 archive
             if not bn or "coil_currents" not in bl:

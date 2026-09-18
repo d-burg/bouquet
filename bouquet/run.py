@@ -420,6 +420,7 @@ class Bouquet:
                                  % (", ".join(sorted(t["coils"])),
                                     ", ".join(sorted(set(t["coils"]) - known)))
                                  for t in dropped)))
+            spec = self._check_coil_reg_turns(mygs, spec)
             named = {c for t in spec for c in t["coils"]}
 
             def _build(exploratory):
@@ -459,6 +460,80 @@ class Bouquet:
                 del mygs._weak_coil_reg
         mygs.set_coil_reg(reg_terms=reg_terms)
         return reg_terms
+
+    @staticmethod
+    def _mesh_net_turns(mygs, name):
+        """Turns this MESH carries for coil set *name*, or None if unknowable.
+
+        TokaMaker sums ``nturns`` over a coil set's sub-coils into
+        ``coil_sets[name]["net_turns"]``. A stub/mesh-less solver object (or an
+        older build) may expose only the names, in which case the convention
+        cannot be confirmed and the caller must treat it as unconfirmed.
+        """
+        sets = getattr(mygs, "coil_sets", None)
+        info = sets.get(name) if isinstance(sets, dict) else None
+        try:
+            return float(info["net_turns"])
+        except (TypeError, KeyError, ValueError):
+            return None
+
+    def _check_coil_reg_turns(self, mygs, spec):
+        """Drop terms whose circuit-amps -> ampere-turns factor the mesh contradicts.
+
+        ``coil_targets`` converts a measured circuit current with the DEVICE's
+        turn table, but which side carries the turns is a property of the MESH:
+        the shipped D3D mesh gives its F-coil sets ``net_turns = 1``, so the
+        x58/x55 factor supplies them, and gives ECOILA/ECOILB ``net_turns = 61``,
+        so those convert at x1.0. Keyed by device, that x1.0 is an ASSUMPTION
+        about one mesh -- a second registered mesh of the same machine (e.g. one
+        that splits the E-coil into E567UP/E567DN/E89UP/E89DN) would take the
+        same implicit 1.0 and, if it does not carry the turns either, be pinned
+        to a target wrong by its whole turn count at W0 = 100, i.e. a strong,
+        confidently wrong constraint.
+
+        Exactly one side must carry the turns, which is checkable without
+        knowing the physical count: a factor != 1 needs ``net_turns == 1``, and
+        a factor of 1 needs ``net_turns != 1``. Both-1 (turns nowhere) and
+        neither-1 (turns twice) are refused, as is a mesh that cannot report
+        ``net_turns`` at all. A refused term is dropped with the same warning
+        the off-mesh drop gives -- its coils revert to target=0, weight=1, which
+        is the historical behaviour rather than a wrong strong target.
+
+        Only terms carrying a ``"turns"`` key are checked: that key is the
+        conversion CLAIM stamped by :func:`coil_targets.coil_reg_from_measured`.
+        A hand-built term makes no claim and is left alone.
+        """
+        bad = []
+        for t in spec:
+            f = t.get("turns")
+            if f is None:
+                continue
+            for c in t["coils"]:
+                if c == "#VSC":
+                    continue
+                nt = self._mesh_net_turns(mygs, c)
+                if nt is None:
+                    bad.append((t, c, f, "this mesh does not report net_turns"))
+                elif (float(f) == 1.0) == (nt == 1.0):
+                    bad.append((t, c, f, "mesh net_turns = %g" % nt))
+        if not bad:
+            return spec
+        import warnings
+        drop = {id(t) for t, _c, _f, _w in bad}
+        warnings.warn(
+            "coil_reg: dropping %d term(s) whose turns convention this mesh does not "
+            "confirm. The circuit-amps -> ampere-turns factor is a property of the "
+            "MESH, not of the device, so an unconfirmed factor would pin the coil to a "
+            "target wrong by its whole turn count -- at the configured weight. EVERY "
+            "coil in a dropped term reverts to the target=0, weight=1 default: %s. "
+            "Pass `turns` explicitly to coil_reg_from_measured for this mesh, or build "
+            "the term by hand (a term with no 'turns' key claims nothing and is not "
+            "checked)."
+            % (len(drop),
+               "; ".join("{%s} (%s: factor %g, %s)"
+                         % (", ".join(sorted(t["coils"])), c, float(f), why)
+                         for t, c, f, why in bad)))
+        return [t for t in spec if id(t) not in drop]
 
     def _seed_coil_init(self, mygs):
         """Seed the inverse iterate from ``SolverConfig.coil_init`` ({name: A-t}).

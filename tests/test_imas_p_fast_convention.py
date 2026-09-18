@@ -150,6 +150,27 @@ class TestDetectConvention:
         det = detect_p_fast_convention(dd)
         assert det["rule"] == rule and det["basis"] == "explicit-stamp"
 
+    @pytest.mark.parametrize("stamp,value", [
+        ("p_fast_reduction=tracee", "tracee"),
+        ("p_fast_reduction: auto", "auto"),
+        ("pressure_fast_convention = per dof", "per"),   # the space truncates it
+    ])
+    def test_an_unrecognised_stamp_value_is_not_discarded_silently(self, stamp,
+                                                                   value):
+        """A dd that states its own convention and is then misread is the one case
+        the stamp mechanism was supposed to make authoritative."""
+        dd = _stamp(_minimal_dd(), "dataset_description", "ids_properties",
+                    "comment", f"hand-built fixture; {stamp}")
+        dd["global_time"] = 1.0        # so inference has something to fall back on
+        with pytest.warns(UserWarning, match="not recognised") as rec:
+            det = detect_p_fast_convention(dd)
+        msg = " ".join(str(w.message) for w in rec)
+        assert repr(value) in msg                     # the value is named
+        assert "dataset_description.ids_properties.comment" in msg
+        assert "inferred" in msg
+        # ... and the inference still runs, rather than the read failing
+        assert det["rule"] == "sum" and det["basis"] == "imas.jl-structure"
+
     def test_structure_outranks_an_imported_sub_ids_producer(self):
         """A FUSE dd legitimately carries IDSes imported from other codes.
 
@@ -287,6 +308,68 @@ class TestMissingParallelField:
             read_imas_baseline(ImasSource(ids_path=path, time=1.0),
                                p_fast_reduction="sum")
         assert not [w for w in rec if "pressure_fast_parallel" in str(w.message)]
+
+
+# ---------------------------------------------------------------------------
+# the "auto" warning fires only where the convention moved a number
+# ---------------------------------------------------------------------------
+class TestUndeterminedWarningIsConditional:
+    """The factor-of-3 warning is the single guard the ``auto`` design rests on.
+
+    It has to stay credible: a user who sees it on runs where it cannot matter
+    filters it, and then it does not fire on the run where it does.  These
+    exercise the ``auto`` branch itself (not an explicit rule).
+    """
+
+    @staticmethod
+    def _no_fast_dd(absent):
+        """A provenance-less dd whose fast pressure is zero, or absent entirely."""
+        dd = _minimal_dd(p_fast_perp=np.zeros(9))
+        if absent:
+            for sp in dd["core_profiles"]["profiles_1d"][0]["ion"]:
+                sp.pop("pressure_fast_perpendicular", None)
+                sp.pop("pressure_fast_parallel", None)
+        return dd
+
+    @pytest.mark.parametrize("absent", [False, True], ids=["all-zero", "absent"])
+    def test_silent_when_the_dd_carries_no_fast_pressure(self, tmp_path, absent):
+        dd = self._no_fast_dd(absent)
+        assert detect_p_fast_convention(dd)["rule"] is None   # genuinely unknown
+        path = _write(tmp_path, dd, f"no_fast_{int(absent)}.json")
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            bl = read_imas_baseline(ImasSource(ids_path=path, time=1.0))
+        assert not [w for w in rec if "FACTOR OF 3" in str(w.message)]
+        assert np.allclose(bl.p_fast, 0.0)
+        # the resolution is still recorded; only the warning is held back
+        assert bl.p_fast_meta["basis"] == "undetermined-fallback"
+        assert bl.p_fast_meta["rule"] == P_FAST_UNDETERMINED_FALLBACK
+        assert not bl.p_fast_meta["warned"]
+
+    def test_silent_when_the_user_supplies_p_fast(self, tmp_path):
+        dd = _minimal_dd()              # non-zero fast fields, no provenance
+        path = _write(tmp_path, dd, "user_p_fast.json")
+        mine = np.linspace(2.0e3, 0.0, 9)
+        fixed = FixedComponentsConfig(p_fast=mine, psi_N=np.linspace(0, 1, 9))
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            bl = read_imas_baseline(ImasSource(ids_path=path, time=1.0),
+                                    fixed=fixed, allow_incomplete_pressure=True)
+        assert not [w for w in rec if "FACTOR OF 3" in str(w.message)]
+        assert np.allclose(bl.p_fast, mine)
+        assert bl.p_fast_meta["basis"] == "user-override"
+        assert not bl.p_fast_meta["warned"]
+
+    def test_a_genuinely_ambiguous_dd_still_warns(self, tmp_path):
+        dd = _minimal_dd()              # non-zero fast fields, no provenance
+        path = _write(tmp_path, dd, "ambiguous.json")
+        with pytest.warns(UserWarning, match="FACTOR OF 3") as rec:
+            bl = read_imas_baseline(ImasSource(ids_path=path, time=1.0),
+                                    allow_incomplete_pressure=True)
+        assert len([w for w in rec if "FACTOR OF 3" in str(w.message)]) == 1
+        assert bl.p_fast_meta["basis"] == "undetermined-fallback"
+        assert bl.p_fast_meta["rule"] == P_FAST_UNDETERMINED_FALLBACK
+        assert bl.p_fast_meta["warned"]
 
 
 # ---------------------------------------------------------------------------

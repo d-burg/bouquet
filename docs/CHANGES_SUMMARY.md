@@ -47,7 +47,14 @@ synthetic `examples/D3D-like/D3Dlike_baseline_omas.json`.
      OMAS/OMFIT/IMASPy ⇒ `"trace"`.
 * **Undeterminable provenance falls back to `"sum"` and warns loudly, once**,
   naming both conventions, the factor-of-3 stake, and how to set the rule
-  explicitly. It is never applied silently.
+  explicitly. It is never applied silently. The warning is raised only where the
+  choice actually moved a number: it is held back when the dd's fast pressure is
+  absent or identically zero, and when `FixedComponentsConfig.p_fast` supplies
+  `p_fast` instead of the dd. `Baseline.p_fast_meta` records the resolution
+  either way (`basis="undetermined-fallback"`, `warned=False`).
+* **A convention stamp whose value is unrecognised warns**, naming the slot and
+  the value, and the convention is inferred from structure/producer instead — a
+  typo in a stamp is no longer silently discarded.
 * **An explicit `"sum"` / `"trace"` / `"mean"` / `"perp"` always wins and is
   silent.**
 * The rule used, the basis for it and the evidence are recorded on the new
@@ -75,8 +82,9 @@ synthetic `examples/D3D-like/D3Dlike_baseline_omas.json`.
   `examples/D3D-like/slurm_jobs/bouquet_2000ms_bundle.json` pins it on purpose —
   it runs against the synthetic dictionary-convention dd — and now says so in a
   `_p_fast_note`.
-* **A dd with no recorded provenance warns on every read** until the rule is
-  pinned or the dd is stamped. Stamping is one line:
+* **A dd with no recorded provenance warns once per process**, on reads where
+  its own fast pressure is non-zero, until the rule is pinned or the dd is
+  stamped. Stamping is one line:
   `core_profiles.ids_properties.comment = "... p_fast_reduction=sum ..."`.
 * `examples/D3D-like/D3Dlike_baseline_omas.json` carries that stamp now. The
   local (gitignored) generator that produces it should emit it too.

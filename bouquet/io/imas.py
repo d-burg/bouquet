@@ -185,6 +185,17 @@ def detect_p_fast_convention(dd: dict) -> dict:
             if val in _STAMP_VALUES:
                 return {"rule": _STAMP_VALUES[val], "basis": "explicit-stamp",
                         "evidence": f"{where} = {text!r}"}
+            # A dd that states its own convention and is then misread is exactly
+            # what the stamp exists to prevent -- never discard one silently.
+            import warnings
+            warnings.warn(
+                f"{where} carries a fast-pressure convention stamp whose value "
+                f"{m.group(1)!r} is not recognised; expected one of "
+                + ", ".join(repr(v) for v in sorted(_STAMP_VALUES))
+                + ". The stamp is ignored and the convention is inferred from the "
+                "dd's structure/producer instead.",
+                stacklevel=2,
+            )
 
     # 2. IMAS.jl / FUSE structural markers
     found = [k for k in _IMASJL_TOPLEVEL_MARKERS if k in dd]
@@ -220,38 +231,15 @@ def detect_p_fast_convention(dd: dict) -> dict:
 P_FAST_UNDETERMINED_FALLBACK = "sum"
 
 
-def resolve_p_fast_reduction(dd: dict, requested: str = "auto") -> dict:
-    """Resolve the fast-pressure reduction rule for ``dd``.
+def warn_p_fast_undetermined(rule: str = P_FAST_UNDETERMINED_FALLBACK,
+                             stacklevel: int = 2) -> None:
+    """The factor-of-3 warning for a dd whose convention cannot be determined.
 
-    ``requested`` is ``"auto"`` (inspect the dd's provenance) or one of the
-    explicit rules, which always wins and is applied silently.
-
-    Returns the metadata dict recorded on :attr:`bouquet.baseline.Baseline.p_fast_meta`::
-
-        {"rule": str, "basis": str, "evidence": str, "requested": str,
-         "warned": bool}
-
-    When ``requested == "auto"`` and the dd's provenance is undeterminable the
-    rule falls back to :data:`P_FAST_UNDETERMINED_FALLBACK` and a single
-    ``UserWarning`` is raised naming both conventions and the factor-of-3 stake.
+    Split out of :func:`resolve_p_fast_reduction` so a caller that resolves the
+    rule eagerly can hold the warning back until it knows the choice moved a
+    number -- see :func:`read_imas_baseline`.
     """
-    from ..physics import P_FAST_REDUCTIONS
-
-    if requested != "auto":
-        if requested not in P_FAST_REDUCTIONS:
-            raise ValueError(
-                f"unknown p_fast_reduction {requested!r}; expected 'auto' or one of "
-                + ", ".join(repr(r) for r in P_FAST_REDUCTIONS))
-        return {"rule": requested, "basis": "explicit-argument",
-                "evidence": f"p_fast_reduction={requested!r} supplied by the caller",
-                "requested": requested, "warned": False}
-
-    det = detect_p_fast_convention(dd)
-    if det["rule"] is not None:
-        return {**det, "requested": "auto", "warned": False}
-
     import warnings
-    rule = P_FAST_UNDETERMINED_FALLBACK
     warnings.warn(
         "p_fast_reduction='auto': this data dictionary records no producer, so the "
         "storage convention of pressure_fast_parallel/perpendicular cannot be "
@@ -268,10 +256,49 @@ def resolve_p_fast_reduction(dd: dict, requested: str = "auto") -> dict:
         "read_imas_baseline(..., p_fast_reduction=...)); alternatively stamp the dd "
         "itself, e.g. core_profiles.ids_properties.comment = "
         "'... p_fast_reduction=trace ...'.",
-        stacklevel=2,
+        stacklevel=stacklevel + 1,
     )
+
+
+def resolve_p_fast_reduction(dd: dict, requested: str = "auto",
+                             warn: bool = True) -> dict:
+    """Resolve the fast-pressure reduction rule for ``dd``.
+
+    ``requested`` is ``"auto"`` (inspect the dd's provenance) or one of the
+    explicit rules, which always wins and is applied silently.
+
+    Returns the metadata dict recorded on :attr:`bouquet.baseline.Baseline.p_fast_meta`::
+
+        {"rule": str, "basis": str, "evidence": str, "requested": str,
+         "warned": bool}
+
+    When ``requested == "auto"`` and the dd's provenance is undeterminable the
+    rule falls back to :data:`P_FAST_UNDETERMINED_FALLBACK` and a single
+    ``UserWarning`` is raised naming both conventions and the factor-of-3 stake.
+    ``warn=False`` resolves the metadata without raising it; the caller then owns
+    the warning and can key on ``basis == "undetermined-fallback"``.
+    """
+    from ..physics import P_FAST_REDUCTIONS
+
+    if requested != "auto":
+        if requested not in P_FAST_REDUCTIONS:
+            raise ValueError(
+                f"unknown p_fast_reduction {requested!r}; expected 'auto' or one of "
+                + ", ".join(repr(r) for r in P_FAST_REDUCTIONS))
+        return {"rule": requested, "basis": "explicit-argument",
+                "evidence": f"p_fast_reduction={requested!r} supplied by the caller",
+                "requested": requested, "warned": False}
+
+    det = detect_p_fast_convention(dd)
+    if det["rule"] is not None:
+        return {**det, "requested": "auto", "warned": False}
+
+    rule = P_FAST_UNDETERMINED_FALLBACK
+    if warn:
+        warn_p_fast_undetermined(rule, stacklevel=2)
     return {"rule": rule, "basis": "undetermined-fallback",
-            "evidence": det["evidence"], "requested": "auto", "warned": True}
+            "evidence": det["evidence"], "requested": "auto",
+            "warned": bool(warn)}
 
 
 def _isotropic_fast_pressure(species: dict, method: str, n: int,
@@ -545,7 +572,12 @@ def read_imas_baseline(
     T = source.time
 
     # Which fast-pressure convention this dd was written in (factor of 3).
-    p_fast_meta = resolve_p_fast_reduction(dd, p_fast_reduction)
+    # The metadata is resolved eagerly -- the reduction rule is needed to read the
+    # fields and the completeness message quotes it -- but the loud undetermined
+    # warning is held back until we know the choice actually moved a number: it
+    # says nothing on a dd whose fast pressure is absent or identically zero, and
+    # nothing on a run whose p_fast comes from FixedComponentsConfig instead.
+    p_fast_meta = resolve_p_fast_reduction(dd, p_fast_reduction, warn=False)
     p_fast_rule = p_fast_meta["rule"]
 
     # --- targets from the equilibrium IDS ---
@@ -660,6 +692,14 @@ def read_imas_baseline(
             j_NBI = _override(fixed.j_NBI, fixed.psi_N, psi_N)
         if fixed.j_RF is not None:
             j_RF = _override(fixed.j_RF, fixed.psi_N, psi_N)
+
+    # The deferred factor-of-3 warning: the convention was undeterminable AND the
+    # fast pressure it scales is non-zero AND it came from the dd (a user-supplied
+    # p_fast has already rewritten the basis to "user-override").
+    if (p_fast_meta["basis"] == "undetermined-fallback"
+            and float(np.max(np.abs(np.asarray(p_fast, dtype=float)))) > 0.0):
+        warn_p_fast_undetermined(p_fast_meta["rule"])
+        p_fast_meta = {**p_fast_meta, "warned": True}
 
     # Authoritative toroidal total; inductive absorbs the residual so the
     # decomposition sums exactly and Ip is preserved.

@@ -88,6 +88,47 @@ class SolverConfig:
     coil_init: Optional[dict] = None
     region_overrides: Optional[dict] = None          # special-case cond/coil dict edits
 
+    def __post_init__(self):
+        """Validate the coil settings here, not inside ``setup_solver``.
+
+        A malformed ``coil_reg`` entry used to die on ``set(t["coils"])`` with a
+        bare ``KeyError``/``TypeError`` naming neither the entry nor the field,
+        after the mesh had been loaded; ``coil_init`` was only type-checked when
+        ``_seed_coil_init`` ran. Both mistakes are config typos and both checks
+        are free, so they happen at construction.
+        """
+        if self.coil_reg is None:
+            self.coil_reg = []
+        if not isinstance(self.coil_reg, (list, tuple)):
+            raise TypeError(
+                "solver.coil_reg must be a list of "
+                "{'coils': {name: coeff}, 'target': float, 'weight': float} terms, got "
+                f"{type(self.coil_reg).__name__}")
+        for i, term in enumerate(self.coil_reg):
+            where = f"solver.coil_reg[{i}]"
+            if not isinstance(term, dict):
+                raise TypeError(f"{where} must be a dict, got {type(term).__name__}")
+            if "coils" not in term:
+                raise ValueError(
+                    f"{where} has no 'coils' key; every term names the coils it "
+                    "constrains as {name: coefficient}")
+            if not isinstance(term["coils"], dict) or not term["coils"]:
+                raise TypeError(
+                    f"{where}['coils'] must be a non-empty {{name: coefficient}} dict, "
+                    f"got {type(term['coils']).__name__}")
+            for key in ("target", "weight"):
+                if key in term:
+                    try:
+                        float(term[key])
+                    except (TypeError, ValueError):
+                        raise TypeError(
+                            f"{where}[{key!r}] must be a number, got "
+                            f"{type(term[key]).__name__}") from None
+        if self.coil_init is not None and not hasattr(self.coil_init, "items"):
+            raise TypeError(
+                "solver.coil_init must be a {coil_name: current_A_turns} mapping, got "
+                f"{type(self.coil_init).__name__}")
+
 
 # ---------------------------------------------------------------------------
 # Baseline sources (discriminated union via `BouquetConfig.source`)

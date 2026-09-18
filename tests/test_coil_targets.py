@@ -118,6 +118,44 @@ class TestInverseVarianceWeights:
         assert by["F1A"]["weight"] == 1.0
 
 
+class TestCoilsWithNoSigma:
+    """A coil measured but with no usable sigma must not be RELEASED.
+
+    ``sigma_from_pf_active`` omits any coil whose ``data_error_upper`` is missing
+    or non-positive, so it survives into ``measured`` but not into ``sigma``.
+    Dropping it from the spec is the one thing that must not happen: every coil
+    no term names is given target=0 at weight 1 by ``_apply_coil_reg``, i.e. the
+    pull toward zero the whole module exists to remove.
+    """
+
+    SIG = {"F1A": 100.0, "F2A": 100.0}
+
+    def test_the_coil_is_pinned_at_its_measurement_at_the_flat_reference_weight(self):
+        meas = {"F1A": 1000.0, "F2A": 1000.0, "F6A": 2000.0}   # F6A has no sigma
+        with pytest.warns(UserWarning, match="F6A"):
+            by = _by_coil(coil_reg_from_measured(meas, sigma=self.SIG, **D3D))
+        assert set(by) == {"F1A", "F2A", "F6A"}
+        assert by["F6A"]["target"] == pytest.approx(2000.0 * 55.0)
+        assert by["F6A"]["weight"] == pytest.approx(DEFAULT_W0)
+        assert by["F6A"]["weight"] > 1.0      # not the toward-zero default strength
+
+    def test_the_warning_says_what_happened_and_what_would_have(self):
+        with pytest.warns(UserWarning) as rec:
+            coil_reg_from_measured({"F1A": 1.0, "F6A": 1.0}, sigma=self.SIG, **D3D)
+        msg = str(rec[0].message)
+        assert "F6A" in msg and "no usable sigma" in msg
+        assert "target=0, weight=1" in msg     # the outcome that was avoided
+
+    def test_an_explicit_weight_covers_the_gap_without_warning(self):
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            by = _by_coil(coil_reg_from_measured(
+                {"F1A": 1.0, "F6A": 1.0}, sigma=self.SIG,
+                weights={"F6A": 7.0}, **D3D))
+        assert by["F6A"]["weight"] == 7.0
+
+
 class TestPfActiveReaders:
     @staticmethod
     def _dd(tmp_path):
@@ -210,6 +248,137 @@ class TestApplyCoilReg:
         by = {list(t["coils"])[0]: t for t in got}
         assert by["F6A"]["target"] == 0.0
         assert "#VSC" in by
+
+
+class TestTurnsConventionIsCheckedAgainstTheMesh:
+    """The turns factor is keyed by DEVICE; which side carries the turns is a
+    property of the MESH. Exactly one of them must, so the claim is checkable:
+    factor != 1 needs net_turns == 1, factor == 1 needs net_turns != 1."""
+
+    class _GS:
+        def __init__(self, sets):
+            # TokaMaker's real shape: {name: {"id", "net_turns", "sub_coils"}}
+            self.coil_sets = sets
+            self.installed = None
+
+        def coil_reg_term(self, coils, target=0.0, weight=1.0):
+            return {"coils": dict(coils), "target": target, "weight": weight}
+
+        def set_coil_reg(self, reg_terms=None): self.installed = list(reg_terms)
+
+    #: the shipped D3D mesh: F-coil sets carry one turn, the E-coils carry 61
+    SHIPPED = {"F1A": {"net_turns": 1.0}, "ECOILA": {"net_turns": 61.0}}
+
+    def _run(self, spec, sets=None):
+        from bouquet.run import Bouquet
+        gs = self._GS(dict(self.SHIPPED if sets is None else sets))
+        obj = Bouquet.__new__(Bouquet)
+        obj.config = type("C", (), {"solver": type("S", (), {"coil_reg": spec})()})()
+        Bouquet._apply_coil_reg(obj, gs)
+        return {list(t["coils"])[0]: t for t in gs.installed}
+
+    def test_the_shipped_convention_is_confirmed_and_nothing_is_dropped(self):
+        import warnings
+        spec = coil_reg_from_measured({"F1A": 1000.0, "ECOILA": 1000.0}, **D3D)
+        assert [t["turns"] for t in spec] == [58.0, 1.0]
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            by = self._run(spec)
+        assert by["F1A"]["target"] == pytest.approx(58000.0)
+        assert by["ECOILA"]["target"] == pytest.approx(1000.0)
+
+    def test_an_unconfirmed_implicit_factor_is_dropped_not_applied(self):
+        """A second mesh of the same machine that splits the E-coil and does NOT
+        carry its turns would take the same implicit 1.0 and be pinned to a
+        target wrong by the whole turn count -- at the configured weight."""
+        spec = coil_reg_from_measured({"F1A": 1000.0, "E567UP": 1000.0}, **D3D)
+        sets = {"F1A": {"net_turns": 1.0}, "E567UP": {"net_turns": 1.0}}
+        with pytest.warns(UserWarning) as rec:
+            by = self._run(spec, sets=sets)
+        msg = "\n".join(str(r.message) for r in rec)
+        assert "E567UP" in msg and "net_turns = 1" in msg and "target=0, weight=1" in msg
+        assert by["E567UP"]["target"] == 0.0 and by["E567UP"]["weight"] == 1.0
+        assert by["F1A"]["target"] == pytest.approx(58000.0)     # unaffected
+
+    def test_turns_counted_twice_is_refused_as_well(self):
+        spec = coil_reg_from_measured({"F1A": 1000.0}, **D3D)
+        with pytest.warns(UserWarning, match="net_turns = 58"):
+            by = self._run(spec, sets={"F1A": {"net_turns": 58.0}})
+        assert by["F1A"]["target"] == 0.0
+
+    def test_a_mesh_that_cannot_report_net_turns_is_unconfirmed(self):
+        spec = coil_reg_from_measured({"F1A": 1000.0}, **D3D)
+        with pytest.warns(UserWarning, match="does not report net_turns"):
+            by = self._run(spec, sets={"F1A": {}})
+        assert by["F1A"]["target"] == 0.0
+
+    def test_a_hand_built_term_claims_nothing_and_is_not_checked(self):
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            by = self._run([{"coils": {"F1A": 1.0}, "target": 7.0, "weight": 9.0}])
+        assert by["F1A"]["target"] == 7.0 and by["F1A"]["weight"] == 9.0
+
+    def test_the_shipped_mesh_really_carries_this_convention(self):
+        """The check is only safe if the shipped mesh matches it -- read it."""
+        import json
+        import os
+        import h5py
+        mesh = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "examples", "D3D-like", "DIIID_mesh.h5")
+        if not os.path.exists(mesh):
+            pytest.skip("example mesh not present")
+        with h5py.File(mesh, "r") as hf:
+            coil_dict = json.loads(hf["mesh/coil_dict"][()])
+        net = {}
+        for key, v in coil_dict.items():
+            net[v.get("coil_set", key)] = net.get(v.get("coil_set", key), 0.0) \
+                + float(v.get("nturns", 1.0))
+        assert net["F1A"] == 1.0 and net["ECOILA"] == 61.0 and net["ECOILB"] == 61.0
+        for name, factor in TURNFC_D3D.items():
+            assert factor != 1.0 and net[name] == 1.0
+
+
+class TestSolverConfigValidation:
+    """A malformed coil_reg entry used to die inside setup_solver on a bare
+    KeyError/TypeError, after the mesh had been loaded."""
+
+    def test_a_non_dict_term_is_named(self):
+        from bouquet.config import SolverConfig
+        with pytest.raises(TypeError, match=r"coil_reg\[1\] must be a dict"):
+            SolverConfig(mesh_path="m.h5", coil_reg=[{"coils": {"F1A": 1.0}}, 3])
+
+    def test_a_term_without_coils_is_named(self):
+        from bouquet.config import SolverConfig
+        with pytest.raises(ValueError, match=r"coil_reg\[0\] has no 'coils' key"):
+            SolverConfig(mesh_path="m.h5", coil_reg=[{"target": 1.0}])
+
+    def test_coils_must_be_a_non_empty_mapping(self):
+        from bouquet.config import SolverConfig
+        for bad in (["F1A"], {}):
+            with pytest.raises(TypeError, match="non-empty"):
+                SolverConfig(mesh_path="m.h5", coil_reg=[{"coils": bad}])
+
+    def test_target_and_weight_must_be_numbers(self):
+        from bouquet.config import SolverConfig
+        with pytest.raises(TypeError, match="'target'"):
+            SolverConfig(mesh_path="m.h5",
+                         coil_reg=[{"coils": {"F1A": 1.0}, "target": "big"}])
+        with pytest.raises(TypeError, match="'weight'"):
+            SolverConfig(mesh_path="m.h5",
+                         coil_reg=[{"coils": {"F1A": 1.0}, "weight": None}])
+
+    def test_coil_init_must_be_a_mapping(self):
+        from bouquet.config import SolverConfig
+        with pytest.raises(TypeError, match="coil_init must be a"):
+            SolverConfig(mesh_path="m.h5", coil_init=["F1A", 1.0])
+        SolverConfig(mesh_path="m.h5", coil_init={"F1A": 1.0})      # fine
+
+    def test_a_valid_spec_and_the_default_pass(self):
+        from bouquet.config import SolverConfig
+        SolverConfig(mesh_path="m.h5")
+        SolverConfig(mesh_path="m.h5",
+                     coil_reg=coil_reg_from_measured({"F1A": 1000.0}, **D3D))
 
 
 class TestWeakExploratoryReg:

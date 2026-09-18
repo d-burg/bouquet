@@ -39,23 +39,69 @@ def q_ravg(ravgs, which: str):
     return ravgs[_GET_Q_RAVG_INDEX[which]]
 
 
-def isotropize_fast_pressure(p_perp, p_par, method: str = "trace"):
+#: Reduction rules :func:`isotropize_fast_pressure` accepts.  ``"sum"`` is the
+#: per-degree-of-freedom rule; the other three read the two fields as the full
+#: perpendicular/parallel pressures of a gyrotropic tensor.
+P_FAST_REDUCTIONS = ("trace", "mean", "perp", "sum")
+
+#: Which storage convention each rule assumes for
+#: ``pressure_fast_{parallel,perpendicular}``.  This is the factor-of-3 axis:
+#: "per_dof" fields hold a third of the fast pressure each, "total" fields hold
+#: the full directional pressures.
+P_FAST_CONVENTION_OF_RULE = {
+    "sum": "per_dof",
+    "trace": "total",
+    "mean": "total",
+    "perp": "total",
+}
+
+
+def isotropize_fast_pressure(p_perp, p_par, method: str):
     """Reduce anisotropic fast-ion pressure to a scalar for the scalar-p GS solve.
 
-    For a gyrotropic pressure tensor ``P = p_par b b + p_perp (I - b b)`` the
-    standard scalar pressure is one-third of the trace:
+    ``method`` is REQUIRED and has no default: the two families below differ by
+    a factor of three on the same input, so there is no value that is safe to
+    assume on a caller's behalf.  Readers that have a data dictionary to look at
+    should call :func:`bouquet.io.imas.resolve_p_fast_reduction`, which picks the
+    rule from the dd's recorded provenance.
 
-        method="trace"  ->  (2 * p_perp + p_par) / 3        [DEFAULT]
+    **Fields stored as the FULL directional pressures** (the IMAS/OMAS data
+    dictionary reading of ``pressure_fast_parallel`` -- "fast (non-thermal)
+    parallel pressure").  For a gyrotropic tensor
+    ``P = p_par b b + p_perp (I - b b)``:
+
+        method="trace"  ->  (2 * p_perp + p_par) / 3
         method="mean"   ->  (p_perp + p_par) / 2
         method="perp"   ->  p_perp
 
-    ``"trace"`` is recommended: it is the textbook scalar pressure p = tr(P)/3 of
-    a gyrotropic distribution and it preserves the fast-ion energy density
+    ``"trace"`` is the textbook scalar pressure p = tr(P)/3 of a gyrotropic
+    distribution and it preserves the fast-ion energy density
     (w = (1/2)(p_par + 2 p_perp) = (3/2) p_scalar), consistent with how
     kinetic-EFIT constrains the total stored pressure
     (p_tot = p_e + p_i + p_Z + p_fast). Use ``"perp"`` only if matching the
     diamagnetic magnetic response specifically; the rigorous alternative is a
     modified anisotropic Grad-Shafranov solve (out of scope for a scalar solver).
+
+    **Fields stored PER DEGREE OF FREEDOM** (IMAS.jl / FUSE):
+
+        method="sum"    ->  p_par + 2 * p_perp
+
+    IMAS.jl's ``pressure`` expression is ``pressure_thermal +
+    pressure_fast_parallel + 2*pressure_fast_perpendicular``, and its
+    ``physics/fast.jl`` writes ``pressa/3`` into *each* of
+    ``pressure_fast_parallel`` and ``pressure_fast_perpendicular``.  So on an
+    IMAS.jl-written dd the two fields carry a third of the fast pressure each and
+    ``"sum"`` recovers ``pressa``; ``"trace"`` would return one third of it.
+    Measured on a set of beam-heated tokamak discharges reconstructed through
+    FUSE, that shortfall was 8-35 % of the total pressure and closed to <2 % with
+    ``"sum"``.  Conversely, ``"sum"`` on a dictionary-convention dd over-counts
+    the fast pressure by exactly 3x.
+
+    Note that ``"sum"`` is not a tensor reduction: on isotropic input it returns
+    ``3*p``, not ``p``, because the input is a third of the pressure per degree of
+    freedom rather than a directional pressure.  The invariant "every reduction
+    is the identity on isotropic input" holds for the three ``"total"``-convention
+    rules only.
 
     Inputs are per-species arrays on a common grid; the caller sums species.
 
@@ -65,6 +111,9 @@ def isotropize_fast_pressure(p_perp, p_par, method: str = "trace"):
     - Anisotropic Grad-Shafranov treatment: arXiv:1301.4714; J. Plasma Phys.,
       "Analysis of the isotropic and anisotropic Grad-Shafranov equation".
     - Kinetic-EFIT total-pressure constraint p_tot = p_e + p_i + p_Z + p_fast.
+    - IMAS.jl (ProjectTorreyPines): ``src/expressions/dynamic.jl`` (the
+      ``pressure`` expression) and ``src/physics/fast.jl`` (``pressa/3`` into
+      each directional field).
     """
     p_perp = np.asarray(p_perp, dtype=float)
     p_par = np.asarray(p_par, dtype=float)
@@ -78,8 +127,10 @@ def isotropize_fast_pressure(p_perp, p_par, method: str = "trace"):
         return (p_perp + p_par) / 2.0
     if method == "perp":
         return p_perp
+    if method == "sum":
+        return p_par + 2.0 * p_perp
     raise ValueError(
-        f"unknown p_fast reduction method {method!r}; expected 'trace', 'mean', or 'perp'"
+        f"unknown p_fast reduction method {method!r}; expected 'trace', 'mean', 'perp', or 'sum'"
     )
 
 
@@ -497,7 +548,54 @@ def effective_impurity_charge(ne, ni, zeff, min_dilution=1e-3):
     return float(np.median(z[ok]))
 
 
-def main_ion_density_from_zeff(ne, zeff, Z_imp):
+def impurity_charge_with_fast_ions(ne, ni, zeff, z_fast=None):
+    """``(Z_imp, ne_th)`` when fast ions carry part of the neutralization.
+
+    With a beam population, quasineutrality reads
+    ``ne = ni + Z_imp*nz + z_fast`` -- only ``ne_th = ne - z_fast`` is
+    neutralized by THERMAL ions.  A ``zeff`` normalized to the FULL ``ne``
+    (the IMAS convention: thermal-species numerator over total electron
+    density) must therefore be renormalized to ``zeff * ne / ne_th`` before
+    the single-impurity inversion; passing the thermal ``ne`` with the
+    full-``ne`` ``zeff`` recovers only half the bias (measured: raw 1.95,
+    half-applied 3.19, true 6.00 for C6 at 25 % fast fraction).  Surfaces
+    where ``z_fast >= ne`` get a non-finite renormalized zeff and are
+    excluded by :func:`effective_impurity_charge`'s own validity mask.
+
+    ``z_fast`` is optional.  ``None`` or an all-zero profile short-circuits
+    to the plain :func:`effective_impurity_charge` inversion on the full
+    ``ne``, so a source with no fast ions reproduces the pre-fast-ion result
+    BIT-FOR-BIT.  The general branch would not: ``zeff * ne / ne`` is not an
+    exact identity in floating point (~8 % of realistic values differ, at
+    ~1 ulp), which is far below any physics scale but enough to move an
+    archive that the repo's regeneration contract says must be reproducible.
+
+    ASSUMPTION (load-bearing, not verified here): the source's ``zeff`` is
+    normalized to the FULL ``ne`` with only THERMAL species in its numerator
+    -- i.e. ``zeff = sum_thermal(n_s Z_s^2) / ne``.  That is what the
+    ``zeff * ne / ne_th`` renormalization assumes and what the local
+    fallback numerator in :mod:`bouquet.io.imas` builds.  If a producer's
+    ``zeff`` already carries the fast-ion contribution in its numerator, the
+    fast-ion charge is counted twice and ``Z_imp`` comes out too high.  The
+    convention of any given producer has not been confirmed against a real
+    data file; treat a source whose documented convention differs as out of
+    scope for this helper.
+    """
+    ne = np.asarray(ne, dtype=float)
+    if z_fast is None:
+        return effective_impurity_charge(ne, ni, zeff), ne
+    z_fast = np.asarray(z_fast, dtype=float)
+    if not np.any(z_fast):
+        return effective_impurity_charge(ne, ni, zeff), ne
+    ne_th = np.maximum(ne - z_fast, 0.0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        zeff_th = np.where(ne_th > 0.0,
+                           np.asarray(zeff, dtype=float) * ne / ne_th,
+                           np.nan)
+    return effective_impurity_charge(ne_th, ni, zeff_th), ne_th
+
+
+def main_ion_density_from_zeff(ne, zeff, Z_imp, z_fast=None):
     """Main-ion density from (ne, Zeff) under single-impurity quasineutrality.
 
     ::
@@ -508,13 +606,29 @@ def main_ion_density_from_zeff(ne, zeff, Z_imp):
     For ``1 <= Zeff <= Z_imp`` this guarantees ``0 <= ni <= ne`` and
     ``nz >= 0`` -- the consistent (ne, ni, Zeff, nz) set that the independent
     per-channel draws cannot provide. Returns ``ni``.
+
+    With a fast-ion charge profile ``z_fast`` the thermal quasineutrality is
+    ``ni + Z_imp nz = ne - z_fast`` while ``zeff`` keeps the full-``ne``
+    normalization, giving
+
+    ::
+
+        ni = (Z_imp (ne - z_fast) - Zeff ne) / (Z_imp - 1)
+
+    which reduces to the plain form at ``z_fast = 0``.  The corresponding
+    physical bounds on a full-``ne`` Zeff are
+    ``ne_th/ne <= Zeff <= Z_imp ne_th/ne`` (both reduce to the familiar
+    ``[1, Z_imp]`` without fast ions).
     """
     ne = np.asarray(ne, dtype=float)
     zeff = np.asarray(zeff, dtype=float)
     Z_imp = float(Z_imp)
     if not Z_imp > 1.0:
         raise ValueError(f"Z_imp must exceed 1 (got {Z_imp})")
-    return ne * (Z_imp - zeff) / (Z_imp - 1.0)
+    if z_fast is None:
+        return ne * (Z_imp - zeff) / (Z_imp - 1.0)
+    ne_th = np.maximum(ne - np.asarray(z_fast, dtype=float), 0.0)
+    return (Z_imp * ne_th - zeff * ne) / (Z_imp - 1.0)
 
 
 # Elementary charge [C] -- thermal pressure p = e * sum_s(n_s * T_s) with n in

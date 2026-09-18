@@ -126,8 +126,15 @@ class ImasSource:
     # When set, the baseline ne/Te/Ti/omega_tor are taken from this IDA .cdf
     # (externally fit, smoother across time than FUSE's per-slice profile fits),
     # resampled onto the FUSE core_profiles psi_N grid. Z_eff / Z_imp / the ni
-    # dilution stay FUSE (IDA's reported Z_eff is unreliable -- internally
-    # inconsistent with its own carbon density). Everything else (currents,
+    # dilution stay FUSE, for consistency with FUSE's own resistive diffusion
+    # (which consumed FUSE's Z_eff to produce j_ohmic).  NOTE the old blanket
+    # rationale "IDA's Z_eff is internally inconsistent with its own carbon
+    # density" is SHOT-DEPENDENT, not general: measured Zeff(VB) vs
+    # 1+Z(Z-1)nC/ne core-median deviations are -1.7 % / +4.7 % / +11.3 % on
+    # three DIII-D demo shots, i.e. mostly within the file's own measured
+    # sigma_Zeff (~8-9 %); read_ida now prints this cross-check per file
+    # (Callahan 2019 JINST 14 C10002 is the agreement pedigree when C6+
+    # dominates). Everything else (currents,
     # equilibrium, p_fast, anchors) stays FUSE. Also wire it to
     # UncertaintyConfig.ida_path so the sigma envelopes come from the same IDA.
     ida_path: Optional[str] = None
@@ -182,11 +189,24 @@ class FixedComponentsConfig:
 
     # How to collapse anisotropic fast-ion pressure (p_perp, p_par) to the scalar
     # p_fast that a scalar-pressure GS solver needs. See
-    # bouquet.physics.isotropize_fast_pressure.
-    #   "trace" -> (2*p_perp + p_par)/3   [DEFAULT; tr(P)/3, preserves fast energy]
+    # bouquet.physics.isotropize_fast_pressure and
+    # bouquet.io.imas.resolve_p_fast_reduction.
+    #
+    # The dd field pair is written with two incompatible meanings whose scalars
+    # differ by a FACTOR OF 3, and no dd field records which one is in use:
+    #   "sum"   -> p_par + 2*p_perp       for IMAS.jl/FUSE, which store the fields
+    #                                     PER DEGREE OF FREEDOM (pressa/3 each)
+    #   "trace" -> (2*p_perp + p_par)/3   tr(P)/3, for the IMAS data-dictionary
+    #                                     reading (full directional pressures) --
+    #                                     what OMAS-written dds carry
     #   "mean"  -> (p_perp + p_par)/2
     #   "perp"  -> p_perp                 (diamagnetic-dominant)
-    p_fast_reduction: str = "trace"
+    #   "auto"  -> [DEFAULT] pick "sum" or "trace" from the dd's own recorded
+    #              provenance; if that cannot be determined, fall back to "sum"
+    #              with a loud one-time warning. An explicit rule always wins and
+    #              is applied silently. The rule used and the grounds for it are
+    #              recorded on Baseline.p_fast_meta.
+    p_fast_reduction: str = "auto"
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +294,34 @@ class UncertaintyConfig:
     # Set 0.0 to disable (Z_eff held at baseline, ni drawn independently).
     # An explicit aux_sigmas['zeff'] always overrides this.
     zeff_scalar_sigma: float = 0.05
+    # Where the Z_eff envelope's MAGNITUDE comes from (the channel is enabled
+    # by zeff_scalar_sigma > 0 either way):
+    #   "auto"     -- highest-fidelity tier the file supports:
+    #                 carbon-propagated dilution sigma (n_12C6_err / the
+    #                 dilution posterior; 1.9-5.8 % of Zeff in-core on the
+    #                 demo shots, sane in the SOL) > the file's VB-measured
+    #                 sigma_Zeff (Zeff_err / sample spread; 8-9 % core but
+    #                 44-130 % SOL, grand means to ~90 % on some shots) >
+    #                 the scalar.  The Zeff-primary scheme perturbs Zeff to
+    #                 move the dilution ni = ne - Z nC, and CER carbon IS
+    #                 that dilution's direct measurement, hence the order.
+    #   "carbon"   -- require the carbon-propagated tier; loud fallback.
+    #   "measured" -- require the VB-measured envelope; loud fallback.
+    #   "scalar"   -- always the flat zeff_scalar_sigma fraction (pre-1.3.2
+    #                 behaviour).
+    # Only the reconstruction/IDA path is eligible for the measured tiers,
+    # and only when the sigma .cdf IS the source's own profiles file: on the
+    # IMAS/ida_hybrid path the Z_eff baseline is FUSE's, and pairing a FUSE
+    # baseline (or a p-file one, or a different .cdf vintage named via
+    # ida_path) with an IDA-measured envelope would mix channels.  That file
+    # test compares RESOLVED paths (expanduser + realpath, samefile when both
+    # exist), so a relative-vs-absolute, '~'-prefixed, trailing-slash or
+    # symlinked spelling of the same file stays eligible.
+    # NO step down this ladder is silent: each one emits a single warning
+    # naming the tier chosen, the tier skipped and why (source ineligible /
+    # missing dataset / invalid data), and the same record is returned as
+    # resolve_uncertainty()'s "zeff_sigma_tier" metadata.
+    zeff_sigma_source: str = "auto"
 
     # GPR correlation length scales (psi_N units) -- define the perturbation
     n_ls: float = 0.5                      # density
@@ -591,9 +639,11 @@ class BouquetConfig:
                 f"{type(src).__name__}"
             )
 
-        if self.fixed_components.p_fast_reduction not in ("trace", "mean", "perp"):
+        if self.fixed_components.p_fast_reduction not in (
+                "auto", "trace", "mean", "perp", "sum"):
             raise ValueError(
-                "fixed_components.p_fast_reduction must be 'trace', 'mean', or 'perp'"
+                "fixed_components.p_fast_reduction must be 'auto', 'trace', 'mean', "
+                "'perp', or 'sum'"
             )
         if self.device is not None:
             # fail here, not after a whole ensemble has been solved: the device is
@@ -614,6 +664,14 @@ class BouquetConfig:
         if self.uncertainty.sigma_method not in ("percentile", "std"):
             raise ValueError(
                 "uncertainty.sigma_method must be 'percentile' or 'std'")
+        # Caught here rather than only in resolve_zeff_envelope, which runs
+        # inside Bouquet.generate() -- i.e. after prepare_baseline() has
+        # already paid for the baseline GS solve.
+        if self.uncertainty.zeff_sigma_source not in (
+                "auto", "carbon", "measured", "scalar"):
+            raise ValueError(
+                "uncertainty.zeff_sigma_source must be 'auto', 'carbon', "
+                "'measured', or 'scalar'")
         if self.generation.n_equils < 1:
             raise ValueError("generation.n_equils must be >= 1")
         if self.generation.workflow not in (

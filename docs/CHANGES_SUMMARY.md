@@ -75,6 +75,152 @@ header, mesh name or file path, and `filter()` prints the era it resolved, the
 floor that buys and which route it came from, once per call. Full table in
 [`workflows.md`](workflows.md#configuration-reference).
 
+## Unreleased — fast-ion pressure: the reduction rule now comes from dd provenance
+
+**Behaviour change on the IMAS path.** `FixedComponentsConfig.p_fast_reduction`
+and `read_imas_baseline(..., p_fast_reduction=...)` now default to `"auto"`
+instead of `"trace"`. On a FUSE/IMAS.jl-written dd this makes `p_fast` **3×
+larger** than ≤1.3.1 produced; on a dictionary-convention dd it is unchanged.
+Every downstream `beta_N`, `W_MHD` and `p'` on the IMAS path moves with it. The
+g-file / `ReconstructionSource` path is untouched — `p_fast_reduction` is read
+only on the IMAS path.
+
+### What was wrong
+
+`pressure_fast_parallel` / `pressure_fast_perpendicular` are written with two
+incompatible meanings, and no dd field records which one is in use:
+
+| producer | what the two fields hold | scalar `p_fast` | rule |
+|---|---|---|---|
+| IMAS.jl / FUSE | the pressure **per degree of freedom** (`pressa/3` in each) | `p_par + 2·p_perp` | `"sum"` |
+| IMAS data dictionary, OMAS-written dds | the **full** directional pressures | `(p_par + 2·p_perp)/3` | `"trace"` |
+
+Verified upstream: IMAS.jl's `pressure` expression is `pressure_thermal +
+pressure_fast_parallel + 2·pressure_fast_perpendicular`
+(`src/expressions/dynamic.jl`) and its `src/physics/fast.jl` adds `pressa/3` to
+*each* directional field. So the old fixed `"trace"` default returned **one
+third** of the fast-ion pressure on every FUSE dd — a shortfall measured at
+8–35 % of the total pressure across a set of beam-heated discharges, closing to
+<2 % under `"sum"`. A fixed `"sum"` default would have been wrong the other way,
+by exactly 3×, on any standards-compliant dd — including this repo's own
+synthetic `examples/D3D-like/D3Dlike_baseline_omas.json`.
+
+### What changed
+
+* **`p_fast_reduction="auto"` (new default)** picks the rule from the dd's own
+  recorded provenance, most specific first:
+  1. an explicit convention stamp in a provenance comment, e.g.
+     `core_profiles.ids_properties.comment = "... p_fast_reduction=trace ..."`;
+  2. IMASdd.jl-only top-level keys (`global_time`, `requirements`, `build`,
+     `balance_of_plant`, `solid_mechanics`, `costing`) ⇒ `"sum"`. This
+     identifies the *writer of the file*, which is what sets the convention, so
+     it outranks per-IDS producer names — a FUSE dd legitimately carries IDSes
+     imported from other codes;
+  3. producer names in `{dataset_description, core_profiles, equilibrium,
+     summary}` × `{ids_properties.{comment,provider,source},
+     code.{name,description,repository}}` — FUSE/IMAS.jl ⇒ `"sum"`,
+     OMAS/OMFIT/IMASPy ⇒ `"trace"`.
+* **Undeterminable provenance falls back to `"sum"` and warns loudly, once**,
+  naming both conventions, the factor-of-3 stake, and how to set the rule
+  explicitly. It is never applied silently. The warning is raised only where the
+  choice actually moved a number: it is held back when the dd's fast pressure is
+  absent or identically zero, and when `FixedComponentsConfig.p_fast` supplies
+  `p_fast` instead of the dd. `Baseline.p_fast_meta` records the resolution
+  either way (`basis="undetermined-fallback"`, `warned=False`).
+* **A convention stamp whose value is unrecognised warns**, naming the slot and
+  the value, and the convention is inferred from structure/producer instead — a
+  typo in a stamp is no longer silently discarded.
+* **An explicit `"sum"` / `"trace"` / `"mean"` / `"perp"` always wins and is
+  silent.**
+* The rule used, the basis for it and the evidence are recorded on the new
+  **`Baseline.p_fast_meta`**.
+* **The missing-`pressure_fast_parallel` fallback is explicit.** The reader still
+  closes with `p_par := p_perp`, but now warns and states what that means under
+  the rule in force: `p_perp` under the full-pressure rules (unchanged from
+  ≤1.3.1), `3·p_perp` under `"sum"` — where `2·p_perp` is the competing reading
+  if the producer simply omitted an all-zero parallel field. Under a bare `"sum"`
+  default this path would have tripled silently.
+* **`physics.isotropize_fast_pressure(p_perp, p_par, method)` now requires
+  `method`.** No default is safe for both conventions; a direct caller gets a
+  `TypeError` rather than a silent 3×.
+* The completeness backstop (`equilibrium.pressure` vs the reconstruction) now
+  reports the **signed** direction, names the reduction rule in force, and claims
+  the `p_diff` anchor absorbs the gap only when
+  `anchor_pressure_to_equilibrium` is actually on (it is off by default).
+
+### What this changes for you
+
+* **Configs that omit `p_fast_reduction`** resolve to `"auto"`. On a FUSE dd that
+  is `"sum"` — 3× the ≤1.3.1 `p_fast`. Results produced before and after this
+  change are not comparable on the IMAS path unless the rule was pinned.
+* **Configs that pin `"trace"`** keep `"trace"`. The shipped
+  `examples/D3D-like/slurm_jobs/bouquet_2000ms_bundle.json` pins it on purpose —
+  it runs against the synthetic dictionary-convention dd — and now says so in a
+  `_p_fast_note`.
+* **A dd with no recorded provenance warns once per process**, on reads where
+  its own fast pressure is non-zero, until the rule is pinned or the dd is
+  stamped. Stamping is one line:
+  `core_profiles.ids_properties.comment = "... p_fast_reduction=sum ..."`.
+* `examples/D3D-like/D3Dlike_baseline_omas.json` carries that stamp now. The
+  local (gitignored) generator that produces it should emit it too.
+
+## Unreleased — the Z_eff envelope is measured, not assumed
+
+**Behaviour change on the reconstruction/IDA path.** The Z_eff perturbation
+width used to be `zeff_scalar_sigma · |Z_eff|` — an *assumed* 5 % — even when
+the IDA `.cdf` carried a measured uncertainty. It is now taken from the file
+wherever the file supports it, through a three-tier ladder selected by the new
+`UncertaintyConfig.zeff_sigma_source` (default `"auto"`):
+
+| Tier | Source | Typical width |
+|---|---|---|
+| carbon-propagated | `n_12C6_err` (direct) or the dilution posterior (ensemble), propagated with `sigma_ne` | ~2 % of Z_eff in-core |
+| VB-measured | `Zeff_err` (direct) or the `Zeff` sample spread (ensemble) | ~8–9 % in-core, much wider in the SOL |
+| scalar | `zeff_scalar_sigma` × abs(Z_eff) | the assumed 5 % |
+
+Because Z_eff is the primary density channel, this rescales **every `n_i` /
+`n_z` band in the ensemble** — by up to a factor of ~4 either way, depending on
+which tier a given file reaches. Runs before and after this change are not
+comparable on the recon+IDA path unless `zeff_sigma_source="scalar"` was set.
+Users with no IDA file, or with `zeff_sigma_source="scalar"`, are bit-identical
+to ≤1.3.1: the scalar expression is unchanged and no channel is added or
+removed, so the sampler sees the same `user_sigmas` in the same order.
+
+* **Both measured tiers are eligible only when the Z_eff baseline is itself the
+  IDA one** — the recon path, and the *same* file that supplies the sigmas.
+  Pairing a FUSE (IMAS/`ida_hybrid`) or p-file baseline with an IDA envelope
+  would mix channels, so it falls back to the scalar. The file test compares
+  **resolved** paths (`expandvars` → `expanduser` → `abspath` → `realpath`, then
+  `os.path.samefile`), so a relative, `~`-prefixed, trailing-separator or
+  symlinked spelling of the same file stays eligible.
+* **No step down the ladder is silent.** Each emits a single `UserWarning`
+  naming the tier chosen, every tier skipped, and the reason class (*source
+  ineligible* / *missing dataset* / *invalid data*); the same record comes back
+  as `resolve_uncertainty()`'s `"zeff_sigma_tier"` metadata and is printed under
+  `[sigma]`.
+* **Non-physical carbon data drops the carbon tier rather than corrupting it**,
+  in **both** IDA layouts. Negative `n_12C6` (SOL spline undershoot), netCDF
+  fill values (~1e36) and NaN holes all survive the downstream clip floors and
+  produce enormous-but-valid-looking sigmas, so any bad radius (direct) or bad
+  sample point (ensemble) drops the tier with a counted, printed reason.
+* A 1-sigma array with **negative entries** is refused as corrupt rather than
+  read as a wide band, with a counted reason; shape, non-finite, negative and
+  all-zero are four distinct recorded refusals.
+* `uncertainty.zeff_sigma_source` is validated in `BouquetConfig.__post_init__`,
+  so a typo raises at construction rather than after the baseline GS solve.
+
+### Also in this change: `impurity_Z` now reaches the IDA reader
+
+`resolve_uncertainty` previously called `read_ida()` without `impurity_Z`, so
+the sigma read always used the default **Z = 6** regardless of the source's own
+`impurity_Z`. It now passes `source.impurity_Z` through, matching what the
+kinetics loader has always done.
+
+**This moves `sigma_ni`, not only the new Z_eff channel**, for any user whose
+source sets `impurity_Z != 6.0`: `ni = n_e − Z·n_C` is re-derived at the
+source's real charge, and the ion-density sigma follows. Users on the default
+carbon `impurity_Z = 6.0` are unaffected.
+
 ## 1.3.0 — the seeded draw is now machine-independent; find_ida (2026-08-05)
 
 1.2.0 shipped the contract "same seed → bitwise-identical archives". True on

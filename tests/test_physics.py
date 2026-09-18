@@ -225,10 +225,26 @@ class TestIsotropizeFastPressure:
         assert np.allclose(out, self.p_perp)
 
     def test_isotropic_input_is_identity(self):
-        # p_perp == p_par -> every reduction returns the same scalar pressure
+        # p_perp == p_par -> every FULL-PRESSURE reduction returns the same
+        # scalar. "sum" is deliberately excluded: it is not a tensor reduction
+        # but the per-degree-of-freedom recovery p_par + 2*p_perp, so on
+        # isotropic per-dof input it returns 3*p by construction (see
+        # test_sum_is_not_a_tensor_reduction).
         p = np.array([1.0e4, 5.0e3])
         for method in ("trace", "mean", "perp"):
             assert np.allclose(isotropize_fast_pressure(p, p, method=method), p)
+
+    def test_sum_is_not_a_tensor_reduction(self):
+        # The one rule that breaks the identity above, stated explicitly so the
+        # exception is documented rather than discovered.
+        p = np.array([1.0e4, 5.0e3])
+        assert np.allclose(isotropize_fast_pressure(p, p, method="sum"), 3.0 * p)
+
+    def test_method_is_required(self):
+        # No default: the two conventions differ by 3x, so there is no value
+        # that is safe to assume on a caller's behalf.
+        with pytest.raises(TypeError):
+            isotropize_fast_pressure(self.p_perp, self.p_par)
 
     def test_trace_preserves_energy_density(self):
         # w = (p_par + 2 p_perp)/2 = (3/2) p_scalar for the trace reduction
@@ -238,7 +254,7 @@ class TestIsotropizeFastPressure:
 
     def test_shape_mismatch_raises(self):
         with pytest.raises(ValueError, match="same shape"):
-            isotropize_fast_pressure(np.zeros(3), np.zeros(4))
+            isotropize_fast_pressure(np.zeros(3), np.zeros(4), method="trace")
 
     def test_unknown_method_raises(self):
         with pytest.raises(ValueError, match="unknown p_fast reduction"):
@@ -544,3 +560,13 @@ class TestFloorInductiveSplit:
         j_bs = np.full(9, 0.2e6)
         ji2, jb2 = floor_inductive_split(j_ind, j_bs)
         assert np.array_equal(ji2, j_ind) and np.array_equal(jb2, j_bs)
+
+
+def test_isotropize_sum_recovers_imas_per_dof_fast_pressure():
+    """IMAS.jl stores pressa/3 in each directional field; 'sum' recovers pressa,
+    'trace' returns pressa/3 (the defect seen on FUSE dds)."""
+    from bouquet.physics import isotropize_fast_pressure
+    pressa = np.array([3.0e4, 1.5e4, 0.0])
+    p_perp = p_par = pressa / 3.0
+    assert np.allclose(isotropize_fast_pressure(p_perp, p_par, method="sum"), pressa)
+    assert np.allclose(isotropize_fast_pressure(p_perp, p_par, method="trace"), pressa / 3.0)

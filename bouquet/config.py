@@ -71,6 +71,10 @@ class SolverConfig:
     # Bouquet._apply_coil_reg at BOTH setup_solver and _reset_solver_state --
     # the reset runs immediately before the IMAS baseline solve, so anything
     # installed only at setup is discarded.
+    # When populated, these targets are also what the draw path's WEAK
+    # exploratory regularisation aims at (same targets, historical weight 1.0)
+    # instead of zero -- otherwise the exploration is pulled along the very coil
+    # null space the targets exist to remove. Empty => that path is unchanged.
     coil_reg: list = field(default_factory=list)
     # Initial coil currents {name: A-t} for the IMAS baseline inverse solve --
     # seeds the iteration in a chosen basin; does NOT constrain the answer.

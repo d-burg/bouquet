@@ -2370,28 +2370,40 @@ def perturb_kinetic_equilibrium(
         # weak reg, diverge with 1e4 reg).  Stash the strong reg, install a
         # weak recon-like reg for the whole SWB block, restore in finally.
         #
-        # OPEN, and deliberately NOT changed here: "recon-like" is hard-coded as
-        # target=0, weight=1.0, which stopped being the recon setup the moment
-        # SolverConfig.coil_reg could carry measured-current targets.  So during
-        # the exploratory SWB phase the solve is pulled along the very coil null
-        # space the targets exist to remove.  The ENDPOINT should be unaffected:
-        # the strong reg restored below targets _initial_coils (the baseline's own
-        # pinned currents) and the downstream constrained phase runs under it.
-        # The exploratory PATH is not obviously unaffected -- the SWB scale chosen
-        # by find_optimal_scale, the H-mode iteration and the maxits/failure rate
-        # are all computed under the weak reg.  Deriving this weak reg from
-        # config.solver.coil_reg (same targets, reduced weight) is the natural
-        # fix, but it changes solver behaviour and needs a run to settle; see the
-        # review notes for the A/B that would settle it.
+        # "Weak" must mean "the same place, held loosely" -- not "pulled toward
+        # zero".  Hard-coding target=0 stopped being the recon setup the moment
+        # SolverConfig.coil_reg could carry measured-current targets: the
+        # exploratory solve was then pulled along the very coil null space the
+        # targets exist to remove, and it went (measured on a D3D case: the
+        # recon-anchor coil carrying that null space sat tens of kA-turn, of
+        # order 100 sigma of the coil measurement precision, away from where the
+        # derived reg puts it, on half the draws).  So when the targets exist,
+        # Bouquet._apply_coil_reg publishes mygs._weak_coil_reg -- the SAME
+        # terms, at this same weak magnitude -- and it is used here.  A caller
+        # that reaches perturb_kinetic_equilibrium without that stash (no
+        # coil_reg, or not via the Bouquet class) keeps the historical
+        # toward-zero build below, bit-identically.
+        #
+        # The weight stays 1.0 on purpose: the targets are nearly free (converged
+        # coil currents move by at most ~0.2 sigma, boundary RMS by ~0.03 mm,
+        # with yield and failure rate unchanged), while raising the weight
+        # tripled that endpoint shift and cost up to +0.5 mm of boundary RMS for
+        # no measured benefit.  Note the endpoint IS touched, slightly: the
+        # strong reg restored in the finally targets _initial_coils and the
+        # constrained phase runs under it, but the exploratory path feeds the
+        # state that phase starts from, so "unaffected" is only true to well
+        # inside the coil measurement precision -- not bitwise.
         _stashed_reg = getattr(mygs, '_strong_coil_reg', None)
         if _stashed_reg is not None:
             try:
-                _weak_rt = []
-                for _rn in mygs.coil_sets:
+                _weak_rt = getattr(mygs, '_weak_coil_reg', None)
+                if _weak_rt is None:
+                    _weak_rt = []
+                    for _rn in mygs.coil_sets:
+                        _weak_rt.append(mygs.coil_reg_term(
+                            {_rn: 1.0}, target=0.0, weight=1.0))
                     _weak_rt.append(mygs.coil_reg_term(
-                        {_rn: 1.0}, target=0.0, weight=1.0))
-                _weak_rt.append(mygs.coil_reg_term(
-                    {'#VSC': 1.0}, target=0.0, weight=1e-2))
+                        {'#VSC': 1.0}, target=0.0, weight=1e-2))
                 mygs.set_coil_reg(reg_terms=_weak_rt)
             except Exception as _wreg_exc:
                 print(f"  [SWB-hygiene] weak-reg install failed "

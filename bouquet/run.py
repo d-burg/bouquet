@@ -348,7 +348,8 @@ class Bouquet:
             mygs.set_saddle_constraints(_sad, weights=_sw)
 
         # Coil regularisation: SolverConfig.coil_reg targets when given, else
-        # the historical weak pull toward zero + small VSC freedom.
+        # the historical pull toward zero + small VSC freedom.  Also publishes
+        # the WEAK exploratory reg the draw path swaps in for the SWB phase.
         self._apply_coil_reg(mygs)
 
         self.mygs = mygs
@@ -369,6 +370,22 @@ class Bouquet:
         ``{"coils": {name: coeff}, "target": float, "weight": float}``. When it
         is empty the historical behaviour is used unchanged -- every coil pulled
         toward ZERO at unit weight, plus a weak VSC term.
+
+        Also publishes ``mygs._weak_coil_reg``: the SAME terms at the historical
+        WEAK magnitude (weight 1.0 on every coil term, the VSC channel at 1e-2),
+        which the draw path swaps in for the exploratory SWB phase in place of
+        the strong reg. The point is the TARGETS: once coil_reg carries
+        measured-current targets, a weak reg aimed at zero is not "the recon
+        setup held loosely", it is a pull along the very coil null space the
+        targets exist to remove, and the exploratory solve follows it (measured:
+        the recon-anchor moved tens of kA-turn, of order 100 sigma of the coil
+        measurement precision, on the coil carrying that null space). The weight
+        is deliberately NOT raised: at weight 1.0 the converged coil currents
+        move by at most ~0.2 sigma and boundary RMS by ~0.03 mm, with yield and
+        failure rate unchanged, whereas raising it tripled the endpoint shift
+        and cost up to half a millimetre of boundary RMS for no measured gain.
+        With ``coil_reg`` empty nothing is published and the draw path builds
+        its historical toward-zero weak reg, so that case is bit-identical.
 
         Called from BOTH :meth:`setup_solver` and :meth:`_reset_solver_state`.
         That matters: ``_repoint_imas_geometry`` resets the solver immediately
@@ -403,23 +420,43 @@ class Bouquet:
                                  % (", ".join(sorted(t["coils"])),
                                     ", ".join(sorted(set(t["coils"]) - known)))
                                  for t in dropped)))
-            reg_terms = [
-                mygs.coil_reg_term(dict(t["coils"]),
-                                   target=float(t.get("target", 0.0)),
-                                   weight=float(t.get("weight", 1.0)))
-                for t in spec
-            ]
             named = {c for t in spec for c in t["coils"]}
-            reg_terms += [mygs.coil_reg_term({n: 1.0}, target=0.0, weight=1.0)
-                          for n in mygs.coil_sets if n not in named]
-            if "#VSC" not in named:
-                reg_terms.append(
-                    mygs.coil_reg_term({"#VSC": 1.0}, target=0.0, weight=1e-2))
+
+            def _build(exploratory):
+                """The term list: configured weights, or the weak exploratory one.
+
+                Same terms and same targets either way -- ``exploratory`` only
+                drops every coil term to the historical weak weight of 1.0 and
+                leaves the VSC channel its own weak term (a #VSC term in the
+                config is a constraint for the CONSTRAINED phase; carrying it at
+                weight 1.0 into the exploration would clamp the vertical-stability
+                channel the exploration needs).  Coils no term names keep the
+                zero target they have always had -- there is no measured target
+                for them to be held at.
+                """
+                out = [mygs.coil_reg_term(
+                           dict(t["coils"]), target=float(t.get("target", 0.0)),
+                           weight=1.0 if exploratory else float(t.get("weight", 1.0)))
+                       for t in spec
+                       if not (exploratory and set(t["coils"]) == {"#VSC"})]
+                out += [mygs.coil_reg_term({n: 1.0}, target=0.0, weight=1.0)
+                        for n in mygs.coil_sets if n not in named]
+                if exploratory or "#VSC" not in named:
+                    out.append(
+                        mygs.coil_reg_term({"#VSC": 1.0}, target=0.0, weight=1e-2))
+                return out
+
+            reg_terms = _build(False)
+            mygs._weak_coil_reg = _build(True)
         else:
             reg_terms = [mygs.coil_reg_term({name: 1.0}, target=0.0, weight=1.0)
                          for name in mygs.coil_sets]
             reg_terms.append(
                 mygs.coil_reg_term({"#VSC": 1.0}, target=0.0, weight=1e-2))
+            # no measured targets -> nothing to publish, and an earlier slice's
+            # stash must not survive into a run that has none
+            if hasattr(mygs, "_weak_coil_reg"):
+                del mygs._weak_coil_reg
         mygs.set_coil_reg(reg_terms=reg_terms)
         return reg_terms
 
@@ -470,8 +507,10 @@ class Bouquet:
         leaves the coil currents at the last draw's drifted values. A
         subsequent slice in a :meth:`set_slice` sweep must inherit none of that.
         Restore the pristine post-setup equilibrium (zero coils) captured in
-        :meth:`setup_solver`, then re-apply the weak toward-zero reg and clear
-        any stashed drift bounds.
+        :meth:`setup_solver`, then re-apply the setup-time reg (the configured
+        targets, or the toward-zero default when there are none -- which also
+        refreshes the weak exploratory stash for THIS slice) and clear any
+        stashed drift bounds.
         """
         mygs = self.mygs
         # full reset of the equilibrium + coil currents to the post-setup state

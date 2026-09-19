@@ -1,6 +1,84 @@
 # Bouquet — change summaries
 
-## Unreleased — the default coil acceptance criterion changed
+## 1.4.0 — hybrid Ip closures, measurement-referenced coil filter, provenance-read fast pressure (2026-09-19)
+
+Ten PRs landed together. Four of them change results for existing configs;
+they are listed first. Everything else is opt-in or a bug fix.
+
+### Behaviour changes — check these before re-running old configs
+
+1. **Fast-ion pressure convention is now read from the data file.**
+   `p_fast_reduction` defaults to `"auto"`. Integrated-modelling codes disagree on
+   whether `pressure_fast_perpendicular/parallel` are full pressures or
+   per-degree-of-freedom values — a factor of 3 in p_fast. `"auto"` uses an explicit
+   stamp in the file if present, else identifies the producing code from provenance,
+   else falls back with a warning. For per-degree-of-freedom producers this raises
+   p_fast (and so beta_N, W_MHD, P') relative to 1.3.x. Set `"sum"` or `"trace"`
+   explicitly to pin it. The rule used is recorded on `Baseline.p_fast_meta`.
+2. **Coil-current acceptance is now a chi-squared test, not a ± percent band.**
+   Each draw's coil currents are compared to the baseline using per-coil
+   uncertainties from a device registry (`bouquet/devices.py`); a draw must pass
+   both chi2/nu and worst-coil |z|. A given ensemble will select a *different*
+   subset than before. `filtering.coil_filter = "legacy"` restores the old band
+   exactly. Devices not in the registry fall back to the legacy band with a
+   warning; supply `filtering.coil_sigma` (floor + fraction, or a per-coil table)
+   to use the new test on another machine. The acquisition era that sets the
+   uncertainty floor is chosen from the pulse number and printed on every
+   `filter()` call; `filtering.coil_daq_era` overrides it.
+3. **Fast ions no longer inflate the impurity density (IMAS path).** Quasi-neutrality
+   removes the fast-ion charge before the main-ion / impurity split. Sources with no
+   fast ions are bit-identical to before. Assumes the source Z_eff is defined with
+   thermal species over the full n_e — stated in the docstring, not verified.
+4. **Z_eff uncertainty is measured when the data allow it.**
+   `uncertainty.zeff_sigma_source` walks a ladder: propagated from measured carbon
+   density → measured visible-bremsstrahlung sigma → the old scalar envelope. The
+   tier used is recorded; fallbacks warn. Users still on the scalar tier are
+   unchanged. Side effect: `impurity_Z` now reaches the kinetics reader, which moves
+   sigma_ni for non-carbon impurities.
+
+Also fixed: in `jbs_delta_mode` (and DIFF_BS), the sigma=0 bootstrap reference was
+built at scale 1 while draws used the configured scale, biasing every delta.
+
+### New capabilities (all opt-in)
+
+- **Hybrid "ohmic" baseline with explicit Ip closure.** Baseline current =
+  s_ind·j_inductive (from an integrated-modelling source) + s_bs·j_bootstrap
+  (neoclassical model on measured kinetics) + fixed sources, closed on the measured
+  Ip. `closure_channel` chooses what absorbs the mismatch:
+  - `"bootstrap"` — scalar rescale of j_BS (remains the code default);
+  - `"sawtooth_bootstrap"` — two scalars, Ip exact and q0 pinned when sawtoothing;
+  - `"structured"` — smooth radial scale functions (four Gaussians in psi_N) for both
+    components, minimum-norm under trust weights, with **Ip and l_i as soft
+    measurements** and a one-sided prior on mid-radius inductive current. Selecting
+    this channel applies the validated preset `li_soft_onesided` by default
+    (`structured_preset="none"` opts out). In our study it matched Ip within 0.5 % on
+    all slices and l_i within its uncertainty on 95 %, and beat both scalar channels
+    about 2:1 on agreement with MSE-constrained q profiles, without rescaling the
+    bootstrap current beyond ±50 %. The preset's widths come from one device and one
+    modelling source: a starting point elsewhere — check the recorded
+    closure-health flags.
+  - `"ohmic"` is deprecated.
+  Every closure records a health block (bound hits, |s_bs−1| > 0.5, missed q0,
+  l_i / Ip residuals in sigma, refusals). Refusals are loud, never silent.
+- **`SolverConfig.coil_reg`** — regularise the baseline inverse solve toward measured
+  coil currents with inverse-variance weights (helpers in `bouquet/coil_targets.py`).
+  Removes the large null-space wander of an unregularised baseline. Turn-count
+  conventions are checked against the mesh at solve time. `coil_init` seeds the solve.
+- **`generation.n_inspec_target`** — draw until N draws pass the in-spec filters
+  (bounded by `max_total_draws`) instead of drawing exactly N. The in-loop test and
+  the post-hoc filter are the same code on the same stored vectors.
+
+### Compatibility
+
+- `isotropize_fast_pressure(..., method)` signature changed (hence the minor bump).
+- Counts such as `n_inspec_target` / `max_total_draws` must be true integers.
+- `closure_channel="structured"` with no other settings now means the validated
+  preset, not the raw weight ladder.
+- No acceptance tolerance was loosened anywhere in this release.
+
+The four "1.4.0 detail" sections below give the full account of each behaviour change.
+
+## 1.4.0 detail — the default coil acceptance criterion changed
 
 **`Bouquet.filter()` now judges coil currents with a measurement-referenced χ²
 test instead of the ±2% band.** `FilterConfig.coil_filter` is a new field and its
@@ -75,7 +153,7 @@ header, mesh name or file path, and `filter()` prints the era it resolved, the
 floor that buys and which route it came from, once per call. Full table in
 [`workflows.md`](workflows.md#configuration-reference).
 
-## Unreleased — fast-ion pressure: the reduction rule now comes from dd provenance
+## 1.4.0 detail — fast-ion pressure: the reduction rule now comes from dd provenance
 
 **Behaviour change on the IMAS path.** `FixedComponentsConfig.p_fast_reduction`
 and `read_imas_baseline(..., p_fast_reduction=...)` now default to `"auto"`
@@ -164,7 +242,7 @@ synthetic `examples/D3D-like/D3Dlike_baseline_omas.json`.
 * `examples/D3D-like/D3Dlike_baseline_omas.json` carries that stamp now. The
   local (gitignored) generator that produces it should emit it too.
 
-## Unreleased — the Z_eff envelope is measured, not assumed
+## 1.4.0 detail — the Z_eff envelope is measured, not assumed
 
 **Behaviour change on the reconstruction/IDA path.** The Z_eff perturbation
 width used to be `zeff_scalar_sigma · |Z_eff|` — an *assumed* 5 % — even when
@@ -221,7 +299,7 @@ source sets `impurity_Z != 6.0`: `ni = n_e − Z·n_C` is re-derived at the
 source's real charge, and the ion-density sigma follows. Users on the default
 carbon `impurity_Z = 6.0` are unaffected.
 
-## Unreleased — the structured closure defaults to its validated preset
+## 1.4.0 detail — the structured closure defaults to its validated preset
 
 ### The structured closure's default prior is now the validated one
 

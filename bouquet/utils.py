@@ -253,6 +253,124 @@ def safe_save_eqdsk(mygs, filename, **kwargs):
         mygs.replace_eq(source_eq=saved)
 
 
+#: Size of the Fortran ``x_points`` buffer (``max_xpoints`` in
+#: ``src/physics/grad_shaf.F90``).  Used only to recognise the
+#: sentinel-scan failure described in :func:`capture_xpoints`.
+_XPOINT_BUFFER_ROWS = 20
+
+
+def capture_xpoints(mygs):
+    r'''Take an **owned** snapshot of ``mygs.get_xpoints()``.
+
+    ``TokaMaker.get_xpoints()`` does not return data — it returns a *view*
+    onto Fortran-owned memory.  The wrapper binds
+    ``self._x_points = numpy.ctypeslib.as_array(x_loc, shape=(20,2))`` once,
+    against ``c_loc(gs_equil%x_points)``, and ``get_xpoints`` then hands back
+    ``self._x_points[:i,:]`` — a slice of that view, never a copy.
+    ``np.asarray(v, dtype=float)`` on such a view is a no-op (the dtype
+    already matches), so it does *not* decouple the caller from that buffer.
+
+    That matters because the ``gs_equil`` object owning the buffer is
+    reference-counted on the python side and freed the moment it is
+    replaced: ``replace_eq()`` rebinds ``_tMaker_equil``, the old
+    ``TokaMaker_equilibrium.__del__`` runs, and the Fortran object is
+    ``DEALLOCATE``d.  Every snapshot/restore wrapper in this module
+    (:func:`safe_trace_surf`, :func:`safe_save_eqdsk`) performs exactly that
+    swap, as does each surface of ``capture_equilibrium_fsa``.  A retained
+    view therefore becomes a dangling pointer into freed heap, and anything
+    read from it afterwards is whatever the allocator has since put there —
+    stale values on one platform, zeros or denormal bit patterns (reused
+    heap pointers) on another.  That is a use-after-free, and it makes the
+    archived ``x_points`` dataset non-reproducible for a fixed seed.
+
+    So: copy at capture, and keep the copy.
+
+    Two rows are dropped, both on the strength of what the Fortran actually
+    guarantees rather than on how the numbers look:
+
+    * **non-finite rows** — ``x_points`` holds an (R, Z) location in metres;
+      a ``NaN``/``inf`` coordinate is not a location and cannot be plotted,
+      compared, or distance-filtered.
+    * **rows with R <= 0** — this is the upstream *sentinel*, not data.
+      ``grad_shaf.F90`` fills ``self%x_points(1,:) = -1.d0`` before writing
+      the X-points it found, and the wrapper's vacuum branch writes
+      ``[-1.0, 0.0]`` into every row; ``get_xpoints`` scans for the first
+      ``R < 0`` to decide how many rows are real.  A surviving ``R <= 0``
+      row means that scan did not do its job, and a major radius of zero or
+      less is unphysical in any case.
+
+    Nothing else is filtered.  In particular a row with a small but
+    *positive* R is kept, because no threshold on R can distinguish garbage
+    from data without inventing a geometry bound — if the upstream sentinel
+    is missing, the honest signal is a warning, which is what the row-count
+    check below emits.
+
+    Parameters
+    ----------
+    mygs : OpenFUSIONToolkit.TokaMaker.TokaMaker
+        Active TokaMaker instance (or anything exposing ``get_xpoints()``).
+
+    Returns
+    -------
+    (numpy.ndarray or None, bool or None)
+        ``((N, 2)`` owned float64 array, diverted flag), or ``(None, None)``
+        if ``get_xpoints()`` reported no X-points / raised, or if no row
+        survived the sentinel drop.
+
+    Warns
+    -----
+    RuntimeWarning
+        If sentinel/non-finite rows had to be dropped, or if
+        ``get_xpoints()`` returned at least ``_XPOINT_BUFFER_ROWS - 1``
+        rows.  The latter is the signature of a missing sentinel: no
+        tokamak equilibrium has 19 X-points, so such a return means the
+        wrapper walked the whole buffer without finding a terminator and
+        the values are not trustworthy.  They are still returned rather
+        than silently discarded.
+    '''
+    try:
+        raw, diverted = mygs.get_xpoints()
+    except Exception as exc:                       # noqa: BLE001 - reported
+        warnings.warn(f"get_xpoints() failed ({type(exc).__name__}: {exc}); "
+                      f"no X-points captured",
+                      RuntimeWarning, stacklevel=2)
+        return None, None
+    if raw is None:
+        return None, (bool(diverted) if diverted is not None else None)
+
+    # The copy: reshape the view, then .copy() so the result OWNS a
+    # C-contiguous buffer and is decoupled from the gs_equil that may be freed
+    # on the next eq swap.  (A bare np.asarray(view, dtype=float) is a no-op
+    # here -- the dtype already matches -- which is precisely the bug.)
+    xp = np.asarray(raw, dtype=np.float64).reshape(-1, 2).copy()
+
+    if xp.shape[0] >= _XPOINT_BUFFER_ROWS - 1:
+        warnings.warn(
+            f"get_xpoints() returned {xp.shape[0]} rows of a "
+            f"{_XPOINT_BUFFER_ROWS}-row buffer; the upstream R<0 sentinel "
+            f"that marks the end of the X-point list is missing, so these "
+            f"coordinates are not trustworthy (they are captured anyway, "
+            f"unfiltered, rather than silently dropped)",
+            RuntimeWarning, stacklevel=2)
+
+    finite = np.isfinite(xp).all(axis=1)
+    physical = xp[:, 0] > 0.0                      # R <= 0 is the sentinel
+    keep = finite & physical
+    if not keep.all():
+        warnings.warn(
+            f"dropped {int((~keep).sum())} of {xp.shape[0]} X-point row(s) "
+            f"returned by get_xpoints(): "
+            f"{int((~finite).sum())} non-finite, "
+            f"{int((finite & ~physical).sum())} with R <= 0 (the upstream "
+            f"'no X-point' sentinel). Kept rows are unmodified",
+            RuntimeWarning, stacklevel=2)
+        xp = xp[keep]
+
+    if xp.shape[0] == 0:
+        return None, (bool(diverted) if diverted is not None else None)
+    return xp, (bool(diverted) if diverted is not None else None)
+
+
 def pchip_derivative(x, y, x_eval=None, strict=False):
     r'''Analytic derivative dy/dx via PCHIP on the native (x, y) grid.
 

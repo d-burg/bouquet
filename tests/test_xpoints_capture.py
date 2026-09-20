@@ -127,3 +127,20 @@ def test_get_xpoints_failure_is_reported_not_raised():
     with pytest.warns(RuntimeWarning, match="get_xpoints\\(\\) failed"):
         xp, div = capture_xpoints(Boom())
     assert xp is None and div is None
+
+
+def test_a_malformed_return_costs_the_draw_its_xpoints_not_the_run():
+    """A return that cannot be read as (N, 2) is reported and dropped, like a
+    failed call: it must not raise out of the per-draw loop."""
+    class _Bad:
+        def get_xpoints(self):
+            return np.zeros(3), True
+    with pytest.warns(RuntimeWarning, match="get_xpoints"):
+        assert capture_xpoints(_Bad()) == (None, None)
+
+
+def test_a_limited_plasma_keeps_its_diverted_flag():
+    class _Limited:
+        def get_xpoints(self):
+            return None, False
+    assert capture_xpoints(_Limited()) == (None, False)

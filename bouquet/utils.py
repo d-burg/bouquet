@@ -313,9 +313,11 @@ def capture_xpoints(mygs):
     Returns
     -------
     (numpy.ndarray or None, bool or None)
-        ``((N, 2)`` owned float64 array, diverted flag), or ``(None, None)``
-        if ``get_xpoints()`` reported no X-points / raised, or if no row
-        survived the sentinel drop.
+        ``(N, 2)`` owned float64 array and the diverted flag.  The array is
+        ``None`` when ``get_xpoints()`` reported no X-points or no row survived
+        the sentinel drop; the diverted flag is still returned in that case
+        (a limited plasma gives ``(None, False)``).  Only a failed or malformed
+        ``get_xpoints()`` gives ``(None, None)``.
 
     Warns
     -----
@@ -328,21 +330,23 @@ def capture_xpoints(mygs):
         the values are not trustworthy.  They are still returned rather
         than silently discarded.
     '''
+    # The conversion sits INSIDE the guard with the call: a return that is not
+    # (N, 2)-shaped must cost this draw its X-points, not the whole ensemble.
     try:
         raw, diverted = mygs.get_xpoints()
+        if raw is None:
+            return None, (bool(diverted) if diverted is not None else None)
+        # The copy: reshape the view, then .copy() so the result OWNS a
+        # C-contiguous buffer and is decoupled from the gs_equil that may be
+        # freed on the next eq swap.  (A bare np.asarray(view, dtype=float) is
+        # a no-op here -- the dtype already matches -- which is precisely the
+        # bug.)
+        xp = np.asarray(raw, dtype=np.float64).reshape(-1, 2).copy()
     except Exception as exc:                       # noqa: BLE001 - reported
         warnings.warn(f"get_xpoints() failed ({type(exc).__name__}: {exc}); "
                       f"no X-points captured",
                       RuntimeWarning, stacklevel=2)
         return None, None
-    if raw is None:
-        return None, (bool(diverted) if diverted is not None else None)
-
-    # The copy: reshape the view, then .copy() so the result OWNS a
-    # C-contiguous buffer and is decoupled from the gs_equil that may be freed
-    # on the next eq swap.  (A bare np.asarray(view, dtype=float) is a no-op
-    # here -- the dtype already matches -- which is precisely the bug.)
-    xp = np.asarray(raw, dtype=np.float64).reshape(-1, 2).copy()
 
     if xp.shape[0] >= _XPOINT_BUFFER_ROWS - 1:
         warnings.warn(

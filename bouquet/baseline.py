@@ -338,20 +338,21 @@ def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
 
     Returns ``(sigma_array, label, meta)``.  Tiers, in fidelity order:
 
-    1. **carbon-propagated** (``sigma_Zeff_carbon``: n_12C6_err on the direct
-       layout, the dilution's own posterior on the ensemble layout).  The
-       Zeff-primary scheme perturbs Zeff precisely to move the DILUTION
-       ``ni = ne - Z nC``, and CER carbon density is that dilution's direct
-       measurement; drawing Zeff with this sigma IS error propagation
-       through ``ni = ne - Z nC``.  Measured on the demo shots it is 1.9-5.8
-       % of Zeff in-core and stays sane in the SOL (4-19 %).
-    2. **VB-measured** (``sigma_Zeff``: the file's Zeff_err / Zeff sample
-       spread).  Conservative -- the visible-bremsstrahlung inversion's own
-       error, which carries n_e^2 sqrt(T_e) propagation, calibration and
-       mantle-subtraction systematics: 8-9 % core but 44-130 % in the SOL
-       on the demo direct files, and grand means up to ~90 % on some shots.
-    3. the flat ``zeff_scalar_sigma`` fraction of ``|Z_eff|`` -- the
+    1. **IDA-resolved** (``sigma_Zeff``): the envelope
+       :func:`bouquet.io.ida.read_ida` already resolved by walking
+       ``VB+CER > CER > VB`` over what the file supports, with the route
+       disagreement folded in.  ``measured_source`` names the rung it
+       landed on, so the label reads e.g. "measured IDA (VB+CER)".  This is
+       the SAME resolution ``ni`` was derived from -- which is the point:
+       one ladder, so the sampler can never get an ``ni`` that its own
+       ``Z_eff`` fails to reproduce.
+    2. the flat ``zeff_scalar_sigma`` fraction of ``|Z_eff|`` -- the
        pre-1.3.2 behaviour, the "scalar" setting, and the loud fallback.
+
+    ``zeff_sigma_source="carbon"`` overrides the resolution with the bare
+    carbon-propagated array (``sigma_Zeff_carbon``) for an A/B against the
+    combined envelope; it is a single-route override, so the ``ni`` in play
+    was NOT necessarily derived from it.
 
     Both measured tiers are eligible only when the Z_eff baseline itself is
     the IDA one (``zeff_is_ida``, decided by
@@ -420,14 +421,20 @@ def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
         _why = ineligible_reason or (
             "the Z_eff baseline does not come from the IDA file supplying "
             "the sigmas")
-        _attempted = {"auto": ("carbon-propagated", "VB-measured"),
-                      "carbon": ("carbon-propagated", "VB-measured"),
-                      "measured": ("VB-measured",),
+        _attempted = {"auto": ("IDA-resolved",),
+                      "carbon": ("carbon-propagated", "IDA-resolved"),
+                      "measured": ("IDA-resolved",),
                       "scalar": ()}[zeff_sigma_source]
         for _t in _attempted:
             skipped.append((_t, f"source ineligible: {_why}"))
     else:
-        if zeff_sigma_source in ("auto", "carbon"):
+        # "auto" takes the READER's resolved envelope: read_ida has already
+        # walked VB+CER > CER > VB and combined what the file supports (see
+        # bouquet.io.ida), so preferring the bare carbon array here would
+        # silently discard the VB information it folded in -- and would let
+        # this ladder pick a different route than the one ni was derived
+        # from.  "carbon" stays as an explicit single-route override.
+        if zeff_sigma_source == "carbon":
             c = _usable(carbon_sigma, "carbon-propagated")
             if c is not None:
                 env, tier = c, "carbon-propagated"
@@ -438,15 +445,24 @@ def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
                                 "missing dataset: this file provides no "
                                 "n_12C6 uncertainty"))
         if env is None and zeff_sigma_source in ("auto", "carbon", "measured"):
-            m = _usable(measured_sigma, "VB-measured")
+            m = _usable(measured_sigma, "IDA-resolved")
             if m is not None:
-                env, tier = m, "VB-measured"
+                env, tier = m, "IDA-resolved"
                 provenance = str(measured_source)
                 label = f"measured IDA ({measured_source})"
+                # The reader resolved this envelope, but a rung it could not
+                # reach is still a fallback and main's rule stands: NO
+                # fallback down this ladder is silent.  read_ida only
+                # PRINTS its degradation notice, which a batch run loses.
+                if str(measured_source) != "VB+CER":
+                    skipped.append(
+                        ("VB+CER", "missing dataset: this file supports only "
+                                   f"the {measured_source} route, so the "
+                                   "envelope carries no cross-route check"))
             elif measured_sigma is None:
-                skipped.append(("VB-measured",
+                skipped.append(("IDA-resolved",
                                 "missing dataset: this IDA file carries no "
-                                "Zeff uncertainty (older direct vintage)"))
+                                "usable Z_eff envelope on either route"))
 
     if env is None:
         env, tier = scalar_env, "scalar"
@@ -558,15 +574,23 @@ def resolve_uncertainty(config, baseline) -> dict:
     _ida_zeff_carbon, _ida_zeff_carbon_source = None, "none"
     if ida_path is not None:
         from .io.ida import read_ida
-        ida = read_ida(
-            ida_path, time=getattr(src, "time", None),
-            sigma_mode=unc.sigma_mode, sigma_method=unc.sigma_method,
-            ni_source=getattr(src, "ni_source", "all"),
-            # the carbon tier's Z(Z-1) propagation is quadratically
-            # Z-sensitive; the kinetics loader already passes this, and
-            # omitting it here silently pinned the sigma math to carbon
-            impurity_Z=float(getattr(src, "impurity_Z", 6.0)),
-        )
+        # Read once, shared: the ida_hybrid path already read this file (at
+        # the RESOLVED IMAS slice, which src.time need not name) and left the
+        # result on baseline.aux. Re-reading here could silently pair an
+        # envelope from one slice with kinetics from another.
+        _shared = (baseline.aux or {}).get("ida_profiles")
+        ida = (_shared[1] if _shared is not None
+               and _same_path(_shared[0], ida_path) else None)
+        if ida is None:
+            ida = read_ida(
+                ida_path, time=getattr(src, "time", None),
+                sigma_mode=unc.sigma_mode, sigma_method=unc.sigma_method,
+                ni_source=getattr(src, "ni_source", "all"),
+                # the carbon tier's Z(Z-1) propagation is quadratically
+                # Z-sensitive; the kinetics loader already passes this, and
+                # omitting it here silently pinned the sigma math to carbon
+                impurity_Z=float(getattr(src, "impurity_Z", 6.0)),
+            )
 
         def _to_kin(arr):
             return np.interp(psi_kin, ida.psi_N, np.asarray(arr, dtype=float))
@@ -647,9 +671,11 @@ def resolve_uncertainty(config, baseline) -> dict:
         )
 
     # --- who draws ni when the zeff channel is active ------------------------
-    # Auto: hand ni back to its own sigma whenever that sigma is a real envelope
-    # (an IDA ni_source route, or an explicit array) rather than the flat
-    # ni_scalar_sigma fallback. An explicit UncertaintyConfig.ni_from_zeff wins.
+    # ANY IDA route wins: whenever sigma_ni is a real envelope -- an IDA
+    # ni_source route or an explicit array -- ni is drawn from it and the
+    # Z_eff channel stops deriving ni.  Only the flat ni_scalar_sigma
+    # fallback, which carries no dilution information, hands ni back to the
+    # Z_eff route.  An explicit UncertaintyConfig.ni_from_zeff still wins.
     _nfz = getattr(unc, "ni_from_zeff", None)
     out["ni_from_zeff"] = (bool(_won["ni"].startswith("scalar"))
                            if _nfz is None else bool(_nfz))

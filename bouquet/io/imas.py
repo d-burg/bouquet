@@ -543,7 +543,11 @@ def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impu
     without updating sigma_ni.
 
     Returns ``(ne, te, ti, ni, zeff, omega_or_None, sigma_ne, sigma_te, sigma_ni,
-    sigma_ti)`` on ``psi_N``.
+    sigma_ti, ida)`` on ``psi_N`` -- the trailing ``IDAProfiles`` is the read
+    itself, handed back so ``resolve_uncertainty`` can reuse it instead of
+    re-reading the file (see ``Baseline.aux['ida_profiles']``). Re-reading
+    risked a DIFFERENT slice: this path resolves ``time`` against the IMAS
+    slice, while the envelope path only had the requested ``source.time``.
     """
     from .ida import read_ida
     ida = read_ida(ida_path, time=time, impurity_Z=impurity_Z, ni_source=ni_source)
@@ -557,7 +561,8 @@ def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impu
         # ni from FUSE Z_eff + IDA ne (single-impurity dilution; Z_imp = machine charge)
         ni = main_ion_density_from_zeff(ne, np.clip(Zeff_fuse, 1.0, impurity_Z), impurity_Z)
     omega = _read_ida_omega(ida_path, time, psi_N)
-    return ne, te, ti, ni, zeff, omega, sigma_ne, sigma_te, sigma_ni, sigma_ti
+    return (ne, te, ti, ni, zeff, omega, sigma_ne, sigma_te, sigma_ni,
+            sigma_ti, ida)
 
 
 def read_imas_baseline(
@@ -739,7 +744,8 @@ def read_imas_baseline(
     use_ida = bool(kinetic_source == "ida_hybrid" and getattr(source, "ida_path", None))
     if use_ida:
         (ne, te, ti, ni, Zeff, _omega,
-         sigma_ne_ida, sigma_te_ida, sigma_ni_ida, sigma_ti_ida) = _merge_ida_kinetics(
+         sigma_ne_ida, sigma_te_ida, sigma_ni_ida, sigma_ti_ida,
+         _ida_read) = _merge_ida_kinetics(
             psi_N, ne, ni, Zeff, source.ida_path, T,
             getattr(source, "impurity_Z", 6.0),
             ni_source=getattr(source, "ni_source", "all"),
@@ -747,6 +753,9 @@ def read_imas_baseline(
         if _omega is not None:
             aux["omega_tor"] = _omega
         aux["zeff"] = Zeff   # keep the switchboard's zeff baseline consistent
+        # Read once, shared: resolve_uncertainty reuses this instead of
+        # opening the same file again (and possibly at another slice).
+        aux["ida_profiles"] = (str(source.ida_path), _ida_read)
         aux["sigma_ne_ida"] = sigma_ne_ida
         aux["sigma_te_ida"] = sigma_te_ida
         aux["sigma_ni_ida"] = sigma_ni_ida

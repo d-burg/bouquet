@@ -58,6 +58,17 @@ def _write_direct(path, with_zeff_err, with_carbon=True):
     return psi, zeff
 
 
+def _resolved_envelope(zeff):
+    """The envelope read_ida resolves for a ``_write_direct`` file.
+
+    Both routes live and exactly consistent -> tier VB+CER, equal weights,
+    no route-difference inflation.
+    """
+    vb = 0.09 * zeff                                   # Zeff_err
+    cer = (zeff - 1.0) * np.sqrt(0.25 ** 2 + 0.05 ** 2)  # nC (+) ne
+    return np.sqrt((0.5 * vb) ** 2 + (0.5 * cer) ** 2)
+
+
 def _write_ensemble(path, spread=0.08, nsamp=64):
     psi, ne, te, zeff = _grids()
     rng = np.random.default_rng(7)
@@ -184,7 +195,7 @@ class TestEnvelopeLadder:
             "auto", 0.05, self._base, True, self._meas, "Zeff_err")
         np.testing.assert_array_equal(env, self._meas)
         assert "measured IDA (Zeff_err)" in label
-        assert meta["tier"] == "VB-measured"
+        assert meta["tier"] == "IDA-resolved"
         assert meta["provenance"] == "Zeff_err"
 
     def test_scalar_fallback_when_the_file_has_no_measurement(self):
@@ -195,8 +206,7 @@ class TestEnvelopeLadder:
         np.testing.assert_allclose(env, 0.05 * self._base)
         assert label.startswith("scalar")
         assert meta["tier"] == "scalar" and meta["fell_back"]
-        assert [s["tier"] for s in meta["skipped"]] == ["carbon-propagated",
-                                                        "VB-measured"]
+        assert [s["tier"] for s in meta["skipped"]] == ["IDA-resolved"]
         assert all("missing dataset" in s["reason"] for s in meta["skipped"])
 
     def test_fuse_baseline_never_pairs_with_an_ida_envelope(self):
@@ -222,19 +232,31 @@ class TestEnvelopeLadder:
                 "measured", 0.05, self._base, True, None, "none")
         np.testing.assert_allclose(env, 0.05 * self._base)
         assert "FALLBACK" in label
-        assert meta["warned"] and meta["skipped"][0]["tier"] == "VB-measured"
+        assert meta["warned"] and meta["skipped"][0]["tier"] == "IDA-resolved"
 
     # ---- the carbon tier (dilution's direct measurement) ------------------
     _carb = np.full(10, 0.04)
 
-    def test_auto_prefers_carbon_over_vb(self):
+    def test_auto_takes_the_readers_resolved_envelope(self):
+        """read_ida already walked VB+CER > CER > VB; 'auto' must take that
+        resolution, not re-pick a single route here -- picking carbon would
+        discard the VB information the reader folded in AND could disagree
+        with the route ni was derived from."""
         env, label, meta = resolve_zeff_envelope(
-            "auto", 0.05, self._base, True, self._meas, "Zeff_err",
+            "auto", 0.05, self._base, True, self._meas, "VB+CER",
+            carbon_sigma=self._carb, carbon_source="n_12C6_err")
+        np.testing.assert_array_equal(env, self._meas)
+        assert "measured IDA (VB+CER)" in label
+        assert meta["tier"] == "IDA-resolved"
+        assert meta["skipped"] == [] and not meta["warned"]
+
+    def test_forced_carbon_overrides_the_resolution(self):
+        """'carbon' is an explicit single-route override for an A/B."""
+        env, label, meta = resolve_zeff_envelope(
+            "carbon", 0.05, self._base, True, self._meas, "VB+CER",
             carbon_sigma=self._carb, carbon_source="n_12C6_err")
         np.testing.assert_array_equal(env, self._carb)
-        assert "carbon-propagated (n_12C6_err)" in label
         assert meta["tier"] == "carbon-propagated"
-        assert meta["skipped"] == [] and not meta["warned"]
 
     def test_forced_carbon_falls_back_to_vb_with_a_warning(self):
         with pytest.warns(UserWarning, match="carbon"):
@@ -243,15 +265,15 @@ class TestEnvelopeLadder:
                 carbon_sigma=None, carbon_source="none")
         np.testing.assert_array_equal(env, self._meas)
         assert "measured IDA" in label
-        assert meta["tier"] == "VB-measured"
-        assert meta["skipped"] == [
-            {"tier": "carbon-propagated",
-             "reason": "missing dataset: this file provides no n_12C6 "
-                       "uncertainty"}]
+        assert meta["tier"] == "IDA-resolved"
+        # the forced carbon rung is missing, AND the resolution it fell back
+        # to is a single route -- both are recorded
+        assert [_s["tier"] for _s in meta["skipped"]] == [
+            "carbon-propagated", "VB+CER"]
 
     def test_forced_measured_still_means_the_vb_tier(self):
         env, label, meta = resolve_zeff_envelope(
-            "measured", 0.05, self._base, True, self._meas, "Zeff_err",
+            "measured", 0.05, self._base, True, self._meas, "VB+CER",
             carbon_sigma=self._carb, carbon_source="n_12C6_err")
         np.testing.assert_array_equal(env, self._meas)
         assert "measured IDA" in label
@@ -509,14 +531,13 @@ class TestEnvelopeWiring:
     _bl = staticmethod(_mk_bl)
     _cfg = staticmethod(_mk_cfg)
 
-    def test_own_cdf_gets_the_carbon_tier(self, tmp_path):
+    def test_own_cdf_gets_the_resolved_envelope(self, tmp_path):
         from bouquet.baseline import resolve_uncertainty
         cdf = str(tmp_path / "own.cdf")
         psi, zeff = _write_direct(cdf, with_zeff_err=True, with_carbon=True)
         env = resolve_uncertainty(self._cfg(cdf, tmp_path), self._bl(psi))
-        expect = (zeff - 1.0) * np.sqrt(0.25 ** 2 + 0.05 ** 2)
-        np.testing.assert_allclose(env["aux_sigmas"]["zeff"], expect,
-                                   rtol=1e-6)
+        np.testing.assert_allclose(env["aux_sigmas"]["zeff"],
+                                   _resolved_envelope(zeff), rtol=1e-6)
 
     def test_pfile_baseline_never_pairs_with_an_ida_envelope(self, tmp_path):
         """A p-file Zeff baseline + unc.ida_path must resolve the SCALAR:
@@ -555,8 +576,14 @@ class TestEnvelopeWiring:
         from bouquet.baseline import resolve_uncertainty
         cdf = str(tmp_path / "z5.cdf")
         psi, zeff = _write_direct(cdf, with_zeff_err=True, with_carbon=True)
-        env = resolve_uncertainty(self._cfg(cdf, tmp_path, impurity_Z=5.0),
-                                  self._bl(psi))
+        # The CER *ni route* needs Z=6 (n_12C6 is carbon), so at Z=5 the
+        # ladder drops it -- force the carbon envelope explicitly to check
+        # that impurity_Z still reaches the propagation itself.
+        from bouquet.config import UncertaintyConfig
+        env = resolve_uncertainty(
+            self._cfg(cdf, tmp_path, impurity_Z=5.0,
+                      unc=UncertaintyConfig(zeff_sigma_source="carbon")),
+            self._bl(psi))
         # fixture carbon: nc = (zeff-1)*ne/30, so dil(Z=5) = 20*nc/ne
         expect = (zeff - 1.0) * (20.0 / 30.0) * np.sqrt(0.25 ** 2 + 0.05 ** 2)
         np.testing.assert_allclose(env["aux_sigmas"]["zeff"], expect,
@@ -585,9 +612,11 @@ class TestSigmaPathSpelling:
                                   with_carbon=True)
         return own, psi, zeff
 
-    def _expect_carbon(self, zeff):
-        # the fixture's carbon propagation, identical to the wiring tests
-        return (zeff - 1.0) * np.sqrt(0.25 ** 2 + 0.05 ** 2)
+    def _expect_resolved(self, zeff):
+        # The fixture carries BOTH routes and its carbon is exactly
+        # consistent with its Zeff, so the reader lands on VB+CER with a
+        # zero route-difference term: sqrt((vb/2)^2 + (cer/2)^2).
+        return _resolved_envelope(zeff)
 
     # ---- unit level: the eligibility predicate itself ---------------------
 
@@ -686,8 +715,8 @@ class TestSigmaPathSpelling:
             warnings.simplefilter("error")       # no fallback may occur
             env = resolve_uncertainty(cfg, _mk_bl(psi))
         np.testing.assert_allclose(env["aux_sigmas"]["zeff"],
-                                   self._expect_carbon(zeff), rtol=1e-6)
-        assert env["zeff_sigma_tier"]["tier"] == "carbon-propagated"
+                                   self._expect_resolved(zeff), rtol=1e-6)
+        assert env["zeff_sigma_tier"]["tier"] == "IDA-resolved"
         assert env["zeff_sigma_tier"]["skipped"] == []
 
     def test_symlink_spelling_keeps_the_carbon_tier_end_to_end(self, tmp_path):
@@ -702,8 +731,8 @@ class TestSigmaPathSpelling:
             warnings.simplefilter("error")
             env = resolve_uncertainty(cfg, _mk_bl(psi))
         np.testing.assert_allclose(env["aux_sigmas"]["zeff"],
-                                   self._expect_carbon(zeff), rtol=1e-6)
-        assert env["zeff_sigma_tier"]["tier"] == "carbon-propagated"
+                                   self._expect_resolved(zeff), rtol=1e-6)
+        assert env["zeff_sigma_tier"]["tier"] == "IDA-resolved"
 
     def test_a_different_file_falls_back_loudly_and_is_recorded(
             self, tmp_path):
@@ -724,8 +753,7 @@ class TestSigmaPathSpelling:
         assert meta["tier"] == "scalar" and meta["warned"]
         assert not meta["eligible"]
         assert "genuinely different file" in meta["ineligible_reason"]
-        assert [s["tier"] for s in meta["skipped"]] == ["carbon-propagated",
-                                                        "VB-measured"]
+        assert [s["tier"] for s in meta["skipped"]] == ["IDA-resolved"]
 
     def test_a_pfile_baseline_falls_back_loudly_and_is_recorded(
             self, tmp_path):
@@ -752,8 +780,8 @@ class TestSigmaPathSpelling:
         with pytest.warns(UserWarning, match="missing dataset"):
             env = resolve_uncertainty(cfg, _mk_bl(psi))
         meta = env["zeff_sigma_tier"]
-        assert meta["tier"] == "VB-measured"
-        assert meta["skipped"][0]["tier"] == "carbon-propagated"
+        assert meta["tier"] == "IDA-resolved"
+        assert meta["skipped"][0]["tier"] == "VB+CER"
         assert "missing dataset" in meta["skipped"][0]["reason"]
         assert "path" not in meta["skipped"][0]["reason"]
 

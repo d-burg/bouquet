@@ -278,15 +278,12 @@ def zeff_sigma_eligibility(source, ida_path):
     ``.cdf``; they may only be paired with a Z_eff baseline built from that
     SAME file.  This is a FILE-IDENTITY test, not a source-type test.
 
-    It used to refuse every ``ImasSource`` on the grounds that the
-    ``ida_hybrid`` path's Z_eff "deliberately stays FUSE's".  That premise
-    is gone: ``ida_hybrid`` now takes Z_eff from the IDA file by default
-    (``ImasSource.zeff_from_fuse=False``, see
-    :func:`bouquet.io.imas._merge_ida_kinetics`), so refusing it dropped the
-    measured tiers on exactly the path they were built for.  Each source
-    declares its own IDA file -- ``profiles_path`` for a
+    Each source declares its own IDA file -- ``profiles_path`` for a
     :class:`ReconstructionSource`, ``ida_path`` for an :class:`ImasSource`
-    -- and that file must be the one supplying the sigmas.
+    -- and that file must be the one supplying the sigmas.  ``ida_hybrid``
+    qualifies: its Z_eff is the IDA file's by default
+    (``ImasSource.zeff_from_fuse=False``, see
+    :func:`bouquet.io.imas._merge_ida_kinetics`).
 
     ``zeff_from_fuse=True`` stays ELIGIBLE on purpose: it swaps the Z_eff
     VALUE for FUSE's while keeping the IDA ladder's envelope, carried
@@ -339,13 +336,12 @@ def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
     Returns ``(sigma_array, label, meta)``.  Tiers, in fidelity order:
 
     1. **IDA-resolved** (``sigma_Zeff``): the envelope
-       :func:`bouquet.io.ida.read_ida` already resolved by walking
+       :func:`bouquet.io.ida.read_ida` resolved by walking
        ``VB+CER > CER > VB`` over what the file supports, with the route
-       disagreement folded in.  ``measured_source`` names the rung it
-       landed on, so the label reads e.g. "measured IDA (VB+CER)".  This is
-       the SAME resolution ``ni`` was derived from -- which is the point:
-       one ladder, so the sampler can never get an ``ni`` that its own
-       ``Z_eff`` fails to reproduce.
+       disagreement folded in.  ``measured_source`` names the rung it landed
+       on, so the label reads e.g. "measured IDA (VB+CER)".  It is the same
+       resolution ``ni`` came from, so the sampler cannot get an ``ni`` its
+       own ``Z_eff`` fails to reproduce.
     2. the flat ``zeff_scalar_sigma`` fraction of ``|Z_eff|`` -- the
        pre-1.3.2 behaviour, the "scalar" setting, and the loud fallback.
 
@@ -428,12 +424,10 @@ def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
         for _t in _attempted:
             skipped.append((_t, f"source ineligible: {_why}"))
     else:
-        # "auto" takes the READER's resolved envelope: read_ida has already
-        # walked VB+CER > CER > VB and combined what the file supports (see
-        # bouquet.io.ida), so preferring the bare carbon array here would
-        # silently discard the VB information it folded in -- and would let
-        # this ladder pick a different route than the one ni was derived
-        # from.  "carbon" stays as an explicit single-route override.
+        # "auto" takes the reader's resolved envelope: read_ida has already
+        # walked VB+CER > CER > VB (see bouquet.io.ida), and it is the route
+        # ni was derived from.  "carbon" stays as an explicit single-route
+        # override.
         if zeff_sigma_source == "carbon":
             c = _usable(carbon_sigma, "carbon-propagated")
             if c is not None:
@@ -450,10 +444,9 @@ def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
                 env, tier = m, "IDA-resolved"
                 provenance = str(measured_source)
                 label = f"measured IDA ({measured_source})"
-                # The reader resolved this envelope, but a rung it could not
-                # reach is still a fallback and main's rule stands: NO
-                # fallback down this ladder is silent.  read_ida only
-                # PRINTS its degradation notice, which a batch run loses.
+                # A rung the reader could not reach is still a fallback, and
+                # no fallback down this ladder is silent: read_ida only
+                # prints its notice, which a batch run loses.
                 if str(measured_source) != "VB+CER":
                     skipped.append(
                         ("VB+CER", "missing dataset: this file supports only "

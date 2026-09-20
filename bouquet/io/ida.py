@@ -498,8 +498,23 @@ def read_ida_cer(
         def _center(a):
             return np.median(a, axis=0) if ensemble_median else np.mean(a, axis=0)
 
+        def _pick(*names):
+            """First of ``names`` present in the file, else None.
+
+            DIII-D IDA files suffix the CER channels with the measured ion, e.g.
+            ``v_pol_12C6``; older/synthetic files use the bare ``v_pol``.
+            """
+            return next((n for n in names if n in f), None)
+
         def read(key, err_key=None):
-            """(value, sigma) for one channel across either layout."""
+            """(value, sigma) for one channel across either layout.
+
+            ``key=None`` (channel absent from the file) zero-fills rather than
+            raising -- only v_pol is optional enough to reach here.
+            """
+            if key is None:
+                zero = np.zeros_like(psi_N)
+                return zero, zero.copy()
             if is_ensemble:
                 s = np.asarray(f[key][t_idx], dtype=float)      # (n_samples, n_radial)
                 return _center(s), _band(s)
@@ -513,10 +528,16 @@ def read_ida_cer(
         else:
             psi_N = np.asarray(f["psi_n"][:], dtype=float)
 
+        missing = [k for k in ("n_12C6", "T_12C6", "omega_tor_12C6") if k not in f]
+        if missing:
+            raise KeyError(
+                f"{path!r} has no {', '.join(missing)}: this file carries no carbon-CER "
+                "measurement, so rotation / E_r cannot be derived from it")
+
         n_c, s_nc = read("n_12C6", "n_12C6_err")
         t_c, s_tc = read("T_12C6", "T_12C6_err")
         omg, s_om = read("omega_tor_12C6", "omega_tor_12C6_err")
-        vpol, s_vp = read("v_pol", "v_pol_err")
+        vpol, s_vp = read(_pick("v_pol_12C6", "v_pol"), _pick("v_pol_12C6_err", "v_pol_err"))
         bpol, _ = read("Bpol_midplane", "Bpol_midplane_err")
         rmaj, _ = read("Rmaj_midplane", "Rmaj_midplane_err")
         dpsidr, _ = read("dPsiN_dR_midplane", "dPsiN_dR_midplane_err")

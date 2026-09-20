@@ -618,6 +618,46 @@ class TestSigmaPathSpelling:
         # zero route-difference term: sqrt((vb/2)^2 + (cer/2)^2).
         return _resolved_envelope(zeff)
 
+    # ---- the ida_hybrid path (B) ------------------------------------------
+
+    def _imas(self, tmp_path, ida_path, **kw):
+        from bouquet.config import ImasSource
+        return ImasSource(ids_path=str(tmp_path / "dd.json"),
+                          ida_path=ida_path, time=3.0, **kw)
+
+    def test_ida_hybrid_is_eligible_for_the_measured_tiers(self, tmp_path):
+        """It used to be refused on SOURCE TYPE, on the grounds that
+        ida_hybrid's Z_eff 'deliberately stays FUSE's'. It does not: the
+        baseline Z_eff IS the IDA one, so refusing it dropped the measured
+        tiers on the very path they were built for -- silently, to the
+        assumed scalar."""
+        own, psi, zeff = self._own(tmp_path)
+        ok, why = zeff_sigma_eligibility(self._imas(tmp_path, str(own)),
+                                         str(own))
+        assert ok and why == ""
+
+    def test_zeff_from_fuse_keeps_the_ida_envelope(self, tmp_path):
+        """The VALUE becomes FUSE's; the envelope stays the IDA ladder's,
+        carried ABSOLUTE rather than rescaled onto the FUSE value."""
+        own, psi, zeff = self._own(tmp_path)
+        src = self._imas(tmp_path, str(own), zeff_from_fuse=True)
+        assert zeff_sigma_eligibility(src, str(own))[0]
+
+    def test_ida_hybrid_without_an_ida_path_is_still_refused(self, tmp_path):
+        from bouquet.config import ImasSource
+        own, psi, zeff = self._own(tmp_path)
+        src = ImasSource(ids_path=str(tmp_path / "dd.json"), time=3.0)
+        ok, why = zeff_sigma_eligibility(src, str(own))
+        assert not ok and "not an IDA .cdf" in why
+
+    def test_ida_hybrid_naming_another_file_is_refused(self, tmp_path):
+        own, psi, zeff = self._own(tmp_path)
+        other = tmp_path / "other_vintage.cdf"
+        _write_direct(str(other), with_zeff_err=True, with_carbon=True)
+        ok, why = zeff_sigma_eligibility(self._imas(tmp_path, str(own)),
+                                         str(other))
+        assert not ok and "genuinely different file" in why
+
     # ---- unit level: the eligibility predicate itself ---------------------
 
     def _eligible(self, src_spelling, sigma_spelling, tmp_path):
@@ -802,3 +842,61 @@ class TestConfigValidation:
         cfg = _mk_cfg(str(tmp_path / "x.cdf"), tmp_path,
                       unc=UncertaintyConfig(zeff_sigma_source=src))
         assert cfg.uncertainty.zeff_sigma_source == src
+
+
+class TestSharedIdaRead:
+    """read_ida must run ONCE and be shared (item I).
+
+    The kinetics path resolves ``time`` against the IMAS slice; the envelope
+    path only ever had the requested ``source.time``.  Re-reading therefore
+    risked pairing an envelope from one slice with kinetics from another,
+    silently.  ``Baseline.aux['ida_profiles']`` carries the read across.
+    """
+
+    def test_resolve_uncertainty_reuses_the_parked_read(self, tmp_path,
+                                                        monkeypatch):
+        from bouquet import baseline as bl_mod
+        from bouquet.baseline import resolve_uncertainty
+        from bouquet.io.ida import read_ida as real_read
+
+        own = str(tmp_path / "own.cdf")
+        psi, zeff = _write_direct(own, with_zeff_err=True, with_carbon=True)
+        parked = real_read(own, time=3.0)
+
+        calls = []
+
+        def _spy(*a, **kw):
+            calls.append(a[0])
+            return real_read(*a, **kw)
+
+        monkeypatch.setattr("bouquet.io.ida.read_ida", _spy)
+
+        bl = _mk_bl(psi)
+        bl.aux = dict(bl.aux or {})
+        bl.aux["ida_profiles"] = (own, parked)
+        env = resolve_uncertainty(_mk_cfg(own, tmp_path), bl)
+
+        assert calls == []                      # the parked read was reused
+        np.testing.assert_allclose(env["aux_sigmas"]["zeff"],
+                                   _resolved_envelope(zeff), rtol=1e-6)
+
+    def test_a_parked_read_of_another_file_is_not_reused(self, tmp_path):
+        """The share is keyed on file identity, so a stale park cannot leak
+        one file's envelope onto another file's baseline."""
+        from bouquet.baseline import resolve_uncertainty
+        from bouquet.io.ida import read_ida as real_read
+
+        own = str(tmp_path / "own.cdf")
+        other = str(tmp_path / "other.cdf")
+        psi, zeff = _write_direct(own, with_zeff_err=True, with_carbon=True)
+        _write_direct(other, with_zeff_err=False, with_carbon=True)
+
+        bl = _mk_bl(psi)
+        bl.aux = dict(bl.aux or {})
+        bl.aux["ida_profiles"] = (other, real_read(other, time=3.0))
+        env = resolve_uncertainty(_mk_cfg(own, tmp_path), bl)
+
+        # own.cdf has both routes -> VB+CER, not other.cdf's CER-only
+        assert env["zeff_sigma_tier"]["provenance"] == "VB+CER"
+        np.testing.assert_allclose(env["aux_sigmas"]["zeff"],
+                                   _resolved_envelope(zeff), rtol=1e-6)

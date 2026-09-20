@@ -57,9 +57,11 @@ class IDAProfiles:
 
     time: float                     # selected slice [s]
     raw_bytes: Optional[bytes] = None   # original file bytes for archival
-    # Per-radius tension between the two routes, in sigma; >1 widens both
-    # sigma_ni and sigma_Zeff. None unless both routes are live.
+    # Per-radius tension between the two routes, in sigma, one per channel:
+    # each is the delta that widens THAT channel's envelope, over its own
+    # propagated spread. None unless both routes are live.
     ni_route_chi: Optional[np.ndarray] = None
+    zeff_route_chi: Optional[np.ndarray] = None
 
     #: Measured 1-sigma envelope on ``Zeff``, when the file provides one:
     #: sample spread on the ensemble layout, the ``Zeff_err`` dataset on newer
@@ -170,6 +172,13 @@ def _carbon_tier_usable(nC, ne, sigma_nC=None, sigma_ne=None, *,
     return False
 
 
+def _chi(delta, var_delta):
+    """Route disagreement in sigma; NaN where the spread is zero."""
+    return np.sqrt(np.divide(delta ** 2, var_delta,
+                             out=np.full_like(delta, np.nan),
+                             where=var_delta > 0.0))
+
+
 def read_ida(
     path: str,
     time: Optional[float] = None,
@@ -215,8 +224,9 @@ def read_ida(
     Ti.
 
     With both routes live, ``sigma_ni`` and ``sigma_Zeff`` also carry what the
-    routes disagree on beyond their statistical errors. The term is one-sided
-    and ``ni_route_chi`` reports the tension behind it.
+    routes disagree on beyond their statistical errors. The term is one-sided,
+    and ``ni_route_chi`` / ``zeff_route_chi`` report the tension behind each.
+    They differ: ne cancels partly in ni and not at all in Z_eff.
     """
     import h5py
 
@@ -496,11 +506,12 @@ def read_ida(
         # resolved value is the mean of two routes, so an offset delta
         # displaces it by delta/2 -> variance excess /4.  ne cancels partly in
         # ni and not at all in Z_eff, so each delta gets its own Jacobian.
-        ni_route_chi = None
+        ni_route_chi = zeff_route_chi = None
         if use_vb and use_cer:
             d_z = zeff_vb - zeff_cer
             var_dz = sigma_Zeff ** 2 + sigma_Zeff_carbon ** 2
             var_zeff = var_zeff + np.maximum(d_z ** 2 - var_dz, 0.0) / 4.0
+            zeff_route_chi = _chi(d_z, var_dz)
 
             ni_vb = main_ion_density_from_zeff(
                 ne, np.clip(zeff_vb, 1.0, impurity_Z), impurity_Z)
@@ -511,9 +522,7 @@ def read_ida(
                 + (ne * _inv * sigma_Zeff) ** 2 \
                 + (impurity_Z * sigma_n_carbon) ** 2
             var_ni = var_ni + np.maximum(d_n ** 2 - var_dn, 0.0) / 4.0
-            ni_route_chi = np.sqrt(np.divide(
-                d_z ** 2, var_dz, out=np.full_like(d_z, np.nan),
-                where=var_dz > 0.0))
+            ni_route_chi = _chi(d_n, var_dn)
 
         if zeff_sigma_from_ne:
             # Nothing to propagate: both channels inherit ne's fractional
@@ -539,6 +548,7 @@ def read_ida(
         sigma_Zeff_carbon_source=sigma_Zeff_carbon_source,
         zeff_carbon_dev=zeff_carbon_dev,
         ni_route_chi=ni_route_chi,
+        zeff_route_chi=zeff_route_chi,
     )
 
 

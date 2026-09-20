@@ -211,6 +211,7 @@ class TestRouteDiscrepancy:
         ida = read_ida(str(p), time=3.0)
         # chi ~ 1: the routes differ only by their own statistical errors
         assert 0.4 < np.median(ida.ni_route_chi) < 1.6
+        assert 0.4 < np.median(ida.zeff_route_chi) < 1.6
         assert np.allclose(ida.sigma_ni, _plain_sigma_ni(str(p)), rtol=0.05)
 
     def test_disagreeing_routes_inflate_sigma(self, tmp_path):
@@ -219,6 +220,7 @@ class TestRouteDiscrepancy:
         ida = read_ida(str(p), time=3.0)
         plain = _plain_sigma_ni(str(p))
         assert np.median(ida.ni_route_chi) > 3.0
+        assert np.median(ida.zeff_route_chi) > 3.0
         assert np.all(ida.sigma_ni >= plain)
         assert np.median(ida.sigma_ni / plain) > 1.1
 
@@ -241,4 +243,16 @@ class TestRouteDiscrepancy:
         for src in ("Zeff", "CER"):
             ida = read_ida(str(p), time=3.0, ni_source=src)
             assert ida.ni_route_chi is None
+            assert ida.zeff_route_chi is None
             assert np.all(np.isfinite(ida.sigma_ni)) and np.all(ida.sigma_ni > 0)
+
+    def test_the_two_chis_are_measured_in_their_own_channels(self, tmp_path):
+        # Same disagreement, different Jacobians: ne cancels partly in ni and
+        # not at all in Z_eff, so the two tensions must not be one number.
+        p = tmp_path / "bad.cdf"
+        _write_consistent(str(p), nc_scale=2.5)
+        ida = read_ida(str(p), time=3.0)
+        assert not np.allclose(ida.ni_route_chi, ida.zeff_route_chi, rtol=1e-3)
+        # Both still flag the same event.
+        assert np.median(ida.ni_route_chi) > 3.0
+        assert np.median(ida.zeff_route_chi) > 3.0

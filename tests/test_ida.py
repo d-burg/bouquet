@@ -228,7 +228,12 @@ class TestRouteDiscrepancy:
         p = tmp_path / "ok.cdf"
         _write_consistent(str(p))
         ida = read_ida(str(p), time=3.0)
-        assert np.all(ida.sigma_ni >= _plain_sigma_ni(str(p)) - 1e-9)
+        # RELATIVE tolerance: sigma_ni is ~1e18, so an absolute 1e-9 slack is
+        # far below one ulp. The reader and this helper evaluate the same
+        # algebra in a different association order, and a 1-ulp shortfall is
+        # not the clamp failing.
+        plain = _plain_sigma_ni(str(p))
+        assert np.all(ida.sigma_ni >= plain * (1.0 - 1e-12))
 
     def test_single_route_has_no_discrepancy_term(self, tmp_path):
         p = tmp_path / "bad.cdf"

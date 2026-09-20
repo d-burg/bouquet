@@ -275,43 +275,57 @@ def zeff_sigma_eligibility(source, ida_path):
     and RECORDED instead of silently costing the run its measured tiers.
 
     The measured tiers are ABSOLUTE sigma profiles read out of one IDA
-    ``.cdf``; they may only be paired with a Z_eff baseline that came from
-    that same file.  Three refusals:
+    ``.cdf``; they may only be paired with a Z_eff baseline built from that
+    SAME file.  This is a FILE-IDENTITY test, not a source-type test.
 
-    * no IDA sigma file is configured at all -- there is no ladder;
-    * the baseline is the IMAS/FUSE one (``ImasSource``, including the
-      ``ida_hybrid`` path, whose Z_eff deliberately stays FUSE's);
-    * a reconstruction source whose own profiles file is not that ``.cdf``
-      -- a p-file Z_eff baseline, or ``unc.ida_path`` naming a different
-      file or vintage.
+    It used to refuse every ``ImasSource`` on the grounds that the
+    ``ida_hybrid`` path's Z_eff "deliberately stays FUSE's".  That premise
+    is gone: ``ida_hybrid`` now takes Z_eff from the IDA file by default
+    (``ImasSource.zeff_from_fuse=False``, see
+    :func:`bouquet.io.imas._merge_ida_kinetics`), so refusing it dropped the
+    measured tiers on exactly the path they were built for.  Each source
+    declares its own IDA file -- ``profiles_path`` for a
+    :class:`ReconstructionSource`, ``ida_path`` for an :class:`ImasSource`
+    -- and that file must be the one supplying the sigmas.
+
+    ``zeff_from_fuse=True`` stays ELIGIBLE on purpose: it swaps the Z_eff
+    VALUE for FUSE's while keeping the IDA ladder's envelope, carried
+    ABSOLUTE (not rescaled onto the FUSE value).
+
+    Three refusals: no IDA sigma file configured; the source declares no IDA
+    ``.cdf`` of its own (a p-file Z_eff baseline, or an ``ImasSource`` with
+    no ``ida_path``); the two files are genuinely different.
 
     The file-identity test compares RESOLVED paths (:func:`_same_path`),
     never raw strings.
     """
     import os
 
-    from .config import ReconstructionSource
+    from .config import ImasSource, ReconstructionSource
 
     if ida_path is None:
         return False, "no IDA sigma file is configured (no ladder applies)"
     ida_name = os.path.basename(_norm_path(ida_path)) or str(ida_path)
-    if not isinstance(source, ReconstructionSource):
+
+    if isinstance(source, ReconstructionSource):
+        own, own_kind = str(getattr(source, "profiles_path", "") or ""), "profiles file"
+    elif isinstance(source, ImasSource):
+        own, own_kind = str(getattr(source, "ida_path", "") or ""), "ida_path"
+    else:
         return False, (
-            "the Z_eff baseline comes from the IMAS/FUSE source rather than "
-            f"from {ida_name}; pairing a FUSE Z_eff with an IDA-measured "
-            "envelope would mix channels")
-    src_profiles = str(getattr(source, "profiles_path", "") or "")
-    src_norm = _norm_path(src_profiles)
-    if not src_norm.endswith(".cdf"):
+            f"source type {type(source).__name__} declares no IDA file, so "
+            f"its Z_eff baseline did not come from {ida_name}")
+    own_norm = _norm_path(own)
+    if not own_norm.endswith(".cdf"):
         return False, (
-            f"the source's own profiles file is not an IDA .cdf "
-            f"({os.path.basename(src_norm) or '<unset>'}), so its Z_eff "
+            f"the source's own {own_kind} is not an IDA .cdf "
+            f"({os.path.basename(own_norm) or '<unset>'}), so its Z_eff "
             f"baseline did not come from {ida_name}")
-    if not _same_path(ida_path, src_profiles):
+    if not _same_path(ida_path, own):
         return False, (
             f"the sigma file ({ida_name}) is a genuinely different file "
-            f"from the source's own profiles file "
-            f"({os.path.basename(src_norm)}) -- compared after expanduser + "
+            f"from the source's own {own_kind} "
+            f"({os.path.basename(own_norm)}) -- compared after expanduser + "
             f"realpath, so this is a real mismatch, not a path spelling")
     return True, ""
 
@@ -512,7 +526,7 @@ def resolve_uncertainty(config, baseline) -> dict:
     import warnings
 
     import numpy as np
-    from .config import ReconstructionSource, UncertaintyConfig
+    from .config import ImasSource, ReconstructionSource, UncertaintyConfig
 
     # Read the defaults off the dataclass so "the user changed this" can never
     # drift from the declared defaults.
@@ -525,10 +539,18 @@ def resolve_uncertainty(config, baseline) -> dict:
     src = config.source
     psi_kin = np.asarray(baseline.psi_N_kinetic, dtype=float)
 
+    # The IDA file supplying the sigmas: an explicit unc.ida_path wins, else
+    # the source's own declared IDA file.  The ImasSource arm matters on the
+    # ida_hybrid path, whose ne/Te/Ti/ni/Z_eff already came from that file --
+    # without it the envelope silently fell to the scalar tier while the
+    # BASELINE was IDA's (see zeff_sigma_eligibility).
     ida_path = unc.ida_path
-    if ida_path is None and isinstance(src, ReconstructionSource) \
-            and src.profiles_path.endswith(".cdf"):
-        ida_path = src.profiles_path
+    if ida_path is None:
+        if isinstance(src, ReconstructionSource) \
+                and src.profiles_path.endswith(".cdf"):
+            ida_path = src.profiles_path
+        elif isinstance(src, ImasSource):
+            ida_path = getattr(src, "ida_path", None)
 
     # IDA arrays (read once) available as a fallback below
     ida_sig = None

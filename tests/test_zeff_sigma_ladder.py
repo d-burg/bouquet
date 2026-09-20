@@ -77,27 +77,62 @@ def _write_ensemble(path, spread=0.08, nsamp=64):
 
 
 class TestReaderTiers:
-    def test_direct_with_zeff_err_uses_it(self, tmp_path):
+    def test_direct_with_both_routes_combines_them(self, tmp_path):
+        """Top rung: both routes present -> Z_eff is their mean and the
+        envelope combines both, so it is NOT the bare Zeff_err any more."""
         p = str(tmp_path / "new_direct.cdf")
         psi, zeff = _write_direct(p, with_zeff_err=True)
         r = read_ida(p)
-        assert r.sigma_Zeff_source == "Zeff_err"
-        np.testing.assert_allclose(r.sigma_Zeff, 0.09 * zeff, rtol=1e-12)
+        assert r.sigma_Zeff_source == "VB+CER"
+        # the fixture's carbon is exactly consistent, so the VALUE is
+        # unchanged by averaging; only the envelope moves
+        np.testing.assert_allclose(r.Zeff, zeff, rtol=1e-12)
+        vb, cer = 0.09 * zeff, r.sigma_Zeff_carbon
+        np.testing.assert_allclose(
+            r.sigma_Zeff, np.sqrt((0.5 * vb) ** 2 + (0.5 * cer) ** 2),
+            rtol=1e-12)
+        # consistent routes -> no inflation
+        assert np.median(r.ni_route_chi) < 1.6
 
-    def test_old_direct_without_zeff_err_reports_none(self, tmp_path):
+    def test_direct_without_zeff_err_falls_to_the_carbon_rung(self, tmp_path):
+        """VB rung gone -> CER alone carries Z_eff, value AND envelope."""
         p = str(tmp_path / "old_direct.cdf")
         _write_direct(p, with_zeff_err=False)
         r = read_ida(p)
-        assert r.sigma_Zeff is None
-        assert r.sigma_Zeff_source == "none"
+        assert r.sigma_Zeff_source == "CER"
+        np.testing.assert_allclose(r.sigma_Zeff, r.sigma_Zeff_carbon,
+                                   rtol=1e-12)
+        assert r.ni_route_chi is None
+
+    def test_direct_without_carbon_falls_to_the_vb_rung(self, tmp_path):
+        p = str(tmp_path / "vbonly.cdf")
+        psi, zeff = _write_direct(p, with_zeff_err=True, with_carbon=False)
+        r = read_ida(p)
+        assert r.sigma_Zeff_source == "VB"
+        np.testing.assert_allclose(r.sigma_Zeff, 0.09 * zeff, rtol=1e-12)
+        assert r.ni_route_chi is None
+
+    def test_ni_is_always_the_resolved_zeff_s_own_ni(self, tmp_path):
+        """The invariant the single ladder exists to protect: whatever rung
+        wins, ni(Z_eff_resolved) == the ni actually returned."""
+        from bouquet.physics import main_ion_density_from_zeff
+        for kw in ({"with_zeff_err": True}, {"with_zeff_err": False},
+                   {"with_zeff_err": True, "with_carbon": False}):
+            q = str(tmp_path / f"inv{len(kw)}{kw.get('with_carbon', 1)}.cdf")
+            _write_direct(q, **kw)
+            r = read_ida(q)
+            np.testing.assert_allclose(
+                r.ni, main_ion_density_from_zeff(r.ne, r.Zeff, 6.0),
+                rtol=1e-12)
 
     def test_ensemble_uses_sample_spread(self, tmp_path):
         p = str(tmp_path / "ens.cdf")
         psi, zeff, spread = _write_ensemble(p)
         r = read_ida(p, sigma_method="std")
-        assert r.sigma_Zeff_source == "ensemble-samples"
+        assert r.sigma_Zeff_source == "VB+CER"
         frac = np.median(r.sigma_Zeff / r.Zeff)
-        assert frac == pytest.approx(spread, rel=0.25)   # 64 samples
+        # the combined envelope is TIGHTER than either route alone
+        assert frac < spread
 
     def test_carbon_crosscheck_reports_zero_on_a_consistent_file(self, tmp_path, capsys):
         p = str(tmp_path / "cons.cdf")

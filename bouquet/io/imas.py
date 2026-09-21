@@ -63,6 +63,14 @@ SAWTOOTH_SOURCE_INDEX = 701
 # FixedComponentsConfig.j_RF. See the "revisit RF" flag in the project notes
 # if/when internal EC/IC/LH summation is wanted.
 
+# core_sources identifier.index -> label, for the diagnostic decomposition read
+# by read_fuse_currents(). An index missing here is kept under 'index_<n>'
+# rather than dropped, so a source type FUSE starts writing cannot go unnoticed.
+CURRENT_SOURCE_LABELS = {
+    2: "nbi", 3: "ec", 4: "lh", 5: "ic", 6: "fusion",
+    7: "ohmic", 13: "bootstrap", 701: "sawteeth",
+}
+
 
 def _nearest_index(time_array, t: Optional[float], what: str) -> int:
     """Index of the slice nearest ``t`` (seconds) in ``time_array``."""
@@ -737,6 +745,79 @@ def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impu
             sigma_ti, ida, ni_fast_meta)
 
 
+def _source_slice(profiles_1d, T):
+    """Slice of a core_sources source nearest ``T``, indexed on its OWN time array.
+
+    ``core_sources.time`` and a source's ``profiles_1d`` can differ in length --
+    FUSE's sawteeth source carries one fewer slice than the parent grid -- so the
+    parent's nearest-index is off by one for those. Returns None if the source
+    carries no per-slice time.
+    """
+    times = [p.get("time") for p in profiles_1d]
+    if not times or any(t is None for t in times):
+        return None
+    return profiles_1d[int(np.argmin(np.abs(np.asarray(times, float) - T)))]
+
+
+def read_fuse_currents(dd: dict, time: Optional[float] = None) -> dict:
+    """FUSE's current profiles at ``time``, exactly as dd_sim stores them.
+
+    Aggregates, from ``core_profiles.profiles_1d[t]``. Parallel is <j.B>/B0;
+    ``j_tor`` is the only toroidal entry. Nothing is converted or derived::
+
+        j_total          total parallel current
+        j_ohmic          inductive part      (parallel)
+        j_bootstrap      bootstrap part      (parallel)
+        j_non_inductive  j_total - j_ohmic   (parallel)
+        j_tor            total toroidal current
+        q                safety factor, core_profiles' own (positive; the
+                         equilibrium IDS stores q with the opposite sign)
+
+    Sources, from ``core_sources.source[*].profiles_1d[t].j_parallel`` -- every
+    source carrying one, summed over the sources sharing an ``identifier.index``
+    and keyed by CURRENT_SOURCE_LABELS (ohmic 7, bootstrap 13, nbi 2, ec 3, lh 4,
+    ic 5, fusion 6, sawteeth 701; an unlisted index keeps ``index_<n>``).
+    All-zero sources are dropped. Each source is indexed on its own
+    ``profiles_1d[].time`` (see _source_slice), not the parent grid.
+
+    Returns ``{'time', 'psi_norm', 'rho_tor_norm', <aggregates present>,
+    'sources': {label: array}, 'source_indices': {label: index}}``.
+    """
+    cp_ids = dd["core_profiles"]
+    ic = _nearest_index(cp_ids["time"], time, "core_profiles")
+    cp = cp_ids["profiles_1d"][ic]
+    t = float(cp_ids["time"][ic])
+
+    out = {"time": t}
+    grid = cp.get("grid", {})
+    for key in ("psi_norm", "rho_tor_norm"):
+        if key in grid:
+            out[key] = np.asarray(grid[key], dtype=float)
+    for key in ("j_total", "j_ohmic", "j_bootstrap", "j_non_inductive", "j_tor", "q"):
+        if key in cp:
+            out[key] = np.asarray(cp[key], dtype=float)
+    n = out["j_total"].size if "j_total" in out else None
+
+    sources, indices = {}, {}
+    for s in dd.get("core_sources", {}).get("source", []):
+        pr = s.get("profiles_1d")
+        if not pr:
+            continue
+        sl = _source_slice(pr, t)
+        if sl is None or "j_parallel" not in sl:
+            continue
+        j_par = np.asarray(sl["j_parallel"], dtype=float)
+        if not np.any(j_par) or (n is not None and j_par.size != n):
+            continue
+        idx = s.get("identifier", {}).get("index")
+        label = CURRENT_SOURCE_LABELS.get(idx, f"index_{idx}")
+        sources[label] = sources[label] + j_par if label in sources else j_par
+        indices[label] = idx
+    out["sources"] = sources
+    out["source_indices"] = indices
+    return out
+
+
 def read_imas_baseline(
     source: "ImasSource",
     fixed: Optional["FixedComponentsConfig"] = None,
@@ -837,6 +918,11 @@ def read_imas_baseline(
                         float(np.nanmax(np.abs(jsaw))))
     sawtooth["active"] = bool(sawtooth["present"]
                               and sawtooth["j_par_max_abs"] > 0.0)
+
+    # FUSE's own current profiles, as dd_sim stores them (parallel, unconverted).
+    # Diagnostics only -- does NOT feed the solve: j_inductive below stays the
+    # j_phi residual, unchanged.
+    fuse_currents = read_fuse_currents(dd, T)
 
     # --- kinetic profiles + Zeff + fast pressure ---
     el = cp["electrons"]
@@ -1099,6 +1185,7 @@ def read_imas_baseline(
         aux=aux,
         p_fast_meta=p_fast_meta,
         sawtooth=sawtooth,
+        fuse_currents=fuse_currents,
     )
 
 

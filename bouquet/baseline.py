@@ -164,6 +164,13 @@ class Baseline:
     # user may add/override via UncertaintyConfig.aux_baselines.
     aux: Optional[dict] = None
 
+    # IMAS path only: FUSE's own current profiles as dd_sim stores them --
+    # j_total/j_ohmic/j_bootstrap/j_non_inductive (parallel), j_tor, q, and every
+    # core_sources entry carrying a j_parallel. Unconverted and underived, so it
+    # does NOT share this class's toroidal convention. Nothing in the solve reads
+    # it. See bouquet.io.imas.read_fuse_currents for the keys.
+    fuse_currents: Optional[dict] = None
+
     # curated reconstruction quality metrics (reconstruction path only): a flat
     # dict consumed by Bouquet's reconstruction summary -- Ip/l_i target-vs-
     # achieved, boundary RMS/max, q0/q95, shape, and a pass/fail verdict.

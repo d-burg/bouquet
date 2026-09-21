@@ -678,16 +678,6 @@ def resolve_uncertainty(config, baseline) -> dict:
             stacklevel=2,
         )
 
-    # --- who draws ni when the zeff channel is active ------------------------
-    # ANY IDA route wins: whenever sigma_ni is a real envelope -- an IDA
-    # ni_source route or an explicit array -- ni is drawn from it and the
-    # Z_eff channel stops deriving ni.  Only the flat ni_scalar_sigma
-    # fallback, which carries no dilution information, hands ni back to the
-    # Z_eff route.  An explicit UncertaintyConfig.ni_from_zeff still wins.
-    _nfz = getattr(unc, "ni_from_zeff", None)
-    out["ni_from_zeff"] = (bool(_won["ni"].startswith("scalar"))
-                           if _nfz is None else bool(_nfz))
-
     # --- switchboard: resolve the auxiliary perturbed profiles ---------------
     # A sigma entry enables a profile. Baseline = manual (aux_baselines) over
     # source-provided (baseline.aux). Warn + skip if the baseline is absent or
@@ -745,6 +735,35 @@ def resolve_uncertainty(config, baseline) -> dict:
             for _sk in _z_meta["skipped"]:
                 print(f"[sigma]   {_sk['tier']} tier skipped: "
                       f"{_sk['reason']}")
+
+    # --- who draws ni when the zeff channel is active ------------------------
+    # read_ida resolves ni FROM its Z_eff (ni = ne (Z - Zeff)/(Z - 1)), so when
+    # the baseline ni and Z_eff are that one resolution -- the IDA-resolved
+    # envelope on both -- ni is derived per draw from the drawn (ne, Zeff):
+    # drawing them apart gave each draw a Z_eff its densities contradict.
+    # zeff_dne carries the CER route's ne dependence, so the derived ni has
+    # sigma_ni.  Any other real ni envelope (an explicit array, a FUSE
+    # Z_eff under zeff_from_fuse) keeps ni its own channel; the flat
+    # ni_scalar_sigma fallback, which carries no dilution information,
+    # derives it.  An explicit UncertaintyConfig.ni_from_zeff still wins.
+    _ida_pair = bool(
+        ida_sig is not None and _won["ni"].startswith("IDA")
+        and (out["zeff_sigma_tier"] or {}).get("tier") == "IDA-resolved"
+        and "zeff" not in (unc.aux_baselines or {})
+        and not getattr(src, "zeff_from_fuse", False)
+        and (isinstance(src, ReconstructionSource)
+             or "ida_profiles" in (baseline.aux or {}))
+        and getattr(ida, "zeff_dne", None) is not None)
+    _nfz = getattr(unc, "ni_from_zeff", None)
+    out["ni_from_zeff"] = (bool(_won["ni"].startswith("scalar") or _ida_pair)
+                           if _nfz is None else bool(_nfz))
+    out["zeff_dne"] = (_to_kin(ida.zeff_dne)
+                       if _ida_pair and out["ni_from_zeff"] else None)
+    if bool(getattr(unc, "log_sigma_sources", True)) and "zeff" in user_sigmas:
+        print("  [sigma-source] ni per draw   <- "
+              + ("derived from the drawn (ne, Z_eff)"
+                 + (" (one IDA resolution)" if out["zeff_dne"] is not None else "")
+                 if out["ni_from_zeff"] else "its own sigma_ni (independent of Z_eff)"))
 
     resolved_sigma, resolved_base = {}, {}
     for name, sig in user_sigmas.items():

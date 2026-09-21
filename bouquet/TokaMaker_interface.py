@@ -1696,6 +1696,7 @@ def perturb_kinetic_equilibrium(
     aux_baselines=None,
     aux_length_scales=None,
     ni_from_zeff=True,
+    zeff_dne=None,
     max_proxy_draws=500,
     bnd_diag_callback=None,
     # Differential bootstrap (DIFF_BS=1 mode):
@@ -1942,6 +1943,9 @@ def perturb_kinetic_equilibrium(
     # ni_from_zeff=False opts out (ni drawn from its own sigma_ni, e.g. a
     # measured IDA ni_source envelope); Zeff is still drawn below as a normal
     # aux channel, bounded by the same Z_imp, and drives the bootstrap either way.
+    # zeff_dne (dZeff/dne, kinetic grid; bouquet.io.ida.IDAProfiles.zeff_dne)
+    # couples the Z_eff draw to the ne draw: its ne term is taken out of
+    # sigma_zeff and added back as zeff_dne * (ne_perturb - ne).
     _zeff_chan = bool(aux_sigmas) and ('zeff' in aux_sigmas) \
         and (aux_baselines or {}).get('zeff') is not None
     _zeff_active = bool(ni_from_zeff) and _zeff_chan
@@ -2005,12 +2009,19 @@ def perturb_kinetic_equilibrium(
             from .physics import main_ion_density_from_zeff
             _zb = np.asarray(aux_baselines['zeff'], dtype=float)
             _zs = np.asarray(aux_sigmas['zeff'], dtype=float)
+            if zeff_dne is not None:
+                _zs = np.sqrt(np.maximum(
+                    _zs ** 2 - (np.asarray(zeff_dne, dtype=float) * sigma_ne) ** 2,
+                    0.0))
             _z0 = float(np.max(np.abs(_zb))) or 1.0
             _zeff_draw = np.atleast_1d(np.asarray(np.squeeze(
                 generate_perturbed_GPR(
                     psi_kin, _zb / _z0, _zs / _z0,
                     length_scale=(aux_length_scales or {}).get('zeff', 0.4),
                     n_samples=1, rng=rng)) * _z0, dtype=float))
+            if zeff_dne is not None:
+                _zeff_draw = _zeff_draw + np.asarray(zeff_dne, dtype=float) * (
+                    ne_perturb - ne)
             # The single-impurity window (physics.zeff_bounds): outside it
             # ni or nz goes negative and Z_imp / p_imp lose their meaning.
             _z_lo, _z_hi = _zeff_window(ne_perturb)
@@ -3629,6 +3640,7 @@ def generate_bouquet(
     aux_baselines=None,
     aux_length_scales=None,
     ni_from_zeff=True,
+    zeff_dne=None,
     progress_callback=None,
     source_kind=None,
     capture_live_eq=True,
@@ -5224,6 +5236,7 @@ def generate_bouquet(
                 aux_baselines=aux_baselines,
                 aux_length_scales=aux_length_scales,
                 ni_from_zeff=ni_from_zeff,
+                zeff_dne=zeff_dne,
                 max_proxy_draws=max_proxy_draws,
                 p_thresh=p_thresh,
                 # the run's single Generator -- every GPR draw in this draw

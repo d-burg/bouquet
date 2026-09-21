@@ -95,6 +95,11 @@ class IDAProfiles:
     #: shots, i.e. shot-dependent and mostly within the measured sigma_Zeff;
     #: a large value flags the file, not the workflow.
     zeff_carbon_dev: Optional[dict] = None
+    #: dZeff/dne of the resolved Z_eff at fixed nC: ``-w_c (Zeff_CER - 1)/ne``,
+    #: zero without the CER route.  ``sigma_Zeff`` carries this ne term, so a
+    #: draw deriving ni from its own (ne, Zeff) adds ``zeff_dne * dne`` and
+    #: draws the rest; ni then carries ``sigma_ni`` exactly (to first order).
+    zeff_dne: Optional[np.ndarray] = None
 
 
 @dataclass
@@ -524,6 +529,9 @@ def read_ida(
             var_ni = var_ni + np.maximum(d_n ** 2 - var_dn, 0.0) / 4.0
             ni_route_chi = _chi(d_n, var_dn)
 
+        zeff_dne = (-w_c * (zeff_cer - 1.0) / np.clip(ne, 1e10, None)
+                    if w_c else np.zeros_like(ne))
+
         if zeff_sigma_from_ne:
             # Nothing to propagate: both channels inherit ne's fractional
             # error.
@@ -531,6 +539,7 @@ def read_ida(
                 _frac = np.where(ne > 0, sigma_ne / ne, 0.0)
             var_ni = (np.abs(ni) * _frac) ** 2
             var_zeff = (np.abs(Zeff) * _frac) ** 2
+            zeff_dne = np.zeros_like(ne)
 
         sigma_ni = np.sqrt(var_ni)
         sigma_Zeff = np.sqrt(var_zeff)
@@ -549,6 +558,7 @@ def read_ida(
         zeff_carbon_dev=zeff_carbon_dev,
         ni_route_chi=ni_route_chi,
         zeff_route_chi=zeff_route_chi,
+        zeff_dne=zeff_dne,
     )
 
 

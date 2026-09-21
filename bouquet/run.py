@@ -3433,6 +3433,7 @@ class Bouquet:
                 aux_length_scales=env.get("aux_length_scales"),
                 # Who draws ni when zeff is active (see UncertaintyConfig).
                 ni_from_zeff=env.get("ni_from_zeff", True),
+                zeff_dne=env.get("zeff_dne"),
                 progress_callback=progress_callback,
                 # Provenance marker stored on the baseline for robust path
                 # detection in plotting (independent of the aux switchboard).

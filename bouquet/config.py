@@ -417,11 +417,12 @@ class UncertaintyConfig:
     # Who draws ni when the zeff channel is active. True: ni is DERIVED per draw
     # from the drawn (ne, Zeff) by quasineutrality and sigma_ni is unused (one
     # mutually consistent ne/ni/Zeff/nz set per draw). False: ni is drawn from
-    # its own sigma_ni -- use this when sigma_ni is a real measured envelope (an
-    # IDA ni_source route), at the cost of ni and Zeff no longer being mutually
-    # consistent within a draw. None (default) = auto: False whenever the ni
-    # channel resolved to a real envelope (IDA or explicit sigma_profiles['ni']),
-    # True when sigma_ni is only the flat ni_scalar_sigma fallback. Zeff is
+    # its own sigma_ni, at the cost of ni and Zeff no longer being mutually
+    # consistent within a draw. None (default) = auto: True when sigma_ni is
+    # only the flat ni_scalar_sigma fallback, or when ni and Zeff are one IDA
+    # resolution (read_ida derives ni from its Zeff; the draw then keeps
+    # sigma_ni via IDAProfiles.zeff_dne); False for any other real ni envelope
+    # (explicit sigma_profiles['ni'], ImasSource.zeff_from_fuse). Zeff is
     # perturbed and drives the bootstrap either way.
     ni_from_zeff: Optional[bool] = None
 

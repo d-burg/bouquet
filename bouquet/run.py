@@ -93,6 +93,7 @@ class Bouquet:
                   ida_path=None, LCFS_geqdsk=None, impurity_Z=6.0,
                   ni_source="all", zeff_from_fuse=False,
                   kinetic_source=None, anchor_pressure_to_equilibrium=False,
+                  sawteeth_in_ohmic=False,
                   **solver_kwargs) -> "Bouquet":
         """Minimal constructor for the IMAS/OMAS path (no reconstruction).
 
@@ -106,6 +107,8 @@ class Bouquet:
         baseline ni and its propagated sigma; ``zeff_from_fuse=True`` keeps the
         FUSE Z_eff instead of IDA's. ``kinetic_source`` defaults to
         ``"ida_hybrid"`` when an ``ida_path`` is given, else ``"fuse"``.
+        ``sawteeth_in_ohmic=True`` leaves the dd's sawteeth current in the
+        inductive (ohmic) distribution instead of holding it fixed in j_other.
 
         ``LCFS_geqdsk`` is OPTIONAL: a g-file whose LCFS replaces the source
         boundary outline as the isoflux target, for when you have a better
@@ -120,6 +123,7 @@ class Bouquet:
             source=ImasSource(ids_path=ids_path, time=time, ida_path=ida_path,
                               impurity_Z=impurity_Z, ni_source=ni_source,
                               zeff_from_fuse=zeff_from_fuse,
+                              sawteeth_in_ohmic=sawteeth_in_ohmic,
                               LCFS_geqdsk=LCFS_geqdsk),
             solver=SolverConfig(mesh_path=mesh, **solver_kwargs),
             generation=GenerationConfig(n_equils=n_draws,
@@ -700,12 +704,12 @@ class Bouquet:
         j_phi = np.asarray(bl.j_phi, dtype=float)
         dropped = {
             name: float(np.max(np.abs(np.asarray(getattr(bl, name), dtype=float))))
-            for name in ("j_BS", "j_NBI", "j_RF")
+            for name in ("j_BS", "j_NBI", "j_RF", "j_other")
             if getattr(bl, name, None) is not None
         }
         bl.j_inductive = j_phi.copy()
         bl.j_BS = np.zeros_like(j_phi)
-        for name in ("j_NBI", "j_RF"):
+        for name in ("j_NBI", "j_RF", "j_other"):
             if getattr(bl, name, None) is not None:
                 setattr(bl, name, np.zeros_like(j_phi))
         gc.recalculate_j_BS = False          # already forced in prepare_baseline
@@ -2227,13 +2231,12 @@ class Bouquet:
         # bl.j_phi and every draw inherits a fixed (SWB - source_jBS) offset.
         #
         # Fix: keep the inductive component as the reader's j_inductive.
-        # NOTE that is a RESIDUAL, j_tor - j_BS - j_NBI - j_RF (imas.py), NOT
-        # to_toroidal(j_ohmic): on postdictive FUSE files the two agree to
-        # ~0.4% of Ip at flattop, but any unmodelled non-inductive term the
-        # dd carries (verified: NOT the sawteeth source, which nets exactly
-        # zero current and is already folded into FUSE's diffused j_ohmic;
-        # the observed gap is a near-axis j_non_inductive artifact) lands in
-        # this component and is what ohm_scale rescales.  Recompute the
+        # NOTE that is a RESIDUAL, j_tor - j_BS - j_NBI - j_RF - j_other
+        # (imas.py), NOT to_toroidal(j_ohmic): every core_sources current is
+        # held fixed in its own channel (sawteeth in j_other unless
+        # ImasSource.sawteeth_in_ohmic), but the dd's unattributed current,
+        # j_total - (ohmic + bootstrap + sources), lands in this component and
+        # is what ohm_scale rescales (imas.py prints its size).  Recompute the
         # bootstrap via
         # SWB, and rebuild the total as ohmic + SWB + fixed. We do NOT make the
         # inductive a residual against SWB (an earlier version did, which forced
@@ -2273,7 +2276,7 @@ class Bouquet:
             j_ind = np.asarray(bl.j_inductive, dtype=float)   # FUSE ohmic (kept)
             j_BS_src = np.asarray(bl.j_BS, dtype=float)        # source bootstrap (FUSE)
             FUSE_tot = np.asarray(bl.j_phi, dtype=float)       # source total (j_tor)
-            j_fixed = FUSE_tot - j_ind - j_BS_src              # = j_NBI + j_RF
+            j_fixed = FUSE_tot - j_ind - j_BS_src              # = j_NBI + j_RF + j_other
             # 'ohmic' mode: freeze the ANCHOR geometry now. solve_with_bootstrap
             # iterates its own GS solves (generic inductive seed + its bootstrap)
             # and leaves mygs on a different equilibrium; integrating FUSE's
@@ -2897,7 +2900,8 @@ class Bouquet:
         ax[2].plot(pe, np.asarray(bl.j_inductive) / 1e6, "-", color="tab:orange",
                    label=r"$j_{ind}$")
         ax[2].plot(pe, np.asarray(bl.j_BS) / 1e6, "-", color="tab:green", label=r"$j_{BS}$")
-        for nm, arr in (("j_NBI", bl.j_NBI), ("j_RF", bl.j_RF)):
+        for nm, arr in (("j_NBI", bl.j_NBI), ("j_RF", bl.j_RF),
+                        ("j_other", getattr(bl, "j_other", None))):
             if arr is not None and np.any(np.asarray(arr)):
                 ax[2].plot(pe, np.asarray(arr) / 1e6, "--", lw=1, label=nm)
         ax[2].set_ylabel(r"$j$ [MA/m$^2$]"); ax[2].set_xlabel(r"$\psi_N$")
@@ -3426,6 +3430,7 @@ class Bouquet:
                 jphi_diff=getattr(bl, "jphi_diff", None),
                 j_NBI=bl.j_NBI,
                 j_RF=bl.j_RF,
+                j_other=getattr(bl, "j_other", None),
                 # Switchboard: auxiliary perturbed profiles -- rotation /
                 # transport channels (passive) + Zeff (active).
                 aux_sigmas=env.get("aux_sigmas"),

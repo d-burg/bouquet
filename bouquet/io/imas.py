@@ -17,14 +17,15 @@ Field mapping (verified against a D3D FUSE run)::
     core_profiles.profiles_1d[t].electrons.{density_thermal,temperature}
     core_profiles.profiles_1d[t].ion[*].{density_thermal,temperature,element[].z_n}
     core_profiles.profiles_1d[t].{electrons,ion[*]}.pressure_fast_{perpendicular,parallel}
-    core_sources.source[*].profiles_1d[t].j_parallel          -> beam-source j_NBI only
+    core_sources.source[*].profiles_1d[t].j_parallel          -> j_NBI (beam), j_RF (EC/LH/IC),
+                                                                 j_other (fusion, sawteeth, unlisted)
 
 Currents are converted parallel->toroidal (see :func:`bouquet.physics.parallel_to_toroidal`)
 via the per-surface factor c = j_tor/j_total, and fast pressure is isotropized
 (see :func:`bouquet.physics.isotropize_fast_pressure`). The total j_phi is set to
 the authoritative toroidal ``j_tor`` and the inductive component is taken as the
-residual ``j_phi - j_BS - j_NBI - j_RF`` so the decomposition sums exactly and Ip
-is preserved.
+residual ``j_phi - j_BS - j_NBI - j_RF - j_other`` so the decomposition sums
+exactly and Ip is preserved.
 
 Note: ``j_BS`` read here is the FUSE bootstrap baseline, but it is *overridden*
 when ``GenerationConfig.recalculate_j_BS`` is True -- bouquet then recomputes
@@ -58,10 +59,6 @@ NBI_SOURCE_INDEX = 2          # neutral beam injection -> summed into j_NBI
 # time?" -- for the closure_channel="sawtooth_bootstrap" gate, which pins q0
 # only where sawteeth make q0 ~ 1 a physical fact rather than a model artefact.
 SAWTOOTH_SOURCE_INDEX = 701
-# NOTE: j_RF is NOT computed internally (RF is the least-common input). It is
-# left as zeros and accepted as a user-supplied array via
-# FixedComponentsConfig.j_RF. See the "revisit RF" flag in the project notes
-# if/when internal EC/IC/LH summation is wanted.
 
 # core_sources identifier.index -> label, for the diagnostic decomposition read
 # by read_fuse_currents(). An index missing here is kept under 'index_<n>'
@@ -69,6 +66,17 @@ SAWTOOTH_SOURCE_INDEX = 701
 CURRENT_SOURCE_LABELS = {
     2: "nbi", 3: "ec", 4: "lh", 5: "ic", 6: "fusion",
     7: "ohmic", 13: "bootstrap", 701: "sawteeth",
+}
+
+# Which Baseline channel each labelled source lands in (read_imas_baseline).
+# ohmic and bootstrap are not listed: the inductive part is the residual
+# j_tor - j_BS - (fixed channels), and j_BS is core_profiles' own bootstrap.
+# Every other source carrying a j_parallel is held FIXED across draws: beam in
+# j_NBI, EC/LH/IC in j_RF, and fusion, sawteeth and any unlisted index in
+# j_other.  ImasSource.sawteeth_in_ohmic moves sawteeth to the inductive part.
+CURRENT_SOURCE_CHANNELS = {
+    "nbi": "j_NBI", "ec": "j_RF", "lh": "j_RF", "ic": "j_RF",
+    "fusion": "j_other", "sawteeth": "j_other",
 }
 
 
@@ -745,18 +753,23 @@ def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impu
             sigma_ti, ida, ni_fast_meta)
 
 
-def _source_slice(profiles_1d, T):
-    """Slice of a core_sources source nearest ``T``, indexed on its OWN time array.
+def _source_slice(profiles_1d, T, parent_time=None):
+    """``(slice, time)`` of a core_sources source nearest ``T``, on its OWN time array.
 
     ``core_sources.time`` and a source's ``profiles_1d`` can differ in length --
     FUSE's sawteeth source carries one fewer slice than the parent grid -- so the
-    parent's nearest-index is off by one for those. Returns None if the source
-    carries no per-slice time.
+    parent's nearest-index is off by one for those.  A source without per-slice
+    times falls back to ``parent_time`` only when it has one profile per parent
+    slice.  Returns ``(None, None)`` when neither applies.
     """
     times = [p.get("time") for p in profiles_1d]
-    if not times or any(t is None for t in times):
-        return None
-    return profiles_1d[int(np.argmin(np.abs(np.asarray(times, float) - T)))]
+    if times and all(t is not None for t in times):
+        i = int(np.argmin(np.abs(np.asarray(times, float) - T)))
+        return profiles_1d[i], float(times[i])
+    if parent_time is not None and len(parent_time) == len(profiles_1d):
+        i = int(np.argmin(np.abs(np.asarray(parent_time, float) - T)))
+        return profiles_1d[i], float(parent_time[i])
+    return None, None
 
 
 def read_fuse_currents(dd: dict, time: Optional[float] = None) -> dict:
@@ -777,11 +790,15 @@ def read_fuse_currents(dd: dict, time: Optional[float] = None) -> dict:
     source carrying one, summed over the sources sharing an ``identifier.index``
     and keyed by CURRENT_SOURCE_LABELS (ohmic 7, bootstrap 13, nbi 2, ec 3, lh 4,
     ic 5, fusion 6, sawteeth 701; an unlisted index keeps ``index_<n>``).
-    All-zero sources are dropped. Each source is indexed on its own
-    ``profiles_1d[].time`` (see _source_slice), not the parent grid.
+    All-zero sources are dropped. Each source is taken at the core_profiles
+    slice time on its own ``profiles_1d[].time`` (see _source_slice), not the
+    parent grid.  A source on another radial grid is interpolated onto the
+    core_profiles one in ``rho_tor_norm`` (or ``psi_norm``); one that cannot be
+    placed is listed in ``skipped`` with the reason, never dropped silently.
 
     Returns ``{'time', 'psi_norm', 'rho_tor_norm', <aggregates present>,
-    'sources': {label: array}, 'source_indices': {label: index}}``.
+    'sources': {label: array}, 'source_indices': {label: index},
+    'source_times': {label: time used}, 'skipped': [(name, index, reason)]}``.
     """
     cp_ids = dd["core_profiles"]
     ic = _nearest_index(cp_ids["time"], time, "core_profiles")
@@ -798,23 +815,45 @@ def read_fuse_currents(dd: dict, time: Optional[float] = None) -> dict:
             out[key] = np.asarray(cp[key], dtype=float)
     n = out["j_total"].size if "j_total" in out else None
 
-    sources, indices = {}, {}
-    for s in dd.get("core_sources", {}).get("source", []):
+    cs = dd.get("core_sources", {})
+    sources, indices, times, skipped = {}, {}, {}, []
+    for s in cs.get("source", []):
         pr = s.get("profiles_1d")
         if not pr:
             continue
-        sl = _source_slice(pr, t)
-        if sl is None or "j_parallel" not in sl:
+        idx = s.get("identifier", {}).get("index")
+        name = s.get("identifier", {}).get("name", "?")
+        sl, ts = _source_slice(pr, t, cs.get("time"))
+        if sl is None:
+            if any("j_parallel" in p for p in pr):
+                skipped.append((name, idx, "no per-slice time and not on the "
+                                           "core_sources time grid"))
+            continue
+        if "j_parallel" not in sl:
             continue
         j_par = np.asarray(sl["j_parallel"], dtype=float)
-        if not np.any(j_par) or (n is not None and j_par.size != n):
+        if not np.any(j_par):
             continue
-        idx = s.get("identifier", {}).get("index")
+        if not np.all(np.isfinite(j_par)):
+            skipped.append((name, idx, "non-finite j_parallel"))
+            continue
+        if n is not None and j_par.size != n:
+            sg = sl.get("grid", {})
+            key = next((k for k in ("rho_tor_norm", "psi_norm")
+                        if k in sg and k in out and len(sg[k]) == j_par.size), None)
+            if key is None:
+                skipped.append((name, idx, f"{j_par.size} points vs core_profiles' "
+                                           f"{n}, no shared radial grid"))
+                continue
+            j_par = np.interp(out[key], np.asarray(sg[key], float), j_par)
         label = CURRENT_SOURCE_LABELS.get(idx, f"index_{idx}")
         sources[label] = sources[label] + j_par if label in sources else j_par
         indices[label] = idx
+        times[label] = ts
     out["sources"] = sources
     out["source_indices"] = indices
+    out["source_times"] = times
+    out["skipped"] = skipped
     return out
 
 
@@ -885,44 +924,76 @@ def read_imas_baseline(
 
     j_BS = to_toroidal(j_boot)
 
-    # --- NBI: sum beam-source parallel currents, then convert ---
-    src_ids = dd.get("core_sources", {})
-    isrc = _nearest_index(src_ids["time"], T, "core_sources") if src_ids.get("time") else ic
-    jnbi_par = np.zeros(n)
-    for s in src_ids.get("source", []):
-        if s.get("identifier", {}).get("index") == NBI_SOURCE_INDEX:
-            pr = s.get("profiles_1d", [])
-            if pr:
-                idx = isrc if len(pr) > isrc else 0
-                jnbi_par = jnbi_par + np.asarray(pr[idx]["j_parallel"], dtype=float)
-    j_NBI = to_toroidal(jnbi_par)
-    j_RF = np.zeros(n)   # never computed internally; user-supplied only
+    # --- driven currents: every core_sources j_parallel, held fixed ----------
+    # read_fuse_currents takes each source at the core_profiles slice time on
+    # its OWN time array (the sawteeth source is one slice shorter than the
+    # parent grid, so a parent index lands a slice late) and sums the sources
+    # sharing an identifier index.  Each lands in its CURRENT_SOURCE_CHANNELS
+    # channel; ohmic and bootstrap stay out (the inductive part is the residual
+    # below, j_BS is core_profiles' own).
+    fuse_currents = read_fuse_currents(dd, T)
+    sawteeth_in_ohmic = bool(getattr(source, "sawteeth_in_ohmic", False))
+    _chan_par = {"j_NBI": np.zeros(n), "j_RF": np.zeros(n), "j_other": np.zeros(n)}
+    channels = {}
+    for _lab, _jp in fuse_currents["sources"].items():
+        if _lab in ("ohmic", "bootstrap"):
+            continue
+        if _lab == "sawteeth" and sawteeth_in_ohmic:
+            channels[_lab] = "j_inductive"
+            continue
+        _ch = CURRENT_SOURCE_CHANNELS.get(_lab, "j_other")
+        channels[_lab] = _ch
+        _chan_par[_ch] = _chan_par[_ch] + _jp
+    fuse_currents["channels"] = channels
+    fuse_currents["sawteeth_in_ohmic"] = sawteeth_in_ohmic
+    import warnings
+    _unlisted = sorted(l for l in channels if l.startswith("index_"))
+    if _unlisted:
+        warnings.warn(f"core_sources carries j_parallel under unlisted "
+                      f"identifier index(es) {_unlisted}: held fixed in j_other")
+    for _nm, _ix, _why in fuse_currents["skipped"]:
+        warnings.warn(f"core_sources '{_nm}' (index {_ix}) carries a j_parallel "
+                      f"that could not be read ({_why}); it stays in the "
+                      f"inductive residual")
+    j_NBI = to_toroidal(_chan_par["j_NBI"])
+    j_RF = to_toroidal(_chan_par["j_RF"])
+    j_other = to_toroidal(_chan_par["j_other"])
+    # What no source accounts for: j_total - (ohmic + bootstrap + sources).
+    # It rides in the inductive residual; recorded so its size is visible.
+    _S = fuse_currents["sources"]
+    _accounted = (_S.get("ohmic", np.asarray(cp.get("j_ohmic", np.zeros(n)), float))
+                  + j_boot + sum(v for k, v in _S.items()
+                                 if k not in ("ohmic", "bootstrap")))
+    _unattr = j_total - _accounted
+    fuse_currents["unattributed_parallel"] = _unattr
+    _pk = float(np.max(np.abs(j_total))) or 1.0
+    print(f"  [currents] fixed: " + (", ".join(
+        f"{l}->{c} (peak {np.max(np.abs(_S[l])) / _pk:.1%})"
+        for l, c in channels.items()) or "none")
+        + f"; unattributed (rides in j_inductive) peak "
+          f"{np.max(np.abs(_unattr)) / _pk:.1%} of j_total")
 
     # --- sawtooth model presence/amplitude at this slice (gate input only) ----
-    # Read here because the dd (100s of MB) is not retained past this function.
     # "active" means the source EXISTS and carries a non-zero j_parallel at this
-    # time index: a declared-but-idle sawtooth source (all zeros before onset)
-    # must NOT admit a ramp slice to the q0 pin.
+    # slice: a declared-but-idle sawtooth source (all zeros before onset) must
+    # NOT admit a ramp slice to the q0 pin.  Same per-source slice as above.
+    src_ids = dd.get("core_sources", {})
     sawtooth = {"source_index": SAWTOOTH_SOURCE_INDEX, "present": False,
                 "j_par_max_abs": 0.0, "active": False, "q0_dd": None}
     for s in src_ids.get("source", []):
         if s.get("identifier", {}).get("index") == SAWTOOTH_SOURCE_INDEX:
             sawtooth["present"] = True
             pr = s.get("profiles_1d", [])
-            if pr:
-                jsaw = np.asarray(pr[isrc if len(pr) > isrc else 0]
-                                  .get("j_parallel", []), dtype=float)
+            sl, _ = (_source_slice(pr, fuse_currents["time"], src_ids.get("time"))
+                     if pr else (None, None))
+            if sl is not None:
+                jsaw = np.asarray(sl.get("j_parallel", []), dtype=float)
                 if jsaw.size and np.any(np.isfinite(jsaw)):
                     sawtooth["j_par_max_abs"] = max(
                         sawtooth["j_par_max_abs"],
                         float(np.nanmax(np.abs(jsaw))))
     sawtooth["active"] = bool(sawtooth["present"]
                               and sawtooth["j_par_max_abs"] > 0.0)
-
-    # FUSE's own current profiles, as dd_sim stores them (parallel, unconverted).
-    # Diagnostics only -- does NOT feed the solve: j_inductive below stays the
-    # j_phi residual, unchanged.
-    fuse_currents = read_fuse_currents(dd, T)
 
     # --- kinetic profiles + Zeff + fast pressure ---
     el = cp["electrons"]
@@ -1078,6 +1149,8 @@ def read_imas_baseline(
             j_NBI = _override(fixed.j_NBI, fixed.psi_N, psi_N)
         if fixed.j_RF is not None:
             j_RF = _override(fixed.j_RF, fixed.psi_N, psi_N)
+        if getattr(fixed, "j_other", None) is not None:
+            j_other = _override(fixed.j_other, fixed.psi_N, psi_N)
 
     # The deferred factor-of-3 warning: the convention was undeterminable AND the
     # fast pressure it scales is non-zero AND it came from the dd (a user-supplied
@@ -1090,7 +1163,7 @@ def read_imas_baseline(
     # Authoritative toroidal total; inductive absorbs the residual so the
     # decomposition sums exactly and Ip is preserved.
     j_phi = j_tor.copy()
-    j_inductive = j_phi - j_BS - j_NBI - j_RF
+    j_inductive = j_phi - j_BS - j_NBI - j_RF - j_other
 
     # --- pressure anchor ("diff" approach) + completeness validation ----------
     # The authoritative dd equilibrium pressure (GS-consistent total, incl.
@@ -1168,6 +1241,7 @@ def read_imas_baseline(
         provenance="imas",
         j_NBI=j_NBI,
         j_RF=j_RF,
+        j_other=j_other,
         p_fast=p_fast,
         z_fast=(z_fast if np.any(z_fast) else None),
         z2_fast=(z2_fast if np.any(z_fast) else None),

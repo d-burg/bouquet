@@ -1731,7 +1731,8 @@ def plot_input_vs_recon(run, npsi=80, max_dev_mm=10.0):
             _d = np.asarray(bl.jBS_diff, float)
             _jBS_eff = _jBS_eff + _to_jx(_d, _kin_x if _d.shape == _kin_x.shape else _blx)
         _j_ind_eff = j_sol - _jBS_eff
-        for _fx in (getattr(bl, "j_NBI", None), getattr(bl, "j_RF", None)):
+        for _fx in (getattr(bl, "j_NBI", None), getattr(bl, "j_RF", None),
+                    getattr(bl, "j_other", None)):
             if _fx is not None:
                 _fx = np.asarray(_fx, float)
                 _j_ind_eff = _j_ind_eff - _to_jx(

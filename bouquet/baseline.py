@@ -35,7 +35,7 @@ class Baseline:
     # --- required fields (no defaults) ---------------------------------
     # current-density grid + separated currents
     psi_N: "np.ndarray"
-    j_phi: "np.ndarray"            # total [A/m^2] = j_inductive + j_BS + j_NBI + j_RF
+    j_phi: "np.ndarray"            # total [A/m^2] = j_inductive + j_BS + j_NBI + j_RF + j_other
     j_inductive: "np.ndarray"     # ohmic part [A/m^2]   (perturbed via l_i matching)
     j_BS: "np.ndarray"            # bootstrap part [A/m^2] (recomputed per draw)
 
@@ -67,6 +67,9 @@ class Baseline:
     #   p_total     = p_thermal(perturbed) + p_fast
     j_NBI: Optional["np.ndarray"] = None    # beam-driven current [A/m^2]
     j_RF: Optional["np.ndarray"] = None     # RF-driven current [A/m^2]
+    # Other fixed driven current [A/m^2]: fusion-driven, sawteeth (unless
+    # ImasSource.sawteeth_in_ohmic) and unlisted core_sources indices.
+    j_other: Optional["np.ndarray"] = None
     p_fast: Optional["np.ndarray"] = None   # fast/beam pressure
 
     # How p_fast was reduced from the source's anisotropic fields, and how that
@@ -1057,7 +1060,8 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
 
     j_NBI = _resolve_fixed(fc.j_NBI, fc.psi_N, psi_N)
     j_RF = _resolve_fixed(fc.j_RF, fc.psi_N, psi_N)
-    j_inductive = j_phi - j_BS - j_NBI - j_RF   # == j_inductive_fit when NBI=RF=0
+    j_other = _resolve_fixed(getattr(fc, "j_other", None), fc.psi_N, psi_N)
+    j_inductive = j_phi - j_BS - j_NBI - j_RF - j_other   # == j_inductive_fit when all 0
     # Physical component convention: the inductive current is >= 0. On shots
     # with a strong pedestal the achieved total can dip BELOW the full-Sauter
     # bootstrap there, leaving a small negative residual (~1% of the core) --
@@ -1088,6 +1092,7 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
         provenance="reconstruction",
         j_NBI=j_NBI,
         j_RF=j_RF,
+        j_other=j_other,
         p_fast=p_fast,
         # SAME source as the value handed to the reconstruction above, so the
         # two paths activate together or not at all.  The draws read

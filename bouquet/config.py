@@ -231,6 +231,10 @@ class ImasSource:
     impurity_Z: float = 6.0            # machine impurity charge (carbon); ni dilution
     ni_source: str = "all"             # IDA ni route for ida_hybrid: "Zeff" | "CER" | "all"
     zeff_from_fuse: bool = False       # ida_hybrid: keep FUSE Z_eff instead of IDA's
+    # core_sources' sawteeth j_parallel: held fixed in Baseline.j_other (False), or
+    # left in the inductive residual -- the ohmic distribution the draws perturb and
+    # the ohmic closure rescales -- (True).
+    sawteeth_in_ohmic: bool = False
     # OPTIONAL. A gEQDSK whose LCFS replaces the dd boundary outline as the
     # isoflux separatrix target. Leave None to use the source's own boundary.
     # Supply one when you have a more accurate separatrix for the slice than the
@@ -253,7 +257,7 @@ class FixedComponentsConfig:
     These are summed into the baseline *and* every perturbed equilibrium,
     untouched by the GPR perturbation::
 
-        j_phi_total = j_inductive + j_BS + j_NBI + j_RF
+        j_phi_total = j_inductive + j_BS + j_NBI + j_RF + j_other
         p_total     = p_thermal(perturbed) + p_fast
 
     Any component may simply be handed in as a 1-D array over ``psi_N`` -- this is
@@ -267,8 +271,11 @@ class FixedComponentsConfig:
         Either way an explicit array here wins (e.g. from TRANSP/ONETWO).
       * ``j_NBI`` -- :class:`ImasSource` sums beam-source ``j_parallel``;
         :class:`ReconstructionSource` defaults to zero. Explicit array wins.
-      * ``j_RF`` -- **never computed internally** (RF is the least-common input).
-        Always zeros unless the user supplies an array here.
+      * ``j_RF`` -- :class:`ImasSource` sums EC/LH/IC ``j_parallel``;
+        :class:`ReconstructionSource` defaults to zero. Explicit array wins.
+      * ``j_other`` -- :class:`ImasSource` sums fusion-driven, sawteeth (unless
+        ``ImasSource.sawteeth_in_ohmic``) and unlisted-index ``j_parallel``;
+        zero elsewhere. Explicit array wins.
 
     All arrays are on ``psi_N`` (kinetic grid), SI units, toroidal current
     convention for j_*. ``None`` -> zeros.
@@ -277,6 +284,7 @@ class FixedComponentsConfig:
     p_fast: Optional["np.ndarray"] = None   # fast/beam pressure
     j_NBI: Optional["np.ndarray"] = None    # beam-driven TOROIDAL current density [A/m^2]
     j_RF: Optional["np.ndarray"] = None     # RF-driven TOROIDAL current density [A/m^2]
+    j_other: Optional["np.ndarray"] = None  # other fixed driven TOROIDAL current [A/m^2]
     psi_N: Optional["np.ndarray"] = None    # grid for the above (if arrays given)
 
     # How to collapse anisotropic fast-ion pressure (p_perp, p_par) to the scalar

@@ -18,6 +18,7 @@ from bouquet.io.imas import PSI_RHO_DRIFT_TOL, PSI_RHO_GATE_RHO, _psi_rho_drift
 from test_ni_fast_subtraction import N, _build, _read
 
 PSI = np.linspace(0.0, 1.0, N)
+RHO = PSI ** 0.55                   # a real (non-placeholder) dd rho grid
 
 
 class _G:
@@ -37,15 +38,20 @@ def gfile(monkeypatch):
 
 class TestDrift:
     def test_same_map_is_quiet(self, gfile):
-        d = _psi_rho_drift(PSI, np.sqrt(PSI), gfile(0.5))
-        assert d["max_abs"] < 1e-3 and not d["exceeds"]
+        d = _psi_rho_drift(PSI, RHO, gfile(0.55))
+        assert d["max_abs"] < 1e-3 and not d["exceeds"] and not d["placeholder"]
 
     def test_a_shifted_map_is_measured_in_psi_N(self, gfile):
-        d = _psi_rho_drift(PSI, np.sqrt(PSI), gfile(0.45))
+        d = _psi_rho_drift(PSI, RHO, gfile(0.45))
         pts = np.asarray(PSI_RHO_GATE_RHO)
-        expect = np.interp(pts, np.sqrt(PSI), PSI) - pts ** (1 / 0.45)
+        expect = np.interp(pts, RHO, PSI) - pts ** (1 / 0.45)
         np.testing.assert_allclose(list(d["gate"].values()), expect, atol=2e-3)
         assert d["exceeds"] and d["max_abs"] > PSI_RHO_DRIFT_TOL
+
+    def test_a_sqrt_psi_placeholder_is_not_a_drift(self, gfile):
+        """Hand-built dds (the D3D-like example) store rho = sqrt(psi_N)."""
+        d = _psi_rho_drift(PSI, np.sqrt(PSI), gfile(0.45))
+        assert d["placeholder"] and not d["exceeds"]
 
     def test_no_usable_rho_grid(self, gfile):
         assert _psi_rho_drift(PSI, np.zeros(N), gfile(0.5)) is None
@@ -54,7 +60,7 @@ class TestDrift:
 def _with_rho(scale_ni=1.0):
     def mutate(dd):
         cp = dd["core_profiles"]["profiles_1d"][0]
-        cp["grid"]["rho_tor_norm"] = np.sqrt(PSI).tolist()
+        cp["grid"]["rho_tor_norm"] = RHO.tolist()
         cp["ion"][0]["density_thermal"] = (
             scale_ni * np.asarray(cp["ion"][0]["density_thermal"])).tolist()
     return mutate
@@ -76,11 +82,11 @@ class TestReader:
 
     def test_quiet_on_a_matching_g_file(self, tmp_path, gfile):
         ddp, cdf, *_ = _build(tmp_path, dd_mutate=_with_rho())
-        bl, msgs = _read_warned(ddp, cdf, gfile(0.5))
+        bl, msgs = _read_warned(ddp, cdf, gfile(0.55))
         assert not bl.aux["psi_rho_drift"]["exceeds"]
         assert not any("psi_N(rho)" in m for m in msgs)
 
-    @pytest.mark.parametrize("power, named", [(0.45, True), (0.5, False)])
+    @pytest.mark.parametrize("power, named", [(0.45, True), (0.55, False)])
     def test_the_ni_mismatch_names_the_drift_only_when_there_is_one(
             self, tmp_path, gfile, power, named):
         ddp, cdf, *_ = _build(tmp_path, dd_mutate=_with_rho(scale_ni=1.05))

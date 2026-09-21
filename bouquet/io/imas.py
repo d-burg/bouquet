@@ -565,6 +565,11 @@ def _psi_rho_drift(psi_N, rho, gfile):
     rho = np.asarray(rho, dtype=float)
     if rho.shape != np.shape(psi_N) or not np.all(np.diff(rho) > 0):
         return None
+    if np.allclose(rho, np.sqrt(np.clip(psi_N, 0.0, None)), rtol=0, atol=1e-6):
+        # a placeholder grid, not the dd's equilibrium: nothing to compare
+        return {"gate": None, "max_abs": None, "rho_worst": None, "gfile": str(gfile),
+                "exceeds": False, "placeholder": True,
+                "evidence": "dd rho_tor_norm is the sqrt(psi_N) placeholder; not compared"}
     g = read_geqdsk(gfile)
     rho_g = np.asarray(g.rhovn, dtype=float)
     psi_g = np.linspace(0.0, 1.0, rho_g.size)
@@ -575,6 +580,7 @@ def _psi_rho_drift(psi_N, rho, gfile):
            "max_abs": float(abs(d[iw])), "rho_worst": float(pts[iw]),
            "gfile": str(gfile)}
     out["exceeds"] = out["max_abs"] > PSI_RHO_DRIFT_TOL
+    out["placeholder"] = False
     out["evidence"] = (
         f"dd psi_N(rho) differs from the g-file's by {d[iw]:+.3f} at "
         f"rho={pts[iw]:g} (psi_N {np.interp(pts[iw], rho, psi_N):.3f} vs "

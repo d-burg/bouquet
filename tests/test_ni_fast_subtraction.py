@@ -18,7 +18,8 @@ import numpy as np
 import pytest
 
 from bouquet.config import ImasSource
-from bouquet.io.imas import NI_FAST_RTOL, _subtract_fast_ni, read_imas_baseline
+from bouquet.io.imas import (NI_FAST_GATE_PSI_N, NI_FAST_RTOL,
+                             _subtract_fast_ni, read_imas_baseline)
 
 
 # ---------------------------------------------------------------------------
@@ -28,21 +29,22 @@ def _profiles(n=32, fast_frac=0.2):
     psi = np.linspace(0.0, 1.0, n)
     ni_total = 4.0e19 * (1.0 - 0.7 * psi ** 2)
     ni_fast = fast_frac * ni_total * (1.0 - psi ** 2)      # core-peaked beam
-    return ni_total, ni_fast, ni_total - ni_fast
+    return psi, ni_total, ni_fast, ni_total - ni_fast
 
 
 class TestGate:
     def test_matching_total_fires_and_subtracts(self):
-        ni_total, ni_fast, ni_th = _profiles()
-        ni, sig, meta = _subtract_fast_ni(ni_total, 0.1 * ni_total, ni_th, ni_fast)
+        psi, ni_total, ni_fast, ni_th = _profiles()
+        ni, sig, meta = _subtract_fast_ni(psi, ni_total, 0.1 * ni_total,
+                                          ni_th, ni_fast)
         assert meta["applied"]
         np.testing.assert_allclose(ni, ni_th, rtol=1e-12)
 
     def test_a_mismatched_total_refuses_and_says_why(self):
-        ni_total, ni_fast, ni_th = _profiles()
+        psi, ni_total, ni_fast, ni_th = _profiles()
         # IDA ni 1% above the dd total: the two are not the same quantity, so
         # subtracting density_fast would correct one disagreement with another.
-        ni, sig, meta = _subtract_fast_ni(1.01 * ni_total, 0.1 * ni_total,
+        ni, sig, meta = _subtract_fast_ni(psi, 1.01 * ni_total, 0.1 * ni_total,
                                           ni_th, ni_fast)
         assert not meta["applied"]
         assert meta["mismatch"] > NI_FAST_RTOL
@@ -50,17 +52,46 @@ class TestGate:
         np.testing.assert_allclose(ni, 1.01 * ni_total)   # untouched
 
     def test_the_gate_sits_exactly_at_the_documented_tolerance(self):
-        ni_total, ni_fast, ni_th = _profiles()
-        peak = float(np.max(ni_total))
+        """A uniform relative offset straddling NI_FAST_RTOL flips the gate."""
+        psi, ni_total, ni_fast, ni_th = _profiles()
         for mult, applied in ((0.5, True), (2.0, False)):
-            off = mult * NI_FAST_RTOL * peak
-            _, _, meta = _subtract_fast_ni(ni_total + off, None, ni_th, ni_fast)
+            scaled = ni_total * (1.0 + mult * NI_FAST_RTOL)
+            _, _, meta = _subtract_fast_ni(psi, scaled, None, ni_th, ni_fast)
             assert meta["applied"] is applied, mult
+            assert meta["mismatch"] == pytest.approx(mult * NI_FAST_RTOL,
+                                                     rel=1e-6)
+
+    def test_the_gate_is_evaluated_at_the_five_declared_points(self):
+        psi, ni_total, ni_fast, ni_th = _profiles()
+        _, _, meta = _subtract_fast_ni(psi, ni_total, None, ni_th, ni_fast)
+        assert tuple(meta["gate"]) == NI_FAST_GATE_PSI_N == (0.0, 0.2, 0.4,
+                                                             0.6, 0.8)
+
+    def test_a_disagreement_outside_the_gate_points_is_not_consulted(self):
+        """Past 0.8 both profiles roll off; a ratio there is the edge model.
+
+        The gate deliberately does not look there, so an edge-only deviation
+        must not veto a subtraction the interior fully supports.
+        """
+        psi, ni_total, ni_fast, ni_th = _profiles(n=128)
+        bad = ni_total.copy()
+        bad[psi > 0.9] *= 1.5                     # gross, and entirely outside
+        _, _, meta = _subtract_fast_ni(psi, bad, None, ni_th, ni_fast)
+        assert meta["applied"]
+
+    def test_a_disagreement_on_axis_alone_is_enough_to_veto(self):
+        """psi_N=0 is in the gate: that is where a beam is most peaked."""
+        psi, ni_total, ni_fast, ni_th = _profiles(n=128)
+        bad = ni_total.copy()
+        bad[psi < 0.05] *= 1.01
+        _, _, meta = _subtract_fast_ni(psi, bad, None, ni_th, ni_fast)
+        assert not meta["applied"]
+        assert meta["gate"][0.0] > NI_FAST_RTOL
 
     def test_no_density_fast_is_inert(self):
-        ni_total, _, _ = _profiles(fast_frac=0.0)
+        psi, ni_total, _, _ = _profiles(fast_frac=0.0)
         sig = 0.1 * ni_total
-        ni, s, meta = _subtract_fast_ni(ni_total, sig, ni_total,
+        ni, s, meta = _subtract_fast_ni(psi, ni_total, sig, ni_total,
                                         np.zeros_like(ni_total))
         assert not meta["applied"]
         np.testing.assert_array_equal(ni, ni_total)
@@ -70,24 +101,24 @@ class TestGate:
 
 class TestSigmaScaling:
     def test_the_fractional_error_is_preserved(self):
-        ni_total, ni_fast, ni_th = _profiles()
+        psi, ni_total, ni_fast, ni_th = _profiles()
         sig = 0.13 * ni_total
-        ni, s, meta = _subtract_fast_ni(ni_total, sig, ni_th, ni_fast)
+        ni, s, meta = _subtract_fast_ni(psi, ni_total, sig, ni_th, ni_fast)
         assert meta["applied"]
         # The envelope is a measurement error on the deuteron inventory; the
         # fast density removed from the mean carries no IDA error of its own.
         np.testing.assert_allclose(s / ni, sig / ni_total, rtol=1e-12)
 
     def test_the_envelope_shrinks_with_the_mean_never_grows(self):
-        ni_total, ni_fast, ni_th = _profiles()
+        psi, ni_total, ni_fast, ni_th = _profiles()
         sig = 0.13 * ni_total
-        _, s, _ = _subtract_fast_ni(ni_total, sig, ni_th, ni_fast)
+        _, s, _ = _subtract_fast_ni(psi, ni_total, sig, ni_th, ni_fast)
         assert np.all(s <= sig + 1e-30)
         assert float(np.max(sig - s)) > 0.0          # it actually moved
 
     def test_a_none_envelope_survives(self):
-        ni_total, ni_fast, ni_th = _profiles()
-        ni, s, meta = _subtract_fast_ni(ni_total, None, ni_th, ni_fast)
+        psi, ni_total, ni_fast, ni_th = _profiles()
+        ni, s, meta = _subtract_fast_ni(psi, ni_total, None, ni_th, ni_fast)
         assert meta["applied"] and s is None
 
 

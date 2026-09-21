@@ -238,8 +238,8 @@ class ImasSource:
     # bootstrap (IMAS.Sauter_neo2021_bootstrap) is driven by
     # cp1d.pressure_thermal, i.e. density_thermal only.  Subtracting closes
     # that gap, so the sigma=0 draw reproduces FUSE's own j_BS.  Guarded: it
-    # only fires when the IDA ni and the dd TOTAL ni already agree (see
-    # NI_FAST_RTOL), and it is inert on a dd carrying no density_fast.
+    # only fires when the IDA ni and the dd TOTAL ni already agree at each
+    # of NI_FAST_GATE_PSI_N, and it is inert on a dd with no density_fast.
     ni_subtract_fast: bool = True
     # OPTIONAL. A gEQDSK whose LCFS replaces the dd boundary outline as the
     # isoflux separatrix target. Leave None to use the source's own boundary.

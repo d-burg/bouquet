@@ -530,15 +530,21 @@ def _read_ida_omega(path, time_s, psi_N):
         return None
 
 
-#: Profile-relative tolerance for the ``ni_subtract_fast`` gate: the IDA ni and
-#: the dd's TOTAL main-ion density must agree to this fraction of the profile
-#: peak before the fast density is subtracted.  Normalising by the peak rather
-#: than pointwise keeps the test from being decided by the edge, where both
-#: profiles go to zero and any relative measure diverges.
+#: Where the ``ni_subtract_fast`` gate is evaluated.  Five interior points: the
+#: comparison is a POINTWISE relative one, so it must be taken where ni is a
+#: real number.  Past ~0.8 both profiles roll off towards the separatrix and a
+#: ratio there reports the edge model, not whether the two ni are the same
+#: quantity.  The axis is included because that is where a beam population is
+#: most peaked and a missed subtraction costs the most.
+NI_FAST_GATE_PSI_N = (0.0, 0.2, 0.4, 0.6, 0.8)
+
+#: Tolerance the gate applies at each of :data:`NI_FAST_GATE_PSI_N`: the IDA ni
+#: and the dd's TOTAL main-ion density must agree to this relative value at
+#: every one of them before the fast density is subtracted.
 NI_FAST_RTOL = 1e-4
 
 
-def _subtract_fast_ni(ni, sigma_ni, ni_fuse_thermal, ni_fast):
+def _subtract_fast_ni(psi_N, ni, sigma_ni, ni_fuse_thermal, ni_fast):
     """Thermal ``(ni, sigma_ni)`` for the bootstrap, plus a provenance dict.
 
     IDA's ni is a TOTAL deuteron density: neither the VB Z_eff nor the CER
@@ -548,47 +554,56 @@ def _subtract_fast_ni(ni, sigma_ni, ni_fuse_thermal, ni_fast):
     puts the sigma=0 draw on FUSE's own footing.
 
     Applied only when the IDA ni already reproduces the dd TOTAL ni to
-    :data:`NI_FAST_RTOL` of the profile peak -- that agreement is the evidence
-    that the IDA ni really is the total, and without it the subtraction would
-    be correcting one disagreement with another.
+    :data:`NI_FAST_RTOL` at each of :data:`NI_FAST_GATE_PSI_N` -- that
+    agreement is the evidence the IDA ni really is the total, and without it
+    the subtraction would be correcting one disagreement with another.
 
     ``sigma_ni`` is scaled by ``ni_thermal/ni``, holding the FRACTIONAL error
     fixed.  The envelope is a measurement error on the deuteron inventory, and
     the fast density removed from the mean is a separate (FUSE) quantity
     carrying no IDA error, so the fraction is what survives the subtraction.
 
-    Returns ``(ni, sigma_ni, meta)``; ``meta["applied"]`` says whether it fired
-    and ``meta["evidence"]`` why.
+    Returns ``(ni, sigma_ni, meta)``; ``meta["applied"]`` says whether it fired,
+    ``meta["evidence"]`` why, and ``meta["gate"]`` the per-point relative
+    deviations behind the decision.
     """
     ni = np.asarray(ni, dtype=float)
     ni_fast = np.asarray(ni_fast, dtype=float)
-    scale = float(np.max(np.abs(np.asarray(ni_fuse_thermal, dtype=float)
-                                + ni_fast)))
     if not np.any(ni_fast):
-        return ni, sigma_ni, {"applied": False, "mismatch": None,
+        return ni, sigma_ni, {"applied": False, "mismatch": None, "gate": None,
                               "evidence": "dd carries no main-ion density_fast"}
-    if not scale > 0.0:
-        return ni, sigma_ni, {"applied": False, "mismatch": None,
-                              "evidence": "dd main-ion density is identically zero"}
-    mismatch = float(np.max(np.abs(
-        ni - (np.asarray(ni_fuse_thermal, dtype=float) + ni_fast)))) / scale
+    ni_total = np.asarray(ni_fuse_thermal, dtype=float) + ni_fast
+    psi_N = np.asarray(psi_N, dtype=float)
+    pts = np.asarray(NI_FAST_GATE_PSI_N, dtype=float)
+    a = np.interp(pts, psi_N, ni)
+    b = np.interp(pts, psi_N, ni_total)
+    if not np.all(np.abs(b) > 0.0):
+        return ni, sigma_ni, {"applied": False, "mismatch": None, "gate": None,
+                              "evidence": ("dd main-ion density vanishes at a "
+                                           "gate point, so the relative test "
+                                           "is undefined")}
+    gate = dict(zip(NI_FAST_GATE_PSI_N, (np.abs(a - b) / np.abs(b)).tolist()))
+    mismatch = float(max(gate.values()))
     if mismatch > NI_FAST_RTOL:
+        worst = max(gate, key=gate.get)
         return ni, sigma_ni, {
-            "applied": False, "mismatch": mismatch,
+            "applied": False, "mismatch": mismatch, "gate": gate,
             "evidence": (f"IDA ni differs from the dd TOTAL ni by "
-                         f"{mismatch:.2e} of peak (> {NI_FAST_RTOL:.0e}), so "
-                         f"the IDA ni is not the dd's total and subtracting "
-                         f"density_fast from it is not defined")}
+                         f"{mismatch:.2e} at psi_N={worst:g} "
+                         f"(> {NI_FAST_RTOL:.0e}), so the IDA ni is not the "
+                         f"dd's total and subtracting density_fast from it is "
+                         f"not defined")}
     ni_th = np.maximum(ni - ni_fast, 0.0)
     if sigma_ni is not None:
         with np.errstate(divide="ignore", invalid="ignore"):
             frac = np.where(ni > 0.0, ni_th / ni, 1.0)
         sigma_ni = np.asarray(sigma_ni, dtype=float) * frac
     return ni_th, sigma_ni, {
-        "applied": True, "mismatch": mismatch,
+        "applied": True, "mismatch": mismatch, "gate": gate,
         "fast_fraction_peak": float(np.max(ni_fast / np.maximum(ni, 1e-30))),
-        "evidence": (f"IDA ni matches the dd TOTAL ni to {mismatch:.2e} of "
-                     f"peak; subtracted the dd main-ion density_fast")}
+        "evidence": (f"IDA ni matches the dd TOTAL ni to {mismatch:.2e} over "
+                     f"psi_N={NI_FAST_GATE_PSI_N}; subtracted the dd main-ion "
+                     f"density_fast")}
 
 
 def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impurity_Z,
@@ -629,9 +644,10 @@ def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impu
     # After both ni branches: each produces a TOTAL deuteron density.
     if ni_subtract_fast and ni_fast is not None:
         ni, sigma_ni, ni_fast_meta = _subtract_fast_ni(
-            ni, sigma_ni, np.asarray(ni_fuse, dtype=float), ni_fast)
+            psi_N, ni, sigma_ni, np.asarray(ni_fuse, dtype=float), ni_fast)
     else:
         ni_fast_meta = {"applied": False, "mismatch": None,
+                        "gate": None,
                         "evidence": ("ImasSource.ni_subtract_fast=False"
                                      if not ni_subtract_fast else
                                      "no main-ion density_fast supplied")}

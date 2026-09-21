@@ -89,6 +89,10 @@ class Baseline:
     # _forward_solve_imas_baseline, mirroring the g-file fit_inductive_profile).
     # 1.0 means no rebuild was done (raw source split kept).
     bs_scale: float = 1.0
+    # The structured closure's bootstrap multiplier PROFILE s_bs(psi) on psi_N
+    # (bl.j_BS = s_bs * SWB(scale 1)); None when the multiplier is the scalar
+    # bs_scale.  generate() hands it to the draws, which apply it after SWB.
+    bs_scale_profile: Optional["np.ndarray"] = None
     # 'ohmic' mode only: factor applied to FUSE j_inductive so the hybrid
     # (s*j_ohm + SWB_jBS + j_fixed) integrates to Ip_target. 1.0 otherwise.
     ohm_scale: float = 1.0

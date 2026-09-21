@@ -1712,6 +1712,7 @@ class Bouquet:
                                  for r in (0.0, 0.2, 0.4, 0.6, 0.8, 0.95, 1.0)}
                 bl.ohm_scale = float(out["ohm_scale_eff"])
                 bl.bs_scale = float(out["bs_scale_eff"])
+                bl.bs_scale_profile = s_bs.copy()
                 bl.j_inductive = s_ind * state["j_ind"]
                 bl.j_BS = s_bs * state["j_BS_swb"]
                 bl.j_phi = bl.j_inductive + bl.j_BS + state["j_fixed"]
@@ -2081,6 +2082,7 @@ class Bouquet:
                 else:
                     bl.ohm_scale = float(s_new)
                     bl.bs_scale = float(sbs_new)
+                    bl.bs_scale_profile = None
                     bl.j_inductive = s_new * state["j_ind"]
                     bl.j_BS = sbs_new * state["j_BS_swb"]
                     bl.j_phi = bl.j_inductive + bl.j_BS + state["j_fixed"]
@@ -2578,6 +2580,8 @@ class Bouquet:
                 bl.jBS_diff = None
                 bl.bs_scale = float(bs_scale)
                 bl.ohm_scale = float(ohm_scale)
+                bl.bs_scale_profile = (None if _s_bs is None
+                                       else np.asarray(_s_bs, dtype=float).copy())
                 bl.j_BS = (bs_scale if _s_bs is None else _s_bs) * j_BS_swb
                 bl.j_inductive = (ohm_scale if _s_ind is None
                                   else _s_ind) * j_ind
@@ -2912,6 +2916,21 @@ class Bouquet:
         fig.suptitle(ttl, fontsize=11); fig.tight_layout()
         return fig, ax
 
+    def _bootstrap_multiplier(self):
+        """The baseline's bootstrap multiplier on psi_N, or None when it is 1.
+
+        ``bl.j_BS = m * SWB(scale 1)`` with ``m`` the structured closure's
+        ``s_bs(psi)`` or the scalar ``bs_scale``.
+        """
+        import numpy as np
+        bl = self.baseline
+        prof = getattr(bl, "bs_scale_profile", None)
+        if prof is not None:
+            return np.asarray(prof, dtype=float)
+        bs = float(getattr(bl, "bs_scale", 1.0))
+        return None if bs == 1.0 else bs * np.ones_like(
+            np.asarray(bl.psi_N, dtype=float))
+
     def verify_sigma0_consistency(self, tol_frac=0.02, swb_iterations=3):
         """Regression guard: the draw pipeline must reproduce the baseline
         j_BS split when the kinetics are UNPERTURBED (sigma=0).
@@ -3061,13 +3080,16 @@ class Bouquet:
             raise
 
         seed = create_power_flux_fun(len(psi_N), 1.5, 1.5)["y"]
+        # As the draw does: SWB at the jitter's centre (1.0), then the
+        # baseline's multiplier (bs_scale or s_bs(psi)) after SWB.
+        _mult = self._bootstrap_multiplier()
         res = solve_with_bootstrap(
             mygs, ne_eq, te_eq, ni_eq, ti_eq, Zeff_eq,
             float(bl.Ip_target), seed,
-            scale_jBS=float(getattr(bl, "bs_scale", 1.0)),
+            scale_jBS=1.0,
             isolate_edge_jBS=bool(gc.isolate_edge_jBS),
             diagnostic_plots=False, iterations=swb_iterations)
-        spike0 = smooth_jbs_transition(
+        spike0 = (1.0 if _mult is None else _mult) * smooth_jbs_transition(
             _swb_jbs_to_toroidal(mygs, res["isolated_j_BS"], psi_pad))
         if gc.floor_j_BS:
             spike0 = np.clip(spike0, 0.0, None)
@@ -3343,14 +3365,14 @@ class Bouquet:
         # stays readable; the full text is kept on generation_log for debugging.
         # Set BouquetConfig.verbose=True to stream it (and the tqdm progress bar).
         #
-        # Center the per-draw bootstrap scale on the calibrated bs_scale so the
-        # SWB amplitude correction established in prepare_baseline applies to
-        # EVERY draw; the configured jBS_scale_range spread is retained as
-        # bootstrap-model uncertainty around that center. bs_scale == 1.0 (no
-        # SWB rebuild, e.g. reconstruction path) leaves the range unchanged.
-        _bs = float(getattr(bl, "bs_scale", 1.0))
+        # The baseline built j_BS as (multiplier) x SWB(scale 1); the draws
+        # apply the same multiplier after SWB (jBS_scale_profile) and keep
+        # jBS_scale_range as the per-draw jitter inside it.  Passing the
+        # multiplier INTO SWB as scale_jBS instead is not the same thing:
+        # OFT applies it inside SWB's self-consistent iteration.
+        _bs_mult = self._bootstrap_multiplier()
         _jbs_range = (None if gc.jBS_scale_range is None
-                      else (gc.jBS_scale_range[0] * _bs, gc.jBS_scale_range[1] * _bs))
+                      else tuple(gc.jBS_scale_range))
 
         from .utils import capture_native_output
         verbose = bool(getattr(self.config, "verbose", False))
@@ -3378,6 +3400,7 @@ class Bouquet:
                 accept_anchor_inband=gc.accept_anchor_inband,
                 perturb_jind_in_anchor=gc.perturb_jind_in_anchor,
                 jBS_scale_range=_jbs_range,
+                jBS_scale_profile=_bs_mult,
                 jbs_delta_mode=gc.jbs_delta_mode,
                 swb_iterations=gc.swb_iterations,
                 diagnostic_plots=gc.diagnostic_plots,

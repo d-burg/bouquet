@@ -104,13 +104,12 @@ def sigma0_reference_scale(jBS_scale_range):
     1.0).  The reference follows whatever the draws are actually sampled
     from.
 
-    The range this receives is NOT the configured one: run.py MULTIPLIES
-    both endpoints of ``gc.jBS_scale_range`` by ``bl.bs_scale``, so the
-    midpoint returned here is ``bs_scale * mid(gc.jBS_scale_range)``.
-    That equals ``bl.bs_scale`` only for a configured range symmetric
-    about 1.0 (the default ``(0.99, 1.01)`` is); for an asymmetric
-    configured range it does not, which is what
-    ``test_asymmetric_range_uses_its_own_mean`` pins.
+    The range this receives is the configured ``gc.jBS_scale_range``:
+    run.py hands the baseline's ``bs_scale`` (or structured ``s_bs(psi)``)
+    over separately as ``jBS_scale_profile``, applied after SWB, so the
+    range is the per-draw jitter only and its midpoint is the reference.
+    For an asymmetric configured range that midpoint is not 1.0, which is
+    what ``test_asymmetric_range_uses_its_own_mean`` pins.
 
     Telescoping is exact only IN EXPECTATION, not per draw: the
     ``jBS_scales`` samples are drawn independently of the kinetic sigmas,
@@ -1679,6 +1678,7 @@ def perturb_kinetic_equilibrium(
     scale_jBS=1.0,
     floor_j_BS=True,
     jBS_diff=None,
+    jBS_scale_profile=None,
     accept_anchor_inband=False,
     perturb_jind_in_anchor=False,
     swb_iterations=3,
@@ -1819,6 +1819,8 @@ def perturb_kinetic_equilibrium(
     scale_jBS : float
         Multiplicative scale factor applied to :math:`j_{\rm BS}` in
         ``solve_with_bootstrap``.  A value of 1.0 applies no scaling.
+    jBS_scale_profile : float, ndarray on ``psi_N``, or None
+        Multiplier applied to the SWB spike after SWB; see generate_bouquet.
     swb_iterations : int
         H-mode self-consistency iterations inside ``solve_with_bootstrap``
         (its ``iterations`` argument). 2 is usually enough when trading
@@ -1919,6 +1921,15 @@ def perturb_kinetic_equilibrium(
     if j_other is not None:
         _jfix = _jfix + np.asarray(j_other, dtype=float)
     j_fixed_eff = _jfix if recalculate_j_BS else np.zeros_like(psi_N)
+    # The baseline's bootstrap multiplier (run.py: bs_scale, or the structured
+    # closure's s_bs(psi)), applied to the SWB spike AFTER SWB exactly as the
+    # baseline applied it to its SWB(scale 1) spike.  scale_jBS stays the
+    # per-draw jitter inside SWB.  OFT applies scale_jBS inside SWB's
+    # self-consistent iteration, so SWB(bs_scale) != bs_scale * SWB(1): the
+    # difference was 8.9 % of the peak bootstrap at the pedestal at
+    # bs_scale 0.77, which the sigma=0 draw could not reproduce.
+    _bs_mult = (1.0 if jBS_scale_profile is None
+                else np.asarray(jBS_scale_profile, dtype=float))
     # Total-current anchor: fold jphi_diff (= equilibrium.j_tor - core_profiles
     # total) into the fixed additive so it rides under EVERY downstream new_jphi
     # build (recon-anchor / l_i-match / corrective; all use j_fixed_eff), exactly
@@ -2332,7 +2343,7 @@ def perturb_kinetic_equilibrium(
             mygs, _results_diff["isolated_j_BS"], psi_pad))
         _full_j_BS_tor = smooth_jbs_transition(_swb_jbs_to_toroidal(
             mygs, _results_diff["j_BS"], psi_pad))
-        delta_spike = _spike_perturbed - spike_profile_recon_cached
+        delta_spike = _bs_mult * (_spike_perturbed - spike_profile_recon_cached)
         _delta_rms = float(np.sqrt(np.mean(delta_spike**2)))
         _delta_max = float(np.max(np.abs(delta_spike)))
         print(f"  [DIFF_BS] delta_spike rms={_delta_rms:.3e} A/m² "
@@ -2345,7 +2356,7 @@ def perturb_kinetic_equilibrium(
         mygs.replace_eq(source_eq=recon_eq_snapshot)
         # Build new_jphi as input_j_phi (recon exact) + delta_spike
         spike_profile = delta_spike
-        full_j_BS = _full_j_BS_tor
+        full_j_BS = _bs_mult * _full_j_BS_tor
         # ---- DIFF_BS recon-anchor solve (mirrors regular SWB branch's
         # recon-anchor at line ~1067 but with new_jphi = input_j_phi +
         # delta_spike).  Without this explicit solve, mygs stays in the
@@ -2676,8 +2687,8 @@ def perturb_kinetic_equilibrium(
             _full_raw = _swb_jbs_to_toroidal(mygs, results["j_BS"], psi_pad)
             _delta_bl = np.asarray(spike_delta_baseline, dtype=float)
             _delta_ref = np.asarray(spike_delta_ref, dtype=float)
-            spike_profile = _delta_bl + (_spike_raw - _delta_ref)
-            full_j_BS = _delta_bl + (_full_raw - _delta_ref)
+            spike_profile = _delta_bl + _bs_mult * (_spike_raw - _delta_ref)
+            full_j_BS = _delta_bl + _bs_mult * (_full_raw - _delta_ref)
             print(f"  [jBS-delta] spike = baseline + raw SWB delta "
                   f"(|delta| rms={np.sqrt(np.mean((_spike_raw - _delta_ref)**2))/1e3:.1f} kA/m²)")
         else:
@@ -2686,9 +2697,9 @@ def perturb_kinetic_equilibrium(
             # without it, every draw target carries a 1-2 grid-point axis
             # divot vs the recon baseline (hollow core, q0 shifted +12%
             # wholesale at sigma=0).
-            full_j_BS = smooth_jbs_transition(
+            full_j_BS = _bs_mult * smooth_jbs_transition(
                 _swb_jbs_to_toroidal(mygs, results["j_BS"], psi_pad))
-            spike_profile = smooth_jbs_transition(
+            spike_profile = _bs_mult * smooth_jbs_transition(
                 _swb_jbs_to_toroidal(mygs, results["isolated_j_BS"], psi_pad))
 
         # Floor the SWB bootstrap at 0 (drop unphysical negative excursions)
@@ -3578,6 +3589,7 @@ def generate_bouquet(
     isolate_edge_jBS=True,
     floor_j_BS=True,
     jBS_diff=None,
+    jBS_scale_profile=None,
     accept_anchor_inband=False,
     perturb_jind_in_anchor=False,
     jBS_scale_range=None,
@@ -3754,6 +3766,12 @@ def generate_bouquet(
         ``[0.8, 1.2]`` draws from :math:`\mathcal{U}(0.8, 1.2)`.
         When ``None``, no additional scaling is applied
         (``scale_jBS = 1.0`` for every sample).
+    jBS_scale_profile : float, ndarray on ``psi_N``, or None
+        The baseline's own bootstrap multiplier (``Baseline.bs_scale`` or the
+        structured closure's ``s_bs(psi)``), applied to every draw's SWB
+        spike AFTER SWB, as the baseline applied it to its SWB(1) spike.
+        ``jBS_scale_range`` is then the per-draw jitter around it.  ``None``
+        multiplies by 1.
     swb_iterations : int
         H-mode self-consistency iterations inside ``solve_with_bootstrap``
         (its ``iterations`` argument); 2 trades a little accuracy for speed.
@@ -5227,6 +5245,7 @@ def generate_bouquet(
                 isolate_edge_jBS=isolate_edge_jBS,
                 floor_j_BS=floor_j_BS,
                 jBS_diff=jBS_diff,
+                jBS_scale_profile=jBS_scale_profile,
                 Z_imp=Z_imp,
                 p_diff=p_diff,
                 jphi_diff=jphi_diff,

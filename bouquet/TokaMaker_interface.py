@@ -5870,8 +5870,14 @@ def generate_bouquet(
         pressure_total_perturb = pressure_perturb.copy()
         if Z_imp:
             from .physics import impurity_pressure as _impP
+            # On ne - z_fast, as the solve does: only the thermal electrons
+            # are neutralised by the impurity (0.9 % of peak p on a 14 % beam).
+            _ne_th_eqp = (_ne_eqp if z_fast is None else np.maximum(
+                _ne_eqp - (_to_eq(np.asarray(z_fast, dtype=float))
+                           if psi_N_kinetic is not None
+                           else np.asarray(z_fast, dtype=float)), 0.0))
             pressure_total_perturb = pressure_total_perturb + _impP(
-                _ne_eqp, _ni_eqp, _ti_eqp, Z_imp)
+                _ne_th_eqp, _ni_eqp, _ti_eqp, Z_imp)
         if p_fast is not None:
             _pf_eq = np.asarray(p_fast, dtype=float)
             pressure_total_perturb = pressure_total_perturb + (

@@ -40,7 +40,7 @@ import numpy as np
 
 from ..physics import (fast_ion_density_equivalent, impurity_pressure,
                        impurity_charge_with_fast_ions,
-                       isotropize_fast_pressure, main_ion_density_from_zeff,
+                       isotropize_fast_pressure,
                        parallel_to_toroidal)
 
 # Elementary charge [C]: thermal pressure p = e * sum_s(n_s * T_s).
@@ -616,7 +616,7 @@ def _subtract_fast_ni(psi_N, ni, sigma_ni, ni_fuse_thermal, z_fast, z2_fast,
 
 
 def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impurity_Z,
-                         ni_source="all", ni_from_imas_Zeff=False, zeff_from_fuse=False,
+                         ni_source="all", zeff_from_fuse=False,
                          z_fast=None, z2_fast=None, ni_subtract_fast=True):
     """IDA-hybrid kinetics: replace FUSE ne/ni/Te/Ti/Zeff (+omega) with IDA fits,
     resampled onto the FUSE ``psi_N`` grid (psi_N == psi_N_kinetic).
@@ -625,8 +625,7 @@ def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impu
     keeps the FUSE Zeff instead); ni via ``ni_source`` ("Zeff"/"CER"/"all", with
     Jacobian-propagated sigma_ni -- see :func:`bouquet.io.ida.read_ida`). The
     "Zeff"/"all" dilution always uses IDA's own Zeff regardless of
-    ``zeff_from_fuse``. ``ni_from_imas_Zeff`` forces ni from the FUSE ``Zeff_fuse``
-    without updating sigma_ni.
+    ``zeff_from_fuse``.
 
     ``ni_subtract_fast`` (with the fast charge moments ``z_fast``/``z2_fast``)
     converts the IDA TOTAL ni to a THERMAL one; see :func:`_subtract_fast_ni`.
@@ -646,12 +645,8 @@ def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impu
     zeff = np.asarray(Zeff_fuse, dtype=float) if zeff_from_fuse else g(ida.Zeff)
     sigma_ne, sigma_te, sigma_ni, sigma_ti = (
         g(ida.sigma_ne), g(ida.sigma_te), g(ida.sigma_ni), g(ida.sigma_ti))
-    if ni_from_imas_Zeff:
-        # ni from FUSE Z_eff + IDA ne (single-impurity dilution; Z_imp = machine charge)
-        ni = main_ion_density_from_zeff(ne, np.clip(Zeff_fuse, 1.0, impurity_Z), impurity_Z)
     # Total -> thermal, so the sigma=0 draw meets FUSE's thermal bootstrap.
-    # The ni_source ni is a TOTAL deuteron density (ni_from_imas_Zeff, built
-    # on FUSE's thermal-numerator Zeff, is neither total nor thermal).
+    # The ni_source ni is a TOTAL deuteron density.
     if ni_subtract_fast and z_fast is not None:
         ni, sigma_ni, ni_fast_meta = _subtract_fast_ni(
             psi_N, ni, sigma_ni, np.asarray(ni_fuse, dtype=float),
@@ -938,7 +933,7 @@ def read_imas_baseline(
     # (see impurity_charge_with_fast_ions).  The Zeff consumed by the
     # bootstrap / forward solve deliberately stays the full-ne one.
     _Z_inverted, ne_th = impurity_charge_with_fast_ions(ne, ni, Zeff, z_fast)
-    # With IDA-hybrid kinetics, ni was built (read_ida / main_ion_density_from_zeff)
+    # With IDA-hybrid kinetics, ni was built (read_ida)
     # under single-impurity quasineutrality at charge source.impurity_Z, so that IS
     # the impurity charge; the inversion is then only needed for ne_th.
     Z_imp = (float(getattr(source, "impurity_Z", 6.0)) if use_ida

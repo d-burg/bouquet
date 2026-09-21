@@ -129,11 +129,11 @@ class Baseline:
     # bootstrap stays on the full ne.
     z_fast: Optional[np.ndarray] = None       # sum_s Z_s   n_s^fast
     z2_fast: Optional[np.ndarray] = None      # sum_s Z_s^2 n_s^fast
-    # Whether Z_eff's numerator counts the fast ions.  A MEASURED Z_eff does
-    # (VB bremsstrahlung sees a beam deuteron as Z=1 like any other, and a CER
-    # Z_eff = 1 + Z(Z-1)nC/ne inherits that normalisation), so the ida_hybrid
-    # path sets this True.  FUSE stores a THERMAL-numerator zeff, so the plain
-    # IMAS path leaves it False.  Only matters when z_fast is non-zero; see
+    # Whether Z_eff's numerator counts the fast ions.  A MEASURED Z_eff does,
+    # so the ida_hybrid path sets this True.  On the dd's own Z_eff it is read
+    # off the dd (io.imas._dd_zeff): IMAS's zeff expression counts them, and
+    # FUSE carves the beam out of density_thermal, so FUSE output usually
+    # does too.  Only matters when z_fast is non-zero; see
     # physics.main_ion_density_from_zeff and physics.zeff_bounds.
     zeff_includes_fast: bool = False
 

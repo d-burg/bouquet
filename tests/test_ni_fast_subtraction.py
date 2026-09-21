@@ -40,32 +40,34 @@ def _profiles(n=32, fast_frac=0.2, Z_beam=1.0, Z_imp=6.0):
     return psi, ni_total, ni_fast, ni_total - ni_fast, z_fast, z2_fast
 
 
-class TestGate:
-    def test_matching_total_fires_and_subtracts(self):
+class TestCrossCheck:
+    """The IDA-vs-dd total ni check is advisory: it never stops the subtraction."""
+
+    def test_matching_total_subtracts_and_agrees(self):
         psi, ni_total, ni_fast, ni_th, zf, z2 = _profiles()
         ni, sig, meta = _subtract_fast_ni(psi, ni_total, 0.1 * ni_total,
                                           ni_th, zf, z2, 6.0)
-        assert meta["applied"]
+        assert meta["applied"] and meta["agrees"]
         np.testing.assert_allclose(ni, ni_th, rtol=1e-12)
 
-    def test_a_mismatched_total_refuses_and_says_why(self):
+    def test_a_mismatched_total_still_subtracts_and_says_why(self):
+        """Leaving ni total would mis-label it: downstream takes it as thermal."""
         psi, ni_total, ni_fast, ni_th, zf, z2 = _profiles()
-        # IDA ni 1% above the dd total: the two are not the same quantity, so
-        # subtracting density_fast would correct one disagreement with another.
-        ni, sig, meta = _subtract_fast_ni(psi, 1.01 * ni_total, 0.1 * ni_total,
+        ni, sig, meta = _subtract_fast_ni(psi, 1.05 * ni_total, 0.1 * ni_total,
                                           ni_th, zf, z2, 6.0)
-        assert not meta["applied"]
+        assert meta["applied"] and meta["agrees"] is False
         assert meta["mismatch"] > NI_FAST_RTOL
-        assert "not the dd's total" in meta["evidence"]
-        np.testing.assert_allclose(ni, 1.01 * ni_total)   # untouched
+        assert "not the IDA one" in meta["evidence"]
+        np.testing.assert_allclose(ni, 1.05 * ni_total - ni_fast, rtol=1e-12)
 
-    def test_the_gate_sits_exactly_at_the_documented_tolerance(self):
-        """A uniform relative offset straddling NI_FAST_RTOL flips the gate."""
+    def test_the_check_sits_exactly_at_the_documented_tolerance(self):
+        """A uniform relative offset straddling NI_FAST_RTOL flips the verdict."""
         psi, ni_total, ni_fast, ni_th, zf, z2 = _profiles()
-        for mult, applied in ((0.5, True), (2.0, False)):
+        for mult, agrees in ((0.5, True), (2.0, False)):
             scaled = ni_total * (1.0 + mult * NI_FAST_RTOL)
             _, _, meta = _subtract_fast_ni(psi, scaled, None, ni_th, zf, z2, 6.0)
-            assert meta["applied"] is applied, mult
+            assert meta["applied"]
+            assert meta["agrees"] is agrees, mult
             assert meta["mismatch"] == pytest.approx(mult * NI_FAST_RTOL,
                                                      rel=1e-6)
 
@@ -79,21 +81,21 @@ class TestGate:
         """Past 0.8 both profiles roll off; a ratio there is the edge model.
 
         The gate deliberately does not look there, so an edge-only deviation
-        must not veto a subtraction the interior fully supports.
+        must not flag a dd the interior fully supports.
         """
         psi, ni_total, ni_fast, ni_th, zf, z2 = _profiles(n=128)
         bad = ni_total.copy()
         bad[psi > 0.9] *= 1.5                     # gross, and entirely outside
         _, _, meta = _subtract_fast_ni(psi, bad, None, ni_th, zf, z2, 6.0)
-        assert meta["applied"]
+        assert meta["agrees"]
 
-    def test_a_disagreement_on_axis_alone_is_enough_to_veto(self):
+    def test_a_disagreement_on_axis_alone_is_enough_to_flag(self):
         """psi_N=0 is in the gate: that is where a beam is most peaked."""
         psi, ni_total, ni_fast, ni_th, zf, z2 = _profiles(n=128)
         bad = ni_total.copy()
         bad[psi < 0.05] *= 1.0 + 10.0 * NI_FAST_RTOL
         _, _, meta = _subtract_fast_ni(psi, bad, None, ni_th, zf, z2, 6.0)
-        assert not meta["applied"]
+        assert meta["applied"] and meta["agrees"] is False
         assert meta["gate"][0.0] > NI_FAST_RTOL
 
     def test_no_density_fast_is_inert(self):
@@ -235,31 +237,23 @@ class TestEndToEnd:
         # and decisively not the total it started as
         assert float(np.max(np.abs(bl.ni - ni_total))) > 0.1 * float(np.max(ni_fast))
 
-    def test_opting_out_keeps_the_total(self, tmp_path):
-        ddp, cdf, ni_total, ni_fast, ni_th = _build(tmp_path)
-        bl = _read(ddp, cdf, ni_subtract_fast=False)
-        assert not bl.aux["ni_fast_meta"]["applied"]
-        np.testing.assert_allclose(bl.ni, ni_total, rtol=2e-6)
-
     def test_the_ida_envelope_is_scaled_with_it(self, tmp_path):
         ddp, cdf, *_ = _build(tmp_path)
-        on = _read(ddp, cdf)
-        off = _read(ddp, cdf, ni_subtract_fast=False)
-        np.testing.assert_allclose(on.aux["sigma_ni_ida"] / on.ni,
-                                   off.aux["sigma_ni_ida"] / off.ni, rtol=1e-9)
-        assert float(np.max(off.aux["sigma_ni_ida"]
-                            - on.aux["sigma_ni_ida"])) > 0.0
+        bl = _read(ddp, cdf)
+        raw = bl.aux["ida_profiles"][1]              # same psi_N grid as the dd
+        np.testing.assert_allclose(bl.aux["sigma_ni_ida"] / bl.ni,
+                                   raw.sigma_ni / raw.ni, rtol=1e-9)
+        assert float(np.max(raw.sigma_ni - bl.aux["sigma_ni_ida"])) > 0.0
 
-    @pytest.mark.parametrize("subtract", [True, False])
-    def test_the_draws_get_the_readers_envelope(self, tmp_path, subtract):
+    def test_the_draws_get_the_readers_envelope(self, tmp_path):
         """resolve_uncertainty must not re-derive sigma_ni from the raw file."""
         from bouquet.baseline import resolve_uncertainty
         from bouquet.config import BouquetConfig, SolverConfig
         ddp, cdf, *_ = _build(tmp_path)
-        bl = _read(ddp, cdf, ni_subtract_fast=subtract)
+        bl = _read(ddp, cdf)
         cfg = BouquetConfig(
             source=ImasSource(ids_path=ddp, time=1.0, ida_path=cdf,
-                              impurity_Z=Z_IMP, ni_subtract_fast=subtract),
+                              impurity_Z=Z_IMP),
             solver=SolverConfig(mesh_path="unused"), output_header="unused")
         env = resolve_uncertainty(cfg, bl)
         np.testing.assert_allclose(env["sigma_ni"], bl.aux["sigma_ni_ida"],
@@ -271,24 +265,26 @@ class TestEndToEnd:
         assert not bl.aux["ni_fast_meta"]["applied"]
         np.testing.assert_allclose(bl.ni, ni_total, rtol=2e-6)
 
-    def test_a_dd_whose_total_disagrees_is_left_alone(self, tmp_path):
+    def test_a_dd_whose_total_disagrees_still_subtracts_and_warns(self, tmp_path):
         def bump(dd):
             ion = dd["core_profiles"]["profiles_1d"][0]["ion"][0]
             ion["density_thermal"] = (np.asarray(ion["density_thermal"])
                                       * (1.0 + 10.0 * NI_FAST_RTOL)).tolist()
-        ddp, cdf, ni_total, _, _ = _build(tmp_path, dd_mutate=bump)
-        bl = _read(ddp, cdf)
-        assert not bl.aux["ni_fast_meta"]["applied"]
-        assert bl.aux["ni_fast_meta"]["mismatch"] > NI_FAST_RTOL
-        np.testing.assert_allclose(bl.ni, ni_total, rtol=2e-6)
+        ddp, cdf, ni_total, ni_fast, _ = _build(tmp_path, dd_mutate=bump)
+        with pytest.warns(UserWarning, match="subtracted anyway"):
+            bl = _read(ddp, cdf)
+        meta = bl.aux["ni_fast_meta"]
+        assert meta["applied"] and meta["agrees"] is False
+        assert meta["mismatch"] > NI_FAST_RTOL
+        np.testing.assert_allclose(bl.ni, ni_total - ni_fast, rtol=2e-6)
 
-    def test_zero_fast_fraction_reproduces_the_opted_out_baseline(self, tmp_path):
-        """The no-beam case must not depend on the flag at all."""
+    def test_zero_fast_fraction_is_the_raw_ida_read(self, tmp_path):
         ddp, cdf, *_ = _build(tmp_path, fast_frac=0.0)
-        on, off = _read(ddp, cdf), _read(ddp, cdf, ni_subtract_fast=False)
-        np.testing.assert_array_equal(on.ni, off.ni)
-        np.testing.assert_array_equal(on.aux["sigma_ni_ida"],
-                                      off.aux["sigma_ni_ida"])
+        bl = _read(ddp, cdf)
+        raw = bl.aux["ida_profiles"][1]
+        assert not bl.aux["ni_fast_meta"]["applied"]
+        np.testing.assert_array_equal(bl.ni, raw.ni)
+        np.testing.assert_array_equal(bl.aux["sigma_ni_ida"], raw.sigma_ni)
 
 
 class TestQuasineutralityIsPreserved:
@@ -308,12 +304,11 @@ class TestQuasineutralityIsPreserved:
         nc_expected = (ne - ni_total) / Z_IMP          # the CER carbon
         np.testing.assert_allclose(nz, nc_expected, rtol=1e-5)
 
-    def test_leaving_ni_total_breaks_that_invariant(self, tmp_path):
+    def test_leaving_ni_total_would_break_that_invariant(self, tmp_path):
         ddp, cdf, ni_total, ni_fast, _ = _build(tmp_path)
-        bl = _read(ddp, cdf, ni_subtract_fast=False)
+        bl = _read(ddp, cdf)
         ne = np.asarray(bl.ne, dtype=float)
-        nz = (ne - np.asarray(bl.z_fast, dtype=float)
-              - np.asarray(bl.ni, dtype=float)) / Z_IMP
+        nz = (ne - np.asarray(bl.z_fast, dtype=float) - ni_total) / Z_IMP
         nc_expected = (ne - ni_total) / Z_IMP
         assert not np.allclose(nz, nc_expected, rtol=1e-3)
 
@@ -365,9 +360,85 @@ class TestArchiveConsumers:
         # and the convention flag the per-draw Z_eff maths needs
         assert bl.zeff_includes_fast is True
 
-    def test_zeff_from_fuse_flips_the_convention(self, tmp_path):
-        ddp, cdf, *_ = _build(tmp_path)
-        assert _read(ddp, cdf, zeff_from_fuse=True).zeff_includes_fast is False
+    @pytest.mark.parametrize("stored, expected", [
+        (None, True),          # IMAS expression: sum over ion.density
+        ("thermal", False), ("all", True)])
+    def test_zeff_from_fuse_carries_the_dds_convention(self, tmp_path,
+                                                       stored, expected):
+        ddp, cdf, *_ = _build(tmp_path, dd_mutate=_store_zeff(stored))
+        assert _read(ddp, cdf,
+                     zeff_from_fuse=True).zeff_includes_fast is expected
+
+
+def _store_zeff(kind):
+    """dd_mutate: store core_profiles.zeff with one numerator or the other."""
+    def mutate(dd):
+        if kind is None:
+            return
+        cp = dd["core_profiles"]["profiles_1d"][0]
+        ne = np.asarray(cp["electrons"]["density_thermal"])
+        num = np.zeros_like(ne)
+        for ion in cp["ion"]:
+            Z = ion["element"][0]["z_n"]
+            n = np.asarray(ion["density_thermal"])
+            if kind == "all":
+                n = n + np.asarray(ion.get("density_fast", 0.0 * n))
+            num += Z * Z * n
+        cp["zeff"] = (num / ne * (1.03 if kind == "neither" else 1.0)).tolist()
+    return mutate
+
+
+class TestDdZeffConvention:
+    """Which numerator the dd's own (bootstrap) Z_eff carries.
+
+    IMAS's zeff expression sums ion.density (thermal + fast), and FUSE carves
+    the beam out of density_thermal holding the total fixed, so FUSE output
+    normally counts the fast ions.  A stored zeff is classified, not assumed.
+    """
+
+    def _fuse(self, tmp_path, kind):
+        ddp, *_ = _build(tmp_path, dd_mutate=_store_zeff(kind))
+        return read_imas_baseline(
+            ImasSource(ids_path=ddp, time=1.0, impurity_Z=Z_IMP),
+            kinetic_source="fuse")
+
+    @pytest.mark.parametrize("kind, expected",
+                             [(None, True), ("thermal", False), ("all", True)])
+    def test_the_convention_is_read_off_the_dd(self, tmp_path, kind, expected):
+        bl = self._fuse(tmp_path, kind)
+        assert bl.zeff_includes_fast is expected
+        # the baseline Z_eff is the dd's own, whichever numerator it carries
+        np.testing.assert_allclose(bl.Zeff, bl.aux["zeff"], rtol=1e-12)
+
+    def test_the_two_numerators_differ_by_z2_fast_over_ne(self, tmp_path):
+        th, al = self._fuse(tmp_path, "thermal"), self._fuse(tmp_path, "all")
+        np.testing.assert_allclose(al.Zeff - th.Zeff,
+                                   np.asarray(th.z2_fast) / np.asarray(th.ne),
+                                   rtol=1e-9)
+
+    def test_the_impurity_charge_is_convention_independent(self, tmp_path):
+        """Z_imp inverts the reader's OWN thermal numerator, never the dd's."""
+        th, al = self._fuse(tmp_path, "thermal"), self._fuse(tmp_path, "all")
+        assert th.Z_imp == pytest.approx(al.Z_imp, rel=1e-12)
+        assert th.Z_imp == pytest.approx(Z_IMP, rel=1e-6)
+
+    def test_a_stored_zeff_matching_neither_warns(self, tmp_path):
+        with pytest.warns(UserWarning, match="matches neither"):
+            self._fuse(tmp_path, "neither")
+
+    def test_no_beam_is_bit_identical_to_the_thermal_recompute(self, tmp_path):
+        ddp, *_ = _build(tmp_path, fast_frac=0.0, dd_mutate=_store_zeff("all"))
+        bl = read_imas_baseline(ImasSource(ids_path=ddp, time=1.0,
+                                           impurity_Z=Z_IMP),
+                                kinetic_source="fuse")
+        dd = json.load(open(ddp))["core_profiles"]["profiles_1d"][0]
+        ne = np.asarray(dd["electrons"]["density_thermal"], dtype=float)
+        num = np.zeros_like(ne)
+        for ion in dd["ion"]:
+            Z = float(ion["element"][0]["z_n"])
+            num += np.asarray(ion["density_thermal"], dtype=float) * Z * Z
+        np.testing.assert_array_equal(bl.Zeff, num / ne)
+        assert bl.zeff_includes_fast is False
 
 
 class TestZeffBounds:

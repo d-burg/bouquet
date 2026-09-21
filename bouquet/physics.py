@@ -570,16 +570,12 @@ def impurity_charge_with_fast_ions(ne, ni, zeff, z_fast=None):
     ~1 ulp), which is far below any physics scale but enough to move an
     archive that the repo's regeneration contract says must be reproducible.
 
-    ASSUMPTION (load-bearing, not verified here): the source's ``zeff`` is
-    normalized to the FULL ``ne`` with only THERMAL species in its numerator
-    -- i.e. ``zeff = sum_thermal(n_s Z_s^2) / ne``.  That is what the
-    ``zeff * ne / ne_th`` renormalization assumes and what the local
-    fallback numerator in :mod:`bouquet.io.imas` builds.  If a producer's
-    ``zeff`` already carries the fast-ion contribution in its numerator, the
-    fast-ion charge is counted twice and ``Z_imp`` comes out too high.  The
-    convention of any given producer has not been confirmed against a real
-    data file; treat a source whose documented convention differs as out of
-    scope for this helper.
+    CONVENTION: ``zeff`` must have only THERMAL species in its numerator,
+    over the FULL ``ne`` (``sum_thermal(n_s Z_s^2) / ne``) -- what the
+    ``zeff * ne / ne_th`` renormalization assumes.  A thermal+fast numerator
+    (IMAS's own ``zeff`` expression, and a MEASURED Z_eff) counts the fast
+    charge twice and ``Z_imp`` comes out too high, so :mod:`bouquet.io.imas`
+    passes its own thermal-numerator recomputation, never the dd's ``zeff``.
     """
     ne = np.asarray(ne, dtype=float)
     if z_fast is None:
@@ -661,13 +657,13 @@ def main_ion_density_from_zeff(ne, zeff, Z_imp, z_fast=None, z2_fast=None,
     form when the fast population is absent.
 
     ``zeff_includes_fast=False`` -- THERMAL numerator over the full ``ne``
-    (``zeff = sum_thermal(n_s Z_s^2)/ne``), which is what FUSE stores on
-    ``core_profiles.profiles_1d[].zeff``.  Only the charge matters here::
+    (``zeff = sum_thermal(n_s Z_s^2)/ne``).  Only the charge matters here::
 
         ni = (Z_imp (ne - z_fast) - Zeff ne) / (Z_imp - 1)
 
     ``zeff_includes_fast=True`` -- ALL ions in the numerator, fast included.
-    This is what a MEASURED Z_eff is: VB bremsstrahlung counts a beam ion by
+    This is IMAS's ``zeff`` expression (``ion.density`` = thermal + fast), and
+    what a MEASURED Z_eff is: VB bremsstrahlung counts a beam ion by
     its own Z_s exactly like a thermal one, and a CER Z_eff built as
     ``1 + Z(Z-1) nC/ne`` inherits the same normalisation.  Then ``z2_fast`` is
     REQUIRED, because the numerator weights the beam by ``Z_s^2``::

@@ -2023,6 +2023,14 @@ def perturb_kinetic_equilibrium(
             ni_perturb = _draw_monotonic_perturbation(
                 psi_kin, ni / ni[0], sigma_ni / ni[0], n_ls, rng=rng
             ) * ni[0]
+            if Z_imp:
+                # Drawn on its own, ni can exceed the thermal electrons that
+                # neutralise it (nz < 0), which impurity_pressure then clips
+                # to zero without a word.  Hold it inside the single-impurity
+                # window, as the Z_eff draw is held inside zeff_bounds.
+                ni_perturb = np.minimum(ni_perturb, np.maximum(
+                    ne_perturb - (0.0 if z_fast is None
+                                  else np.asarray(z_fast, dtype=float)), 0.0))
 
         ti_perturb = _draw_monotonic_perturbation(
             psi_kin, ti / ti[0], sigma_ti / ti[0], t_ls, rng=rng

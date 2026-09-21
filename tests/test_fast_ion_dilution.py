@@ -186,6 +186,9 @@ class TestThermalDrawPathConsistency:
         # the per-draw archived "pressure" must carry the same impurity term
         assert "_impP(\n                _ne_th_eqp, _ni_eqp, _ti_eqp, Z_imp)" in tsrc
         assert "_impP(\n                _ne_eqp," not in tsrc
+        # an independently drawn ni is held to nz >= 0 on ne - z_fast
+        assert ("ni_perturb = np.minimum(ni_perturb, np.maximum(\n"
+                "                    ne_perturb - (0.0 if z_fast is None") in tsrc
         assert "impurity_pressure(_kin2eq(_ne_bl)" in tsrc
         assert "impurity_pressure(_ne_th, ni, ti, bl.Z_imp)" in rsrc
         assert "impurity_pressure(_ne_th_eq, ni_eq, ti_eq,\n" in rsrc

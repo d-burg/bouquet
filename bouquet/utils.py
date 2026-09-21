@@ -3257,6 +3257,8 @@ def store_equilibrium(
     j_BS_edge=None,
     pfile_bytes=None,
     Zeff=None,
+    z_fast=None,
+    Z_imp=None,
     coil_currents=None,
     psi_N_kinetic=None,
     homotopy_pass=None,
@@ -3388,6 +3390,16 @@ def store_equilibrium(
         # ---- optional: Zeff profile ----------------------------------------
         if Zeff is not None:
             write_profile(grp, "Zeff", Zeff)
+
+        # ---- optional: fast-ion charge density ------------------------------
+        # On psi_N_kinetic, like the kinetics.  Fixed across draws, but written
+        # per draw so a reader holding one entry can reproduce the thermal
+        # electron density ne - z_fast the solve used; without it any consumer
+        # re-deriving the impurity from (ne, ni) charges the beam to carbon.
+        if z_fast is not None:
+            write_profile(grp, "z_fast", z_fast)
+        if Z_imp:
+            grp.attrs["Z_imp"] = float(Z_imp)
 
         # ---- optional: coil currents ---------------------------------------
         if coil_currents is not None:
@@ -3570,6 +3582,10 @@ def load_equilibrium(header, count, scan_key=None, eqdsk_out_dir=None):
         # ---- optional: Zeff -----------------------------------------------
         if "Zeff" in grp:
             result["Zeff"] = np.array(grp["Zeff"])
+        if "z_fast" in grp:
+            result["z_fast"] = np.array(grp["z_fast"])
+        if "Z_imp" in grp.attrs:
+            result["Z_imp"] = float(grp.attrs["Z_imp"])
 
         # ---- optional: p-file bytes ----------------------------------------
         # Text p-file sources are stored per draw (draw-perturbed); binary IDA
@@ -3615,6 +3631,8 @@ def store_baseline_profiles(
     scan_key=None,
     l_i_scale=LI_SCALE,
     pressure_thermal=None,
+    z_fast=None,
+    Z_imp=None,
     eqdsk_bytes=None,
     pfile_bytes=None,
     psi_N_kinetic=None,
@@ -3670,6 +3688,11 @@ def store_baseline_profiles(
         write_profile(grp, "pressure", pressure)
         if pressure_thermal is not None:
             write_profile(grp, "pressure_thermal", pressure_thermal)
+        # See store_equilibrium: needed to recover ne - z_fast downstream.
+        if z_fast is not None:
+            write_profile(grp, "z_fast", z_fast)
+        if Z_imp:
+            grp.attrs["Z_imp"] = float(Z_imp)
         write_profile(grp, "j_phi", j_phi)
         if j_BS is not None:
             write_profile(grp, "j_BS", j_BS)
@@ -3916,6 +3939,10 @@ def load_equilibrium_by_path(h5path_or_header, count, scan_key=None):
 
         if "Zeff" in grp:
             result["Zeff"] = np.array(grp["Zeff"])
+        if "z_fast" in grp:
+            result["z_fast"] = np.array(grp["z_fast"])
+        if "Z_imp" in grp.attrs:
+            result["Z_imp"] = float(grp.attrs["Z_imp"])
 
         # auxiliary ("switchboard") perturbed profiles -- aux_zeff, aux_omega_tor,
         # aux_chi_e, ... on psi_N_kinetic -- so per-draw plots (draw_zeff, the aux

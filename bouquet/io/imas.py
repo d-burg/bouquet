@@ -836,6 +836,7 @@ def read_imas_baseline(
     # sigmas land in aux as sigma_*_ida (informational -- resolve_uncertainty still
     # needs UncertaintyConfig.ida_path for the actual generation envelope).
     use_ida = bool(kinetic_source == "ida_hybrid" and getattr(source, "ida_path", None))
+    zeff_includes_fast = False        # FUSE stores a thermal-numerator zeff
     if use_ida:
         (ne, te, ti, ni, Zeff, _omega,
          sigma_ne_ida, sigma_te_ida, sigma_ni_ida, sigma_ti_ida,
@@ -859,6 +860,9 @@ def read_imas_baseline(
         if _omega is not None:
             aux["omega_tor"] = _omega
         aux["zeff"] = Zeff   # keep the switchboard's zeff baseline consistent
+        # IDA's Z_eff is MEASURED, so its numerator counts the fast ions;
+        # zeff_from_fuse swaps in FUSE's thermal-numerator one instead.
+        zeff_includes_fast = not getattr(source, "zeff_from_fuse", False)
         # Read once, shared: resolve_uncertainty reuses this instead of
         # opening the same file again (and possibly at another slice).
         aux["ida_profiles"] = (str(source.ida_path), _ida_read)
@@ -967,6 +971,7 @@ def read_imas_baseline(
         j_RF=j_RF,
         p_fast=p_fast,
         z_fast=(z_fast if np.any(z_fast) else None),
+        zeff_includes_fast=zeff_includes_fast,
         p_equilibrium=p_equilibrium,
         p_diff=p_diff,
         Z_imp=Z_imp,

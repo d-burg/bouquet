@@ -1688,6 +1688,7 @@ def perturb_kinetic_equilibrium(
     psi_N_kinetic=None,
     p_fast=None,
     z_fast=None,
+    zeff_includes_fast=False,
     j_NBI=None,
     j_RF=None,
     aux_sigmas=None,
@@ -1960,6 +1961,13 @@ def perturb_kinetic_equilibrium(
                 ne, ni, np.asarray(aux_baselines['zeff'], dtype=float),
                 np.zeros_like(np.asarray(ne, dtype=float))
                 if z_fast is None else z_fast)
+        # One bound for both draw paths (active derives ni from it, passive
+        # only feeds the bootstrap) -- they were separate expressions and
+        # drifted apart the moment z_fast arrived.  The window is
+        # convention-dependent; see physics.zeff_bounds.
+        from .physics import zeff_bounds
+        _z_lo, _z_hi = ((1.0, None) if _Z_imp is None else
+                        zeff_bounds(ne, _Z_imp, z_fast, zeff_includes_fast))
         if _zeff_active and _Z_imp is None:
             print("  [zeff] baseline has no ne-ni dilution (ni ~= ne): Zeff "
                   "draws still drive the bootstrap, but ni remains an "
@@ -1998,17 +2006,13 @@ def perturb_kinetic_equilibrium(
                     psi_kin, _zb / _z0, _zs / _z0,
                     length_scale=(aux_length_scales or {}).get('zeff', 0.4),
                     n_samples=1, rng=rng)) * _z0, dtype=float))
-            # ne_th/ne <= Zeff <= Z_imp*ne_th/ne guarantees 0 <= ni <= ne_th
-            # and nz >= 0 (reduces to the familiar [1, Z_imp] at z_fast=0)
-            if z_fast is None:
-                _zeff_draw = np.clip(_zeff_draw, 1.0, _Z_imp * (1.0 - 1e-9))
-            else:
-                _fth = np.clip((ne_perturb - np.asarray(z_fast, dtype=float))
-                               / np.clip(ne_perturb, 1e10, None), 0.0, 1.0)
-                _zeff_draw = np.clip(_zeff_draw, np.maximum(_fth, 1e-9),
-                                     _Z_imp * _fth * (1.0 - 1e-9))
-            ni_perturb = main_ion_density_from_zeff(ne_perturb, _zeff_draw,
-                                                    _Z_imp, z_fast=z_fast)
+            # The single-impurity window (physics.zeff_bounds): outside it
+            # ni or nz goes negative and Z_imp / p_imp lose their meaning.
+            _zeff_draw = np.clip(_zeff_draw, np.maximum(_z_lo, 1e-9),
+                                 _z_hi * (1.0 - 1e-9))
+            ni_perturb = main_ion_density_from_zeff(
+                ne_perturb, _zeff_draw, _Z_imp, z_fast=z_fast,
+                zeff_includes_fast=zeff_includes_fast)
         else:
             ni_perturb = _draw_monotonic_perturbation(
                 psi_kin, ni / ni[0], sigma_ni / ni[0], n_ls, rng=rng
@@ -2076,10 +2080,11 @@ def perturb_kinetic_equilibrium(
                 psi_kin, _eb / _e0, _es / _e0, length_scale=_els, n_samples=1,
                 rng=rng)) * _e0
             if _en == 'zeff':
-                # Same bound as the active path: a draw outside [1, Z_imp] is
-                # outside the single-impurity model that Z_imp / p_imp assume.
-                _ep = np.clip(_ep, 1.0,
-                              None if _Z_imp is None else _Z_imp * (1.0 - 1e-9))
+                # The SAME bound object the active path uses, not a second
+                # expression that agrees today: a draw outside the window is
+                # outside the single-impurity model Z_imp / p_imp assume.
+                _ep = np.clip(_ep, np.maximum(_z_lo, 1e-9),
+                              None if _z_hi is None else _z_hi * (1.0 - 1e-9))
             aux_out[_en] = np.atleast_1d(np.asarray(_ep, dtype=float))
         if _zeff_draw is not None:
             aux_out['zeff'] = _zeff_draw      # the draw ni was derived from
@@ -3598,6 +3603,7 @@ def generate_bouquet(
     pin_jphi=False,
     p_fast=None,
     z_fast=None,
+    zeff_includes_fast=False,
     Z_imp=None,
     p_diff=None,
     jphi_diff=None,
@@ -4662,6 +4668,8 @@ def generate_bouquet(
         # thermal-only part, so plots can separate it from the impurity+fast
         # the GS solve added (pressure_solve - pressure).
         pressure_thermal=pressure,
+        z_fast=z_fast,
+        Z_imp=Z_imp,
         eqdsk_bytes=baseline_eqdsk_bytes,
         pfile_bytes=stored_pfile_bytes,
         psi_N_kinetic=psi_N_kinetic,
@@ -5191,6 +5199,7 @@ def generate_bouquet(
                 psi_N_kinetic=psi_N_kinetic,
                 p_fast=p_fast,
                 z_fast=z_fast,
+                zeff_includes_fast=zeff_includes_fast,
                 j_NBI=j_NBI,
                 j_RF=j_RF,
                 aux_sigmas=aux_sigmas,
@@ -5910,6 +5919,20 @@ def generate_bouquet(
                         )(psi_grid)
                         pf.set_profile(pf_key, psi_grid, vals)
 
+                # Fast-ion density.  ni above is THERMAL whenever the source
+                # carries a fast population, and the p-file model is
+                # nz1 = (ne - ni - nb)/Z_imp -- so without nb the whole beam is
+                # charged to the impurity.  Written even when the source p-file
+                # has no nb block (set_profile creates it), since its absence
+                # is read as zero.  z_fast is a CHARGE density; nb is a particle
+                # density, equal for the hydrogenic beams these files describe.
+                if z_fast is not None:
+                    _nb_psi = pf.psinorm_for("ne")
+                    _zf = np.asarray(z_fast, dtype=float) * 1e-20
+                    pf.set_profile("nb", _nb_psi, interp1d(
+                        _psi_src, _zf, kind="cubic", bounds_error=False,
+                        fill_value=(_zf[0], _zf[-1]))(_nb_psi))
+
                 # Recompute the impurity density from THIS draw's (ne, ni)
                 # via quasineutrality, so the p-file species block implies
                 # exactly this draw's Zeff -- one Zeff per draw across the
@@ -6016,6 +6039,8 @@ def generate_bouquet(
             j_BS_edge=diagnostics["j_BS_edge"],
             pfile_bytes=perturbed_pfile_bytes,
             Zeff=Zeff_profile,
+            z_fast=z_fast,
+            Z_imp=Z_imp,
             coil_currents=coil_current_dict,
             psi_N_kinetic=psi_N_kinetic,
             homotopy_pass=diagnostics.get('homotopy_pass'),

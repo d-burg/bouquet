@@ -128,6 +128,13 @@ class Baseline:
     # derivation) must run on ne - z_fast, while the Zeff consumed by the
     # bootstrap stays on the full ne.
     z_fast: Optional[np.ndarray] = None
+    # Whether Z_eff's numerator counts the fast ions.  A MEASURED Z_eff does
+    # (VB bremsstrahlung sees a beam deuteron as Z=1 like any other, and a CER
+    # Z_eff = 1 + Z(Z-1)nC/ne inherits that normalisation), so the ida_hybrid
+    # path sets this True.  FUSE stores a THERMAL-numerator zeff, so the plain
+    # IMAS path leaves it False.  Only matters when z_fast is non-zero; see
+    # physics.main_ion_density_from_zeff and physics.zeff_bounds.
+    zeff_includes_fast: bool = False
 
     # IMAS total-current anchor: jphi_diff = equilibrium.profiles_1d.j_tor
     # (the GS-consistent current GPEC reads, with the pedestal current) minus the

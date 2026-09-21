@@ -595,7 +595,8 @@ def impurity_charge_with_fast_ions(ne, ni, zeff, z_fast=None):
     return effective_impurity_charge(ne_th, ni, zeff_th), ne_th
 
 
-def main_ion_density_from_zeff(ne, zeff, Z_imp, z_fast=None):
+def main_ion_density_from_zeff(ne, zeff, Z_imp, z_fast=None,
+                               zeff_includes_fast=False):
     """Main-ion density from (ne, Zeff) under single-impurity quasineutrality.
 
     ::
@@ -607,18 +608,31 @@ def main_ion_density_from_zeff(ne, zeff, Z_imp, z_fast=None):
     ``nz >= 0`` -- the consistent (ne, ni, Zeff, nz) set that the independent
     per-channel draws cannot provide. Returns ``ni``.
 
-    With a fast-ion charge profile ``z_fast`` the thermal quasineutrality is
-    ``ni + Z_imp nz = ne - z_fast`` while ``zeff`` keeps the full-``ne``
-    normalization, giving
+    With a fast-ion charge profile ``z_fast`` the result is the THERMAL main-ion
+    density, and which formula gives it depends on what is in ``zeff``'s
+    numerator.  ``zeff_includes_fast`` says which convention applies; the two
+    differ only when ``z_fast`` is non-zero, and both reduce to the plain form
+    at ``z_fast = 0``.
 
-    ::
+    ``zeff_includes_fast=False`` -- THERMAL numerator over the full ``ne``
+    (``zeff = sum_thermal(n_s Z_s^2)/ne``), which is what FUSE stores on
+    ``core_profiles.profiles_1d[].zeff``::
 
         ni = (Z_imp (ne - z_fast) - Zeff ne) / (Z_imp - 1)
 
-    which reduces to the plain form at ``z_fast = 0``.  The corresponding
-    physical bounds on a full-``ne`` Zeff are
-    ``ne_th/ne <= Zeff <= Z_imp ne_th/ne`` (both reduce to the familiar
-    ``[1, Z_imp]`` without fast ions).
+    ``zeff_includes_fast=True`` -- ALL ions in the numerator, fast included.
+    This is what a MEASURED Z_eff is: VB bremsstrahlung counts a beam deuteron
+    exactly like a thermal one, and a CER Z_eff built as
+    ``1 + Z(Z-1) nC/ne`` inherits the same normalisation.  Then
+    ``nz = ne (Zeff - 1)/(Z_imp (Z_imp - 1))`` needs no fast-ion term at all
+    and the thermal main ion is just the total one less the beam::
+
+        ni = ne (Z_imp - Zeff) / (Z_imp - 1) - z_fast
+
+    Getting this backwards does not fail loudly -- it biases ``ni`` by
+    ``z_fast/(Z_imp - 1)``, ~20 % of the beam density for carbon.  See
+    :func:`zeff_bounds` for the matching validity window, which also differs
+    between the two conventions.
     """
     ne = np.asarray(ne, dtype=float)
     zeff = np.asarray(zeff, dtype=float)
@@ -627,8 +641,40 @@ def main_ion_density_from_zeff(ne, zeff, Z_imp, z_fast=None):
         raise ValueError(f"Z_imp must exceed 1 (got {Z_imp})")
     if z_fast is None:
         return ne * (Z_imp - zeff) / (Z_imp - 1.0)
-    ne_th = np.maximum(ne - np.asarray(z_fast, dtype=float), 0.0)
+    z_fast = np.asarray(z_fast, dtype=float)
+    if zeff_includes_fast:
+        return ne * (Z_imp - zeff) / (Z_imp - 1.0) - z_fast
+    ne_th = np.maximum(ne - z_fast, 0.0)
     return (Z_imp * ne_th - zeff * ne) / (Z_imp - 1.0)
+
+
+def zeff_bounds(ne, Z_imp, z_fast=None, zeff_includes_fast=False):
+    """``(lo, hi)`` on Z_eff: the window where ni >= 0 and nz >= 0.
+
+    The single-impurity model :func:`main_ion_density_from_zeff` inverts is
+    only defined inside this window, so it is what a Z_eff DRAW must be
+    clipped to -- whether or not that draw goes on to derive ``ni``, since the
+    same ``Z_imp`` bounds the impurity pressure either way.
+
+    Without fast ions this is the familiar ``[1, Z_imp]``.  With them it
+    depends on the same convention :func:`main_ion_density_from_zeff` takes::
+
+        zeff_includes_fast=False -> [ne_th/ne,  Z_imp ne_th/ne]
+        zeff_includes_fast=True  -> [1,         Z_imp - (Z_imp - 1) z_fast/ne]
+
+    Both reduce to ``[1, Z_imp]`` at ``z_fast = 0``.  Returns scalars there and
+    arrays otherwise; ``hi`` is not clamped above ``lo``, so a surface with
+    ``z_fast >= ne`` yields an empty window the caller can detect.
+    """
+    Z_imp = float(Z_imp)
+    if z_fast is None:
+        return 1.0, Z_imp
+    ne = np.asarray(ne, dtype=float)
+    f = np.clip(np.asarray(z_fast, dtype=float) / np.clip(ne, 1e-30, None),
+                0.0, 1.0)
+    if zeff_includes_fast:
+        return np.ones_like(f), Z_imp - (Z_imp - 1.0) * f
+    return 1.0 - f, Z_imp * (1.0 - f)
 
 
 # Elementary charge [C] -- thermal pressure p = e * sum_s(n_s * T_s) with n in

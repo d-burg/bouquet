@@ -3417,6 +3417,8 @@ class Bouquet:
                 # pressure to the dd equilibrium.pressure (mirrors jBS_diff).
                 Z_imp=getattr(bl, "Z_imp", None),
                 z_fast=getattr(bl, "z_fast", None),
+                zeff_includes_fast=bool(getattr(bl, "zeff_includes_fast",
+                                                False)),
                 p_diff=getattr(bl, "p_diff", None),
                 # Total-current anchor to equilibrium.j_tor (fixed offset; rides
                 # under the SWB bootstrap + perturbed j_ind in every draw).

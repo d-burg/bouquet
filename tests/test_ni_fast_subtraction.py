@@ -293,3 +293,171 @@ class TestQuasineutralityIsPreserved:
               - np.asarray(bl.ni, dtype=float)) / Z_IMP
         nc_expected = (ne - ni_total) / Z_IMP
         assert not np.allclose(nz, nc_expected, rtol=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# the consumers that re-derive the impurity from (ne, ni)
+# ---------------------------------------------------------------------------
+class TestArchiveConsumers:
+    """A thermal n_i must be paired with a thermal n_e everywhere.
+
+    Pairing the archive's full ne with a thermal n_i makes every (ne, ni)
+    inversion charge the whole beam to the impurity.
+    """
+
+    def _case(self, fast_frac=0.20):
+        Z, ne, ti = 6.0, 5.0e19, 2.0e3
+        nC = 0.005 * ne
+        zeff = 1.0 + Z * (Z - 1.0) * nC / ne
+        ni_total = ne - Z * nC
+        z_fast = fast_frac * ne
+        return Z, ne, nC, zeff, ni_total, z_fast, ti
+
+    def test_pairing_thermal_ni_with_full_ne_is_the_trap(self):
+        from bouquet.physics import (effective_impurity_charge,
+                                     impurity_pressure)
+        Z, ne, nC, zeff, ni_total, z_fast, ti = self._case()
+        ni_th = ni_total - z_fast
+        a, b = np.full(4, ne), np.full(4, ni_th)
+        bad = impurity_pressure(a, b, np.full(4, ti),
+                                effective_impurity_charge(a, b,
+                                                          np.full(4, zeff)))
+        true = 1.602176634e-19 * nC * ti
+        assert bad[0] > 10.0 * true          # the regression this guards
+
+    def test_the_archived_Z_imp_makes_the_pair_exact(self):
+        from bouquet.physics import impurity_pressure
+        Z, ne, nC, zeff, ni_total, z_fast, ti = self._case()
+        ni_th = ni_total - z_fast
+        ne_th = ne - z_fast
+        good = impurity_pressure(np.full(4, ne_th), np.full(4, ni_th),
+                                 np.full(4, ti), Z)
+        np.testing.assert_allclose(good, 1.602176634e-19 * nC * ti, rtol=1e-12)
+
+    def test_the_baseline_carries_what_the_consumers_need(self, tmp_path):
+        ddp, cdf, *_ = _build(tmp_path)
+        bl = _read(ddp, cdf)
+        assert bl.z_fast is not None and np.any(bl.z_fast)
+        assert bl.Z_imp == Z_IMP
+        # and the convention flag the per-draw Z_eff maths needs
+        assert bl.zeff_includes_fast is True
+
+    def test_zeff_from_fuse_flips_the_convention(self, tmp_path):
+        ddp, cdf, *_ = _build(tmp_path)
+        assert _read(ddp, cdf, zeff_from_fuse=True).zeff_includes_fast is False
+
+
+class TestZeffBounds:
+    """The window both Z_eff draw paths clip to (physics.zeff_bounds)."""
+
+    def test_no_fast_ions_is_the_familiar_window(self):
+        from bouquet.physics import zeff_bounds
+        assert zeff_bounds(np.full(4, 5e19), 6.0) == (1.0, 6.0)
+
+    def test_both_conventions_reduce_to_it_at_zero_fast(self):
+        from bouquet.physics import zeff_bounds
+        ne, zf = np.full(4, 5e19), np.zeros(4)
+        for flag in (False, True):
+            lo, hi = zeff_bounds(ne, 6.0, zf, zeff_includes_fast=flag)
+            np.testing.assert_allclose(lo, 1.0)
+            np.testing.assert_allclose(hi, 6.0)
+
+    def test_the_two_conventions_differ_once_a_beam_is_present(self):
+        from bouquet.physics import zeff_bounds
+        ne, zf = np.full(4, 5e19), np.full(4, 0.2 * 5e19)
+        lo_t, hi_t = zeff_bounds(ne, 6.0, zf, zeff_includes_fast=False)
+        lo_m, hi_m = zeff_bounds(ne, 6.0, zf, zeff_includes_fast=True)
+        np.testing.assert_allclose(lo_t, 0.8)      # thermal numerator
+        np.testing.assert_allclose(hi_t, 4.8)
+        np.testing.assert_allclose(lo_m, 1.0)      # measured (all ions)
+        np.testing.assert_allclose(hi_m, 5.0)
+
+    def test_the_window_is_exactly_where_ni_and_nz_stay_positive(self):
+        """Each bound is the edge case it claims to be, in its own convention."""
+        from bouquet.physics import main_ion_density_from_zeff, zeff_bounds
+        ne, zf, Z = np.full(4, 5e19), np.full(4, 0.2 * 5e19), 6.0
+        for flag in (False, True):
+            lo, hi = zeff_bounds(ne, Z, zf, zeff_includes_fast=flag)
+            ni_hi = main_ion_density_from_zeff(ne, hi, Z, z_fast=zf,
+                                               zeff_includes_fast=flag)
+            np.testing.assert_allclose(ni_hi, 0.0, atol=1e6)   # ni -> 0 at hi
+            ni_lo = main_ion_density_from_zeff(ne, lo, Z, z_fast=zf,
+                                               zeff_includes_fast=flag)
+            nz_lo = (ne - zf - ni_lo) / Z
+            np.testing.assert_allclose(nz_lo, 0.0, atol=1e6)   # nz -> 0 at lo
+
+
+class TestMainIonConvention:
+    def test_the_measured_convention_is_the_total_less_the_beam(self):
+        from bouquet.physics import main_ion_density_from_zeff
+        ne, zf, Z, zeff = np.full(4, 5e19), np.full(4, 1e19), 6.0, np.full(4, 1.15)
+        total = main_ion_density_from_zeff(ne, zeff, Z)
+        np.testing.assert_allclose(
+            main_ion_density_from_zeff(ne, zeff, Z, z_fast=zf,
+                                       zeff_includes_fast=True),
+            total - zf, rtol=1e-12)
+
+    def test_using_the_wrong_convention_biases_ni_by_z_fast_over_Z_minus_1(self):
+        from bouquet.physics import main_ion_density_from_zeff
+        ne, zf, Z, zeff = np.full(4, 5e19), np.full(4, 1e19), 6.0, np.full(4, 1.15)
+        a = main_ion_density_from_zeff(ne, zeff, Z, z_fast=zf,
+                                       zeff_includes_fast=True)
+        b = main_ion_density_from_zeff(ne, zeff, Z, z_fast=zf,
+                                       zeff_includes_fast=False)
+        np.testing.assert_allclose(a - b, zf / (Z - 1.0), rtol=1e-12)
+
+    def test_z_fast_none_is_bit_identical_under_either_flag(self):
+        from bouquet.physics import main_ion_density_from_zeff
+        ne, Z, zeff = np.full(8, 5e19), 6.0, np.linspace(1.0, 5.0, 8)
+        base = main_ion_density_from_zeff(ne, zeff, Z)
+        for flag in (False, True):
+            np.testing.assert_array_equal(
+                main_ion_density_from_zeff(ne, zeff, Z,
+                                           zeff_includes_fast=flag), base)
+
+
+class TestPFileFastIonBlock:
+    """The p-file model is nz1 = (ne - ni - nb)/Z_imp.
+
+    It has always expected a THERMAL ni plus a separate nb, so the subtraction
+    puts bouquet's ni on the right footing -- but only if nb travels with it.
+    """
+
+    def _pf(self, npts=32, with_nb=True):
+        from bouquet.io.pfile import PFile
+        Z, psi = 6.0, np.linspace(0.0, 1.0, npts)
+        ne = 5.0e19 * (1.0 - 0.7 * psi ** 2)
+        nC = 0.005 * ne
+        nb = 0.20 * ne
+        ni_th = ne - Z * nC - nb
+        pf = PFile.__new__(PFile)
+        pf._raw, pf._modified = {}, set()
+        pf.set_profile("ne", psi, ne * 1e-20)
+        pf.set_profile("ni", psi, ni_th * 1e-20)
+        if with_nb:
+            pf.set_profile("nb", psi, nb * 1e-20)
+        pf.set_ion_species([1, 1], [Z, 1.0], [12.0, 2.0])
+        return pf, psi, nC
+
+    def test_nb_recovers_the_carbon(self):
+        pf, psi, nC = self._pf()
+        pf.compute_quasineutrality()
+        np.testing.assert_allclose(np.asarray(pf["nz1"]["data"]) * 1e20,
+                                   nC, rtol=1e-9)
+
+    def test_without_nb_the_beam_is_charged_to_the_impurity(self):
+        """nz1 inflates by exactly nb/(Z nC) -- 7.67x for this 20 % beam.
+
+        Smaller than the plotting failure (~28x) because Z_imp comes from the
+        species block here rather than an (ne, ni) inversion that is itself
+        thrown off; only the numerator is wrong.
+        """
+        import warnings
+        pf, psi, nC = self._pf(with_nb=False)
+        nb = 0.20 * 5.0e19 * (1.0 - 0.7 * psi ** 2)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            pf.compute_quasineutrality()
+        nz1 = np.asarray(pf["nz1"]["data"]) * 1e20
+        np.testing.assert_allclose(nz1, nC + nb / 6.0, rtol=1e-9)
+        assert np.median(nz1 / nC) == pytest.approx(7.667, abs=0.01)

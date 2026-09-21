@@ -3258,6 +3258,7 @@ def store_equilibrium(
     pfile_bytes=None,
     Zeff=None,
     z_fast=None,
+    z2_fast=None,
     Z_imp=None,
     coil_currents=None,
     psi_N_kinetic=None,
@@ -3398,6 +3399,8 @@ def store_equilibrium(
         # re-deriving the impurity from (ne, ni) charges the beam to carbon.
         if z_fast is not None:
             write_profile(grp, "z_fast", z_fast)
+        if z2_fast is not None:
+            write_profile(grp, "z2_fast", z2_fast)
         if Z_imp:
             grp.attrs["Z_imp"] = float(Z_imp)
 
@@ -3584,6 +3587,8 @@ def load_equilibrium(header, count, scan_key=None, eqdsk_out_dir=None):
             result["Zeff"] = np.array(grp["Zeff"])
         if "z_fast" in grp:
             result["z_fast"] = np.array(grp["z_fast"])
+        if "z2_fast" in grp:
+            result["z2_fast"] = np.array(grp["z2_fast"])
         if "Z_imp" in grp.attrs:
             result["Z_imp"] = float(grp.attrs["Z_imp"])
 
@@ -3632,6 +3637,7 @@ def store_baseline_profiles(
     l_i_scale=LI_SCALE,
     pressure_thermal=None,
     z_fast=None,
+    z2_fast=None,
     Z_imp=None,
     eqdsk_bytes=None,
     pfile_bytes=None,
@@ -3691,6 +3697,8 @@ def store_baseline_profiles(
         # See store_equilibrium: needed to recover ne - z_fast downstream.
         if z_fast is not None:
             write_profile(grp, "z_fast", z_fast)
+        if z2_fast is not None:
+            write_profile(grp, "z2_fast", z2_fast)
         if Z_imp:
             grp.attrs["Z_imp"] = float(Z_imp)
         write_profile(grp, "j_phi", j_phi)
@@ -3941,6 +3949,8 @@ def load_equilibrium_by_path(h5path_or_header, count, scan_key=None):
             result["Zeff"] = np.array(grp["Zeff"])
         if "z_fast" in grp:
             result["z_fast"] = np.array(grp["z_fast"])
+        if "z2_fast" in grp:
+            result["z2_fast"] = np.array(grp["z2_fast"])
         if "Z_imp" in grp.attrs:
             result["Z_imp"] = float(grp.attrs["Z_imp"])
 

@@ -25,27 +25,35 @@ from bouquet.io.imas import (NI_FAST_GATE_PSI_N, NI_FAST_RTOL,
 # ---------------------------------------------------------------------------
 # the helper in isolation
 # ---------------------------------------------------------------------------
-def _profiles(n=32, fast_frac=0.2):
+def _profiles(n=32, fast_frac=0.2, Z_beam=1.0, Z_imp=6.0):
+    """Returns (psi, ni_total, ni_fast_equivalent, ni_thermal, z_fast, z2_fast).
+
+    ``ni_fast_equivalent`` is what a MEASURED ni carries of the beam --
+    n_fast Z_b(Z_imp - Z_b)/(Z_imp - 1) -- not the bare particle density.
+    """
     psi = np.linspace(0.0, 1.0, n)
     ni_total = 4.0e19 * (1.0 - 0.7 * psi ** 2)
-    ni_fast = fast_frac * ni_total * (1.0 - psi ** 2)      # core-peaked beam
-    return psi, ni_total, ni_fast, ni_total - ni_fast
+    n_fast = fast_frac * ni_total * (1.0 - psi ** 2)       # core-peaked beam
+    z_fast = Z_beam * n_fast
+    z2_fast = Z_beam ** 2 * n_fast
+    ni_fast = n_fast * Z_beam * (Z_imp - Z_beam) / (Z_imp - 1.0)
+    return psi, ni_total, ni_fast, ni_total - ni_fast, z_fast, z2_fast
 
 
 class TestGate:
     def test_matching_total_fires_and_subtracts(self):
-        psi, ni_total, ni_fast, ni_th = _profiles()
+        psi, ni_total, ni_fast, ni_th, zf, z2 = _profiles()
         ni, sig, meta = _subtract_fast_ni(psi, ni_total, 0.1 * ni_total,
-                                          ni_th, ni_fast)
+                                          ni_th, zf, z2, 6.0)
         assert meta["applied"]
         np.testing.assert_allclose(ni, ni_th, rtol=1e-12)
 
     def test_a_mismatched_total_refuses_and_says_why(self):
-        psi, ni_total, ni_fast, ni_th = _profiles()
+        psi, ni_total, ni_fast, ni_th, zf, z2 = _profiles()
         # IDA ni 1% above the dd total: the two are not the same quantity, so
         # subtracting density_fast would correct one disagreement with another.
         ni, sig, meta = _subtract_fast_ni(psi, 1.01 * ni_total, 0.1 * ni_total,
-                                          ni_th, ni_fast)
+                                          ni_th, zf, z2, 6.0)
         assert not meta["applied"]
         assert meta["mismatch"] > NI_FAST_RTOL
         assert "not the dd's total" in meta["evidence"]
@@ -53,17 +61,17 @@ class TestGate:
 
     def test_the_gate_sits_exactly_at_the_documented_tolerance(self):
         """A uniform relative offset straddling NI_FAST_RTOL flips the gate."""
-        psi, ni_total, ni_fast, ni_th = _profiles()
+        psi, ni_total, ni_fast, ni_th, zf, z2 = _profiles()
         for mult, applied in ((0.5, True), (2.0, False)):
             scaled = ni_total * (1.0 + mult * NI_FAST_RTOL)
-            _, _, meta = _subtract_fast_ni(psi, scaled, None, ni_th, ni_fast)
+            _, _, meta = _subtract_fast_ni(psi, scaled, None, ni_th, zf, z2, 6.0)
             assert meta["applied"] is applied, mult
             assert meta["mismatch"] == pytest.approx(mult * NI_FAST_RTOL,
                                                      rel=1e-6)
 
     def test_the_gate_is_evaluated_at_the_five_declared_points(self):
-        psi, ni_total, ni_fast, ni_th = _profiles()
-        _, _, meta = _subtract_fast_ni(psi, ni_total, None, ni_th, ni_fast)
+        psi, ni_total, ni_fast, ni_th, zf, z2 = _profiles()
+        _, _, meta = _subtract_fast_ni(psi, ni_total, None, ni_th, zf, z2, 6.0)
         assert tuple(meta["gate"]) == NI_FAST_GATE_PSI_N == (0.0, 0.2, 0.4,
                                                              0.6, 0.8)
 
@@ -73,52 +81,52 @@ class TestGate:
         The gate deliberately does not look there, so an edge-only deviation
         must not veto a subtraction the interior fully supports.
         """
-        psi, ni_total, ni_fast, ni_th = _profiles(n=128)
+        psi, ni_total, ni_fast, ni_th, zf, z2 = _profiles(n=128)
         bad = ni_total.copy()
         bad[psi > 0.9] *= 1.5                     # gross, and entirely outside
-        _, _, meta = _subtract_fast_ni(psi, bad, None, ni_th, ni_fast)
+        _, _, meta = _subtract_fast_ni(psi, bad, None, ni_th, zf, z2, 6.0)
         assert meta["applied"]
 
     def test_a_disagreement_on_axis_alone_is_enough_to_veto(self):
         """psi_N=0 is in the gate: that is where a beam is most peaked."""
-        psi, ni_total, ni_fast, ni_th = _profiles(n=128)
+        psi, ni_total, ni_fast, ni_th, zf, z2 = _profiles(n=128)
         bad = ni_total.copy()
         bad[psi < 0.05] *= 1.0 + 10.0 * NI_FAST_RTOL
-        _, _, meta = _subtract_fast_ni(psi, bad, None, ni_th, ni_fast)
+        _, _, meta = _subtract_fast_ni(psi, bad, None, ni_th, zf, z2, 6.0)
         assert not meta["applied"]
         assert meta["gate"][0.0] > NI_FAST_RTOL
 
     def test_no_density_fast_is_inert(self):
-        psi, ni_total, _, _ = _profiles(fast_frac=0.0)
+        psi, ni_total, _, _, zf, z2 = _profiles(fast_frac=0.0)
         sig = 0.1 * ni_total
         ni, s, meta = _subtract_fast_ni(psi, ni_total, sig, ni_total,
-                                        np.zeros_like(ni_total))
+                                        zf, z2, 6.0)
         assert not meta["applied"]
         np.testing.assert_array_equal(ni, ni_total)
         np.testing.assert_array_equal(s, sig)
-        assert "no main-ion density_fast" in meta["evidence"]
+        assert "no fast-ion population" in meta["evidence"]
 
 
 class TestSigmaScaling:
     def test_the_fractional_error_is_preserved(self):
-        psi, ni_total, ni_fast, ni_th = _profiles()
+        psi, ni_total, ni_fast, ni_th, zf, z2 = _profiles()
         sig = 0.13 * ni_total
-        ni, s, meta = _subtract_fast_ni(psi, ni_total, sig, ni_th, ni_fast)
+        ni, s, meta = _subtract_fast_ni(psi, ni_total, sig, ni_th, zf, z2, 6.0)
         assert meta["applied"]
         # The envelope is a measurement error on the deuteron inventory; the
         # fast density removed from the mean carries no IDA error of its own.
         np.testing.assert_allclose(s / ni, sig / ni_total, rtol=1e-12)
 
     def test_the_envelope_shrinks_with_the_mean_never_grows(self):
-        psi, ni_total, ni_fast, ni_th = _profiles()
+        psi, ni_total, ni_fast, ni_th, zf, z2 = _profiles()
         sig = 0.13 * ni_total
-        _, s, _ = _subtract_fast_ni(psi, ni_total, sig, ni_th, ni_fast)
+        _, s, _ = _subtract_fast_ni(psi, ni_total, sig, ni_th, zf, z2, 6.0)
         assert np.all(s <= sig + 1e-30)
         assert float(np.max(sig - s)) > 0.0          # it actually moved
 
     def test_a_none_envelope_survives(self):
-        psi, ni_total, ni_fast, ni_th = _profiles()
-        ni, s, meta = _subtract_fast_ni(psi, ni_total, None, ni_th, ni_fast)
+        psi, ni_total, ni_fast, ni_th, zf, z2 = _profiles()
+        ni, s, meta = _subtract_fast_ni(psi, ni_total, None, ni_th, zf, z2, 6.0)
         assert meta["applied"] and s is None
 
 
@@ -350,61 +358,149 @@ class TestArchiveConsumers:
 class TestZeffBounds:
     """The window both Z_eff draw paths clip to (physics.zeff_bounds)."""
 
+    NE, ZI = np.full(4, 5e19), 6.0
+
+    def _moments(self, frac=0.2, Z_beam=1.0):
+        n_fast = frac * self.NE
+        return Z_beam * n_fast, Z_beam ** 2 * n_fast
+
     def test_no_fast_ions_is_the_familiar_window(self):
         from bouquet.physics import zeff_bounds
-        assert zeff_bounds(np.full(4, 5e19), 6.0) == (1.0, 6.0)
+        assert zeff_bounds(self.NE, self.ZI) == (1.0, 6.0)
 
     def test_both_conventions_reduce_to_it_at_zero_fast(self):
         from bouquet.physics import zeff_bounds
-        ne, zf = np.full(4, 5e19), np.zeros(4)
+        zf, z2 = np.zeros(4), np.zeros(4)
         for flag in (False, True):
-            lo, hi = zeff_bounds(ne, 6.0, zf, zeff_includes_fast=flag)
+            lo, hi = zeff_bounds(self.NE, self.ZI, zf, z2,
+                                 zeff_includes_fast=flag)
             np.testing.assert_allclose(lo, 1.0)
             np.testing.assert_allclose(hi, 6.0)
 
     def test_the_two_conventions_differ_once_a_beam_is_present(self):
         from bouquet.physics import zeff_bounds
-        ne, zf = np.full(4, 5e19), np.full(4, 0.2 * 5e19)
-        lo_t, hi_t = zeff_bounds(ne, 6.0, zf, zeff_includes_fast=False)
-        lo_m, hi_m = zeff_bounds(ne, 6.0, zf, zeff_includes_fast=True)
-        np.testing.assert_allclose(lo_t, 0.8)      # thermal numerator
+        zf, z2 = self._moments(0.2)                      # hydrogenic
+        lo_t, hi_t = zeff_bounds(self.NE, self.ZI, zf, z2,
+                                 zeff_includes_fast=False)
+        lo_m, hi_m = zeff_bounds(self.NE, self.ZI, zf, z2,
+                                 zeff_includes_fast=True)
+        np.testing.assert_allclose(lo_t, 0.8)            # thermal numerator
         np.testing.assert_allclose(hi_t, 4.8)
-        np.testing.assert_allclose(lo_m, 1.0)      # measured (all ions)
+        np.testing.assert_allclose(lo_m, 1.0)            # measured (all ions)
         np.testing.assert_allclose(hi_m, 5.0)
 
-    def test_the_window_is_exactly_where_ni_and_nz_stay_positive(self):
-        """Each bound is the edge case it claims to be, in its own convention."""
+    def test_the_measured_window_moves_with_the_beam_charge(self):
+        """A He beam is not a D beam at the same charge density."""
+        from bouquet.physics import zeff_bounds
+        zf_d, z2_d = self._moments(0.2, Z_beam=1.0)
+        zf_he, z2_he = self._moments(0.1, Z_beam=2.0)    # same z_fast
+        np.testing.assert_allclose(zf_d, zf_he)          # identical charge
+        lo_d, hi_d = zeff_bounds(self.NE, self.ZI, zf_d, z2_d,
+                                 zeff_includes_fast=True)
+        lo_h, hi_h = zeff_bounds(self.NE, self.ZI, zf_he, z2_he,
+                                 zeff_includes_fast=True)
+        assert not np.allclose(lo_d, lo_h)               # z2 tells them apart
+        assert not np.allclose(hi_d, hi_h)
+
+    @pytest.mark.parametrize("Z_beam", [1.0, 2.0, 6.0])
+    def test_the_window_is_exactly_where_ni_and_nz_stay_positive(self, Z_beam):
+        """Each bound is the edge case it claims, in its own convention."""
         from bouquet.physics import main_ion_density_from_zeff, zeff_bounds
-        ne, zf, Z = np.full(4, 5e19), np.full(4, 0.2 * 5e19), 6.0
+        zf, z2 = self._moments(0.1, Z_beam)
         for flag in (False, True):
-            lo, hi = zeff_bounds(ne, Z, zf, zeff_includes_fast=flag)
-            ni_hi = main_ion_density_from_zeff(ne, hi, Z, z_fast=zf,
+            lo, hi = zeff_bounds(self.NE, self.ZI, zf, z2,
+                                 zeff_includes_fast=flag)
+            ni_hi = main_ion_density_from_zeff(self.NE, hi, self.ZI, z_fast=zf,
+                                               z2_fast=z2,
                                                zeff_includes_fast=flag)
             np.testing.assert_allclose(ni_hi, 0.0, atol=1e6)   # ni -> 0 at hi
-            ni_lo = main_ion_density_from_zeff(ne, lo, Z, z_fast=zf,
+            ni_lo = main_ion_density_from_zeff(self.NE, lo, self.ZI, z_fast=zf,
+                                               z2_fast=z2,
                                                zeff_includes_fast=flag)
-            nz_lo = (ne - zf - ni_lo) / Z
+            nz_lo = (self.NE - zf - ni_lo) / self.ZI
             np.testing.assert_allclose(nz_lo, 0.0, atol=1e6)   # nz -> 0 at lo
+
+    def test_the_measured_branch_refuses_to_guess_the_beam_charge(self):
+        from bouquet.physics import zeff_bounds
+        zf, _ = self._moments()
+        with pytest.raises(ValueError, match="z2_fast"):
+            zeff_bounds(self.NE, self.ZI, zf, None, zeff_includes_fast=True)
+
+
+class TestFastIonDensityEquivalent:
+    """What a MEASURED ni carries of the fast population."""
+
+    def test_a_hydrogenic_beam_is_its_own_density(self):
+        from bouquet.physics import fast_ion_density_equivalent
+        n = np.full(4, 1e19)
+        np.testing.assert_allclose(
+            fast_ion_density_equivalent(n, n, 6.0), n, rtol=1e-12)
+
+    def test_a_beam_at_the_impurity_charge_contributes_nothing(self):
+        """It is indistinguishable from thermal impurity, in both channels."""
+        from bouquet.physics import fast_ion_density_equivalent
+        n, Z = np.full(4, 1e19), 6.0
+        np.testing.assert_allclose(
+            fast_ion_density_equivalent(Z * n, Z * Z * n, Z), 0.0, atol=1e3)
+
+    @pytest.mark.parametrize("Z_beam", [1.0, 2.0, 3.0, 6.0])
+    def test_it_matches_the_per_species_sum(self, Z_beam):
+        from bouquet.physics import fast_ion_density_equivalent
+        n, Z = np.full(4, 1e19), 6.0
+        np.testing.assert_allclose(
+            fast_ion_density_equivalent(Z_beam * n, Z_beam ** 2 * n, Z),
+            n * Z_beam * (Z - Z_beam) / (Z - 1.0), rtol=1e-12)
+
+    def test_two_species_add(self):
+        from bouquet.physics import fast_ion_density_equivalent as f
+        nD, nHe, Z = np.full(4, 1e19), np.full(4, 4e18), 6.0
+        zf = 1.0 * nD + 2.0 * nHe
+        z2 = 1.0 * nD + 4.0 * nHe
+        np.testing.assert_allclose(f(zf, z2, Z),
+                                   f(nD, nD, Z) + f(2 * nHe, 4 * nHe, Z),
+                                   rtol=1e-12)
 
 
 class TestMainIonConvention:
-    def test_the_measured_convention_is_the_total_less_the_beam(self):
-        from bouquet.physics import main_ion_density_from_zeff
-        ne, zf, Z, zeff = np.full(4, 5e19), np.full(4, 1e19), 6.0, np.full(4, 1.15)
-        total = main_ion_density_from_zeff(ne, zeff, Z)
-        np.testing.assert_allclose(
-            main_ion_density_from_zeff(ne, zeff, Z, z_fast=zf,
-                                       zeff_includes_fast=True),
-            total - zf, rtol=1e-12)
+    NE, ZI, ZEFF = np.full(4, 5e19), 6.0, np.full(4, 1.15)
 
-    def test_using_the_wrong_convention_biases_ni_by_z_fast_over_Z_minus_1(self):
+    def test_the_measured_convention_subtracts_the_equivalent_not_the_charge(self):
+        from bouquet.physics import (fast_ion_density_equivalent,
+                                     main_ion_density_from_zeff)
+        n = np.full(4, 1e19)
+        zf, z2 = 2.0 * n, 4.0 * n                    # He beam: z_fast != n
+        total = main_ion_density_from_zeff(self.NE, self.ZEFF, self.ZI)
+        got = main_ion_density_from_zeff(self.NE, self.ZEFF, self.ZI,
+                                         z_fast=zf, z2_fast=z2,
+                                         zeff_includes_fast=True)
+        np.testing.assert_allclose(
+            got, total - fast_ion_density_equivalent(zf, z2, self.ZI),
+            rtol=1e-12)
+        assert not np.allclose(got, total - zf)      # subtracting charge is wrong
+
+    def test_using_the_wrong_convention_biases_ni(self):
         from bouquet.physics import main_ion_density_from_zeff
-        ne, zf, Z, zeff = np.full(4, 5e19), np.full(4, 1e19), 6.0, np.full(4, 1.15)
-        a = main_ion_density_from_zeff(ne, zeff, Z, z_fast=zf,
+        n = np.full(4, 1e19)
+        for Z_beam in (1.0, 2.0):
+            zf, z2 = Z_beam * n, Z_beam ** 2 * n
+            a = main_ion_density_from_zeff(self.NE, self.ZEFF, self.ZI,
+                                           z_fast=zf, z2_fast=z2,
+                                           zeff_includes_fast=True)
+            b = main_ion_density_from_zeff(self.NE, self.ZEFF, self.ZI,
+                                           z_fast=zf, z2_fast=z2,
+                                           zeff_includes_fast=False)
+            # measured minus thermal-numerator == z2_fast/(Z_imp - 1),
+            # which for a hydrogenic beam is z_fast/(Z_imp - 1) -- 20 % of the
+            # beam density at Z_imp = 6.
+            np.testing.assert_allclose(a - b, z2 / (self.ZI - 1.0),
+                                       rtol=1e-12)
+
+    def test_the_measured_branch_refuses_to_guess_the_beam_charge(self):
+        from bouquet.physics import main_ion_density_from_zeff
+        with pytest.raises(ValueError, match="z2_fast"):
+            main_ion_density_from_zeff(self.NE, self.ZEFF, self.ZI,
+                                       z_fast=np.full(4, 1e19),
                                        zeff_includes_fast=True)
-        b = main_ion_density_from_zeff(ne, zeff, Z, z_fast=zf,
-                                       zeff_includes_fast=False)
-        np.testing.assert_allclose(a - b, zf / (Z - 1.0), rtol=1e-12)
 
     def test_z_fast_none_is_bit_identical_under_either_flag(self):
         from bouquet.physics import main_ion_density_from_zeff
@@ -423,24 +519,30 @@ class TestPFileFastIonBlock:
     puts bouquet's ni on the right footing -- but only if nb travels with it.
     """
 
-    def _pf(self, npts=32, with_nb=True):
+    def _pf(self, npts=32, with_nb=True, Z_beam=1.0):
         from bouquet.io.pfile import PFile
         Z, psi = 6.0, np.linspace(0.0, 1.0, npts)
         ne = 5.0e19 * (1.0 - 0.7 * psi ** 2)
         nC = 0.005 * ne
-        nb = 0.20 * ne
-        ni_th = ne - Z * nC - nb
+        nb = 0.20 * ne / Z_beam          # same fast CHARGE at any beam charge
+        ni_th = ne - Z * nC - Z_beam * nb
         pf = PFile.__new__(PFile)
         pf._raw, pf._modified = {}, set()
         pf.set_profile("ne", psi, ne * 1e-20)
         pf.set_profile("ni", psi, ni_th * 1e-20)
         if with_nb:
             pf.set_profile("nb", psi, nb * 1e-20)
-        pf.set_ion_species([1, 1], [Z, 1.0], [12.0, 2.0])
+        pf.set_ion_species([1, 1, 1], [Z, 1.0, Z_beam], [12.0, 2.0, 2.0])
         return pf, psi, nC
 
-    def test_nb_recovers_the_carbon(self):
-        pf, psi, nC = self._pf()
+    @pytest.mark.parametrize("Z_beam", [1.0, 2.0])
+    def test_nb_recovers_the_carbon(self, Z_beam):
+        """nb is a PARTICLE density, so quasineutrality must weight it Z_beam.
+
+        Charging it at Z=1 pushes (Z_beam - 1) nb into nz1 -- invisible for the
+        hydrogenic beams these files usually carry, wrong for a He beam.
+        """
+        pf, psi, nC = self._pf(Z_beam=Z_beam)
         pf.compute_quasineutrality()
         np.testing.assert_allclose(np.asarray(pf["nz1"]["data"]) * 1e20,
                                    nC, rtol=1e-9)
@@ -454,7 +556,7 @@ class TestPFileFastIonBlock:
         """
         import warnings
         pf, psi, nC = self._pf(with_nb=False)
-        nb = 0.20 * 5.0e19 * (1.0 - 0.7 * psi ** 2)
+        nb = 0.20 * 5.0e19 * (1.0 - 0.7 * psi ** 2)   # Z_beam = 1 here
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", UserWarning)
             pf.compute_quasineutrality()

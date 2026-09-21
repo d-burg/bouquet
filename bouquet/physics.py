@@ -595,7 +595,52 @@ def impurity_charge_with_fast_ions(ne, ni, zeff, z_fast=None):
     return effective_impurity_charge(ne_th, ni, zeff_th), ne_th
 
 
-def main_ion_density_from_zeff(ne, zeff, Z_imp, z_fast=None,
+def fast_ion_density_equivalent(z_fast, z2_fast, Z_imp):
+    """How much of a MEASURED main-ion density is actually fast ions [m^-3].
+
+    A measured Z_eff counts every ion, so ``ni = ne (Z_imp - Zeff)/(Z_imp - 1)``
+    returns thermal AND fast main ions together.  The fast part it returns is
+    not simply the fast particle density: each fast species enters
+    quasineutrality with weight ``Z_s`` and the Z_eff numerator with weight
+    ``Z_s^2``, and the two combine as
+
+    ::
+
+        sum_s n_s^fast Z_s (Z_imp - Z_s) / (Z_imp - 1)
+            == (Z_imp z_fast - z2_fast) / (Z_imp - 1)
+
+    with the two charge moments of the fast population
+
+    ::
+
+        z_fast  = sum_s Z_s   n_s^fast     [m^-3, charge density]
+        z2_fast = sum_s Z_s^2 n_s^fast     [m^-3]
+
+    so no beam charge is assumed anywhere.  A hydrogenic beam
+    (``Z_s = 1``, ``z2_fast == z_fast``) gives back the plain fast density; a
+    fast species at the impurity charge (``Z_s = Z_imp``) gives zero, correctly,
+    since it is indistinguishable from thermal impurity in both quasineutrality
+    and Z_eff.
+    """
+    Z_imp = float(Z_imp)
+    if not Z_imp > 1.0:
+        raise ValueError(f"Z_imp must exceed 1 (got {Z_imp})")
+    return (Z_imp * np.asarray(z_fast, dtype=float)
+            - np.asarray(z2_fast, dtype=float)) / (Z_imp - 1.0)
+
+
+def _require_z2(z2_fast, who):
+    if z2_fast is None:
+        raise ValueError(
+            f"{who}: zeff_includes_fast=True needs z2_fast (= sum_s Z_s^2 "
+            f"n_s^fast) as well as z_fast. A measured Z_eff weights each fast "
+            f"species by Z_s^2 while quasineutrality weights it by Z_s, so the "
+            f"two moments are independent and the beam charge cannot be "
+            f"inferred from z_fast alone. Pass Baseline.z2_fast.")
+    return z2_fast
+
+
+def main_ion_density_from_zeff(ne, zeff, Z_imp, z_fast=None, z2_fast=None,
                                zeff_includes_fast=False):
     """Main-ion density from (ne, Zeff) under single-impurity quasineutrality.
 
@@ -608,29 +653,31 @@ def main_ion_density_from_zeff(ne, zeff, Z_imp, z_fast=None,
     ``nz >= 0`` -- the consistent (ne, ni, Zeff, nz) set that the independent
     per-channel draws cannot provide. Returns ``ni``.
 
-    With a fast-ion charge profile ``z_fast`` the result is the THERMAL main-ion
-    density, and which formula gives it depends on what is in ``zeff``'s
-    numerator.  ``zeff_includes_fast`` says which convention applies; the two
-    differ only when ``z_fast`` is non-zero, and both reduce to the plain form
-    at ``z_fast = 0``.
+    With a fast-ion population the result is the THERMAL main-ion density, and
+    which formula gives it depends on what is in ``zeff``'s numerator.  The
+    fast population enters through its charge moments ``z_fast`` (= sum_s Z_s
+    n_s^fast) and ``z2_fast`` (= sum_s Z_s^2 n_s^fast); see
+    :func:`fast_ion_density_equivalent`.  Both branches reduce to the plain
+    form when the fast population is absent.
 
     ``zeff_includes_fast=False`` -- THERMAL numerator over the full ``ne``
     (``zeff = sum_thermal(n_s Z_s^2)/ne``), which is what FUSE stores on
-    ``core_profiles.profiles_1d[].zeff``::
+    ``core_profiles.profiles_1d[].zeff``.  Only the charge matters here::
 
         ni = (Z_imp (ne - z_fast) - Zeff ne) / (Z_imp - 1)
 
     ``zeff_includes_fast=True`` -- ALL ions in the numerator, fast included.
-    This is what a MEASURED Z_eff is: VB bremsstrahlung counts a beam deuteron
-    exactly like a thermal one, and a CER Z_eff built as
-    ``1 + Z(Z-1) nC/ne`` inherits the same normalisation.  Then
-    ``nz = ne (Zeff - 1)/(Z_imp (Z_imp - 1))`` needs no fast-ion term at all
-    and the thermal main ion is just the total one less the beam::
+    This is what a MEASURED Z_eff is: VB bremsstrahlung counts a beam ion by
+    its own Z_s exactly like a thermal one, and a CER Z_eff built as
+    ``1 + Z(Z-1) nC/ne`` inherits the same normalisation.  Then ``z2_fast`` is
+    REQUIRED, because the numerator weights the beam by ``Z_s^2``::
 
-        ni = ne (Z_imp - Zeff) / (Z_imp - 1) - z_fast
+        ni = ne (Z_imp - Zeff)/(Z_imp - 1) - (Z_imp z_fast - z2_fast)/(Z_imp - 1)
 
-    Getting this backwards does not fail loudly -- it biases ``ni`` by
-    ``z_fast/(Z_imp - 1)``, ~20 % of the beam density for carbon.  See
+    Getting the convention backwards does not fail loudly: the two differ by
+    exactly ``z2_fast/(Z_imp - 1)``, which for a hydrogenic beam is
+    ``z_fast/(Z_imp - 1)`` -- ~20 % of the beam density at ``Z_imp = 6``, and
+    four times that for a helium beam of the same charge density.  See
     :func:`zeff_bounds` for the matching validity window, which also differs
     between the two conventions.
     """
@@ -641,14 +688,16 @@ def main_ion_density_from_zeff(ne, zeff, Z_imp, z_fast=None,
         raise ValueError(f"Z_imp must exceed 1 (got {Z_imp})")
     if z_fast is None:
         return ne * (Z_imp - zeff) / (Z_imp - 1.0)
-    z_fast = np.asarray(z_fast, dtype=float)
     if zeff_includes_fast:
-        return ne * (Z_imp - zeff) / (Z_imp - 1.0) - z_fast
-    ne_th = np.maximum(ne - z_fast, 0.0)
+        _require_z2(z2_fast, "main_ion_density_from_zeff")
+        return (ne * (Z_imp - zeff) / (Z_imp - 1.0)
+                - fast_ion_density_equivalent(z_fast, z2_fast, Z_imp))
+    ne_th = np.maximum(ne - np.asarray(z_fast, dtype=float), 0.0)
     return (Z_imp * ne_th - zeff * ne) / (Z_imp - 1.0)
 
 
-def zeff_bounds(ne, Z_imp, z_fast=None, zeff_includes_fast=False):
+def zeff_bounds(ne, Z_imp, z_fast=None, z2_fast=None,
+                zeff_includes_fast=False):
     """``(lo, hi)`` on Z_eff: the window where ni >= 0 and nz >= 0.
 
     The single-impurity model :func:`main_ion_density_from_zeff` inverts is
@@ -657,23 +706,30 @@ def zeff_bounds(ne, Z_imp, z_fast=None, zeff_includes_fast=False):
     same ``Z_imp`` bounds the impurity pressure either way.
 
     Without fast ions this is the familiar ``[1, Z_imp]``.  With them it
-    depends on the same convention :func:`main_ion_density_from_zeff` takes::
+    depends on the same convention :func:`main_ion_density_from_zeff` takes,
+    and on the same two charge moments::
 
-        zeff_includes_fast=False -> [ne_th/ne,  Z_imp ne_th/ne]
-        zeff_includes_fast=True  -> [1,         Z_imp - (Z_imp - 1) z_fast/ne]
+        zeff_includes_fast=False
+            [ne_th/ne,                     Z_imp ne_th/ne]
+        zeff_includes_fast=True
+            [1 + (z2_fast - z_fast)/ne,    Z_imp - (Z_imp z_fast - z2_fast)/ne]
 
-    Both reduce to ``[1, Z_imp]`` at ``z_fast = 0``.  Returns scalars there and
-    arrays otherwise; ``hi`` is not clamped above ``lo``, so a surface with
-    ``z_fast >= ne`` yields an empty window the caller can detect.
+    Both reduce to ``[1, Z_imp]`` when the fast population is absent, and the
+    ``True`` window reduces to ``[1, Z_imp - (Z_imp - 1) z_fast/ne]`` for a
+    hydrogenic beam.  Returns scalars when ``z_fast`` is None and arrays
+    otherwise; ``hi`` is not clamped above ``lo``, so a surface whose fast
+    population overwhelms ``ne`` yields an empty window the caller can detect.
     """
     Z_imp = float(Z_imp)
     if z_fast is None:
         return 1.0, Z_imp
     ne = np.asarray(ne, dtype=float)
-    f = np.clip(np.asarray(z_fast, dtype=float) / np.clip(ne, 1e-30, None),
-                0.0, 1.0)
+    _ne = np.clip(ne, 1e-30, None)
+    zf = np.asarray(z_fast, dtype=float)
     if zeff_includes_fast:
-        return np.ones_like(f), Z_imp - (Z_imp - 1.0) * f
+        z2 = np.asarray(_require_z2(z2_fast, "zeff_bounds"), dtype=float)
+        return 1.0 + (z2 - zf) / _ne, Z_imp - (Z_imp * zf - z2) / _ne
+    f = np.clip(zf / _ne, 0.0, 1.0)
     return 1.0 - f, Z_imp * (1.0 - f)
 
 

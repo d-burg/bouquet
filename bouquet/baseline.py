@@ -127,7 +127,8 @@ class Baseline:
     # thermal impurity math (Z_imp above, nz, p_imp, the Zeff-primary ni
     # derivation) must run on ne - z_fast, while the Zeff consumed by the
     # bootstrap stays on the full ne.
-    z_fast: Optional[np.ndarray] = None
+    z_fast: Optional[np.ndarray] = None       # sum_s Z_s   n_s^fast
+    z2_fast: Optional[np.ndarray] = None      # sum_s Z_s^2 n_s^fast
     # Whether Z_eff's numerator counts the fast ions.  A MEASURED Z_eff does
     # (VB bremsstrahlung sees a beam deuteron as Z=1 like any other, and a CER
     # Z_eff = 1 + Z(Z-1)nC/ne inherits that normalisation), so the ida_hybrid

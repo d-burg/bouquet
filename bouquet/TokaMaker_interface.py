@@ -1688,6 +1688,7 @@ def perturb_kinetic_equilibrium(
     psi_N_kinetic=None,
     p_fast=None,
     z_fast=None,
+    z2_fast=None,
     zeff_includes_fast=False,
     j_NBI=None,
     j_RF=None,
@@ -1967,7 +1968,8 @@ def perturb_kinetic_equilibrium(
         # convention-dependent; see physics.zeff_bounds.
         from .physics import zeff_bounds
         _z_lo, _z_hi = ((1.0, None) if _Z_imp is None else
-                        zeff_bounds(ne, _Z_imp, z_fast, zeff_includes_fast))
+                        zeff_bounds(ne, _Z_imp, z_fast, z2_fast,
+                                    zeff_includes_fast))
         if _zeff_active and _Z_imp is None:
             print("  [zeff] baseline has no ne-ni dilution (ni ~= ne): Zeff "
                   "draws still drive the bootstrap, but ni remains an "
@@ -2012,7 +2014,7 @@ def perturb_kinetic_equilibrium(
                                  _z_hi * (1.0 - 1e-9))
             ni_perturb = main_ion_density_from_zeff(
                 ne_perturb, _zeff_draw, _Z_imp, z_fast=z_fast,
-                zeff_includes_fast=zeff_includes_fast)
+                z2_fast=z2_fast, zeff_includes_fast=zeff_includes_fast)
         else:
             ni_perturb = _draw_monotonic_perturbation(
                 psi_kin, ni / ni[0], sigma_ni / ni[0], n_ls, rng=rng
@@ -3603,6 +3605,7 @@ def generate_bouquet(
     pin_jphi=False,
     p_fast=None,
     z_fast=None,
+    z2_fast=None,
     zeff_includes_fast=False,
     Z_imp=None,
     p_diff=None,
@@ -4669,6 +4672,7 @@ def generate_bouquet(
         # the GS solve added (pressure_solve - pressure).
         pressure_thermal=pressure,
         z_fast=z_fast,
+        z2_fast=z2_fast,
         Z_imp=Z_imp,
         eqdsk_bytes=baseline_eqdsk_bytes,
         pfile_bytes=stored_pfile_bytes,
@@ -5199,6 +5203,7 @@ def generate_bouquet(
                 psi_N_kinetic=psi_N_kinetic,
                 p_fast=p_fast,
                 z_fast=z_fast,
+                z2_fast=z2_fast,
                 zeff_includes_fast=zeff_includes_fast,
                 j_NBI=j_NBI,
                 j_RF=j_RF,
@@ -5919,19 +5924,41 @@ def generate_bouquet(
                         )(psi_grid)
                         pf.set_profile(pf_key, psi_grid, vals)
 
-                # Fast-ion density.  ni above is THERMAL whenever the source
+                # Fast-ion block.  ni above is THERMAL whenever the source
                 # carries a fast population, and the p-file model is
-                # nz1 = (ne - ni - nb)/Z_imp -- so without nb the whole beam is
-                # charged to the impurity.  Written even when the source p-file
-                # has no nb block (set_profile creates it), since its absence
-                # is read as zero.  z_fast is a CHARGE density; nb is a particle
-                # density, equal for the hydrogenic beams these files describe.
-                if z_fast is not None:
-                    _nb_psi = pf.psinorm_for("ne")
-                    _zf = np.asarray(z_fast, dtype=float) * 1e-20
-                    pf.set_profile("nb", _nb_psi, interp1d(
-                        _psi_src, _zf, kind="cubic", bounds_error=False,
-                        fill_value=(_zf[0], _zf[-1]))(_nb_psi))
+                # nz1 = (ne - ni - Z_beam nb)/Z_imp -- so without nb the whole
+                # beam is charged to the impurity.  Written even when the
+                # source p-file has no nb block (set_profile creates it), since
+                # its absence is read as zero.
+                #
+                # nb is a PARTICLE density and the block carries ONE beam
+                # charge, so the two archived charge moments are collapsed to
+                # the single species the format can hold:
+                #     Z_beam = z2_fast/z_fast     (charge-weighted mean charge)
+                #     n_fast = z_fast/Z_beam = z_fast^2/z2_fast
+                # Exact for a single fast species -- the usual case, and the
+                # only one a p-file can represent -- and an effective charge
+                # otherwise.  Both moments are preserved by construction when
+                # the population really is one species; nothing assumes Z=1.
+                if z_fast is not None and z2_fast is not None:
+                    _zf = np.asarray(z_fast, dtype=float)
+                    _z2 = np.asarray(z2_fast, dtype=float)
+                    _ok = _zf > 0.0
+                    if np.any(_ok):
+                        _Zb = float(np.sum(_z2[_ok]) / np.sum(_zf[_ok]))
+                        _nfast = np.where(_ok, _zf ** 2
+                                          / np.where(_ok, _z2, 1.0), 0.0)
+                        _nb_psi = pf.psinorm_for("ne")
+                        _nb = _nfast * 1e-20
+                        pf.set_profile("nb", _nb_psi, interp1d(
+                            _psi_src, _nb, kind="cubic", bounds_error=False,
+                            fill_value=(_nb[0], _nb[-1]))(_nb_psi))
+                        _nza = pf["N Z A"] if "N Z A" in pf else None
+                        if _nza is not None and len(_nza["Z"]) > 2:
+                            _Zarr = np.asarray(_nza["Z"], dtype=float).copy()
+                            _Aarr = np.asarray(_nza["A"], dtype=float).copy()
+                            _Zarr[-1] = _Zb
+                            pf.set_ion_species(_nza["N"], _Zarr, _Aarr)
 
                 # Recompute the impurity density from THIS draw's (ne, ni)
                 # via quasineutrality, so the p-file species block implies
@@ -6040,6 +6067,7 @@ def generate_bouquet(
             pfile_bytes=perturbed_pfile_bytes,
             Zeff=Zeff_profile,
             z_fast=z_fast,
+            z2_fast=z2_fast,
             Z_imp=Z_imp,
             coil_currents=coil_current_dict,
             psi_N_kinetic=psi_N_kinetic,

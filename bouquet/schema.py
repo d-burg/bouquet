@@ -37,6 +37,7 @@ PROFILE_UNITS = {
     "pressure_thermal": "Pa",
     "Zeff": "",
     "z_fast": "m^-3",
+    "z2_fast": "m^-3",
     "sigma_ne": "m^-3",
     "sigma_te": "eV",
     "sigma_ni": "m^-3",

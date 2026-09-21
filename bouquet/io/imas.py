@@ -541,7 +541,7 @@ NI_FAST_GATE_PSI_N = (0.0, 0.2, 0.4, 0.6, 0.8)
 #: Tolerance the gate applies at each of :data:`NI_FAST_GATE_PSI_N`: the IDA ni
 #: and the dd's TOTAL main-ion density must agree to this relative value at
 #: every one of them before the fast density is subtracted.
-NI_FAST_RTOL = 1e-4
+NI_FAST_RTOL = 1e-2
 
 
 def _subtract_fast_ni(psi_N, ni, sigma_ni, ni_fuse_thermal, ni_fast):

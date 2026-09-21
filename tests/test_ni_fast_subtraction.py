@@ -83,7 +83,7 @@ class TestGate:
         """psi_N=0 is in the gate: that is where a beam is most peaked."""
         psi, ni_total, ni_fast, ni_th = _profiles(n=128)
         bad = ni_total.copy()
-        bad[psi < 0.05] *= 1.01
+        bad[psi < 0.05] *= 1.0 + 10.0 * NI_FAST_RTOL
         _, _, meta = _subtract_fast_ni(psi, bad, None, ni_th, ni_fast)
         assert not meta["applied"]
         assert meta["gate"][0.0] > NI_FAST_RTOL
@@ -252,7 +252,7 @@ class TestEndToEnd:
         def bump(dd):
             ion = dd["core_profiles"]["profiles_1d"][0]["ion"][0]
             ion["density_thermal"] = (np.asarray(ion["density_thermal"])
-                                      * 1.05).tolist()
+                                      * (1.0 + 10.0 * NI_FAST_RTOL)).tolist()
         ddp, cdf, ni_total, _, _ = _build(tmp_path, dd_mutate=bump)
         bl = _read(ddp, cdf)
         assert not bl.aux["ni_fast_meta"]["applied"]

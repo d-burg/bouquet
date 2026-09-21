@@ -441,6 +441,100 @@ class TestDdZeffConvention:
         assert bl.zeff_includes_fast is False
 
 
+# ---------------------------------------------------------------------------
+# closure: the baseline's charge, Z_eff and pressure add up with a beam
+# ---------------------------------------------------------------------------
+EC = 1.602176634e-19
+
+
+class TestBeamClosure:
+    """On a 20 % beam dd the baseline's densities, Z_eff and pressure agree.
+
+    IDA temperatures are set to the dd's so the ida_hybrid total pressure can
+    be compared exactly (the default fixture's differ by design).
+    """
+
+    def _read(self, tmp_path, ks, anchor, zeff_kind=None):
+        ddp, cdf, ni_total, ni_fast, ni_th = _build(
+            tmp_path, dd_mutate=_store_zeff(zeff_kind))
+        dd = json.load(open(ddp))
+        cp = dd["core_profiles"]["profiles_1d"][0]
+        with h5py.File(cdf, "r+") as f:
+            f["T_e"][...] = np.asarray(cp["electrons"]["temperature"])[None, :]
+            f["T_12C6"][...] = np.asarray(cp["ion"][0]["temperature"])[None, :]
+        src = ImasSource(ids_path=ddp, time=1.0, impurity_Z=Z_IMP,
+                         ida_path=cdf if ks == "ida_hybrid" else None)
+        with pytest.warns(UserWarning) as rec:     # p_fast_reduction='auto'
+            bl = read_imas_baseline(src, kinetic_source=ks,
+                                    anchor_pressure_to_equilibrium=anchor)
+        assert not [w for w in rec
+                    if "reconstructed total pressure" in str(w.message)]
+        f = lambda x: np.asarray(x, dtype=float)
+        parts = dict(ne=f(bl.ne), ni=f(bl.ni), ti=f(bl.ti), te=f(bl.te),
+                     z_fast=f(bl.z_fast), z2_fast=f(bl.z2_fast))
+        return bl, cp, dd, parts
+
+    @staticmethod
+    def _nz(p, bl):
+        return (p["ne"] - p["z_fast"] - p["ni"]) / bl.Z_imp
+
+    @pytest.mark.parametrize("anchor", [False, True])
+    @pytest.mark.parametrize("ks", ["ida_hybrid", "fuse"])
+    def test_charge_balances_on_the_dd_species(self, tmp_path, ks, anchor):
+        bl, cp, _, p = self._read(tmp_path, ks, anchor)
+        ni_th = np.asarray(cp["ion"][0]["density_thermal"], dtype=float)
+        nc = np.asarray(cp["ion"][1]["density_thermal"], dtype=float)
+        assert bl.Z_imp == pytest.approx(Z_IMP, rel=1e-9)
+        np.testing.assert_allclose(p["ni"], ni_th, rtol=1e-9)
+        np.testing.assert_allclose(self._nz(p, bl), nc, rtol=1e-9)
+        np.testing.assert_allclose(p["ni"] + Z_IMP * nc + p["z_fast"],
+                                   p["ne"], rtol=1e-12)
+
+    @pytest.mark.parametrize("anchor", [False, True])
+    @pytest.mark.parametrize("ks, zeff_kind", [
+        ("ida_hybrid", None), ("fuse", None), ("fuse", "all"),
+        ("fuse", "thermal")])
+    def test_zeff_is_the_densities_own(self, tmp_path, ks, zeff_kind, anchor):
+        """bl.Zeff == Sum Z^2 n / ne over the same ni, nz (and fast ions iff
+        zeff_includes_fast) the pressure is built from."""
+        bl, _, _, p = self._read(tmp_path, ks, anchor, zeff_kind)
+        num = p["ni"] + Z_IMP ** 2 * self._nz(p, bl)
+        if bl.zeff_includes_fast:
+            num = num + p["z2_fast"]
+        assert bl.zeff_includes_fast is (zeff_kind != "thermal")
+        np.testing.assert_allclose(bl.Zeff, num / p["ne"], rtol=1e-9)
+
+    @pytest.mark.parametrize("anchor", [False, True])
+    @pytest.mark.parametrize("ks", ["ida_hybrid", "fuse"])
+    def test_total_pressure_is_the_dds(self, tmp_path, ks, anchor):
+        """thermal + impurity(ne - z_fast) + p_fast == Sum n_s T_s + p_fast
+        == equilibrium.pressure, so the anchor has nothing to absorb."""
+        from bouquet.physics import impurity_pressure
+        bl, cp, dd, p = self._read(tmp_path, ks, anchor)
+        p_imp = impurity_pressure(p["ne"] - p["z_fast"], p["ni"], p["ti"],
+                                  bl.Z_imp)
+        p_fast = np.asarray(bl.p_fast, dtype=float)
+        recon = EC * (p["ne"] * p["te"] + p["ni"] * p["ti"]) + p_imp + p_fast
+
+        species = EC * p["ne"] * np.asarray(cp["electrons"]["temperature"])
+        for ion in cp["ion"]:
+            species = species + EC * (np.asarray(ion["density_thermal"])
+                                      * np.asarray(ion["temperature"]))
+        p_eq = np.asarray(dd["equilibrium"]["time_slice"][0]["profiles_1d"]
+                          ["pressure"], dtype=float)
+        scale = float(np.max(p_eq))
+        assert float(np.max(p_fast)) > 0.05 * scale     # the beam is real
+        np.testing.assert_allclose(recon, species + p_fast, rtol=0,
+                                   atol=1e-12 * scale)
+        np.testing.assert_allclose(recon, p_eq, rtol=0, atol=1e-12 * scale)
+        if anchor:
+            np.testing.assert_allclose(recon + bl.p_diff, p_eq, rtol=0,
+                                       atol=1e-12 * scale)
+            assert float(np.max(np.abs(bl.p_diff))) < 1e-12 * scale
+        else:
+            assert bl.p_diff is None
+
+
 class TestZeffBounds:
     """The window both Z_eff draw paths clip to (physics.zeff_bounds)."""
 

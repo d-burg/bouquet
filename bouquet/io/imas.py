@@ -543,6 +543,45 @@ NI_FAST_GATE_PSI_N = (0.0, 0.2, 0.4, 0.6, 0.8)
 #: only: the subtraction runs regardless.
 NI_FAST_RTOL = 1e-2
 
+#: psi_N(rho_tor_norm) of the dd's core_profiles grid vs the LCFS g-file's, at
+#: these rho: FUSE holds replayed profiles fixed in rho while it solves its own
+#: equilibrium, so anything placed by psi_N from elsewhere (an IDA fit on EFIT
+#: psi_N) lands at a shifted radius against the dd's profiles and sources.
+PSI_RHO_GATE_RHO = (0.2, 0.4, 0.6, 0.8, 0.9)
+
+#: Largest |psi_N_dd - psi_N_g| at :data:`PSI_RHO_GATE_RHO` before the reader
+#: warns.  Advisory only.
+PSI_RHO_DRIFT_TOL = 2e-2
+
+
+def _psi_rho_drift(psi_N, rho, gfile):
+    """The dd's psi_N(rho) against the g-file's, at :data:`PSI_RHO_GATE_RHO`.
+
+    Returns a dict: ``gate`` (rho -> psi_N_dd - psi_N_g), ``max_abs``,
+    ``rho_worst``, ``exceeds`` and a one-line ``evidence``; ``None`` without a
+    usable rho grid.
+    """
+    from .geqdsk import read_geqdsk
+    rho = np.asarray(rho, dtype=float)
+    if rho.shape != np.shape(psi_N) or not np.all(np.diff(rho) > 0):
+        return None
+    g = read_geqdsk(gfile)
+    rho_g = np.asarray(g.rhovn, dtype=float)
+    psi_g = np.linspace(0.0, 1.0, rho_g.size)
+    pts = np.asarray(PSI_RHO_GATE_RHO, dtype=float)
+    d = np.interp(pts, rho, psi_N) - np.interp(pts, rho_g, psi_g)
+    iw = int(np.argmax(np.abs(d)))
+    out = {"gate": dict(zip(PSI_RHO_GATE_RHO, d.tolist())),
+           "max_abs": float(abs(d[iw])), "rho_worst": float(pts[iw]),
+           "gfile": str(gfile)}
+    out["exceeds"] = out["max_abs"] > PSI_RHO_DRIFT_TOL
+    out["evidence"] = (
+        f"dd psi_N(rho) differs from the g-file's by {d[iw]:+.3f} at "
+        f"rho={pts[iw]:g} (psi_N {np.interp(pts[iw], rho, psi_N):.3f} vs "
+        f"{np.interp(pts[iw], rho_g, psi_g):.3f}; tol {PSI_RHO_DRIFT_TOL:g})")
+    return out
+
+
 #: Relative core mismatch above which a stored Z_eff matches neither numerator.
 ZEFF_CONVENTION_RTOL = 1e-2
 
@@ -889,6 +928,17 @@ def read_imas_baseline(
     # needs UncertaintyConfig.ida_path for the actual generation envelope).
     use_ida = bool(kinetic_source == "ida_hybrid" and getattr(source, "ida_path", None))
     zeff_includes_fast = dd_zeff_includes_fast
+    # Geometry guard: does the dd place its profiles where the g-file does?
+    _drift = None
+    if getattr(source, "LCFS_geqdsk", None) and "rho_tor_norm" in cp["grid"]:
+        _drift = _psi_rho_drift(psi_N, cp["grid"]["rho_tor_norm"], source.LCFS_geqdsk)
+        aux["psi_rho_drift"] = _drift
+        if _drift is not None and _drift["exceeds"]:
+            import warnings
+            warnings.warn(
+                f"{_drift['evidence']}: the dd's equilibrium is not the g-file's, "
+                "so its profiles and sources sit at shifted psi_N"
+                + (" against the IDA kinetics (placed by IDA psi_N)" if use_ida else ""))
     if use_ida:
         (ne, te, ti, ni, Zeff, _omega,
          sigma_ne_ida, sigma_te_ida, sigma_ni_ida, sigma_ti_ida,
@@ -898,6 +948,9 @@ def read_imas_baseline(
             ni_source=getattr(source, "ni_source", "all"),
             zeff_from_fuse=getattr(source, "zeff_from_fuse", False),
             z_fast=z_fast, z2_fast=z2_fast)
+        if _ni_fast_meta["agrees"] is False and _drift is not None and _drift["exceeds"]:
+            _ni_fast_meta["evidence"] += (
+                f"; likely the psi_N(rho) drift ({_drift['evidence']})")
         aux["ni_fast_meta"] = _ni_fast_meta
         # Loud: the subtraction moves ni, and a failed cross-check means the
         # beam density belongs to a plasma that is not quite the IDA one.

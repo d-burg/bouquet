@@ -91,6 +91,7 @@ class Bouquet:
     def from_imas(cls, ids_path, *, mesh, time=None,
                   n_draws=20, header="bouquet",
                   ida_path=None, LCFS_geqdsk=None, impurity_Z=6.0,
+                  ni_source="all", zeff_from_fuse=False,
                   kinetic_source=None, anchor_pressure_to_equilibrium=False,
                   **solver_kwargs) -> "Bouquet":
         """Minimal constructor for the IMAS/OMAS path (no reconstruction).
@@ -99,8 +100,11 @@ class Bouquet:
         ``bq.uncertainty`` / ``bq.generation`` afterwards for advanced knobs.
 
         IDA-hybrid kinetics: pass ``ida_path`` (an IDA ``.cdf``) to take the
-        baseline ne/Te/Ti/omega_tor (and sigma envelopes) from IDA fits while
-        keeping FUSE Z_eff/currents/equilibrium. ``kinetic_source`` defaults to
+        baseline ne/Te/Ti/Zeff/omega_tor (and the ne/Te/ni/Ti/Z_eff sigma
+        envelopes) from IDA fits while keeping FUSE currents/equilibrium.
+        ``ni_source`` picks the IDA ni route ("Zeff"/"CER"/"all") for both the
+        baseline ni and its propagated sigma; ``zeff_from_fuse=True`` keeps the
+        FUSE Z_eff instead of IDA's. ``kinetic_source`` defaults to
         ``"ida_hybrid"`` when an ``ida_path`` is given, else ``"fuse"``.
 
         ``LCFS_geqdsk`` is OPTIONAL: a g-file whose LCFS replaces the source
@@ -114,7 +118,9 @@ class Bouquet:
             kinetic_source = "ida_hybrid" if ida_path else "fuse"
         cfg = BouquetConfig(
             source=ImasSource(ids_path=ids_path, time=time, ida_path=ida_path,
-                              impurity_Z=impurity_Z, LCFS_geqdsk=LCFS_geqdsk),
+                              impurity_Z=impurity_Z, ni_source=ni_source,
+                              zeff_from_fuse=zeff_from_fuse,
+                              LCFS_geqdsk=LCFS_geqdsk),
             solver=SolverConfig(mesh_path=mesh, **solver_kwargs),
             generation=GenerationConfig(n_equils=n_draws,
                                         kinetic_source=kinetic_source,
@@ -3411,6 +3417,9 @@ class Bouquet:
                 # pressure to the dd equilibrium.pressure (mirrors jBS_diff).
                 Z_imp=getattr(bl, "Z_imp", None),
                 z_fast=getattr(bl, "z_fast", None),
+                z2_fast=getattr(bl, "z2_fast", None),
+                zeff_includes_fast=bool(getattr(bl, "zeff_includes_fast",
+                                                False)),
                 p_diff=getattr(bl, "p_diff", None),
                 # Total-current anchor to equilibrium.j_tor (fixed offset; rides
                 # under the SWB bootstrap + perturbed j_ind in every draw).
@@ -3422,6 +3431,9 @@ class Bouquet:
                 aux_sigmas=env.get("aux_sigmas"),
                 aux_baselines=env.get("aux_baselines"),
                 aux_length_scales=env.get("aux_length_scales"),
+                # Who draws ni when zeff is active (see UncertaintyConfig).
+                ni_from_zeff=env.get("ni_from_zeff", True),
+                zeff_dne=env.get("zeff_dne"),
                 progress_callback=progress_callback,
                 # Provenance marker stored on the baseline for robust path
                 # detection in plotting (independent of the aux switchboard).

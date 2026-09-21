@@ -38,9 +38,9 @@ from typing import Optional, TYPE_CHECKING
 
 import numpy as np
 
-from ..physics import (effective_impurity_charge, impurity_pressure,
+from ..physics import (fast_ion_density_equivalent, impurity_pressure,
                        impurity_charge_with_fast_ions,
-                       isotropize_fast_pressure, main_ion_density_from_zeff,
+                       isotropize_fast_pressure,
                        parallel_to_toroidal)
 
 # Elementary charge [C]: thermal pressure p = e * sum_s(n_s * T_s).
@@ -530,24 +530,211 @@ def _read_ida_omega(path, time_s, psi_N):
         return None
 
 
-def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impurity_Z):
-    """IDA-hybrid kinetics: replace FUSE ne/Te/Ti (+omega) with IDA fits, resampled
-    onto the FUSE ``psi_N`` grid (single-grid; keeps psi_N == psi_N_kinetic).
+#: Where the IDA-vs-dd ni cross-check is evaluated.  Five interior points: the
+#: comparison is a POINTWISE relative one, so it must be taken where ni is a
+#: real number.  Past ~0.8 both profiles roll off towards the separatrix and a
+#: ratio there reports the edge model, not whether the two ni are the same
+#: quantity.  The axis is included because that is where a beam population is
+#: most peaked.  Also the core window :func:`_dd_zeff` classifies Z_eff on.
+NI_FAST_GATE_PSI_N = (0.0, 0.2, 0.4, 0.6, 0.8)
 
-    Z_eff stays FUSE (IDA's reported Z_eff is internally inconsistent with its own
-    carbon density), and ni is re-derived from the FUSE Z_eff under single-impurity
-    quasineutrality applied to the IDA electron density. Returns
-    ``(ne, te, ti, ni, omega_tor_or_None)``.
+#: Relative IDA-vs-dd TOTAL ni disagreement, at any of
+#: :data:`NI_FAST_GATE_PSI_N`, above which the subtraction warns.  Advisory
+#: only: the subtraction runs regardless.
+NI_FAST_RTOL = 1e-2
+
+#: psi_N(rho_tor_norm) of the dd's core_profiles grid vs the LCFS g-file's, at
+#: these rho: FUSE holds replayed profiles fixed in rho while it solves its own
+#: equilibrium, so anything placed by psi_N from elsewhere (an IDA fit on EFIT
+#: psi_N) lands at a shifted radius against the dd's profiles and sources.
+PSI_RHO_GATE_RHO = (0.2, 0.4, 0.6, 0.8, 0.9)
+
+#: Largest |psi_N_dd - psi_N_g| at :data:`PSI_RHO_GATE_RHO` before the reader
+#: warns.  Advisory only.
+PSI_RHO_DRIFT_TOL = 2e-2
+
+
+def _psi_rho_drift(psi_N, rho, gfile):
+    """The dd's psi_N(rho) against the g-file's, at :data:`PSI_RHO_GATE_RHO`.
+
+    Returns a dict: ``gate`` (rho -> psi_N_dd - psi_N_g), ``max_abs``,
+    ``rho_worst``, ``exceeds`` and a one-line ``evidence``; ``None`` without a
+    usable rho grid.
+    """
+    from .geqdsk import read_geqdsk
+    rho = np.asarray(rho, dtype=float)
+    if rho.shape != np.shape(psi_N) or not np.all(np.diff(rho) > 0):
+        return None
+    if np.allclose(rho, np.sqrt(np.clip(psi_N, 0.0, None)), rtol=0, atol=1e-6):
+        # a placeholder grid, not the dd's equilibrium: nothing to compare
+        return {"gate": None, "max_abs": None, "rho_worst": None, "gfile": str(gfile),
+                "exceeds": False, "placeholder": True,
+                "evidence": "dd rho_tor_norm is the sqrt(psi_N) placeholder; not compared"}
+    g = read_geqdsk(gfile)
+    rho_g = np.asarray(g.rhovn, dtype=float)
+    psi_g = np.linspace(0.0, 1.0, rho_g.size)
+    pts = np.asarray(PSI_RHO_GATE_RHO, dtype=float)
+    d = np.interp(pts, rho, psi_N) - np.interp(pts, rho_g, psi_g)
+    iw = int(np.argmax(np.abs(d)))
+    out = {"gate": dict(zip(PSI_RHO_GATE_RHO, d.tolist())),
+           "max_abs": float(abs(d[iw])), "rho_worst": float(pts[iw]),
+           "gfile": str(gfile)}
+    out["exceeds"] = out["max_abs"] > PSI_RHO_DRIFT_TOL
+    out["placeholder"] = False
+    out["evidence"] = (
+        f"dd psi_N(rho) differs from the g-file's by {d[iw]:+.3f} at "
+        f"rho={pts[iw]:g} (psi_N {np.interp(pts[iw], rho, psi_N):.3f} vs "
+        f"{np.interp(pts[iw], rho_g, psi_g):.3f}; tol {PSI_RHO_DRIFT_TOL:g})")
+    return out
+
+
+#: Relative core mismatch above which a stored Z_eff matches neither numerator.
+ZEFF_CONVENTION_RTOL = 1e-2
+
+
+def _dd_zeff(cp, zeff_th, z2_fast, ne, psi_N):
+    """``(zeff, includes_fast)``: the Z_eff the dd's own bootstrap consumed.
+
+    IMAS resolves ``cp1d.zeff`` as stored data if present, else the expression
+    ``IMAS.zeff`` = ``sum_s n_s Z_s^2 / ne`` over ``ion.density`` -- thermal
+    PLUS fast.  FUSE's ``fast_particles_profiles!`` carves the beam out of
+    ``density_thermal`` holding the total fixed, so a zeff stored before the
+    beam arrived also has the fast ions in its numerator.  Neither is
+    guaranteed, so a stored zeff is classified against both numerators on the
+    core (``psi_N <= 0.8``, where carbon is fully stripped and IMAS's ``avgZ``
+    equals ``z_n``).
+    """
+    if "zeff" not in cp:
+        zeff_all = zeff_th + z2_fast / np.clip(ne, 1e-30, None)
+        return zeff_all, bool(np.any(z2_fast))
+    stored = np.asarray(cp["zeff"], dtype=float)
+    if not np.any(z2_fast):
+        return stored, False
+    zeff_all = zeff_th + z2_fast / np.clip(ne, 1e-30, None)
+    core = np.asarray(psi_N, dtype=float) <= NI_FAST_GATE_PSI_N[-1]
+    _s = np.abs(stored[core])
+    d_th = float(np.max(np.abs(stored - zeff_th)[core] / _s))
+    d_all = float(np.max(np.abs(stored - zeff_all)[core] / _s))
+    includes = d_all < d_th
+    if min(d_th, d_all) > ZEFF_CONVENTION_RTOL:
+        import warnings
+        warnings.warn(
+            f"core_profiles.zeff matches neither Z_eff numerator on the core "
+            f"(thermal-only {d_th:.1e}, thermal+fast {d_all:.1e}); taking the "
+            f"closer ({'thermal+fast' if includes else 'thermal-only'}). A zeff "
+            f"stored before the dd's ne or ion densities were last changed "
+            f"does this.")
+    return stored, includes
+
+
+def _subtract_fast_ni(psi_N, ni, sigma_ni, ni_fuse_thermal, z_fast, z2_fast,
+                      impurity_Z):
+    """Thermal ``(ni, sigma_ni)`` from a MEASURED ni, plus a provenance dict.
+
+    A measured ni is a TOTAL deuteron density: neither the VB Z_eff nor the
+    CER carbon can tell a beam ion from a thermal one.  Everything downstream
+    of the reader (bootstrap, impurity pressure, archive, p-file ``nb``) takes
+    ni as THERMAL whenever the dd carries a fast population, so the
+    subtraction is unconditional; leaving ni total would mis-label it.
+
+    The density removed is :func:`fast_ion_density_equivalent` of the charge
+    moments ``z_fast``/``z2_fast``, so no beam charge is assumed.
+
+    ``sigma_ni`` is returned unchanged, keeping the ABSOLUTE error: the fast
+    density removed is a FUSE quantity carrying no IDA error, so subtracting
+    it leaves the measurement's error as it was.  This is also the spread of
+    an ni derived per draw from the drawn (ne, Z_eff).
+
+    Cross-check (advisory): the IDA ni against the dd's TOTAL ni at each of
+    :data:`NI_FAST_GATE_PSI_N`.  They agree when FUSE was built from the same
+    IDA fits.  A disagreement beyond :data:`NI_FAST_RTOL` warns -- the beam
+    density then comes from a plasma that is not quite the IDA one -- but
+    does not stop the subtraction.
+
+    Returns ``(ni, sigma_ni, meta)``; ``meta["applied"]`` says whether it
+    fired, ``meta["agrees"]`` the cross-check verdict, ``meta["gate"]`` the
+    per-point relative deviations, ``meta["evidence"]`` a one-line reason.
+    """
+    ni = np.asarray(ni, dtype=float)
+    # What the MEASURED ni actually carries of the fast population: each fast
+    # species enters it weighted Z_s(Z_imp - Z_s)/(Z_imp - 1), not as a bare
+    # particle density.  Equals the fast density for a hydrogenic beam and
+    # zero for a fast species at the impurity charge.
+    ni_fast = fast_ion_density_equivalent(z_fast, z2_fast, impurity_Z)
+    if not np.any(ni_fast):
+        return ni, sigma_ni, {"applied": False, "agrees": None,
+                              "mismatch": None, "gate": None,
+                              "evidence": "dd carries no fast-ion population"}
+    ni_total = np.asarray(ni_fuse_thermal, dtype=float) + ni_fast
+    pts = np.asarray(NI_FAST_GATE_PSI_N, dtype=float)
+    a = np.interp(pts, np.asarray(psi_N, dtype=float), ni)
+    b = np.interp(pts, np.asarray(psi_N, dtype=float), ni_total)
+    gate = mismatch = agrees = None
+    if np.all(np.abs(b) > 0.0):
+        gate = dict(zip(NI_FAST_GATE_PSI_N, (np.abs(a - b) / np.abs(b)).tolist()))
+        mismatch = float(max(gate.values()))
+        agrees = mismatch <= NI_FAST_RTOL
+    ni_th = np.maximum(ni - ni_fast, 0.0)
+    if agrees is None:
+        evidence = ("dd main-ion density vanishes at a check point; "
+                    "cross-check skipped")
+    elif agrees:
+        evidence = (f"IDA ni matches the dd TOTAL ni to {mismatch:.2e} over "
+                    f"psi_N={NI_FAST_GATE_PSI_N}")
+    else:
+        worst = max(gate, key=gate.get)
+        evidence = (f"IDA ni differs from the dd TOTAL ni by {mismatch:.2e} "
+                    f"at psi_N={worst:g} (> {NI_FAST_RTOL:.0e}): the beam "
+                    f"density comes from a plasma that is not the IDA one")
+    return ni_th, sigma_ni, {
+        "applied": True, "agrees": agrees, "mismatch": mismatch, "gate": gate,
+        "fast_fraction_peak": float(np.max(ni_fast / np.maximum(ni, 1e-30))),
+        "evidence": evidence}
+
+
+def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impurity_Z,
+                         ni_source="all", zeff_from_fuse=False,
+                         z_fast=None, z2_fast=None):
+    """IDA-hybrid kinetics: replace FUSE ne/ni/Te/Ti/Zeff (+omega) with IDA fits,
+    resampled onto the FUSE ``psi_N`` grid (psi_N == psi_N_kinetic).
+
+    Zeff and ni both default to IDA: Zeff measured directly (``zeff_from_fuse=True``
+    keeps the FUSE Zeff instead); ni via ``ni_source`` ("Zeff"/"CER"/"all", with
+    Jacobian-propagated sigma_ni -- see :func:`bouquet.io.ida.read_ida`). The
+    "Zeff"/"all" dilution always uses IDA's own Zeff regardless of
+    ``zeff_from_fuse``.
+
+    With the fast charge moments ``z_fast``/``z2_fast`` the IDA TOTAL ni is
+    always converted to a THERMAL one; see :func:`_subtract_fast_ni`.
+
+    Returns ``(ne, te, ti, ni, zeff, omega_or_None, sigma_ne, sigma_te, sigma_ni,
+    sigma_ti, ida, ni_fast_meta)`` on ``psi_N`` -- the ``IDAProfiles`` is the read
+    itself, handed back so ``resolve_uncertainty`` can reuse it instead of
+    re-reading the file (see ``Baseline.aux['ida_profiles']``). Re-reading
+    risked a DIFFERENT slice: this path resolves ``time`` against the IMAS
+    slice, while the envelope path only had the requested ``source.time``.
     """
     from .ida import read_ida
-    ida = read_ida(ida_path, time=time, impurity_Z=impurity_Z)
+    ida = read_ida(ida_path, time=time, impurity_Z=impurity_Z, ni_source=ni_source)
     _ipsi = np.asarray(ida.psi_N, dtype=float)
     g = lambda a: np.interp(psi_N, _ipsi, np.asarray(a, dtype=float))
-    ne, te, ti = g(ida.ne), g(ida.te), g(ida.ti)
-    # ni from FUSE Z_eff + IDA ne (single-impurity dilution; Z_imp = machine charge)
-    ni = main_ion_density_from_zeff(ne, np.clip(Zeff_fuse, 1.0, impurity_Z), impurity_Z)
+    ne, ni, te, ti = g(ida.ne), g(ida.ni), g(ida.te), g(ida.ti)
+    zeff = np.asarray(Zeff_fuse, dtype=float) if zeff_from_fuse else g(ida.Zeff)
+    sigma_ne, sigma_te, sigma_ni, sigma_ti = (
+        g(ida.sigma_ne), g(ida.sigma_te), g(ida.sigma_ni), g(ida.sigma_ti))
+    # The ni_source ni is a TOTAL deuteron density; everything downstream
+    # takes ni as thermal once the dd carries a beam.
+    if z_fast is not None:
+        ni, sigma_ni, ni_fast_meta = _subtract_fast_ni(
+            psi_N, ni, sigma_ni, np.asarray(ni_fuse, dtype=float),
+            z_fast, z2_fast, impurity_Z)
+    else:
+        ni_fast_meta = {"applied": False, "agrees": None, "mismatch": None,
+                        "gate": None,
+                        "evidence": "no fast-ion charge moments supplied"}
     omega = _read_ida_omega(ida_path, time, psi_N)
-    return ne, te, ti, ni, omega
+    return (ne, te, ti, ni, zeff, omega, sigma_ne, sigma_te, sigma_ni,
+            sigma_ti, ida, ni_fast_meta)
 
 
 def read_imas_baseline(
@@ -662,7 +849,12 @@ def read_imas_baseline(
     ti = None
     main_ion = None
     zeff_num = np.zeros(n)
-    z_fast = np.zeros(n)          # charge carried by fast ions
+    # The two charge moments of the fast population.  Quasineutrality weights
+    # each fast species by Z_s, a measured Z_eff's numerator by Z_s^2, so both
+    # are needed and neither implies the other (see physics.
+    # fast_ion_density_equivalent).  No beam charge is assumed anywhere.
+    z_fast = np.zeros(n)          # sum_s Z_s   n_s^fast  [m^-3]
+    z2_fast = np.zeros(n)         # sum_s Z_s^2 n_s^fast  [m^-3]
     # pressure_fast_* and density_fast are independent fields: a dd can carry
     # one without the other, and a species with fast pressure but no fast
     # density gets the full p_fast treatment and ZERO dilution correction.
@@ -672,7 +864,9 @@ def read_imas_baseline(
         n_s = np.asarray(ion["density_thermal"], dtype=float)
         zeff_num += n_s * Z * Z
         if "density_fast" in ion:
-            z_fast += Z * np.asarray(ion["density_fast"], dtype=float)
+            _nf = np.asarray(ion["density_fast"], dtype=float)
+            z_fast += Z * _nf
+            z2_fast += Z * Z * _nf
         p_fast_s = _isotropic_fast_pressure(
             ion, p_fast_rule, n, _no_par, str(ion.get("label", f"Z={Z:g}")))
         if np.any(p_fast_s) and not np.any(
@@ -697,13 +891,22 @@ def read_imas_baseline(
             "full while the fast-ion dilution correction for those species is "
             "zero, so Z_imp / nz / p_imp retain the fast-ion bias. Fill "
             "core_profiles.ion[].density_fast to enable the correction.")
-    Zeff = zeff_num / ne
+    # Thermal-only numerator over the full ne: the convention
+    # impurity_charge_with_fast_ions inverts, built here from the dd's own
+    # densities so it holds by construction.
+    Zeff_th = zeff_num / ne
+    # The dd's bootstrap Z_eff and its convention (see _dd_zeff).  Zeff is its
+    # recomputation from the densities -- bit-identical to Zeff_th without a
+    # beam -- and is what the baseline solve and the draws are handed.
+    zeff_dd, dd_zeff_includes_fast = _dd_zeff(cp, Zeff_th, z2_fast, ne, psi_N)
+    Zeff = (Zeff_th + z2_fast / np.clip(ne, 1e-30, None)
+            if dd_zeff_includes_fast else Zeff_th)
 
     # --- auxiliary source-provided profiles for the switchboard ---------------
     # Read whatever this source carries (production FUSE files have rotation;
     # chi/E_r are typically absent and supplied via aux_baselines). All on the
     # core_profiles grid (== psi_N_kinetic for IMAS).
-    aux = {"zeff": np.asarray(cp["zeff"], dtype=float) if "zeff" in cp else Zeff}
+    aux = {"zeff": zeff_dd}
     if main_ion is not None and "rotation_frequency_tor" in main_ion:
         aux["omega_tor"] = np.asarray(main_ion["rotation_frequency_tor"], dtype=float)
     if "e_field" in cp and "radial" in cp["e_field"]:
@@ -721,15 +924,62 @@ def read_imas_baseline(
             if "d" in ctsl.get("total_ion_energy", {}):
                 aux["chi_i"] = np.asarray(ctsl["total_ion_energy"]["d"], dtype=float)
 
-    # --- IDA-hybrid: swap FUSE ne/Te/Ti/omega for externally-fit IDA profiles -----
-    # Z_eff/ni-dilution stay FUSE; p_fast/currents/equilibrium/anchors stay FUSE.
-    # Done before the pressure block so p_recon/Z_imp/p_imp use the IDA kinetics.
-    if kinetic_source == "ida_hybrid" and getattr(source, "ida_path", None):
-        ne, te, ti, ni, _omega = _merge_ida_kinetics(
+    # --- IDA-hybrid: swap FUSE ne/Te/Ti/Zeff/omega for externally-fit IDA profiles ---
+    # ni via source.ni_source; Zeff from IDA unless source.zeff_from_fuse. Done
+    # before the pressure block so p_recon/Z_imp/p_imp use the IDA kinetics. IDA
+    # sigmas land in aux as sigma_*_ida (informational -- resolve_uncertainty still
+    # needs UncertaintyConfig.ida_path for the actual generation envelope).
+    use_ida = bool(kinetic_source == "ida_hybrid" and getattr(source, "ida_path", None))
+    zeff_includes_fast = dd_zeff_includes_fast
+    # Geometry guard: does the dd place its profiles where the g-file does?
+    _drift = None
+    if getattr(source, "LCFS_geqdsk", None) and "rho_tor_norm" in cp["grid"]:
+        _drift = _psi_rho_drift(psi_N, cp["grid"]["rho_tor_norm"], source.LCFS_geqdsk)
+        aux["psi_rho_drift"] = _drift
+        if _drift is not None and _drift["exceeds"]:
+            import warnings
+            warnings.warn(
+                f"{_drift['evidence']}: the dd's equilibrium is not the g-file's, "
+                "so its profiles and sources sit at shifted psi_N"
+                + (" against the IDA kinetics (placed by IDA psi_N)" if use_ida else ""))
+    if use_ida:
+        (ne, te, ti, ni, Zeff, _omega,
+         sigma_ne_ida, sigma_te_ida, sigma_ni_ida, sigma_ti_ida,
+         _ida_read, _ni_fast_meta) = _merge_ida_kinetics(
             psi_N, ne, ni, Zeff, source.ida_path, T,
-            getattr(source, "impurity_Z", 6.0))
+            getattr(source, "impurity_Z", 6.0),
+            ni_source=getattr(source, "ni_source", "all"),
+            zeff_from_fuse=getattr(source, "zeff_from_fuse", False),
+            z_fast=z_fast, z2_fast=z2_fast)
+        if _ni_fast_meta["agrees"] is False and _drift is not None and _drift["exceeds"]:
+            _ni_fast_meta["evidence"] += (
+                f"; likely the psi_N(rho) drift ({_drift['evidence']})")
+        aux["ni_fast_meta"] = _ni_fast_meta
+        # Loud: the subtraction moves ni, and a failed cross-check means the
+        # beam density belongs to a plasma that is not quite the IDA one.
+        if _ni_fast_meta["applied"]:
+            print(f"  [ni] thermal ni: subtracted the dd fast-ion equivalent "
+                  f"(peak fast fraction "
+                  f"{_ni_fast_meta['fast_fraction_peak']:.1%}); "
+                  f"{_ni_fast_meta['evidence']}")
+            if _ni_fast_meta["agrees"] is False:
+                import warnings
+                warnings.warn(f"ida_hybrid: {_ni_fast_meta['evidence']}; "
+                              f"subtracted anyway")
         if _omega is not None:
             aux["omega_tor"] = _omega
+        aux["zeff"] = Zeff   # keep the switchboard's zeff baseline consistent
+        # IDA's Z_eff is MEASURED, so its numerator counts the fast ions;
+        # zeff_from_fuse carries the dd's own convention over with its value.
+        if not getattr(source, "zeff_from_fuse", False):
+            zeff_includes_fast = True
+        # Read once, shared: resolve_uncertainty reuses this instead of
+        # opening the same file again (and possibly at another slice).
+        aux["ida_profiles"] = (str(source.ida_path), _ida_read)
+        aux["sigma_ne_ida"] = sigma_ne_ida
+        aux["sigma_te_ida"] = sigma_te_ida
+        aux["sigma_ni_ida"] = sigma_ni_ida
+        aux["sigma_ti_ida"] = sigma_ti_ida
 
     # --- user overrides for fixed additive components ---
     if fixed is not None:
@@ -782,7 +1032,15 @@ def read_imas_baseline(
     # electrons -- without that the inversion recovers only half the bias
     # (see impurity_charge_with_fast_ions).  The Zeff consumed by the
     # bootstrap / forward solve deliberately stays the full-ne one.
-    Z_imp, ne_th = impurity_charge_with_fast_ions(ne, ni, Zeff, z_fast)
+    # (Zeff_th: the helper's thermal-numerator convention.  On the ida path
+    # only ne_th is used, which does not depend on Z_eff.)
+    _Z_inverted, ne_th = impurity_charge_with_fast_ions(
+        ne, ni, Zeff if use_ida else Zeff_th, z_fast)
+    # With IDA-hybrid kinetics, ni was built (read_ida)
+    # under single-impurity quasineutrality at charge source.impurity_Z, so that IS
+    # the impurity charge; the inversion is then only needed for ne_th.
+    Z_imp = (float(getattr(source, "impurity_Z", 6.0)) if use_ida
+             else _Z_inverted)
     p_imp = impurity_pressure(ne_th, ni, ti, Z_imp)
     p_recon = _EC * (ne * te + ni * ti) + p_imp + p_fast
     # p_diff anchors the solve thermal pressure to the FUSE equilibrium.pressure.
@@ -826,6 +1084,8 @@ def read_imas_baseline(
         j_RF=j_RF,
         p_fast=p_fast,
         z_fast=(z_fast if np.any(z_fast) else None),
+        z2_fast=(z2_fast if np.any(z_fast) else None),
+        zeff_includes_fast=zeff_includes_fast,
         p_equilibrium=p_equilibrium,
         p_diff=p_diff,
         Z_imp=Z_imp,

@@ -1688,11 +1688,15 @@ def perturb_kinetic_equilibrium(
     psi_N_kinetic=None,
     p_fast=None,
     z_fast=None,
+    z2_fast=None,
+    zeff_includes_fast=False,
     j_NBI=None,
     j_RF=None,
     aux_sigmas=None,
     aux_baselines=None,
     aux_length_scales=None,
+    ni_from_zeff=True,
+    zeff_dne=None,
     max_proxy_draws=500,
     bnd_diag_callback=None,
     # Differential bootstrap (DIFF_BS=1 mode):
@@ -1936,19 +1940,44 @@ def perturb_kinetic_equilibrium(
     # one mutually consistent (ne, ni, Zeff, nz) set per draw, used by the
     # bootstrap, the archived profiles, and the per-draw p-file alike.
     # sigma_ni is not used in this mode. See physics.main_ion_density_from_zeff.
-    _zeff_active = bool(aux_sigmas) and ('zeff' in aux_sigmas) \
+    # ni_from_zeff=False opts out (ni drawn from its own sigma_ni, e.g. a
+    # measured IDA ni_source envelope); Zeff is still drawn below as a normal
+    # aux channel, bounded by the same Z_imp, and drives the bootstrap either way.
+    # zeff_dne (dZeff/dne, kinetic grid; bouquet.io.ida.IDAProfiles.zeff_dne)
+    # couples the Z_eff draw to the ne draw: its ne term is taken out of
+    # sigma_zeff and added back as zeff_dne * (ne_perturb - ne).
+    _zeff_chan = bool(aux_sigmas) and ('zeff' in aux_sigmas) \
         and (aux_baselines or {}).get('zeff') is not None
+    _zeff_active = bool(ni_from_zeff) and _zeff_chan
     _Z_imp = None
     _zeff_draw = None
-    if _zeff_active:
-        # z_fast-aware: on the IMAS path the fast-ion charge must not be
-        # charged to the impurity (identical to the reader's own Z_imp).
-        from .physics import impurity_charge_with_fast_ions
-        _Z_imp, _ = impurity_charge_with_fast_ions(
-            ne, ni, np.asarray(aux_baselines['zeff'], dtype=float),
-            np.zeros_like(np.asarray(ne, dtype=float))
-            if z_fast is None else z_fast)
-        if _Z_imp is None:
+    if _zeff_chan:
+        # Prefer the baseline's own Z_imp (the charge its ni was actually built
+        # with, e.g. the IDA impurity_Z); invert (ne, ni, Zeff) only if absent.
+        # Resolved for the whole channel, not just the active mode: it also
+        # bounds the passive draw below.
+        if Z_imp:
+            _Z_imp = float(Z_imp)
+        else:
+            # z_fast-aware: on the IMAS path the fast-ion charge must not be
+            # charged to the impurity (identical to the reader's own Z_imp).
+            from .physics import impurity_charge_with_fast_ions
+            _Z_imp, _ = impurity_charge_with_fast_ions(
+                ne, ni, np.asarray(aux_baselines['zeff'], dtype=float),
+                np.zeros_like(np.asarray(ne, dtype=float))
+                if z_fast is None else z_fast)
+        # One bound for both draw paths (active derives ni from it, passive
+        # only feeds the bootstrap) -- they were separate expressions and
+        # drifted apart the moment z_fast arrived.  The window is
+        # convention-dependent; see physics.zeff_bounds.
+        # Evaluated on the DRAWN ne: the window scales with z_fast/ne.
+        from .physics import zeff_bounds
+
+        def _zeff_window(_ne):
+            return ((1.0, None) if _Z_imp is None else
+                    zeff_bounds(_ne, _Z_imp, z_fast, z2_fast,
+                                zeff_includes_fast))
+        if _zeff_active and _Z_imp is None:
             print("  [zeff] baseline has no ne-ni dilution (ni ~= ne): Zeff "
                   "draws still drive the bootstrap, but ni remains an "
                   "independent channel")
@@ -1980,27 +2009,39 @@ def perturb_kinetic_equilibrium(
             from .physics import main_ion_density_from_zeff
             _zb = np.asarray(aux_baselines['zeff'], dtype=float)
             _zs = np.asarray(aux_sigmas['zeff'], dtype=float)
+            if zeff_dne is not None:
+                _zs = np.sqrt(np.maximum(
+                    _zs ** 2 - (np.asarray(zeff_dne, dtype=float) * sigma_ne) ** 2,
+                    0.0))
             _z0 = float(np.max(np.abs(_zb))) or 1.0
             _zeff_draw = np.atleast_1d(np.asarray(np.squeeze(
                 generate_perturbed_GPR(
                     psi_kin, _zb / _z0, _zs / _z0,
                     length_scale=(aux_length_scales or {}).get('zeff', 0.4),
                     n_samples=1, rng=rng)) * _z0, dtype=float))
-            # ne_th/ne <= Zeff <= Z_imp*ne_th/ne guarantees 0 <= ni <= ne_th
-            # and nz >= 0 (reduces to the familiar [1, Z_imp] at z_fast=0)
-            if z_fast is None:
-                _zeff_draw = np.clip(_zeff_draw, 1.0, _Z_imp * (1.0 - 1e-9))
-            else:
-                _fth = np.clip((ne_perturb - np.asarray(z_fast, dtype=float))
-                               / np.clip(ne_perturb, 1e10, None), 0.0, 1.0)
-                _zeff_draw = np.clip(_zeff_draw, np.maximum(_fth, 1e-9),
-                                     _Z_imp * _fth * (1.0 - 1e-9))
-            ni_perturb = main_ion_density_from_zeff(ne_perturb, _zeff_draw,
-                                                    _Z_imp, z_fast=z_fast)
+            if zeff_dne is not None:
+                _zeff_draw = _zeff_draw + np.asarray(zeff_dne, dtype=float) * (
+                    ne_perturb - ne)
+            # The single-impurity window (physics.zeff_bounds): outside it
+            # ni or nz goes negative and Z_imp / p_imp lose their meaning.
+            _z_lo, _z_hi = _zeff_window(ne_perturb)
+            _zeff_draw = np.clip(_zeff_draw, np.maximum(_z_lo, 1e-9),
+                                 _z_hi * (1.0 - 1e-9))
+            ni_perturb = main_ion_density_from_zeff(
+                ne_perturb, _zeff_draw, _Z_imp, z_fast=z_fast,
+                z2_fast=z2_fast, zeff_includes_fast=zeff_includes_fast)
         else:
             ni_perturb = _draw_monotonic_perturbation(
                 psi_kin, ni / ni[0], sigma_ni / ni[0], n_ls, rng=rng
             ) * ni[0]
+            if Z_imp:
+                # Drawn on its own, ni can exceed the thermal electrons that
+                # neutralise it (nz < 0), which impurity_pressure then clips
+                # to zero without a word.  Hold it inside the single-impurity
+                # window, as the Z_eff draw is held inside zeff_bounds.
+                ni_perturb = np.minimum(ni_perturb, np.maximum(
+                    ne_perturb - (0.0 if z_fast is None
+                                  else np.asarray(z_fast, dtype=float)), 0.0))
 
         ti_perturb = _draw_monotonic_perturbation(
             psi_kin, ti / ti[0], sigma_ti / ti[0], t_ls, rng=rng
@@ -2063,6 +2104,13 @@ def perturb_kinetic_equilibrium(
             _ep = np.squeeze(generate_perturbed_GPR(
                 psi_kin, _eb / _e0, _es / _e0, length_scale=_els, n_samples=1,
                 rng=rng)) * _e0
+            if _en == 'zeff':
+                # The SAME window the active path uses, not a second
+                # expression that agrees today: a draw outside the window is
+                # outside the single-impurity model Z_imp / p_imp assume.
+                _z_lo, _z_hi = _zeff_window(ne_perturb)
+                _ep = np.clip(_ep, np.maximum(_z_lo, 1e-9),
+                              None if _z_hi is None else _z_hi * (1.0 - 1e-9))
             aux_out[_en] = np.atleast_1d(np.asarray(_ep, dtype=float))
         if _zeff_draw is not None:
             aux_out['zeff'] = _zeff_draw      # the draw ni was derived from
@@ -3581,6 +3629,8 @@ def generate_bouquet(
     pin_jphi=False,
     p_fast=None,
     z_fast=None,
+    z2_fast=None,
+    zeff_includes_fast=False,
     Z_imp=None,
     p_diff=None,
     jphi_diff=None,
@@ -3589,6 +3639,8 @@ def generate_bouquet(
     aux_sigmas=None,
     aux_baselines=None,
     aux_length_scales=None,
+    ni_from_zeff=True,
+    zeff_dne=None,
     progress_callback=None,
     source_kind=None,
     capture_live_eq=True,
@@ -4644,6 +4696,9 @@ def generate_bouquet(
         # thermal-only part, so plots can separate it from the impurity+fast
         # the GS solve added (pressure_solve - pressure).
         pressure_thermal=pressure,
+        z_fast=z_fast,
+        z2_fast=z2_fast,
+        Z_imp=Z_imp,
         eqdsk_bytes=baseline_eqdsk_bytes,
         pfile_bytes=stored_pfile_bytes,
         psi_N_kinetic=psi_N_kinetic,
@@ -4839,17 +4894,23 @@ def generate_bouquet(
 
     # One-time notice for the Zeff-primary mode (the per-draw mechanics live
     # in perturb_kinetic_equilibrium; see physics.main_ion_density_from_zeff).
-    if aux_sigmas and 'zeff' in aux_sigmas:
-        from .physics import impurity_charge_with_fast_ions
-        _zimp_note, _ = impurity_charge_with_fast_ions(
-            ne, ni, np.asarray((aux_baselines or {}).get('zeff', Zeff),
-                               dtype=float),
-            np.zeros_like(np.asarray(ne, dtype=float))
-            if z_fast is None else z_fast)
+    # Gate and Z_imp source both mirror that function's _zeff_active branch:
+    # the mode needs a zeff sigma AND a zeff baseline, and uses the baseline's
+    # declared Z_imp when it has one, else inverts (ne, ni, Zeff).
+    if (ni_from_zeff and aux_sigmas and 'zeff' in aux_sigmas
+            and (aux_baselines or {}).get('zeff') is not None):
+        if Z_imp:
+            _zimp_note = float(Z_imp)
+        else:
+            from .physics import impurity_charge_with_fast_ions
+            _zimp_note, _ = impurity_charge_with_fast_ions(
+                ne, ni, np.asarray(aux_baselines['zeff'], dtype=float),
+                np.zeros_like(np.asarray(ne, dtype=float))
+                if z_fast is None else z_fast)
         if _zimp_note is not None:
             print(f"NOTE: zeff channel active -> ni is DERIVED per draw from "
-                  f"(ne, Zeff) via quasineutrality (Z_imp = {_zimp_note:.2f}); "
-                  f"the independent sigma_ni input is not used.")
+                  f"the drawn (ne, Zeff) via single-impurity quasineutrality "
+                  f"at Z_imp = {_zimp_note:.2f}; sigma_ni is not used.")
 
     t_batch_start = time.perf_counter()
     elapsed_times = []
@@ -5167,11 +5228,15 @@ def generate_bouquet(
                 psi_N_kinetic=psi_N_kinetic,
                 p_fast=p_fast,
                 z_fast=z_fast,
+                z2_fast=z2_fast,
+                zeff_includes_fast=zeff_includes_fast,
                 j_NBI=j_NBI,
                 j_RF=j_RF,
                 aux_sigmas=aux_sigmas,
                 aux_baselines=aux_baselines,
                 aux_length_scales=aux_length_scales,
+                ni_from_zeff=ni_from_zeff,
+                zeff_dne=zeff_dne,
                 max_proxy_draws=max_proxy_draws,
                 p_thresh=p_thresh,
                 # the run's single Generator -- every GPR draw in this draw
@@ -5826,8 +5891,14 @@ def generate_bouquet(
         pressure_total_perturb = pressure_perturb.copy()
         if Z_imp:
             from .physics import impurity_pressure as _impP
+            # On ne - z_fast, as the solve does: only the thermal electrons
+            # are neutralised by the impurity (0.9 % of peak p on a 14 % beam).
+            _ne_th_eqp = (_ne_eqp if z_fast is None else np.maximum(
+                _ne_eqp - (_to_eq(np.asarray(z_fast, dtype=float))
+                           if psi_N_kinetic is not None
+                           else np.asarray(z_fast, dtype=float)), 0.0))
             pressure_total_perturb = pressure_total_perturb + _impP(
-                _ne_eqp, _ni_eqp, _ti_eqp, Z_imp)
+                _ne_th_eqp, _ni_eqp, _ti_eqp, Z_imp)
         if p_fast is not None:
             _pf_eq = np.asarray(p_fast, dtype=float)
             pressure_total_perturb = pressure_total_perturb + (
@@ -5884,6 +5955,42 @@ def generate_bouquet(
                                         arr_si[-1] * scale),
                         )(psi_grid)
                         pf.set_profile(pf_key, psi_grid, vals)
+
+                # Fast-ion block.  ni above is THERMAL whenever the source
+                # carries a fast population, and the p-file model is
+                # nz1 = (ne - ni - Z_beam nb)/Z_imp -- so without nb the whole
+                # beam is charged to the impurity.  Written even when the
+                # source p-file has no nb block (set_profile creates it), since
+                # its absence is read as zero.
+                #
+                # nb is a PARTICLE density and the block carries ONE beam
+                # charge, so the two archived charge moments are collapsed to
+                # the single species the format can hold:
+                #     Z_beam = z2_fast/z_fast     (charge-weighted mean charge)
+                #     n_fast = z_fast/Z_beam = z_fast^2/z2_fast
+                # Exact for a single fast species -- the usual case, and the
+                # only one a p-file can represent -- and an effective charge
+                # otherwise.  Both moments are preserved by construction when
+                # the population really is one species; nothing assumes Z=1.
+                if z_fast is not None and z2_fast is not None:
+                    _zf = np.asarray(z_fast, dtype=float)
+                    _z2 = np.asarray(z2_fast, dtype=float)
+                    _ok = _zf > 0.0
+                    if np.any(_ok):
+                        _Zb = float(np.sum(_z2[_ok]) / np.sum(_zf[_ok]))
+                        _nfast = np.where(_ok, _zf ** 2
+                                          / np.where(_ok, _z2, 1.0), 0.0)
+                        _nb_psi = pf.psinorm_for("ne")
+                        _nb = _nfast * 1e-20
+                        pf.set_profile("nb", _nb_psi, interp1d(
+                            _psi_src, _nb, kind="cubic", bounds_error=False,
+                            fill_value=(_nb[0], _nb[-1]))(_nb_psi))
+                        _nza = pf["N Z A"] if "N Z A" in pf else None
+                        if _nza is not None and len(_nza["Z"]) > 2:
+                            _Zarr = np.asarray(_nza["Z"], dtype=float).copy()
+                            _Aarr = np.asarray(_nza["A"], dtype=float).copy()
+                            _Zarr[-1] = _Zb
+                            pf.set_ion_species(_nza["N"], _Zarr, _Aarr)
 
                 # Recompute the impurity density from THIS draw's (ne, ni)
                 # via quasineutrality, so the p-file species block implies
@@ -5991,6 +6098,9 @@ def generate_bouquet(
             j_BS_edge=diagnostics["j_BS_edge"],
             pfile_bytes=perturbed_pfile_bytes,
             Zeff=Zeff_profile,
+            z_fast=z_fast,
+            z2_fast=z2_fast,
+            Z_imp=Z_imp,
             coil_currents=coil_current_dict,
             psi_N_kinetic=psi_N_kinetic,
             homotopy_pass=diagnostics.get('homotopy_pass'),

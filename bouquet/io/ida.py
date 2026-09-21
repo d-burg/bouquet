@@ -12,15 +12,14 @@ Operational DIII-D ``IDA_*.cdf`` layout (verified against a real IDA file):
     profiles are 2-D ``(n_time, n_radial)`` with companion ``*_err`` datasets
     (direct 1-sigma); the radial grid is ``psi_n`` (n_radial,), extending past
     the separatrix to ~1.2; ``time`` is in milliseconds. Units are already SI
-    (n_e in m^-3; T_e, T_12C6 in eV). There is no stored main-ion density, but
-    the file carries ``Zeff`` (visible bremsstrahlung), so ``ni`` is derived
-    from ``(ne, Zeff)`` under single-impurity quasineutrality with the machine
-    impurity charge ``impurity_Z`` (carbon Z=6 by default; the carbon CER
-    ``T_12C6`` is itself the carbon diagnostic). This makes the IDA baseline
-    information-equivalent to a p-file's ``(ne, ni)`` and self-consistent
-    between its pressure and its Z_eff -- unlike the legacy ``ni = ne``, which
-    silently meant Z_eff = 1 for the pressure while feeding the real Z_eff to
-    the bootstrap.
+    (n_e in m^-3; T_e, T_12C6 in eV).
+
+There is no stored main-ion density; ``ni`` can come from ``Zeff``
+reconstructed from visible bremsstrahlung data (``ni_source="Zeff"``), from
+the measured carbon density ``n_12C6`` from charge exchange recombination
+(``ni_source="CER"``), or from the mean of the two (``ni_source="all"``, default).
+With both active, their disagreement beyond statistical error widens
+``sigma_ni``.
 """
 
 from __future__ import annotations
@@ -58,6 +57,11 @@ class IDAProfiles:
 
     time: float                     # selected slice [s]
     raw_bytes: Optional[bytes] = None   # original file bytes for archival
+    # Per-radius tension between the two routes, in sigma, one per channel:
+    # each is the delta that widens THAT channel's envelope, over its own
+    # propagated spread. None unless both routes are live.
+    ni_route_chi: Optional[np.ndarray] = None
+    zeff_route_chi: Optional[np.ndarray] = None
 
     #: Measured 1-sigma envelope on ``Zeff``, when the file provides one:
     #: sample spread on the ensemble layout, the ``Zeff_err`` dataset on newer
@@ -91,6 +95,11 @@ class IDAProfiles:
     #: shots, i.e. shot-dependent and mostly within the measured sigma_Zeff;
     #: a large value flags the file, not the workflow.
     zeff_carbon_dev: Optional[dict] = None
+    #: dZeff/dne of the resolved Z_eff at fixed nC: ``-w_c (Zeff_CER - 1)/ne``,
+    #: zero without the CER route.  ``sigma_Zeff`` carries this ne term, so a
+    #: draw deriving ni from its own (ne, Zeff) adds ``zeff_dne * dne`` and
+    #: draws the rest; ni then carries ``sigma_ni`` exactly (to first order).
+    zeff_dne: Optional[np.ndarray] = None
 
 
 @dataclass
@@ -168,12 +177,20 @@ def _carbon_tier_usable(nC, ne, sigma_nC=None, sigma_ne=None, *,
     return False
 
 
+def _chi(delta, var_delta):
+    """Route disagreement in sigma; NaN where the spread is zero."""
+    return np.sqrt(np.divide(delta ** 2, var_delta,
+                             out=np.full_like(delta, np.nan),
+                             where=var_delta > 0.0))
+
+
 def read_ida(
     path: str,
     time: Optional[float] = None,
     sigma_mode: str = "auto",
     sigma_method: str = "percentile",   # ensemble-layout band estimator
-    sigma_ni_from_ne: bool = True,
+    ensemble_median: bool = False,      # ensemble-layout central estimator
+    ni_source: str = "all",
     impurity_Z: float = 6.0,
 ) -> IDAProfiles:
     """Read an IDA ``.cdf`` and return profiles + sigmas at ``time``.
@@ -193,15 +210,28 @@ def read_ida(
     sigma_method : {"percentile", "std"}
         Ensemble band estimator: ``"percentile"`` -> (p84-p16)/2 (robust),
         ``"std"`` -> sample standard deviation. Unused for the direct layout.
-    sigma_ni_from_ne : bool
-        Retained for API symmetry. With ``ni = ne`` the ion-density sigma always
-        tracks ``sigma_ne``.
+    ensemble_median : bool
+        Ensemble central estimator: sample mean (default) or median.
+    ni_source : {"Zeff", "CER", "all"}
+        Which measurement the main-ion density comes from. ``"Zeff"``
+        applies single-impurity quasineutrality to ``(ne, Zeff)``; ``"CER"``
+        subtracts the measured carbon density ``n_12C6``; ``"all"`` takes the
+        mean of the two (default). An explicit route needs its own ``*_err``
+        dataset on the direct layout and raises without it; ``"all"`` uses
+        whichever routes the file supports.
+    impurity_Z : float
+        Impurity charge Z (carbon Z=6).
 
     Notes
     -----
     Opens with ``h5py.File(path, "r")`` -- the file is netCDF4/HDF5, so no
     OMFIT or netCDF4 package is needed. Units are already SI; ``T_12C6`` maps to
-    Ti, and ``ni`` is reconstructed as ``n_e - Z_imp * n_12C6``.
+    Ti.
+
+    With both routes live, ``sigma_ni`` and ``sigma_Zeff`` also carry what the
+    routes disagree on beyond their statistical errors. The term is one-sided,
+    and ``ni_route_chi`` / ``zeff_route_chi`` report the tension behind each.
+    They differ: ne cancels partly in ni and not at all in Z_eff.
     """
     import h5py
 
@@ -211,6 +241,14 @@ def read_ida(
     if sigma_method not in ("percentile", "std"):
         raise ValueError(
             f"unknown sigma_method {sigma_method!r}; expected 'percentile' or 'std'")
+    if ni_source not in ("Zeff", "CER", "all"):
+        raise ValueError(
+            f"unknown ni_source {ni_source!r}; expected 'Zeff', 'CER', or 'all'")
+    if ni_source == "CER" and float(impurity_Z) != 6.0:
+        raise ValueError(
+            f"ni_source={ni_source!r} requires impurity_Z=6.0, got {impurity_Z!r}: "
+            "the carbon route subtracts the 'n_12C6' density, which is carbon "
+            "(Z=6). For another impurity use ni_source='Zeff'")
 
     with open(path, "rb") as fh:
         raw_bytes = fh.read()
@@ -225,7 +263,7 @@ def read_ida(
         # Two field-validated layouts, distinguished by dimensionality:
         #   direct   : (n_time, n_radial) profiles + companion *_err datasets;
         #   ensemble : (n_time, n_samples, n_radial) posterior samples, no *_err
-        #              -> profile = sample mean, sigma = sample spread.
+        #              -> profile = sample centre, sigma = sample spread.
         is_ensemble = (np.asarray(f["n_e"].shape).size == 3)
         if sigma_mode == "direct" and is_ensemble:
             raise ValueError("sigma_mode='direct' but the file is a 3-D posterior "
@@ -233,6 +271,30 @@ def read_ida(
         if sigma_mode == "ensemble" and not is_ensemble:
             raise ValueError("sigma_mode='ensemble' but the file is a 2-D direct "
                              "IDA; use sigma_mode='auto' or 'direct'")
+        # An EXPLICIT ni_source is strict: asking for a named route and
+        # silently getting the other one is worse than an error.  The default
+        # "all" walks the ladder below instead, once the data is in hand --
+        # route availability turns on the carbon validity screen, not merely
+        # on which datasets exist.
+        if ni_source == "CER" and "n_12C6" not in f:
+            raise KeyError(
+                f"{path!r} has no 'n_12C6' dataset, so ni cannot be derived from "
+                "the carbon density; pass ni_source='Zeff' to use the "
+                "(ne, Zeff) quasineutrality route instead")
+        if ni_source == "CER" and not is_ensemble and "n_12C6_err" not in f:
+            raise KeyError(
+                f"{path!r} has 'n_12C6' but no 'n_12C6_err', so the carbon term of "
+                "sigma_ni cannot be propagated; pass ni_source='Zeff' to use "
+                "the (ne, Zeff) quasineutrality route instead")
+        if ni_source == "Zeff" and not is_ensemble and "Zeff_err" not in f:
+            raise KeyError(
+                f"{path!r} has no 'Zeff_err' dataset, so the Zeff term of sigma_ni "
+                "cannot be propagated; pass ni_source='CER' to derive ni from "
+                "the carbon density instead")
+
+        # The CER route's value + envelope, filled by whichever layout
+        # branch runs below; None when the file carries no carbon channel.
+        n_carbon = sigma_n_carbon = None
 
         if is_ensemble:
             def _samples(key):  # (n_samples, n_radial) at the selected slice
@@ -244,10 +306,14 @@ def read_ida(
                 lo, hi = np.percentile(a, [16.0, 84.0], axis=0)
                 return 0.5 * (hi - lo)
 
+            def _center(a):
+                return np.median(a, axis=0) if ensemble_median else np.mean(a, axis=0)
+
             psi_N = np.asarray(f["psi_n"][t_idx], dtype=float)[0]   # shared radial grid
             ne_s, te_s = _samples("n_e"), _samples("T_e")
             ti_s, zf_s = _samples("T_12C6"), _samples("Zeff")
-            ne, te, ti, Zeff = (ne_s.mean(0), te_s.mean(0), ti_s.mean(0), zf_s.mean(0))
+            ne, te, ti, Zeff = (_center(ne_s), _center(te_s),
+                                _center(ti_s), _center(zf_s))
             sigma_ne, sigma_te, sigma_ti = _band(ne_s), _band(te_s), _band(ti_s)
             # Highest-fidelity tier: the posterior carries Zeff samples, so the
             # Zeff envelope is measured the same way as the kinetic ones.
@@ -257,6 +323,9 @@ def read_ida(
             sigma_Zeff_carbon, sigma_Zeff_carbon_source = None, "none"
             if "n_12C6" in f:
                 nc_s = _samples("n_12C6")
+                # The CER route's own centre/spread, read whenever the
+                # channel exists: the ladder below decides whether to use it.
+                n_carbon, sigma_n_carbon = _center(nc_s), _band(nc_s)
                 # Same screen as the direct layout, per SAMPLE: one fill value in
                 # one sample at one radius is enough to put ~1e17 into the band,
                 # and _band (a percentile half-width) is always finite and
@@ -275,9 +344,13 @@ def read_ida(
             ne, te = col("n_e"), col("T_e")          # m^-3, eV
             ti, Zeff = col("T_12C6"), col("Zeff")    # eV (carbon CER), dimensionless
             sigma_ne, sigma_te, sigma_ti = col("n_e_err"), col("T_e_err"), col("T_12C6_err")
+            if "n_12C6" in f:
+                n_carbon = col("n_12C6")
+                sigma_n_carbon = (col("n_12C6_err") if "n_12C6_err" in f
+                                  else None)
             # Newer direct-layout vintages carry a measured Zeff_err profile;
             # older ones do not.  None (NOT a guessed scalar) marks the older
-            # vintage so the envelope resolver can say which tier it used.
+            # vintage, which is what drops the VB rung of the ladder below.
             if "Zeff_err" in f:
                 sigma_Zeff = col("Zeff_err")
                 sigma_Zeff_source = "Zeff_err"
@@ -299,14 +372,6 @@ def read_ida(
                             + (sigma_ne / np.clip(ne, 1e10, None)) ** 2)
                     sigma_Zeff_carbon_source = "n_12C6_err"
 
-        # Main-ion density from the measured (ne, Zeff) via single-impurity
-        # quasineutrality: ni = ne (Z_imp - Zeff)/(Z_imp - 1). The IDA file
-        # carries Z_eff directly (visible bremsstrahlung), so the dilution is
-        # measured, not assumed -- equivalent in information to a p-file's
-        # (ne, ni). Z_eff is clipped to [1, Z_imp] so 0 <= ni <= ne.
-        Zeff_c = np.clip(Zeff, 1.0, impurity_Z)
-        ni = main_ion_density_from_zeff(ne, Zeff_c, impurity_Z)
-
         # Zeff-vs-carbon consistency (report-only, issue-#19-adjacent QC):
         # the file reports Zeff from visible bremsstrahlung AND n_12C6 from
         # CER; under the same single-impurity assumption they must agree as
@@ -314,6 +379,7 @@ def read_ida(
         # the two techniques agree at DIII-D when C6+ dominates, so a large
         # deviation flags THIS file (non-carbon impurity, calibration, or
         # fit vintage), not the method.  No acceptance criterion -- one line.
+        # It is also the spread that ni_source="all" folds into sigma_ni below.
         zeff_carbon_dev = None
         if "n_12C6" in f:
             n_c_raw = np.asarray(f["n_12C6"][t_idx], dtype=float)
@@ -346,11 +412,138 @@ def read_ida(
             else:
                 print("[read_ida] Zeff-vs-carbon cross-check skipped: no "
                       "valid core (psi_N<=0.9) carbon points in this file")
-        # sigma_ni is only used in the (now rare) independent-ni fallback;
-        # propagate the ne fractional error onto the derived ni.
-        with np.errstate(divide="ignore", invalid="ignore"):
-            _frac = np.where(ne > 0, sigma_ne / ne, 0.0)
-        sigma_ni = np.abs(ni) * _frac
+
+        # ---- the Z_eff / n_i ladder: VB+CER > CER > VB -------------------
+        # ni is linear in Z_eff and the CER route is the same measurement in
+        # other coordinates:
+        #     Zeff_CER = 1 + Z(Z-1) nC/ne   <=>   ni = ne - Z nC   (exact)
+        # so resolving Z_eff route-wise and taking ni from the result is the
+        # same ni as resolving ni route-wise, and keeps the archived
+        # (ne, ni, Z_eff) mutually quasineutral -- the invariant the p-file
+        # export and the per-draw dilution assume.
+        #
+        # Independent measured variables: ne, Zeff_VB, nC, with cov = 0
+        # between them (IDA stores none; VB and CER are separate
+        # diagnostics).  ne enters ni both explicitly and through the CER
+        # route, so its two derivatives are summed before squaring.
+        zeff_vb = Zeff                       # the file's VB measurement
+        zeff_cer = None
+        if n_carbon is not None:
+            with np.errstate(divide="ignore", invalid="ignore"):
+                zeff_cer = 1.0 + (impurity_Z * (impurity_Z - 1.0)
+                                  * n_carbon / np.clip(ne, 1e10, None))
+
+        # A route is LIVE only with a value AND a validated envelope.
+        # sigma_Zeff_carbon carries the carbon screen's verdict (see
+        # _carbon_tier_usable), so the ladder and the tier share ONE screen.
+        _vb_ok = sigma_Zeff is not None
+        _cer_ok = (zeff_cer is not None and sigma_Zeff_carbon is not None
+                   and sigma_n_carbon is not None
+                   and float(impurity_Z) == 6.0)
+        if ni_source == "Zeff":
+            use_vb, use_cer = True, False
+        elif ni_source == "CER":
+            if not _cer_ok:
+                raise KeyError(
+                    f"{path!r}: ni_source='CER' was asked for, but the carbon "
+                    "route has no usable envelope here (no 'n_12C6_err', "
+                    "impurity_Z != 6, or the carbon validity screen rejected "
+                    "the data); pass ni_source='Zeff' or 'all'")
+            use_vb, use_cer = False, True
+        else:
+            use_vb, use_cer = _vb_ok, _cer_ok
+
+        # Bottom rung: neither route has a usable envelope (the oldest
+        # vintages carry no *_err).  The dilution value is still there, so
+        # take it and fall back to an ne-fraction sigma.
+        zeff_sigma_from_ne = not (use_vb or use_cer)
+        if zeff_sigma_from_ne:
+            if zeff_vb is not None:
+                use_vb = True
+            elif zeff_cer is not None:
+                use_cer = True
+            else:
+                raise KeyError(
+                    f"{path!r} carries neither a 'Zeff' nor a usable 'n_12C6' "
+                    "dilution measurement, so ni cannot be derived at all")
+
+        w_v = 0.5 if (use_vb and use_cer) else (1.0 if use_vb else 0.0)
+        w_c = 0.5 if (use_vb and use_cer) else (1.0 if use_cer else 0.0)
+        zeff_tier = ("VB+CER" if (use_vb and use_cer)
+                     else "CER" if use_cer else "VB")
+        if zeff_sigma_from_ne:
+            zeff_tier += " (ne-fraction sigma)"
+        if ni_source == "all" and not (use_vb and use_cer):
+            print(f"[read_ida] ni_source='all' -> Z_eff/ni tier "
+                  f"'{zeff_tier}': the other route has no usable envelope in "
+                  "this file, so no route-difference term enters sigma_ni")
+
+        # Resolved Z_eff, then ni from it.  The single-impurity clamp applies
+        # once, to the mean, so ni(mean(Zeff)) == mean(ni) stays exact.
+        zeff_res = (w_v * zeff_vb if w_v else 0.0) + (w_c * zeff_cer if w_c else 0.0)
+        Zeff = np.clip(zeff_res, 1.0, impurity_Z)
+        ni = main_ion_density_from_zeff(ne, Zeff, impurity_Z)
+
+        _inv = 1.0 / (impurity_Z - 1.0)
+        # dZeff_res/dne comes from the CER route alone (VB's Z_eff has no ne
+        # dependence); dni/dne then sums the explicit factor with it.
+        d_ni_dne = (impurity_Z - zeff_res) * _inv
+        if w_c:
+            d_ni_dne = d_ni_dne + w_c * (zeff_cer - 1.0) * _inv
+
+        # Z_eff channel: sigma_Zeff_carbon is ALREADY the CER route's total
+        # (nC (+) ne), so it enters whole here.  ni must NOT reuse it -- ne
+        # is carried there by d_ni_dne instead.
+        z_terms, n_terms = [], []
+        if w_v and sigma_Zeff is not None:
+            z_terms.append(w_v * sigma_Zeff)
+            n_terms.append(w_v * ne * _inv * sigma_Zeff)
+        if w_c and sigma_Zeff_carbon is not None:
+            z_terms.append(w_c * sigma_Zeff_carbon)
+            n_terms.append(w_c * impurity_Z * sigma_n_carbon)
+        n_terms.append(d_ni_dne * sigma_ne)
+        var_zeff = sum(t ** 2 for t in z_terms) if z_terms else np.zeros_like(ne)
+        var_ni = sum(t ** 2 for t in n_terms)
+
+        # Route disagreement, folded into both envelopes.  Both routes are GP
+        # fits, so a nonzero difference is a coherent offset in psi_N, not
+        # point-to-point scatter.  max(., 0) keeps the term one-sided; the
+        # resolved value is the mean of two routes, so an offset delta
+        # displaces it by delta/2 -> variance excess /4.  ne cancels partly in
+        # ni and not at all in Z_eff, so each delta gets its own Jacobian.
+        ni_route_chi = zeff_route_chi = None
+        if use_vb and use_cer:
+            d_z = zeff_vb - zeff_cer
+            var_dz = sigma_Zeff ** 2 + sigma_Zeff_carbon ** 2
+            var_zeff = var_zeff + np.maximum(d_z ** 2 - var_dz, 0.0) / 4.0
+            zeff_route_chi = _chi(d_z, var_dz)
+
+            ni_vb = main_ion_density_from_zeff(
+                ne, np.clip(zeff_vb, 1.0, impurity_Z), impurity_Z)
+            ni_cer = np.maximum(ne - impurity_Z * n_carbon, 0.0)
+            d_n = ni_vb - ni_cer
+            var_dn = (((impurity_Z - np.clip(zeff_vb, 1.0, impurity_Z))
+                       * _inv - 1.0) * sigma_ne) ** 2 \
+                + (ne * _inv * sigma_Zeff) ** 2 \
+                + (impurity_Z * sigma_n_carbon) ** 2
+            var_ni = var_ni + np.maximum(d_n ** 2 - var_dn, 0.0) / 4.0
+            ni_route_chi = _chi(d_n, var_dn)
+
+        zeff_dne = (-w_c * (zeff_cer - 1.0) / np.clip(ne, 1e10, None)
+                    if w_c else np.zeros_like(ne))
+
+        if zeff_sigma_from_ne:
+            # Nothing to propagate: both channels inherit ne's fractional
+            # error.
+            with np.errstate(divide="ignore", invalid="ignore"):
+                _frac = np.where(ne > 0, sigma_ne / ne, 0.0)
+            var_ni = (np.abs(ni) * _frac) ** 2
+            var_zeff = (np.abs(Zeff) * _frac) ** 2
+            zeff_dne = np.zeros_like(ne)
+
+        sigma_ni = np.sqrt(var_ni)
+        sigma_Zeff = np.sqrt(var_zeff)
+        sigma_Zeff_source = zeff_tier
 
     return IDAProfiles(
         psi_N=psi_N,
@@ -363,6 +556,9 @@ def read_ida(
         sigma_Zeff_carbon=sigma_Zeff_carbon,
         sigma_Zeff_carbon_source=sigma_Zeff_carbon_source,
         zeff_carbon_dev=zeff_carbon_dev,
+        ni_route_chi=ni_route_chi,
+        zeff_route_chi=zeff_route_chi,
+        zeff_dne=zeff_dne,
     )
 
 
@@ -370,6 +566,7 @@ def read_ida_cer(
     path: str,
     time: Optional[float] = None,
     sigma_method: str = "percentile",
+    ensemble_median: bool = False,
 ) -> IDACERProfiles:
     """Read the carbon-CER channels needed for a radial-field (E_r) analysis.
 
@@ -377,8 +574,9 @@ def read_ida_cer(
     midplane poloidal field and geometry (``Rmaj``, ``dpsiN_dR``), and their
     measured 1-sigma envelopes, at ``time`` on the IDA ``psi_N`` grid. Handles
     both file layouts like :func:`read_ida`: direct (2-D + ``*_err``) and ensemble
-    (3-D posterior samples -> sample mean + ``sigma_method`` band). Feed the
+    (3-D posterior samples -> central profile + ``sigma_method`` band). Feed the
     result to :func:`bouquet.physics.radial_field_from_impurity_force_balance`.
+    ``ensemble_median`` matches :func:`read_ida`; set both alike.
     """
     import h5py
 
@@ -397,11 +595,29 @@ def read_ida_cer(
             lo, hi = np.percentile(a, [16.0, 84.0], axis=0)
             return 0.5 * (hi - lo)
 
+        def _center(a):
+            return np.median(a, axis=0) if ensemble_median else np.mean(a, axis=0)
+
+        def _pick(*names):
+            """First of ``names`` present in the file, else None.
+
+            DIII-D IDA files suffix the CER channels with the measured ion, e.g.
+            ``v_pol_12C6``; older/synthetic files use the bare ``v_pol``.
+            """
+            return next((n for n in names if n in f), None)
+
         def read(key, err_key=None):
-            """(value, sigma) for one channel across either layout."""
+            """(value, sigma) for one channel across either layout.
+
+            ``key=None`` (channel absent from the file) zero-fills rather than
+            raising -- only v_pol is optional enough to reach here.
+            """
+            if key is None:
+                zero = np.zeros_like(psi_N)
+                return zero, zero.copy()
             if is_ensemble:
                 s = np.asarray(f[key][t_idx], dtype=float)      # (n_samples, n_radial)
-                return s.mean(0), _band(s)
+                return _center(s), _band(s)
             val = np.asarray(f[key][t_idx], dtype=float)
             sig = (np.asarray(f[err_key][t_idx], dtype=float)
                    if err_key and err_key in f else np.zeros_like(val))
@@ -412,10 +628,16 @@ def read_ida_cer(
         else:
             psi_N = np.asarray(f["psi_n"][:], dtype=float)
 
+        missing = [k for k in ("n_12C6", "T_12C6", "omega_tor_12C6") if k not in f]
+        if missing:
+            raise KeyError(
+                f"{path!r} has no {', '.join(missing)}: this file carries no carbon-CER "
+                "measurement, so rotation / E_r cannot be derived from it")
+
         n_c, s_nc = read("n_12C6", "n_12C6_err")
         t_c, s_tc = read("T_12C6", "T_12C6_err")
         omg, s_om = read("omega_tor_12C6", "omega_tor_12C6_err")
-        vpol, s_vp = read("v_pol", "v_pol_err")
+        vpol, s_vp = read(_pick("v_pol_12C6", "v_pol"), _pick("v_pol_12C6_err", "v_pol_err"))
         bpol, _ = read("Bpol_midplane", "Bpol_midplane_err")
         rmaj, _ = read("Rmaj_midplane", "Rmaj_midplane_err")
         dpsidr, _ = read("dPsiN_dR_midplane", "dPsiN_dR_midplane_err")

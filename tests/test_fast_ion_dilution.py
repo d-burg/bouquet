@@ -20,7 +20,7 @@ def _case(fast_frac):
     nC = 0.02 * ne                       # carbon, Z = 6
     n_fast = fast_frac * ne              # fast deuterium, Z = 1
     ni = ne - 6.0 * nC - n_fast          # thermal D closes quasineutrality
-    zeff = (ni + 36.0 * nC) / ne         # thermal numerator / FULL ne (IMAS)
+    zeff = (ni + 36.0 * nC) / ne         # thermal numerator / FULL ne (the helper's convention)
     return ne, ni, n_fast, zeff
 
 
@@ -124,7 +124,7 @@ def test_imas_wiring_uses_the_helper():
     import inspect
     import bouquet.io.imas as imas
     src = inspect.getsource(imas)
-    assert "impurity_charge_with_fast_ions(ne, ni, Zeff, z_fast)" in src
+    assert "impurity_charge_with_fast_ions(\n        ne, ni, Zeff if use_ida else Zeff_th, z_fast)" in src
     assert "effective_impurity_charge(ne_th" not in src
 
 
@@ -136,13 +136,9 @@ class TestThermalDrawPathConsistency:
     the thermal-derived Z_imp -- a sigma=0 pressure skew of
     e*z_fast*ti/Z_imp between reader and solver.
 
-    Scope, stated exactly rather than as "every consumer": this covers the
-    consumers that feed the GS solve.  The archive DISPLAY path
-    (``plotting._pressure_components``) is deliberately NOT covered and
-    stays uncorrected -- it recomputes the impurity term from archived
-    kinetics and ``z_fast`` is not archived, so it cannot subtract it.  The
-    limitation is documented on that function; its impurity/fast split is
-    diagnostic, not the split the solve used.
+    Scope: the consumers that feed the GS solve.  The archive display path
+    (``plotting._pressure_components``) is covered in
+    ``test_ni_fast_subtraction.TestArchiveConsumers``.
     """
 
     def _plasma(self, fast_frac=0.25):
@@ -187,6 +183,12 @@ class TestThermalDrawPathConsistency:
         rsrc = inspect.getsource(brun)
         assert tsrc.count("z_fast=z_fast") >= 2       # sig pass-throughs
         assert "impurity_pressure(_ne_th_eq, ni_eq, ti_eq, Z_imp)" in tsrc
+        # the per-draw archived "pressure" must carry the same impurity term
+        assert "_impP(\n                _ne_th_eqp, _ni_eqp, _ti_eqp, Z_imp)" in tsrc
+        assert "_impP(\n                _ne_eqp," not in tsrc
+        # an independently drawn ni is held to nz >= 0 on ne - z_fast
+        assert ("ni_perturb = np.minimum(ni_perturb, np.maximum(\n"
+                "                    ne_perturb - (0.0 if z_fast is None") in tsrc
         assert "impurity_pressure(_kin2eq(_ne_bl)" in tsrc
         assert "impurity_pressure(_ne_th, ni, ti, bl.Z_imp)" in rsrc
         assert "impurity_pressure(_ne_th_eq, ni_eq, ti_eq,\n" in rsrc

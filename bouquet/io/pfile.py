@@ -608,7 +608,15 @@ class PFile:
     def compute_quasineutrality(self):
         """Compute impurity density nz1 from quasi-neutrality.
 
-        ``nz1 = (ne - ni - nb) / Z_impurity``
+        ``nz1 = (ne - ni - Z_beam nb) / Z_impurity``
+
+        ``nb`` is a PARTICLE density -- the same convention
+        :meth:`compute_zeff` uses when it weights the block by
+        ``Z_beam**2`` -- so it enters quasi-neutrality weighted by the beam
+        charge from the species block, not bare.  The two agree for the
+        hydrogenic beams these files usually describe; they do not for a
+        helium or heavier beam, where charging ``nb`` at Z=1 would push the
+        difference into ``nz1``.
 
         Requires ``ne``, ``ni`` on the same grid and a ``"N Z A"`` block
         with at least one impurity species.  ``nb`` defaults to zero if
@@ -618,6 +626,7 @@ class PFile:
         if nza is None:
             raise ValueError("Ion species (N Z A) block required")
         Z_imp = nza["Z"][0]
+        Z_beam = float(nza["Z"][-1]) if len(nza["Z"]) > 2 else 1.0
 
         psinorm = self._raw["ne"]["psinorm"]
         ne = self._raw["ne"]["data"]
@@ -626,13 +635,13 @@ class PFile:
         if nb is None:
             nb = np.zeros_like(psinorm)
 
-        nz1 = (ne - ni - nb) / Z_imp
+        nz1 = (ne - ni - Z_beam * nb) / Z_imp
         n_neg = np.count_nonzero(nz1 < 0)
         if n_neg:
             warnings.warn(
                 f"Quasi-neutrality produced negative nz1 at {n_neg}/{len(nz1)} "
                 f"grid points (min = {nz1.min():.4g}).  This usually means "
-                f"the perturbed ne is too low relative to ni + nb.  Consider "
+                f"the perturbed ne is too low relative to ni + Z_beam*nb.  Consider "
                 f"skipping quasi-neutrality recomputation and keeping the "
                 f"baseline impurity density instead."
             )

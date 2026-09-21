@@ -231,6 +231,16 @@ class ImasSource:
     impurity_Z: float = 6.0            # machine impurity charge (carbon); ni dilution
     ni_source: str = "all"             # IDA ni route for ida_hybrid: "Zeff" | "CER" | "all"
     zeff_from_fuse: bool = False       # ida_hybrid: keep FUSE Z_eff instead of IDA's
+    # ida_hybrid: hand the solve a THERMAL ni by subtracting the dd's main-ion
+    # density_fast from the IDA ni.  IDA's ni is a TOTAL deuteron density --
+    # neither the VB Z_eff nor the CER carbon sees the beam population, so
+    # ne(Z-Zeff)/(Z-1) counts fast ions with thermal ones -- while FUSE's
+    # bootstrap (IMAS.Sauter_neo2021_bootstrap) is driven by
+    # cp1d.pressure_thermal, i.e. density_thermal only.  Subtracting closes
+    # that gap, so the sigma=0 draw reproduces FUSE's own j_BS.  Guarded: it
+    # only fires when the IDA ni and the dd TOTAL ni already agree (see
+    # NI_FAST_RTOL), and it is inert on a dd carrying no density_fast.
+    ni_subtract_fast: bool = True
     # OPTIONAL. A gEQDSK whose LCFS replaces the dd boundary outline as the
     # isoflux separatrix target. Leave None to use the source's own boundary.
     # Supply one when you have a more accurate separatrix for the slice than the

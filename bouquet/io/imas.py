@@ -530,8 +530,70 @@ def _read_ida_omega(path, time_s, psi_N):
         return None
 
 
+#: Profile-relative tolerance for the ``ni_subtract_fast`` gate: the IDA ni and
+#: the dd's TOTAL main-ion density must agree to this fraction of the profile
+#: peak before the fast density is subtracted.  Normalising by the peak rather
+#: than pointwise keeps the test from being decided by the edge, where both
+#: profiles go to zero and any relative measure diverges.
+NI_FAST_RTOL = 1e-4
+
+
+def _subtract_fast_ni(ni, sigma_ni, ni_fuse_thermal, ni_fast):
+    """Thermal ``(ni, sigma_ni)`` for the bootstrap, plus a provenance dict.
+
+    IDA's ni is a TOTAL deuteron density: neither the VB Z_eff nor the CER
+    carbon sees the beam population, so ``ne(Z-Zeff)/(Z-1)`` counts fast ions
+    with thermal ones.  FUSE's bootstrap consumes ``cp1d.pressure_thermal``,
+    which is ``density_thermal`` only.  Subtracting the dd's ``density_fast``
+    puts the sigma=0 draw on FUSE's own footing.
+
+    Applied only when the IDA ni already reproduces the dd TOTAL ni to
+    :data:`NI_FAST_RTOL` of the profile peak -- that agreement is the evidence
+    that the IDA ni really is the total, and without it the subtraction would
+    be correcting one disagreement with another.
+
+    ``sigma_ni`` is scaled by ``ni_thermal/ni``, holding the FRACTIONAL error
+    fixed.  The envelope is a measurement error on the deuteron inventory, and
+    the fast density removed from the mean is a separate (FUSE) quantity
+    carrying no IDA error, so the fraction is what survives the subtraction.
+
+    Returns ``(ni, sigma_ni, meta)``; ``meta["applied"]`` says whether it fired
+    and ``meta["evidence"]`` why.
+    """
+    ni = np.asarray(ni, dtype=float)
+    ni_fast = np.asarray(ni_fast, dtype=float)
+    scale = float(np.max(np.abs(np.asarray(ni_fuse_thermal, dtype=float)
+                                + ni_fast)))
+    if not np.any(ni_fast):
+        return ni, sigma_ni, {"applied": False, "mismatch": None,
+                              "evidence": "dd carries no main-ion density_fast"}
+    if not scale > 0.0:
+        return ni, sigma_ni, {"applied": False, "mismatch": None,
+                              "evidence": "dd main-ion density is identically zero"}
+    mismatch = float(np.max(np.abs(
+        ni - (np.asarray(ni_fuse_thermal, dtype=float) + ni_fast)))) / scale
+    if mismatch > NI_FAST_RTOL:
+        return ni, sigma_ni, {
+            "applied": False, "mismatch": mismatch,
+            "evidence": (f"IDA ni differs from the dd TOTAL ni by "
+                         f"{mismatch:.2e} of peak (> {NI_FAST_RTOL:.0e}), so "
+                         f"the IDA ni is not the dd's total and subtracting "
+                         f"density_fast from it is not defined")}
+    ni_th = np.maximum(ni - ni_fast, 0.0)
+    if sigma_ni is not None:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            frac = np.where(ni > 0.0, ni_th / ni, 1.0)
+        sigma_ni = np.asarray(sigma_ni, dtype=float) * frac
+    return ni_th, sigma_ni, {
+        "applied": True, "mismatch": mismatch,
+        "fast_fraction_peak": float(np.max(ni_fast / np.maximum(ni, 1e-30))),
+        "evidence": (f"IDA ni matches the dd TOTAL ni to {mismatch:.2e} of "
+                     f"peak; subtracted the dd main-ion density_fast")}
+
+
 def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impurity_Z,
-                         ni_source="all", ni_from_imas_Zeff=False, zeff_from_fuse=False):
+                         ni_source="all", ni_from_imas_Zeff=False, zeff_from_fuse=False,
+                         ni_fast=None, ni_subtract_fast=True):
     """IDA-hybrid kinetics: replace FUSE ne/ni/Te/Ti/Zeff (+omega) with IDA fits,
     resampled onto the FUSE ``psi_N`` grid (psi_N == psi_N_kinetic).
 
@@ -542,8 +604,11 @@ def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impu
     ``zeff_from_fuse``. ``ni_from_imas_Zeff`` forces ni from the FUSE ``Zeff_fuse`` 
     without updating sigma_ni.
 
+    ``ni_subtract_fast`` (with ``ni_fast``, the dd's main-ion ``density_fast``)
+    converts the IDA TOTAL ni to a THERMAL one; see :func:`_subtract_fast_ni`.
+
     Returns ``(ne, te, ti, ni, zeff, omega_or_None, sigma_ne, sigma_te, sigma_ni,
-    sigma_ti, ida)`` on ``psi_N`` -- the trailing ``IDAProfiles`` is the read
+    sigma_ti, ida, ni_fast_meta)`` on ``psi_N`` -- the ``IDAProfiles`` is the read
     itself, handed back so ``resolve_uncertainty`` can reuse it instead of
     re-reading the file (see ``Baseline.aux['ida_profiles']``). Re-reading
     risked a DIFFERENT slice: this path resolves ``time`` against the IMAS
@@ -560,9 +625,19 @@ def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impu
     if ni_from_imas_Zeff:
         # ni from FUSE Z_eff + IDA ne (single-impurity dilution; Z_imp = machine charge)
         ni = main_ion_density_from_zeff(ne, np.clip(Zeff_fuse, 1.0, impurity_Z), impurity_Z)
+    # Total -> thermal, so the sigma=0 draw meets FUSE's thermal bootstrap.
+    # After both ni branches: each produces a TOTAL deuteron density.
+    if ni_subtract_fast and ni_fast is not None:
+        ni, sigma_ni, ni_fast_meta = _subtract_fast_ni(
+            ni, sigma_ni, np.asarray(ni_fuse, dtype=float), ni_fast)
+    else:
+        ni_fast_meta = {"applied": False, "mismatch": None,
+                        "evidence": ("ImasSource.ni_subtract_fast=False"
+                                     if not ni_subtract_fast else
+                                     "no main-ion density_fast supplied")}
     omega = _read_ida_omega(ida_path, time, psi_N)
     return (ne, te, ti, ni, zeff, omega, sigma_ne, sigma_te, sigma_ni,
-            sigma_ti, ida)
+            sigma_ti, ida, ni_fast_meta)
 
 
 def read_imas_baseline(
@@ -676,6 +751,7 @@ def read_imas_baseline(
     ni = None
     ti = None
     main_ion = None
+    ni_fast = np.zeros(n)         # main-ion fast density (ida_hybrid subtraction)
     zeff_num = np.zeros(n)
     z_fast = np.zeros(n)          # charge carried by fast ions
     # pressure_fast_* and density_fast are independent fields: a dd can carry
@@ -698,6 +774,8 @@ def read_imas_baseline(
             ni = n_s
             ti = np.asarray(ion["temperature"], dtype=float)
             main_ion = ion
+            ni_fast = np.asarray(ion.get("density_fast", 0.0),
+                                 dtype=float) * np.ones(n)
     if ni is None:
         raise ValueError("no hydrogenic (Z=1) main ion found in core_profiles.ion")
     _warn_missing_parallel(_no_par, p_fast_rule)
@@ -745,11 +823,23 @@ def read_imas_baseline(
     if use_ida:
         (ne, te, ti, ni, Zeff, _omega,
          sigma_ne_ida, sigma_te_ida, sigma_ni_ida, sigma_ti_ida,
-         _ida_read) = _merge_ida_kinetics(
+         _ida_read, _ni_fast_meta) = _merge_ida_kinetics(
             psi_N, ne, ni, Zeff, source.ida_path, T,
             getattr(source, "impurity_Z", 6.0),
             ni_source=getattr(source, "ni_source", "all"),
-            zeff_from_fuse=getattr(source, "zeff_from_fuse", False))
+            zeff_from_fuse=getattr(source, "zeff_from_fuse", False),
+            ni_fast=ni_fast,
+            ni_subtract_fast=getattr(source, "ni_subtract_fast", True))
+        aux["ni_fast_meta"] = _ni_fast_meta
+        # Loud either way: a silent "no" leaves the sigma=0 draw off FUSE's
+        # bootstrap, a silent "yes" moves ni without the reader knowing.
+        if _ni_fast_meta["applied"]:
+            print(f"  [ni] thermal ni: subtracted the dd main-ion density_fast "
+                  f"(peak fast fraction "
+                  f"{_ni_fast_meta['fast_fraction_peak']:.1%}, IDA-vs-dd total "
+                  f"ni mismatch {_ni_fast_meta['mismatch']:.1e})")
+        elif np.any(ni_fast):
+            print(f"  [ni] ni left TOTAL: {_ni_fast_meta['evidence']}")
         if _omega is not None:
             aux["omega_tor"] = _omega
         aux["zeff"] = Zeff   # keep the switchboard's zeff baseline consistent

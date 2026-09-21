@@ -634,9 +634,10 @@ def _subtract_fast_ni(psi_N, ni, sigma_ni, ni_fuse_thermal, z_fast, z2_fast,
     The density removed is :func:`fast_ion_density_equivalent` of the charge
     moments ``z_fast``/``z2_fast``, so no beam charge is assumed.
 
-    ``sigma_ni`` is scaled by ``ni_thermal/ni``, holding the FRACTIONAL error
-    fixed: the envelope is a measurement error on the deuteron inventory, and
-    the fast density removed is a FUSE quantity carrying no IDA error.
+    ``sigma_ni`` is returned unchanged, keeping the ABSOLUTE error: the fast
+    density removed is a FUSE quantity carrying no IDA error, so subtracting
+    it leaves the measurement's error as it was.  This is also the spread of
+    an ni derived per draw from the drawn (ne, Z_eff).
 
     Cross-check (advisory): the IDA ni against the dd's TOTAL ni at each of
     :data:`NI_FAST_GATE_PSI_N`.  They agree when FUSE was built from the same
@@ -668,10 +669,6 @@ def _subtract_fast_ni(psi_N, ni, sigma_ni, ni_fuse_thermal, z_fast, z2_fast,
         mismatch = float(max(gate.values()))
         agrees = mismatch <= NI_FAST_RTOL
     ni_th = np.maximum(ni - ni_fast, 0.0)
-    if sigma_ni is not None:
-        with np.errstate(divide="ignore", invalid="ignore"):
-            frac = np.where(ni > 0.0, ni_th / ni, 1.0)
-        sigma_ni = np.asarray(sigma_ni, dtype=float) * frac
     if agrees is None:
         evidence = ("dd main-ion density vanishes at a check point; "
                     "cross-check skipped")

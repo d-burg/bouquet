@@ -110,21 +110,16 @@ class TestCrossCheck:
 
 
 class TestSigmaScaling:
-    def test_the_fractional_error_is_preserved(self):
+    def test_the_absolute_error_is_kept(self):
         psi, ni_total, ni_fast, ni_th, zf, z2 = _profiles()
         sig = 0.13 * ni_total
         ni, s, meta = _subtract_fast_ni(psi, ni_total, sig, ni_th, zf, z2, 6.0)
         assert meta["applied"]
-        # The envelope is a measurement error on the deuteron inventory; the
-        # fast density removed from the mean carries no IDA error of its own.
-        np.testing.assert_allclose(s / ni, sig / ni_total, rtol=1e-12)
-
-    def test_the_envelope_shrinks_with_the_mean_never_grows(self):
-        psi, ni_total, ni_fast, ni_th, zf, z2 = _profiles()
-        sig = 0.13 * ni_total
-        _, s, _ = _subtract_fast_ni(psi, ni_total, sig, ni_th, zf, z2, 6.0)
-        assert np.all(s <= sig + 1e-30)
-        assert float(np.max(sig - s)) > 0.0          # it actually moved
+        # The fast density removed is a FUSE quantity with no IDA error, so
+        # the measurement's absolute error is unchanged -- which is also the
+        # spread of an ni derived per draw from the drawn (ne, Z_eff).
+        np.testing.assert_array_equal(s, sig)
+        assert np.all(s / np.maximum(ni, 1e-30) >= sig / ni_total)
 
     def test_a_none_envelope_survives(self):
         psi, ni_total, ni_fast, ni_th, zf, z2 = _profiles()
@@ -237,13 +232,12 @@ class TestEndToEnd:
         # and decisively not the total it started as
         assert float(np.max(np.abs(bl.ni - ni_total))) > 0.1 * float(np.max(ni_fast))
 
-    def test_the_ida_envelope_is_scaled_with_it(self, tmp_path):
+    def test_the_ida_envelope_keeps_its_absolute_error(self, tmp_path):
         ddp, cdf, *_ = _build(tmp_path)
         bl = _read(ddp, cdf)
         raw = bl.aux["ida_profiles"][1]              # same psi_N grid as the dd
-        np.testing.assert_allclose(bl.aux["sigma_ni_ida"] / bl.ni,
-                                   raw.sigma_ni / raw.ni, rtol=1e-9)
-        assert float(np.max(raw.sigma_ni - bl.aux["sigma_ni_ida"])) > 0.0
+        np.testing.assert_allclose(bl.aux["sigma_ni_ida"], raw.sigma_ni, rtol=1e-12)
+        assert np.all(bl.ni[:-1] < raw.ni[:-1])      # while the mean moved (beam is 0 at the edge)
 
     def test_the_draws_get_the_readers_envelope(self, tmp_path):
         """resolve_uncertainty must not re-derive sigma_ni from the raw file."""

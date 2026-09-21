@@ -598,9 +598,8 @@ def resolve_uncertainty(config, baseline) -> dict:
 
         ida_sig = {"ne": _to_kin(ida.sigma_ne), "te": _to_kin(ida.sigma_te),
                    "ni": _to_kin(ida.sigma_ni), "ti": _to_kin(ida.sigma_ti)}
-        # The ida_hybrid reader rescales sigma_ni along with its fast-ion
-        # subtraction (io.imas._subtract_fast_ni); that envelope, not the
-        # file's, belongs to the (thermal) baseline ni.
+        # The ida_hybrid reader's own sigma_ni (io.imas._subtract_fast_ni),
+        # already on the baseline grid, belongs to the (thermal) baseline ni.
         _sni = (baseline.aux or {}).get("sigma_ni_ida")
         if (_shared is not None and ida is _shared[1] and _sni is not None
                 and np.shape(_sni) == psi_kin.shape):

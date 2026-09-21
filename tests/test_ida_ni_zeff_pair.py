@@ -134,6 +134,31 @@ class TestResolve:
         assert (env["zeff_dne"] is not None) is pair
 
 
+def test_with_a_beam_the_draws_spread_ni_by_the_archived_sigma(tmp_path):
+    """ida_hybrid + beam: the (sigma_ne, sigma_Zeff, zeff_dne) the draws use give
+    ni the sigma_ni that is archived.  The reader used to scale sigma_ni by
+    ni_thermal/ni, so the archive understated the draws by ni_total/ni_thermal."""
+    import warnings
+    from bouquet.baseline import resolve_uncertainty
+    from bouquet.config import ImasSource
+    from test_ni_fast_subtraction import Z_IMP, _build, _read
+    ddp, cdf, *_ = _build(tmp_path, fast_frac=0.3)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        bl = _read(ddp, cdf)
+        env = resolve_uncertainty(_cfg(tmp_path, ImasSource(
+            ids_path=ddp, time=1.0, ida_path=cdf, impurity_Z=Z_IMP)), bl)
+    assert env["ni_from_zeff"] and env["zeff_dne"] is not None
+    ne, sne, dz = np.asarray(bl.ne), env["sigma_ne"], env["zeff_dne"]
+    zb, sz = env["aux_baselines"]["zeff"], env["aux_sigmas"]["zeff"]
+    s_ind2 = np.maximum(sz ** 2 - (dz * sne) ** 2, 0.0)
+    a = (Z_IMP - zb) / (Z_IMP - 1) - ne / (Z_IMP - 1) * dz
+    s_der = np.sqrt((a * sne) ** 2 + (ne / (Z_IMP - 1)) ** 2 * s_ind2)
+    core = np.asarray(bl.psi_N_kinetic) < 0.9
+    assert float(np.max(bl.aux["ni_fast_meta"]["fast_fraction_peak"])) > 0.2
+    np.testing.assert_allclose(s_der[core], env["sigma_ni"][core], rtol=1e-6)
+
+
 # --- the draw itself: perturb_kinetic_equilibrium up to the solve ---------------
 
 class _Stop(Exception):

@@ -625,7 +625,7 @@ def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impu
     keeps the FUSE Zeff instead); ni via ``ni_source`` ("Zeff"/"CER"/"all", with
     Jacobian-propagated sigma_ni -- see :func:`bouquet.io.ida.read_ida`). The
     "Zeff"/"all" dilution always uses IDA's own Zeff regardless of
-    ``zeff_from_fuse``. ``ni_from_imas_Zeff`` forces ni from the FUSE ``Zeff_fuse`` 
+    ``zeff_from_fuse``. ``ni_from_imas_Zeff`` forces ni from the FUSE ``Zeff_fuse``
     without updating sigma_ni.
 
     ``ni_subtract_fast`` (with the fast charge moments ``z_fast``/``z2_fast``)
@@ -650,7 +650,8 @@ def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impu
         # ni from FUSE Z_eff + IDA ne (single-impurity dilution; Z_imp = machine charge)
         ni = main_ion_density_from_zeff(ne, np.clip(Zeff_fuse, 1.0, impurity_Z), impurity_Z)
     # Total -> thermal, so the sigma=0 draw meets FUSE's thermal bootstrap.
-    # After both ni branches: each produces a TOTAL deuteron density.
+    # The ni_source ni is a TOTAL deuteron density (ni_from_imas_Zeff, built
+    # on FUSE's thermal-numerator Zeff, is neither total nor thermal).
     if ni_subtract_fast and z_fast is not None:
         ni, sigma_ni, ni_fast_meta = _subtract_fast_ni(
             psi_N, ni, sigma_ni, np.asarray(ni_fuse, dtype=float),

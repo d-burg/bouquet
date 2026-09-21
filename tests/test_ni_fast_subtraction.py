@@ -250,6 +250,21 @@ class TestEndToEnd:
         assert float(np.max(off.aux["sigma_ni_ida"]
                             - on.aux["sigma_ni_ida"])) > 0.0
 
+    @pytest.mark.parametrize("subtract", [True, False])
+    def test_the_draws_get_the_readers_envelope(self, tmp_path, subtract):
+        """resolve_uncertainty must not re-derive sigma_ni from the raw file."""
+        from bouquet.baseline import resolve_uncertainty
+        from bouquet.config import BouquetConfig, SolverConfig
+        ddp, cdf, *_ = _build(tmp_path)
+        bl = _read(ddp, cdf, ni_subtract_fast=subtract)
+        cfg = BouquetConfig(
+            source=ImasSource(ids_path=ddp, time=1.0, ida_path=cdf,
+                              impurity_Z=Z_IMP, ni_subtract_fast=subtract),
+            solver=SolverConfig(mesh_path="unused"), output_header="unused")
+        env = resolve_uncertainty(cfg, bl)
+        np.testing.assert_allclose(env["sigma_ni"], bl.aux["sigma_ni_ida"],
+                                   rtol=1e-12)
+
     def test_a_dd_without_density_fast_is_untouched(self, tmp_path):
         ddp, cdf, ni_total, _, _ = _build(tmp_path, with_fast_density=False)
         bl = _read(ddp, cdf)

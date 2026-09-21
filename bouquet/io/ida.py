@@ -208,7 +208,7 @@ def read_ida(
     ensemble_median : bool
         Ensemble central estimator: sample mean (default) or median.
     ni_source : {"Zeff", "CER", "all"}
-        Which measurement the main-ion density comes from. ``"Zeff"`` 
+        Which measurement the main-ion density comes from. ``"Zeff"``
         applies single-impurity quasineutrality to ``(ne, Zeff)``; ``"CER"``
         subtracts the measured carbon density ``n_12C6``; ``"all"`` takes the
         mean of the two (default). An explicit route needs its own ``*_err``

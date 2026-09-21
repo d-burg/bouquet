@@ -1966,10 +1966,13 @@ def perturb_kinetic_equilibrium(
         # only feeds the bootstrap) -- they were separate expressions and
         # drifted apart the moment z_fast arrived.  The window is
         # convention-dependent; see physics.zeff_bounds.
+        # Evaluated on the DRAWN ne: the window scales with z_fast/ne.
         from .physics import zeff_bounds
-        _z_lo, _z_hi = ((1.0, None) if _Z_imp is None else
-                        zeff_bounds(ne, _Z_imp, z_fast, z2_fast,
-                                    zeff_includes_fast))
+
+        def _zeff_window(_ne):
+            return ((1.0, None) if _Z_imp is None else
+                    zeff_bounds(_ne, _Z_imp, z_fast, z2_fast,
+                                zeff_includes_fast))
         if _zeff_active and _Z_imp is None:
             print("  [zeff] baseline has no ne-ni dilution (ni ~= ne): Zeff "
                   "draws still drive the bootstrap, but ni remains an "
@@ -2010,6 +2013,7 @@ def perturb_kinetic_equilibrium(
                     n_samples=1, rng=rng)) * _z0, dtype=float))
             # The single-impurity window (physics.zeff_bounds): outside it
             # ni or nz goes negative and Z_imp / p_imp lose their meaning.
+            _z_lo, _z_hi = _zeff_window(ne_perturb)
             _zeff_draw = np.clip(_zeff_draw, np.maximum(_z_lo, 1e-9),
                                  _z_hi * (1.0 - 1e-9))
             ni_perturb = main_ion_density_from_zeff(
@@ -2082,9 +2086,10 @@ def perturb_kinetic_equilibrium(
                 psi_kin, _eb / _e0, _es / _e0, length_scale=_els, n_samples=1,
                 rng=rng)) * _e0
             if _en == 'zeff':
-                # The SAME bound object the active path uses, not a second
+                # The SAME window the active path uses, not a second
                 # expression that agrees today: a draw outside the window is
                 # outside the single-impurity model Z_imp / p_imp assume.
+                _z_lo, _z_hi = _zeff_window(ne_perturb)
                 _ep = np.clip(_ep, np.maximum(_z_lo, 1e-9),
                               None if _z_hi is None else _z_hi * (1.0 - 1e-9))
             aux_out[_en] = np.atleast_1d(np.asarray(_ep, dtype=float))

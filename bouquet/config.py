@@ -177,7 +177,7 @@ class ReconstructionSource:
 
     ``ni_source`` picks the IDA main-ion density route: ``"Zeff"``
     (single-impurity quasineutrality), ``"CER"`` (``ni = max(ne - Z_imp n_C, 0)``
-    from the measured ``n_12C6``), or ``"all"`` (default, the mean of the two). 
+    from the measured ``n_12C6``), or ``"all"`` (default, the mean of the two).
     The two routes are independent measurements and may disagree. Ignored for p-files.
     """
 

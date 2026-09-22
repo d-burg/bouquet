@@ -211,7 +211,7 @@ as an enormous sigma.
 | `anchor_pressure_to_equilibrium` | `False` | IMAS path: add the fixed `p_diff = equilibrium.pressure − p_reconstructed` offset |
 | `imas_corrective_jphi` | `False` | Opt-in corrective j_phi iteration on the IMAS baseline solve (still being validated) |
 | `floor_j_BS` | `False` | Clip negative bootstrap excursions; only needed with `isolate_edge_jBS=False` on sources that carry an inner negative lobe |
-| `swb_iterations` | `3` | `solve_with_bootstrap` self-consistency iterations per draw |
+| `bootstrap_kwargs` | `{}` | Additional keyword options passed through to `solve_with_bootstrap` in OpenFUSIONToolkit (e.g. `iterations`, the Fortran `set_boot_ops` knobs `djBS_tol` / `taper_edge_*`). Keys already fixed at the call sites (`scale_jBS`, `isolate_edge_jBS`, `verbose`, …) are rejected |
 | `coil_drift` | `0.01` | Soft coil-drift target |
 | `coil_drift_hard_factor` | `None` | Optional hard inequality bounds at `± factor·coil_drift` in every solve |
 | `homotopy_passes` | `[(0.05, 0.10), (0.02, 0.05), (0.01, 0.01)]` | Progressive `(F_tol, VSC_tol)` schedule — see [coil-constraints.md](coil-constraints.md) |

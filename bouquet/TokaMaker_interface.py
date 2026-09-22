@@ -1850,6 +1850,9 @@ def perturb_kinetic_equilibrium(
         :func:`bouquet.sampling.make_rng`) so one seed governs the whole
         ensemble.  ``None`` (default) draws from fresh OS entropy, i.e. the
         call is NOT reproducible; an ``int`` is promoted to a Generator.
+    **kwargs
+        Additional keyword options passed through to
+        :func:`solve_with_bootstrap` in OpenFUSIONToolkit.
 
     Returns
     -------

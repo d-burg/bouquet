@@ -212,6 +212,7 @@ as an enormous sigma.
 | `imas_corrective_jphi` | `False` | Opt-in corrective j_phi iteration on the IMAS baseline solve (still being validated) |
 | `floor_j_BS` | `False` | Clip negative bootstrap excursions; only needed with `isolate_edge_jBS=False` on sources that carry an inner negative lobe |
 | `swb_iterations` | `3` | `solve_with_bootstrap` self-consistency iterations per draw |
+| `draw_solve_maxits` | `50` | GS iteration cap inside `generate()`. Draw solves converge in ≤ ~25 iterations; one that does not is stuck in a limit cycle just above `nl_tol` and would burn the setup cap (800, ~200–350 s). It is re-solved from where it stopped at each `draw_solve_retry_urf` (default none), then at `nl_tol = draw_solve_loose_tol` (`2e-5`), which accepts it only if the residual really is that small. Failed solves, and what recovered each, are listed per draw in `diagnostics['solve_failures']`, on `Bouquet.solve_failures`, and in one printed `[draw-solves]` line with the largest iteration count seen. `None` keeps the setup cap |
 | `coil_drift` | `0.01` | Soft coil-drift target |
 | `coil_drift_hard_factor` | `None` | Optional hard inequality bounds at `± factor·coil_drift` in every solve |
 | `homotopy_passes` | `[(0.05, 0.10), (0.02, 0.05), (0.01, 0.01)]` | Progressive `(F_tol, VSC_tol)` schedule — see [coil-constraints.md](coil-constraints.md) |

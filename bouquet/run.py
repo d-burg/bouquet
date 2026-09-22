@@ -49,6 +49,7 @@ class Bouquet:
         self._resolved_uncertainty = None         # resolved sigma profiles + length scales
         self.diagnostics: Optional[list] = None   # generate() per-draw output
         self.generation_log: Optional[str] = None # captured generate() solver chatter
+        self.solve_failures: Optional[list] = None  # generate() solves that raised
         self._selection = None                    # filter() result
 
     # ── constructors ----------------------------------------------------
@@ -271,6 +272,7 @@ class Bouquet:
         self.baseline = None
         self._resolved_uncertainty = None
         self.diagnostics = None
+        self.solve_failures = None
         self._selection = None
         return self
 
@@ -3264,7 +3266,7 @@ class Bouquet:
         """
         import numpy as np
         from .baseline import resolve_uncertainty
-        from .TokaMaker_interface import generate_bouquet
+        from .TokaMaker_interface import DrawSolveGuard, generate_bouquet
         from .utils import initialize_equilibrium_database
 
         if self.baseline is None:
@@ -3344,7 +3346,11 @@ class Bouquet:
 
         from .utils import capture_native_output
         verbose = bool(getattr(self.config, "verbose", False))
-        with capture_native_output(enabled=not verbose) as _cap:
+        # Draw-loop maxits cap + failed-solve record (DrawSolveGuard).
+        with capture_native_output(enabled=not verbose) as _cap, \
+                DrawSolveGuard(self.mygs, gc.draw_solve_maxits,
+                               retry_urf=gc.draw_solve_retry_urf,
+                               loose_tol=gc.draw_solve_loose_tol) as _solve_guard:
             self.diagnostics = generate_bouquet(
                 self.mygs, np.asarray(bl.psi_N, dtype=float), n_equils, header,
                 np.asarray(bl.j_phi, dtype=float),
@@ -3436,8 +3442,13 @@ class Bouquet:
                 # bounds the target-vs-achieved gap to its tolerance (~2-3%
                 # core RMS) -- storing the achieved output removes even that.
                 store_achieved_jphi=True,
+                solve_guard=_solve_guard,
             )
         self.generation_log = _cap["text"] or None
+        # Outside the capture: failed solves are caught by the draw path, so
+        # this line is their only trace in a quiet run's log.
+        self.solve_failures = list(_solve_guard.records)
+        print(_solve_guard.summary())
 
         # until-N outcome, OUTSIDE the capture: on the default quiet path the
         # in-loop prints and generate_bouquet's cap-missed RuntimeWarning were

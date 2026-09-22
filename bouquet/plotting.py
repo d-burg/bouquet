@@ -709,16 +709,14 @@ def _pressure_components(bl, psi_eq=None):
     regridded onto the total's grid before differencing. Single-grid archives
     (OMAS) skip this since the shapes already match.
 
-    KNOWN LIMITATION with fast ions.  The solve path derives ``Z_imp`` and
-    ``p_imp`` on the THERMAL electron density ``ne - z_fast``; this display
-    path cannot, because ``z_fast`` is not written to the archive (only
-    ``p_fast`` rides in the total).  So on a fast-ion source the impurity
-    term recomputed here is the uncorrected, inflated one, and the
-    impurity/fast split shown is NOT the split the GS solve used -- the
-    plotted impurity is too large and the fast remainder correspondingly too
-    small.  Thermal and total are unaffected, as is every solve-path
-    consumer.  Archiving ``z_fast`` is what would close this; until then the
-    decomposition is diagnostic only.
+    Fast ions.  The solve derives ``Z_imp`` and ``p_imp`` on the THERMAL
+    electron density ``ne - z_fast``, and the archived ``n_i`` is itself
+    thermal, so this path must subtract ``z_fast`` too -- pairing the archive's
+    full ``ne`` with a thermal ``n_i`` makes the inversion charge the whole
+    beam to the impurity (a ~30x p_imp on a 20 % fast fraction).  Archives
+    written before ``z_fast`` was stored carry no such key; those are
+    pre-subtraction archives whose ``n_i`` is a total, and the full ``ne`` is
+    the right partner for them.  Either way the pair is self-consistent.
     """
     if "pressure" not in bl or "pressure_thermal" not in bl:
         return None
@@ -731,7 +729,22 @@ def _pressure_components(bl, psi_eq=None):
         ti = np.asarray(bl["T_i"], float)
         zeff = np.asarray(bl["aux_zeff"] if "aux_zeff" in bl else bl["Zeff"], float)
         from .physics import effective_impurity_charge, impurity_pressure
-        imp = impurity_pressure(ne, ni, ti, effective_impurity_charge(ne, ni, zeff))
+        # ne and n_i must describe the same population: a thermal n_i (any
+        # archive carrying z_fast) pairs with ne - z_fast, a total one with
+        # the full ne.  Either way the pair is self-consistent.
+        if "z_fast" in bl:
+            zf = np.asarray(bl["z_fast"], float)   # same grid as n_e / n_i
+            if zf.shape == ne.shape:
+                ne = np.maximum(ne - zf, 0.0)
+        # Prefer the archived Z_imp: inverting (ne, ni, Zeff) for it needs to
+        # know whether Zeff's numerator counts the fast ions, and the archive
+        # does not record that.  The inversion stays as the fallback for
+        # archives written before Z_imp was stored (no fast ions there, where
+        # the two conventions coincide and it is exact).
+        Z_imp = bl.get("Z_imp") if hasattr(bl, "get") else None
+        if not Z_imp:
+            Z_imp = effective_impurity_charge(ne, ni, zeff)
+        imp = impurity_pressure(ne, ni, ti, Z_imp)
     except Exception:
         imp = np.zeros_like(total)
     # Align kinetics-derived terms (imp; thermal defensively) onto the total's
@@ -1718,7 +1731,8 @@ def plot_input_vs_recon(run, npsi=80, max_dev_mm=10.0):
             _d = np.asarray(bl.jBS_diff, float)
             _jBS_eff = _jBS_eff + _to_jx(_d, _kin_x if _d.shape == _kin_x.shape else _blx)
         _j_ind_eff = j_sol - _jBS_eff
-        for _fx in (getattr(bl, "j_NBI", None), getattr(bl, "j_RF", None)):
+        for _fx in (getattr(bl, "j_NBI", None), getattr(bl, "j_RF", None),
+                    getattr(bl, "j_other", None)):
             if _fx is not None:
                 _fx = np.asarray(_fx, float)
                 _j_ind_eff = _j_ind_eff - _to_jx(

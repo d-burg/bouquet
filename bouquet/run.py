@@ -91,7 +91,9 @@ class Bouquet:
     def from_imas(cls, ids_path, *, mesh, time=None,
                   n_draws=20, header="bouquet",
                   ida_path=None, LCFS_geqdsk=None, impurity_Z=6.0,
+                  ni_source="all", zeff_from_fuse=False,
                   kinetic_source=None, anchor_pressure_to_equilibrium=False,
+                  sawteeth_in_ohmic=False,
                   **solver_kwargs) -> "Bouquet":
         """Minimal constructor for the IMAS/OMAS path (no reconstruction).
 
@@ -99,9 +101,14 @@ class Bouquet:
         ``bq.uncertainty`` / ``bq.generation`` afterwards for advanced knobs.
 
         IDA-hybrid kinetics: pass ``ida_path`` (an IDA ``.cdf``) to take the
-        baseline ne/Te/Ti/omega_tor (and sigma envelopes) from IDA fits while
-        keeping FUSE Z_eff/currents/equilibrium. ``kinetic_source`` defaults to
+        baseline ne/Te/Ti/Zeff/omega_tor (and the ne/Te/ni/Ti/Z_eff sigma
+        envelopes) from IDA fits while keeping FUSE currents/equilibrium.
+        ``ni_source`` picks the IDA ni route ("Zeff"/"CER"/"all") for both the
+        baseline ni and its propagated sigma; ``zeff_from_fuse=True`` keeps the
+        FUSE Z_eff instead of IDA's. ``kinetic_source`` defaults to
         ``"ida_hybrid"`` when an ``ida_path`` is given, else ``"fuse"``.
+        ``sawteeth_in_ohmic=True`` leaves the dd's sawteeth current in the
+        inductive (ohmic) distribution instead of holding it fixed in j_other.
 
         ``LCFS_geqdsk`` is OPTIONAL: a g-file whose LCFS replaces the source
         boundary outline as the isoflux target, for when you have a better
@@ -114,7 +121,10 @@ class Bouquet:
             kinetic_source = "ida_hybrid" if ida_path else "fuse"
         cfg = BouquetConfig(
             source=ImasSource(ids_path=ids_path, time=time, ida_path=ida_path,
-                              impurity_Z=impurity_Z, LCFS_geqdsk=LCFS_geqdsk),
+                              impurity_Z=impurity_Z, ni_source=ni_source,
+                              zeff_from_fuse=zeff_from_fuse,
+                              sawteeth_in_ohmic=sawteeth_in_ohmic,
+                              LCFS_geqdsk=LCFS_geqdsk),
             solver=SolverConfig(mesh_path=mesh, **solver_kwargs),
             generation=GenerationConfig(n_equils=n_draws,
                                         kinetic_source=kinetic_source,
@@ -694,12 +704,12 @@ class Bouquet:
         j_phi = np.asarray(bl.j_phi, dtype=float)
         dropped = {
             name: float(np.max(np.abs(np.asarray(getattr(bl, name), dtype=float))))
-            for name in ("j_BS", "j_NBI", "j_RF")
+            for name in ("j_BS", "j_NBI", "j_RF", "j_other")
             if getattr(bl, name, None) is not None
         }
         bl.j_inductive = j_phi.copy()
         bl.j_BS = np.zeros_like(j_phi)
-        for name in ("j_NBI", "j_RF"):
+        for name in ("j_NBI", "j_RF", "j_other"):
             if getattr(bl, name, None) is not None:
                 setattr(bl, name, np.zeros_like(j_phi))
         gc.recalculate_j_BS = False          # already forced in prepare_baseline
@@ -1702,6 +1712,7 @@ class Bouquet:
                                  for r in (0.0, 0.2, 0.4, 0.6, 0.8, 0.95, 1.0)}
                 bl.ohm_scale = float(out["ohm_scale_eff"])
                 bl.bs_scale = float(out["bs_scale_eff"])
+                bl.bs_scale_profile = s_bs.copy()
                 bl.j_inductive = s_ind * state["j_ind"]
                 bl.j_BS = s_bs * state["j_BS_swb"]
                 bl.j_phi = bl.j_inductive + bl.j_BS + state["j_fixed"]
@@ -2071,6 +2082,7 @@ class Bouquet:
                 else:
                     bl.ohm_scale = float(s_new)
                     bl.bs_scale = float(sbs_new)
+                    bl.bs_scale_profile = None
                     bl.j_inductive = s_new * state["j_ind"]
                     bl.j_BS = sbs_new * state["j_BS_swb"]
                     bl.j_phi = bl.j_inductive + bl.j_BS + state["j_fixed"]
@@ -2221,13 +2233,12 @@ class Bouquet:
         # bl.j_phi and every draw inherits a fixed (SWB - source_jBS) offset.
         #
         # Fix: keep the inductive component as the reader's j_inductive.
-        # NOTE that is a RESIDUAL, j_tor - j_BS - j_NBI - j_RF (imas.py), NOT
-        # to_toroidal(j_ohmic): on postdictive FUSE files the two agree to
-        # ~0.4% of Ip at flattop, but any unmodelled non-inductive term the
-        # dd carries (verified: NOT the sawteeth source, which nets exactly
-        # zero current and is already folded into FUSE's diffused j_ohmic;
-        # the observed gap is a near-axis j_non_inductive artifact) lands in
-        # this component and is what ohm_scale rescales.  Recompute the
+        # NOTE that is a RESIDUAL, j_tor - j_BS - j_NBI - j_RF - j_other
+        # (imas.py), NOT to_toroidal(j_ohmic): every core_sources current is
+        # held fixed in its own channel (sawteeth in j_other unless
+        # ImasSource.sawteeth_in_ohmic), but the dd's unattributed current,
+        # j_total - (ohmic + bootstrap + sources), lands in this component and
+        # is what ohm_scale rescales (imas.py prints its size).  Recompute the
         # bootstrap via
         # SWB, and rebuild the total as ohmic + SWB + fixed. We do NOT make the
         # inductive a residual against SWB (an earlier version did, which forced
@@ -2267,7 +2278,7 @@ class Bouquet:
             j_ind = np.asarray(bl.j_inductive, dtype=float)   # FUSE ohmic (kept)
             j_BS_src = np.asarray(bl.j_BS, dtype=float)        # source bootstrap (FUSE)
             FUSE_tot = np.asarray(bl.j_phi, dtype=float)       # source total (j_tor)
-            j_fixed = FUSE_tot - j_ind - j_BS_src              # = j_NBI + j_RF
+            j_fixed = FUSE_tot - j_ind - j_BS_src              # = j_NBI + j_RF + j_other
             # 'ohmic' mode: freeze the ANCHOR geometry now. solve_with_bootstrap
             # iterates its own GS solves (generic inductive seed + its bootstrap)
             # and leaves mygs on a different equilibrium; integrating FUSE's
@@ -2569,6 +2580,8 @@ class Bouquet:
                 bl.jBS_diff = None
                 bl.bs_scale = float(bs_scale)
                 bl.ohm_scale = float(ohm_scale)
+                bl.bs_scale_profile = (None if _s_bs is None
+                                       else np.asarray(_s_bs, dtype=float).copy())
                 bl.j_BS = (bs_scale if _s_bs is None else _s_bs) * j_BS_swb
                 bl.j_inductive = (ohm_scale if _s_ind is None
                                   else _s_ind) * j_ind
@@ -2891,7 +2904,8 @@ class Bouquet:
         ax[2].plot(pe, np.asarray(bl.j_inductive) / 1e6, "-", color="tab:orange",
                    label=r"$j_{ind}$")
         ax[2].plot(pe, np.asarray(bl.j_BS) / 1e6, "-", color="tab:green", label=r"$j_{BS}$")
-        for nm, arr in (("j_NBI", bl.j_NBI), ("j_RF", bl.j_RF)):
+        for nm, arr in (("j_NBI", bl.j_NBI), ("j_RF", bl.j_RF),
+                        ("j_other", getattr(bl, "j_other", None))):
             if arr is not None and np.any(np.asarray(arr)):
                 ax[2].plot(pe, np.asarray(arr) / 1e6, "--", lw=1, label=nm)
         ax[2].set_ylabel(r"$j$ [MA/m$^2$]"); ax[2].set_xlabel(r"$\psi_N$")
@@ -2901,6 +2915,21 @@ class Bouquet:
                f"l_i(target)={bl.l_i_target:.3f}")
         fig.suptitle(ttl, fontsize=11); fig.tight_layout()
         return fig, ax
+
+    def _bootstrap_multiplier(self):
+        """The baseline's bootstrap multiplier on psi_N, or None when it is 1.
+
+        ``bl.j_BS = m * SWB(scale 1)`` with ``m`` the structured closure's
+        ``s_bs(psi)`` or the scalar ``bs_scale``.
+        """
+        import numpy as np
+        bl = self.baseline
+        prof = getattr(bl, "bs_scale_profile", None)
+        if prof is not None:
+            return np.asarray(prof, dtype=float)
+        bs = float(getattr(bl, "bs_scale", 1.0))
+        return None if bs == 1.0 else bs * np.ones_like(
+            np.asarray(bl.psi_N, dtype=float))
 
     def verify_sigma0_consistency(self, tol_frac=0.02, swb_iterations=3):
         """Regression guard: the draw pipeline must reproduce the baseline
@@ -3051,13 +3080,16 @@ class Bouquet:
             raise
 
         seed = create_power_flux_fun(len(psi_N), 1.5, 1.5)["y"]
+        # As the draw does: SWB at the jitter's centre (1.0), then the
+        # baseline's multiplier (bs_scale or s_bs(psi)) after SWB.
+        _mult = self._bootstrap_multiplier()
         res = solve_with_bootstrap(
             mygs, ne_eq, te_eq, ni_eq, ti_eq, Zeff_eq,
             float(bl.Ip_target), seed,
-            scale_jBS=float(getattr(bl, "bs_scale", 1.0)),
+            scale_jBS=1.0,
             isolate_edge_jBS=bool(gc.isolate_edge_jBS),
             diagnostic_plots=False, iterations=swb_iterations)
-        spike0 = smooth_jbs_transition(
+        spike0 = (1.0 if _mult is None else _mult) * smooth_jbs_transition(
             _swb_jbs_to_toroidal(mygs, res["isolated_j_BS"], psi_pad))
         if gc.floor_j_BS:
             spike0 = np.clip(spike0, 0.0, None)
@@ -3333,14 +3365,14 @@ class Bouquet:
         # stays readable; the full text is kept on generation_log for debugging.
         # Set BouquetConfig.verbose=True to stream it (and the tqdm progress bar).
         #
-        # Center the per-draw bootstrap scale on the calibrated bs_scale so the
-        # SWB amplitude correction established in prepare_baseline applies to
-        # EVERY draw; the configured jBS_scale_range spread is retained as
-        # bootstrap-model uncertainty around that center. bs_scale == 1.0 (no
-        # SWB rebuild, e.g. reconstruction path) leaves the range unchanged.
-        _bs = float(getattr(bl, "bs_scale", 1.0))
+        # The baseline built j_BS as (multiplier) x SWB(scale 1); the draws
+        # apply the same multiplier after SWB (jBS_scale_profile) and keep
+        # jBS_scale_range as the per-draw jitter inside it.  Passing the
+        # multiplier INTO SWB as scale_jBS instead is not the same thing:
+        # OFT applies it inside SWB's self-consistent iteration.
+        _bs_mult = self._bootstrap_multiplier()
         _jbs_range = (None if gc.jBS_scale_range is None
-                      else (gc.jBS_scale_range[0] * _bs, gc.jBS_scale_range[1] * _bs))
+                      else tuple(gc.jBS_scale_range))
 
         from .utils import capture_native_output
         verbose = bool(getattr(self.config, "verbose", False))
@@ -3368,6 +3400,7 @@ class Bouquet:
                 accept_anchor_inband=gc.accept_anchor_inband,
                 perturb_jind_in_anchor=gc.perturb_jind_in_anchor,
                 jBS_scale_range=_jbs_range,
+                jBS_scale_profile=_bs_mult,
                 jbs_delta_mode=gc.jbs_delta_mode,
                 swb_iterations=gc.swb_iterations,
                 diagnostic_plots=gc.diagnostic_plots,
@@ -3411,17 +3444,24 @@ class Bouquet:
                 # pressure to the dd equilibrium.pressure (mirrors jBS_diff).
                 Z_imp=getattr(bl, "Z_imp", None),
                 z_fast=getattr(bl, "z_fast", None),
+                z2_fast=getattr(bl, "z2_fast", None),
+                zeff_includes_fast=bool(getattr(bl, "zeff_includes_fast",
+                                                False)),
                 p_diff=getattr(bl, "p_diff", None),
                 # Total-current anchor to equilibrium.j_tor (fixed offset; rides
                 # under the SWB bootstrap + perturbed j_ind in every draw).
                 jphi_diff=getattr(bl, "jphi_diff", None),
                 j_NBI=bl.j_NBI,
                 j_RF=bl.j_RF,
+                j_other=getattr(bl, "j_other", None),
                 # Switchboard: auxiliary perturbed profiles -- rotation /
                 # transport channels (passive) + Zeff (active).
                 aux_sigmas=env.get("aux_sigmas"),
                 aux_baselines=env.get("aux_baselines"),
                 aux_length_scales=env.get("aux_length_scales"),
+                # Who draws ni when zeff is active (see UncertaintyConfig).
+                ni_from_zeff=env.get("ni_from_zeff", True),
+                zeff_dne=env.get("zeff_dne"),
                 progress_callback=progress_callback,
                 # Provenance marker stored on the baseline for robust path
                 # detection in plotting (independent of the aux switchboard).

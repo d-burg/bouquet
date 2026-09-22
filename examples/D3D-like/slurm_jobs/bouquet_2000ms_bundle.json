@@ -70,7 +70,7 @@
       "anchor_pressure_to_equilibrium": false,
       "imas_corrective_jphi": false,
       "floor_j_BS": false,
-      "swb_iterations": 3,
+      "bootstrap_kwargs": {},
       "coil_drift": 0.01,
       "coil_drift_hard_factor": null,
       "homotopy_passes": [

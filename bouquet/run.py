@@ -91,6 +91,7 @@ class Bouquet:
     def from_imas(cls, ids_path, *, mesh, time=None,
                   n_draws=20, header="bouquet",
                   ida_path=None, LCFS_geqdsk=None, impurity_Z=6.0,
+                  ni_source="all", zeff_from_fuse=False,
                   kinetic_source=None, anchor_pressure_to_equilibrium=False,
                   **solver_kwargs) -> "Bouquet":
         """Minimal constructor for the IMAS/OMAS path (no reconstruction).
@@ -99,8 +100,11 @@ class Bouquet:
         ``bq.uncertainty`` / ``bq.generation`` afterwards for advanced knobs.
 
         IDA-hybrid kinetics: pass ``ida_path`` (an IDA ``.cdf``) to take the
-        baseline ne/Te/Ti/omega_tor (and sigma envelopes) from IDA fits while
-        keeping FUSE Z_eff/currents/equilibrium. ``kinetic_source`` defaults to
+        baseline ne/Te/Ti/Zeff/omega_tor (and the ne/Te/ni/Ti/Z_eff sigma
+        envelopes) from IDA fits while keeping FUSE currents/equilibrium.
+        ``ni_source`` picks the IDA ni route ("Zeff"/"CER"/"all") for both the
+        baseline ni and its propagated sigma; ``zeff_from_fuse=True`` keeps the
+        FUSE Z_eff instead of IDA's. ``kinetic_source`` defaults to
         ``"ida_hybrid"`` when an ``ida_path`` is given, else ``"fuse"``.
 
         ``LCFS_geqdsk`` is OPTIONAL: a g-file whose LCFS replaces the source
@@ -114,7 +118,9 @@ class Bouquet:
             kinetic_source = "ida_hybrid" if ida_path else "fuse"
         cfg = BouquetConfig(
             source=ImasSource(ids_path=ids_path, time=time, ida_path=ida_path,
-                              impurity_Z=impurity_Z, LCFS_geqdsk=LCFS_geqdsk),
+                              impurity_Z=impurity_Z, ni_source=ni_source,
+                              zeff_from_fuse=zeff_from_fuse,
+                              LCFS_geqdsk=LCFS_geqdsk),
             solver=SolverConfig(mesh_path=mesh, **solver_kwargs),
             generation=GenerationConfig(n_equils=n_draws,
                                         kinetic_source=kinetic_source,
@@ -2330,6 +2336,7 @@ class Bouquet:
                 mygs, ne, te, ni, ti, Zeff, bl.Ip_target, swb_seed,
                 scale_jBS=1.0, isolate_edge_jBS=iso,
                 diagnostic_plots=False, verbose=False,
+                **gc.bootstrap_kwargs,
             )
             # Same axis-transition smoothing every per-draw spike receives, so
             # the sigma=0 draw reproduces this baseline split exactly.
@@ -2902,7 +2909,7 @@ class Bouquet:
         fig.suptitle(ttl, fontsize=11); fig.tight_layout()
         return fig, ax
 
-    def verify_sigma0_consistency(self, tol_frac=0.02, swb_iterations=3):
+    def verify_sigma0_consistency(self, tol_frac=0.02):
         """Regression guard: the draw pipeline must reproduce the baseline
         j_BS split when the kinetics are UNPERTURBED (sigma=0).
 
@@ -2943,8 +2950,6 @@ class Bouquet:
         tol_frac : float
             Pass threshold on ``max|spike0 - j_BS|`` as a fraction of
             ``max(j_BS)`` (default 2%).
-        swb_iterations : int
-            Iterations for the SWB call (match GenerationConfig).
 
         Returns
         -------
@@ -3056,7 +3061,7 @@ class Bouquet:
             float(bl.Ip_target), seed,
             scale_jBS=float(getattr(bl, "bs_scale", 1.0)),
             isolate_edge_jBS=bool(gc.isolate_edge_jBS),
-            diagnostic_plots=False, iterations=swb_iterations)
+            **gc.bootstrap_kwargs)
         spike0 = smooth_jbs_transition(
             _swb_jbs_to_toroidal(mygs, res["isolated_j_BS"], psi_pad))
         if gc.floor_j_BS:
@@ -3369,7 +3374,6 @@ class Bouquet:
                 perturb_jind_in_anchor=gc.perturb_jind_in_anchor,
                 jBS_scale_range=_jbs_range,
                 jbs_delta_mode=gc.jbs_delta_mode,
-                swb_iterations=gc.swb_iterations,
                 diagnostic_plots=gc.diagnostic_plots,
                 capture_live_eq=gc.capture_live_eq,
                 capture_npsi=gc.capture_npsi,
@@ -3411,6 +3415,9 @@ class Bouquet:
                 # pressure to the dd equilibrium.pressure (mirrors jBS_diff).
                 Z_imp=getattr(bl, "Z_imp", None),
                 z_fast=getattr(bl, "z_fast", None),
+                z2_fast=getattr(bl, "z2_fast", None),
+                zeff_includes_fast=bool(getattr(bl, "zeff_includes_fast",
+                                                False)),
                 p_diff=getattr(bl, "p_diff", None),
                 # Total-current anchor to equilibrium.j_tor (fixed offset; rides
                 # under the SWB bootstrap + perturbed j_ind in every draw).
@@ -3422,6 +3429,9 @@ class Bouquet:
                 aux_sigmas=env.get("aux_sigmas"),
                 aux_baselines=env.get("aux_baselines"),
                 aux_length_scales=env.get("aux_length_scales"),
+                # Who draws ni when zeff is active (see UncertaintyConfig).
+                ni_from_zeff=env.get("ni_from_zeff", True),
+                zeff_dne=env.get("zeff_dne"),
                 progress_callback=progress_callback,
                 # Provenance marker stored on the baseline for robust path
                 # detection in plotting (independent of the aux switchboard).
@@ -3436,6 +3446,7 @@ class Bouquet:
                 # bounds the target-vs-achieved gap to its tolerance (~2-3%
                 # core RMS) -- storing the achieved output removes even that.
                 store_achieved_jphi=True,
+                **gc.bootstrap_kwargs,
             )
         self.generation_log = _cap["text"] or None
 

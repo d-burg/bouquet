@@ -174,6 +174,11 @@ class ReconstructionSource:
     e.g. tungsten ~ 74 (use the effective radiating charge if W is not fully
     stripped), beryllium 4, neon 10. For a p-file this is informational: the
     Osborne ``N Z A`` footer carries the species directly and is authoritative.
+
+    ``ni_source`` picks the IDA main-ion density route: ``"Zeff"``
+    (single-impurity quasineutrality), ``"CER"`` (``ni = max(ne - Z_imp n_C, 0)``
+    from the measured ``n_12C6``), or ``"all"`` (default, the mean of the two).
+    The two routes are independent measurements and may disagree. Ignored for p-files.
     """
 
     geqdsk_path: str
@@ -181,6 +186,7 @@ class ReconstructionSource:
     cocos: int = 1
     time: Optional[float] = None       # IDA time slice [s] (multi-time .cdf files)
     impurity_Z: float = 6.0            # effective impurity charge (carbon); set per machine
+    ni_source: str = "all"             # IDA path: "Zeff" | "CER" (n_12C6) | "all" (mean)
     profile_overrides: dict = field(default_factory=dict)  # name -> array, manual override
     # reconstruction knobs
     psi_pad: float = 1e-3
@@ -206,20 +212,25 @@ class ImasSource:
     # --- IDA-hybrid kinetics (GenerationConfig.kinetic_source = "ida_hybrid") ---
     # When set, the baseline ne/Te/Ti/omega_tor are taken from this IDA .cdf
     # (externally fit, smoother across time than FUSE's per-slice profile fits),
-    # resampled onto the FUSE core_profiles psi_N grid. Z_eff / Z_imp / the ni
-    # dilution stay FUSE, for consistency with FUSE's own resistive diffusion
-    # (which consumed FUSE's Z_eff to produce j_ohmic).  NOTE the old blanket
-    # rationale "IDA's Z_eff is internally inconsistent with its own carbon
-    # density" is SHOT-DEPENDENT, not general: measured Zeff(VB) vs
+    # resampled onto the FUSE core_profiles psi_N grid.  Everything else
+    # (currents, equilibrium, p_fast, anchors) stays FUSE.  Z_eff is IDA's own
+    # unless zeff_from_fuse=True (keeping FUSE's Z_eff is the conservative
+    # choice for consistency with FUSE's own resistive diffusion, which
+    # consumed FUSE's Z_eff to produce j_ohmic); ni comes from IDA via
+    # ni_source below, and its dilution always uses IDA's own Zeff.  NOTE the
+    # old blanket rationale "IDA's Z_eff is internally inconsistent with its
+    # own carbon density" is SHOT-DEPENDENT, not general: measured Zeff(VB) vs
     # 1+Z(Z-1)nC/ne core-median deviations are -1.7 % / +4.7 % / +11.3 % on
     # three DIII-D demo shots, i.e. mostly within the file's own measured
     # sigma_Zeff (~8-9 %); read_ida now prints this cross-check per file
     # (Callahan 2019 JINST 14 C10002 is the agreement pedigree when C6+
-    # dominates). Everything else (currents,
-    # equilibrium, p_fast, anchors) stays FUSE. Also wire it to
-    # UncertaintyConfig.ida_path so the sigma envelopes come from the same IDA.
+    # dominates).  IDA sigmas land in Baseline.aux as sigma_{ne,te,ni,ti}_ida
+    # (informational -- also set UncertaintyConfig.ida_path = ida_path so the
+    # sigma envelopes come from the same IDA).
     ida_path: Optional[str] = None
     impurity_Z: float = 6.0            # machine impurity charge (carbon); ni dilution
+    ni_source: str = "all"             # IDA ni route for ida_hybrid: "Zeff" | "CER" | "all"
+    zeff_from_fuse: bool = False       # ida_hybrid: keep FUSE Z_eff instead of IDA's
     # OPTIONAL. A gEQDSK whose LCFS replaces the dd boundary outline as the
     # isoflux separatrix target. Leave None to use the source's own boundary.
     # Supply one when you have a more accurate separatrix for the slice than the
@@ -345,7 +356,6 @@ class UncertaintyConfig:
     ida_path: Optional[str] = None
     sigma_mode: str = "auto"               # "auto" (by dim) | "direct" (*_err) | "ensemble"
     sigma_method: str = "percentile"       # "percentile" | "std"  (ensemble only)
-    sigma_ni_from_ne: bool = True          # IDA path only: sigma_ni = sigma_ne
 
     # flat fractional kinetic sigma envelopes (per channel). ni/Ti default wider
     # than ne/Te -- ion density and temperature are harder to diagnose.
@@ -403,6 +413,18 @@ class UncertaintyConfig:
     # missing dataset / invalid data), and the same record is returned as
     # resolve_uncertainty()'s "zeff_sigma_tier" metadata.
     zeff_sigma_source: str = "auto"
+
+    # Who draws ni when the zeff channel is active. True: ni is DERIVED per draw
+    # from the drawn (ne, Zeff) by quasineutrality and sigma_ni is unused (one
+    # mutually consistent ne/ni/Zeff/nz set per draw). False: ni is drawn from
+    # its own sigma_ni, at the cost of ni and Zeff no longer being mutually
+    # consistent within a draw. None (default) = auto: True when sigma_ni is
+    # only the flat ni_scalar_sigma fallback, or when ni and Zeff are one IDA
+    # resolution (read_ida derives ni from its Zeff; the draw then keeps
+    # sigma_ni via IDAProfiles.zeff_dne); False for any other real ni envelope
+    # (explicit sigma_profiles['ni'], ImasSource.zeff_from_fuse). Zeff is
+    # perturbed and drives the bootstrap either way.
+    ni_from_zeff: Optional[bool] = None
 
     # GPR correlation length scales (psi_N units) -- define the perturbation
     n_ls: float = 0.5                      # density
@@ -908,9 +930,10 @@ class GenerationConfig:
     # already ~clean, so flooring is redundant -- and it REGRESSED a stiff
     # high-l_i case (clipping its isolate-edge spike drove yield to 0).
     floor_j_BS: bool = False
-    # solve_with_bootstrap H-mode self-consistency iterations per draw (default
-    # 3); lowering to 2 trades a little accuracy for speed on large bouquets.
-    swb_iterations: int = 3
+    # Keyword dict forwarded to every solve_with_bootstrap call, the one surface
+    # for the bootstrap options bouquet does not set itself. Keys are checked
+    # against the toolkit's signatures in __post_init__.
+    bootstrap_kwargs: dict = field(default_factory=dict)
     # Coil handling (homotopy-based). The inverse solve drifts coils within
     # coil_drift, stepped through homotopy_passes = list of (F_tol, VSC_tol)
     # stages that tighten loose->tight (each warm-starts the next). A single
@@ -941,8 +964,18 @@ class GenerationConfig:
     # to skip that cost (self-validated + graceful fallback either way).
     capture_exact_inv_R2: bool = True
 
+    #: Arguments the call sites set themselves; ``bootstrap_kwargs`` may not
+    #: shadow them (duplicate keyword, or a silent override of a per-draw
+    #: value).
+    _RESERVED = frozenset(
+        "mygs ne Te ni Ti Zeff Ip_target inductive_jphi scale_jBS "
+        "isolate_edge_jBS verbose diagnostic_plots "
+        "ffp_prof ne_prof te_prof ni_prof ti_prof".split()
+    )
+
     def __post_init__(self):
-        """Resolve ``structured_preset`` into the individual structured fields.
+        """Validate ``bootstrap_kwargs``, then resolve ``structured_preset``
+        into the individual structured fields.
 
         Thin wrapper over :func:`resolve_structured_preset`, which carries the
         rules (and is called again at the closure's own entry point, where it
@@ -970,7 +1003,94 @@ class GenerationConfig:
         switches the channel on -- ``structured_preset=None`` resolves to the
         DEFAULT preset only when the channel is already ``"structured"``.
         """
+        validate_bootstrap_kwargs(self.bootstrap_kwargs, self._RESERVED)
         resolve_structured_preset(self, stacklevel=4)
+
+
+#: Old spellings, so they raise with their replacement rather than as an
+#: unknown option.
+_BOOTSTRAP_KWARG_RENAMES = {"swb_iterations": "iterations"}
+
+
+def _bootstrap_kwarg_names():
+    """Every keyword ``bootstrap_kwargs`` can reach, introspected from the
+    toolkit's bootstrap entry points.  ``None`` when OpenFUSIONToolkit is not
+    importable, which skips the unknown-key check.  Cached: one import
+    attempt per process.
+    """
+    global _BOOTSTRAP_KWARG_NAMES
+    try:
+        return _BOOTSTRAP_KWARG_NAMES
+    except NameError:
+        pass
+    try:
+        import inspect
+
+        from OpenFUSIONToolkit.TokaMaker._core import TokaMaker
+        from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
+
+        # Only the entry points this toolkit has: on one without the
+        # internal solve, the accepted set is solve_with_bootstrap's own
+        # arguments, which is what it accepts there.
+        names = set()
+        for fn in (solve_with_bootstrap,
+                   getattr(TokaMaker, "solve_bootstrap", None),
+                   getattr(TokaMaker, "set_boot_ops", None)):
+            if fn is None:
+                continue
+            names |= {prm.name for prm in inspect.signature(fn).parameters.values()
+                      if prm.kind in (prm.POSITIONAL_OR_KEYWORD, prm.KEYWORD_ONLY)}
+        _BOOTSTRAP_KWARG_NAMES = frozenset(names) - {"self"}
+    except Exception:
+        # No OFT (unit tests, a docs build): cannot introspect, so do not
+        # guess.  A wrong key then surfaces where it used to, at the call.
+        _BOOTSTRAP_KWARG_NAMES = None
+    return _BOOTSTRAP_KWARG_NAMES
+
+
+def validate_bootstrap_kwargs(bootstrap_kwargs, reserved, known=None):
+    """Refuse a ``bootstrap_kwargs`` key that would not survive the call chain.
+
+    Checked here, at config time, because ``generate_bouquet`` and
+    ``perturb_kinetic_equilibrium`` end in ``**kwargs``: a wrong key is no
+    longer a ``TypeError`` at the call, it raises inside the draw loop's
+    blanket ``except Exception`` and quietly fails every draw.
+
+    Parameters
+    ----------
+    bootstrap_kwargs : dict
+        The keys to check.
+    reserved : set of str
+        Names the call sites pass themselves (``GenerationConfig._RESERVED``).
+    known : set of str, optional
+        The accepted keyword names; defaults to :func:`_bootstrap_kwarg_names`
+        (``None`` from it skips the unknown-key check).  Passed explicitly by
+        the tests, which run without OpenFUSIONToolkit.
+    """
+    keys = set(bootstrap_kwargs)
+
+    bad = sorted(reserved & keys)
+    if bad:
+        raise ValueError(
+            f"bootstrap_kwargs may not set {bad}: passed explicitly at call sites.")
+
+    renamed = sorted(keys & _BOOTSTRAP_KWARG_RENAMES.keys())
+    if renamed:
+        pairs = ", ".join(f"{k!r} -> {_BOOTSTRAP_KWARG_RENAMES[k]!r}"
+                          for k in renamed)
+        raise ValueError(
+            f"bootstrap_kwargs uses the old name(s) {renamed}: {pairs}. "
+            f"For example bootstrap_kwargs={{'iterations': 3}}.")
+
+    if known is None:
+        known = _bootstrap_kwarg_names()
+    if known is None:
+        return
+    unknown = sorted(keys - set(known))
+    if unknown:
+        raise ValueError(
+            f"bootstrap_kwargs has no such solve_with_bootstrap option(s): "
+            f"{unknown}. Accepted: {sorted(set(known) - set(reserved))}.")
 
 
 def resolve_structured_preset(gc, warn: bool = True, stacklevel: int = 3):

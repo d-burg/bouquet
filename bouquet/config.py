@@ -930,9 +930,9 @@ class GenerationConfig:
     # already ~clean, so flooring is redundant -- and it REGRESSED a stiff
     # high-l_i case (clipping its isolate-edge spike drove yield to 0).
     floor_j_BS: bool = False
-    # Keyword dict forwarded to every solve_with_bootstrap call. Single UI surface
-    # for backend/Sauter options (e.g. the Fortran set_boot_ops options djBS_tol,
-    # taper_edge_jBS/psi0/shape, or iterations). Validated in __post_init__.
+    # Keyword dict forwarded to every solve_with_bootstrap call, the one surface
+    # for the bootstrap options bouquet does not set itself. Keys are checked
+    # against the toolkit's signatures in __post_init__.
     bootstrap_kwargs: dict = field(default_factory=dict)
     # Coil handling (homotopy-based). The inverse solve drifts coils within
     # coil_drift, stepped through homotopy_passes = list of (F_tol, VSC_tol)
@@ -964,12 +964,13 @@ class GenerationConfig:
     # to skip that cost (self-validated + graceful fallback either way).
     capture_exact_inv_R2: bool = True
 
-    #: ``solve_with_bootstrap`` arguments the call sites set themselves;
-    #: ``bootstrap_kwargs`` may not shadow them (they would collide as
-    #: duplicate keywords, or silently override a per-draw value).
+    #: Arguments the call sites set themselves; ``bootstrap_kwargs`` may not
+    #: shadow them (duplicate keyword, or a silent override of a per-draw
+    #: value).
     _RESERVED = frozenset(
         "mygs ne Te ni Ti Zeff Ip_target inductive_jphi scale_jBS "
-        "isolate_edge_jBS verbose diagnostic_plots".split()
+        "isolate_edge_jBS verbose diagnostic_plots "
+        "ffp_prof ne_prof te_prof ni_prof ti_prof".split()
     )
 
     def __post_init__(self):
@@ -1002,11 +1003,94 @@ class GenerationConfig:
         switches the channel on -- ``structured_preset=None`` resolves to the
         DEFAULT preset only when the channel is already ``"structured"``.
         """
-        bad = sorted(self._RESERVED & self.bootstrap_kwargs.keys())
-        if bad:
-            raise ValueError(
-                f"bootstrap_kwargs may not set {bad}: passed explicitly at call sites.")
+        validate_bootstrap_kwargs(self.bootstrap_kwargs, self._RESERVED)
         resolve_structured_preset(self, stacklevel=4)
+
+
+#: Old spellings, so they raise with their replacement rather than as an
+#: unknown option.
+_BOOTSTRAP_KWARG_RENAMES = {"swb_iterations": "iterations"}
+
+
+def _bootstrap_kwarg_names():
+    """Every keyword ``bootstrap_kwargs`` can reach, introspected from the
+    toolkit's bootstrap entry points.  ``None`` when OpenFUSIONToolkit is not
+    importable, which skips the unknown-key check.  Cached: one import
+    attempt per process.
+    """
+    global _BOOTSTRAP_KWARG_NAMES
+    try:
+        return _BOOTSTRAP_KWARG_NAMES
+    except NameError:
+        pass
+    try:
+        import inspect
+
+        from OpenFUSIONToolkit.TokaMaker._core import TokaMaker
+        from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
+
+        # Only the entry points this toolkit has: on one without the
+        # internal solve, the accepted set is solve_with_bootstrap's own
+        # arguments, which is what it accepts there.
+        names = set()
+        for fn in (solve_with_bootstrap,
+                   getattr(TokaMaker, "solve_bootstrap", None),
+                   getattr(TokaMaker, "set_boot_ops", None)):
+            if fn is None:
+                continue
+            names |= {prm.name for prm in inspect.signature(fn).parameters.values()
+                      if prm.kind in (prm.POSITIONAL_OR_KEYWORD, prm.KEYWORD_ONLY)}
+        _BOOTSTRAP_KWARG_NAMES = frozenset(names) - {"self"}
+    except Exception:
+        # No OFT (unit tests, a docs build): cannot introspect, so do not
+        # guess.  A wrong key then surfaces where it used to, at the call.
+        _BOOTSTRAP_KWARG_NAMES = None
+    return _BOOTSTRAP_KWARG_NAMES
+
+
+def validate_bootstrap_kwargs(bootstrap_kwargs, reserved, known=None):
+    """Refuse a ``bootstrap_kwargs`` key that would not survive the call chain.
+
+    Checked here, at config time, because ``generate_bouquet`` and
+    ``perturb_kinetic_equilibrium`` end in ``**kwargs``: a wrong key is no
+    longer a ``TypeError`` at the call, it raises inside the draw loop's
+    blanket ``except Exception`` and quietly fails every draw.
+
+    Parameters
+    ----------
+    bootstrap_kwargs : dict
+        The keys to check.
+    reserved : set of str
+        Names the call sites pass themselves (``GenerationConfig._RESERVED``).
+    known : set of str, optional
+        The accepted keyword names; defaults to :func:`_bootstrap_kwarg_names`
+        (``None`` from it skips the unknown-key check).  Passed explicitly by
+        the tests, which run without OpenFUSIONToolkit.
+    """
+    keys = set(bootstrap_kwargs)
+
+    bad = sorted(reserved & keys)
+    if bad:
+        raise ValueError(
+            f"bootstrap_kwargs may not set {bad}: passed explicitly at call sites.")
+
+    renamed = sorted(keys & _BOOTSTRAP_KWARG_RENAMES.keys())
+    if renamed:
+        pairs = ", ".join(f"{k!r} -> {_BOOTSTRAP_KWARG_RENAMES[k]!r}"
+                          for k in renamed)
+        raise ValueError(
+            f"bootstrap_kwargs uses the old name(s) {renamed}: {pairs}. "
+            f"For example bootstrap_kwargs={{'iterations': 3}}.")
+
+    if known is None:
+        known = _bootstrap_kwarg_names()
+    if known is None:
+        return
+    unknown = sorted(keys - set(known))
+    if unknown:
+        raise ValueError(
+            f"bootstrap_kwargs has no such solve_with_bootstrap option(s): "
+            f"{unknown}. Accepted: {sorted(set(known) - set(reserved))}.")
 
 
 def resolve_structured_preset(gc, warn: bool = True, stacklevel: int = 3):

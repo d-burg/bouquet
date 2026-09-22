@@ -9,7 +9,8 @@ h5py = pytest.importorskip("h5py")
 import bouquet as bq
 from bouquet.config import (BouquetConfig, SolverConfig, ReconstructionSource,
                             ImasSource, UncertaintyConfig, GenerationConfig,
-                            FilterConfig, FixedComponentsConfig)
+                            FilterConfig, FixedComponentsConfig,
+                            validate_bootstrap_kwargs, _bootstrap_kwarg_names)
 
 
 def _full_recon_cfg(header="RUN"):
@@ -111,7 +112,8 @@ class TestBootstrapKwargs:
         assert gc.bootstrap_kwargs["taper_edge_jBS"] is True
 
     @pytest.mark.parametrize("key", ["scale_jBS", "isolate_edge_jBS", "verbose",
-                                     "diagnostic_plots", "mygs", "Ip_target"])
+                                     "diagnostic_plots", "mygs", "Ip_target",
+                                     "ffp_prof", "te_prof"])
     def test_an_argument_the_call_sites_set_is_refused(self, key):
         # These arrive as explicit keywords at every solve_with_bootstrap call,
         # so **bootstrap_kwargs would either duplicate them (TypeError deep in
@@ -124,3 +126,59 @@ class TestBootstrapKwargs:
         cfg.generation.bootstrap_kwargs = {"djBS_tol": 1e-5}
         cfg2 = BouquetConfig.from_json(cfg.to_json())
         assert cfg2.generation.bootstrap_kwargs == {"djBS_tol": 1e-5}
+
+
+class TestBootstrapKwargValidation:
+    """The unknown-key guard.  ``generate_bouquet`` and
+    ``perturb_kinetic_equilibrium`` end in ``**kwargs``, so a wrong key no
+    longer raises at the call -- it raises inside the draw loop's blanket
+    ``except Exception`` and quietly fails every draw.  These run without
+    OpenFUSIONToolkit, so they pass ``known`` explicitly."""
+
+    KNOWN = {"iterations", "djBS_tol", "taper_edge_jBS", "taper_edge_psi0",
+             "use_python_solve", "scale_jBS", "verbose"}
+
+    def _check(self, d):
+        validate_bootstrap_kwargs(d, GenerationConfig._RESERVED, known=self.KNOWN)
+
+    def test_a_known_option_passes(self):
+        self._check({"djBS_tol": 1e-5, "taper_edge_jBS": True})
+
+    def test_a_misspelled_option_is_refused_and_the_message_lists_the_real_ones(self):
+        with pytest.raises(ValueError) as e:
+            self._check({"djBS_tolerance": 1e-5})
+        assert "djBS_tolerance" in str(e.value)
+        assert "djBS_tol" in str(e.value)          # the accepted spelling
+        assert "scale_jBS" not in str(e.value)     # reserved, not offered
+
+    def test_the_old_swb_iterations_spelling_names_its_replacement(self):
+        # The migration this PR creates: generate_bouquet(swb_iterations=2)
+        # used to be valid, and would now be swallowed by **kwargs.
+        with pytest.raises(ValueError, match="iterations"):
+            self._check({"swb_iterations": 2})
+
+    def test_a_reserved_name_is_reported_as_reserved_not_as_unknown(self):
+        with pytest.raises(ValueError, match="passed explicitly at call sites"):
+            self._check({"scale_jBS": 1.0})
+
+    def test_without_the_toolkit_only_the_reserved_check_runs(self):
+        # known=None means "cannot introspect": do not guess at the accepted
+        # set, let a wrong key surface at the call as it did before.
+        validate_bootstrap_kwargs({"anything_at_all": 1},
+                                  GenerationConfig._RESERVED, known=None)
+        with pytest.raises(ValueError, match="passed explicitly"):
+            validate_bootstrap_kwargs({"verbose": False},
+                                      GenerationConfig._RESERVED, known=None)
+
+    def test_the_introspected_name_set_is_cached(self):
+        assert _bootstrap_kwarg_names() is _bootstrap_kwarg_names()
+
+    def test_every_reserved_name_is_a_real_argument(self):
+        # A typo in _RESERVED would silently stop guarding that argument.
+        # Some reserved names exist only on a toolkit with the internal
+        # bootstrap solve (djBS_tol is its marker).
+        known = _bootstrap_kwarg_names()
+        if known is None or "djBS_tol" not in known:
+            pytest.skip("needs an OpenFUSIONToolkit with the internal "
+                        "Fortran bootstrap solve")
+        assert GenerationConfig._RESERVED <= known

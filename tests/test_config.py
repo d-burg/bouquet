@@ -92,3 +92,35 @@ class TestProvenance:
         bq.write_provenance(hdr, config=cfg)
         with h5py.File(hdr + ".h5", "r") as hf:
             assert hf.attrs["created"] == created1     # set once, never overwritten
+
+
+class TestBootstrapKwargs:
+    """``GenerationConfig.bootstrap_kwargs`` -- the one surface for the
+    ``solve_with_bootstrap`` options bouquet does not set itself."""
+
+    def test_default_is_an_empty_per_instance_dict(self):
+        a, b = GenerationConfig(), GenerationConfig()
+        assert a.bootstrap_kwargs == {}
+        a.bootstrap_kwargs["djBS_tol"] = 1e-5
+        assert b.bootstrap_kwargs == {}      # default_factory, not a shared dict
+
+    def test_backend_options_pass_validation(self):
+        gc = GenerationConfig(bootstrap_kwargs={"djBS_tol": 1e-5,
+                                                "taper_edge_jBS": True,
+                                                "iterations": 2})
+        assert gc.bootstrap_kwargs["taper_edge_jBS"] is True
+
+    @pytest.mark.parametrize("key", ["scale_jBS", "isolate_edge_jBS", "verbose",
+                                     "diagnostic_plots", "mygs", "Ip_target"])
+    def test_an_argument_the_call_sites_set_is_refused(self, key):
+        # These arrive as explicit keywords at every solve_with_bootstrap call,
+        # so **bootstrap_kwargs would either duplicate them (TypeError deep in
+        # a draw) or silently override a per-draw value.
+        with pytest.raises(ValueError, match=key):
+            GenerationConfig(bootstrap_kwargs={key: 1})
+
+    def test_it_survives_a_config_roundtrip(self):
+        cfg = _full_recon_cfg()
+        cfg.generation.bootstrap_kwargs = {"djBS_tol": 1e-5}
+        cfg2 = BouquetConfig.from_json(cfg.to_json())
+        assert cfg2.generation.bootstrap_kwargs == {"djBS_tol": 1e-5}

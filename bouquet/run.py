@@ -2254,6 +2254,23 @@ class Bouquet:
         # runs AFTER the common tail's forward solve; None everywhere else.
         _q0_state = None
         _structured_state = None
+        # Same refusal as _validate_workflow, here for baseline-only callers
+        # (prepare_baseline() without generate()): a non-default
+        # closure_channel outside the ohmic hybrid split is never read.
+        _chan0 = str(getattr(self.config.generation, "closure_channel",
+                             "bootstrap"))
+        if _chan0 != "bootstrap" and (
+                str(self.config.generation.jBS_baseline_mode) != "ohmic"
+                or not bool(self.config.generation.recalculate_j_BS)):
+            raise ValueError(
+                f"closure_channel={_chan0!r} is only read when "
+                "jBS_baseline_mode='ohmic' and recalculate_j_BS=True "
+                f"(have jBS_baseline_mode="
+                f"{str(self.config.generation.jBS_baseline_mode)!r}, "
+                f"recalculate_j_BS={bool(self.config.generation.recalculate_j_BS)}); "
+                "it would otherwise be silently ignored. Set "
+                "jBS_baseline_mode='ohmic' or leave closure_channel at "
+                "'bootstrap'.")
         if self.config.generation.recalculate_j_BS:
             from .TokaMaker_interface import (_swb_jbs_to_toroidal,
                                               smooth_jbs_transition)
@@ -3145,6 +3162,32 @@ class Bouquet:
         if float(getattr(uc, "jphi_scalar_sigma", 0.0)) <= 0.0:
             problems.append("jphi_scalar_sigma<=0 freezes j_inductive "
                             "perturbation (violates the all-profiles rule)")
+        # closure_channel is consumed ONLY by the IMAS hybrid baseline
+        # (jBS_baseline_mode="ohmic" with recalculate_j_BS=True).  Anywhere
+        # else it used to be resolved (the structured preset even printed
+        # "applied by default"), then never read -- so the caller believed a
+        # closure ran that did not.  Refuse instead of ignoring.
+        _chan = str(getattr(gc, "closure_channel", "bootstrap"))
+        if _chan != "bootstrap":
+            _is_imas = isinstance(self.config.source, ImasSource)
+            if not _is_imas:
+                problems.append(
+                    f"closure_channel={_chan!r} is only read on the IMAS "
+                    "path with jBS_baseline_mode='ohmic' (the hybrid "
+                    "baseline); a g-file source has no FUSE j_inductive to "
+                    "close on, so the channel would be silently ignored")
+            elif str(gc.jBS_baseline_mode) != "ohmic":
+                problems.append(
+                    f"closure_channel={_chan!r} is only read when "
+                    f"jBS_baseline_mode='ohmic' (it is "
+                    f"{str(gc.jBS_baseline_mode)!r}), so it would be "
+                    "silently ignored; set jBS_baseline_mode='ohmic' or "
+                    "leave closure_channel at 'bootstrap'")
+            elif not bool(gc.recalculate_j_BS):
+                problems.append(
+                    f"closure_channel={_chan!r} needs recalculate_j_BS=True "
+                    "(the closure runs inside the SWB bootstrap split); with "
+                    "recalculate_j_BS=False it would be silently ignored")
         if isinstance(self.config.source, ReconstructionSource):
             # perturb_jind_in_anchor (route R2) is no longer a hard error on
             # the geqdsk path -- see the method docstring.  It is still not
@@ -3428,6 +3471,13 @@ class Bouquet:
                 source_kind=("imas"
                              if type(self.config.source).__name__ == "ImasSource"
                              else "geqdsk"),
+                # Baseline provenance for readers: the li_metrics dict (l_i
+                # comparison, forward-solve residuals, jBS_baseline_mode,
+                # scales) and -- on a closed hybrid baseline -- the full
+                # ip_closure health record with its closure_limited verdict.
+                # Downstream bands need that flag per slice; before this it
+                # lived only on the in-memory Baseline object.
+                baseline_meta=getattr(bl, "li_metrics", None),
                 # BOTH paths: archive the ACHIEVED FSA j_phi of each converged
                 # solve (baseline + draws) so the stored 1-D current always
                 # matches the stored eqdsk in the same group. On the IMAS path

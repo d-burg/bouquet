@@ -3591,6 +3591,10 @@ def generate_bouquet(
     aux_length_scales=None,
     progress_callback=None,
     source_kind=None,
+    # Baseline provenance dict (Baseline.li_metrics, which carries the
+    # ip_closure health record on hybrid baselines); archived as JSON on the
+    # _baseline group so closure_limited travels with the slice.
+    baseline_meta=None,
     capture_live_eq=True,
     capture_npsi=257,
     capture_exact_inv_R2=True,
@@ -4656,6 +4660,7 @@ def generate_bouquet(
         j_BS=_bl_jBS_store,
         j_inductive=_bl_jind_store,
         source_kind=source_kind,
+        baseline_meta=baseline_meta,
     )
 
     # ---- Purge stale draws for THIS scan value -------------------------

@@ -20,6 +20,8 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
 │                                      per-scan copies below are authoritative)
 └── scan/<scan_key>/                   one group per scan point / time slice
     ├── config_json                    this slice's exact config
+    │   attrs: [coil_filter]           'chi2' | 'legacy' -- which coil filter wrote
+    │          [coil_sigma_model]      passes_coil_filter last (chi2: the sigma model JSON)
     ├── _baseline/                     written once per scan point
     │   ├── eqdsk, [pfile]             raw byte-perfect g-file / p-file
     │   ├── psi_N, psi_N_kinetic
@@ -30,7 +32,11 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │   ├── [aux_<name>, sigma_aux_<name>]   switchboard channels
     │   ├── [recon_lcfs_ref]           10k-pt LCFS reference (boundary metric)
     │   ├── [x_points], [coil_currents, coil_names]
-    │   └── attrs: Ip_target, l_i_target, source_kind, [diverted]
+    │   └── attrs: Ip_target, l_i_target, l_i_scale, source_kind, [diverted],
+    │              [li_metrics_json, closure_limited]   baseline provenance (1.4+):
+    │              Baseline.li_metrics as JSON, incl. the ip_closure health
+    │              record on hybrid baselines; load_baseline_profiles() decodes
+    │              it to li_metrics / ip_closure / closure_limited
     └── <count>/                       one group per accepted draw
         │                              (integer; gaps = rejected draws)
         ├── eqdsk, [pfile]             raw bytes, fixed names

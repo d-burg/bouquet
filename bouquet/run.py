@@ -3292,7 +3292,8 @@ class Bouquet:
         else:
             raise ValueError(msg)
 
-    def generate(self, n: Optional[int] = None, progress_callback=None) -> list:
+    def generate(self, n: Optional[int] = None, progress_callback=None,
+                 on_inspec=None, stop_check=None) -> list:
         """Generate the perturbed bouquet and archive to ``{header}.h5``.
 
         Auto-feeds the baseline (j_phi, j_inductive, l_i_target, Ip_target) and
@@ -3473,6 +3474,9 @@ class Bouquet:
                 aux_baselines=env.get("aux_baselines"),
                 aux_length_scales=env.get("aux_length_scales"),
                 progress_callback=progress_callback,
+                # shared until-N hooks (bouquet.parallel); None on the serial path
+                on_inspec=on_inspec,
+                stop_check=stop_check,
                 # Provenance marker stored on the baseline for robust path
                 # detection in plotting (independent of the aux switchboard).
                 source_kind=("imas"
@@ -3507,7 +3511,19 @@ class Bouquet:
             _tgt = int(gc.n_inspec_target)
             _got = until_n_delivered(self.diagnostics)
             _tries = len(self.diagnostics or [])
-            if _got < _tgt:
+            _shared_done = False
+            if stop_check is not None:
+                try:
+                    _shared_done = bool(stop_check())
+                except Exception:
+                    _shared_done = False
+            if _shared_done:
+                # This worker's LOCAL target was not the run's target: the
+                # pooled count crossed the shared target, which is the only
+                # verdict that matters here.
+                print(f"[until-N] shared target reached: this worker "
+                      f"delivered {_got} in-spec draws in {_tries} attempts.")
+            elif _got < _tgt:
                 import warnings as _w
                 _msg = (f"until-N did not reach its target: {_got}/{_tgt} "
                         f"in-spec draws after {_tries} attempts (cap "

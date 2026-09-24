@@ -32,11 +32,31 @@ of ``(seed, worker_id, scan_key)``, so re-running the same ``seed`` over the
 same ``n_workers`` regenerates every shard's draws bitwise. Changing
 ``n_workers`` re-partitions the draws and therefore changes the ensemble --
 record it alongside the seed.
+
+**Shared until-N.**  ``generation.n_inspec_target`` is honoured on both
+launchers through a *shared yield ledger*: every worker records each draw that
+passes the in-loop filters, and checks the pooled count at the top of every
+attempt, stopping once the run's ONE target is met -- a cooperative stop at the
+attempt boundary, never a kill, so every archived draw is complete.  The
+laptop pool shares a ``multiprocessing.Manager`` counter; the SLURM array
+shares an append-only file on the job's filesystem.  Up to one extra in-spec
+draw per worker can land after the threshold (a draw in flight is finished,
+not discarded), so the merged archive holds *at least* the target.  The
+attempt cap ``max_total_draws`` is split across workers the same way
+``n_equils`` is, so a zero-yield configuration still terminates.
+
+A shared-stop run is reproducible in a different sense from a fixed-``n``
+one: each draw is still a pure function of ``(seed, worker_id, scan_key,
+index)``, but WHICH draws exist depends on worker timing.  The merged archive
+therefore carries a manifest (scan-group attr ``parallel_manifest_json``) with
+every worker's attempt count; replaying those counts as fixed per-worker
+allocations regenerates the archive exactly.
 """
 from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import os
 
 __all__ = [
@@ -44,6 +64,11 @@ __all__ = [
     "merge_archives",
     "parallel_generate",
     "emit_slurm_script",
+    "apply_filters_after_merge",
+    "SharedYieldLedger",
+    "ManagerYieldLedger",
+    "FileYieldLedger",
+    "shared_until_n_budget",
 ]
 
 
@@ -131,28 +156,119 @@ def _warn_multithreaded(threads_per_worker):
 # --------------------------------------------------------------------------
 #  worker: generate one shard
 # --------------------------------------------------------------------------
-def _reject_until_n(config, where):
-    """The until-N stopping rule is serial-only -- refuse it here.
+class SharedYieldLedger:
+    """Pooled in-spec count shared by every worker of ONE until-N run.
 
-    Each shard is a separate process with its own archive and no view of the
-    others' yield, so N workers each chasing ``n_inspec_target`` would deliver
-    N*target draws, and no worker can chase a shared fraction of it. Rejecting
-    is the honest option: silently ignoring the field would hand back a
-    differently-sized ensemble than the config asks for.
+    ``record()`` is called by a worker for each draw that passes the in-loop
+    filters; ``count()`` returns the pooled total; ``reached(target)`` is the
+    worker's stop test.  Backends differ only in where the count lives.
     """
-    tgt = getattr(config.generation, "n_inspec_target", None)
-    if tgt is not None:
+
+    def record(self) -> None:
+        raise NotImplementedError
+
+    def count(self) -> int:
+        raise NotImplementedError
+
+    def reached(self, target) -> bool:
+        return self.count() >= int(target)
+
+    def reset(self) -> None:
+        """Start a fresh run (no-op where the backend is created fresh)."""
+
+
+class ManagerYieldLedger(SharedYieldLedger):
+    """Laptop pool: a ``multiprocessing.Manager`` counter behind a lock.
+
+    Both proxies pickle into spawned workers exactly as the progress queue
+    does; the parent owns the manager for the life of the pool.
+    """
+
+    def __init__(self, manager):
+        self._v = manager.Value("i", 0)
+        self._lock = manager.Lock()
+
+    def record(self) -> None:
+        with self._lock:
+            self._v.value += 1
+
+    def count(self) -> int:
+        return int(self._v.value)
+
+    def reset(self) -> None:
+        with self._lock:
+            self._v.value = 0
+
+
+class FileYieldLedger(SharedYieldLedger):
+    """SLURM array: one line appended per in-spec draw to a shared file.
+
+    Each ``record()`` is a single ``O_APPEND`` write of two bytes, which
+    stays atomic across the array's tasks on a shared filesystem; ``count()``
+    is the line count.  On NFS the visible count may lag other nodes' appends
+    by seconds -- that lag only delays the stop, i.e. adds overshoot, which
+    the merged archive keeps anyway.  ``submit.sh`` truncates the file before
+    the array starts so a previous run's ledger can never pre-satisfy the
+    target.
+    """
+
+    def __init__(self, path):
+        self.path = os.path.abspath(str(path))
+
+    def record(self) -> None:
+        fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        try:
+            os.write(fd, b"1\n")
+        finally:
+            os.close(fd)
+
+    def count(self) -> int:
+        try:
+            with open(self.path, "rb") as fh:
+                return fh.read().count(b"\n")
+        except FileNotFoundError:
+            return 0
+
+    def reset(self) -> None:
+        with open(self.path, "wb"):
+            pass
+
+
+def ledger_path_for(out_header) -> str:
+    """The SLURM ledger file that belongs to ``{out_header}.h5``."""
+    return os.path.abspath(f"{out_header}_inspec.ledger")
+
+
+def shared_until_n_budget(n_inspec_target, max_total_draws, n_equils_total,
+                          n_workers, worker_id) -> dict:
+    """Per-worker attempt budget for a shared until-N run.
+
+    The run's attempt cap (``max_total_draws``, default
+    ``max(n_equils_total, 5 * target)`` exactly as the serial rule) is split
+    over workers with :func:`_shard_size`, so the shares sum to the cap and a
+    zero-yield configuration still terminates.  The worker's LOCAL
+    ``n_inspec_target`` is ``min(target, share)``: a worker can never see more
+    in-spec draws than attempts, so this keeps the serial validation
+    (``max_total_draws >= n_inspec_target``) satisfied while the real stop is
+    the shared ledger.  Returns ``dict(total_cap, cap, local_target)``.
+    """
+    tgt = int(n_inspec_target)
+    if tgt < 1:
+        raise ValueError("n_inspec_target must be >= 1")
+    total_cap = (int(max_total_draws) if max_total_draws is not None
+                 else max(int(n_equils_total), 5 * tgt))
+    if total_cap < tgt:
         raise ValueError(
-            f"generation.n_inspec_target={tgt} is not supported by {where}: "
-            f"the until-N-in-spec stopping rule is serial-only (workers cannot "
-            f"see each other's yield). Either run serially via Bouquet."
-            f"generate(), or set n_inspec_target=None and size n_equils to "
-            f"the yield you expect.")
+            f"max_total_draws={total_cap} is below n_inspec_target={tgt}; "
+            "the shared target could never be met")
+    share = _shard_size(total_cap, n_workers, worker_id)
+    return dict(total_cap=total_cap, cap=int(share),
+                local_target=min(tgt, int(share)))
 
 
 def run_shard(config, worker_id, n_workers, *, n_equils_total, seed_base,
               out_header, scan_key, threads_per_worker, verbose=False,
-              progress_q=None):
+              progress_q=None, ledger=None):
     """Generate worker *worker_id*'s shard of draws in THIS process.
 
     Builds its own TokaMaker (own ``OFT_env``), forward-solves the baseline, and
@@ -164,11 +280,24 @@ def run_shard(config, worker_id, n_workers, *, n_equils_total, seed_base,
     (otherwise N workers x every slice floods the parent's stdout); set True to
     stream it for debugging.
     """
-    _reject_until_n(config, "run_shard")
-    n = _shard_size(n_equils_total, n_workers, worker_id)
+    tgt = getattr(config.generation, "n_inspec_target", None)
+    budget = None
+    if tgt is not None:
+        if ledger is None:
+            raise ValueError(
+                f"generation.n_inspec_target={tgt} on run_shard needs a shared "
+                "ledger (parallel_generate / the SLURM CLI supply one): N "
+                "workers each chasing the target alone would deliver "
+                "N*target draws.")
+        budget = shared_until_n_budget(
+            tgt, getattr(config.generation, "max_total_draws", None),
+            n_equils_total, n_workers, worker_id)
+        n = budget["cap"]
+    else:
+        n = _shard_size(n_equils_total, n_workers, worker_id)
     if n == 0:
-        return dict(worker_id=worker_id, path=None, n=0,
-                    li_target=None, Ip_target=None)
+        return dict(worker_id=worker_id, path=None, n=0, n_attempts=0,
+                    n_inspec=0, li_target=None, Ip_target=None)
 
     # Silence the worker's entire stdout/stderr at the fd level BEFORE importing
     # OFT, which caches fd 1 at init -- a later redirect leaks the banner + N x
@@ -187,6 +316,15 @@ def run_shard(config, worker_id, n_workers, *, n_equils_total, seed_base,
         cfg = copy.deepcopy(config)
         cfg.solver.nthreads = int(threads_per_worker)
         cfg.generation.n_equils = int(n)
+        if budget is not None:
+            # This worker's share of the run's attempt cap, and a local
+            # target the serial validation accepts; the shared ledger is
+            # the stop that matters (see shared_until_n_budget).
+            cfg.generation.max_total_draws = int(budget["cap"])
+            cfg.generation.n_inspec_target = int(budget["local_target"])
+            print(f"[until-N] worker {worker_id}: shared target {int(tgt)} "
+                  f"across {n_workers} workers; this worker's attempt cap "
+                  f"{budget['cap']} of {budget['total_cap']} total.")
         # Independent, slice-decorrelated, deterministically-derived stream:
         # generate_bouquet consumes this into the shard's single Generator
         # (see _derive_seed and sampling.make_rng), so re-running the same
@@ -206,28 +344,80 @@ def run_shard(config, worker_id, n_workers, *, n_equils_total, seed_base,
         if os.path.exists(_shard_h5):
             os.remove(_shard_h5)
 
-        # per-draw progress -> parent aggregate bar (one tick per draw attempt)
-        cb = None
-        if progress_q is not None:
-            def cb(_count, _q=progress_q, _w=worker_id):
+        # per-draw progress -> parent aggregate bar (one tick per draw
+        # attempt); the same tick counts this worker's attempts for the
+        # manifest, which is what makes a shared-stop run replayable.
+        _attempts = [0]
+
+        def cb(_count, _q=progress_q, _w=worker_id):
+            _attempts[0] = int(_count) + 1
+            if _q is not None:
                 try:
                     _q.put(_w)
                 except Exception:
                     pass
 
+        _inspec = [0]
+        on_inspec = stop_check = None
+        if budget is not None:
+            def on_inspec(_l=ledger):
+                _inspec[0] += 1
+                _l.record()
+
+            def stop_check(_l=ledger, _t=int(tgt)):
+                return _l.reached(_t)
+
         b = bq.Bouquet(cfg)
         b.setup_solver()
         b.prepare_baseline()
-        b.generate(progress_callback=cb)
-        return dict(worker_id=worker_id, path=f"{cfg.output_header}.h5", n=int(n),
-                    li_target=float(b.baseline.l_i_target),
-                    Ip_target=float(b.baseline.Ip_target))
+        b.generate(progress_callback=cb, on_inspec=on_inspec,
+                   stop_check=stop_check)
+        rec = dict(worker_id=int(worker_id), path=f"{cfg.output_header}.h5",
+                   n=int(n), n_attempts=int(_attempts[0]),
+                   n_inspec=int(_inspec[0]),
+                   seed=int(cfg.generation.seed),
+                   li_target=float(b.baseline.l_i_target),
+                   Ip_target=float(b.baseline.Ip_target))
+        if budget is not None:
+            rec.update(shared_target=int(tgt), local_target=budget["local_target"],
+                       attempt_cap=budget["cap"], total_cap=budget["total_cap"])
+        # Stamp the worker record on the shard so the merge (either launcher)
+        # can build the run manifest from the shards alone.
+        _write_worker_record(rec["path"], scan_key, rec)
+        return rec
     finally:
         if _saved is not None:
             os.dup2(_saved[0], 1)
             os.dup2(_saved[1], 2)
             os.close(_saved[0])
             os.close(_saved[1])
+
+
+def _write_worker_record(shard_path, scan_key, rec):
+    """Attr ``parallel_worker_json`` on the shard's scan group (or root)."""
+    import h5py
+    from .utils import _scan_key
+    bkey = _scan_key(scan_key)
+    gp = f"scan/{bkey}" if bkey is not None else "/"
+    try:
+        with h5py.File(shard_path, "a") as hf:
+            if gp not in hf:
+                hf.require_group(gp)
+            hf[gp].attrs["parallel_worker_json"] = json.dumps(
+                {k: v for k, v in rec.items() if k != "path"})
+    except OSError as exc:            # a missing shard is the caller's problem
+        print(f"WARN: could not stamp worker record on {shard_path}: {exc}")
+
+
+def _read_worker_record(src, base_path):
+    parent = src[base_path] if base_path else src
+    raw = parent.attrs.get("parallel_worker_json", None)
+    if raw is None:
+        return None
+    try:
+        return json.loads(raw.decode() if isinstance(raw, bytes) else str(raw))
+    except (ValueError, TypeError):
+        return None
 
 
 # --------------------------------------------------------------------------
@@ -316,6 +506,7 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
     initialize_equilibrium_database(out_header)
 
     offset = 0
+    workers = []
     with h5py.File(out_path, "a") as out:
         if bkey is not None and base_path not in out:
             out.create_group(base_path)
@@ -326,6 +517,10 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
                 parent = src[base_path] if base_path else src
                 if "_baseline" in parent and bl_dst not in out:
                     out.copy(parent["_baseline"], bl_dst)
+                _wrec = _read_worker_record(src, base_path)
+                if _wrec is not None:
+                    _wrec["first_index"] = offset      # where its draws land
+                    workers.append(_wrec)
                 idxs = sorted(
                     int(k) for k in parent.keys()
                     if k not in ("_baseline", "scan")
@@ -346,6 +541,27 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
     from .utils import write_provenance
     write_provenance(out_header, config=config, scan_key=scan_key)
 
+    # Run manifest: one record per worker (attempts, in-spec, seed, caps).
+    # For a shared until-N run this is the replay key -- re-running with each
+    # worker's n_attempts as a fixed allocation regenerates the archive.
+    if workers:
+        shared = [w for w in workers if "shared_target" in w]
+        manifest = dict(
+            n_workers=len(workers), n_draws=int(offset), workers=workers,
+            until_n=(dict(target=shared[0]["shared_target"],
+                          total_cap=shared[0].get("total_cap"),
+                          n_inspec_recorded=sum(int(w.get("n_inspec", 0))
+                                                for w in shared))
+                     if shared else None))
+        with h5py.File(out_path, "a") as out:
+            gp = base_path if base_path else "/"
+            out[gp].attrs["parallel_manifest_json"] = json.dumps(manifest)
+        if shared:
+            _u = manifest["until_n"]
+            print(f"[until-N] merged {offset} draws from {len(workers)} "
+                  f"workers; {_u['n_inspec_recorded']} in-spec recorded "
+                  f"against a shared target of {_u['target']}.")
+
     if cleanup:
         for sp in shard_paths:
             if sp and os.path.exists(sp):
@@ -353,12 +569,26 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
     return out_path, offset
 
 
+def apply_filters_after_merge(config):
+    """Run ``Bouquet(config).filter()`` on the merged archive.
+
+    The parallel path used to leave the merged archive UNFILTERED: the only
+    coil verdict on it was the in-loop legacy band, so ``selection="selected"``
+    silently meant something different from a serial run.  This applies the
+    configured filters (chi2 coil filter by default, plus the boundary cut)
+    exactly as the serial ``run.filter()`` does.  Needs no solver.
+    """
+    from .run import Bouquet
+    return Bouquet(copy.deepcopy(config)).filter()
+
+
 # --------------------------------------------------------------------------
 #  orchestration
 # --------------------------------------------------------------------------
 def parallel_generate(config, *, n_workers=None, threads_per_worker=1, seed=0,
                       backend="laptop", baseline_match_rtol=1e-6, cleanup=True,
-                      verbose=False, progress=True, slurm=None):
+                      verbose=False, progress=True, slurm=None,
+                      apply_filters=True):
     """Fan ``config.generation.n_equils`` draws across worker processes, merge.
 
     ``backend="laptop"`` runs a ``ProcessPoolExecutor`` (spawn) now;
@@ -375,8 +605,13 @@ def parallel_generate(config, *, n_workers=None, threads_per_worker=1, seed=0,
     raises (a worker did not converge to the shared baseline -- e.g. a stray
     ``nthreads>1`` or a mismatched source). Returns a summary dict.
     """
-    _reject_until_n(config, "parallel_generate")
     n_total = int(config.generation.n_equils)
+    tgt = getattr(config.generation, "n_inspec_target", None)
+    if tgt is not None:
+        # shared until-N: the pool's total is the run's attempt cap
+        n_total = shared_until_n_budget(
+            tgt, getattr(config.generation, "max_total_draws", None),
+            n_total, 1, 0)["total_cap"]
     scan_key = config.generation.scan_key
     out_header = config.output_header
     if n_workers is None:
@@ -416,8 +651,9 @@ def parallel_generate(config, *, n_workers=None, threads_per_worker=1, seed=0,
     # tqdm can't surface across processes, and worker stderr is suppressed).
     import threading
     import queue as _queue
-    mgr = ctx.Manager() if progress else None
+    mgr = ctx.Manager() if (progress or tgt is not None) else None
     pq = mgr.Queue() if progress else None
+    ledger = ManagerYieldLedger(mgr) if tgt is not None else None
     bar = None
     drain_stop = threading.Event()
     if progress:
@@ -453,7 +689,7 @@ def parallel_generate(config, *, n_workers=None, threads_per_worker=1, seed=0,
                           n_equils_total=n_total, seed_base=seed,
                           out_header=out_header, scan_key=scan_key,
                           threads_per_worker=threads_per_worker, verbose=verbose,
-                          progress_q=pq): i
+                          progress_q=pq, ledger=ledger): i
                 for i in range(nw)
             }
             for fut in as_completed(futs):
@@ -491,9 +727,26 @@ def parallel_generate(config, *, n_workers=None, threads_per_worker=1, seed=0,
     paths = [r["path"] for r in results if r and r["path"]]
     out_path, n_merged = merge_archives(paths, out_header, scan_key=scan_key,
                                         cleanup=cleanup, config=config)
-    return dict(out_path=out_path, n_draws=n_merged, n_workers=nw,
-                threads_per_worker=threads_per_worker,
-                li_target=li0, Ip_target=ip0)
+    summary = dict(out_path=out_path, n_draws=n_merged, n_workers=nw,
+                   threads_per_worker=threads_per_worker,
+                   li_target=li0, Ip_target=ip0,
+                   n_attempts=sum(int(r.get("n_attempts", 0)) for r in results if r),
+                   n_inspec_recorded=sum(int(r.get("n_inspec", 0)) for r in results if r))
+    if tgt is not None:
+        summary["until_n"] = dict(target=int(tgt), total_cap=n_total,
+                                  reached=summary["n_inspec_recorded"] >= int(tgt))
+        if not summary["until_n"]["reached"]:
+            import warnings
+            warnings.warn(
+                f"shared until-N did not reach its target: "
+                f"{summary['n_inspec_recorded']}/{int(tgt)} in-spec draws "
+                f"after the pooled attempt cap of {n_total}. The archive "
+                "holds every attempt; raise max_total_draws, loosen the "
+                "filter thresholds deliberately, or treat the low yield as a "
+                "finding about this equilibrium.", RuntimeWarning, stacklevel=2)
+    if apply_filters:
+        summary["filter"] = apply_filters_after_merge(config)
+    return summary
 
 
 # --------------------------------------------------------------------------
@@ -526,9 +779,12 @@ def emit_slurm_script(config, *, n_workers, seed, threads_per_worker,
     shard/merged ``.h5`` outputs land there too unless
     ``config.output_header`` is an absolute path.)
     """
-    _reject_until_n(config, "emit_slurm_script")
     _warn_multithreaded(threads_per_worker)
     os.makedirs(out_dir, exist_ok=True)
+    tgt = getattr(config.generation, "n_inspec_target", None)
+    if tgt is not None:      # validate the pooled budget now, not on the node
+        shared_until_n_budget(tgt, getattr(config.generation, "max_total_draws", None),
+                              int(config.generation.n_equils), 1, 0)
     # Config JSON bundle (not pickle): portable across package/Python versions,
     # human-inspectable, and the same serialization the h5 provenance uses (F25).
     import json
@@ -538,6 +794,12 @@ def emit_slurm_script(config, *, n_workers, seed, threads_per_worker,
         n_equils_total=int(config.generation.n_equils),
         scan_key=config.generation.scan_key,
         out_header=config.output_header,
+        # shared until-N: the array tasks pool their in-spec count in this
+        # file (see FileYieldLedger); None when the run is a fixed-n one.
+        n_inspec_target=(int(tgt) if tgt is not None else None),
+        max_total_draws=getattr(config.generation, "max_total_draws", None),
+        ledger=(ledger_path_for(config.output_header) if tgt is not None
+                else None),
         # The stored config is the TEMPLATE: the shard runner overwrites
         # solver.nthreads with threads_per_worker at run time (see _cli),
         # so a reader of this file must not take solver.nthreads at face
@@ -605,7 +867,10 @@ def emit_slurm_script(config, *, n_workers, seed, threads_per_worker,
         "# chain array + merge; afterany (not afterok) so the merge still\n"
         "# runs -- and reports exactly which shards are missing -- after a\n"
         "# partial array, instead of pending forever.\n"
-        f"aid=$(sbatch --parsable {job_name}_array.sbatch)\n"
+        + (f"# shared until-N: start from an EMPTY ledger so a previous run's\n"
+           f"# count can never pre-satisfy the target\n"
+           f": > \"{bundle['ledger']}\"\n" if tgt is not None else "")
+        + f"aid=$(sbatch --parsable {job_name}_array.sbatch)\n"
         f"sbatch --dependency=afterany:$aid {job_name}_merge.sbatch\n"
     )
 
@@ -638,16 +903,21 @@ def _cli(argv=None):
         # verbose=True: SLURM already isolates each task's output in its own
         # slurm-*.out, so the notebook flood rationale for fd-suppression does
         # not apply -- and an empty log is useless when a shard dies.
+        ledger = (FileYieldLedger(b["ledger"]) if b.get("ledger") else None)
         run_shard(b["config"], int(argv[2]), b["n_workers"],
                   n_equils_total=b["n_equils_total"], seed_base=b["seed"],
                   out_header=b["out_header"], scan_key=b["scan_key"],
-                  threads_per_worker=b["threads_per_worker"], verbose=True)
+                  threads_per_worker=b["threads_per_worker"], verbose=True,
+                  ledger=ledger)
     elif cmd == "merge":
         allow_missing = "--allow-missing" in argv[2:]
         # workers assigned zero draws legitimately produce no shard file;
         # only count the ones that were expected to write one.
+        _tot = (shared_until_n_budget(b["n_inspec_target"], b.get("max_total_draws"),
+                                      b["n_equils_total"], 1, 0)["total_cap"]
+                if b.get("n_inspec_target") is not None else b["n_equils_total"])
         expected = [i for i in range(b["n_workers"])
-                    if _shard_size(b["n_equils_total"], b["n_workers"], i) > 0]
+                    if _shard_size(_tot, b["n_workers"], i) > 0]
         paths = {i: f"{b['out_header']}_w{i}.h5" for i in expected}
         missing = sorted(i for i, p in paths.items() if not os.path.exists(p))
         if missing:
@@ -666,6 +936,21 @@ def _cli(argv=None):
                                      scan_key=b["scan_key"], cleanup=True,
                                      config=b["config"])
         print(f"merged {n} draws -> {out_path}")
+        if b.get("ledger"):
+            _led = FileYieldLedger(b["ledger"])
+            _cnt, _tgt = _led.count(), int(b["n_inspec_target"])
+            print(f"[until-N] ledger: {_cnt} in-spec recorded against a "
+                  f"shared target of {_tgt}"
+                  + ("" if _cnt >= _tgt else " -- TARGET NOT REACHED "
+                     "(pooled attempt cap exhausted or shards missing)"))
+            try:
+                os.remove(b["ledger"])
+            except OSError:
+                pass
+        # the merged archive is unfiltered until this runs (see
+        # apply_filters_after_merge); a serial run.filter() equivalent
+        if "--no-filter" not in argv[2:]:
+            apply_filters_after_merge(b["config"])
     else:
         raise SystemExit(f"unknown command {cmd!r}")
 

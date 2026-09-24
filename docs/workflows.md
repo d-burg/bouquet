@@ -349,9 +349,22 @@ Points worth knowing:
 - **Hitting `max_total_draws` is a failure, not an answer.** It warns
   (`RuntimeWarning`) and says how far it got. The fix is more attempts, or a
   deliberate decision about the thresholds — not a quietly short bouquet.
-- **Serial only.** `parallel_generate`, `run_shard` and `emit_slurm_script` all
-  reject a config carrying `n_inspec_target`: shards cannot see each other's
-  yield, so N workers each chasing the target would deliver N×target draws.
+- **Both launchers honour it, through a shared ledger.** `parallel_generate`
+  and the SLURM array pool their in-spec count (a `Manager` counter on the
+  laptop, an append-only `{header}_inspec.ledger` file on the cluster); every
+  worker checks the pooled count at the top of each attempt and stops once the
+  run's ONE target is met. The stop is cooperative, at the attempt boundary,
+  so a draw in flight is finished, never killed: up to one extra in-spec draw
+  per worker can land after the threshold and is kept. `max_total_draws` is
+  split across workers, so a zero-yield configuration still terminates. The
+  merged archive carries a manifest (`parallel_manifest_json`) with each
+  worker's attempt count -- the replay key, since *which* draws exist in a
+  shared-stop run depends on worker timing even though each draw is bitwise
+  reproducible. A bare `run_shard` without a ledger refuses the target.
+- **The merged archive is filtered.** `parallel_generate(apply_filters=True)`
+  (the default) and the SLURM merge job run the configured filters on the
+  merged archive, exactly as a serial `run.filter()`; the parallel path used to
+  leave only the in-loop legacy band on it.
 - **The RNG stream is untouched when the feature is off.** The `jBS_scales`
   block draw is unchanged for the first `n_equils` draws and only extends past
   it when until-N actually runs on, so `n_inspec_target=None` runs are bitwise

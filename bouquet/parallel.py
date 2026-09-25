@@ -222,10 +222,14 @@ class FileYieldLedger(SharedYieldLedger):
         finally:
             os.close(fd)
 
+    _RECORD_BYTES = 2                     # b"1\n"
+
     def count(self) -> int:
+        # every record() appends exactly _RECORD_BYTES, so the count is the
+        # file size: O(1) per call, where a re-read would be O(N) per attempt
+        # and O(N^2) over a run on a shared filesystem
         try:
-            with open(self.path, "rb") as fh:
-                return fh.read().count(b"\n")
+            return int(os.stat(self.path).st_size) // self._RECORD_BYTES
         except FileNotFoundError:
             return 0
 
@@ -252,6 +256,11 @@ def shared_until_n_budget(n_inspec_target, max_total_draws, n_equils_total,
     (``max_total_draws >= n_inspec_target``) satisfied while the real stop is
     the shared ledger.  Returns ``dict(total_cap, cap, local_target)``.
     """
+    # the same integer-count validation Bouquet.generate() applies: a float
+    # or bool target is refused, never truncated
+    from .config import require_integer_count
+    require_integer_count(n_inspec_target, "generation.n_inspec_target")
+    require_integer_count(max_total_draws, "generation.max_total_draws")
     tgt = int(n_inspec_target)
     if tgt < 1:
         raise ValueError("n_inspec_target must be >= 1")
@@ -755,7 +764,7 @@ def parallel_generate(config, *, n_workers=None, threads_per_worker=1, seed=0,
 def emit_slurm_script(config, *, n_workers, seed, threads_per_worker,
                       out_dir=".", job_name="bouquet", partition=None,
                       time_limit="02:00:00", mem_per_task="16G",
-                      python="python", setup=None):
+                      python="python", setup=None, apply_filters=True):
     """Write a SLURM job-array (one shard per task) + a dependent merge job.
 
     Serialises the run into ``{job_name}_bundle.json`` (config via
@@ -800,6 +809,10 @@ def emit_slurm_script(config, *, n_workers, seed, threads_per_worker,
         max_total_draws=getattr(config.generation, "max_total_draws", None),
         ledger=(ledger_path_for(config.output_header) if tgt is not None
                 else None),
+        # whether the merge job runs the configured filters on the merged
+        # archive (the serial run.filter() equivalent); the merge CLI's
+        # --no-filter flag also switches it off
+        apply_filters=bool(apply_filters),
         # The stored config is the TEMPLATE: the shard runner overwrites
         # solver.nthreads with threads_per_worker at run time (see _cli),
         # so a reader of this file must not take solver.nthreads at face
@@ -949,8 +962,11 @@ def _cli(argv=None):
                 pass
         # the merged archive is unfiltered until this runs (see
         # apply_filters_after_merge); a serial run.filter() equivalent
-        if "--no-filter" not in argv[2:]:
+        if "--no-filter" not in argv[2:] and b.get("apply_filters", True):
             apply_filters_after_merge(b["config"])
+        else:
+            print("merged archive left UNFILTERED (apply_filters off): run "
+                  "Bouquet(config).filter() before selecting draws")
     else:
         raise SystemExit(f"unknown command {cmd!r}")
 

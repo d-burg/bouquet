@@ -4991,9 +4991,14 @@ def generate_bouquet(
             try:
                 _shared_hit = bool(stop_check())
             except Exception as _sexc:
-                print(f"  [until-N] WARN: stop_check() failed ({_sexc}); "
-                      "continuing on the local count")
-                _shared_hit = False
+                # A ledger outage must not degrade N workers into N
+                # independent targets (an N-times oversize archive that
+                # looks complete): fail this worker loudly instead.
+                raise RuntimeError(
+                    "shared until-N: the yield ledger is unreadable "
+                    f"({type(_sexc).__name__}: {_sexc}); the pooled stop "
+                    "cannot be honoured, so this worker stops rather than "
+                    "falling back to a local target") from _sexc
             if _shared_hit:
                 _stopped_by_shared = True
                 _inspec_hit_target = True
@@ -6109,8 +6114,13 @@ def generate_bouquet(
                     try:
                         on_inspec()
                     except Exception as _lexc:
-                        print(f"  [until-N] WARN: on_inspec() failed "
-                              f"({_lexc}); the shared ledger may undercount")
+                        # same rule: an unrecorded in-spec draw would make
+                        # every other worker overshoot; fail, do not undercount
+                        raise RuntimeError(
+                            "shared until-N: recording an in-spec draw on the "
+                            f"yield ledger failed ({type(_lexc).__name__}: "
+                            f"{_lexc}); the pooled count would undercount, so "
+                            "this worker stops") from _lexc
             _why = "in-spec" if _ok else "OUT (" + ", ".join(_reasons) + ")"
             if _coil_kind == "chi2":
                 _coil_num = (f"coil chi2/nu={_coil_info['chi2_nu']:.2f} "

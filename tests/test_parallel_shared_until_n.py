@@ -286,3 +286,54 @@ def test_generate_bouquet_consults_the_hooks_where_it_should():
     assert 0 < body.index("on_inspec()") - inc < 400
     # and a shared stop is not reported as a missed target
     assert "not _stopped_by_shared" in src
+
+
+# ---------------------------------------------------------------------------
+# review follow-ups (#62): ledger outage is fatal, O(1) count, validation,
+# apply_filters through the SLURM bundle
+# ---------------------------------------------------------------------------
+
+def test_a_ledger_outage_fails_the_worker_instead_of_degrading():
+    from bouquet.TokaMaker_interface import generate_bouquet
+    src = inspect.getsource(generate_bouquet)
+    body = src.split("for count in eq_iter:", 1)[1]
+    head = body.split("progress_callback(count)", 1)[0]
+    assert "raise RuntimeError" in head and "unreadable" in head
+    assert "continuing on the local count" not in src
+    rec = body.split("_n_inspec_seen += 1", 1)[1][:900]
+    assert "raise RuntimeError" in rec and "undercount" in rec
+
+
+def test_file_ledger_count_is_the_file_size(tmp_path):
+    led = FileYieldLedger(tmp_path / "l")
+    for _ in range(7):
+        led.record()
+    assert os.stat(led.path).st_size == 7 * FileYieldLedger._RECORD_BYTES
+    assert led.count() == 7
+    src = inspect.getsource(FileYieldLedger.count)
+    assert "st_size" in src and ".read()" not in src
+
+
+@pytest.mark.parametrize("bad", [5.9, True])
+def test_budget_refuses_non_integer_counts(bad):
+    with pytest.raises((ValueError, TypeError)):
+        shared_until_n_budget(bad, None, 8, 2, 0)
+    with pytest.raises((ValueError, TypeError)):
+        shared_until_n_budget(5, bad, 8, 2, 0)
+
+
+def test_apply_filters_travels_through_the_slurm_bundle(fake_bouquet, tmp_path, capsys):
+    from bouquet.parallel import emit_slurm_script
+    cfg = _cfg(tmp_path, n_inspec_target=2, max_total_draws=4)
+    out = emit_slurm_script(cfg, n_workers=1, seed=1, threads_per_worker=1,
+                            out_dir=str(tmp_path), job_name="j", apply_filters=False)
+    b = json.load(open(out["bundle"]))
+    assert b["apply_filters"] is False
+    # drive the merge CLI on a real shard: the archive must stay unfiltered
+    led = FileYieldLedger(b["ledger"])
+    _shard(cfg, 0, 1, led, tmp_path)
+    _cli(["merge", out["bundle"]])
+    assert "left UNFILTERED" in capsys.readouterr().out
+    from bouquet.filtering import read_filter_flags
+    flags = read_filter_flags(str(tmp_path / "run.h5"), scan_key=0)
+    assert all("passes_coil_filter" not in f for f in flags.values())

@@ -41,6 +41,7 @@ from .sampling import (
 from .utils import (
     Ip_flux_integral_vs_target,
     Ip_fsa_weights,
+    capture_xpoints,
     eq_jphi_profile,
     fsa_current_geometry,
     pchip_derivative,
@@ -4587,15 +4588,14 @@ def generate_bouquet(
     # state (the same state baseline.eqdsk was saved from).  Stored so
     # plot_boundary_point_traces tracks true B_p=0 nulls instead of a
     # geometric corner guess on the saved boundary polyline.
-    try:
-        _bl_xpts, _bl_div = mygs.get_xpoints()
-        _bl_xpts = (np.asarray(_bl_xpts, dtype=float)
-                    if _bl_xpts is not None else None)
-    except Exception as _xexc:
-        print(f"  WARN: baseline get_xpoints() failed ({_xexc}); "
+    # capture_xpoints(), not a bare get_xpoints(): the wrapper hands back a
+    # VIEW onto the gs_equil struct, which every copy_eq/replace_eq swap
+    # frees under us (see utils.capture_xpoints).
+    _bl_xpts, _bl_div = capture_xpoints(mygs)
+    if _bl_xpts is None:
+        print(f"  NOTE: no baseline X-points captured; "
               f"plot_boundary_point_traces will fall back to the "
               f"axis-line intersection for top/bottom")
-        _bl_xpts, _bl_div = None, None
 
     # ---- What to archive as the baseline currents -----------------------
     # Default (geqdsk path / gate off): the anchored target profile
@@ -5766,15 +5766,16 @@ def generate_bouquet(
         # TokaMaker's built-in X-point finder at this same (post-save)
         # solver state -- the authoritative B_p=0 saddle location for this
         # draw, stored for plot_boundary_point_traces.
-        try:
-            _draw_xpts, _draw_div = mygs.get_xpoints()
-            _draw_xpts = (np.asarray(_draw_xpts, dtype=float)
-                          if _draw_xpts is not None else None)
-        except Exception as _xexc:
-            print(f"  WARN: get_xpoints() failed ({_xexc}); "
-                  f"this draw's top/bottom traces fall back to the "
+        # capture_xpoints() copies: get_xpoints() returns a view onto the
+        # gs_equil struct, and capture_equilibrium_fsa below swaps (and so
+        # frees) that struct once per traced surface before this draw is
+        # archived -- a retained view reads freed heap by then, which is how
+        # the same seed produced two different archived x_points datasets.
+        _draw_xpts, _draw_div = capture_xpoints(mygs)
+        if _draw_xpts is None:
+            print(f"  NOTE: no X-points captured for this draw; "
+                  f"top/bottom traces fall back to the "
                   f"axis-line intersection")
-            _draw_xpts, _draw_div = None, None
         diagnostics['x_points'] = _draw_xpts
         diagnostics['diverted'] = _draw_div
 

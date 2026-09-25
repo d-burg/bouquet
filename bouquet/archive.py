@@ -57,6 +57,18 @@ _FLAG_ATTRS = (*_FILTER_FLAGS, "selected")
 _FLAG_METRICS = ("max_F_drift_pct", "max_VSC_drift_pct", "in_spec")
 
 
+def _gfile_pressure_scalars(eq):
+    r"""``(<P> [kPa], beta_N)`` of a parsed g-file equilibrium.
+
+    :math:`\langle P\rangle = \int p\,dV / V` from the g-file's own pressure
+    and traced geometry, and the reader's ``beta_n``. The one definition used
+    by :meth:`ScanView.spread` and :func:`bouquet.stats.draw_scalars`.
+    """
+    vol = np.asarray(eq.geometry["vol"], dtype=float)
+    p_avg_kpa = float(eq.volume_integral(np.asarray(eq.pres))[-1]) / float(vol[-1]) / 1e3
+    return p_avg_kpa, float(eq.betas["beta_n"])
+
+
 class DrawView:
     """Lazy view of one perturbed draw (``scan/<key>/<count>``)."""
 
@@ -66,8 +78,17 @@ class DrawView:
         self.count = int(count)
         self._attrs_cache = None
 
+    #: False for a perturbed draw; :class:`BaselineView` sets it True, so one
+    #: evaluator can serve both (see :func:`bouquet.stats.draw_band`).
+    is_baseline = False
+
     def __repr__(self):
         return f"<DrawView scan={self.scan_key!r} count={self.count}>"
+
+    @property
+    def _gp(self) -> str:
+        """HDF5 group path of this view (overridden by :class:`BaselineView`)."""
+        return _group_path(self.scan_key, self.count)
 
     def refresh(self) -> "DrawView":
         """Drop cached metadata (re-read after e.g. re-running a filter)."""
@@ -87,7 +108,7 @@ class DrawView:
         if self._attrs_cache is None:
             import h5py
             with h5py.File(self._ar.path, "r") as hf:
-                a = hf[_group_path(self.scan_key, self.count)].attrs
+                a = hf[self._gp].attrs
                 self._attrs_cache = {
                     k: (a[k].item() if hasattr(a[k], "item") else a[k]) for k in a}
         return dict(self._attrs_cache)
@@ -125,7 +146,7 @@ class DrawView:
         import h5py
         out = {}
         with h5py.File(self._ar.path, "r") as hf:
-            grp = hf[_group_path(self.scan_key, self.count)]
+            grp = hf[self._gp]
             for name in grp:
                 ds = grp[name]
                 if not isinstance(ds, h5py.Dataset):
@@ -142,7 +163,7 @@ class DrawView:
         import h5py
         out = {}
         with h5py.File(self._ar.path, "r") as hf:
-            grp = hf[_group_path(self.scan_key, self.count)]
+            grp = hf[self._gp]
             for suffix in suffixes:
                 name = find_bytes_dataset(grp, suffix.lstrip("."))
                 out[suffix] = bytes(grp[name][()]) if name is not None else None
@@ -195,7 +216,7 @@ class DrawView:
         from .utils import _read_coil_names
         import h5py
         with h5py.File(self._ar.path, "r") as hf:
-            grp = hf[_group_path(self.scan_key, self.count)]
+            grp = hf[self._gp]
             if "coil_currents" not in grp:
                 return {}
             vals = np.asarray(grp["coil_currents"][()], dtype=float)
@@ -261,6 +282,45 @@ class DrawView:
         return paths
 
 
+class BaselineView(DrawView):
+    """The scan's baseline (``scan/<key>/_baseline``) behind the draw accessors.
+
+    Exposes the same byte and profile accessors as :class:`DrawView`
+    (``attrs``, ``profiles``, ``eqdsk_bytes``, ``pfile_bytes``,
+    ``equilibrium()``, ``pfile()``, ``coil_currents()``), so an evaluator
+    written for draws runs unchanged on the baseline -- the same code path and
+    grid for the overlay. ``count`` is ``None`` and ``is_baseline`` is True.
+    The baseline carries no per-draw ``l_i(1)``/``l_i(3)`` attrs, so ``li1`` /
+    ``li3`` raise ``KeyError`` here.
+    """
+
+    is_baseline = True
+
+    def __init__(self, archive: "BouquetArchive", scan_key):
+        self._ar = archive
+        self.scan_key = scan_key
+        self.count = None
+        self._attrs_cache = None
+
+    def __repr__(self):
+        return f"<BaselineView scan={self.scan_key!r}>"
+
+    @property
+    def _gp(self) -> str:
+        bkey = _scan_key(self.scan_key)
+        return f"scan/{bkey}/_baseline" if bkey is not None else "_baseline"
+
+    @property
+    def pfile_bytes(self) -> Optional[bytes]:
+        return self._read_bytes(".pfile")[".pfile"]
+
+    def profiles_doc(self) -> dict:          # per-draw document; not defined here
+        raise NotImplementedError("profiles_doc is a per-draw document")
+
+    def extract(self, out_dir: str, formats=("geqdsk",)) -> dict:
+        raise NotImplementedError("extract the baseline via the draw bundle tools")
+
+
 class ScanView:
     """View of one scan point (``scan/<key>/``) -- its baseline + draws."""
 
@@ -280,6 +340,10 @@ class ScanView:
     def baseline(self) -> dict:
         """Baseline profiles + sigmas dict for this scan point."""
         return load_baseline_profiles(self._ar.path, scan_key=self.scan_key)
+
+    def baseline_view(self) -> BaselineView:
+        """The baseline behind the :class:`DrawView` accessors (bytes, parse)."""
+        return BaselineView(self._ar, self.scan_key)
 
     def _draws(self, selection: str) -> list:
         idx = select_indices(self._ar.path, scan_key=self.scan_key, selection=selection)
@@ -325,17 +389,21 @@ class ScanView:
         variance in a single call. Returns ``{quantity: {n, mean, std, rel_std,
         min, max}}`` (``None`` for a quantity with no finite draws); prints a
         formatted table unless ``print_table=False``.
+
+        This is a quick-look summary (mean/std, no counts, floor or
+        provenance). For quotable error bars use
+        :func:`bouquet.stats.draw_scalars` (``bq.draw_scalars``), which applies
+        the standard recipe: filtered population, median with p16/p84,
+        per-stage counts and a provenance record.
         """
         draws = self._draws(selection)
         cols = {"l_i(1)": [], "l_i(3)": [], "<P> [kPa]": [], "beta_N": []}
         for d in draws:
             cols["l_i(1)"].append(d.li1)
             cols["l_i(3)"].append(d.li3)
-            eq = d.equilibrium()
-            vol = np.asarray(eq.geometry["vol"], dtype=float)
-            cols["<P> [kPa]"].append(
-                float(eq.volume_integral(np.asarray(eq.pres))[-1]) / float(vol[-1]) / 1e3)
-            cols["beta_N"].append(float(eq.betas["beta_n"]))
+            p_avg_kpa, beta_n = _gfile_pressure_scalars(d.equilibrium())
+            cols["<P> [kPa]"].append(p_avg_kpa)
+            cols["beta_N"].append(beta_n)
 
         out = {}
         for name, vals in cols.items():

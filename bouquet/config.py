@@ -1113,7 +1113,17 @@ def resolve_structured_preset(gc, warn: bool = True, stacklevel: int = 3):
 class FilterConfig:
     """Postprocessing selection of the machine-realizable subset."""
 
-    rms_max_mm: float = 5.0
+    #: LCFS boundary-deviation cut [mm rms] applied by ``Bouquet.filter()`` and
+    #: by the until-N in-loop verdict (the same number, by construction).
+    #: ``None`` (default) resolves to the DEVICE's calibrated cut
+    #: (:attr:`bouquet.devices.DeviceSpec.boundary_rms_max_mm`; 8.5 mm on
+    #: DIII-D from its boundary-UQ study) or, with no device calibration, to
+    #: the generic 5.0 mm (:data:`bouquet.devices.GENERIC_BOUNDARY_RMS_MM`).
+    #: An explicit number always wins. The resolved value and its source are
+    #: printed once and stamped on the archive (``boundary_rms_max_mm`` /
+    #: ``boundary_cut_source``), so a band built later can say which cut
+    #: defined its population.
+    rms_max_mm: Optional[float] = None
     # Coil filter used by Bouquet.filter():
     #   "chi2"   -> measurement-referenced chi2/nu <= chi2_max, with the per-coil
     #               sigma resolved from `coil_sigma` below (default: the device's

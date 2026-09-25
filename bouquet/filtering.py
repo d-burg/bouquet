@@ -437,7 +437,8 @@ def read_filter_flags(h5path_or_header, scan_key=None):
                 for k in (*_FILTER_FLAGS, "selected"):
                     if k in a:
                         rec[k] = bool(a[k])
-                for k in ("max_F_drift_pct", "max_VSC_drift_pct", "in_spec"):
+                for k in ("max_F_drift_pct", "max_VSC_drift_pct", "in_spec",
+                          "boundary_rms_mm", "boundary_max_mm"):
                     if k in a:
                         rec[k] = (float(a[k]) if k != "in_spec"
                                   else bool(a[k]))
@@ -810,7 +811,7 @@ def filter_coil_currents(h5path_or_header, scan_key=None,
 
 def filter_boundaries(h5path_or_header, scan_key=None,
                        rms_max_mm=None, max_max_mm=None,
-                       apply=True, plot=True):
+                       apply=True, plot=True, cut_source="explicit"):
     """LCFS boundary-deviation filter.
 
     Computes each draw's RMS and max LCFS deviation from the recon
@@ -821,6 +822,13 @@ def filter_boundaries(h5path_or_header, scan_key=None,
     actually cut; a draw passes when it satisfies every supplied bound.
 
     Returns ``(summary, fig)`` analogous to :func:`filter_coil_currents`.
+
+    With ``apply=True`` and a cut, the cut itself is recorded on the scan
+    group (``boundary_rms_max_mm`` / ``boundary_max_max_mm`` /
+    ``boundary_cut_source``, the last being *cut_source*: ``"explicit"``,
+    ``"device:<name>"`` or ``"generic"``) and each draw's metric on the draw
+    (``boundary_rms_mm`` / ``boundary_max_mm``), so the population a later
+    statistic is built on is readable from the archive alone.
     """
     h5path = _resolve(h5path_or_header)
     cutting = (rms_max_mm is not None) or (max_max_mm is not None)
@@ -842,6 +850,23 @@ def filter_boundaries(h5path_or_header, scan_key=None,
             draws[i] = {"rms_mm": rms, "max_mm": mx, "passes": passed}
         if apply and cutting:
             _write_filter_result(h5path, sv, results, "passes_boundary_filter")
+            _bkey = _scan_key(sv)
+            _gp = f"scan/{_bkey}" if _bkey is not None else "/"
+            with h5py.File(h5path, "a") as hf:
+                if _gp in hf:
+                    a = hf[_gp].attrs
+                    for _name, _val in (("boundary_rms_max_mm", rms_max_mm),
+                                        ("boundary_max_max_mm", max_max_mm)):
+                        if _val is None:
+                            a.pop(_name, None)
+                        else:
+                            a[_name] = float(_val)
+                    a["boundary_cut_source"] = str(cut_source)
+                for i, rms, mx in rows:
+                    gp = _group_path(sv, i)
+                    if gp in hf:
+                        hf[gp].attrs["boundary_rms_mm"] = float(rms)
+                        hf[gp].attrs["boundary_max_mm"] = float(mx)
         n_pass = sum(results.values())
         summary[sv] = {"n_total": len(results),
                        "n_pass": n_pass if cutting else len(results),

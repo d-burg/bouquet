@@ -174,7 +174,7 @@ b.generation.seed = 1234
 | `filtering.coil_daq_era` | `None` | Acquisition era setting the σ **floor**; never guessed from a name or path |
 | `device` | `None` | Device name for the tolerance model (`bouquet.devices`); detected from the mesh coil names when they match exactly |
 | `filtering.inspec_F_max` / `inspec_VSC_max` | `0.02` | Coil-drift spec for the `in_spec` flag, and the band `coil_filter="legacy"` applies |
-| `filtering.rms_max_mm` | `5.0` | Boundary-RMS acceptance threshold |
+| `filtering.rms_max_mm` | `None` | Boundary-RMS acceptance threshold [mm]. `None` resolves to the device's calibrated cut (8.5 mm on DIII-D, from its boundary-UQ study) or the generic 5.0 mm; an explicit number always wins. The resolved value and its source are stamped on the archive |
 | `solver.nthreads` | `1` | Recommended to keep at 1; parallelise across time slices or discharges instead (`run_slices` / `parallel_generate`) |
 
 Every tolerance is a **fraction**, never a percentage. The full table, and the

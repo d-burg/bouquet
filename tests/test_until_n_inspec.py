@@ -418,11 +418,13 @@ def test_the_loop_and_the_filter_read_the_same_thresholds():
     on a count the postprocess disagrees with."""
     from bouquet.run import Bouquet
     gen = inspect.getsource(Bouquet.generate)
-    assert "inspec_rms_max_mm=fc.rms_max_mm" in gen
+    # the boundary cut is resolved ONCE, by _boundary_cut() (explicit ->
+    # device calibration -> generic), at both sites
+    assert "inspec_rms_max_mm=self._boundary_cut()[0]" in gen
     assert "n_inspec_target=gc.n_inspec_target" in gen
     assert "max_total_draws=gc.max_total_draws" in gen
     flt = inspect.getsource(Bouquet.filter)
-    assert "rms_max_mm=rms" in flt and "fc.rms_max_mm" in flt
+    assert "rms_max_mm=rms" in flt and "self._boundary_cut()" in flt
 
 
 def test_the_summary_states_delivered_vs_requested():

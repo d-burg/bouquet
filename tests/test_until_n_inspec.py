@@ -289,33 +289,34 @@ def test_incoherent_until_n_settings_are_rejected_at_construction(kw, frag):
 
 
 # ==========================================================================
-#  5. serial-only guard
+#  5. parallel launchers: a target is honoured through a shared ledger
 # ==========================================================================
-def test_every_parallel_entry_point_rejects_a_target(tmp_path):
-    """Shards cannot see each other's yield: N workers each chasing the target
-    would deliver N*target draws. All three entry points must refuse."""
-    from bouquet.parallel import (emit_slurm_script, parallel_generate,
-                                  run_shard)
+def test_run_shard_refuses_a_target_without_a_ledger(tmp_path):
+    """N workers each chasing the target alone would deliver N*target draws,
+    so a bare run_shard (no shared ledger) must refuse rather than ignore."""
+    from bouquet.parallel import run_shard
     cfg = _mini_config(n_inspec_target=5)
-    for call in (
-        lambda: parallel_generate(cfg, n_workers=2, seed=1),
-        lambda: emit_slurm_script(cfg, n_workers=2, seed=1,
-                                  threads_per_worker=1,
-                                  out_dir=str(tmp_path), job_name="j"),
-        lambda: run_shard(cfg, 0, 2, n_equils_total=4, seed_base=1,
-                          out_header="h", scan_key=0, threads_per_worker=1),
-    ):
-        with pytest.raises(ValueError, match="serial-only"):
-            call()
+    with pytest.raises(ValueError, match="shared ledger"):
+        run_shard(cfg, 0, 2, n_equils_total=4, seed_base=1,
+                  out_header=str(tmp_path / "h"), scan_key=0,
+                  threads_per_worker=1)
 
 
-def test_parallel_still_runs_the_guard_before_anything_expensive():
-    """The rejection must precede shard sizing / process spawn, so a bad
-    config fails in milliseconds rather than after N baselines solve."""
-    from bouquet import parallel
-    src = inspect.getsource(parallel.run_shard)
-    body = src.split(':\n', 1)[1]
-    assert body.index("_reject_until_n") < body.index("_shard_size")
+def test_emit_slurm_script_carries_the_shared_ledger(tmp_path):
+    """The SLURM bundle records the target and the ledger file, and submit.sh
+    truncates that file before the array starts."""
+    import json
+    from bouquet.parallel import emit_slurm_script
+    cfg = _mini_config(n_inspec_target=5)
+    cfg.output_header = str(tmp_path / "run")
+    out = emit_slurm_script(cfg, n_workers=2, seed=1, threads_per_worker=1,
+                            out_dir=str(tmp_path), job_name="j")
+    b = json.load(open(out["bundle"]))
+    assert b["n_inspec_target"] == 5
+    assert b["ledger"].endswith("run_inspec.ledger")
+    submit = open(out["submit"]).read()
+    assert f': > "{b["ledger"]}"' in submit
+    assert submit.index(': > "') < submit.index("sbatch --parsable")
 
 
 # ==========================================================================

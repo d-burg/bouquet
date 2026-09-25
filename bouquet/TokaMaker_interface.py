@@ -3602,6 +3602,11 @@ def generate_bouquet(
     # geqdsk path leaves this False: its corrective iteration already drives
     # achieved ~= target, and its baseline stores the corrective output.
     store_achieved_jphi=False,
+    # Baseline provenance dict (Baseline.li_metrics, which carries the
+    # ip_closure health record on hybrid baselines); archived as JSON on the
+    # _baseline group so closure_limited travels with the slice.  Appended
+    # LAST: the options above are positional-capable in existing callers.
+    baseline_meta=None,
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
 
@@ -4656,6 +4661,7 @@ def generate_bouquet(
         j_BS=_bl_jBS_store,
         j_inductive=_bl_jind_store,
         source_kind=source_kind,
+        baseline_meta=baseline_meta,
     )
 
     # ---- Purge stale draws for THIS scan value -------------------------

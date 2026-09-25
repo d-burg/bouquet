@@ -388,8 +388,8 @@ class UncertaintyConfig:
     #                 that dilution's direct measurement, hence the order.
     #   "carbon"   -- require the carbon-propagated tier; loud fallback.
     #   "measured" -- require the VB-measured envelope; loud fallback.
-    #   "scalar"   -- always the flat zeff_scalar_sigma fraction (pre-1.3.2
-    #                 behaviour).
+    #   "scalar"   -- always the flat zeff_scalar_sigma fraction (the only
+    #                 behaviour before 1.4.0).
     # Only the reconstruction/IDA path is eligible for the measured tiers,
     # and only when the sigma .cdf IS the source's own profiles file: on the
     # IMAS/ida_hybrid path the Z_eff baseline is FUSE's, and pairing a FUSE
@@ -542,11 +542,21 @@ class GenerationConfig:
     #   "rescale" : keep FUSE ohmic; rescale SWB by a single factor so l_i
     #               matches the source (fully self-consistent bootstrap).
     #   "ohmic"   : HYBRID. SWB bootstrap (from the kinetic source, e.g. IDA)
-    #               and FUSE NBI/RF taken as-is; Ip closed by rescaling FUSE
-    #               j_ohmic only (factor recorded as Baseline.ohm_scale). The
-    #               jphi_diff equilibrium anchor is NOT applied. Use when the
-    #               kinetic source has a materially different pedestal than
-    #               FUSE -- "diff" would erase that current change.
+    #               and FUSE NBI/RF taken as-is; Ip closed on the channel
+    #               named by ``closure_channel`` (default "bootstrap": rescale
+    #               j_BS, factor recorded as Baseline.bs_scale; the
+    #               deprecated "ohmic" channel rescales FUSE j_ohmic instead,
+    #               Baseline.ohm_scale; "sawtooth_bootstrap" and "structured"
+    #               are documented on ``closure_channel``). The jphi_diff
+    #               equilibrium anchor is NOT applied. Use when the kinetic
+    #               source has a materially different pedestal than FUSE --
+    #               "diff" would erase that current change.  BASELINE-ONLY
+    #               for now: generate() refuses this mode unless
+    #               workflow="custom" (the draw-path sigma=0 reproduction of
+    #               an ohmic-closed baseline is unverified).
+    #   ``closure_channel`` is read ONLY in this mode (and only with
+    #   recalculate_j_BS=True); on "diff"/"rescale" a non-default channel is
+    #   refused rather than silently ignored.
     jBS_baseline_mode: str = "diff"
     #: Which channel absorbs the Ip closure in jBS_baseline_mode="ohmic":
     #: "bootstrap" (default) keeps j_inductive exactly as the source diffused it

@@ -247,6 +247,7 @@ def test_recorded_fields_are_read(tmp_path):
         tmp_path / "a.h5", {"1": {i: {"val": i} for i in range(6)}},
         scan_attrs={"n_requested": 20, "n_attempted": 31, "generation_mode": "until_n",
                     "boundary_rms_max_mm": 8.5, "boundary_max_max_mm": 20.0,
+                    "boundary_cut_source": "device:generic-test",
                     "bouquet_version": "1.4.0"},
         baseline_attrs={"li_metrics_json": json.dumps(meta)})
     with h5py.File(p, "a") as hf:
@@ -258,6 +259,7 @@ def test_recorded_fields_are_read(tmp_path):
     assert r.closure_limited_reasons == ("bs_scale 0.2 < 0.3",)
     pv = r.provenance
     assert (pv["rms_max_mm"], pv["max_max_mm"]) == (8.5, 20.0)
+    assert pv["boundary_cut_source"] == "device:generic-test"
     assert pv["draw_boundary_rms_mm"] == {2: 3.25}
     assert pv["generation_mode"] == "until_n"
     assert pv["bouquet_version"]["scan"] == "1.4.0"
@@ -298,6 +300,27 @@ def test_draw_bands_missing_and_refused(tmp_path):
     ref = [r for r in t if r.status == "refused"][0]
     assert ref.refused_reason == "closure gate rejected" and ref.quantity == "x"
     assert [r.median for r in t if r.status == "ok"] == [2.5, 5.0]
+    # refused / no_archive records honour the provenance contract too: the
+    # recipe settings, the reader version, and a limitation saying why
+    for r in t:
+        if r.status in ("refused", "no_archive"):
+            pv = r.provenance
+            assert pv["pole_rule"] == "majority_regular" and pv["min_n"] == 15
+            assert pv["boundary_cut_source"] == "unrecorded"
+            assert pv["bouquet_version"]["reader"] == bq.__version__
+            assert any(f"status={r.status}" in l for l in pv["limitations"])
+            assert r.show is False
+
+
+def test_status_records_carry_the_requested_recipe_settings(tmp_path):
+    p = _make_archive(tmp_path / "a.h5", {"1": {i: {} for i in range(6)}})
+    with h5py.File(p, "a") as hf:
+        hf.create_group("scan/9").attrs["refused_reason"] = "no reference"
+    r = bq.draw_band(p, "9", _by_attr, quantities=["x"], min_n=7, hard_min=3,
+                     percentiles=(25, 75))["x"]
+    assert r.status == "refused" and r.provenance["min_n"] == 7
+    assert r.provenance["percentiles"] == [25, 75]
+    assert "no reference" in r.provenance["limitations"][-1]
 
 
 def test_draw_bands_mapping_and_per_key_exclude(tmp_path):
@@ -391,6 +414,20 @@ def test_draw_scalars_golden_values(golden_scalars):
         assert r.p16 <= r.median <= r.p84, q
     assert 0.0 < s["rho(q=2/1)"].median < 1.0
     assert s["q0"].median < s["q95"].median
+
+
+def test_forced_eq_fsa_source_does_not_fall_back_for_the_baseline():
+    if not os.path.exists(_GOLDEN):
+        pytest.skip("golden fixture absent")
+    ar = bq.BouquetArchive(_GOLDEN)
+    key = ar.scan_keys[0]
+    s = bq.draw_scalars(ar, key, require_filter=False, q_source="eq_fsa")
+    r = s["q0"]
+    # draws have eq_fsa; the baseline has none -> its overlay is absent and
+    # SAYS so, rather than being quietly taken from the g-file
+    assert np.isfinite(r.median)
+    assert r.baseline_status == "status:no_eq_fsa"
+    assert not np.isfinite(r.baseline_value)
 
 
 def test_draw_scalars_rational_flag_matches_q_range(golden_scalars):

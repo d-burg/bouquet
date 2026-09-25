@@ -377,6 +377,9 @@ def _scan_context(ar, key) -> dict:
         _json_attr(sattrs.get("coil_sigma_model")))
     ctx["rms_max_mm"] = sattrs.get("boundary_rms_max_mm", UNRECORDED)
     ctx["max_max_mm"] = sattrs.get("boundary_max_max_mm", UNRECORDED)
+    # where that cut came from: "explicit" | "device:<name>" | "generic"
+    _src = sattrs.get("boundary_cut_source")
+    ctx["boundary_cut_source"] = str(_src) if _src is not None else UNRECORDED
 
     # ---- counts recorded at generation
     n_req, n_req_src, mode = None, UNRECORDED, sattrs.get("generation_mode")
@@ -576,9 +579,12 @@ def draw_band(archive, scan_key, evaluate, *, quantities=None,
 
     if ctx["refused_reason"] is not None:
         qs = list(quantities) if quantities else [None]
-        return {q: BandRecord(scan_key=skey, quantity=q, status="refused",
-                              refused_reason=ctx["refused_reason"],
-                              archive=ar.path, show=False)
+        return {q: _status_record(skey, q, "refused", ar.path,
+                                  refused_reason=ctx["refused_reason"],
+                                  selection=selection, pole_rule=pole_rule,
+                                  min_n=min_n, hard_min=hard_min,
+                                  percentiles=percentiles, method=method,
+                                  evaluator_meta=meta)
                 for q in qs}
 
     if require_filter and selection != "all" and ctx["coil_filter"] is None:
@@ -651,6 +657,7 @@ def draw_band(archive, scan_key, evaluate, *, quantities=None,
         "coil_sigma_model": ctx["coil_sigma_model"],
         "boundary_filter_applied": boundary_flag_seen,
         "rms_max_mm": ctx["rms_max_mm"], "max_max_mm": ctx["max_max_mm"],
+        "boundary_cut_source": ctx["boundary_cut_source"],
         "draw_boundary_rms_mm": draw_rms,
         "generation_mode": ctx["generation_mode"],
         "pole_rule": pole_rule, "regular_label": meta.get("regular_label"),
@@ -752,6 +759,45 @@ def _any_flag(ar, key, draws, flag):
         return any(flag in hf[_group_path(key, d)].attrs for d in draws)
 
 
+_RECIPE_DEFAULTS = dict(selection="selected", pole_rule="majority_regular",
+                        min_n=15, hard_min=5, percentiles=(16, 84),
+                        method="linear", evaluator_meta=None)
+
+
+def _status_record(skey, quantity, status, archive, *, refused_reason=None,
+                   **kw) -> "BandRecord":
+    """A ``refused`` / ``no_archive`` record that still honours the
+    provenance contract: the recipe settings it was asked for, the reader
+    version, and a limitation saying why nothing was evaluated -- so a
+    consumer can tell an intentionally empty record from an unannotated one.
+    """
+    from . import __version__
+    settings = {k: kw.get(k, v) for k, v in _RECIPE_DEFAULTS.items()}
+    why = (f"status={status}"
+           + (f": {refused_reason}" if refused_reason else "")
+           + " -- no draws were evaluated for this key")
+    prov = {
+        "selection": settings["selection"],
+        "coil_filter": UNRECORDED, "coil_sigma_model": UNRECORDED,
+        "boundary_filter_applied": None,
+        "rms_max_mm": UNRECORDED, "max_max_mm": UNRECORDED,
+        "boundary_cut_source": UNRECORDED, "draw_boundary_rms_mm": {},
+        "generation_mode": UNRECORDED,
+        "pole_rule": settings["pole_rule"],
+        "regular_label": (settings["evaluator_meta"] or {}).get("regular_label"),
+        "min_n": int(settings["min_n"]), "hard_min": int(settings["hard_min"]),
+        "percentiles": list(settings["percentiles"]), "method": settings["method"],
+        "exclude": {},
+        "bouquet_version": {"scan": UNRECORDED, "file": UNRECORDED,
+                            "reader": __version__},
+        "evaluator_meta": dict(settings["evaluator_meta"] or {}),
+        "limitations": [LIMITATION_SAMPLED, why],
+    }
+    return BandRecord(scan_key=skey, quantity=quantity, status=status,
+                      refused_reason=refused_reason, archive=archive,
+                      show=False, provenance=prov)
+
+
 def _limitations(rec, ctx, meta, selection, require_filter, percentiles):
     lim = [LIMITATION_SAMPLED]
     for extra in meta.get("limitations", ()) or ():
@@ -823,14 +869,13 @@ def draw_bands(sources, evaluate, **kw) -> BandTable:
     records = []
     for skey, ref, recs in per_key:
         if recs == "no_archive":
-            records.extend(BandRecord(scan_key=skey, quantity=q,
-                                      status="no_archive", archive=ref)
+            records.extend(_status_record(skey, q, "no_archive", ref, **kw)
                            for q in qs)
             continue
         if any(r.status == "refused" for r in recs.values()):
             reason = next(iter(recs.values())).refused_reason
-            records.extend(BandRecord(scan_key=skey, quantity=q, status="refused",
-                                      refused_reason=reason, archive=ref)
+            records.extend(_status_record(skey, q, "refused", ref,
+                                          refused_reason=reason, **kw)
                            for q in qs)
             continue
         records.extend(recs.values())
@@ -927,7 +972,10 @@ def draw_scalars(archive, scan_key=None, *, rational=((2, 1), (3, 1)),
         if fsa is not None and "q" in fsa and "psi_N" in fsa:
             qf, pf = np.abs(fsa["q"]), fsa["psi_N"]
             src = "eq_fsa"
-        elif q_source == "eq_fsa" and not view.is_baseline:
+        elif q_source == "eq_fsa":
+            # forced source, baseline included: a baseline without eq_fsa is
+            # reported as no_eq_fsa rather than quietly overlaid from the
+            # g-file on eq_fsa draw statistics
             qf = pf = None
             src = None
         elif eq is not None:

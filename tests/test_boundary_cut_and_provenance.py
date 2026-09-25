@@ -59,7 +59,11 @@ def _cfg(tmp_path, device=None, rms=None):
 
 def test_bouquet_resolves_explicit_then_device_then_generic(tmp_path, capsys):
     from bouquet.run import Bouquet
-    assert Bouquet(_cfg(tmp_path, rms=3.0))._boundary_cut() == (3.0, "explicit")
+    b = Bouquet(_cfg(tmp_path, rms=3.0))
+    assert b._boundary_cut() == (3.0, "explicit")
+    b._boundary_cut()                                   # second call: no repeat
+    out = capsys.readouterr().out
+    assert out.count("[boundary cut]") == 1 and "3 mm (explicit" in out
     assert Bouquet(_cfg(tmp_path, device="DIII-D"))._boundary_cut() == (8.5, "device:DIII-D")
     out = capsys.readouterr().out
     assert "8.5 mm" in out and "overrides" in out       # announced once, loudly

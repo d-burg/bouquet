@@ -3690,7 +3690,8 @@ class Bouquet:
         from .devices import resolve_device, boundary_cut_for
         fc = self.config.filtering
         if fc.rms_max_mm is not None:
-            return float(fc.rms_max_mm), "explicit"
+            val, src, spec = float(fc.rms_max_mm), "explicit", None
+            return self._announce_boundary_cut(val, src, spec, quiet)
         names = None
         try:
             if self.mygs is not None and getattr(self.mygs, "coil_sets", None):
@@ -3712,9 +3713,16 @@ class Bouquet:
                 names = None
         spec = resolve_device(self.config.device, names)
         val, src = boundary_cut_for(spec)
+        return self._announce_boundary_cut(val, src, spec, quiet)
+
+    def _announce_boundary_cut(self, val, src, spec, quiet):
+        """One announcement per resolved ``(value, source)``, every source alike."""
         if not quiet and getattr(self, "_boundary_cut_announced", None) != (val, src):
             self._boundary_cut_announced = (val, src)
-            if src == "generic":
+            if src == "explicit":
+                print(f"[boundary cut] LCFS rms <= {val:g} mm (explicit "
+                      "filtering.rms_max_mm)")
+            elif src == "generic":
                 print(f"[boundary cut] LCFS rms <= {val:g} mm (generic: no device "
                       "calibration; set config.device or filtering.rms_max_mm)")
             else:

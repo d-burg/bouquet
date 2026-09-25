@@ -427,7 +427,7 @@ def test_forced_eq_fsa_source_does_not_fall_back_for_the_baseline():
     # SAYS so, rather than being quietly taken from the g-file
     assert np.isfinite(r.median)
     assert r.baseline_status == "status:no_eq_fsa"
-    assert not np.isfinite(r.baseline_value)
+    assert r.baseline_value is None
 
 
 def test_draw_scalars_rational_flag_matches_q_range(golden_scalars):

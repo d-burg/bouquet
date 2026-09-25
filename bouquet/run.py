@@ -3442,7 +3442,7 @@ class Bouquet:
                 # does not disable the target.
                 n_inspec_target=gc.n_inspec_target,
                 max_total_draws=gc.max_total_draws,
-                inspec_rms_max_mm=fc.rms_max_mm,
+                inspec_rms_max_mm=self._boundary_cut()[0],
                 # ...including the COIL criterion: same filter, same sigma,
                 # same acceptance numbers and -- via _coil_daq_era() -- the
                 # same era floor .filter() will resolve. A loop still counting
@@ -3510,7 +3510,11 @@ class Bouquet:
             from .filtering import until_n_delivered
             _tgt = int(gc.n_inspec_target)
             _got = until_n_delivered(self.diagnostics)
-            _tries = len(self.diagnostics or [])
+            # attempts, not stored draws: failed draws leave no group, so the
+            # count comes from the generation-provenance stamp
+            from .utils import read_generation_provenance
+            _tries = read_generation_provenance(header, scan_key=gc.scan_key).get(
+                "n_attempted") or len(self.diagnostics or [])
             _shared_done = False
             if stop_check is not None:
                 try:
@@ -3563,7 +3567,7 @@ class Bouquet:
         """Per-draw l_i / LCFS-deviation / anchor-displacement traces for this run."""
         from .plotting import plot_traces as _f
         kwargs.setdefault("li_band", self.config.generation.l_i_tolerance)
-        kwargs.setdefault("rms_max_mm", self.config.filtering.rms_max_mm)
+        kwargs.setdefault("rms_max_mm", self._boundary_cut(quiet=True)[0])
         return _f(f"{self.config.output_header}.h5",
                   scan_key=self.config.generation.scan_key, **kwargs)
 
@@ -3576,7 +3580,7 @@ class Bouquet:
     def plot_spec_summary(self, **kwargs):
         """In-spec fraction summary (coil + boundary) for this run."""
         from .plotting import plot_spec_summary as _f
-        kwargs.setdefault("rms_max_mm", self.config.filtering.rms_max_mm)
+        kwargs.setdefault("rms_max_mm", self._boundary_cut(quiet=True)[0])
         return _f(self.config.output_header,
                   scan_key=self.config.generation.scan_key, **kwargs)
 
@@ -3611,10 +3615,14 @@ class Bouquet:
 
         header = self.config.output_header
         fc = self.config.filtering
-        rms = fc.rms_max_mm if rms_max_mm is None else rms_max_mm
+        rms = fc.rms_max_mm if rms_max_mm is None else rms_max_mm   # explicit wins
 
         sk = self.config.generation.scan_key
         coil_filter_used = fc.coil_filter
+        # the boundary cut: explicit, else the device's calibrated value, else
+        # generic -- the SAME resolution the until-N loop used (identity)
+        rms, rms_source = ((rms, "explicit") if rms_max_mm is not None
+                           else self._boundary_cut())
         if fc.coil_filter == "chi2":
             from .coil_spec import CoilSigmaUnavailable
             # the era sets the sigma floor, i.e. an acceptance criterion -- say
@@ -3658,6 +3666,7 @@ class Bouquet:
             )
         bnd_summary, bnd_fig = filter_boundaries(
             header, scan_key=sk, rms_max_mm=rms, apply=True, plot=plot,
+            cut_source=rms_source,
         )
         # one scan key -> each summary is a single {counts, draws} dict
         self._selection = {"coil": coil_summary, "boundary": bnd_summary,
@@ -3666,6 +3675,52 @@ class Bouquet:
             self._selection["figures"] = (coil_fig, bnd_fig)
         self._print_generation_summary(coil_summary, bnd_summary)
         return self._selection
+
+    def _boundary_cut(self, quiet=False):
+        """``(rms_max_mm, source)`` -- the LCFS boundary cut this run applies.
+
+        ``filtering.rms_max_mm`` when set (``"explicit"``); otherwise the
+        device's calibrated value (``"device:<name>"``, e.g. 8.5 mm on DIII-D
+        from its boundary-UQ study) with the device taken from
+        ``config.device`` or detected from the mesh's coil names; otherwise
+        the generic 5.0 mm (``"generic"``). Used by :meth:`generate`'s
+        until-N verdict and by :meth:`filter`, so the two agree by
+        construction. Printed once per resolution unless *quiet*.
+        """
+        from .devices import resolve_device, boundary_cut_for
+        fc = self.config.filtering
+        if fc.rms_max_mm is not None:
+            return float(fc.rms_max_mm), "explicit"
+        names = None
+        try:
+            if self.mygs is not None and getattr(self.mygs, "coil_sets", None):
+                names = list(self.mygs.coil_sets)
+        except Exception:
+            names = None
+        if names is None:
+            # no live solver (e.g. a filter-only session): the archive's
+            # baseline carries the coil names the chi2 filter reads too
+            try:
+                import h5py
+                from .utils import _read_coil_names, _scan_key
+                bkey = _scan_key(self.config.generation.scan_key)
+                bl = f"scan/{bkey}/_baseline" if bkey is not None else "_baseline"
+                with h5py.File(f"{self.config.output_header}.h5", "r") as hf:
+                    if bl in hf:
+                        names = _read_coil_names(hf[bl]) or None
+            except OSError:
+                names = None
+        spec = resolve_device(self.config.device, names)
+        val, src = boundary_cut_for(spec)
+        if not quiet and getattr(self, "_boundary_cut_announced", None) != (val, src):
+            self._boundary_cut_announced = (val, src)
+            if src == "generic":
+                print(f"[boundary cut] LCFS rms <= {val:g} mm (generic: no device "
+                      "calibration; set config.device or filtering.rms_max_mm)")
+            else:
+                print(f"[boundary cut] LCFS rms <= {val:g} mm ({src} calibration: "
+                      f"{spec.boundary_provenance}; filtering.rms_max_mm overrides)")
+        return val, src
 
     def _coil_daq_era(self):
         """Acquisition era label for the era-dependent coil tolerance floor, or None.

@@ -529,6 +529,20 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
                 _wrec = _read_worker_record(src, base_path)
                 if _wrec is not None:
                     _wrec["first_index"] = offset      # where its draws land
+                    # the shard's own generation provenance (attempt outcomes)
+                    _pa = (src[base_path] if base_path else src).attrs
+                    _raw = _pa.get("attempt_outcomes_json", None)
+                    if _raw is not None:
+                        try:
+                            _wrec["attempt_outcomes"] = json.loads(
+                                _raw.decode() if isinstance(_raw, bytes) else str(_raw))
+                        except (ValueError, TypeError):
+                            pass
+                    for _k in ("n_attempted", "bouquet_version"):
+                        if _k in _pa:
+                            _v = _pa[_k]
+                            _wrec[_k] = _v.decode() if isinstance(_v, bytes) else (
+                                _v.item() if hasattr(_v, "item") else _v)
                     workers.append(_wrec)
                 idxs = sorted(
                     int(k) for k in parent.keys()
@@ -565,6 +579,27 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
         with h5py.File(out_path, "a") as out:
             gp = base_path if base_path else "/"
             out[gp].attrs["parallel_manifest_json"] = json.dumps(manifest)
+        # run-level generation provenance, aggregated over the shards (the
+        # same record a serial run stamps; attempts summed, outcomes keyed by
+        # worker since shard attempt indices overlap)
+        from .utils import stamp_generation_provenance
+        _n_att = [w.get("n_attempted") for w in workers]
+        _vers = sorted({str(w["bouquet_version"]) for w in workers
+                        if w.get("bouquet_version") is not None})
+        stamp_generation_provenance(
+            out_header, scan_key=scan_key,
+            n_requested=(int(shared[0]["shared_target"]) if shared
+                         else (int(config.generation.n_equils) if config is not None
+                               else None)),
+            n_requested_source=("n_inspec_target" if shared else "n_equils"),
+            generation_mode=("until_n" if shared else "fixed"),
+            n_attempted=(int(sum(int(a) for a in _n_att)) if all(a is not None for a in _n_att)
+                         else None),
+            n_stored=int(offset),
+            attempt_outcomes_json={str(w["worker_id"]): w.get("attempt_outcomes")
+                                   for w in workers},
+            bouquet_version=(",".join(_vers) if _vers else None),
+        )
         if shared:
             _u = manifest["until_n"]
             print(f"[until-N] merged {offset} draws from {len(workers)} "

@@ -85,7 +85,8 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, Optional, Tuple
 
 __all__ = ["DeviceSpec", "DEVICES", "detect_device", "resolve_device", "get_device",
-           "tolerance_for", "era_labels", "era_for_pulse", "GENERIC_ACCEPTANCE"]
+           "tolerance_for", "era_labels", "era_for_pulse", "GENERIC_ACCEPTANCE",
+           "GENERIC_BOUNDARY_RMS_MM", "boundary_cut_for"]
 
 
 @dataclass(frozen=True)
@@ -129,6 +130,13 @@ class DeviceSpec:
     # changes their meaning (the filter records both counts and warns).
     acceptance: Dict[str, float] = field(default_factory=dict)   # {"chi2_max","z_max","quantile","calibrated_nu"}
     acceptance_provenance: str = ""
+    # LCFS boundary-deviation acceptance [mm rms], calibrated on the device's
+    # own magnetics-noise boundary uncertainty; None -> the generic
+    # GENERIC_BOUNDARY_RMS_MM. Like the chi2 thresholds this is an acceptance
+    # criterion: it is a device fact, recorded on the archive, and an explicit
+    # ``FilterConfig.rms_max_mm`` always overrides it.
+    boundary_rms_max_mm: Optional[float] = None
+    boundary_provenance: str = ""
     # measured-current conventions (used by the coil-target and dd-referenced paths)
     turns: Dict[str, float] = field(default_factory=dict)       # measured A -> mesh A-t
     coil_family: Callable[[str], str] = lambda n: n[:1]         # for per-family tables
@@ -139,6 +147,8 @@ class DeviceSpec:
 # Generic acceptance when no device calibration is available (a Gaussian-ish
 # "RMS 2 sigma per coil, no coil beyond 5" rule; DIII-D's empirical values are looser).
 GENERIC_ACCEPTANCE = {"chi2_max": 4.0, "z_max": 5.0}
+#: Generic LCFS rms cut [mm] when no device calibration exists.
+GENERIC_BOUNDARY_RMS_MM = 5.0
 
 _D3D_F = [f"F{i}{s}" for i in range(1, 10) for s in "AB"]
 
@@ -199,6 +209,16 @@ DEVICES: Dict[str, DeviceSpec] = {
         digitizer_sigma={"F": 7.0, "E": 69.0},
         vsc_pair=("F9A", "F9B"),
         acceptance={"chi2_max": 6.1, "z_max": 6.3, "quantile": 0.95, "calibrated_nu": 18},
+        # Pre-registered magnetics-UQ study of the reconstructed LCFS: with the
+        # magnetics perturbed at their stated noise level, the across-slice 90th
+        # percentile of the boundary rms displacement was 8.34 mm (about 3.7 mm
+        # per % of noise), rounded to 8.5. The pre-registered rule adopted the
+        # derived value once it came out above 8 mm: a 5 mm cut was rejecting
+        # draws on magnetics noise, not on physics.
+        boundary_rms_max_mm=8.5,
+        boundary_provenance=("across-slice 90th percentile (8.34 mm) of the LCFS rms "
+                             "displacement under the magnetics' stated noise in a "
+                             "pre-registered boundary-UQ study, rounded to 8.5 mm"),
         acceptance_provenance=("95th percentile of chi2/nu and worst-coil |z| scored by real DIII-D "
                                "flat-top slices (r(t)-mean per coil over the adopted per-coil era "
                                "sigma; 16573 slices from the larger of the two flat-top survey sets "
@@ -315,3 +335,16 @@ def resolve_device(device: Optional[str], coil_names=None) -> Optional[DeviceSpe
         if d is not None:
             return DEVICES[d]
     return None
+
+
+def boundary_cut_for(spec: Optional[DeviceSpec]) -> Tuple[float, str]:
+    """``(rms_max_mm, source)`` for the LCFS boundary cut of *spec*.
+
+    The device's calibrated value when it has one (``source`` names the device
+    and its provenance), else :data:`GENERIC_BOUNDARY_RMS_MM` with
+    ``source="generic"``. Explicit ``FilterConfig.rms_max_mm`` is resolved by
+    the caller before this is consulted and always wins.
+    """
+    if spec is not None and spec.boundary_rms_max_mm is not None:
+        return float(spec.boundary_rms_max_mm), f"device:{spec.name}"
+    return float(GENERIC_BOUNDARY_RMS_MM), "generic"

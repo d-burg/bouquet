@@ -165,6 +165,29 @@ def test_custom_workflow_downgrades_the_refusal_to_a_warning(capsys):
     assert "silently ignored" in capsys.readouterr().out
 
 
+def test_baseline_time_refusal_honours_the_custom_downgrade():
+    """_validate_workflow downgrades to a warning under workflow='custom';
+    the baseline-solve copy of the same check must not then raise (Copilot
+    review on #61).  Solve-free: the check sits before any solver call, so
+    it is exercised on the source with the same predicate."""
+    import inspect
+    from bouquet.run import Bouquet
+    src = inspect.getsource(Bouquet._forward_solve_imas_baseline)
+    blk = src.split("Same refusal as _validate_workflow", 1)[1]
+    blk = blk.split("if self.config.generation.recalculate_j_BS:", 1)[0]
+    assert '== "custom"' in blk and "allow_unsafe_workflow" in blk
+    assert blk.index('print("WARN: "') < blk.index("raise ValueError(_msg0)")
+
+
+def test_baseline_meta_is_the_last_generate_bouquet_parameter():
+    """generate_bouquet's trailing options are positional-capable in existing
+    callers; a new optional parameter must be appended, never inserted."""
+    import inspect
+    from bouquet.TokaMaker_interface import generate_bouquet
+    params = list(inspect.signature(generate_bouquet).parameters)
+    assert params[-1] == "baseline_meta"
+
+
 # ---------------------------------------------------------------------------
 # 3. ip_closure travels with the archive
 # ---------------------------------------------------------------------------

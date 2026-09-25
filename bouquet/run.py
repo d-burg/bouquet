@@ -2257,20 +2257,27 @@ class Bouquet:
         # Same refusal as _validate_workflow, here for baseline-only callers
         # (prepare_baseline() without generate()): a non-default
         # closure_channel outside the ohmic hybrid split is never read.
-        _chan0 = str(getattr(self.config.generation, "closure_channel",
-                             "bootstrap"))
+        # Same downgrade too: workflow='custom' / allow_unsafe_workflow turn
+        # it into a printed WARN, so validation and the baseline solve agree.
+        _gc0 = self.config.generation
+        _chan0 = str(getattr(_gc0, "closure_channel", "bootstrap"))
         if _chan0 != "bootstrap" and (
-                str(self.config.generation.jBS_baseline_mode) != "ohmic"
-                or not bool(self.config.generation.recalculate_j_BS)):
-            raise ValueError(
+                str(_gc0.jBS_baseline_mode) != "ohmic"
+                or not bool(_gc0.recalculate_j_BS)):
+            _msg0 = (
                 f"closure_channel={_chan0!r} is only read when "
                 "jBS_baseline_mode='ohmic' and recalculate_j_BS=True "
-                f"(have jBS_baseline_mode="
-                f"{str(self.config.generation.jBS_baseline_mode)!r}, "
-                f"recalculate_j_BS={bool(self.config.generation.recalculate_j_BS)}); "
+                f"(have jBS_baseline_mode={str(_gc0.jBS_baseline_mode)!r}, "
+                f"recalculate_j_BS={bool(_gc0.recalculate_j_BS)}); "
                 "it would otherwise be silently ignored. Set "
                 "jBS_baseline_mode='ohmic' or leave closure_channel at "
                 "'bootstrap'.")
+            if (str(getattr(_gc0, "workflow", "")) == "custom"
+                    or bool(getattr(_gc0, "allow_unsafe_workflow", False))):
+                print("WARN: " + _msg0 + " (workflow='custom': continuing; "
+                      "the channel is NOT applied)")
+            else:
+                raise ValueError(_msg0)
         if self.config.generation.recalculate_j_BS:
             from .TokaMaker_interface import (_swb_jbs_to_toroidal,
                                               smooth_jbs_transition)

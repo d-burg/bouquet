@@ -134,3 +134,48 @@ class TestExactImasExport:
         with pytest.raises(ValueError, match="fidelity must be"):
             write_imas_draw(arc, 0, tmpl, str(tmp_path / "d.json"),
                             scan_key=0, fidelity="bogus")
+
+
+@pytest.mark.skipif(not os.path.isfile(_GEQ), reason="d3dlike.geqdsk absent")
+class TestReconstructFidelityValues:
+    """fidelity='reconstruct' converts with the TEMPLATE's ratio
+    c = j_tor/j_total.  It used to read the template j_tor AFTER overwriting
+    it with the draw's, so c = draw j_tor / template j_total: the exported
+    j_total came out as the template's verbatim.  Check the VALUES of the
+    parallel split, not just that the keys exist."""
+
+    def test_parallel_split_uses_the_template_ratio(self, tmp_path):
+        arc = str(tmp_path / "run.h5"); _make_archive(arc, with_fsa=False)
+        tmpl = str(tmp_path / "tmpl.json"); psi = _make_template(tmpl)
+        out = str(tmp_path / "draw.json")
+        write_imas_draw(arc, 0, tmpl, out, scan_key=0, fidelity="reconstruct")
+        cp = json.load(open(out))["core_profiles"]["profiles_1d"][0]
+        psiN_t = (psi - psi[0]) / (psi[-1] - psi[0])
+        c = 4e5 / 5e5                     # the template's j_tor / j_total
+        jt = np.interp(psiN_t, _PEQ, _J_PHI)
+        assert np.allclose(cp["j_tor"], jt, rtol=1e-12)
+        assert np.allclose(cp["j_total"], jt / c, rtol=1e-12)
+        assert np.allclose(cp["j_ohmic"], np.interp(psiN_t, _PEQ, _J_IND) / c,
+                           rtol=1e-12)
+        assert np.allclose(cp["j_bootstrap"], np.interp(psiN_t, _PEQ, _J_BS) / c,
+                           rtol=1e-12)
+        # witness: the exported total is the DRAW's, not the template's
+        assert not np.allclose(cp["j_total"], 5e5)
+
+    def test_auto_without_capture_gives_the_same_values(self, tmp_path):
+        arc = str(tmp_path / "run.h5"); _make_archive(arc, with_fsa=False)
+        tmpl = str(tmp_path / "tmpl.json"); _make_template(tmpl)
+        a, r = str(tmp_path / "a.json"), str(tmp_path / "r.json")
+        write_imas_draw(arc, 0, tmpl, a, scan_key=0, fidelity="auto")
+        write_imas_draw(arc, 0, tmpl, r, scan_key=0, fidelity="reconstruct")
+        assert json.load(open(a)) == json.load(open(r))
+
+    def test_template_without_j_tor_cannot_reconstruct(self, tmp_path):
+        arc = str(tmp_path / "run.h5"); _make_archive(arc, with_fsa=False)
+        tmpl = str(tmp_path / "tmpl.json"); _make_template(tmpl)
+        t = json.load(open(tmpl))
+        del t["core_profiles"]["profiles_1d"][0]["j_tor"]
+        json.dump(t, open(tmpl, "w"))
+        with pytest.raises(ValueError, match="needs the template's own"):
+            write_imas_draw(arc, 0, tmpl, str(tmp_path / "d.json"), scan_key=0,
+                            fidelity="reconstruct")

@@ -1320,6 +1320,17 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
     if zeff is not None:
         cp["zeff"] = to_t(zeff, pkin).tolist()
 
+    # The template's own toroidal/parallel totals, captured BEFORE j_tor is
+    # overwritten below: the reconstruct fidelity's ratio c = j_tor/j_total
+    # is the TEMPLATE's (baseline) geometry factor.  Reading cp["j_tor"] after
+    # the overwrite made c = draw j_tor / template j_total, i.e. the exported
+    # j_total came out as the template's verbatim and j_ohmic / j_bootstrap
+    # were scaled by template j_total / draw j_tor.
+    base_jtot = (np.asarray(cp["j_total"], dtype=float)
+                 if "j_total" in cp else None)
+    base_jtor = (np.asarray(cp["j_tor"], dtype=float)
+                 if "j_tor" in cp else None)
+
     # j_tor is exact (bouquet stores toroidal current directly).
     jt_t = to_t(j_tor, peq)
     cp["j_tor"] = jt_t.tolist()
@@ -1329,7 +1340,7 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
     # flux-surface geometry (eq_fsa) via physics.toroidal_to_parallel;
     # RECONSTRUCT falls back to the interim baseline ratio c=j_tor/j_total from
     # the template (exact only when the draw's flux geometry matches baseline).
-    if "j_total" in cp and "j_tor" in cp:
+    if base_jtot is not None:
         use_exact = False
         if fidelity in ("auto", "exact") and eq_fsa is not None:
             geom = _eq_fsa_geom_on(eq_fsa, psiN_t, _imas_b0(out, ie, ic))
@@ -1346,8 +1357,12 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
                 "Use fidelity='auto' to fall back to the baseline-ratio "
                 "reconstruction.")
         if not use_exact:                      # baseline-ratio reconstruction
-            base_jtot = np.asarray(cp["j_total"], dtype=float)
-            base_jtor = np.asarray(cp["j_tor"], dtype=float)
+            if base_jtor is None:
+                raise ValueError(
+                    "fidelity='reconstruct' needs the template's own "
+                    "core_profiles j_tor to form the ratio c = j_tor/j_total; "
+                    "the template has none. Use an archive with a captured "
+                    "eq_fsa block (fidelity='exact').")
             eps = 1e-9 * np.nanmax(np.abs(base_jtot)) if base_jtot.size else 0.0
             good = np.abs(base_jtot) > eps
             c = np.ones_like(base_jtot)

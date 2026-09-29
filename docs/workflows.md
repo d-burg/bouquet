@@ -247,9 +247,10 @@ as an enormous sigma.
 ### `FixedComponentsConfig` (`b.fixed_components`)
 
 `p_fast`, `j_NBI`, `j_RF` on their own `psi_N` grid — additive components that
-are never perturbed. On the IMAS path `j_NBI` / `j_RF` replace dd quantities, so
-they are taken in the **dd's own current orientation** and normalised with every
-other dd current (multiplied by `sign(ip)`; see
+are never perturbed. `j_NBI` / `j_RF` are given in bouquet's **positive-Ip
+frame** — co-current drive positive — on both source paths and for either
+orientation of the source; unlike the dd's own currents they are *not*
+multiplied by `sign(ip)` on the IMAS path (see
 [physics-notes](physics-notes.md#current-and-field-orientation)). `p_fast_reduction` (default `"auto"`) selects the
 anisotropic fast-pressure reduction applied before the isotropic GS solve.
 

@@ -29,8 +29,9 @@ such a source.
   equilibrium `j_tor` the anchor uses. New
   `ImasSource.current_orientation` (`"auto"` default, `+1`, `-1`) names the
   factor explicitly for a file whose convention the user knows.
-- A user-supplied `FixedComponentsConfig.j_NBI` / `j_RF` on the IMAS path is
-  taken in the dd's own orientation and normalised with it.
+- A user-supplied `FixedComponentsConfig.j_NBI` / `j_RF` is defined in
+  bouquet's positive-Ip frame (co-current positive) and used as given on both
+  source paths; the IMAS reader does not multiply it by `sign(ip)`.
 - Delivered g-files are unchanged in convention (`CURRENT > 0`, `BCENTR > 0`,
   TokaMaker's COCOS 7, for every source); they do not carry the experiment's
   orientation. See

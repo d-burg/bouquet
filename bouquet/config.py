@@ -281,11 +281,20 @@ class FixedComponentsConfig:
 
     All arrays are on ``psi_N`` (kinetic grid), SI units, toroidal current
     convention for j_*. ``None`` -> zeros.
+
+    Current orientation: ``j_NBI`` / ``j_RF`` are given in bouquet's
+    POSITIVE-Ip frame -- co-current drive is positive, counter-current drive
+    negative -- whatever the orientation of the source.  They are used exactly
+    as given on both source paths: the IMAS reader does NOT multiply them by
+    the dd's orientation factor (``Baseline.source_current_sign``) the way it
+    multiplies the dd's own currents, and the reconstruction path never
+    re-signs them either.  So for a reversed-Ip discharge a co-current beam is
+    still a POSITIVE array here.
     """
 
     p_fast: Optional["np.ndarray"] = None   # fast/beam pressure
-    j_NBI: Optional["np.ndarray"] = None    # beam-driven TOROIDAL current density [A/m^2]
-    j_RF: Optional["np.ndarray"] = None     # RF-driven TOROIDAL current density [A/m^2]
+    j_NBI: Optional["np.ndarray"] = None    # beam-driven TOROIDAL current density [A/m^2], co-Ip > 0
+    j_RF: Optional["np.ndarray"] = None     # RF-driven TOROIDAL current density [A/m^2], co-Ip > 0
     psi_N: Optional["np.ndarray"] = None    # grid for the above (if arrays given)
 
     # How to collapse anisotropic fast-ion pressure (p_perp, p_par) to the scalar

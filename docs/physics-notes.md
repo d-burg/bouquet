@@ -192,7 +192,8 @@ multiplies every current it reads by `sign(equilibrium ip)`:
 | `core_profiles` `j_total`, `j_tor`, `j_ohmic`, `j_bootstrap` | kinetics (`n`, `T`, `Z_eff`), fast and equilibrium pressure |
 | every beam-source `j_parallel` (→ `j_NBI`) | rotation (`omega_tor`), `E_r`, transport coefficients |
 | `equilibrium.profiles_1d.j_tor` (→ `jphi_diff`) | the dd's own `q` (`q0_dd`, recorded raw; the sawtooth gate reads `|q0_dd|`) |
-| a user-supplied `FixedComponentsConfig.j_NBI` / `j_RF` (they replace dd quantities, so they are given in the dd's orientation) | the boundary outline, `F0 = |r0·b0|` |
+| | a user-supplied `FixedComponentsConfig.j_NBI` / `j_RF` — defined in bouquet's positive-Ip frame (co-current positive), exactly as on the g-file path |
+| | the boundary outline, `F0 = |r0·b0|` |
 
 The factor is recorded as `Baseline.source_current_sign` (with where it came
 from as `Baseline.source_current_sign_origin`, and the source's B0 sign as

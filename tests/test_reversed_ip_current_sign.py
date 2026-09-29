@@ -130,21 +130,47 @@ class TestMirroredReadIsBitIdentical:
         assert trapezoid(bl.j_BS, psi) > 0.0
         assert float(np.min(bl.j_BS)) >= 0.0   # the example's bootstrap is >= 0
 
-    def test_user_supplied_fixed_currents_take_the_dd_orientation(self, tmp_path):
-        """A FixedComponentsConfig current replaces a dd quantity, so it is
-        given in the dd's own orientation and normalised with it."""
+    @pytest.mark.parametrize("orient", mdd.ORIENTATIONS,
+                             ids=[mdd.tag(*o) for o in mdd.ORIENTATIONS])
+    def test_user_supplied_fixed_currents_are_positive_frame(self, tmp_path,
+                                                             orient):
+        """A FixedComponentsConfig current is defined in bouquet's positive-Ip
+        frame (co-current positive): the SAME array gives the same baseline
+        for every orientation of the source, and it is used exactly as given
+        -- the same resampling the g-file path applies
+        (baseline._resolve_fixed), with no orientation factor."""
+        from bouquet.baseline import _resolve_fixed
+
         dd = _example()
         psi_fc = np.linspace(0.0, 1.0, 21)
         jnbi = 2.0e5 * (1.0 - psi_fc ** 2)
         jrf = 5.0e4 * np.exp(-((psi_fc - 0.3) / 0.1) ** 2)
-        ref = _read(_write(tmp_path, dd, "ref.json"),
-                    fixed=FixedComponentsConfig(j_NBI=jnbi, j_RF=jrf,
-                                                psi_N=psi_fc))
-        bl = _read(_write(tmp_path, mdd.mirror_dd(dd, -1.0, 1.0), "rev.json"),
-                   fixed=FixedComponentsConfig(j_NBI=-jnbi, j_RF=-jrf,
-                                               psi_N=psi_fc))
-        for f in ("j_NBI", "j_RF", "j_inductive", "j_phi"):
-            assert np.array_equal(getattr(ref, f), getattr(bl, f)), f
+        fc = FixedComponentsConfig(j_NBI=jnbi, j_RF=jrf, psi_N=psi_fc)
+        ref = _read(_write(tmp_path, dd, "ref.json"), fixed=fc)
+        bl = _read(_write(tmp_path, mdd.mirror_dd(dd, *orient), "m.json"),
+                   fixed=fc)
+        _assert_same_baseline(ref, bl, mdd.tag(*orient))
+        # used as given: co-current stays positive, and equals the g-file
+        # path's treatment of the same array on the same grid
+        for f, arr in (("j_NBI", jnbi), ("j_RF", jrf)):
+            got = getattr(bl, f)
+            assert np.array_equal(got, _resolve_fixed(arr, psi_fc, bl.psi_N)), f
+            assert float(np.min(got)) >= 0.0, f
+        # and the inductive residual carries it with the co-Ip sign
+        assert np.array_equal(bl.j_inductive,
+                              bl.j_phi - bl.j_BS - bl.j_NBI - bl.j_RF)
+
+    def test_reversed_source_does_not_flip_user_currents(self, tmp_path):
+        """Witness for the frame choice: on a reversed-Ip source the user
+        array is NOT multiplied by source_current_sign = -1 (the dd's own beam
+        current is)."""
+        dd = mdd.mirror_dd(_example(), -1.0, 1.0)
+        psi_fc = np.linspace(0.0, 1.0, 21)
+        jnbi = 2.0e5 * (1.0 - psi_fc ** 2)
+        bl = _read(_write(tmp_path, dd, "rev.json"),
+                   fixed=FixedComponentsConfig(j_NBI=jnbi, psi_N=psi_fc))
+        assert bl.source_current_sign == -1.0
+        assert np.array_equal(bl.j_NBI, np.interp(bl.psi_N, psi_fc, jnbi))
 
 
 # ---------------------------------------------------------------------------

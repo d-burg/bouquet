@@ -35,14 +35,14 @@ own COCOS) carries NEGATIVE current profiles, and combining those with a
 positive recomputed bootstrap adds the bootstrap AGAINST the inductive current.
 :func:`read_imas_baseline` therefore multiplies EVERY current profile it reads
 -- ``j_total``, ``j_tor``, ``j_ohmic``, ``j_bootstrap``, the beam
-``j_parallel``, the equilibrium ``j_tor`` behind ``jphi_diff``, and any
-user-supplied ``FixedComponentsConfig.j_NBI``/``j_RF`` (which replace dd
-quantities and so are taken in the dd's own orientation) -- by
+``j_parallel`` and the equilibrium ``j_tor`` behind ``jphi_diff`` -- by
 ``sign(equilibrium ip)``, and records the factor as
 :attr:`~bouquet.baseline.Baseline.source_current_sign`.  For ``ip > 0`` the
 factor is ``+1.0`` and the read is bit-identical to what it was.  Everything
 that is not a current (kinetics, pressure, rotation, E_r, the dd's own q) is
-read unchanged.  A dd whose net (area-weighted) ``core_profiles.j_tor`` -- or
+read unchanged, and so is a user-supplied ``FixedComponentsConfig.j_NBI`` /
+``j_RF``: those are defined in bouquet's positive-Ip frame (co-current
+positive) on both source paths.  A dd whose net (area-weighted) ``core_profiles.j_tor`` -- or
 the equilibrium ``j_tor`` the jphi anchor uses -- disagrees in sign with that
 factor is REFUSED (ValueError): its currents and its ip were written in
 different orientations and no single factor puts it in one frame.
@@ -947,13 +947,15 @@ def read_imas_baseline(
             p_fast_meta = {**p_fast_meta, "rule": None, "basis": "user-override",
                            "evidence": "FixedComponentsConfig.p_fast supplied; the "
                                        "dd fast-pressure fields were not read"}
-        # A user-supplied fixed current REPLACES a dd quantity, so it is taken
-        # in the dd's own orientation and brought into bouquet's frame with
-        # the same factor as every dd current (identity for ip >= 0).
+        # A user-supplied fixed current is defined in bouquet's positive-Ip
+        # frame (co-current positive) -- the frame the g-file path has always
+        # taken it in (baseline._resolve_fixed) -- so it is NOT multiplied by
+        # the dd's orientation factor: the same array means the same physics
+        # on both source paths and for either orientation of the source.
         if fixed.j_NBI is not None:
-            j_NBI = cur_sign * _override(fixed.j_NBI, fixed.psi_N, psi_N)
+            j_NBI = _override(fixed.j_NBI, fixed.psi_N, psi_N)
         if fixed.j_RF is not None:
-            j_RF = cur_sign * _override(fixed.j_RF, fixed.psi_N, psi_N)
+            j_RF = _override(fixed.j_RF, fixed.psi_N, psi_N)
 
     # The deferred factor-of-3 warning: the convention was undeterminable AND the
     # fast pressure it scales is non-zero AND it came from the dd (a user-supplied
@@ -974,9 +976,10 @@ def read_imas_baseline(
                      f"= {ip_signed / 1e6:+.4f} MA)")
         print(f"[imas] {_why}: every dd current profile "
               "(j_total, j_tor, j_ohmic, j_bootstrap, NBI j_parallel, "
-              "equilibrium j_tor, user-supplied j_NBI/j_RF) multiplied by -1 "
+              "equilibrium j_tor) multiplied by -1 "
               "into bouquet's positive-current frame (Baseline."
-              "source_current_sign = -1)", flush=True)
+              "source_current_sign = -1); user-supplied FixedComponentsConfig "
+              "j_NBI/j_RF are already co-Ip positive and are not", flush=True)
     elif cur_origin == ORIENTATION_ORIGIN_OVERRIDE and ip_signed < 0.0:
         print(f"[imas] ImasSource.current_orientation = +1 (override): dd "
               f"currents kept as stored although source ip = "

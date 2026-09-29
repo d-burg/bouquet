@@ -3511,10 +3511,16 @@ class Bouquet:
         # while drawing; a fixed-N run records none (and clears a stale one).
         from .utils import stamp_generation_provenance
         _until = gc.n_inspec_target is not None
-        stamp_generation_provenance(
-            header, scan_key=gc.scan_key,
-            inspec_rms_max_mm=(_cut_mm if _until else None),
-            inspec_cut_source=(_cut_source if _until else None))
+        try:
+            stamp_generation_provenance(
+                header, scan_key=gc.scan_key,
+                inspec_rms_max_mm=(_cut_mm if _until else None),
+                inspec_cut_source=(_cut_source if _until else None))
+        except OSError as _exc:        # the draws are stored; say what is missing
+            import warnings as _w
+            _w.warn(f"the until-N boundary cut ({_cut_mm} mm, {_cut_source}) "
+                    f"was applied but could not be stamped on the archive: {_exc}",
+                    RuntimeWarning, stacklevel=2)
 
         # until-N outcome, OUTSIDE the capture: on the default quiet path the
         # in-loop prints and generate_bouquet's cap-missed RuntimeWarning were

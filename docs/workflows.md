@@ -468,7 +468,13 @@ quantity is never silently dropped: a key where no draw reaches the statistic
 (for example, the filters rejected every draw) comes back as `status="empty"`
 with `n_used=0`, no band and an `empty_reason` (`all_draws_rejected`,
 `none_evaluated`, `no_finite_values`, ...); a refused slice as `"refused"`; a
-missing archive or key as `"no_archive"`. `ScanView.spread()` remains the
+missing archive or key as `"no_archive"`; a file that exists but cannot be
+opened (locked, still being written, corrupt) as `"unreadable"`. For
+`draw_scalars` q0/q95 the source of every used draw is in
+`provenance["q_source_by_draw"]`; a statistic mixing `eq_fsa` and g-file
+values, or a g-file baseline overlaid on `eq_fsa` draws (axis q0 vs
+innermost-surface q0), is stated in the limitations and marks
+`baseline_status` `"…:source_mismatch"`. `ScanView.spread()` remains the
 quick-look mean/std summary.
 
 ## Exporting draws

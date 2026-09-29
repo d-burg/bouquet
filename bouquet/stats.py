@@ -81,6 +81,7 @@ from __future__ import annotations
 import csv
 import json
 import math
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from typing import Optional
@@ -118,7 +119,9 @@ class BandRecord:
     """One scan key x one quantity: the band, its population and provenance.
 
     ``p16`` / ``p84`` hold the lower / upper of ``percentiles`` (named for the
-    default ``(16, 84)``). ``status`` is ``"ok"``, ``"empty"`` (the key was
+    default ``(16, 84)``). ``status`` is ``"ok"``, ``"unreadable"`` (the
+    archive file exists but could not be opened -- locked, being written or
+    corrupt; the error is in the limitations), ``"empty"`` (the key was
     read but no draw survived to the statistic: ``n_used == 0``, no band, and
     ``empty_reason`` says at which stage the population ran out), ``"refused"``
     (the scan group carries a ``refused_reason``) or ``"no_archive"`` (the
@@ -159,7 +162,9 @@ class BandRecord:
     no_band: bool = True
     gated: bool = False
     show: bool = False
-    n_extreme: int = 0
+    #: values further than 10 MAD from the median (diagnostic; no cut);
+    #: None when the MAD is 0 and the count has no scale
+    n_extreme: Optional[int] = 0
     # ---- per draw
     values: dict = field(default_factory=dict)
     #: finite values of the irregular draws, kept out of the statistic but
@@ -441,6 +446,7 @@ def _scan_context(ar, key) -> dict:
     ctx["generation_mode"] = mode if mode is not None else UNRECORDED
     na = sattrs.get("n_attempted")
     ctx["n_attempted"] = int(na) if na is not None else None
+    ctx["merge_partial"] = _json_attr(sattrs.get("merge_partial_json"))
     ctx["bouquet_version"] = {
         "scan": str(sattrs["bouquet_version"]) if "bouquet_version" in sattrs
         else UNRECORDED,
@@ -575,7 +581,11 @@ def _stat_block(x, *, min_n, hard_min, percentiles, method):
         lo, hi = np.percentile(x, percentiles, method=method)
         out["p16"], out["p84"] = float(lo), float(hi)
     mad = float(np.median(np.abs(x - med)))
-    out["n_extreme"] = int(np.sum(np.abs(x - med) > 10.0 * mad))
+    # MAD = 0 (more than half the values identical) gives no scale: every
+    # value off the median would count as "extreme", so the diagnostic is
+    # reported as undefined (None) instead
+    out["n_extreme"] = (int(np.sum(np.abs(x - med) > 10.0 * mad)) if mad > 0
+                        else None)
     return out
 
 
@@ -873,7 +883,7 @@ _RECIPE_DEFAULTS = dict(selection="selected", pole_rule="majority_regular",
 
 
 def _status_record(skey, quantity, status, archive, *, refused_reason=None,
-                   **kw) -> "BandRecord":
+                   detail=None, **kw) -> "BandRecord":
     """A ``refused`` / ``no_archive`` record that still honours the
     provenance contract: the recipe settings it was asked for, the reader
     version, and a limitation saying why nothing was evaluated -- so a
@@ -883,6 +893,7 @@ def _status_record(skey, quantity, status, archive, *, refused_reason=None,
     settings = {k: kw.get(k, v) for k, v in _RECIPE_DEFAULTS.items()}
     why = (f"status={status}"
            + (f": {refused_reason}" if refused_reason else "")
+           + (f": {detail}" if detail else "")
            + " -- no draws were evaluated for this key")
     prov = {
         "selection": settings["selection"],
@@ -915,6 +926,11 @@ def _limitations(rec, ctx, meta, selection, require_filter, percentiles):
         lim.append("n_attempted is not recorded on this archive: draws that "
                    "failed before archiving are invisible, so n_stored is not "
                    "the number of attempts.")
+    if ctx.get("merge_partial"):
+        lim.append(f"PARTIAL parallel merge: workers "
+                   f"{ctx['merge_partial'].get('missing_workers')} are missing, so "
+                   "n_requested is the run's request, not what the merged shards "
+                   "were asked for.")
     if ctx["coil_filter"] is None and selection != "all":
         lim.append(f"No coil_filter stamp on the scan (require_filter="
                    f"{require_filter}): selection={selection!r} may be every "
@@ -936,6 +952,9 @@ def _limitations(rec, ctx, meta, selection, require_filter, percentiles):
     if ctx["closure_limited"]:
         lim.append("The baseline Ip closure is flagged closure_limited: do not "
                    "pool this slice with non-limited slices.")
+    if rec.n_used > 0 and rec.n_extreme is None:
+        lim.append("The MAD of the used values is 0 (more than half are "
+                   "identical): n_extreme is undefined and reported as None.")
     if rec.n_irregular > 0:
         lim.append(
             f"The band is CONDITIONAL on the regular outcome: {rec.n_irregular} "
@@ -979,11 +998,19 @@ def draw_bands(sources, evaluate, **kw) -> BandTable:
     for ref, sk in sources:
         skey = None if sk is None else str(sk)
         ar_ref = getattr(ref, "path", ref)
+        if isinstance(ar_ref, (str, bytes, os.PathLike)) and not os.path.exists(ar_ref):
+            per_key.append((skey, str(ar_ref), "no_archive"))
+            continue
         try:
             ar = _as_archive(ref)
             _resolve_key(ar, sk)
-        except (FileNotFoundError, KeyError, OSError):
+        except (FileNotFoundError, KeyError):
             per_key.append((skey, str(ar_ref), "no_archive"))
+            continue
+        except OSError as exc:
+            # the file EXISTS but cannot be read (locked, still being
+            # written, corrupt): not the same fact as "no archive"
+            per_key.append((skey, str(ar_ref), ("unreadable", str(exc)[:300])))
             continue
         ev = evaluate
         if isinstance(evaluate, Mapping):
@@ -1009,6 +1036,11 @@ def draw_bands(sources, evaluate, **kw) -> BandTable:
             continue
         if recs == "no_archive":
             records.extend(_status_record(skey, q, "no_archive", ref, **kw)
+                           for q in qs)
+            continue
+        if isinstance(recs, tuple) and recs[0] == "unreadable":
+            records.extend(_status_record(skey, q, "unreadable", ref,
+                                          detail=recs[1], **kw)
                            for q in qs)
             continue
         if any(r.status == "refused" for r in recs.values()):
@@ -1068,8 +1100,11 @@ def draw_scalars(archive, scan_key=None, *, rational=((2, 1), (3, 1)),
       g-file ``qpsi`` when no ``eq_fsa`` block was captured
       (``q_source="auto"``); ``"geqdsk"`` / ``"eq_fsa"`` force one source.
       The baseline has no ``eq_fsa``, so under ``"auto"`` its overlay comes
-      from the g-file; the sources used are recorded in provenance and a
-      mismatch is listed under limitations.
+      from the g-file (q0 at the magnetic axis, not the innermost stored
+      surface). The source of every used draw is recorded in provenance
+      (``q_source_by_draw``); a statistic that mixes sources, or a baseline
+      from a different source than the draws, is listed under limitations,
+      and the latter also marks ``baseline_status`` ``"...:source_mismatch"``.
     * ``rho(q=m/n)`` for each ``(m, n)`` in ``rational`` -- rho_tor of the
       outermost q = m/n surface from the g-file (``rhovn``); a draw with no
       such surface is ``regular=False`` with label ``no_q=m/n_surface``.
@@ -1103,7 +1138,7 @@ def draw_scalars(archive, scan_key=None, *, rational=((2, 1), (3, 1)),
     li_meta_key = "tokamaker_li_3" if li_attr == "l_i(3)" else "tokamaker_li_1"
     li_base = (bl.get("li_metrics") or {}).get(li_meta_key)
 
-    q_used = {"draws": set(), "baseline": None}
+    q_used = {"draws": set(), "baseline": None, "by_draw": {}}
     labels = {(m, n): f"rho(q={m}/{n})" for m, n in rational}
 
     def _evaluate(view):
@@ -1135,6 +1170,7 @@ def draw_scalars(archive, scan_key=None, *, rational=((2, 1), (3, 1)),
             q_used["baseline"] = src
         elif src is not None:
             q_used["draws"].add(src)
+            q_used["by_draw"][int(view.count)] = src
         if qf is None:
             code = "no_eq_fsa" if q_source == "eq_fsa" else "no_eqdsk"
             out["q0"] = out["q95"] = {"value": _NAN, "status": code}
@@ -1179,16 +1215,45 @@ def draw_scalars(archive, scan_key=None, *, rational=((2, 1), (3, 1)),
                                  "<P> [kPa]", "l_i"])
     recs = draw_band(ar, key, _evaluate, evaluator_meta=meta, **kw)
     used = {"draws": sorted(q_used["draws"]), "baseline": q_used["baseline"]}
+    by_draw = dict(sorted(q_used["by_draw"].items()))
+    _what = {"eq_fsa": "the innermost stored eq_fsa surface",
+             "geqdsk": "the g-file magnetic axis"}
     for q in ("q0", "q95"):
         r = recs.get(q)
         if r is None or r.status != "ok":
             continue
-        r.provenance = dict(r.provenance, q_source_used=used)
-        if used["baseline"] is not None and any(s != used["baseline"] for s in used["draws"]):
-            r.provenance["limitations"] = list(r.provenance["limitations"]) + [
+        # which source each USED draw's value came from, so a mixed statistic
+        # is identifiable draw by draw rather than only in aggregate
+        src_used = {d: by_draw[d] for d in r.values if d in by_draw}
+        r.provenance = dict(r.provenance, q_source_used=used,
+                            q_source_by_draw=src_used)
+        lim = list(r.provenance["limitations"])
+        n_by = {}
+        for v in src_used.values():
+            n_by[v] = n_by.get(v, 0) + 1
+        if len(n_by) > 1:
+            lim.append(
+                f"The {q} statistic MIXES sources: "
+                + ", ".join(f"{n} draws from {k}" for k, n in sorted(n_by.items()))
+                + (" (q0 from " + " vs ".join(_what[k] for k in sorted(n_by))
+                   + ")" if q == "q0" else "")
+                + "; see provenance q_source_by_draw, or pass q_source='geqdsk' "
+                "for a single source.")
+        if used["baseline"] is not None and any(s != used["baseline"] for s in n_by):
+            # the overlay is not like-for-like: say so in the machine-readable
+            # status too, so baseline_quantile / baseline_outside_range are
+            # not read as a draw-path verdict
+            r.baseline_status = f"{r.baseline_status}:source_mismatch"
+            lim.append(
                 f"The baseline {q} comes from {used['baseline']} while the draws "
-                f"use {', '.join(used['draws'])}: the overlay is not like-for-like "
-                "(pass q_source='geqdsk' for a single source)."]
+                f"use {', '.join(sorted(n_by))}"
+                + (f" ({_what[used['baseline']]} vs "
+                   + ", ".join(_what[k] for k in sorted(n_by)) + ")"
+                   if q == "q0" else "")
+                + ": the overlay is not like-for-like, so baseline_quantile and "
+                "baseline_outside_range compare different quantities (pass "
+                "q_source='geqdsk' for a single source).")
+        r.provenance["limitations"] = lim
     return recs
 
 

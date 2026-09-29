@@ -623,3 +623,60 @@ def test_floors_at_exactly_4_5_14_15(tmp_path, n, no_band, below_floor):
     assert bool(cov) == below_floor
     if below_floor:
         assert f"{0.68 * (n - 1) / (n + 1):.2f}" in cov[0]
+
+
+# --------------------------------------------------------------------------
+#  minor items: unreadable file, MAD = 0, q sources named draw by draw
+# --------------------------------------------------------------------------
+def test_an_unreadable_file_is_not_reported_as_absent(tmp_path):
+    bad = tmp_path / "corrupt.h5"
+    bad.write_bytes(b"not an hdf5 file at all" * 10)
+    t = bq.draw_bands([(str(bad), "1"), (str(tmp_path / "absent.h5"), "1")], _by_attr)
+    st = [(r.status, r.show) for r in t]
+    assert st == [("unreadable", False), ("no_archive", False)]
+    assert any("status=unreadable" in l for l in t.records[0].provenance["limitations"])
+
+
+def test_zero_mad_leaves_the_extreme_count_undefined(tmp_path):
+    vals = [1.0] * 19 + [1.0 + 1e-4]
+    p = _simple(tmp_path / "a.h5", 20, vals=vals)
+    r = bq.draw_band(p, "1", _by_attr)["x"]
+    assert r.n_extreme is None and r.n_used == 20       # nothing removed
+    assert any("MAD" in s and "undefined" in s for s in r.provenance["limitations"])
+    rows = BandTable.read_csv(bq.draw_bands([(p, "1")], _by_attr).to_csv(tmp_path / "m.csv"))
+    assert rows[0]["n_extreme"] is None
+
+
+def test_q_sources_are_named_draw_by_draw_and_a_mismatch_marked(tmp_path):
+    import shutil
+    if not os.path.isfile(_GOLDEN):
+        pytest.skip("golden fixture absent")
+    p = str(tmp_path / "g.h5")
+    shutil.copy(_GOLDEN, p)
+    with h5py.File(p, "a") as hf:
+        del hf["scan/0/3/eq_fsa"]                  # one draw falls back to its g-file
+    s = bq.draw_scalars(p, "0", rational=((2, 1),), require_filter=False)
+    r = s["q0"]
+    by = r.provenance["q_source_by_draw"]
+    assert by[3] == "geqdsk" and sum(v == "eq_fsa" for v in by.values()) == len(by) - 1
+    assert set(by) == set(r.values)
+    assert any("MIXES sources" in l and "1 draws from geqdsk" in l
+               for l in r.provenance["limitations"])
+    # the baseline (g-file axis) is not like-for-like with eq_fsa draws
+    assert r.baseline_status.endswith(":source_mismatch")
+    # a single source: no mismatch anywhere
+    g = bq.draw_scalars(p, "0", rational=((2, 1),), require_filter=False,
+                        q_source="geqdsk")["q0"]
+    assert set(g.provenance["q_source_by_draw"].values()) == {"geqdsk"}
+    assert g.baseline_status == "ok"
+    assert not any("MIXES" in l or "not like-for-like" in l
+                   for l in g.provenance["limitations"])
+
+
+def test_a_partial_merge_is_a_limitation_of_every_band(tmp_path):
+    p = _simple(tmp_path / "a.h5", 6,
+                scan_attrs={"merge_partial_json": json.dumps(
+                    {"missing_workers": [1], "merged_workers": [0]})})
+    r = bq.draw_band(p, "1", _by_attr)["x"]
+    assert any("PARTIAL parallel merge" in l and "[1]" in l
+               for l in r.provenance["limitations"])

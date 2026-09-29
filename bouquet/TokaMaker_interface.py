@@ -6401,11 +6401,16 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
     #   the state anchor `pressure_solve`         -- pressure + imp + fast + diff
     # Keep the three sites in step; if you change one, change all of them.
     pres_tmp = 1.6022e-19 * (ne * te + ni * ti)
+    # Per-component copies for the report-only core-pressure hollowness
+    # record; the composition arithmetic is untouched (so bit-identical).
+    _pc = {"electron_thermal": 1.6022e-19 * ne * te,
+           "ion_thermal": 1.6022e-19 * ni * ti}
 
     # Fixed fast-ion pressure -- constant across draws, never perturbed.
     # Supplied already on the equilibrium grid (eqdsk.psi_N) by the caller,
     # which applies the same kin->eq PCHIP the draws use.
     if p_fast is not None:
+        _pc["fast"] = np.asarray(p_fast, dtype=float)
         pres_tmp = pres_tmp + np.asarray(p_fast, dtype=float)
 
     # Impurity (carbon) thermal pressure: one-Zeff single-impurity model on the
@@ -6413,6 +6418,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
     # e*(ne*Te + ni*Ti) omits this.
     if Z_imp:
         from .physics import impurity_pressure
+        _pc["impurity"] = impurity_pressure(ne, ni, ti, Z_imp)
         pres_tmp = pres_tmp + impurity_pressure(ne, ni, ti, Z_imp)
 
     # NOTE: p_diff is deliberately NOT plumbed here.  It is defined as
@@ -6848,8 +6854,22 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
           f"bnd_rms={_bnd_rms_mm:.2f} mm, bnd_max={_bnd_max_mm:.2f} mm")
 
     # FF' from the converged TokaMaker equilibrium
-    _, F_prof, Fp_prof, _, _ = mygs.get_profiles(psi=eqdsk.psi_N)
+    _, F_prof, Fp_prof, _p_ach, _ = mygs.get_profiles(psi=eqdsk.psi_N)
     ffprime_tokamaker = F_prof * Fp_prof
+
+    # ---- core-pressure hollowness health record (report-only) ------------
+    # Describes the core shape of the INPUT pressure this reconstruction
+    # solved with (total, and thermal species only) and of the ACHIEVED
+    # pressure read off the same get_profiles call the FF' above uses.
+    # Nothing reads it back; a failure here is recorded, never raised.
+    try:
+        from .physics import core_pressure_hollow_record
+        quality["core_pressure_hollow"] = core_pressure_hollow_record(
+            eqdsk.psi_N, pres_tmp, input_components=_pc,
+            achieved_total=_p_ach)
+    except Exception as _cph_exc:   # pragma: no cover - defensive
+        quality["core_pressure_hollow"] = {
+            "unavailable": f"health record failed: {_cph_exc}"}
 
     return {
         'ne': ne.copy(),

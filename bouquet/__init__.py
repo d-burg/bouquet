@@ -124,6 +124,9 @@ from .physics import (
     toroidal_to_parallel,
     fast_pressure_residual,
     infer_fast_pressure,
+    core_pressure_health,
+    core_pressure_hollow_record,
+    CorePressureHollowWarning,
     radial_field_from_impurity_force_balance,
     radial_field_from_cer,   # deprecated alias
 )
@@ -182,6 +185,8 @@ __all__ = [
     # ---- physics helpers ----
     "isotropize_fast_pressure", "parallel_to_toroidal", "toroidal_to_parallel",
     "fast_pressure_residual", "infer_fast_pressure",
+    "core_pressure_health", "core_pressure_hollow_record",
+    "CorePressureHollowWarning",
     "radial_field_from_impurity_force_balance", "radial_field_from_cer",
     "Hmode_profiles",
     "Ip_fsa_integral", "Ip_fsa_weights", "fsa_current_geometry",

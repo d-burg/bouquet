@@ -26,6 +26,24 @@ the authoritative toroidal ``j_tor`` and the inductive component is taken as the
 residual ``j_phi - j_BS - j_NBI - j_RF`` so the decomposition sums exactly and Ip
 is preserved.
 
+Current orientation: bouquet works in ONE positive-current frame.  The
+TokaMaker anchor is always solved to ``|Ip|`` with ``F0 = |r0*b0|`` (see
+:func:`read_imas_geometry`), so every bootstrap bouquet recomputes on it (the
+legacy ``solve_with_bootstrap`` path and the self-consistent loop alike) comes
+out positive.  A dd written for a reversed-current discharge (``ip < 0`` in its
+own COCOS) carries NEGATIVE current profiles, and combining those with a
+positive recomputed bootstrap adds the bootstrap AGAINST the inductive current.
+:func:`read_imas_baseline` therefore multiplies EVERY current profile it reads
+-- ``j_total``, ``j_tor``, ``j_ohmic``, ``j_bootstrap``, the beam
+``j_parallel``, the equilibrium ``j_tor`` behind ``jphi_diff``, and any
+user-supplied ``FixedComponentsConfig.j_NBI``/``j_RF`` (which replace dd
+quantities and so are taken in the dd's own orientation) -- by
+``sign(equilibrium ip)``, and records the factor as
+:attr:`~bouquet.baseline.Baseline.source_current_sign`.  For ``ip > 0`` the
+factor is ``+1.0`` and the read is bit-identical to what it was.  Everything
+that is not a current (kinetics, pressure, rotation, E_r, the dd's own q) is
+read unchanged.
+
 Note: ``j_BS`` read here is the FUSE bootstrap baseline, but it is *overridden*
 when ``GenerationConfig.recalculate_j_BS`` is True -- bouquet then recomputes
 bootstrap per draw via TokaMaker ``solve_with_bootstrap`` (whose output is also
@@ -377,6 +395,20 @@ def _override(arr, src_psi, dst_psi):
     return np.interp(dst_psi, np.asarray(src_psi, dtype=float), arr)
 
 
+def source_current_sign(ip) -> float:
+    """``+1.0`` / ``-1.0``: the factor that brings a dd's currents into bouquet's frame.
+
+    bouquet solves every anchor to ``|Ip|`` with ``F0 = |r0*b0|``, i.e. in a
+    positive-current frame, whatever orientation the source was written in.
+    A source with ``ip < 0`` (a reversed-current discharge in the dd's own
+    COCOS) has every current profile multiplied by ``-1`` on read; ``ip >= 0``
+    (and a zero or non-finite ``ip``, which carries no orientation) returns
+    ``+1.0`` and leaves the read untouched.
+    """
+    ip = float(ip)
+    return -1.0 if (np.isfinite(ip) and ip < 0.0) else 1.0
+
+
 def read_imas_geometry(source: "ImasSource"):
     """Return ``(F0, boundary_RZ)`` from a FUSE IDS for TokaMaker setup.
 
@@ -592,6 +624,19 @@ def read_imas_baseline(
     ie = _nearest_index(eq["time"], T, "equilibrium")
     gq = eq["time_slice"][ie]["global_quantities"]
     Ip_target = abs(float(gq["ip"]))
+    # bouquet's frame is positive-current (the anchor is solved to |Ip| with
+    # F0 = |r0*b0|).  Every CURRENT profile read below is multiplied by this
+    # factor so a reversed-current dd (ip < 0) lands in that frame instead of
+    # being combined, with its own negative sign, with a bootstrap recomputed
+    # on the positive anchor.  +1.0 (bit-identical read) for ip >= 0.
+    cur_sign = source_current_sign(gq["ip"])
+    _vtf = eq.get("vacuum_toroidal_field") or {}
+    _b0 = _vtf.get("b0")
+    try:
+        _b0v = float(_b0[ie] if isinstance(_b0, list) else _b0)
+        b0_sign = (-1.0 if _b0v < 0.0 else 1.0) if np.isfinite(_b0v) else None
+    except (TypeError, ValueError, IndexError):
+        b0_sign = None
     ids_li_1 = float(gq["li_1"]) if "li_1" in gq else None
     ids_li_3 = float(gq["li_3"]) if "li_3" in gq else None
     # Provisional l_i_target = IDS li_3; the IMAS forward-solve (Bouquet) replaces
@@ -607,10 +652,14 @@ def read_imas_baseline(
     psi_N = (psi - psi[0]) / (psi[-1] - psi[0])   # 0 (axis) -> 1 (boundary)
     n = psi_N.size
 
-    j_total = np.asarray(cp["j_total"], dtype=float)   # total parallel
-    j_tor = np.asarray(cp["j_tor"], dtype=float)       # total toroidal (authoritative)
-    j_ohmic = np.asarray(cp["j_ohmic"], dtype=float)   # parallel (unused: inductive = residual)
-    j_boot = np.asarray(cp["j_bootstrap"], dtype=float)  # parallel
+    # Currents in bouquet's positive-current frame (cur_sign, above).  The
+    # parallel->toroidal ratio j_tor/j_total is sign-invariant, so flipping the
+    # inputs here is exactly (bitwise) the same as flipping every derived
+    # toroidal component afterwards.
+    j_total = cur_sign * np.asarray(cp["j_total"], dtype=float)   # total parallel
+    j_tor = cur_sign * np.asarray(cp["j_tor"], dtype=float)       # total toroidal (authoritative)
+    j_ohmic = cur_sign * np.asarray(cp["j_ohmic"], dtype=float)   # parallel (unused: inductive = residual)
+    j_boot = cur_sign * np.asarray(cp["j_bootstrap"], dtype=float)  # parallel
 
     def to_toroidal(j_par):
         return parallel_to_toroidal(j_par, j_parallel_total=j_total, j_tor_total=j_tor)
@@ -627,7 +676,7 @@ def read_imas_baseline(
             if pr:
                 idx = isrc if len(pr) > isrc else 0
                 jnbi_par = jnbi_par + np.asarray(pr[idx]["j_parallel"], dtype=float)
-    j_NBI = to_toroidal(jnbi_par)
+    j_NBI = to_toroidal(cur_sign * jnbi_par)
     j_RF = np.zeros(n)   # never computed internally; user-supplied only
 
     # --- sawtooth model presence/amplitude at this slice (gate input only) ----
@@ -738,10 +787,13 @@ def read_imas_baseline(
             p_fast_meta = {**p_fast_meta, "rule": None, "basis": "user-override",
                            "evidence": "FixedComponentsConfig.p_fast supplied; the "
                                        "dd fast-pressure fields were not read"}
+        # A user-supplied fixed current REPLACES a dd quantity, so it is taken
+        # in the dd's own orientation and brought into bouquet's frame with
+        # the same factor as every dd current (identity for ip >= 0).
         if fixed.j_NBI is not None:
-            j_NBI = _override(fixed.j_NBI, fixed.psi_N, psi_N)
+            j_NBI = cur_sign * _override(fixed.j_NBI, fixed.psi_N, psi_N)
         if fixed.j_RF is not None:
-            j_RF = _override(fixed.j_RF, fixed.psi_N, psi_N)
+            j_RF = cur_sign * _override(fixed.j_RF, fixed.psi_N, psi_N)
 
     # The deferred factor-of-3 warning: the convention was undeterminable AND the
     # fast pressure it scales is non-zero AND it came from the dd (a user-supplied
@@ -755,6 +807,23 @@ def read_imas_baseline(
     # decomposition sums exactly and Ip is preserved.
     j_phi = j_tor.copy()
     j_inductive = j_phi - j_BS - j_NBI - j_RF
+    if cur_sign < 0.0:
+        print(f"[imas] source ip = {float(gq['ip']) / 1e6:+.4f} MA < 0 (reversed "
+              "current in the dd's own COCOS): every dd current profile "
+              "(j_total, j_tor, j_ohmic, j_bootstrap, NBI j_parallel, "
+              "equilibrium j_tor, user-supplied j_NBI/j_RF) multiplied by -1 "
+              "into bouquet's positive-current frame (Baseline."
+              "source_current_sign = -1)", flush=True)
+    # A dd whose core_profiles total opposes its own equilibrium ip is not
+    # something a sign convention can fix: say so instead of closing on it.
+    from scipy.integrate import trapezoid as _trapezoid
+    if float(_trapezoid(j_phi, psi_N)) < 0.0:
+        import warnings
+        warnings.warn(
+            "core_profiles.j_tor integrates AGAINST equilibrium ip after the "
+            f"current-orientation normalisation (source ip = {float(gq['ip']):.4g} "
+            "A): the dd's current profiles and its plasma current disagree in "
+            "sign. bouquet's closure assumes they agree; check the dd.")
 
     # --- pressure anchor ("diff" approach) + completeness validation ----------
     # The authoritative dd equilibrium pressure (GS-consistent total, incl.
@@ -808,8 +877,8 @@ def read_imas_baseline(
     # the same Ip), so it redistributes rather than adds net current.
     jphi_diff = None
     if anchor_jtor_to_equilibrium:
-        eq_jtor = np.interp(psi_N, psiN_eq[_o],
-                            np.asarray(eqp1["j_tor"], dtype=float)[_o])
+        eq_jtor = cur_sign * np.interp(psi_N, psiN_eq[_o],
+                                       np.asarray(eqp1["j_tor"], dtype=float)[_o])
         jphi_diff = eq_jtor - j_phi
 
     return Baseline(
@@ -839,6 +908,8 @@ def read_imas_baseline(
         aux=aux,
         p_fast_meta=p_fast_meta,
         sawtooth=sawtooth,
+        source_current_sign=cur_sign,
+        source_b0_sign=b0_sign,
     )
 
 

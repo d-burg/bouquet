@@ -40,7 +40,9 @@ reads an orientation it should not.
 The only fields allowed to differ are the ones that RECORD the source's
 orientation: ``source_current_sign`` / ``source_b0_sign`` (checked against the
 mirror that was written) and the dd's own ``q0_dd`` (the dd's own COCOS
-estimator, recorded raw; checked in magnitude, which is all the gate uses).
+estimator, recorded raw; checked in magnitude, which is all the gate uses) --
+plus wall-clock timings (the bootstrap loop's ``wall_s``), which measure the
+machine, not the equilibrium.
 
 Every live-solver call runs in a subprocess (``OFT_env`` is a per-process
 singleton), one per orientation, four at a time, each at ``nthreads=1``.
@@ -79,6 +81,9 @@ _BASE_CONFIGS = (
 
 #: Fields that record the SOURCE orientation and so legitimately differ.
 _ORIENTATION_KEYS = ("source_current_sign", "source_b0_sign")
+#: Wall-clock timings recorded alongside the physics (the bootstrap loop's
+#: ``wall_s``): measurements of the machine, not of the equilibrium.
+_WALL_CLOCK_KEYS = ("wall_s",)
 
 
 def _oft_importable():
@@ -309,6 +314,8 @@ def test_mirrored_orientation_reproduces_the_baseline_bitwise(solved, name,
             want = (s_ip if leaf == "source_current_sign" else s_b0)
             if ref_rec[k] is not None:
                 assert rec[k] == want * ref_rec[k], (k, rec[k], ref_rec[k])
+            continue
+        if k.rsplit(".", 1)[-1] in _WALL_CLOCK_KEYS:
             continue
         a, b = ref_rec[k], rec[k]
         if k.endswith("q0_dd") and a is not None:

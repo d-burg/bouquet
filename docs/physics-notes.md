@@ -270,12 +270,24 @@ unreadable vacuum `b0` carries no orientation and is recorded as
 **What bouquet delivers.** Every delivered equilibrium is in the positive frame,
 for every source, normal or reversed:
 
-- **g-files** are written by TokaMaker's `save_eqdsk` (its default COCOS 7) and
-  carry `CURRENT > 0` and `BCENTR > 0`. They carry **neither** the experiment's
-  Ip sign **nor** its toroidal-field sign: a normal-orientation source with
-  `B0 < 0` is also delivered with `BCENTR > 0`. This was already the convention
-  before the normalisation above and is unchanged by it.
+- **g-files** are written by TokaMaker's `save_eqdsk` with its default COCOS 7
+  (bouquet passes no `cocos`) from the positive-frame solve, so they carry
+  `CURRENT > 0` and `BCENTR > 0` for every source — and therefore **always
+  `Ip·Bt > 0`**. They carry **neither** the experiment's Ip sign **nor** its
+  toroidal-field sign: a normal-orientation source with `B0 < 0` (`Ip·B0 < 0`)
+  is also delivered with `Ip·Bt > 0`, the opposite field-line helicity to the
+  lab; a reversed-Ip source with `B0 < 0` happens to match the lab. This is
+  what the writer does today, unchanged by this work; which convention the
+  delivered g-file *should* carry is an open decision, not settled here. Being
+  COCOS 7, ψ decreases outward (`SIMAG > SIBRY`), which a reader assuming
+  COCOS 1 must detect.
 - **archived currents** (`j_phi`, `j_BS`, `j_inductive`) are positive-frame.
+- **plots** overlay raw source currents in the same positive frame as the
+  solve: on the IMAS path the dd `j_tor` times the reader's factor, on the
+  g-file path the g-file `<j_tor>` (read in the source's declared COCOS) and
+  `FF′` times `sign(CURRENT)` — so a reversed-Ip input is not drawn upside
+  down. The reconstruction itself fits `abs(Ip)` and `abs(<j_tor>)`; `abs()`
+  also folds any genuine local sign change, which the overlays keep.
 - **IMAS export** (`write_imas_draw` / `export_imas_drawset`) is written in the
   **source's** frame. The template (the source dd) keeps its own
   `core_sources`, `pf_active`, `vacuum_toroidal_field`, rotation and
@@ -292,16 +304,29 @@ for every source, normal or reversed:
   without a COCOS conversion, and the written `profiles_1d` has no `j_tor`, so
   a re-read needs `anchor_jtor_to_equilibrium=False`.
 
-Static MHD quantities (the equilibrium, l_i, q magnitude, Δ′, δW) do not depend
-on the frame: flipping Ip alone is a mirror reflection (φ → −φ) of the plasma
-and flipping both is a full field reversal, and both are symmetries of the MHD
-equations. Quantities that carry a *direction* — toroidal rotation, `E_r`,
-diamagnetic and E×B frequencies — are passed through in the source's own lab
-signs and are **not** transformed into the delivered frame. A consumer that
-combines a delivered equilibrium with flows must therefore either restore the
-source orientation (`Ip → s_I·Ip`, `ψ → s_I·ψ`, `F → s_B·F`, `q → s_I·s_B·q`,
-with `s_I = source_current_sign`, `s_B = source_b0_sign`) or transform the flows
-into the delivered frame. bouquet does neither automatically.
+Intrinsic axisymmetric MHD quantities (the equilibrium, l_i, q magnitude, and
+the Δ′ / δW of the plasma on its own) do not depend on the frame: flipping Ip
+alone is a mirror reflection (φ → −φ) of the plasma and flipping both is a full
+field reversal, and both are symmetries of the MHD equations. What does
+depend on the frame is anything with a *direction relative to the lab*:
+
+- toroidal rotation, `E_r`, diamagnetic and E×B frequencies — passed through in
+  the source's own lab signs and **not** transformed into the delivered frame;
+- the **field-line helicity**, sign(Ip·Bt), relative to external coils. The
+  response to 3D fields — error-field and 3D-coil coupling computed with real
+  coil geometry and phasing, resonant field penetration, NTV — depends on it.
+  Since a delivered g-file always has Ip·Bt > 0 (above), a 3D-response
+  calculation on it describes the lab only for sources whose own Ip·B0 > 0.
+
+A consumer that combines a delivered equilibrium with flows or with lab-frame
+3D coils must therefore either restore the source orientation or transform
+those inputs into the delivered frame. Restoring means, with
+`s_I = source_current_sign` and `s_B = source_b0_sign`:
+`Ip → s_I·Ip`; ψ → s_I·ψ (1-D ψ, `PSIRZ`, `SIMAG`, `SIBRY`); **P′ → s_I·P′ and
+FF′ → s_I·FF′** (both are ψ-derivatives: P′ = dp/dψ flips with ψ; FF′ = F dF/dψ
+flips with ψ and, F and dF flipping together, not with B0); `F → s_B·F`,
+`Bt → s_B·Bt`; `q → s_I·s_B·q`. bouquet does this automatically only in the
+IMAS export (above); archived g-files are left in the positive frame.
 
 ## Z_eff-primary density scheme
 

@@ -522,3 +522,53 @@ class TestRecordsAndOverlays:
         stamp_source_orientation(q, scan_key=0, current_sign=-1.0)
         with h5py.File(q, "r") as hf:
             assert "_baseline" not in hf["scan/0"]
+
+
+class TestGfileOverlaysAreInTheSameFrame:
+    """The reconstruction fits abs(Ip) and abs(<j_tor>); the raw g-file overlays
+    (plot_input_vs_recon's <j_tor>, the reconstruction diagnostic's FF', and
+    plot_jphi's geqdsk total) must be drawn in that same positive frame, so an
+    Ip-reversed g-file overlays exactly like the normal one."""
+
+    _GEQ = __import__("os").path.join(__import__("os").path.dirname(
+        __import__("os").path.abspath(__file__)), "data", "d3dlike.geqdsk")
+
+    def _pair(self):
+        import copy
+        from bouquet.io.geqdsk import GEQDSKEquilibrium, read_geqdsk
+
+        ref = read_geqdsk(self._GEQ, cocos=7)     # TokaMaker writes COCOS 7
+        raw = copy.deepcopy(ref._raw)
+        # an Ip-only reversal in the same COCOS: every Ip-odd raw field flips
+        # (psi and its derivatives, the current, q); F and BCENTR do not
+        for k in ("CURRENT", "SIMAG", "SIBRY"):
+            raw[k] = -raw[k]
+        for k in ("PSIRZ", "PPRIME", "FFPRIM", "QPSI"):
+            raw[k] = -np.asarray(raw[k])
+        rev = GEQDSKEquilibrium.from_raw(raw, cocos=ref.cocos)
+        assert rev.Ip < 0.0 < ref.Ip
+        return ref, rev
+
+    def test_input_jtor_and_ffprim_overlays(self):
+        from bouquet.plotting import (_gfile_current_sign, _gfile_input_ffprim,
+                                      _gfile_input_jtor)
+
+        ref, rev = self._pair()
+        assert _gfile_current_sign(ref) == 1.0
+        assert _gfile_current_sign(rev) == -1.0
+        assert np.array_equal(_gfile_input_ffprim(ref), np.asarray(ref.ffprim))
+        assert np.array_equal(_gfile_input_ffprim(rev), _gfile_input_ffprim(ref))
+        j_ref, j_rev = _gfile_input_jtor(ref), _gfile_input_jtor(rev)
+        # identity for the normal g-file
+        assert np.array_equal(j_ref, np.asarray(ref.j_tor_averaged_direct))
+        # witness: read in its own COCOS the normal g-file's <j_tor> is
+        # co-Ip positive and the reversed one's raw <j_tor> is negative
+        assert np.mean(j_ref) > 0.0
+        assert np.mean(np.asarray(rev.j_tor_averaged_direct)) < 0.0
+        # the overlay is exactly the raw profile times sign(Ip) ...
+        assert np.array_equal(j_rev, -np.asarray(rev.j_tor_averaged_direct))
+        # ... and lands on the normal g-file's overlay point by point in sign.
+        # (Not compared bitwise: the reader traces the negated psi_RZ to
+        # surfaces that differ from the original's at the 1e-4 relative level,
+        # a property of the contour tracing, not of the overlay.)
+        assert np.array_equal(np.sign(j_rev), np.sign(j_ref))

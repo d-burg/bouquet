@@ -48,9 +48,15 @@ such a source.
   whose orientation contradicts the archive. For `ip > 0` sources only `f`
   changes, taking `b0`'s sign.
 - Delivered g-files are unchanged in convention (`CURRENT > 0`, `BCENTR > 0`,
-  TokaMaker's COCOS 7, for every source); they do not carry the experiment's
-  orientation. See
+  so always `Ip·Bt > 0`, TokaMaker's COCOS 7, for every source); they do not
+  carry the experiment's orientation or its field-line helicity, which matters
+  for 3D-field (error-field / coil-coupling / NTV) work. Restoring the source
+  orientation flips P′ and FF′ with ψ. See
   [physics-notes](physics-notes.md#current-and-field-orientation).
+- g-file-path plot overlays (`plot_input_vs_recon`, the reconstruction
+  diagnostic's FF′, `plot_jphi`'s geqdsk total) are now drawn in the solve's
+  positive frame (`× sign(CURRENT)`); `plot_input_vs_recon` reads the g-file in
+  the source's declared COCOS.
 
 ## Unreleased — the default coil acceptance criterion changed
 

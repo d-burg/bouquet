@@ -503,7 +503,8 @@ def plot_tokamaker_comparison(mygs, all_results, plot_idx=None):
 
         # --- (2,0) FF' comparison ---
         ax_ffp = axes[2, 0]
-        ax_ffp.plot(psi_N, eqdsk_ref.ffprim, 'k-', lw=_LW, label=r"geqdsk $FF'$")
+        ax_ffp.plot(psi_N, _gfile_input_ffprim(eqdsk_ref), 'k-', lw=_LW,
+                    label=r"geqdsk $FF'$")
         ax_ffp.plot(psi_N, r['ffprime'], color=_C2, ls='--', lw=_LW, label=r"TokaMaker $FF'$")
         ax_ffp.set_xlabel(r'$\psi_N$'); ax_ffp.set_ylabel(r"$FF'$ [T$^2$ m$^2$ Wb$^{-1}$]")
         ax_ffp.set_title(r"$FF'(\psi)$ comparison"); ax_ffp.legend(fontsize=8); ax_ffp.grid(ls=':')
@@ -1548,6 +1549,34 @@ def _resolve_x_coord(psi_N, x_coord, eq=None, psi_pf=None):
         raise ValueError(f"x_coord must be 'psi_N' or 'rho', got {x_coord!r}")
 
 
+def _gfile_current_sign(eq):
+    """``+1.0`` / ``-1.0``: the factor that puts a g-file's Ip-odd raw
+    quantities (``j_tor``, ``FF'``, ``P'``) in bouquet's positive-Ip frame.
+
+    The reconstruction itself fits ``abs(Ip)`` and ``abs(<j_tor>)``, so a
+    reversed-Ip g-file's raw ``<j_tor>`` / ``FF'`` would otherwise be drawn
+    upside down against the solve.  Same rule as the IMAS reader
+    (:func:`bouquet.io.imas.source_current_sign`): ``sign(CURRENT)``, ``+1``
+    for zero / non-finite.  Unlike ``abs()`` it keeps a genuine local sign
+    change (a counter-current edge) visible.
+    """
+    from .io.imas import source_current_sign
+    return source_current_sign(getattr(eq, "Ip", 1.0))
+
+
+def _gfile_input_jtor(eq):
+    """The g-file's direct flux-surface-averaged ``<j_tor>`` in the solve's
+    positive-Ip frame (what :func:`plot_input_vs_recon` overlays)."""
+    return _gfile_current_sign(eq) * np.asarray(eq.j_tor_averaged_direct, float)
+
+
+def _gfile_input_ffprim(eq):
+    """The g-file's ``FF'`` in the solve's positive-Ip frame (the
+    reconstruction diagnostic's FF' overlay).  FF' is odd in Ip and even in
+    B0, so ``sign(Ip)`` alone maps every orientation onto the solve's."""
+    return _gfile_current_sign(eq) * np.asarray(eq.ffprim, float)
+
+
 def _imas_input_profiles(source):
     r"""Raw input ``(psi_N, pressure[Pa], q)`` from the IDS ``equilibrium``
     profiles_1d at ``source.time`` -- the values the IMAS forward solve starts
@@ -1660,11 +1689,17 @@ def plot_input_vs_recon(run, npsi=80, max_dev_mm=10.0):
 
     # ---- raw input side ----------------------------------------------------
     if not is_imas:
-        eq = read_geqdsk(run.config.source.geqdsk_path)
+        # read in the source's DECLARED COCOS (the reconstruction's own
+        # setting): <j_tor> from the GS relation carries -sigma_Bp, so a
+        # g-file read in the wrong COCOS draws its current upside down
+        eq = read_geqdsk(run.config.source.geqdsk_path,
+                         cocos=int(getattr(run.config.source, "cocos", 1)))
         in_x = np.asarray(eq.psi_N, float)
         in_p = np.asarray(eq.pres, float)
         in_q = np.asarray(eq.q_profile, float)
-        in_jx = in_x; in_j = np.asarray(eq.j_tor_averaged_direct, float)
+        # positive-Ip frame, like the solve it is overlaid on (the fit used
+        # abs(<j_tor>)); identity for a g-file with CURRENT >= 0
+        in_jx = in_x; in_j = _gfile_input_jtor(eq)
         in_bR = np.asarray(eq.boundary_R, float)
         in_bZ = np.asarray(eq.boundary_Z, float)
         in_lbl = "input g-file"
@@ -3646,7 +3681,9 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
                 jg = getattr(eq, "j_tor_averaged", None)
                 if jg is None:
                     jg = getattr(eq, "j_tor_averaged_direct", None)
-                jg = np.asarray(jg, float).ravel()
+                # positive-Ip frame, like the archived baseline and draws
+                # (identity for a g-file with CURRENT >= 0)
+                jg = _gfile_current_sign(eq) * np.asarray(jg, float).ravel()
                 F = dict(total=np.interp(psi, np.asarray(eq.psi_N, float).ravel(), jg),
                          jBS=None, jind=None); Flabel = "geqdsk"
         except Exception as e:

@@ -430,3 +430,46 @@ def test_a_refused_scan_that_holds_draws_is_refused_by_the_reader(tmp_path):
         bq.draw_band(header + ".h5", "7", lambda v: {"x": 1.0})
     with pytest.raises(KeyError, match="refused"):
         bq.BouquetArchive(header + ".h5")["7"].baseline
+
+
+def test_merge_refuses_shards_from_different_generation_setups(tmp_path):
+    from bouquet.parallel import merge_archives
+    s0, s1 = str(tmp_path / "w0.h5"), str(tmp_path / "w1.h5")
+    _shard(s0, 0, 2, {0: "stored", 1: "stored"})
+    _shard(s1, 1, 1, {0: "stored"})
+    with h5py.File(s1, "a") as hf:                    # a fixed-N worker record
+        hf["scan/0"].attrs["parallel_worker_json"] = json.dumps(
+            dict(worker_id=1, n=1, n_attempts=1, n_inspec=0, seed=8))
+    with pytest.raises(RuntimeError, match="different generation set-ups"):
+        merge_archives([s0, s1], str(tmp_path / "m"), scan_key=0)
+    assert not (tmp_path / "m.h5").exists()
+
+
+def test_merge_does_not_sum_attempts_over_shards_without_a_record(tmp_path):
+    from bouquet.parallel import merge_archives
+    s0, s1 = str(tmp_path / "w0.h5"), str(tmp_path / "w1.h5")
+    _shard(s0, 0, 2, {0: "stored", 1: "stored"})
+    _shard(s1, 1, 3, {0: "stored", 1: "stored", 2: "stored"})
+    with h5py.File(s1, "a") as hf:
+        del hf["scan/0"].attrs["parallel_worker_json"]
+    out, n = merge_archives([s0, s1], str(tmp_path / "m"), scan_key=0)
+    rec = read_generation_provenance(out, scan_key=0)
+    assert n == 5 and rec["n_stored"] == 5
+    assert rec["n_attempted"] is None          # 2 recorded < 5 stored: unknown, not 2
+    with h5py.File(out, "r") as hf:
+        assert json.loads(hf["scan/0"].attrs["parallel_manifest_json"])[
+            "n_shards_without_record"] == 1
+
+
+def test_a_partial_merge_is_marked(tmp_path):
+    from bouquet.parallel import merge_archives
+    s0 = str(tmp_path / "w0.h5")
+    _shard(s0, 0, 2, {0: "stored", 1: "stored"})
+    out, _ = merge_archives([s0], str(tmp_path / "m"), scan_key=0,
+                            missing_workers=[1])
+    rec = read_generation_provenance(out, scan_key=0)
+    assert rec["merge_partial_json"] == {"missing_workers": [1], "merged_workers": [0]}
+    assert "PARTIAL merge" in rec["n_requested_source"]
+    with h5py.File(out, "r") as hf:
+        assert json.loads(hf["scan/0"].attrs["parallel_manifest_json"])["partial"][
+            "missing_workers"] == [1]

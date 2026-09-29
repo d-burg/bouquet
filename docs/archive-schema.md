@@ -28,14 +28,18 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │                                  | 'disabled' = cut switched off, no threshold)
     │          [n_requested, n_requested_source, generation_mode, n_attempted,
     │           n_stored, attempt_outcomes_json, bouquet_version,
-    │           inspec_rms_max_mm, inspec_max_max_mm, inspec_cut_source]
-    │                                  generation provenance (1.4+): requested vs attempted
+    │           inspec_rms_max_mm, inspec_max_max_mm, inspec_cut_source,
+    │           merge_partial_json]
+    │                                  generation provenance (absent from older archives;
+    │                                  readers return None): requested vs attempted
     │                                  vs stored; per-attempt outcome (stored |
     │                                  solve_failed | post_align_failed); the version that
     │                                  GENERATED the draws (read_generation_provenance());
     │                                  until-N runs only: the LCFS bound the in-spec count
     │                                  was taken against and its source (absent bound =
-    │                                  none; a merge refuses shards that disagree)
+    │                                  none; a merge refuses shards that disagree);
+    │                                  merge_partial_json marks a merge that knowingly
+    │                                  left workers out (--allow-missing)
     │          [parallel_manifest_json] process-parallel runs: per-worker record
     │          [refused_reason]        a slice refused before any draw (write_refused_scan;
     │                                  run() / run_slices() write it when prepare_baseline
@@ -52,7 +56,8 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │   ├── [recon_lcfs_ref]           10k-pt LCFS reference (boundary metric)
     │   ├── [x_points], [coil_currents, coil_names]
     │   └── attrs: Ip_target, l_i_target, l_i_scale, source_kind, [diverted],
-    │              [li_metrics_json, closure_limited]   baseline provenance (1.4+):
+    │              [li_metrics_json, closure_limited]   baseline provenance (absent
+    │              from older archives):
     │              Baseline.li_metrics as JSON, incl. the ip_closure health
     │              record on hybrid baselines; load_baseline_profiles() decodes
     │              it to li_metrics / ip_closure / closure_limited

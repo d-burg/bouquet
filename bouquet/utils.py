@@ -3175,7 +3175,7 @@ GENERATION_PROVENANCE_KEYS = ("n_requested", "n_requested_source",
                               "generation_mode", "n_attempted", "n_stored",
                               "attempt_outcomes_json", "bouquet_version",
                               "inspec_rms_max_mm", "inspec_max_max_mm",
-                              "inspec_cut_source")
+                              "inspec_cut_source", "merge_partial_json")
 
 
 def stamp_generation_provenance(h5path_or_header, scan_key=None, **attrs):

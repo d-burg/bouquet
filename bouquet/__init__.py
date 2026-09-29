@@ -101,6 +101,7 @@ from .utils import (
     list_equilibrium_indices,
     read_eqdsk_from_bytes,
     write_provenance,
+    write_refused_scan,
     load_config,
 )
 
@@ -167,7 +168,7 @@ __all__ = [
     "load_equilibrium", "load_equilibrium_by_path", "load_eq_fsa",
     "load_baseline_profiles",
     "discover_scan_keys", "count_equilibria", "list_equilibrium_indices",
-    "write_provenance", "load_config",
+    "write_provenance", "write_refused_scan", "load_config",
     # ---- post-process filtering ----
     "filter_coil_currents", "filter_coil_chi2", "measured_coil_currents",
     "resolve_coil_sigma", "CoilSigmaUnavailable", "coil_sigma_floor_fraction", "detect_device", "DEVICES",

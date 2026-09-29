@@ -390,6 +390,14 @@ def _scan_context(ar, key) -> dict:
     ctx = {"attrs": sattrs, "refused_reason": sattrs.get("refused_reason")}
     if ctx["refused_reason"] is not None:
         ctx["refused_reason"] = str(ctx["refused_reason"])
+        held = list_equilibrium_indices(ar.path, scan_key=key)
+        if held:
+            # the writers supersede a refusal when draws land, so this is an
+            # inconsistent archive: refuse to pick one reading silently
+            raise ValueError(
+                f"scan {key!r} carries refused_reason={ctx['refused_reason']!r} "
+                f"but holds {len(held)} draws; the archive is inconsistent "
+                "(remove the attr or the draws deliberately)")
         return ctx
     ctx["indices"] = list_equilibrium_indices(ar.path, scan_key=key)
 

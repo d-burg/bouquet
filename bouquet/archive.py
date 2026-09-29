@@ -337,8 +337,24 @@ class ScanView:
         return list_equilibrium_indices(self._ar.path, scan_key=self.scan_key)
 
     @property
+    def refused_reason(self):
+        """Why this slice was refused before any draw, or None."""
+        import h5py
+        from .utils import _scan_key
+        bkey = _scan_key(self.scan_key)
+        if bkey is None:
+            return None
+        with h5py.File(self._ar.path, "r") as hf:
+            v = hf[f"scan/{bkey}"].attrs.get("refused_reason") if f"scan/{bkey}" in hf else None
+        return (v.decode() if isinstance(v, bytes) else str(v)) if v is not None else None
+
+    @property
     def baseline(self) -> dict:
         """Baseline profiles + sigmas dict for this scan point."""
+        why = self.refused_reason
+        if why is not None:
+            raise KeyError(f"scan {self.scan_key!r} was refused before any "
+                           f"baseline was stored: {why}")
         return load_baseline_profiles(self._ar.path, scan_key=self.scan_key)
 
     def baseline_view(self) -> BaselineView:

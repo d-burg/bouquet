@@ -11,7 +11,7 @@ Docstrings in the source are authoritative; this page is a map.
 | `Bouquet.from_geqdsk()` / `Bouquet.from_imas()` | Minimal constructors for the two baseline sources; auto-apply the validated workflow preset for each path |
 | `Bouquet.describe()` | Print the configuration, non-default knobs only |
 | `Bouquet.verify_sigma0_consistency()` | σ=0 regression guard on the draw-pipeline bootstrap split (one solve) |
-| `Bouquet.run_slices()` | Multi-slice IMAS sweep into one archive, one `scan_key` per slice |
+| `Bouquet.run_slices()` | Multi-slice IMAS sweep into one archive, one `scan_key` per slice; a refused slice is recorded as such (`on_refusal="raise"` default / `"record"` to continue) |
 | `Bouquet.export_bundle()` / `Bouquet.export_ids()` | Per-draw file bundle (geqdsk / pfile / profiles JSON), or one IMAS/OMAS IDS per draw (`fidelity="exact"` uses the captured `eq_fsa` geometry) |
 | `Bouquet.selected_indices()` / `Bouquet.output_spread()` | Post-generation introspection |
 | `Bouquet.plot_baseline()` / `.plot_bouquet()` / `.plot_traces()` / `.plot_coil_currents()` / `.plot_spec_summary()` | Bound plotting |
@@ -39,6 +39,7 @@ Docstrings in the source are authoritative; this page is a map.
 | `BandRecord` / `BandTable` | The per-(key, quantity) record and its container (`to_dataframe()`, `to_csv()`) |
 | `plot_band()` | Median + p16–p84 band across keys; hollow markers below the floor, regular fraction where gated, baseline dashed |
 | `write_provenance()` / `load_config()` | Stamp / recover the exact `BouquetConfig` stored in an archive |
+| `write_refused_scan()` | Record a slice refused before any draw (`refused_reason` on an empty `scan/<key>`); `run()` / `run_slices()` call it when `prepare_baseline` raises |
 | `initialize_equilibrium_database()` | Create/open an archive (stamps `schema_version`) |
 | `load_equilibrium()` / `load_equilibrium_by_path()` | Read one draw |
 | `load_baseline_profiles()` | Read the per-scan baseline |

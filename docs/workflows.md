@@ -527,6 +527,16 @@ metrics = b.run_slices(times=[2.10, 2.20, 2.30],
 `scan_keys` defaults to the time in ms. Reconstruction sources have no time
 axis — build one `Bouquet` per g-file instead.
 
+A slice whose `prepare_baseline` raises (a closure refusal, a failed gate) is
+written into the archive as **refused** (`bq.write_refused_scan`, with the
+exception as `refused_reason`), so `draw_bands` reports it as
+`status="refused"` rather than a gap. By default the sweep then re-raises, as
+before; `run_slices(..., on_refusal="record")` records it in the summary
+(`refused=<reason>`) and moves on to the next slice. `Bouquet.run()` records a
+refusal the same way before re-raising. A later baseline or draw written into
+the same scan supersedes the refusal (kept as `refused_reason_superseded`).
+Parallel shards do not write refused records (a refused worker raises).
+
 ## Process-parallel generation
 
 Draws are embarrassingly parallel, and `OFT_env` is a per-process singleton —

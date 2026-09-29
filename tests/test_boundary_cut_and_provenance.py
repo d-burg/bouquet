@@ -313,3 +313,120 @@ def test_merge_refuses_shards_counted_against_different_cuts(tmp_path):
     with pytest.raises(RuntimeError, match="different boundary cuts"):
         merge_archives([s0, s1], str(tmp_path / "m"), scan_key=0)
     assert not (tmp_path / "m.h5").exists()           # nothing was merged
+
+
+# ---------------------------------------------------------------------------
+# refused slices: written by the pipeline, superseded by a later generation
+# ---------------------------------------------------------------------------
+
+def _store_slice(header, key, n_draws, tmp_path):
+    """A baseline + n draws through the real archive writers."""
+    from bouquet.utils import (store_equilibrium, store_baseline_profiles,
+                               initialize_equilibrium_database)
+    initialize_equilibrium_database(header)
+    psi, one = np.linspace(0, 1, 9), np.ones(9)
+    eq_path = str(tmp_path / "in.eqdsk")
+    with open(eq_path, "wb") as fh:
+        fh.write(b"GEQDSK-BYTES")
+    store_baseline_profiles(header, psi, one, one, one, one, one, one,
+                            one, one, one, one, one, 1e6, 1.0, scan_key=key)
+    for c in range(n_draws):
+        store_equilibrium(header, c, eq_path, psi, one, one, one,
+                          one, one, one, one, one, 1.0, 0.8, scan_key=key)
+    with h5py.File(header + ".h5", "a") as hf:        # a stamped filter
+        hf[f"scan/{key}"].attrs["coil_filter"] = "chi2"
+        for c in range(n_draws):
+            g = hf[f"scan/{key}/{c}"]
+            g.attrs["passes_coil_filter"] = True
+            g.attrs["selected"] = True
+            g.attrs["val"] = float(c)
+
+
+def _slice_bouquet(tmp_path, monkeypatch, refuse_at):
+    """A Bouquet whose solver stages are stubbed: prepare_baseline raises for
+    the times in *refuse_at*; generate writes 5 draws through the writers."""
+    from types import SimpleNamespace
+    from bouquet.run import Bouquet
+    b = Bouquet(_cfg(tmp_path))
+    state = {}
+    monkeypatch.setattr(b, "setup_solver", lambda: None)
+    monkeypatch.setattr(b, "set_slice", lambda time: state.update(t=time))
+    monkeypatch.setattr(b, "filter", lambda *a, **k: None)
+
+    def prep():
+        if state["t"] in refuse_at:
+            raise RuntimeError("closure gate: scale out of bounds")
+        b.baseline = SimpleNamespace(l_i_target=1.0, Ip_target=1e6)
+
+    monkeypatch.setattr(b, "prepare_baseline", prep)
+    monkeypatch.setattr(b, "generate", lambda *a, **k: _store_slice(
+        b.config.output_header, b.config.generation.scan_key, 5, tmp_path))
+    return b
+
+
+def test_run_slices_records_a_refused_slice_and_carries_on(tmp_path, monkeypatch, capsys):
+    import bouquet as bq
+    b = _slice_bouquet(tmp_path, monkeypatch, refuse_at={2.0})
+    res = b.run_slices([1.0, 2.0, 3.0], on_refusal="record")
+    assert "closure gate" in res[2000]["refused"] and res[2000]["n_all"] == 0
+    assert res[1000]["n_all"] == 5 and res[3000]["n_all"] == 5
+    assert "[refused] scan 2000" in capsys.readouterr().out
+    h5 = b.config.output_header + ".h5"
+    t = bq.draw_bands([(h5, k) for k in (1000, 2000, 3000)],
+                      lambda v: {"x": float(v.attrs.get("val", 0.0))})
+    assert [(r.scan_key, r.status) for r in t] == [
+        ("1000", "ok"), ("2000", "refused"), ("3000", "ok")]
+    assert "RuntimeError: closure gate" in t.records[1].refused_reason
+    assert bq.BouquetArchive(h5)["2000"].refused_reason.startswith("prepare_baseline raised")
+
+
+def test_run_slices_default_still_raises_but_the_refusal_is_on_disk(tmp_path, monkeypatch):
+    b = _slice_bouquet(tmp_path, monkeypatch, refuse_at={2.0})
+    with pytest.raises(RuntimeError, match="closure gate"):
+        b.run_slices([1.0, 2.0])
+    with h5py.File(b.config.output_header + ".h5", "r") as hf:
+        assert "closure gate" in hf["scan/2000"].attrs["refused_reason"]
+    with pytest.raises(ValueError, match="on_refusal"):
+        b.run_slices([1.0], on_refusal="skip")
+
+
+def test_run_records_the_refusal_then_reraises(tmp_path, monkeypatch):
+    from bouquet.run import Bouquet
+    b = Bouquet(_cfg(tmp_path))
+    monkeypatch.setattr(b, "setup_solver", lambda: None)
+
+    def boom():
+        raise RuntimeError("no l_i reference")
+    monkeypatch.setattr(b, "prepare_baseline", boom)
+    with pytest.raises(RuntimeError, match="no l_i reference"):
+        b.run()
+    with h5py.File(b.config.output_header + ".h5", "r") as hf:
+        assert "no l_i reference" in hf["scan/0"].attrs["refused_reason"]
+
+
+def test_a_regenerated_slice_supersedes_its_refusal(tmp_path):
+    import bouquet as bq
+    header = str(tmp_path / "regen")
+    bq.write_refused_scan(header, 7, "closure gate rejected")
+    ev = lambda v: {"x": float(v.attrs.get("val", 0.0))}
+    assert bq.draw_band(header + ".h5", "7", ev)[None].status == "refused"
+    _store_slice(header, 7, 6, tmp_path)              # a later generation
+    with h5py.File(header + ".h5", "r") as hf:
+        a = hf["scan/7"].attrs
+        assert "refused_reason" not in a
+        assert a["refused_reason_superseded"] == "closure gate rejected"
+    r = bq.draw_band(header + ".h5", "7", ev)["x"]
+    assert r.status == "ok" and r.n_used == 6 and r.refused_reason is None
+    assert bq.BouquetArchive(header + ".h5")["7"].refused_reason is None
+
+
+def test_a_refused_scan_that_holds_draws_is_refused_by_the_reader(tmp_path):
+    import bouquet as bq
+    header = str(tmp_path / "bad")
+    _store_slice(header, 7, 5, tmp_path)
+    with h5py.File(header + ".h5", "a") as hf:        # hand-edited, inconsistent
+        hf["scan/7"].attrs["refused_reason"] = "stale"
+    with pytest.raises(ValueError, match="inconsistent"):
+        bq.draw_band(header + ".h5", "7", lambda v: {"x": 1.0})
+    with pytest.raises(KeyError, match="refused"):
+        bq.BouquetArchive(header + ".h5")["7"].baseline

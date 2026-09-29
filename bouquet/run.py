@@ -4067,13 +4067,39 @@ class Bouquet:
         """
         self.setup_solver()                       # idempotent
         if self.baseline is None:
-            self.prepare_baseline()
+            try:
+                self.prepare_baseline()
+            except Exception as exc:
+                self._record_refusal(exc)         # then re-raise, unchanged
+                raise
         self.generate()
         self.filter()
         self.export()
         return self
 
-    def run_slices(self, times, scan_keys=None, header=None, export=False) -> dict:
+    def _record_refusal(self, exc):
+        """Write the slice as REFUSED (``write_refused_scan``) after
+        ``prepare_baseline`` raised, so a series reader reports it as
+        ``status="refused"`` rather than a gap. Returns the recorded reason,
+        or None when nothing could be recorded (flat layout, or the scan
+        already holds draws -- then the earlier draws stand)."""
+        import warnings
+        from .utils import write_refused_scan
+        sk = self.config.generation.scan_key
+        reason = f"prepare_baseline raised {type(exc).__name__}: {exc}"[:500]
+        if sk is None:
+            return None
+        try:
+            write_refused_scan(self.config.output_header, sk, reason)
+        except ValueError as e:               # already holds draws
+            warnings.warn(f"slice {sk!r} not marked refused: {e}", UserWarning,
+                          stacklevel=3)
+            return None
+        print(f"[refused] scan {sk!r}: {reason}")
+        return reason
+
+    def run_slices(self, times, scan_keys=None, header=None, export=False,
+                   on_refusal="raise") -> dict:
         """Sweep an IMAS time series into ONE archive, one ``scan_key`` per slice.
 
         Wraps the ``set_slice -> prepare_baseline -> generate -> filter`` loop
@@ -4085,7 +4111,19 @@ class Bouquet:
 
         Reconstruction sources have no time axis (:meth:`set_slice` raises on
         ``time``); build one :class:`Bouquet` per g-file instead.
+
+        A slice whose ``prepare_baseline`` raises (a closure refusal, a
+        failed gate, ...) is written to the archive as REFUSED
+        (:func:`~bouquet.utils.write_refused_scan`, with the exception as the
+        reason), so a later :func:`~bouquet.draw_bands` reports it as
+        ``status="refused"`` instead of a gap. ``on_refusal="raise"``
+        (default) then re-raises, as before; ``"record"`` records it in the
+        summary (``refused=<reason>``, no draws) and carries on with the next
+        slice.
         """
+        if on_refusal not in ("raise", "record"):
+            raise ValueError("on_refusal must be 'raise' or 'record', got "
+                             f"{on_refusal!r}")
         times = [float(t) for t in times]
         if scan_keys is None:
             scan_keys = [int(round(t * 1000)) for t in times]     # ms labels
@@ -4098,7 +4136,17 @@ class Bouquet:
         for t, sk in zip(times, scan_keys):
             self.set_slice(time=t)
             self.config.generation.scan_key = sk
-            self.prepare_baseline()
+            try:
+                self.prepare_baseline()
+            except Exception as exc:
+                reason = self._record_refusal(exc)
+                if on_refusal == "raise":
+                    raise
+                self.baseline = None
+                results[sk] = dict(time=t, n_all=0, n_sel=0, l_i=float("nan"),
+                                   Ip=float("nan"),
+                                   refused=reason or f"{type(exc).__name__}: {exc}")
+                continue
             self.generate()
             self.filter()
             bl = self.baseline

@@ -37,7 +37,10 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │                                  was taken against and its source (absent bound =
     │                                  none; a merge refuses shards that disagree)
     │          [parallel_manifest_json] process-parallel runs: per-worker record
-    │          [refused_reason]        a slice refused before any draw (write_refused_scan)
+    │          [refused_reason]        a slice refused before any draw (write_refused_scan;
+    │                                  run() / run_slices() write it when prepare_baseline
+    │                                  raises); a later baseline/draw write moves it to
+    │                                  [refused_reason_superseded]
     ├── _baseline/                     written once per scan point
     │   ├── eqdsk, [pfile]             raw byte-perfect g-file / p-file
     │   ├── psi_N, psi_N_kinetic

@@ -526,3 +526,33 @@ def test_draw_scalars_reports_every_quantity_on_an_all_rejected_slice(tmp_path):
     assert list(out) == ["q0", "q95", "rho(q=2/1)", "beta_N", "<P> [kPa]", "l_i"]
     assert all(r.status == "empty" and r.empty_reason == "all_draws_rejected"
                and r.n_used == 0 for r in out.values())
+
+
+# --------------------------------------------------------------------------
+#  array-valued quantities are never silently dropped
+# --------------------------------------------------------------------------
+def test_length_one_arrays_are_scalars(tmp_path):
+    p = _simple(tmp_path / "a.h5", 6)
+    ev = {d: {"x": _ok(np.array([float(d)]))} for d in range(6)}
+    ev[1]["x"]["value"] = [1.0]                   # a one-element list too
+    ev[2]["x"]["value"] = np.float64(2.0)
+    ev["_baseline"] = {"x": _ok(np.array([2.5]))}
+    r = bq.draw_band(p, "1", ev)["x"]
+    assert r.status == "ok" and r.n_used == 6
+    assert r.values == {d: float(d) for d in range(6)}
+    assert r.baseline_value == 2.5
+
+
+def test_array_valued_quantity_raises_not_vanishes(tmp_path):
+    from bouquet.stats import NonScalarQuantityError
+    p = _simple(tmp_path / "a.h5", 6)
+    ev = {d: {"x": _ok(float(d)), "prof": _ok(np.array([1.0, 2.0]))} for d in range(6)}
+    with pytest.raises(NonScalarQuantityError, match=r"draw 0 quantity 'prof'.*shape \(2,\)"):
+        bq.draw_band(p, "1", ev)
+    ev = {d: {"x": _ok(np.array([]))} for d in range(6)}
+    with pytest.raises(NonScalarQuantityError):
+        bq.draw_band(p, "1", ev)
+    ev = {d: {"x": _ok(float(d))} for d in range(6)}
+    ev["_baseline"] = {"x": _ok([1.0, 2.0, 3.0])}
+    with pytest.raises(NonScalarQuantityError, match="baseline"):
+        bq.draw_band(p, "1", ev)

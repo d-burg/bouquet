@@ -14,7 +14,9 @@ no ``coil_filter`` stamp would silently report every stored draw as selected,
 so the default ``require_filter=True`` raises on it. The recipe is read-only:
 it never re-filters. Then, per quantity, keep draws the evaluator reports with
 status ``"ok"``, that are *regular* (see the pole rule), and whose value is
-finite. Every removal is kept in ``dropped`` with its reason
+finite. A value must be one number (a one-element array counts as one); an
+array-valued quantity raises :class:`NonScalarQuantityError` rather than being
+dropped as non-finite. Every removal is kept in ``dropped`` with its reason
 (``not_selected``, ``user:<reason>``, ``status:<code>``,
 ``irregular:<label>``, ``non_finite``) and counted at each stage
 (``n_requested`` -> ``n_attempted`` -> ``n_stored`` -> ``n_selected`` ->
@@ -82,7 +84,7 @@ from typing import Optional
 import numpy as np
 
 __all__ = [
-    "BandRecord", "BandTable", "UnfilteredArchiveError",
+    "BandRecord", "BandTable", "UnfilteredArchiveError", "NonScalarQuantityError",
     "draw_band", "draw_bands", "draw_scalars", "plot_band",
 ]
 
@@ -478,7 +480,31 @@ def _lookup_mapping(evaluate, d):
     return None
 
 
-def _classify(entry, label_default):
+class NonScalarQuantityError(ValueError):
+    """An evaluator returned an array (more than one element) for a quantity
+    of the scalar recipe; it would otherwise be dropped as non-finite."""
+
+
+def _scalar_value(v, where):
+    """``float`` of a scalar value; a one-element array or list counts as a
+    scalar, a longer (or empty) one raises :class:`NonScalarQuantityError`.
+    Anything else that is not a number becomes NaN (-> ``non_finite``)."""
+    if isinstance(v, (np.ndarray, list, tuple)):
+        a = np.asarray(v)
+        if a.size != 1:
+            raise NonScalarQuantityError(
+                f"{where}: value has shape {a.shape}; draw_band bands ONE "
+                "number per draw and quantity. Return a scalar, or split a "
+                "profile into one named quantity per point (e.g. "
+                "'q@rho=0.5'), so each point gets its own counts and floors.")
+        v = a.reshape(-1)[0]
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return _NAN
+
+
+def _classify(entry, label_default, where="value"):
     """``(reason_or_None, value, regular)`` for one draw's quantity entry."""
     if not isinstance(entry, Mapping):
         entry = {"value": entry}
@@ -486,10 +512,7 @@ def _classify(entry, label_default):
     if status != "ok":
         return f"status:{status}", None, None
     regular = bool(entry.get("regular", True))
-    try:
-        value = float(entry.get("value"))
-    except (TypeError, ValueError):
-        value = _NAN
+    value = _scalar_value(entry.get("value"), where)
     if not regular:
         label = entry.get("label") or label_default
         return f"irregular:{label}", value, False
@@ -700,7 +723,8 @@ def draw_band(archive, scan_key, evaluate, *, quantities=None,
             if q not in r:
                 dropped.append((d, "status:missing"))
                 continue
-            reason, value, regular = _classify(r[q], label_default)
+            reason, value, regular = _classify(
+                r[q], label_default, where=f"scan {skey!r} draw {d} quantity {q!r}")
             if reason is not None and reason.startswith("status:"):
                 dropped.append((d, reason))
                 continue
@@ -784,7 +808,8 @@ def _baseline_entry(base_res, q, label_default):
         return "not_evaluated", None
     if q not in base_res:
         return "status:missing", None
-    reason, value, regular = _classify(base_res[q], label_default)
+    reason, value, regular = _classify(base_res[q], label_default,
+                                       where=f"baseline quantity {q!r}")
     if reason is not None and reason.startswith("status:"):
         return reason, None
     if value is None or not math.isfinite(value):

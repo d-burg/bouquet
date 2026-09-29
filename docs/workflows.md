@@ -426,7 +426,9 @@ package.
 One recipe for every across-draw band (`bouquet.stats`): the population is the
 draws the stamped filters mark `selected` (an unfiltered archive raises unless
 `require_filter=False`), then per quantity status `"ok"`, `regular` and a finite
-value; the statistic is the median with p16/p84 (`np.percentile`,
+value -- one number per draw (a one-element array counts as one; an
+array-valued quantity raises `NonScalarQuantityError` instead of vanishing, so
+band a profile as one named quantity per point); the statistic is the median with p16/p84 (`np.percentile`,
 `method="linear"`), min and max. The baseline is overlaid, never the centre.
 
 ```python

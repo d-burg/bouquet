@@ -173,6 +173,139 @@ class TestMirroredReadIsBitIdentical:
         assert np.array_equal(bl.j_NBI, np.interp(bl.psi_N, psi_fc, jnbi))
 
 
+def _rich_dd():
+    """The example dd with every signed field a real equilibrium / core_profiles
+    / core_sources / pf_active IDS may carry filled in (synthetic values), so
+    the mirror helper and the reader are exercised on all of them."""
+    dd = _example()
+    nt = len(dd["equilibrium"]["time"])
+    for ts in dd["equilibrium"]["time_slice"]:
+        p1 = ts["profiles_1d"]
+        psi = np.asarray(p1["psi"], float)
+        n = psi.size
+        p1["dpressure_dpsi"] = (-4.0e4 * (1.0 - psi)).tolist()
+        p1["f_df_dpsi"] = (0.8 * (1.0 - psi) ** 2 - 0.1).tolist()
+        p1["f"] = (-3.0 - 0.05 * psi).tolist()          # B0 < 0 in the example
+        p1["j_parallel"] = (1.02 * np.asarray(p1["j_tor"], float)).tolist()
+        gq = ts["global_quantities"]
+        gq.update(psi_axis=-0.25, psi_boundary=0.35, q_axis=1.05, q_95=4.2,
+                  q_min={"value": 1.01, "rho_tor_norm": 0.2})
+        ts["profiles_2d"] = [{"psi": [[0.1 * i + 0.01 * k for k in range(4)]
+                                      for i in range(3)],
+                              "b_field_r": [[0.02] * 4] * 3,
+                              "b_field_z": [[-0.03] * 4] * 3,
+                              "b_field_tor": [[-1.8] * 4] * 3}]
+        ts["boundary"]["psi"] = 0.35
+    cpi = dd["core_profiles"]
+    cpi["vacuum_toroidal_field"] = {"r0": 1.68877232, "b0": [-1.8] * nt}
+    cpi["global_quantities"] = {"ip": [1.2346e6] * nt,
+                                "current_bootstrap": [3.0e5] * nt,
+                                "current_non_inductive": [5.0e5] * nt,
+                                "v_loop": [0.4] * nt}
+    for c in cpi["profiles_1d"]:
+        n = len(c["j_tor"])
+        c["grid"]["psi_magnetic_axis"] = -0.25
+        c["grid"]["psi_boundary"] = 0.35
+        c["q"] = np.linspace(1.05, 6.8, n).tolist()
+    for s in dd["core_sources"]["source"]:
+        for pr in s["profiles_1d"]:
+            pr["current_parallel_inside"] = np.cumsum(pr["j_parallel"]).tolist()
+        s["global_quantities"] = [{"current_parallel": 1.0e5}] * nt
+    dd["pf_active"] = {"coil": [
+        {"name": "F1A", "current": {"time": list(dd["equilibrium"]["time"]),
+                                    "data": [1.0e3] * nt,
+                                    "data_error_upper": [7.0] * nt}}]}
+    return dd
+
+
+class TestMirrorHelperIsComplete:
+    """tests/_mirror_dd must transform every signed field a genuinely reversed
+    source carries -- otherwise the suite cannot see a consumer of one of them
+    (the coil targets, the IMAS export) mixing frames."""
+
+    #: (path, parity) -- parity "ip", "b0" or "q" (= ip*b0)
+    _FIELDS = (
+        (("equilibrium", "vacuum_toroidal_field", "b0"), "b0"),
+        (("core_profiles", "vacuum_toroidal_field", "b0"), "b0"),
+        (("equilibrium", "time_slice", 2, "global_quantities", "ip"), "ip"),
+        (("equilibrium", "time_slice", 2, "global_quantities", "psi_axis"), "ip"),
+        (("equilibrium", "time_slice", 2, "global_quantities", "psi_boundary"), "ip"),
+        (("equilibrium", "time_slice", 2, "global_quantities", "q_axis"), "q"),
+        (("equilibrium", "time_slice", 2, "global_quantities", "q_95"), "q"),
+        (("equilibrium", "time_slice", 2, "global_quantities", "q_min", "value"), "q"),
+        (("equilibrium", "time_slice", 2, "profiles_1d", "psi"), "ip"),
+        (("equilibrium", "time_slice", 2, "profiles_1d", "j_tor"), "ip"),
+        (("equilibrium", "time_slice", 2, "profiles_1d", "j_parallel"), "ip"),
+        (("equilibrium", "time_slice", 2, "profiles_1d", "dpressure_dpsi"), "ip"),
+        (("equilibrium", "time_slice", 2, "profiles_1d", "f_df_dpsi"), "ip"),
+        (("equilibrium", "time_slice", 2, "profiles_1d", "f"), "b0"),
+        (("equilibrium", "time_slice", 2, "profiles_1d", "q"), "q"),
+        (("equilibrium", "time_slice", 2, "profiles_2d", 0, "psi"), "ip"),
+        (("equilibrium", "time_slice", 2, "profiles_2d", 0, "b_field_r"), "ip"),
+        (("equilibrium", "time_slice", 2, "profiles_2d", 0, "b_field_z"), "ip"),
+        (("equilibrium", "time_slice", 2, "profiles_2d", 0, "b_field_tor"), "b0"),
+        (("equilibrium", "time_slice", 2, "boundary", "psi"), "ip"),
+        (("core_profiles", "global_quantities", "ip"), "ip"),
+        (("core_profiles", "global_quantities", "current_bootstrap"), "ip"),
+        (("core_profiles", "global_quantities", "current_non_inductive"), "ip"),
+        (("core_profiles", "global_quantities", "v_loop"), "ip"),
+        (("core_profiles", "profiles_1d", 2, "grid", "psi"), "ip"),
+        (("core_profiles", "profiles_1d", 2, "grid", "psi_magnetic_axis"), "ip"),
+        (("core_profiles", "profiles_1d", 2, "grid", "psi_boundary"), "ip"),
+        (("core_profiles", "profiles_1d", 2, "j_tor"), "ip"),
+        (("core_profiles", "profiles_1d", 2, "j_total"), "ip"),
+        (("core_profiles", "profiles_1d", 2, "j_ohmic"), "ip"),
+        (("core_profiles", "profiles_1d", 2, "j_bootstrap"), "ip"),
+        (("core_profiles", "profiles_1d", 2, "j_non_inductive"), "ip"),
+        (("core_profiles", "profiles_1d", 2, "q"), "q"),
+        (("core_sources", "source", 0, "profiles_1d", 2, "j_parallel"), "ip"),
+        (("core_sources", "source", 0, "profiles_1d", 2,
+          "current_parallel_inside"), "ip"),
+        (("core_sources", "source", 0, "global_quantities", 2,
+          "current_parallel"), "ip"),
+        (("pf_active", "coil", 0, "current", "data"), "ip"),
+    )
+    #: never touched: kinetics, pressure, geometry, rotation, magnitudes
+    _UNSIGNED = (
+        ("equilibrium", "time_slice", 2, "profiles_1d", "pressure"),
+        ("equilibrium", "time_slice", 2, "boundary", "outline"),
+        ("core_profiles", "profiles_1d", 2, "electrons"),
+        ("core_profiles", "profiles_1d", 2, "ion"),
+        ("core_profiles", "profiles_1d", 2, "grid", "rho_tor_norm"),
+        ("pf_active", "coil", 0, "current", "data_error_upper"),
+    )
+
+    @staticmethod
+    def _get(d, path):
+        for k in path:
+            d = d[k]
+        return d
+
+    @pytest.mark.parametrize("orient", mdd.ORIENTATIONS,
+                             ids=[mdd.tag(*o) for o in mdd.ORIENTATIONS])
+    def test_every_signed_field_is_mirrored(self, orient):
+        s_ip, s_b0 = orient
+        fac = {"ip": s_ip, "b0": s_b0, "q": s_ip * s_b0}
+        dd = _rich_dd()
+        m = mdd.mirror_dd(dd, s_ip, s_b0)
+        for path, parity in self._FIELDS:
+            a = np.asarray(self._get(dd, path), float)
+            b = np.asarray(self._get(m, path), float)
+            assert np.array_equal(b, fac[parity] * a), (path, orient)
+        for path in self._UNSIGNED:
+            assert self._get(dd, path) == self._get(m, path), (path, orient)
+
+    @pytest.mark.parametrize("orient", mdd.ORIENTATIONS,
+                             ids=[mdd.tag(*o) for o in mdd.ORIENTATIONS])
+    def test_rich_dd_reads_bit_identically_in_every_orientation(self, tmp_path,
+                                                                 orient):
+        dd = _rich_dd()
+        ref = _read(_write(tmp_path, dd, "ref.json"))
+        bl = _read(_write(tmp_path, mdd.mirror_dd(dd, *orient), "m.json"))
+        _assert_same_baseline(ref, bl, mdd.tag(*orient))
+        assert bl.source_current_sign == orient[0]
+
+
 # ---------------------------------------------------------------------------
 #  2. the reader records (and logs) what it did; ip > 0 is untouched
 # ---------------------------------------------------------------------------

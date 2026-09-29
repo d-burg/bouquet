@@ -556,24 +556,16 @@ class TestCoilTargetsAreInTheSolveFrame:
         Bouquet._apply_coil_reg(obj, gs)
         return gs.installed
 
-    @staticmethod
-    def _mirror(dd, s_ip):
-        """A reversed-Ip discharge: ip AND every coil current reversed."""
-        import copy
-        d = copy.deepcopy(dd)
-        for ts in d["equilibrium"]["time_slice"]:
-            ts["global_quantities"]["ip"] *= s_ip
-        for c in d["pf_active"]["coil"]:
-            c["current"]["data"] = [s_ip * v for v in c["current"]["data"]]
-        return d
-
     def test_mirrored_source_gives_identical_solve_frame_targets(self, tmp_path):
+        """tests/_mirror_dd mirrors ip AND every pf_active coil current, as a
+        genuinely reversed discharge carries them."""
+        import _mirror_dd as mdd
         from bouquet.coil_targets import measured_from_pf_active
 
         dd = self._dd()
         installed, stamps = [], []
-        for s_ip, s_b0 in ((1.0, 1.0), (-1.0, 1.0)):
-            p = self._write(tmp_path, self._mirror(dd, s_ip), "m.json")
+        for s_ip, s_b0 in mdd.ORIENTATIONS:
+            p = self._write(tmp_path, mdd.mirror_dd(dd, s_ip, s_b0), "m.json")
             meas = measured_from_pf_active(p, 2.0)
             assert meas.current_sign == s_ip
             spec = coil_reg_from_measured(meas, sigma={"F1A": 7 * 58.0,
@@ -588,7 +580,7 @@ class TestCoilTargetsAreInTheSolveFrame:
         assert by["F1A"]["target"] == 20.0 * 58.0
         assert by["F6A"]["target"] == -6.0 * 55.0
         assert by["ECOILA"]["target"] == -2.0e3
-        assert stamps == [{1.0}, {-1.0}]
+        assert stamps == [{1.0}, {1.0}, {-1.0}, {-1.0}]
 
     def test_positive_source_values_are_the_stored_ones(self, tmp_path):
         from bouquet.coil_targets import MeasuredCoilCurrents, measured_from_pf_active

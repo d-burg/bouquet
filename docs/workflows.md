@@ -247,7 +247,10 @@ as an enormous sigma.
 ### `FixedComponentsConfig` (`b.fixed_components`)
 
 `p_fast`, `j_NBI`, `j_RF` on their own `psi_N` grid — additive components that
-are never perturbed. `p_fast_reduction` (default `"auto"`) selects the
+are never perturbed. On the IMAS path `j_NBI` / `j_RF` replace dd quantities, so
+they are taken in the **dd's own current orientation** and normalised with every
+other dd current (multiplied by `sign(ip)`; see
+[physics-notes](physics-notes.md#current-and-field-orientation)). `p_fast_reduction` (default `"auto"`) selects the
 anisotropic fast-pressure reduction applied before the isotropic GS solve.
 
 > **`p_fast_reduction` — a factor-of-3 convention, chosen from dd provenance.**
@@ -421,6 +424,12 @@ bq.BouquetArchive("my_run.h5")["0"].extract("bundle/", formats=("geqdsk", "pfile
 
 b.export_ids("ids/", fidelity="exact")            # IMAS/OMAS source only
 ```
+
+Every exported equilibrium is in bouquet's positive-current frame (g-file
+`CURRENT > 0`, `BCENTR > 0`; IDS `ip > 0`), whatever the source's orientation;
+the source's own signs are on the archive (`source_current_sign`,
+`source_b0_sign` on `_baseline`) for a consumer that needs to restore them —
+see [physics-notes](physics-notes.md#current-and-field-orientation).
 
 The profiles JSON is source-agnostic and carries everything needed to rebuild
 the state elsewhere: the perturbed profiles and their units, scalar diagnostics

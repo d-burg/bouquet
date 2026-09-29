@@ -1,5 +1,33 @@
 # Bouquet — change summaries
 
+## Unreleased — reversed-current IMAS sources (hotfix)
+
+**A dd with `ip < 0` is now read into bouquet's positive-current frame.** Before
+this, `read_imas_baseline` kept the dd's (negative) current profiles while every
+bootstrap bouquet recomputes on its positive-current anchor is positive, so on
+a reversed-current source the bootstrap was added **against** Ip — in the
+legacy `solve_with_bootstrap` path, in the draws, and (on builds that have it)
+in the self-consistent loop. The Ip closure, the q0 target (negative),
+`fuse_total_err_pct` (off by 2c) and `swb_over_fuse_jBS_peak` were all wrong for
+such a source.
+
+- **Changes results only for sources with `ip < 0`.** For `ip ≥ 0` the reader
+  multiplies by exactly `+1.0`; baselines, closures, draws and archives are
+  bit-identical to before (verified bitwise A/B against the pre-fix build: the
+  synthetic IMAS example's forward-solved baseline under four closure paths,
+  and a seeded g-file run of the golden-fixture example including its draws). **Any bouquet result built on a reversed-current dd before
+  this change is invalid and must be regenerated.**
+- New records: `Baseline.source_current_sign` / `source_b0_sign`,
+  `li_metrics.source_current_sign` / `source_b0_sign`,
+  `ip_closure.source_current_sign`, and `_baseline` attrs
+  `source_current_sign` / `source_b0_sign` / `current_frame` on IMAS archives.
+- A user-supplied `FixedComponentsConfig.j_NBI` / `j_RF` on the IMAS path is
+  taken in the dd's own orientation and normalised with it.
+- Delivered g-files are unchanged in convention (`CURRENT > 0`, `BCENTR > 0`,
+  TokaMaker's COCOS 7, for every source); they do not carry the experiment's
+  orientation. See
+  [physics-notes](physics-notes.md#current-and-field-orientation).
+
 ## Unreleased — the default coil acceptance criterion changed
 
 **`Bouquet.filter()` now judges coil currents with a measurement-referenced χ²

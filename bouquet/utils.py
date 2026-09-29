@@ -725,6 +725,13 @@ def closure_sign_convention(ip_ind, ip_bs, ip_fix, c_affine, Ip_abs):
     Returns ``(sgn, Ip_target_signed, c_signed)``.  For the ordinary
     positive convention ``sgn`` is ``+1`` and both values pass through
     unchanged.
+
+    On the IMAS path the reader has already brought every source current
+    into the anchor's positive frame (``Baseline.source_current_sign``), so
+    ``sgn`` is ``+1`` for any dd whose currents agree with its own ``ip``.
+    This pairing does NOT re-sign a recomputed bootstrap and never did: it is
+    kept as a guard for callers that hand in their own components, and a
+    ``-1`` on reader output is reported by the caller as a mixed-frame input.
     """
     _lin_total = float(ip_ind) + float(ip_bs) + float(ip_fix)
     if not np.isfinite(_lin_total):

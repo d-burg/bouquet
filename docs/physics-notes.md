@@ -14,6 +14,7 @@ covers the guarantees a user should know about and the knobs that change them.
 - [Kinetics regridding](#kinetics-regridding)
 - [Edge-profile classification](#edge-profile-classification)
 - [Hybrid kinetics on the IMAS path](#hybrid-kinetics-on-the-imas-path)
+- [Current and field orientation](#current-and-field-orientation)
 - [Z_eff-primary density scheme](#z_eff-primary-density-scheme)
 - [Corrective j_phi iteration](#corrective-j_phi-iteration)
 - [The structured closure and its l_i constraint](#the-structured-closure-and-its-l_i-constraint)
@@ -172,6 +173,72 @@ than the dd carries, typically a magnetics-only equilibrium reconstruction.
 Note that `anchor_pressure_to_equilibrium` defaults to `False` for exactly this
 reason: with IDA-hybrid kinetics, anchoring to `equilibrium.pressure` would
 force the trusted IDA pressure back onto the FUSE total.
+
+## Current and field orientation
+
+bouquet works in **one positive-current frame**: every TokaMaker anchor is
+solved to `|Ip|` with `F0 = |R·B|` (`read_imas_geometry`, and `abs(R_center·B_center)`
+on the g-file path), whatever orientation the source was written in. Every
+bootstrap bouquet recomputes on that anchor — the legacy `solve_with_bootstrap`
+path and the self-consistent loop's `evaluate_jBS` alike — therefore comes out
+positive, and so does everything built from the solve.
+
+**IMAS sources.** A dd written for a reversed-current discharge (`ip < 0` in the
+dd's own COCOS) carries *negative* current profiles. `read_imas_baseline`
+multiplies every current it reads by `sign(equilibrium ip)`:
+
+| multiplied by `sign(ip)` | read unchanged |
+|---|---|
+| `core_profiles` `j_total`, `j_tor`, `j_ohmic`, `j_bootstrap` | kinetics (`n`, `T`, `Z_eff`), fast and equilibrium pressure |
+| every beam-source `j_parallel` (→ `j_NBI`) | rotation (`omega_tor`), `E_r`, transport coefficients |
+| `equilibrium.profiles_1d.j_tor` (→ `jphi_diff`) | the dd's own `q` (`q0_dd`, recorded raw; the sawtooth gate reads `|q0_dd|`) |
+| a user-supplied `FixedComponentsConfig.j_NBI` / `j_RF` (they replace dd quantities, so they are given in the dd's orientation) | the boundary outline, `F0 = |r0·b0|` |
+
+The factor is recorded as `Baseline.source_current_sign` (with the source's B0
+sign as `Baseline.source_b0_sign`), in `li_metrics` and `ip_closure`, and on the
+archive's `_baseline` group; a reversed source is also logged. For `ip ≥ 0` the
+factor is exactly `+1.0` and the read is bit-identical to what it always was.
+For a mirrored source the Baseline is **bit-identical** to the original's — the
+factor is exact in IEEE arithmetic and every operation the reader applies to a
+current afterwards (the `j_tor/j_total` conversion ratio, the inductive
+residual, the `jphi_diff` difference) is odd in it — so the whole downstream
+chain (closure, q0 target, bootstrap loop, draws) sees identical inputs.
+
+Before this normalisation the reader kept the dd's sign: on a reversed source
+the inductive and fixed currents stayed negative while the recomputed bootstrap
+was positive, so the bootstrap was added *against* Ip.
+`utils.closure_sign_convention` re-signed the Ip target and the affine P′
+constant but never the bootstrap, and `unrenormalise_q0` mixed the two frames
+into a negative q0 target. `closure_sign_convention` stays in place as a guard
+(`current_direction_sign` in the closure record is read *after* the
+normalisation and is `+1` on any dd whose currents agree with its own `ip`; a
+negative value is printed as a warning), and a dd whose `core_profiles` total
+integrates against its own `ip` is warned about by the reader — no sign
+convention can repair that.
+
+**What bouquet delivers.** Every delivered equilibrium is in the positive frame,
+for every source, normal or reversed:
+
+- **g-files** are written by TokaMaker's `save_eqdsk` (its default COCOS 7) and
+  carry `CURRENT > 0` and `BCENTR > 0`. They carry **neither** the experiment's
+  Ip sign **nor** its toroidal-field sign: a normal-orientation source with
+  `B0 < 0` is also delivered with `BCENTR > 0`. This was already the convention
+  before the normalisation above and is unchanged by it.
+- **archived currents** (`j_phi`, `j_BS`, `j_inductive`) are positive-frame.
+- **IMAS export** (`write_imas_draw` / `export_imas_drawset`) writes the draw's
+  positive-frame `ip` and currents into the source template; it does not
+  restore the source orientation.
+
+Static MHD quantities (the equilibrium, l_i, q magnitude, Δ′, δW) do not depend
+on the frame: flipping Ip alone is a mirror reflection (φ → −φ) of the plasma
+and flipping both is a full field reversal, and both are symmetries of the MHD
+equations. Quantities that carry a *direction* — toroidal rotation, `E_r`,
+diamagnetic and E×B frequencies — are passed through in the source's own lab
+signs and are **not** transformed into the delivered frame. A consumer that
+combines a delivered equilibrium with flows must therefore either restore the
+source orientation (`Ip → s_I·Ip`, `ψ → s_I·ψ`, `F → s_B·F`, `q → s_I·s_B·q`,
+with `s_I = source_current_sign`, `s_B = source_b0_sign`) or transform the flows
+into the delivered frame. bouquet does neither automatically.
 
 ## Z_eff-primary density scheme
 

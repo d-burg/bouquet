@@ -968,6 +968,14 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
                     scan_key=None, time=None, fidelity="auto"):
     """Reconstruct a perturbed IMAS/OMAS IDS for one draw from the bouquet HDF5.
 
+    Orientation: everything written here is in bouquet's positive-current
+    frame (the archived eqdsk's ``ip > 0`` and the archived currents), also
+    for a source written with ``ip < 0``; the template's own fields that are
+    not overwritten (``vacuum_toroidal_field``, rotation, ...) keep the
+    source's signs.  The source orientation is recorded on the archive
+    (``_baseline`` attrs ``source_current_sign`` / ``source_b0_sign``) and is
+    NOT restored here.
+
     Maps the draw's archived eqdsk to the ``equilibrium`` IDS
     (``profiles_1d`` / ``profiles_2d`` / ``global_quantities`` / ``boundary`` --
     lossless to the eqdsk grid, machine-precision GS) and the draw's ``.h5``

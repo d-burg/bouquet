@@ -1563,7 +1563,13 @@ def _imas_input_profiles(source):
     psi = np.asarray(p1["psi"], float)
     psiN = (psi - psi[0]) / (psi[-1] - psi[0]) if psi[-1] != psi[0] else psi
     q = np.asarray(p1["q"], float) if "q" in p1 else None
-    jt = np.asarray(p1["j_tor"], float) if "j_tor" in p1 else None
+    # j_tor in bouquet's positive-current frame -- the frame the solved
+    # profile it is overlaid on lives in (read_imas_baseline applies the same
+    # factor); identity for ip >= 0.
+    from .io.imas import source_current_sign
+    s = source_current_sign(
+        eq["time_slice"][ie].get("global_quantities", {}).get("ip", 1.0))
+    jt = s * np.asarray(p1["j_tor"], float) if "j_tor" in p1 else None
     return psiN, np.asarray(p1["pressure"], float), q, jt
 
 
@@ -3612,15 +3618,27 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
         try:
             if kind == "imas":
                 from .physics import parallel_to_toroidal
-                cp = json.load(open(source))["core_profiles"]
+                from .io.imas import source_current_sign
+                _dd = json.load(open(source))
+                cp = _dd["core_profiles"]
                 ic = int(np.argmin(np.abs(np.asarray(cp["time"], float) - float(int(sk)) / 1000.0)))
                 c = cp["profiles_1d"][ic]
+                # the raw source currents in bouquet's positive-current frame
+                # (the frame the archived baseline and draws are in); the
+                # same factor read_imas_baseline applies, identity for ip >= 0
+                _eq = _dd.get("equilibrium", {})
+                _cs = 1.0
+                if _eq.get("time_slice"):
+                    _ie = int(np.argmin(np.abs(np.asarray(_eq["time"], float) - float(int(sk)) / 1000.0)))
+                    _cs = source_current_sign(
+                        _eq["time_slice"][_ie].get("global_quantities", {}).get("ip", 1.0))
+                del _dd
                 p = np.asarray(c["grid"]["psi"], float); pN = (p - p[0]) / (p[-1] - p[0])
-                jtot = np.asarray(c["j_total"], float); jtor = np.asarray(c["j_tor"], float)
+                jtot = _cs * np.asarray(c["j_total"], float); jtor = _cs * np.asarray(c["j_tor"], float)
                 tt = lambda jp: parallel_to_toroidal(jp, j_parallel_total=jtot, j_tor_total=jtor)
                 F = dict(total=np.interp(psi, pN, jtor),
-                         jBS=np.interp(psi, pN, tt(np.asarray(c["j_bootstrap"], float))),
-                         jind=np.interp(psi, pN, tt(np.asarray(c["j_ohmic"], float))))
+                         jBS=np.interp(psi, pN, tt(_cs * np.asarray(c["j_bootstrap"], float))),
+                         jind=np.interp(psi, pN, tt(_cs * np.asarray(c["j_ohmic"], float))))
                 fixed = F["total"] - F["jBS"] - F["jind"]; Flabel = "FUSE"
             else:
                 from .io.geqdsk import read_geqdsk

@@ -192,6 +192,7 @@ multiplies every current it reads by `sign(equilibrium ip)`:
 | `core_profiles` `j_total`, `j_tor`, `j_ohmic`, `j_bootstrap` | kinetics (`n`, `T`, `Z_eff`), fast and equilibrium pressure |
 | every beam-source `j_parallel` (→ `j_NBI`) | rotation (`omega_tor`), `E_r`, transport coefficients |
 | `equilibrium.profiles_1d.j_tor` (→ `jphi_diff`) | the dd's own `q` (`q0_dd`, recorded raw; the sawtooth gate reads `|q0_dd|`) |
+| `pf_active` coil currents read as coil-regularisation targets (`coil_targets.measured_from_pf_active`) | `pf_active` per-coil sigma (`data_error_upper`, used through `abs()` by the χ² coil filter) |
 | | a user-supplied `FixedComponentsConfig.j_NBI` / `j_RF` — defined in bouquet's positive-Ip frame (co-current positive), exactly as on the g-file path |
 | | the boundary outline, `F0 = |r0·b0|` |
 
@@ -215,6 +216,21 @@ into a negative q0 target. `closure_sign_convention` stays in place as a guard
 (`current_direction_sign` in the closure record is read *after* the
 normalisation and is `+1` on any dd whose currents agree with its own `ip`; a
 negative value is printed as a warning).
+
+**Coil-current targets.** The positive-frame solve of a reversed-Ip discharge
+is the mirror image of the lab plasma, so its equilibrium coil currents are the
+lab ones with the sign reversed. `coil_targets.measured_from_pf_active`
+therefore multiplies every measured circuit current by the same factor
+(`sign(ip)` of the same dd at the same time, or its own explicit
+`current_orientation=+1/-1`) and returns it with the factor recorded;
+`coil_reg_from_measured` copies the factor onto each `SolverConfig.coil_reg`
+term as `"source_current_sign"` without applying it again, so it reaches the
+archived `config_json`. `Bouquet._apply_coil_reg` refuses a term whose recorded
+factor disagrees with the IMAS baseline's `source_current_sign` (e.g. an
+`ImasSource.current_orientation` override the coil read did not share): pinning
+at W0 = 100 toward the mirror-image field would distort or fail the solve.
+Hand-built terms and plain-dict targets claim no orientation and are not
+checked.
 
 **Mixed-orientation sources are refused.** A dd whose current profiles and
 plasma current were written in *different* orientations (for example an IDS

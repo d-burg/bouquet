@@ -85,7 +85,11 @@ class SolverConfig:
     #   {"coils": {name: coeff}, "target": float, "weight": float}
     # Empty (default) => every coil pulled toward ZERO at unit weight, the
     # historical behaviour. Populate to pin coils to measured currents; see
-    # bouquet.coil_targets.coil_reg_from_measured. Applied by
+    # bouquet.coil_targets.coil_reg_from_measured. Targets are in the SOLVE
+    # (positive-Ip) frame: measured_from_pf_active multiplies the measured
+    # circuit currents by the source's orientation factor and records it on
+    # each term ("source_current_sign"); a term whose recorded factor disagrees
+    # with the IMAS baseline's source_current_sign is refused. Applied by
     # Bouquet._apply_coil_reg at BOTH setup_solver and _reset_solver_state --
     # the reset runs immediately before the IMAS baseline solve, so anything
     # installed only at setup is discarded.

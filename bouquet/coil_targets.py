@@ -39,6 +39,25 @@ rule is enforced here rather than left in prose (see :data:`MIN_SAFE_W0`).
 
 At high beta_N the coils and the plasma are not the same equilibrium and even
 W0 = 100 leaves the baseline several sigma out; the weights cannot fix that.
+
+Current orientation -- the targets are in the SOLVE frame
+---------------------------------------------------------
+bouquet solves every equilibrium in one positive-Ip frame (``|Ip|``,
+``F0 = |R*B|``).  For a reversed-Ip discharge that solve is the mirror image of
+the lab plasma, and its equilibrium coil currents are the lab ones with the
+sign reversed -- the poloidal field every coil makes flips with Ip.  A target
+pinned to the LAB current at W0 = 100 would drive the coils toward the
+wrong-sign vertical and shaping field.  :func:`measured_from_pf_active`
+therefore multiplies every circuit current by the same orientation factor the
+IMAS reader applies to the plasma currents (``sign(equilibrium ip)`` of the
+same dd at the same time, or an explicit ``current_orientation``), and it is
+the ONLY place that factor is applied: :func:`coil_reg_from_measured` records
+it on each term (``"source_current_sign"``) without applying it again, and
+:meth:`bouquet.run.Bouquet._apply_coil_reg` refuses a term whose recorded
+factor disagrees with the IMAS baseline's ``source_current_sign``.  For
+``ip > 0`` the factor is ``+1.0`` and the targets are exactly what they were.
+The chi^2 coil filter uses pf_active only for per-coil sigma, through
+``abs()``, and is orientation-free.
 """
 
 import warnings
@@ -48,7 +67,7 @@ import numpy as np
 
 __all__ = ["TURNFC_D3D", "DEFAULT_W0", "MIN_SAFE_W0", "coil_reg_from_measured",
            "measured_from_pf_active", "sigma_from_pf_active",
-           "inverse_variance_weights"]
+           "inverse_variance_weights", "MeasuredCoilCurrents"]
 
 #: DIII-D F-coil turns::
 #:
@@ -109,20 +128,90 @@ def _pf_active_index(t, time_s, name, time_tol_s):
     return j
 
 
+class MeasuredCoilCurrents(dict):
+    """``{name: circuit_current_A}`` in bouquet's positive-Ip SOLVE frame.
+
+    A plain dict of the measured circuit currents, each already multiplied by
+    :attr:`current_sign`, plus the record of that factor:
+
+    * ``current_sign`` -- ``+1.0`` / ``-1.0``, the factor applied (the lab
+      current is ``current_sign * value``);
+    * ``current_sign_origin`` -- where it came from (``"auto: sign(equilibrium
+      ip)"``, ``"override: current_orientation"``, or the no-ip fallback).
+
+    :func:`coil_reg_from_measured` copies ``current_sign`` onto every term it
+    builds, so the orientation travels with the targets into the config (and
+    the archived ``config_json``).
+    """
+
+    current_sign: float = 1.0
+    current_sign_origin: Optional[str] = None
+
+
+def _dd_ip_at(dd, time_s):
+    """Signed equilibrium ip at the slice nearest *time_s*, or None."""
+    eq = dd.get("equilibrium") or {}
+    ts = eq.get("time_slice") or []
+    if not ts:
+        return None
+    t = np.atleast_1d(np.asarray(eq.get("time", [time_s]), dtype=float))
+    i = int(np.argmin(np.abs(t - float(time_s)))) if t.size > 1 else 0
+    try:
+        return float(ts[min(i, len(ts) - 1)]["global_quantities"]["ip"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def measured_from_pf_active(dd_path: str, time_s: float,
-                            time_tol_s: Optional[float] = PF_ACTIVE_TIME_TOL_S
-                            ) -> Dict[str, float]:
-    """``{name: circuit_current_A}`` from an IMAS ``pf_active`` at *time_s* [s].
+                            time_tol_s: Optional[float] = PF_ACTIVE_TIME_TOL_S,
+                            current_orientation="auto"
+                            ) -> "MeasuredCoilCurrents":
+    """``{name: circuit_current_A}`` from an IMAS ``pf_active`` at *time_s* [s],
+    in bouquet's positive-Ip solve frame.
 
     The nearest sample is taken; a request further than *time_tol_s* from any
     sample warns instead of silently returning an endpoint.
+
+    Every current is multiplied by the orientation factor (see the module
+    docstring): with ``current_orientation="auto"`` (default) the sign of the
+    SAME dd's ``equilibrium`` ip at the slice nearest *time_s* -- exactly the
+    factor :func:`bouquet.io.imas.read_imas_baseline` applies to the plasma
+    currents -- or ``+1`` / ``-1`` given explicitly (use the same value as
+    ``ImasSource.current_orientation`` when you set that).  A dd that carries
+    no equilibrium ip cannot be oriented: the currents are taken as given
+    (factor ``+1``) and a warning says so.  The factor and its origin are on
+    the returned :class:`MeasuredCoilCurrents`; for ``ip > 0`` the values are
+    exactly the stored ones.
     """
     import json
+    from .io.imas import (ORIENTATION_ORIGIN_AUTO, parse_current_orientation,
+                          source_current_sign)
 
+    orient = parse_current_orientation(
+        current_orientation, what="measured_from_pf_active(current_orientation=)")
     with open(dd_path) as fh:
         dd = json.load(fh)
     time_s = float(time_s)
-    out = {}
+    if orient == "auto":
+        ip = _dd_ip_at(dd, time_s)
+        if ip is None:
+            sgn = 1.0
+            origin = "auto: no equilibrium ip in the dd (taken as +1)"
+            warnings.warn(
+                "measured_from_pf_active: the dd carries no equilibrium ip, so "
+                "the pf_active currents cannot be oriented and are taken AS "
+                "STORED. For a reversed-Ip discharge that pins every coil to "
+                "the wrong-sign field; pass current_orientation=+1/-1 if you "
+                "know the discharge's orientation.", stacklevel=2)
+        else:
+            sgn = source_current_sign(ip)
+            origin = ORIENTATION_ORIGIN_AUTO
+    else:
+        sgn = float(orient)
+        origin = "override: current_orientation"
+    out = MeasuredCoilCurrents()
+    out.current_sign = sgn
+    out.current_sign_origin = origin
     for c in dd.get("pf_active", {}).get("coil", []):
         name = c.get("name") or c.get("identifier")
         cur = c.get("current") or {}
@@ -130,7 +219,7 @@ def measured_from_pf_active(dd_path: str, time_s: float,
             continue
         t = np.asarray(cur["time"], dtype=float)
         d = np.asarray(cur["data"], dtype=float)
-        out[name] = float(d[_pf_active_index(t, time_s, name, time_tol_s)])
+        out[name] = sgn * float(d[_pf_active_index(t, time_s, name, time_tol_s)])
     return out
 
 
@@ -218,7 +307,13 @@ def coil_reg_from_measured(measured: Dict[str, float],
     Parameters
     ----------
     measured : {name: current}
-        Measured circuit currents [A].
+        Measured circuit currents [A], in the SOLVE (positive-Ip) frame --
+        what :func:`measured_from_pf_active` returns.  Not re-signed here:
+        when *measured* carries ``current_sign`` (a
+        :class:`MeasuredCoilCurrents`) that factor is recorded on every term
+        as ``"source_current_sign"`` so :meth:`Bouquet._apply_coil_reg` can
+        check it against the baseline; a plain dict records nothing and is
+        taken as already being in the solve frame.
     weights : {name: weight}, optional
         Explicit per-coil weights.  Coils absent from it fall back to the
         inverse-variance weight when *sigma* is given, else to *W0*.
@@ -249,6 +344,7 @@ def coil_reg_from_measured(measured: Dict[str, float],
     """
     turns = _resolve_turns(turns, device)
     weights = dict(weights or {})
+    _sign = getattr(measured, "current_sign", None)
     if default_weight is not None:
         warnings.warn(
             "coil_reg_from_measured(default_weight=...) is deprecated: it is a flat "
@@ -284,14 +380,19 @@ def coil_reg_from_measured(measured: Dict[str, float],
             # the same rule every coil gets when no sigma is supplied at all.
             w = float(W0)
             unweighted.append(name)
-        spec.append({
+        term = {
             "coils": {name: 1.0},
             "target": float(i_circuit) * float(turns.get(name, 1.0)),
             "weight": float(w),
             # the turns convention this target assumes, for _apply_coil_reg to
             # check against the mesh that is actually loaded (V50-2)
             "turns": float(turns.get(name, 1.0)),
-        })
+        }
+        if _sign is not None:
+            # the orientation factor ALREADY applied to i_circuit (by
+            # measured_from_pf_active) -- recorded, never applied again
+            term["source_current_sign"] = float(_sign)
+        spec.append(term)
     if unweighted:
         warnings.warn(
             "coil_targets: %d coil(s) carry a measured current but no usable sigma "

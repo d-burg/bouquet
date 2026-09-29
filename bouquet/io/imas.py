@@ -422,8 +422,12 @@ ORIENTATION_ORIGIN_AUTO = "auto: sign(equilibrium ip)"
 ORIENTATION_ORIGIN_OVERRIDE = "override: ImasSource.current_orientation"
 
 
-def parse_current_orientation(setting):
+def parse_current_orientation(setting, what="ImasSource.current_orientation"):
     """Validate ``ImasSource.current_orientation``: ``"auto"``, ``+1.0`` or ``-1.0``.
+
+    (Also the ``current_orientation`` of
+    :func:`bouquet.coil_targets.measured_from_pf_active`; *what* names the
+    setting in the error message.)
 
     Accepts ``"auto"`` (any case), the numbers ``1`` / ``-1`` (int or float)
     and their string spellings (``"+1"``, ``"-1"``).  Anything else -- ``0``,
@@ -446,7 +450,7 @@ def parse_current_orientation(setting):
             v = None
     if v not in (1.0, -1.0):
         raise ValueError(
-            "ImasSource.current_orientation must be 'auto' (default: "
+            f"{what} must be 'auto' (default: "
             "sign(equilibrium ip), refusing a dd whose current profiles "
             "disagree with it), +1 or -1 (the factor that brings this dd's "
             f"currents into bouquet's positive-Ip frame); got {setting!r}")

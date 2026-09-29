@@ -29,6 +29,13 @@ such a source.
   equilibrium `j_tor` the anchor uses. New
   `ImasSource.current_orientation` (`"auto"` default, `+1`, `-1`) names the
   factor explicitly for a file whose convention the user knows.
+- **Measured coil-current targets are in the solve frame.**
+  `coil_targets.measured_from_pf_active` multiplies the `pf_active` circuit
+  currents by the source's orientation factor (new `current_orientation`
+  argument, `"auto"` default) and returns a `MeasuredCoilCurrents` dict that
+  records it; `coil_reg_from_measured` stamps each term with
+  `"source_current_sign"`, and `_apply_coil_reg` refuses a term whose factor
+  disagrees with the IMAS baseline's. Unchanged for `ip > 0`.
 - A user-supplied `FixedComponentsConfig.j_NBI` / `j_RF` is defined in
   bouquet's positive-Ip frame (co-current positive) and used as given on both
   source paths; the IMAS reader does not multiply it by `sign(ip)`.

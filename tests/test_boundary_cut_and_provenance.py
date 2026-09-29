@@ -45,10 +45,22 @@ def test_diiid_boundary_cut_is_calibrated_and_generic_is_five():
 
 
 def test_filterconfig_default_is_unresolved_not_five():
-    assert FilterConfig().rms_max_mm is None
+    # "auto": resolved per device at run time, never a hard-coded 5.0
+    assert FilterConfig().rms_max_mm == "auto"
 
 
-def _cfg(tmp_path, device=None, rms=None):
+@pytest.mark.parametrize("bad", ["none", "Auto", True, float("nan"), float("inf"), [5.0]])
+def test_filterconfig_refuses_an_unknown_boundary_cut_setting(bad):
+    with pytest.raises(ValueError, match="rms_max_mm"):
+        FilterConfig(rms_max_mm=bad)
+
+
+@pytest.mark.parametrize("ok", ["auto", "off", None, 5.0, 3, np.float32(2.5)])
+def test_filterconfig_accepts_the_documented_settings(ok):
+    assert FilterConfig(rms_max_mm=ok).rms_max_mm is ok
+
+
+def _cfg(tmp_path, device=None, rms="auto"):
     cfg = BouquetConfig(source=ImasSource(ids_path="unused.json"),
                         solver=SolverConfig(mesh_path="unused.h5"),
                         output_header=str(tmp_path / "run"),
@@ -68,6 +80,70 @@ def test_bouquet_resolves_explicit_then_device_then_generic(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "8.5 mm" in out and "overrides" in out       # announced once, loudly
     assert Bouquet(_cfg(tmp_path))._boundary_cut() == (5.0, "generic")   # no mesh, no archive
+
+
+def test_the_boundary_cut_can_be_switched_off_explicitly(tmp_path, capsys):
+    from bouquet.run import Bouquet
+    b = Bouquet(_cfg(tmp_path, device="DIII-D", rms="off"))
+    assert b._boundary_cut() == (None, "disabled")
+    assert b.boundary_cut() == (None, "disabled")          # public, quiet
+    out = capsys.readouterr().out
+    assert out.count("[boundary cut]") == 1 and "DISABLED" in out and "'off'" in out
+
+
+def test_none_keeps_its_historical_meaning_no_cut(tmp_path, capsys):
+    """Before the device-calibrated default, rms_max_mm=None meant "no LCFS
+    cut" in both the loop and filter(). A caller who set None deliberately
+    still gets no cut, and is told so -- never a device cut instead."""
+    from bouquet.run import Bouquet
+    assert Bouquet(_cfg(tmp_path, device="DIII-D", rms=None))._boundary_cut() == \
+        (None, "disabled")
+    out = capsys.readouterr().out
+    assert "DISABLED" in out and "historical meaning" in out
+    # the same through a stored config JSON written with null
+    cfg = _cfg(tmp_path, device="DIII-D", rms=None)
+    back = BouquetConfig.from_dict(json.loads(cfg.to_json()))
+    assert back.filtering.rms_max_mm is None
+    assert Bouquet(back)._boundary_cut(quiet=True) == (None, "disabled")
+    # ...and a config that does not mention it gets "auto"
+    d = json.loads(cfg.to_json())
+    d["filtering"].pop("rms_max_mm")
+    assert BouquetConfig.from_dict(d).filtering.rms_max_mm == "auto"
+
+
+def test_the_livelock_guard_suggests_a_setting_that_disables_the_bound():
+    from bouquet.TokaMaker_interface import generate_bouquet
+    src = inspect.getsource(generate_bouquet)
+    assert "filtering.rms_max_mm='off'" in src
+    assert "filtering.rms_max_mm=None) to target" not in src
+    assert FilterConfig(rms_max_mm="off").rms_max_mm == "off"
+
+
+def test_disabled_cut_clears_an_earlier_boundary_verdict(tmp_path):
+    h5 = str(tmp_path / "b.h5")
+    _boundary_archive(h5)
+    filter_boundaries(h5, scan_key=0, rms_max_mm=5.0, plot=False)
+    assert read_filter_flags(h5, scan_key=0)[1]["selected"] is False
+    filter_boundaries(h5, scan_key=0, plot=False, cut_source="disabled")
+    flags = read_filter_flags(h5, scan_key=0)
+    assert all("passes_boundary_filter" not in f for f in flags.values())
+    assert all(f["selected"] is True for f in flags.values())
+    assert flags[1]["boundary_rms_mm"] == pytest.approx(10.0, abs=0.2)
+    with h5py.File(h5, "r") as hf:
+        a = hf["scan/0"].attrs
+        assert a["boundary_cut_source"] == "disabled"
+        assert "boundary_rms_max_mm" not in a
+    with pytest.raises(ValueError, match="disabled"):
+        filter_boundaries(h5, scan_key=0, rms_max_mm=5.0, plot=False,
+                          cut_source="disabled")
+
+
+def test_plots_refuse_a_setting_word_as_a_threshold(tmp_path):
+    from bouquet.plotting import plot_traces, plot_spec_summary
+    with pytest.raises(ValueError, match="boundary_cut"):
+        plot_traces(str(tmp_path / "x.h5"), rms_max_mm="auto")
+    with pytest.raises(ValueError, match="boundary_cut"):
+        plot_spec_summary(str(tmp_path / "x"), rms_max_mm="off")
 
 
 def test_bouquet_detects_the_device_from_the_archived_coil_names(tmp_path):

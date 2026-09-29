@@ -2431,6 +2431,18 @@ def plot_coil_currents(h5path_or_header, scan_key=None, vsc_coils=('F9A', 'F9B')
     return fig, ax
 
 
+def _require_numeric_cut(rms_max_mm, where, allow_none):
+    """A plotted threshold is a number: the words a FilterConfig accepts
+    (``"auto"`` / ``"off"``) are settings, resolved by Bouquet.boundary_cut()."""
+    if rms_max_mm is None and allow_none:
+        return
+    if isinstance(rms_max_mm, str) or rms_max_mm is None:
+        raise ValueError(
+            f"{where}: rms_max_mm={rms_max_mm!r} is a FilterConfig setting, not "
+            "a threshold in mm; pass the resolved cut, e.g. "
+            "rms_max_mm=run.boundary_cut()[0]")
+
+
 def plot_spec_summary(h5path_or_header, scan_key=None, rms_max_mm=5.0):
     """The in-spec filter story in one figure.
 
@@ -2446,6 +2458,7 @@ def plot_spec_summary(h5path_or_header, scan_key=None, rms_max_mm=5.0):
     -------
     (fig, axes)
     """
+    _require_numeric_cut(rms_max_mm, "plot_spec_summary", allow_none=False)
     from .utils import _scan_key
     from .filtering import _baseline_boundary, _boundary_devs
 
@@ -2855,6 +2868,7 @@ def plot_traces(h5path_or_header, scan_key="all", li_band=None, rms_max_mm=None)
     figs : list of Figure
         One figure per scan value.
     """
+    _require_numeric_cut(rms_max_mm, "plot_traces", allow_none=True)
     from .utils import read_eqdsk_from_bytes, _scan_key
     from .filtering import _baseline_boundary, _boundary_devs
 

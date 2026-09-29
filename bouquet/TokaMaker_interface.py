@@ -4941,7 +4941,7 @@ def generate_bouquet(
                     "unavailable (BNDDIAG=0 disables the trace that supplies "
                     "it). Re-enable the boundary diagnostic, pass "
                     "recon_lcfs_ref explicitly, or drop the LCFS bound "
-                    "(filtering.rms_max_mm=None) to target the coil spec "
+                    "(filtering.rms_max_mm='off') to target the coil spec "
                     "alone.")
         if _coil_kind == "chi2":
             _acc = _coil_model["acceptance"]

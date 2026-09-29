@@ -829,9 +829,18 @@ def filter_boundaries(h5path_or_header, scan_key=None,
     ``"device:<name>"`` or ``"generic"``) and each draw's metric on the draw
     (``boundary_rms_mm`` / ``boundary_max_mm``), so the population a later
     statistic is built on is readable from the archive alone.
+
+    ``cut_source="disabled"`` (no bound given) records that the boundary cut
+    was switched OFF: with ``apply=True`` it removes any earlier
+    ``passes_boundary_filter`` flag (so ``selected`` is the coil verdict
+    alone), drops the stamped thresholds, writes each draw's metric and
+    stamps ``boundary_cut_source="disabled"``.
     """
     h5path = _resolve(h5path_or_header)
     cutting = (rms_max_mm is not None) or (max_max_mm is not None)
+    disabling = str(cut_source) == "disabled"
+    if disabling and cutting:
+        raise ValueError("cut_source='disabled' with a boundary bound given")
     summary = {}
     fig_payload = []
     for sv in _iter_scan_keys(h5path, scan_key):
@@ -848,8 +857,17 @@ def filter_boundaries(h5path_or_header, scan_key=None,
             passed = passes_boundary_spec(rms, mx, rms_max_mm, max_max_mm)
             results[i] = passed
             draws[i] = {"rms_mm": rms, "max_mm": mx, "passes": passed}
-        if apply and cutting:
-            _write_filter_result(h5path, sv, results, "passes_boundary_filter")
+        if apply and disabling:
+            with h5py.File(h5path, "a") as hf:
+                for i, rms, mx in rows:
+                    gp = _group_path(sv, i)
+                    if gp in hf:
+                        g = hf[gp]
+                        g.attrs.pop("passes_boundary_filter", None)
+                        _recompute_selected(g)
+        if apply and (cutting or disabling):
+            if cutting:
+                _write_filter_result(h5path, sv, results, "passes_boundary_filter")
             _bkey = _scan_key(sv)
             _gp = f"scan/{_bkey}" if _bkey is not None else "/"
             with h5py.File(h5path, "a") as hf:

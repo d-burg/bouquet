@@ -400,9 +400,12 @@ def _scan_context(ar, key) -> dict:
         _json_attr(sattrs.get("coil_sigma_model")))
     ctx["rms_max_mm"] = sattrs.get("boundary_rms_max_mm", UNRECORDED)
     ctx["max_max_mm"] = sattrs.get("boundary_max_max_mm", UNRECORDED)
-    # where that cut came from: "explicit" | "device:<name>" | "generic"
+    # where that cut came from: "explicit" | "device:<name>" | "generic" |
+    # "disabled" (the cut was switched off: no threshold, none applied)
     _src = sattrs.get("boundary_cut_source")
     ctx["boundary_cut_source"] = str(_src) if _src is not None else UNRECORDED
+    if ctx["boundary_cut_source"] == "disabled":
+        ctx["rms_max_mm"] = ctx["max_max_mm"] = None
 
     # ---- counts recorded at generation
     n_req, n_req_src, mode = None, UNRECORDED, sattrs.get("generation_mode")
@@ -899,7 +902,10 @@ def _limitations(rec, ctx, meta, selection, require_filter, percentiles):
         lim.append(f"No coil_filter stamp on the scan (require_filter="
                    f"{require_filter}): selection={selection!r} may be every "
                    "stored draw.")
-    if ctx["rms_max_mm"] == UNRECORDED and ctx["max_max_mm"] == UNRECORDED:
+    if ctx["boundary_cut_source"] == "disabled":
+        lim.append("No LCFS boundary cut was applied (boundary_cut_source="
+                   "'disabled'): the population is the coil filter's alone.")
+    elif ctx["rms_max_mm"] == UNRECORDED and ctx["max_max_mm"] == UNRECORDED:
         lim.append("The boundary acceptance threshold is not recorded on the "
                    "archive.")
     if ctx["closure_limited"]:

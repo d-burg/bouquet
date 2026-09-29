@@ -3580,7 +3580,9 @@ class Bouquet:
     def plot_spec_summary(self, **kwargs):
         """In-spec fraction summary (coil + boundary) for this run."""
         from .plotting import plot_spec_summary as _f
-        kwargs.setdefault("rms_max_mm", self._boundary_cut(quiet=True)[0])
+        _cut = self._boundary_cut(quiet=True)[0]
+        if _cut is not None:            # disabled: keep the plot's own scale
+            kwargs.setdefault("rms_max_mm", _cut)
         return _f(self.config.output_header,
                   scan_key=self.config.generation.scan_key, **kwargs)
 
@@ -3603,8 +3605,13 @@ class Bouquet:
             selection=selection, print_table=print_table)
 
     # ── stage 4: filter + export ----------------------------------------
-    def filter(self, rms_max_mm: Optional[float] = None, plot: bool = False) -> dict:
+    def filter(self, rms_max_mm=None, plot: bool = False) -> dict:
         """Mark the machine-realizable subset (coil + boundary filters).
+
+        ``rms_max_mm``: None (default) applies ``filtering.rms_max_mm``; a
+        number, ``"auto"`` or ``"off"`` overrides it for this call (see
+        :meth:`boundary_cut`). The cut applied is printed and stamped on the
+        archive with its source.
 
         Non-destructive: writes pass flags into the HDF5. Returns a summary dict.
         With ``plot=True`` the coil-drift and boundary distribution figures are
@@ -3615,14 +3622,17 @@ class Bouquet:
 
         header = self.config.output_header
         fc = self.config.filtering
-        rms = fc.rms_max_mm if rms_max_mm is None else rms_max_mm   # explicit wins
 
         sk = self.config.generation.scan_key
         coil_filter_used = fc.coil_filter
-        # the boundary cut: explicit, else the device's calibrated value, else
-        # generic -- the SAME resolution the until-N loop used (identity)
-        rms, rms_source = ((rms, "explicit") if rms_max_mm is not None
-                           else self._boundary_cut())
+        # the boundary cut: the argument when given (a number, "auto" or
+        # "off"), else filtering.rms_max_mm -- the SAME resolution the until-N
+        # loop used (identity). Announced either way.
+        if rms_max_mm is None:
+            rms, rms_source = self._boundary_cut()
+        else:
+            rms, rms_source = self._boundary_cut(setting=rms_max_mm,
+                                                 origin="argument")
         if fc.coil_filter == "chi2":
             from .coil_spec import CoilSigmaUnavailable
             # the era sets the sigma floor, i.e. an acceptance criterion -- say
@@ -3676,22 +3686,57 @@ class Bouquet:
         self._print_generation_summary(coil_summary, bnd_summary)
         return self._selection
 
-    def _boundary_cut(self, quiet=False):
+    def boundary_cut(self):
+        """``(rms_max_mm, source)`` of the LCFS boundary cut this run applies.
+
+        Resolved from ``filtering.rms_max_mm`` exactly as :meth:`generate`'s
+        until-N verdict and :meth:`filter` resolve it; ``rms_max_mm`` is None
+        when the cut is disabled (``source="disabled"``). Quiet: prints
+        nothing. Use it to draw the threshold a plot should show, e.g.
+        ``bq.plot_traces(h5, rms_max_mm=run.boundary_cut()[0])``.
+        """
+        return self._boundary_cut(quiet=True)
+
+    def _boundary_cut(self, quiet=False, setting=None, origin="config"):
         """``(rms_max_mm, source)`` -- the LCFS boundary cut this run applies.
 
-        ``filtering.rms_max_mm`` when set (``"explicit"``); otherwise the
-        device's calibrated value (``"device:<name>"``, e.g. 8.5 mm on DIII-D
-        from its boundary-UQ study) with the device taken from
-        ``config.device`` or detected from the mesh's coil names; otherwise
-        the generic 5.0 mm (``"generic"``). Used by :meth:`generate`'s
-        until-N verdict and by :meth:`filter`, so the two agree by
-        construction. Printed once per resolution unless *quiet*.
+        *setting* is ``filtering.rms_max_mm`` (``origin="config"``) or an
+        explicit :meth:`filter` argument (``origin="argument"``):
+
+        * a number -> that cut (``"explicit"``);
+        * ``"off"`` or ``None`` -> no cut (``(None, "disabled")``; ``None``
+          keeps its historical meaning, "no boundary cut");
+        * ``"auto"`` -> the device's calibrated value (``"device:<name>"``,
+          e.g. 8.5 mm on DIII-D from its boundary-UQ study) with the device
+          taken from ``config.device`` or detected from the mesh's coil
+          names, else the generic 5.0 mm (``"generic"``).
+
+        Used by :meth:`generate`'s until-N verdict and by :meth:`filter`, so
+        the two agree by construction. Printed once per resolution unless
+        *quiet*.
         """
-        from .devices import resolve_device, boundary_cut_for
-        fc = self.config.filtering
-        if fc.rms_max_mm is not None:
-            val, src, spec = float(fc.rms_max_mm), "explicit", None
-            return self._announce_boundary_cut(val, src, spec, quiet)
+        from .config import check_boundary_cut_setting
+        from .devices import boundary_cut_for
+        if origin == "config":
+            setting = self.config.filtering.rms_max_mm
+        check_boundary_cut_setting(
+            setting, "filtering.rms_max_mm" if origin == "config"
+            else "filter(rms_max_mm=...)")
+        if setting is None or setting == "off":
+            return self._announce_boundary_cut(None, "disabled", None, quiet,
+                                               origin, setting)
+        if not isinstance(setting, str):
+            return self._announce_boundary_cut(float(setting), "explicit", None,
+                                               quiet, origin, setting)
+        spec = self._boundary_cut_device()
+        val, src = boundary_cut_for(spec)
+        return self._announce_boundary_cut(val, src, spec, quiet, origin, setting)
+
+    def _boundary_cut_device(self):
+        """The device whose calibrated cut ``"auto"`` resolves to, or None:
+        ``config.device``, else the live solver's coil names, else the
+        archived baseline's coil names (a filter-only session)."""
+        from .devices import resolve_device
         names = None
         try:
             if self.mygs is not None and getattr(self.mygs, "coil_sets", None):
@@ -3711,23 +3756,34 @@ class Bouquet:
                         names = _read_coil_names(hf[bl]) or None
             except OSError:
                 names = None
-        spec = resolve_device(self.config.device, names)
-        val, src = boundary_cut_for(spec)
-        return self._announce_boundary_cut(val, src, spec, quiet)
+        return resolve_device(self.config.device, names)
 
-    def _announce_boundary_cut(self, val, src, spec, quiet):
-        """One announcement per resolved ``(value, source)``, every source alike."""
-        if not quiet and getattr(self, "_boundary_cut_announced", None) != (val, src):
-            self._boundary_cut_announced = (val, src)
-            if src == "explicit":
-                print(f"[boundary cut] LCFS rms <= {val:g} mm (explicit "
-                      "filtering.rms_max_mm)")
+    def _announce_boundary_cut(self, val, src, spec, quiet, origin="config",
+                               setting=None):
+        """One announcement per resolved cut, every source alike."""
+        key = (val, src, origin)
+        if not quiet and getattr(self, "_boundary_cut_announced", None) != key:
+            self._boundary_cut_announced = key
+            where = ("filtering.rms_max_mm" if origin == "config"
+                     else "filter(rms_max_mm=...) argument")
+            if src == "disabled":
+                spelled = "None" if setting is None else repr(setting)
+                print(f"[boundary cut] DISABLED: no LCFS boundary cut ({where}="
+                      f"{spelled}"
+                      + ("; None keeps its historical meaning, 'off' is the "
+                         "explicit spelling, 'auto' the device/generic cut"
+                         if setting is None else "") + ")")
+            elif src == "explicit":
+                print(f"[boundary cut] LCFS rms <= {val:g} mm (explicit {where})")
             elif src == "generic":
                 print(f"[boundary cut] LCFS rms <= {val:g} mm (generic: no device "
                       "calibration; set config.device or filtering.rms_max_mm)")
             else:
+                from .devices import GENERIC_BOUNDARY_RMS_MM
                 print(f"[boundary cut] LCFS rms <= {val:g} mm ({src} calibration: "
-                      f"{spec.boundary_provenance}; filtering.rms_max_mm overrides)")
+                      f"{spec.boundary_provenance}; replaces the generic "
+                      f"{GENERIC_BOUNDARY_RMS_MM:g} mm; filtering.rms_max_mm "
+                      "overrides)")
         return val, src
 
     def _coil_daq_era(self):

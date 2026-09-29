@@ -70,7 +70,7 @@ logic map with a `file:line` anchor on every node:
 | Baseline | `prepare()` / `reconstruct()` / `prepare_baseline()` | Resolves the baseline from `config.source`. `reconstruct()` is the g-file-path alias (`setup_solver()` + `prepare_baseline()`) and prints the reconstruction-fidelity summary; `prepare()` is the source-agnostic form. The IMAS path does a single forward solve instead of a reconstruction. |
 | Guard | `verify_sigma0_consistency()` | Optional but recommended: one bootstrap solve confirming the *draw* pipeline reproduces the *baseline* j_BS split at σ=0. See [physics-notes.md](physics-notes.md#the-0-consistency-guard). |
 | Draws | `generate(n=None)` | Draws `n` (default `GenerationConfig.n_equils`) perturbations, solves each, archives to `{header}.h5`. Returns the per-draw diagnostics list. With `generation.n_inspec_target` set, keeps drawing until that many pass the filters — see [until-N](#until-n-in-spec-draws). |
-| Selection | `filter(rms_max_mm=None, plot=False)` | Applies the coil-drift and boundary-RMS filters, writing non-destructive pass flags into the archive. Returns a summary dict. |
+| Selection | `filter(rms_max_mm=None, plot=False)` | Applies the coil-drift and boundary-RMS filters, writing non-destructive pass flags into the archive. `rms_max_mm=None` applies `filtering.rms_max_mm`; a number, `"auto"` or `"off"` overrides it for this call (announced and stamped). Returns a summary dict. |
 | Export | `export()` / `export_bundle()` / `export_ids()` | Pruned `{header}_selected.h5`, a per-draw file bundle, or one IMAS/OMAS IDS per draw. |
 | All of it | `run()` | `setup_solver → prepare_baseline → generate → filter → export`, idempotent on the early stages. |
 
@@ -228,7 +228,7 @@ as an enormous sigma.
 
 | Knob | Default | Meaning |
 |---|---|---|
-| `rms_max_mm` | `5.0` | Boundary-RMS acceptance threshold |
+| `rms_max_mm` | `"auto"` | Boundary-RMS acceptance threshold [mm]. `"auto"` → the device's calibrated cut (DIII-D: **8.5 mm**, looser than the generic 5.0 mm), else the generic **5.0 mm**; a number is an explicit cut; `"off"` disables it (`None` = `"off"`, its historical meaning). `b.boundary_cut()` returns the resolved `(mm, source)`; the cut is printed once and stamped on the archive |
 | `coil_filter` | `"chi2"` | `"chi2"` = measurement-referenced coil filter; `"legacy"` = the ±`inspec_*` band |
 | `chi2_max`, `z_max` | `None` | `None` → the device's calibrated thresholds (DIII-D: χ²/ν ≤ 6.1, worst-coil \|z\| ≤ 6.3), else the generic 4 / 5 |
 | `coil_sigma` | `None` | Per-coil σ override (`{"floor","fraction"}`, `{coil: σ}`, callable, or a named device model); `None` → the device model |

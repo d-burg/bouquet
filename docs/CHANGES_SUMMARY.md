@@ -17,10 +17,18 @@ such a source.
   synthetic IMAS example's forward-solved baseline under four closure paths,
   and a seeded g-file run of the golden-fixture example including its draws). **Any bouquet result built on a reversed-current dd before
   this change is invalid and must be regenerated.**
-- New records: `Baseline.source_current_sign` / `source_b0_sign`,
-  `li_metrics.source_current_sign` / `source_b0_sign`,
-  `ip_closure.source_current_sign`, and `_baseline` attrs
-  `source_current_sign` / `source_b0_sign` / `current_frame` on IMAS archives.
+- New records: `Baseline.source_current_sign` / `source_current_sign_origin`
+  / `source_b0_sign`, the same keys in `li_metrics`,
+  `ip_closure.source_current_sign` / `source_current_sign_origin`, and
+  `_baseline` attrs `source_current_sign` / `source_current_sign_origin` /
+  `source_b0_sign` / `current_frame` on IMAS archives.
+- **A dd whose current profiles disagree in sign with its own `ip` is now
+  refused** (`ValueError` naming each quantity and its sign) instead of being
+  warned about and closed in a mixed frame. The test is on the net,
+  area-weighted toroidal current of `core_profiles.j_tor` and of the
+  equilibrium `j_tor` the anchor uses. New
+  `ImasSource.current_orientation` (`"auto"` default, `+1`, `-1`) names the
+  factor explicitly for a file whose convention the user knows.
 - A user-supplied `FixedComponentsConfig.j_NBI` / `j_RF` on the IMAS path is
   taken in the dd's own orientation and normalised with it.
 - Delivered g-files are unchanged in convention (`CURRENT > 0`, `BCENTR > 0`,

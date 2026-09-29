@@ -203,14 +203,16 @@ class TestSignIsRecorded:
         assert np.array_equal(bl.j_NBI, j_nbi)
         assert np.array_equal(bl.j_inductive, jtor - j_bs - j_nbi - np.zeros_like(jtor))
 
-    def test_dd_whose_currents_oppose_its_own_ip_is_flagged(self, tmp_path):
+    def test_dd_whose_currents_oppose_its_own_ip_is_refused(self, tmp_path):
         """No sign convention can repair a dd whose core_profiles total opposes
-        its own equilibrium ip -- the reader says so instead of closing on it."""
+        its own equilibrium ip -- the reader REFUSES instead of closing on it
+        (it used to warn and continue with the mixed frame)."""
         dd = _example()
         for c in dd["core_profiles"]["profiles_1d"]:
             for k in ("j_tor", "j_total", "j_ohmic", "j_bootstrap"):
                 c[k] = [-v for v in c[k]]
-        with pytest.warns(UserWarning, match="integrates AGAINST equilibrium ip"):
+        with pytest.raises(ValueError,
+                           match="disagree in sign with its plasma current"):
             read_imas_baseline(ImasSource(ids_path=_write(tmp_path, dd, "bad.json"),
                                           time=mdd.EXAMPLE_TIME))
 

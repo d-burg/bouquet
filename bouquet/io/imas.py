@@ -42,7 +42,13 @@ quantities and so are taken in the dd's own orientation) -- by
 :attr:`~bouquet.baseline.Baseline.source_current_sign`.  For ``ip > 0`` the
 factor is ``+1.0`` and the read is bit-identical to what it was.  Everything
 that is not a current (kinetics, pressure, rotation, E_r, the dd's own q) is
-read unchanged.
+read unchanged.  A dd whose net (area-weighted) ``core_profiles.j_tor`` -- or
+the equilibrium ``j_tor`` the jphi anchor uses -- disagrees in sign with that
+factor is REFUSED (ValueError): its currents and its ip were written in
+different orientations and no single factor puts it in one frame.
+``ImasSource.current_orientation = +1 / -1`` names the factor explicitly for
+a user who knows the file's convention (default ``"auto"``); the factor's
+origin is recorded as ``Baseline.source_current_sign_origin``.
 
 Note: ``j_BS`` read here is the FUSE bootstrap baseline, but it is *overridden*
 when ``GenerationConfig.recalculate_j_BS`` is True -- bouquet then recomputes
@@ -409,6 +415,138 @@ def source_current_sign(ip) -> float:
     return -1.0 if (np.isfinite(ip) and ip < 0.0) else 1.0
 
 
+#: Where the reader's current-orientation factor came from (recorded on the
+#: Baseline as ``source_current_sign_origin``, in li_metrics / ip_closure and
+#: on the archive's ``_baseline`` attrs).
+ORIENTATION_ORIGIN_AUTO = "auto: sign(equilibrium ip)"
+ORIENTATION_ORIGIN_OVERRIDE = "override: ImasSource.current_orientation"
+
+
+def parse_current_orientation(setting):
+    """Validate ``ImasSource.current_orientation``: ``"auto"``, ``+1.0`` or ``-1.0``.
+
+    Accepts ``"auto"`` (any case), the numbers ``1`` / ``-1`` (int or float)
+    and their string spellings (``"+1"``, ``"-1"``).  Anything else -- ``0``,
+    ``True``, ``2``, ``"reversed"`` -- raises :class:`ValueError`: the setting
+    names a sign, and a value that is not one is a typo, not a request.
+    """
+    v = None
+    if isinstance(setting, str):
+        s = setting.strip().lower()
+        if s == "auto":
+            return "auto"
+        try:
+            v = float(s)
+        except ValueError:
+            v = None
+    elif not isinstance(setting, bool):
+        try:
+            v = float(setting)
+        except (TypeError, ValueError):
+            v = None
+    if v not in (1.0, -1.0):
+        raise ValueError(
+            "ImasSource.current_orientation must be 'auto' (default: "
+            "sign(equilibrium ip), refusing a dd whose current profiles "
+            "disagree with it), +1 or -1 (the factor that brings this dd's "
+            f"currents into bouquet's positive-Ip frame); got {setting!r}")
+    return v
+
+
+def _area_measure(x_psiN, own=None, eq_p1=None, psiN_eq=None):
+    """``(x, label)``: the best available cumulative-area coordinate on a grid.
+
+    ``integral(j dx)`` over the returned ``x`` is the plasma current (or a
+    positive multiple of it), so its SIGN is the sign of the net toroidal
+    current -- which an unweighted ``integral(j dpsi_N)`` only approximates
+    when ``j`` changes sign.  In order of preference:
+
+      1. the grid's own ``area`` [m^2] (IMAS ``core_profiles.grid.area`` /
+         ``equilibrium.profiles_1d.area``) -- exact;
+      2. the equilibrium ``profiles_1d.area`` interpolated in psi_N -- exact
+         up to interpolation;
+      3. ``rho_tor_norm**2`` -- a proxy: the toroidal flux enclosed is ~ B0
+         times the enclosed area, exact for a uniform toroidal field;
+      4. ``psi_N`` -- no geometry at all (the previous heuristic).
+
+    Every candidate is monotone in the enclosed area, so a single-signed
+    profile -- the only kind a whole-profile orientation mismatch produces --
+    integrates to the same sign under all four; they can differ only for a
+    profile with a genuine sign reversal of comparable weight, and the label
+    is quoted in any refusal so the user can judge that case.
+    """
+    n = np.asarray(x_psiN).size
+
+    def _ok(a):
+        if a is None:
+            return None
+        try:
+            a = np.asarray(a, dtype=float)
+        except (TypeError, ValueError):
+            return None
+        return a if (a.shape == (n,) and np.all(np.isfinite(a))
+                     and np.ptp(a) > 0.0) else None
+
+    own = own or {}
+    a = _ok(own.get("area"))
+    if a is not None:
+        return a, "area-weighted (own grid area)"
+    if eq_p1 is not None and psiN_eq is not None and "area" in eq_p1:
+        try:
+            ae = np.asarray(eq_p1["area"], dtype=float)
+            o = np.argsort(psiN_eq)
+            a = _ok(np.interp(x_psiN, np.asarray(psiN_eq)[o], ae[o]))
+        except (TypeError, ValueError):
+            a = None
+        if a is not None:
+            return a, "area-weighted (equilibrium profiles_1d.area)"
+    r = _ok(own.get("rho_tor_norm"))
+    if r is not None:
+        return r ** 2, "rho_tor_norm^2-weighted (area proxy; no area on file)"
+    return np.asarray(x_psiN, dtype=float), "psi_N-weighted (no geometry on file)"
+
+
+def _net_current(j, x):
+    """``integral(j dx)`` with ``x`` taken in ascending order (storage order,
+    axis-first or boundary-first, must not flip the sign)."""
+    from scipy.integrate import trapezoid
+    j = np.asarray(j, dtype=float)
+    x = np.asarray(x, dtype=float)
+    o = np.argsort(x, kind="stable")
+    return float(trapezoid(j[o], x[o]))
+
+
+def _refuse_mixed_orientation(bad, ip, cur_sign, origin):
+    """Raise for currents that disagree in sign with the chosen orientation.
+
+    ``bad`` lists ``(quantity, raw_net, weighting)``: the quantity's net
+    toroidal current AS STORED in the dd (before the factor) and how it was
+    weighted.
+    """
+    lines = [f"  - {q}: net {v:+.4g} (sign {'+' if v > 0 else '-'}; {w})"
+             for q, v, w in bad]
+    if origin == ORIENTATION_ORIGIN_AUTO:
+        how = (f"the factor is sign(equilibrium ip) = {cur_sign:+.0f} "
+               "(ImasSource.current_orientation='auto')")
+    else:
+        how = (f"the factor is {cur_sign:+.0f}, set by "
+               "ImasSource.current_orientation")
+    raise ValueError(
+        "IMAS current orientation: the dd's current profiles disagree in sign "
+        f"with its plasma current. equilibrium ip = {float(ip):+.6g} A (sign "
+        f"{'+' if float(ip) >= 0 else '-'}); {how}, but after multiplying by "
+        "it these would integrate AGAINST the positive-Ip frame bouquet "
+        "solves in:\n" + "\n".join(lines) + "\n"
+        "Closing Ip on this would add the recomputed (positive) bootstrap "
+        "against the inductive current. Typical cause: the IDSs were written "
+        "in different COCOS/orientations. If you know this file's current "
+        "convention, set ImasSource.current_orientation to the factor that "
+        "makes its currents co-Ip (+1 keeps them as stored, -1 reverses "
+        "them); if only the equilibrium j_tor disagrees, "
+        "GenerationConfig.anchor_jtor_to_equilibrium=False stops it being "
+        "used. Otherwise fix the file.")
+
+
 def read_imas_geometry(source: "ImasSource"):
     """Return ``(F0, boundary_RZ)`` from a FUSE IDS for TokaMaker setup.
 
@@ -624,19 +762,6 @@ def read_imas_baseline(
     ie = _nearest_index(eq["time"], T, "equilibrium")
     gq = eq["time_slice"][ie]["global_quantities"]
     Ip_target = abs(float(gq["ip"]))
-    # bouquet's frame is positive-current (the anchor is solved to |Ip| with
-    # F0 = |r0*b0|).  Every CURRENT profile read below is multiplied by this
-    # factor so a reversed-current dd (ip < 0) lands in that frame instead of
-    # being combined, with its own negative sign, with a bootstrap recomputed
-    # on the positive anchor.  +1.0 (bit-identical read) for ip >= 0.
-    cur_sign = source_current_sign(gq["ip"])
-    _vtf = eq.get("vacuum_toroidal_field") or {}
-    _b0 = _vtf.get("b0")
-    try:
-        _b0v = float(_b0[ie] if isinstance(_b0, list) else _b0)
-        b0_sign = (-1.0 if _b0v < 0.0 else 1.0) if np.isfinite(_b0v) else None
-    except (TypeError, ValueError, IndexError):
-        b0_sign = None
     ids_li_1 = float(gq["li_1"]) if "li_1" in gq else None
     ids_li_3 = float(gq["li_3"]) if "li_3" in gq else None
     # Provisional l_i_target = IDS li_3; the IMAS forward-solve (Bouquet) replaces
@@ -647,6 +772,41 @@ def read_imas_baseline(
     cp_ids = dd["core_profiles"]
     ic = _nearest_index(cp_ids["time"], T, "core_profiles")
     cp = cp_ids["profiles_1d"][ic]
+
+    # --- current orientation ---------------------------------------------
+    # bouquet's frame is positive-current (the anchor is solved to |Ip| with
+    # F0 = |r0*b0|).  Every CURRENT profile read below is multiplied by this
+    # factor so a reversed-current dd (ip < 0) lands in that frame instead of
+    # being combined, with its own negative sign, with a bootstrap recomputed
+    # on the positive anchor.  +1.0 (bit-identical read) for ip >= 0.
+    # The sign is read at the equilibrium slice nearest the core_profiles
+    # slice the currents come from (the two IDSs choose their slices
+    # independently; with a common time base, as in FUSE output, this is the
+    # slice ``ie`` above).  ImasSource.current_orientation = +1/-1 replaces
+    # it; either way the currents are checked against it further down.
+    _cp_t = np.atleast_1d(np.asarray(cp_ids["time"], dtype=float))
+    ie_s = (_nearest_index(eq["time"], float(_cp_t[min(ic, _cp_t.size - 1)]),
+                           "equilibrium") if _cp_t.size else ie)
+    ip_signed = float(eq["time_slice"][ie_s]["global_quantities"].get(
+        "ip", gq["ip"]))
+    _orient = parse_current_orientation(
+        getattr(source, "current_orientation", "auto"))
+    if _orient == "auto":
+        cur_sign = source_current_sign(ip_signed)
+        cur_origin = ORIENTATION_ORIGIN_AUTO
+    else:
+        cur_sign = float(_orient)
+        cur_origin = ORIENTATION_ORIGIN_OVERRIDE
+    # B0 orientation (recorded only), same slice.  A zero or unreadable b0
+    # carries no orientation: None, not +1.
+    _vtf = eq.get("vacuum_toroidal_field") or {}
+    _b0 = _vtf.get("b0")
+    try:
+        _b0v = float(_b0[ie_s] if isinstance(_b0, list) else _b0)
+        b0_sign = ((-1.0 if _b0v < 0.0 else 1.0)
+                   if (np.isfinite(_b0v) and _b0v != 0.0) else None)
+    except (TypeError, ValueError, IndexError):
+        b0_sign = None
 
     psi = np.asarray(cp["grid"]["psi"], dtype=float)
     psi_N = (psi - psi[0]) / (psi[-1] - psi[0])   # 0 (axis) -> 1 (boundary)
@@ -808,22 +968,19 @@ def read_imas_baseline(
     j_phi = j_tor.copy()
     j_inductive = j_phi - j_BS - j_NBI - j_RF
     if cur_sign < 0.0:
-        print(f"[imas] source ip = {float(gq['ip']) / 1e6:+.4f} MA < 0 (reversed "
-              "current in the dd's own COCOS): every dd current profile "
+        _why = (f"source ip = {ip_signed / 1e6:+.4f} MA < 0 (reversed current "
+                "in the dd's own COCOS)" if cur_origin == ORIENTATION_ORIGIN_AUTO
+                else "ImasSource.current_orientation = -1 (override; source ip "
+                     f"= {ip_signed / 1e6:+.4f} MA)")
+        print(f"[imas] {_why}: every dd current profile "
               "(j_total, j_tor, j_ohmic, j_bootstrap, NBI j_parallel, "
               "equilibrium j_tor, user-supplied j_NBI/j_RF) multiplied by -1 "
               "into bouquet's positive-current frame (Baseline."
               "source_current_sign = -1)", flush=True)
-    # A dd whose core_profiles total opposes its own equilibrium ip is not
-    # something a sign convention can fix: say so instead of closing on it.
-    from scipy.integrate import trapezoid as _trapezoid
-    if float(_trapezoid(j_phi, psi_N)) < 0.0:
-        import warnings
-        warnings.warn(
-            "core_profiles.j_tor integrates AGAINST equilibrium ip after the "
-            f"current-orientation normalisation (source ip = {float(gq['ip']):.4g} "
-            "A): the dd's current profiles and its plasma current disagree in "
-            "sign. bouquet's closure assumes they agree; check the dd.")
+    elif cur_origin == ORIENTATION_ORIGIN_OVERRIDE and ip_signed < 0.0:
+        print(f"[imas] ImasSource.current_orientation = +1 (override): dd "
+              f"currents kept as stored although source ip = "
+              f"{ip_signed / 1e6:+.4f} MA < 0", flush=True)
 
     # --- pressure anchor ("diff" approach) + completeness validation ----------
     # The authoritative dd equilibrium pressure (GS-consistent total, incl.
@@ -881,6 +1038,33 @@ def read_imas_baseline(
                                        np.asarray(eqp1["j_tor"], dtype=float)[_o])
         jphi_diff = eq_jtor - j_phi
 
+    # --- orientation consistency: REFUSE a mixed-sign source ---------------
+    # Every toroidal current bouquet USES must carry, after the factor, the
+    # sign of the positive frame: core_profiles.j_tor (the authoritative total
+    # j_phi) always, and the equilibrium j_tor when the jphi anchor uses it.
+    # The test is on the NET current -- the area-weighted integral (see
+    # _area_measure for the weighting actually available on the file and its
+    # fallbacks), taken on each quantity's own grid -- so a profile with a
+    # genuine local sign reversal (a current hole, a counter-current edge) is
+    # not refused as long as its net current is co-Ip.  A dd with no area on
+    # file falls back to a monotone proxy for it; every proxy classifies a
+    # single-signed profile -- the only kind a frame mismatch produces --
+    # exactly as the true area weighting does.  The factor is +-1, so the
+    # check is done on the stored arrays: sign(raw) * cur_sign < 0.
+    _checks = []
+    _x, _w = _area_measure(psi_N, own=cp.get("grid"), eq_p1=eqp1,
+                           psiN_eq=psiN_eq)
+    _checks.append(("core_profiles.j_tor",
+                    _net_current(np.asarray(cp["j_tor"], dtype=float), _x), _w))
+    if anchor_jtor_to_equilibrium:
+        _xe, _we = _area_measure(psiN_eq, own=eqp1)
+        _checks.append(("equilibrium.profiles_1d.j_tor",
+                        _net_current(np.asarray(eqp1["j_tor"], dtype=float),
+                                     _xe), _we))
+    _bad = [c for c in _checks if cur_sign * c[1] < 0.0]
+    if _bad:
+        _refuse_mixed_orientation(_bad, ip_signed, cur_sign, cur_origin)
+
     return Baseline(
         psi_N=psi_N,
         j_phi=j_phi,
@@ -909,6 +1093,7 @@ def read_imas_baseline(
         p_fast_meta=p_fast_meta,
         sawtooth=sawtooth,
         source_current_sign=cur_sign,
+        source_current_sign_origin=cur_origin,
         source_b0_sign=b0_sign,
     )
 

@@ -194,8 +194,9 @@ multiplies every current it reads by `sign(equilibrium ip)`:
 | `equilibrium.profiles_1d.j_tor` (→ `jphi_diff`) | the dd's own `q` (`q0_dd`, recorded raw; the sawtooth gate reads `|q0_dd|`) |
 | a user-supplied `FixedComponentsConfig.j_NBI` / `j_RF` (they replace dd quantities, so they are given in the dd's orientation) | the boundary outline, `F0 = |r0·b0|` |
 
-The factor is recorded as `Baseline.source_current_sign` (with the source's B0
-sign as `Baseline.source_b0_sign`), in `li_metrics` and `ip_closure`, and on the
+The factor is recorded as `Baseline.source_current_sign` (with where it came
+from as `Baseline.source_current_sign_origin`, and the source's B0 sign as
+`Baseline.source_b0_sign`), in `li_metrics` and `ip_closure`, and on the
 archive's `_baseline` group; a reversed source is also logged. For `ip ≥ 0` the
 factor is exactly `+1.0` and the read is bit-identical to what it always was.
 For a mirrored source the Baseline is **bit-identical** to the original's — the
@@ -212,9 +213,42 @@ constant but never the bootstrap, and `unrenormalise_q0` mixed the two frames
 into a negative q0 target. `closure_sign_convention` stays in place as a guard
 (`current_direction_sign` in the closure record is read *after* the
 normalisation and is `+1` on any dd whose currents agree with its own `ip`; a
-negative value is printed as a warning), and a dd whose `core_profiles` total
-integrates against its own `ip` is warned about by the reader — no sign
-convention can repair that.
+negative value is printed as a warning).
+
+**Mixed-orientation sources are refused.** A dd whose current profiles and
+plasma current were written in *different* orientations (for example an IDS
+conversion that mixed COCOS between the equilibrium and core_profiles IDSs)
+cannot be put into one frame by `sign(ip)`: it would flip currents that were
+already co-Ip. The reader therefore raises `ValueError` — naming each quantity,
+its stored sign, and `ip` — when the *net* toroidal current of
+`core_profiles.j_tor`, or of the equilibrium `j_tor` that the `jphi_diff`
+anchor uses, disagrees in sign with the orientation factor. The net current is
+the area-weighted integral on the quantity's own grid: the file's `area`
+(`core_profiles.grid.area`, or `equilibrium.profiles_1d.area` interpolated in
+ψ_N) when present, else `rho_tor_norm²` as an area proxy, else ψ_N (no
+geometry on file). Every one of these weights is monotone in the enclosed area,
+so a single-signed profile — the only kind a whole-profile orientation mismatch
+produces — is classified identically by all of them; they can differ only for a
+profile with a genuine sign reversal of comparable weight, and the refusal
+quotes the weighting used. A profile with a local counter-current region (a
+current hole) is accepted as long as its net current is co-Ip.
+
+A user who knows the file's convention names the factor with
+`ImasSource.current_orientation` — `"auto"` (default: `sign(ip)`), `+1` (keep
+the stored currents) or `-1` (reverse them). The normalised currents must still
+integrate co-Ip; an override that leaves them counter-Ip is refused the same
+way. A dd whose equilibrium and core_profiles currents disagree with *each
+other* has no single factor: set
+`GenerationConfig.anchor_jtor_to_equilibrium=False` so the equilibrium `j_tor`
+is not used, or fix the file. The factor's origin is recorded as
+`Baseline.source_current_sign_origin`, in `li_metrics` and `ip_closure`, and
+on the archive's `_baseline` attrs.
+
+The orientation is read at the equilibrium slice nearest the core_profiles
+slice the currents come from (the two IDSs choose their slices independently;
+on a common time base, as in FUSE output, it is the requested slice). A zero or
+unreadable vacuum `b0` carries no orientation and is recorded as
+`source_b0_sign = None`.
 
 **What bouquet delivers.** Every delivered equilibrium is in the positive frame,
 for every source, normal or reversed:

@@ -109,15 +109,21 @@ class Baseline:
     # |Ip| with F0 = |R*B|, so every bootstrap it recomputes is positive.  The
     # IMAS reader multiplies every current profile it reads by
     # ``source_current_sign`` (= sign of the dd's equilibrium ip, +1.0 for
-    # ip >= 0) so all currents on this Baseline are in that frame -- see
+    # ip >= 0, unless ``ImasSource.current_orientation`` names the factor
+    # explicitly) so all currents on this Baseline are in that frame -- see
     # :func:`bouquet.io.imas.read_imas_baseline`.  +1.0 on the reconstruction
     # path, whose split is produced by a TokaMaker fit in the same frame.
+    # ``source_current_sign_origin`` says where the factor came from (IMAS
+    # path: "auto: sign(equilibrium ip)" or "override: ImasSource.
+    # current_orientation"; None elsewhere).
     # ``source_b0_sign`` is the sign of the source's vacuum B0 (IMAS path;
-    # None elsewhere) -- recorded only: nothing in the reader flips on it, and
-    # F0 = |r0*b0| was already orientation-free.  Together they are what a
-    # consumer needs to map a delivered (positive-frame) equilibrium back onto
-    # the experiment's orientation.
+    # None elsewhere, and None for a zero or unreadable b0) -- recorded only:
+    # nothing in the reader flips on it, and F0 = |r0*b0| was already
+    # orientation-free.  Together they are what a consumer needs to map a
+    # delivered (positive-frame) equilibrium back onto the experiment's
+    # orientation.
     source_current_sign: float = 1.0
+    source_current_sign_origin: Optional[str] = None
     source_b0_sign: Optional[float] = None
 
     # Case-B ("diff") fixed bootstrap correction profile [A/m^2] = FUSE_jBS - SWB,

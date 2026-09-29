@@ -31,7 +31,8 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │   ├── [recon_lcfs_ref]           10k-pt LCFS reference (boundary metric)
     │   ├── [x_points], [coil_currents, coil_names]
     │   └── attrs: Ip_target, l_i_target, source_kind, [diverted],
-    │              [source_current_sign, source_b0_sign, current_frame]
+    │              [source_current_sign, source_b0_sign,
+    │               source_current_sign_origin, current_frame]
     └── <count>/                       one group per accepted draw
         │                              (integer; gaps = rejected draws)
         ├── eqdsk, [pfile]             raw bytes, fixed names
@@ -77,8 +78,11 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
   positive-current frame (TokaMaker native: `Ip > 0`, `F0 > 0`). IMAS-path
   archives record the source's own orientation on `_baseline`:
   `source_current_sign` (the factor the reader multiplied every source current
-  by; `-1.0` for a reversed-current source), `source_b0_sign` (the source's
-  vacuum-field sign) and `current_frame` (a plain statement of the frame).
+  by; `-1.0` for a reversed-current source), `source_current_sign_origin`
+  (whether that factor was `sign(ip)` or set by
+  `ImasSource.current_orientation`), `source_b0_sign` (the source's
+  vacuum-field sign; absent when `b0` is zero or unreadable) and
+  `current_frame` (a plain statement of the frame).
   Absent on g-file-path archives and on IMAS archives written before the
   reader's normalisation. See
   [physics-notes](physics-notes.md#current-and-field-orientation).

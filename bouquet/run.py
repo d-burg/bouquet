@@ -3393,6 +3393,12 @@ class Bouquet:
         _jbs_range = (None if gc.jBS_scale_range is None
                       else (gc.jBS_scale_range[0] * _bs, gc.jBS_scale_range[1] * _bs))
 
+        # The LCFS boundary cut, resolved ONCE and OUTSIDE the output capture:
+        # the announcement must reach the user (inside the capture it went to
+        # generation_log only), and this one local is both what the until-N
+        # verdict applies and what is stamped on the archive below.
+        _cut_mm, _cut_source = self._boundary_cut()
+
         from .utils import capture_native_output
         verbose = bool(getattr(self.config, "verbose", False))
         with capture_native_output(enabled=not verbose) as _cap:
@@ -3442,7 +3448,7 @@ class Bouquet:
                 # does not disable the target.
                 n_inspec_target=gc.n_inspec_target,
                 max_total_draws=gc.max_total_draws,
-                inspec_rms_max_mm=self._boundary_cut()[0],
+                inspec_rms_max_mm=_cut_mm,
                 # ...including the COIL criterion: same filter, same sigma,
                 # same acceptance numbers and -- via _coil_daq_era() -- the
                 # same era floor .filter() will resolve. A loop still counting
@@ -3499,6 +3505,16 @@ class Bouquet:
                 store_achieved_jphi=True,
             )
         self.generation_log = _cap["text"] or None
+
+        # The cut the until-N loop counted against, next to the counts it
+        # produced (generation provenance). Only an until-N loop applies a cut
+        # while drawing; a fixed-N run records none (and clears a stale one).
+        from .utils import stamp_generation_provenance
+        _until = gc.n_inspec_target is not None
+        stamp_generation_provenance(
+            header, scan_key=gc.scan_key,
+            inspec_rms_max_mm=(_cut_mm if _until else None),
+            inspec_cut_source=(_cut_source if _until else None))
 
         # until-N outcome, OUTSIDE the capture: on the default quiet path the
         # in-loop prints and generate_bouquet's cap-missed RuntimeWarning were
@@ -3674,6 +3690,7 @@ class Bouquet:
                 VSC_max_pct=fc.inspec_VSC_max * 100.0,
                 apply=True, plot=plot,
             )
+        self._check_against_inloop_cut(rms, rms_source)
         bnd_summary, bnd_fig = filter_boundaries(
             header, scan_key=sk, rms_max_mm=rms, apply=True, plot=plot,
             cut_source=rms_source,
@@ -3732,6 +3749,30 @@ class Bouquet:
         val, src = boundary_cut_for(spec)
         return self._announce_boundary_cut(val, src, spec, quiet, origin, setting)
 
+    def _check_against_inloop_cut(self, rms, rms_source):
+        """Warn when filter() cuts at a different boundary bound than the one
+        the until-N loop counted its target against (read from the archive):
+        the delivered count then does not describe this selection."""
+        import warnings
+        from .utils import read_generation_provenance
+        try:
+            gp = read_generation_provenance(self.config.output_header,
+                                            scan_key=self.config.generation.scan_key)
+        except OSError:
+            return
+        if gp.get("inspec_cut_source") is None:     # not an until-N run
+            return
+        loop = gp.get("inspec_rms_max_mm")
+        loop = None if loop is None else float(loop)
+        if loop != (None if rms is None else float(rms)):
+            fmt = lambda v, s: ("no boundary cut" if v is None else f"{v:g} mm") + f" ({s})"
+            warnings.warn(
+                "boundary cut differs from the until-N loop's: the loop counted "
+                f"its in-spec target against {fmt(loop, gp['inspec_cut_source'])} "
+                f"but filter() now cuts at {fmt(rms, rms_source)}, so the "
+                "delivered count does not describe this selection.",
+                UserWarning, stacklevel=3)
+
     def _boundary_cut_device(self):
         """The device whose calibrated cut ``"auto"`` resolves to, or None:
         ``config.device``, else the live solver's coil names, else the
@@ -3756,7 +3797,25 @@ class Bouquet:
                         names = _read_coil_names(hf[bl]) or None
             except OSError:
                 names = None
-        return resolve_device(self.config.device, names)
+        spec = resolve_device(self.config.device, names)
+        if spec is None and self.config.device is None and names is None:
+            # no coil names anywhere (e.g. the baseline coil read failed): the
+            # device the until-N loop resolved, as the archive recorded it
+            spec = self._archived_loop_device()
+        return spec
+
+    def _archived_loop_device(self):
+        from .devices import DEVICES
+        from .utils import read_generation_provenance
+        try:
+            src = read_generation_provenance(
+                self.config.output_header,
+                scan_key=self.config.generation.scan_key).get("inspec_cut_source")
+        except OSError:
+            return None
+        if isinstance(src, str) and src.startswith("device:"):
+            return DEVICES.get(src.split(":", 1)[1])
+        return None
 
     def _announce_boundary_cut(self, val, src, spec, quiet, origin="config",
                                setting=None):

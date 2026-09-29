@@ -158,11 +158,10 @@ def test_bouquet_detects_the_device_from_the_archived_coil_names(tmp_path):
     assert Bouquet(cfg)._boundary_cut(quiet=True) == (8.5, "device:DIII-D")
 
 
-def test_the_loop_and_the_filter_resolve_the_cut_the_same_way():
-    from bouquet.run import Bouquet
-    assert "self._boundary_cut()[0]" in inspect.getsource(Bouquet.generate)
-    flt = inspect.getsource(Bouquet.filter)
-    assert "self._boundary_cut()" in flt and "cut_source=rms_source" in flt
+# The loop-vs-filter identity of the cut is tested BEHAVIOURALLY in
+# tests/test_until_n_inspec.py (test_the_loop_and_the_filter_resolve_the_cut_
+# the_same_way, test_the_default_device_cut_is_the_same_number_in_loop_stamp_
+# and_filter); the source grep that stood here could not see a wrong value.
 
 
 # ---------------------------------------------------------------------------
@@ -256,7 +255,7 @@ def test_refused_slice_is_recorded_not_a_gap(tmp_path):
 # parallel merge aggregates the shards' provenance
 # ---------------------------------------------------------------------------
 
-def _shard(path, worker, n_draws, outcomes):
+def _shard(path, worker, n_draws, outcomes, cut=None):
     with h5py.File(path, "w") as hf:
         g = hf.create_group("scan/0/_baseline")
         g.attrs["l_i_target"] = 0.9
@@ -271,6 +270,9 @@ def _shard(path, worker, n_draws, outcomes):
         sg.attrs["attempt_outcomes_json"] = json.dumps(outcomes)
         sg.attrs["n_attempted"] = len(outcomes)
         sg.attrs["bouquet_version"] = "1.4.0"
+        if cut is not None:                  # the until-N loop's recorded cut
+            sg.attrs["inspec_rms_max_mm"] = cut[0]
+            sg.attrs["inspec_cut_source"] = cut[1]
 
 
 def test_merge_sums_attempts_and_keys_outcomes_by_worker(tmp_path):
@@ -286,3 +288,28 @@ def test_merge_sums_attempts_and_keys_outcomes_by_worker(tmp_path):
     assert rec["attempt_outcomes_json"]["0"]["1"] == "solve_failed"
     assert rec["attempt_outcomes_json"]["1"] == {"0": "stored"}
     assert rec["bouquet_version"] == "1.4.0"
+
+
+def test_merge_carries_the_loops_boundary_cut(tmp_path):
+    from bouquet.parallel import merge_archives
+    s0, s1 = str(tmp_path / "w0.h5"), str(tmp_path / "w1.h5")
+    _shard(s0, 0, 2, {0: "stored", 1: "stored"}, cut=(8.5, "device:DIII-D"))
+    _shard(s1, 1, 1, {0: "stored"}, cut=(8.5, "device:DIII-D"))
+    out, _ = merge_archives([s0, s1], str(tmp_path / "m"), scan_key=0)
+    rec = read_generation_provenance(out, scan_key=0)
+    assert rec["inspec_rms_max_mm"] == 8.5 and rec["inspec_cut_source"] == "device:DIII-D"
+    with h5py.File(out, "r") as hf:
+        man = json.loads(hf["scan/0"].attrs["parallel_manifest_json"])
+    assert man["until_n"]["inspec_rms_max_mm"] == 8.5
+    assert man["until_n"]["inspec_cut_source"] == "device:DIII-D"
+    assert all(w["inspec_rms_max_mm"] == 8.5 for w in man["workers"])
+
+
+def test_merge_refuses_shards_counted_against_different_cuts(tmp_path):
+    from bouquet.parallel import merge_archives
+    s0, s1 = str(tmp_path / "w0.h5"), str(tmp_path / "w1.h5")
+    _shard(s0, 0, 2, {0: "stored", 1: "stored"}, cut=(8.5, "device:DIII-D"))
+    _shard(s1, 1, 1, {0: "stored"}, cut=(5.0, "generic"))
+    with pytest.raises(RuntimeError, match="different boundary cuts"):
+        merge_archives([s0, s1], str(tmp_path / "m"), scan_key=0)
+    assert not (tmp_path / "m.h5").exists()           # nothing was merged

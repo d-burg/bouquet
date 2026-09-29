@@ -24,13 +24,18 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │          [coil_sigma_model]      passes_coil_filter last (chi2: the sigma model JSON)
     │          [boundary_rms_max_mm, boundary_max_max_mm, boundary_cut_source]
     │                                  the LCFS cut filter_boundaries applied and where it
-    │                                  came from ('explicit' | 'device:<name>' | 'generic')
+    │                                  came from ('explicit' | 'device:<name>' | 'generic'
+    │                                  | 'disabled' = cut switched off, no threshold)
     │          [n_requested, n_requested_source, generation_mode, n_attempted,
-    │           n_stored, attempt_outcomes_json, bouquet_version]
+    │           n_stored, attempt_outcomes_json, bouquet_version,
+    │           inspec_rms_max_mm, inspec_max_max_mm, inspec_cut_source]
     │                                  generation provenance (1.4+): requested vs attempted
     │                                  vs stored; per-attempt outcome (stored |
     │                                  solve_failed | post_align_failed); the version that
-    │                                  GENERATED the draws (read_generation_provenance())
+    │                                  GENERATED the draws (read_generation_provenance());
+    │                                  until-N runs only: the LCFS bound the in-spec count
+    │                                  was taken against and its source (absent bound =
+    │                                  none; a merge refuses shards that disagree)
     │          [parallel_manifest_json] process-parallel runs: per-worker record
     │          [refused_reason]        a slice refused before any draw (write_refused_scan)
     ├── _baseline/                     written once per scan point

@@ -3173,7 +3173,9 @@ def write_provenance(h5path_or_header, config=None, scan_key=None):
 
 GENERATION_PROVENANCE_KEYS = ("n_requested", "n_requested_source",
                               "generation_mode", "n_attempted", "n_stored",
-                              "attempt_outcomes_json", "bouquet_version")
+                              "attempt_outcomes_json", "bouquet_version",
+                              "inspec_rms_max_mm", "inspec_max_max_mm",
+                              "inspec_cut_source")
 
 
 def stamp_generation_provenance(h5path_or_header, scan_key=None, **attrs):
@@ -3188,6 +3190,13 @@ def stamp_generation_provenance(h5path_or_header, scan_key=None, **attrs):
     the draws (the file-level version attr is rewritten on every provenance
     write, this one is not). Draws that fail leave no draw group, so without
     this record the archive cannot say how many were attempted.
+
+    An until-N run also records the LCFS bound its in-spec count was taken
+    against: ``inspec_rms_max_mm`` / ``inspec_max_max_mm`` (the numbers the
+    loop applied; absent = no bound) and ``inspec_cut_source`` (``"explicit"``
+    / ``"device:<name>"`` / ``"generic"`` / ``"disabled"``, from
+    ``Bouquet.generate``). A fixed-N run records none of the three. A value
+    of None removes the attr.
     """
     h5path = _resolve_h5(h5path_or_header)
     bkey = _scan_key(scan_key)

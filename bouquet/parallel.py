@@ -390,6 +390,14 @@ def run_shard(config, worker_id, n_workers, *, n_equils_total, seed_base,
         if budget is not None:
             rec.update(shared_target=int(tgt), local_target=budget["local_target"],
                        attempt_cap=budget["cap"], total_cap=budget["total_cap"])
+            # the LCFS bound this worker's in-spec count was taken against,
+            # as generate() stamped it on the shard (the value the loop used)
+            from .utils import read_generation_provenance
+            try:
+                _gp = read_generation_provenance(rec["path"], scan_key=scan_key)
+            except OSError:
+                _gp = {}
+            rec.update({k: _gp.get(k) for k in _INLOOP_CUT_KEYS})
         # Stamp the worker record on the shard so the merge (either launcher)
         # can build the run manifest from the shards alone.
         _write_worker_record(rec["path"], scan_key, rec)
@@ -400,6 +408,16 @@ def run_shard(config, worker_id, n_workers, *, n_equils_total, seed_base,
             os.dup2(_saved[1], 2)
             os.close(_saved[0])
             os.close(_saved[1])
+
+
+#: the until-N loop's boundary cut, as stamped on each shard's scan group
+_INLOOP_CUT_KEYS = ("inspec_rms_max_mm", "inspec_max_max_mm", "inspec_cut_source")
+
+
+def _attr_value(v):
+    if isinstance(v, bytes):
+        return v.decode()
+    return v.item() if hasattr(v, "item") else v
 
 
 def _write_worker_record(shard_path, scan_key, rec):
@@ -478,7 +496,13 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
             return None
         return float(a["l_i_target"]), float(a["Ip_target"])
 
+    def _inloop_cut(src):
+        parent = src[base_path] if base_path else src
+        a = parent.attrs
+        return tuple(_attr_value(a[k]) if k in a else None for k in _INLOOP_CUT_KEYS)
+
     targets = []
+    cuts = {}
     for sp in shard_paths:
         if sp is None:
             continue
@@ -489,6 +513,17 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
                 "or drop the path explicitly from shard_paths.")
         with h5py.File(sp, "r") as src:
             targets.append((sp, _baseline_targets(src)))
+            cuts[sp] = _inloop_cut(src)
+    # every shard's until-N count must have been taken against ONE boundary
+    # cut (a device detected on one node and not on another would mix them)
+    _distinct = {c for c in cuts.values() if c != (None, None, None)}
+    if len(_distinct) > 1:
+        raise RuntimeError(
+            "shards counted their in-spec draws against different boundary "
+            "cuts (inspec_rms_max_mm, inspec_max_max_mm, inspec_cut_source): "
+            + "; ".join(f"{os.path.basename(sp)}: {c}" for sp, c in cuts.items())
+            + ". Nothing was merged -- set filtering.rms_max_mm (or "
+            "config.device) explicitly and re-run.")
     present = [(sp, t) for sp, t in targets if t is not None]
     unchecked = [sp for sp, t in targets if t is None]
     if unchecked and present:
@@ -538,11 +573,9 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
                                 _raw.decode() if isinstance(_raw, bytes) else str(_raw))
                         except (ValueError, TypeError):
                             pass
-                    for _k in ("n_attempted", "bouquet_version"):
+                    for _k in ("n_attempted", "bouquet_version", *_INLOOP_CUT_KEYS):
                         if _k in _pa:
-                            _v = _pa[_k]
-                            _wrec[_k] = _v.decode() if isinstance(_v, bytes) else (
-                                _v.item() if hasattr(_v, "item") else _v)
+                            _wrec[_k] = _attr_value(_pa[_k])
                     workers.append(_wrec)
                 idxs = sorted(
                     int(k) for k in parent.keys()
@@ -574,7 +607,11 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
             until_n=(dict(target=shared[0]["shared_target"],
                           total_cap=shared[0].get("total_cap"),
                           n_inspec_recorded=sum(int(w.get("n_inspec", 0))
-                                                for w in shared))
+                                                for w in shared),
+                          # the one boundary cut every shard counted against
+                          # (only when the shards recorded it)
+                          **({k: v for k, v in zip(_INLOOP_CUT_KEYS, next(iter(_distinct)))}
+                             if _distinct else {}))
                      if shared else None))
         with h5py.File(out_path, "a") as out:
             gp = base_path if base_path else "/"
@@ -599,6 +636,7 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
             attempt_outcomes_json={str(w["worker_id"]): w.get("attempt_outcomes")
                                    for w in workers},
             bouquet_version=(",".join(_vers) if _vers else None),
+            **dict(zip(_INLOOP_CUT_KEYS, next(iter(_distinct), (None, None, None)))),
         )
         if shared:
             _u = manifest["until_n"]

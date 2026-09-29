@@ -6168,6 +6168,12 @@ def generate_bouquet(
             n_stored=int(sum(1 for v in _attempt_outcomes.values() if v == "stored")),
             attempt_outcomes_json=_attempt_outcomes,
             bouquet_version=str(__import__("bouquet").__version__),
+            # the LCFS bounds the until-N verdict above actually applied
+            # (None -> not recorded: a fixed-N loop applies no bound)
+            inspec_rms_max_mm=(None if _until_n is None or inspec_rms_max_mm is None
+                               else float(inspec_rms_max_mm)),
+            inspec_max_max_mm=(None if _until_n is None or inspec_max_max_mm is None
+                               else float(inspec_max_max_mm)),
         )
     except Exception as _pexc:
         print(f"  WARN: generation provenance not stamped ({_pexc})")

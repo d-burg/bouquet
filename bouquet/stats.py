@@ -406,6 +406,12 @@ def _scan_context(ar, key) -> dict:
     ctx["boundary_cut_source"] = str(_src) if _src is not None else UNRECORDED
     if ctx["boundary_cut_source"] == "disabled":
         ctx["rms_max_mm"] = ctx["max_max_mm"] = None
+    # the cut an until-N loop counted its target against (generation stamp)
+    _isrc = sattrs.get("inspec_cut_source")
+    ctx["inloop_cut_source"] = str(_isrc) if _isrc is not None else UNRECORDED
+    _irms = sattrs.get("inspec_rms_max_mm")
+    ctx["inloop_rms_max_mm"] = (float(_irms) if _irms is not None
+                                else (None if _isrc is not None else UNRECORDED))
 
     # ---- counts recorded at generation
     n_req, n_req_src, mode = None, UNRECORDED, sattrs.get("generation_mode")
@@ -723,6 +729,8 @@ def draw_band(archive, scan_key, evaluate, *, quantities=None,
         "boundary_filter_applied": boundary_flag_seen,
         "rms_max_mm": ctx["rms_max_mm"], "max_max_mm": ctx["max_max_mm"],
         "boundary_cut_source": ctx["boundary_cut_source"],
+        "inloop_rms_max_mm": ctx["inloop_rms_max_mm"],
+        "inloop_cut_source": ctx["inloop_cut_source"],
         "draw_boundary_rms_mm": draw_rms,
         "generation_mode": ctx["generation_mode"],
         "pole_rule": pole_rule, "regular_label": meta.get("regular_label"),
@@ -874,6 +882,7 @@ def _status_record(skey, quantity, status, archive, *, refused_reason=None,
         "boundary_filter_applied": None,
         "rms_max_mm": UNRECORDED, "max_max_mm": UNRECORDED,
         "boundary_cut_source": UNRECORDED, "draw_boundary_rms_mm": {},
+        "inloop_rms_max_mm": UNRECORDED, "inloop_cut_source": UNRECORDED,
         "generation_mode": UNRECORDED,
         "pole_rule": settings["pole_rule"],
         "regular_label": (settings["evaluator_meta"] or {}).get("regular_label"),
@@ -908,6 +917,14 @@ def _limitations(rec, ctx, meta, selection, require_filter, percentiles):
     elif ctx["rms_max_mm"] == UNRECORDED and ctx["max_max_mm"] == UNRECORDED:
         lim.append("The boundary acceptance threshold is not recorded on the "
                    "archive.")
+    if (ctx["inloop_cut_source"] != UNRECORDED
+            and ctx["boundary_cut_source"] != UNRECORDED
+            and ctx["inloop_rms_max_mm"] != ctx["rms_max_mm"]):
+        lim.append(f"The until-N loop counted its target against a boundary cut "
+                   f"of {ctx['inloop_rms_max_mm']} mm ({ctx['inloop_cut_source']}) "
+                   f"but the stamped filter cut is {ctx['rms_max_mm']} mm "
+                   f"({ctx['boundary_cut_source']}): n_requested does not "
+                   "describe this population.")
     if ctx["closure_limited"]:
         lim.append("The baseline Ip closure is flagged closure_limited: do not "
                    "pool this slice with non-limited slices.")

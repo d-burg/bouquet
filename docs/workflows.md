@@ -336,7 +336,15 @@ Points worth knowing:
   thresholds in `config.filtering` at generation time. Passing a different
   bound to `filter(rms_max_mm=…)` later re-cuts the archive at the new
   criterion, and the selected count moves accordingly — that is the filters
-  working as designed, not the loop having miscounted.
+  working as designed, not the loop having miscounted. The loop's LCFS bound
+  is archived with the generation counts (`inspec_rms_max_mm` /
+  `inspec_cut_source`), so `filter()` warns when it cuts at a different one,
+  and a band's provenance carries both.
+- **The boundary cut is announced once per run, on screen.** `generate()`
+  resolves `filtering.rms_max_mm` before the solver output is captured and
+  prints `[boundary cut] …` with its value and source (`explicit`,
+  `device:<name>`, `generic` or `disabled`); an explicit `filter(rms_max_mm=…)`
+  argument is announced too.
 - **`run_slices` chases the target per slice.** Each slice gets its own N
   in-spec draws, which is usually what a timeseries sweep wants; budget the
   wall-clock as N-per-slice divided by the worst slice's yield.

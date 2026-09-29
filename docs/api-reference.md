@@ -34,7 +34,7 @@ Docstrings in the source are authoritative; this page is a map.
 | `BouquetArchive` | High-level reader: `ar[scan_key]` → `ScanView` → `DrawView` (profiles, flags, parsed equilibria, extraction) |
 | `ScanView` / `DrawView` / `BaselineView` | The view objects those return (`ScanView.baseline_view()` exposes the baseline through the draw accessors) |
 | `draw_band()` | Standard across-draw band (median, p16/p84, min/max) for a quantity computed per draw by the caller's evaluator; counts, dropped reasons, floors, pole gate, baseline overlay and provenance — see [workflows.md](workflows.md#error-bars-from-an-archive) |
-| `draw_bands()` | `draw_band` over a requested list of `(archive, scan_key)`; absent keys become `no_archive` records, refused slices `refused` |
+| `draw_bands()` | `draw_band` over a requested list of `(archive, scan_key)`; absent keys become `no_archive` records, refused slices `refused`, keys where no draw reaches the statistic (e.g. every draw rejected) `empty` records with an `empty_reason` -- never a silent gap |
 | `draw_scalars()` | `draw_band` for bouquet's own scalars: q0, q95, rho(q=m/n), l_i (archive estimator), beta_N, <P> |
 | `BandRecord` / `BandTable` | The per-(key, quantity) record and its container (`to_dataframe()`, `to_csv()`) |
 | `plot_band()` | Median + p16–p84 band across keys; hollow markers below the floor, regular fraction where gated, baseline dashed |

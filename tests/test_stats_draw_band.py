@@ -456,3 +456,73 @@ def test_draw_scalars_names_li_estimator(golden_scalars):
 
 def test_spread_docstring_points_to_draw_scalars():
     assert "draw_scalars" in bq.ScanView.spread.__doc__
+
+
+# --------------------------------------------------------------------------
+#  never a silent gap: a key where no draw reaches the statistic
+# --------------------------------------------------------------------------
+def _rejected(n):
+    return {i: {"val": float(i), "coil": False} for i in range(n)}
+
+
+def test_all_rejected_slice_is_an_explicit_empty_record(tmp_path):
+    p = _make_archive(tmp_path / "a.h5", {"1": {i: {"val": i} for i in range(20)},
+                                          "2": _rejected(20)})
+    out = bq.draw_band(p, "2", _by_attr)
+    assert list(out) == [None]                    # no quantity known: keyed None
+    r = out[None]
+    assert r.status == "empty" and r.empty_reason == "all_draws_rejected"
+    assert (r.n_stored, r.n_selected, r.n_used) == (20, 0, 0)
+    assert r.no_band and not r.show and math.isnan(r.p16) and math.isnan(r.p84)
+    assert len(r.dropped) == 20 and all(w == "not_selected" for _, w in r.dropped)
+    assert any("n_used=0 (all_draws_rejected)" in s for s in r.provenance["limitations"])
+    # named quantities: one explicit record each
+    out = bq.draw_band(p, "2", _by_attr, quantities=["x", "y"])
+    assert set(out) == {"x", "y"}
+    assert all(v.status == "empty" and v.n_used == 0 for v in out.values())
+
+
+def test_mixed_scan_keeps_the_all_rejected_key(tmp_path):
+    p = _make_archive(tmp_path / "a.h5", {"1": {i: {"val": i} for i in range(20)},
+                                          "2": _rejected(20),
+                                          "3": {i: {"val": i} for i in range(6)}})
+    t = bq.draw_bands([(p, "1"), (p, "2"), (p, "3")], _by_attr)
+    assert [(r.scan_key, r.quantity, r.status, r.n_used) for r in t] == [
+        ("1", "x", "ok", 20), ("2", "x", "empty", 0), ("3", "x", "ok", 6)]
+    r2 = t.records[1]
+    assert r2.empty_reason == "all_draws_rejected" and r2.n_stored == 20
+    rows = BandTable.read_csv(t.to_csv(tmp_path / "t.csv"))
+    assert rows[1]["status"] == "empty" and rows[1]["empty_reason"] == "all_draws_rejected"
+    mpl = pytest.importorskip("matplotlib")
+    mpl.use("Agg")
+    ax = bq.plot_band(t, "x")
+    assert "n=0" in [tx.get_text() for tx in ax.texts]
+
+
+def test_evaluator_returning_none_everywhere_is_reported(tmp_path):
+    p = _simple(tmp_path / "a.h5", 8)
+    out = bq.draw_band(p, "1", lambda v: None)
+    r = out[None]
+    assert r.status == "empty" and r.empty_reason == "none_evaluated"
+    assert r.n_selected == 8 and r.n_evaluated == 0
+    assert all(w == "status:not_evaluated" for _, w in r.dropped)
+
+
+def test_per_quantity_empty_reasons(tmp_path):
+    p = _simple(tmp_path / "a.h5", 6)
+    ev = {d: {"a": _ok(float("nan")), "b": _ok(1.0, regular=False),
+              "c": _ok(1.0, status="failed")} for d in range(6)}
+    out = bq.draw_band(p, "1", ev)
+    assert {q: (r.status, r.empty_reason) for q, r in out.items()} == {
+        "a": ("empty", "no_finite_values"), "b": ("empty", "no_regular_draws"),
+        "c": ("empty", "no_ok_status")}
+    out = bq.draw_band(p, "1", _by_attr, exclude={d: "hand" for d in range(6)})
+    assert out[None].empty_reason == "all_draws_excluded"
+
+
+def test_draw_scalars_reports_every_quantity_on_an_all_rejected_slice(tmp_path):
+    p = _make_archive(tmp_path / "a.h5", {"1": _rejected(5)})
+    out = bq.draw_scalars(p, "1", rational=((2, 1),))
+    assert list(out) == ["q0", "q95", "rho(q=2/1)", "beta_N", "<P> [kPa]", "l_i"]
+    assert all(r.status == "empty" and r.empty_reason == "all_draws_rejected"
+               and r.n_used == 0 for r in out.values())

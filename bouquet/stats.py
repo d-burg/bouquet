@@ -112,9 +112,12 @@ class BandRecord:
     """One scan key x one quantity: the band, its population and provenance.
 
     ``p16`` / ``p84`` hold the lower / upper of ``percentiles`` (named for the
-    default ``(16, 84)``). ``status`` is ``"ok"``, ``"refused"`` (the scan
-    group carries a ``refused_reason``) or ``"no_archive"`` (the archive or the
-    key is absent).
+    default ``(16, 84)``). ``status`` is ``"ok"``, ``"empty"`` (the key was
+    read but no draw survived to the statistic: ``n_used == 0``, no band, and
+    ``empty_reason`` says at which stage the population ran out), ``"refused"``
+    (the scan group carries a ``refused_reason``) or ``"no_archive"`` (the
+    archive or the key is absent). A requested key or quantity is never
+    dropped from a result: it comes back as one of these records.
     """
 
     scan_key: Optional[str]
@@ -161,6 +164,12 @@ class BandRecord:
     closure_limited_reasons: tuple = ()
     closure_channel: Optional[str] = None
     # ---- slice-level
+    #: why ``n_used == 0`` (status ``"empty"``): ``no_draws_stored``,
+    #: ``all_draws_rejected`` (the stamped filters selected none),
+    #: ``all_draws_excluded`` (``exclude`` removed the rest),
+    #: ``none_evaluated``, ``no_ok_status``, ``no_regular_draws`` or
+    #: ``no_finite_values``; None otherwise.
+    empty_reason: Optional[str] = None
     refused_reason: Optional[str] = None
     archive: Optional[str] = None
     provenance: dict = field(default_factory=dict)
@@ -172,7 +181,8 @@ class BandRecord:
     def __repr__(self):
         head = f"<BandRecord {self.scan_key!r}/{self.quantity!r}"
         if self.status != "ok":
-            why = f" ({self.refused_reason})" if self.refused_reason else ""
+            why = self.refused_reason or self.empty_reason
+            why = f" ({why})" if why else ""
             return f"{head} {self.status}{why}>"
         flags = [n for n in ("below_floor", "no_band", "gated") if getattr(self, n)]
         if not self.show:
@@ -565,9 +575,13 @@ def draw_band(archive, scan_key, evaluate, *, quantities=None,
     enter the band. Quantities the evaluator holds fixed (for example rotation
     or transport coefficients) make the band conditional on them.
 
-    Returns ``{quantity: BandRecord}``. A scan carrying ``refused_reason``
-    returns records with ``status="refused"`` (keyed ``None`` when
-    ``quantities`` is not given). A missing key raises ``KeyError``.
+    Returns ``{quantity: BandRecord}``, never empty. A quantity no draw
+    survives for comes back with ``status="empty"``, ``n_used=0`` and an
+    ``empty_reason``; when no quantity is known at all (``quantities`` not
+    given and no draw evaluated) the single record is keyed ``None``. A scan
+    carrying ``refused_reason`` returns records with ``status="refused"``
+    (keyed ``None`` when ``quantities`` is not given). A missing key raises
+    ``KeyError``.
     """
     _validate(selection, pole_rule, percentiles, min_n, hard_min)
     percentiles = tuple(percentiles)
@@ -646,6 +660,11 @@ def draw_band(archive, scan_key, evaluate, *, quantities=None,
                     qs.append(q)
     else:
         qs = list(quantities)
+    if not qs:
+        # nothing reached the evaluator (every draw rejected / excluded, none
+        # stored) or it returned nothing: the key still gets a record, keyed
+        # None, which draw_bands expands to the quantities seen elsewhere
+        qs = [None]
 
     label_default = meta.get("regular_label") or "not_regular"
     draw_rms = _per_draw_boundary(ar, key, to_eval)
@@ -717,6 +736,10 @@ def draw_band(archive, scan_key, evaluate, *, quantities=None,
         for k, v in st.items():
             setattr(rec, k, v)
         rec.show = bool(rec.n_used > 0 and not gated)
+        if rec.n_used == 0:
+            rec.status = "empty"
+            rec.empty_reason = _empty_reason(len(stored), len(sel), len(to_eval),
+                                             n_evaluated, n_ok, n_reg)
 
         # ---- baseline overlay (never the centre)
         if baseline:
@@ -735,6 +758,23 @@ def draw_band(archive, scan_key, evaluate, *, quantities=None,
         rec.provenance = prov
         out[q] = rec
     return out
+
+
+def _empty_reason(n_stored, n_selected, n_to_eval, n_evaluated, n_ok, n_regular):
+    """The first stage at which the population ran out (see BandRecord)."""
+    if n_stored == 0:
+        return "no_draws_stored"
+    if n_selected == 0:
+        return "all_draws_rejected"
+    if n_to_eval == 0:
+        return "all_draws_excluded"
+    if n_evaluated == 0:
+        return "none_evaluated"
+    if n_ok == 0:
+        return "no_ok_status"
+    if n_regular == 0:
+        return "no_regular_draws"
+    return "no_finite_values"
 
 
 def _baseline_entry(base_res, q, label_default):
@@ -816,6 +856,9 @@ def _limitations(rec, ctx, meta, selection, require_filter, percentiles):
     if ctx["closure_limited"]:
         lim.append("The baseline Ip closure is flagged closure_limited: do not "
                    "pool this slice with non-limited slices.")
+    if rec.n_used == 0:
+        lim.append(f"n_used=0 ({rec.empty_reason}): no draw reached the "
+                   "statistic, so there is no median and no band for this key.")
     if rec.below_floor and rec.n_used >= 2:
         lo, hi = percentiles
         cov = (hi - lo) / 100.0 * (rec.n_used - 1) / (rec.n_used + 1)
@@ -833,7 +876,9 @@ def draw_bands(sources, evaluate, **kw) -> BandTable:
 
     A requested key never becomes a silent gap: an absent archive or key yields
     a record with ``status="no_archive"``, a scan group carrying
-    ``refused_reason`` one with ``status="refused"`` -- one per quantity seen
+    ``refused_reason`` one with ``status="refused"``, and a key where no draw
+    reaches the statistic (every draw rejected by the filters, say) one with
+    ``status="empty"`` and its ``empty_reason`` -- one per quantity seen
     elsewhere in the table (``quantity=None`` if none was).
 
     ``evaluate`` is a callable, or a mapping ``{scan_key: {draw: result}}``
@@ -868,6 +913,12 @@ def draw_bands(sources, evaluate, **kw) -> BandTable:
 
     records = []
     for skey, ref, recs in per_key:
+        if (isinstance(recs, dict) and list(recs) == [None]
+                and recs[None].status == "empty" and qs != [None]):
+            # an empty key (e.g. every draw rejected) reports every quantity
+            # the table carries, with its counts -- never a silent gap
+            records.extend(_requantify(recs[None], q) for q in qs)
+            continue
         if recs == "no_archive":
             records.extend(_status_record(skey, q, "no_archive", ref, **kw)
                            for q in qs)
@@ -880,6 +931,14 @@ def draw_bands(sources, evaluate, **kw) -> BandTable:
             continue
         records.extend(recs.values())
     return BandTable(records)
+
+
+def _requantify(rec, quantity):
+    """A copy of a quantity-less ``empty`` record for one named quantity."""
+    import copy
+    out = copy.deepcopy(rec)
+    out.quantity = quantity
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -1026,6 +1085,10 @@ def draw_scalars(archive, scan_key=None, *, rational=((2, 1), (3, 1)),
                 rho_definition="rho_tor = sqrt(int q dpsi_N / int_0^1 q dpsi_N), "
                                "outermost crossing, from the g-file qpsi")
     meta.setdefault("regular_label", "rational surface exists")
+    # the fixed quantity list, so a slice with no usable draw still reports
+    # every quantity (status="empty") instead of returning nothing
+    kw.setdefault("quantities", ["q0", "q95", *labels.values(), "beta_N",
+                                 "<P> [kPa]", "l_i"])
     recs = draw_band(ar, key, _evaluate, evaluator_meta=meta, **kw)
     used = {"draws": sorted(q_used["draws"]), "baseline": q_used["baseline"]}
     for q in ("q0", "q95"):
@@ -1090,7 +1153,8 @@ def plot_band(table, quantity, ax=None, x=None):
     for xi, r, s in zip(x, recs, shown):
         if s:
             continue
-        txt = (r.status if r.status != "ok"
+        txt = ("n=0" if r.status == "empty"
+               else r.status if r.status != "ok"
                else f"{r.n_regular}/{r.n_ok}" if r.n_ok else "n=0")
         ax.text(xi, 0.03, txt, transform=tr, ha="center", va="bottom", fontsize=8)
     ax.set_ylabel(str(quantity))

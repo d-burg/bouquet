@@ -449,8 +449,13 @@ reason (`not_selected`, `user:<reason>`, `status:<code>`, `irregular:<label>`,
 limitations). Below `min_n=15` a record is flagged `below_floor` (shown hollow);
 below `hard_min=5` p16/p84 are NaN. If half or fewer of the ok draws are regular
 the record is `gated` (`show=False`); there is no magnitude cut. Fields an older
-archive does not record come back `None` or `"unrecorded"`. `ScanView.spread()`
-remains the quick-look mean/std summary.
+archive does not record come back `None` or `"unrecorded"`. A requested key or
+quantity is never silently dropped: a key where no draw reaches the statistic
+(for example, the filters rejected every draw) comes back as `status="empty"`
+with `n_used=0`, no band and an `empty_reason` (`all_draws_rejected`,
+`none_evaluated`, `no_finite_values`, ...); a refused slice as `"refused"`; a
+missing archive or key as `"no_archive"`. `ScanView.spread()` remains the
+quick-look mean/std summary.
 
 ## Exporting draws
 

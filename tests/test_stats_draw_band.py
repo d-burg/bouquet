@@ -597,3 +597,29 @@ def test_numpy_bool_regular_is_accepted(tmp_path):
     ev = {d: {"x": _ok(float(d), regular=np.bool_(d != 3))} for d in range(6)}
     r = bq.draw_band(p, "1", ev)["x"]
     assert r.n_irregular == 1 and (3, "irregular:not_regular") in r.dropped
+
+
+# --------------------------------------------------------------------------
+#  the floors at their edges: hard_min=5, min_n=15 (unchanged)
+# --------------------------------------------------------------------------
+@pytest.mark.parametrize("n, no_band, below_floor", [
+    (4, True, True),      # below hard_min: no percentiles
+    (5, False, True),     # at hard_min: band, flagged below the floor
+    (14, False, True),    # one short of min_n
+    (15, False, False),   # at min_n: a full-floor band
+])
+def test_floors_at_exactly_4_5_14_15(tmp_path, n, no_band, below_floor):
+    vals = np.random.default_rng(n).normal(size=n)
+    p = _simple(tmp_path / "a.h5", n, vals=vals)
+    r = bq.draw_band(p, "1", _by_attr)["x"]
+    assert r.n_used == n and r.status == "ok" and r.show
+    assert (r.no_band, r.below_floor) == (no_band, below_floor)
+    if no_band:
+        assert math.isnan(r.p16) and math.isnan(r.p84)
+    else:
+        lo, hi = np.percentile(vals, (16, 84), method="linear")
+        assert (r.p16, r.p84) == (lo, hi)
+    cov = [s for s in r.provenance["limitations"] if "covers about" in s]
+    assert bool(cov) == below_floor
+    if below_floor:
+        assert f"{0.68 * (n - 1) / (n + 1):.2f}" in cov[0]

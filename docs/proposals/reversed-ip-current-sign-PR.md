@@ -1,8 +1,9 @@
 # Reversed-current IMAS sources: bring every source current into bouquet's positive-Ip frame (hotfix)
 
-Branch `fix/reversed-ip-current-sign`, from `main`. Independent of the
-self-consistent-bootstrap branch (the same commits cherry-pick onto it; see
-"Loop branch" below).
+Branch `fix/reversed-ip-current-sign`, from `main`, plus the fixes for the
+adversarial review of 5827981 (section "Review fixes" below). Independent of
+the self-consistent-bootstrap branch (the original commits cherry-pick onto it;
+see "Loop branch" below — that section predates the review fixes).
 
 ## The bug
 
@@ -57,43 +58,116 @@ for `ip ≥ 0` and for a zero or non-finite `ip`):
 | `core_profiles` `j_total`, `j_tor`, `j_ohmic`, `j_bootstrap` | kinetics, `Z_eff`, fast and equilibrium pressure |
 | every beam-source `j_parallel` (→ `j_NBI`) | rotation, `E_r`, transport coefficients |
 | `equilibrium.profiles_1d.j_tor` (→ `jphi_diff`) | the dd's own `q` (`q0_dd`, recorded raw; the gate reads `\|q0_dd\|`) |
-| user `FixedComponentsConfig.j_NBI` / `j_RF` (they replace dd quantities, so they are in the dd's orientation) | boundary outline, `F0 = \|r0·b0\|` (already orientation-free) |
+| `pf_active` coil currents read as `coil_reg` targets (`coil_targets.measured_from_pf_active`, same factor, see below) | boundary outline, `F0 = \|r0·b0\|` (already orientation-free) |
+| | user `FixedComponentsConfig.j_NBI` / `j_RF` — defined in the positive-Ip frame (co-current positive) on both source paths |
 
 The parallel→toroidal ratio `j_tor/j_total` does not depend on the sign, so
 flipping the inputs is bitwise the same as flipping every derived component.
 
 **Recorded, never silent:**
 
-- New fields `Baseline.source_current_sign` and `Baseline.source_b0_sign`. The
-  B0 sign is recorded only; nothing is flipped on it.
-- The same two keys in `li_metrics` on every IMAS forward solve.
-- `ip_closure.source_current_sign`.
+- New fields `Baseline.source_current_sign`, `Baseline.source_current_sign_origin`
+  (`"auto: sign(equilibrium ip)"` or `"override: ImasSource.current_orientation"`)
+  and `Baseline.source_b0_sign` (`None` for a zero or unreadable `b0`). The B0
+  sign is recorded only; nothing in the reader is flipped on it.
+- The same three keys in `li_metrics` on every IMAS forward solve.
+- `ip_closure.source_current_sign` / `source_current_sign_origin`.
 - The IMAS archive's `_baseline` group gets the attrs `source_current_sign`,
-  `source_b0_sign` and `current_frame` (`utils.stamp_source_orientation`,
-  called from `Bouquet.generate`, so it also reaches shards and merged
-  archives).
-- A log line for a reversed source.
-- A `UserWarning` for a dd whose `core_profiles` total integrates against its
-  own `ip`. No sign convention can repair that dd.
+  `source_current_sign_origin`, `source_b0_sign` and `current_frame`
+  (`utils.stamp_source_orientation`, called from `Bouquet.generate`, so it also
+  reaches shards and merged archives).
+- A log line for a reversed source, and for an override.
+- A dd whose current profiles disagree in sign with its own `ip` is
+  **refused** (`ValueError`; see "Review fixes", M1). No single sign convention
+  can repair that dd.
 - In the ohmic closure, a printed warning if `current_direction_sign` is still
-  −1 after the normalisation.
+  −1 after the normalisation (kept as a print; see "Not in this PR").
 
 `closure_sign_convention` is unchanged and stays in place as a guard for
 callers that pass in their own components. On reader output it now returns +1.
-The raw-source plot overlays (`plot_input_vs_recon`, `plot_jphi`) apply the
-same factor, so a reversed source is not drawn upside down against its own
-solve.
+The raw-source plot overlays apply the same factor on the IMAS path
+(`plot_input_vs_recon`, `plot_jphi`) and `sign(CURRENT)` on the g-file path
+(`plot_input_vs_recon`, the reconstruction diagnostic's FF′, `plot_jphi`), so a
+reversed source is not drawn upside down against its own solve.
 
 **Positive-Ip behaviour is unchanged.** The factor is exactly `+1.0`, so every
-array is the same object arithmetic as before. See "A/B identity" below.
+array is the same arithmetic as before (value-identical under IEEE `==`; a
+`+0.0` may become `-0.0` only on a reversed source). See "A/B identity" below
+and, for the review fixes, "Review fixes".
 
-## Sign audit (every site that meets a source current, main line numbers)
+## Review fixes (after the adversarial review of 5827981)
+
+One commit per finding, in this order. M5 and M4 are separable (M4 builds on
+M5 and on M1's origin record).
+
+- **M1 — mixed-sign source is refused** (a7ff27a). Before: a dd whose currents
+  disagree with its own `ip` got a `UserWarning` and was then closed in a mixed
+  frame (`sign(ip) = −1` flipped co-Ip currents counter-Ip). Now the reader
+  raises `ValueError`, naming each quantity, its stored sign and `ip`, when the
+  **net, area-weighted** toroidal current of `core_profiles.j_tor` — or of the
+  equilibrium `j_tor` the `jphi_diff` anchor uses — disagrees with the
+  orientation factor. The weighting is the file's own `area`
+  (`core_profiles.grid.area`, else `equilibrium.profiles_1d.area` interpolated
+  in ψ_N), else `rho_tor_norm²` as an area proxy, else ψ_N (no geometry on
+  file). The synthetic example carries no `area`, so its core_profiles check
+  uses the `rho_tor_norm²` proxy and its equilibrium check ψ_N. All four are monotone in the enclosed
+  area, so a single-signed profile is classified the same by each; the refusal
+  quotes the weighting used. New **`ImasSource.current_orientation`**
+  (`"auto"` default = `sign(ip)`; `+1` keeps the stored currents; `-1`
+  reverses them), validated at config time; an override that still leaves the
+  currents counter-Ip is refused too. Also: the sign is read at the equilibrium
+  slice nearest the core_profiles slice the currents come from (n3), and
+  `b0 == 0` records `source_b0_sign = None` (n2).
+- **M2 — user driven currents are positive-frame** (2d14050).
+  `FixedComponentsConfig.j_NBI` / `j_RF` are no longer multiplied by the dd's
+  factor: they mean co-current positive on both source paths, exactly as the
+  g-file path (`baseline._resolve_fixed`) always took them. Docstring updated.
+- **M3 — coil targets in the solve frame** (f736da6).
+  `coil_targets.measured_from_pf_active` multiplies the measured circuit
+  currents by the same factor (the same dd's `sign(ip)` at the nearest slice,
+  or its own `current_orientation=+1/-1`) and returns a `MeasuredCoilCurrents`
+  dict recording it; a dd with no equilibrium ip keeps the stored sign and
+  warns. `coil_reg_from_measured` records the factor on each term
+  (`"source_current_sign"`) without applying it again; `_apply_coil_reg`
+  refuses a term whose recorded factor disagrees with the IMAS baseline's. The
+  factor is applied in exactly one place. The χ² coil filter uses `pf_active`
+  only for `|σ|` and is unchanged.
+- **Mirror helper completeness** (f34ee1b). `tests/_mirror_dd.py` now applies
+  the full fixed-COCOS orientation transform (ψ, P′, FF′, F, `j_parallel`,
+  `profiles_2d`, `core_profiles` global quantities and grid ψ, `core_sources`
+  `current_parallel*`, `pf_active` currents, both `b0`, every q). No existing
+  test failed with the completed helper.
+- **M5 — export reconstruct fidelity** (94c7265, pre-existing on `main`,
+  separable). `write_imas_draw(fidelity="reconstruct")` read the template
+  `j_tor` after overwriting it with the draw's, so the exported `j_total` was
+  the template's. The template totals are now captured first; a template with
+  no `j_tor` is refused on that path. The new test checks the `j_total` /
+  `j_ohmic` / `j_bootstrap` values (it fails on the previous code).
+- **M4 — export in the source frame** (40eac6e, separable). Every field the
+  writer overwrites is restored to the source orientation to match the
+  template fields it keeps (`core_sources`, `pf_active`, `b0`): `ip`, ψ, P′,
+  FF′ and the currents by `s_I` (archive `source_current_sign`, or
+  `sign(template ip)` for an unstamped archive, with a warning when negative),
+  `f` by the template `b0` sign, q in the template's own q-sign convention. A
+  template contradicting the archive stamp is refused. **For `ip > 0` sources
+  the only change is that the exported `f` takes `b0`'s sign** (it was always
+  positive; a `b0 < 0` source now gets `f < 0`).
+- **Minor** (1178444): g-file overlays in the solve frame (m2); physics-notes
+  restore transform lists P′/FF′ and `PSIRZ`/`SIMAG`/`SIBRY` (m6); the
+  delivered g-file described as the writer produces it today (always
+  `Ip·Bt > 0`), its convention left as an open decision; field-line helicity
+  added to what carries a direction (3D-field coupling). The writer is
+  unchanged.
+
+## Sign audit (every site that meets a source current)
 
 | site | before | after | changed? |
 |---|---|---|---|
 | `io/imas.py` `read_imas_geometry`: `F0 = abs(r0*b0)` | positive frame | same | no (it defines the frame) |
 | `io/imas.py` `Ip_target = abs(ip)` | magnitude | same | no |
-| `io/imas.py` currents `j_total/j_tor/j_ohmic/j_bootstrap`, NBI `j_parallel`, eq `j_tor` (`jphi_diff`), user `j_NBI/j_RF` | dd sign | × `sign(ip)` | **yes**: the fix |
+| `io/imas.py` currents `j_total/j_tor/j_ohmic/j_bootstrap`, NBI `j_parallel`, eq `j_tor` (`jphi_diff`) | dd sign | × `sign(ip)` (or `ImasSource.current_orientation`); refused if the net current then opposes Ip | **yes**: the fix (+ M1) |
+| `io/imas.py` user `FixedComponentsConfig.j_NBI/j_RF` | as given | as given (positive frame, both paths) | no (M2 reverted an interim × `sign(ip)`) |
+| `coil_targets.measured_from_pf_active` → `coil_reg` targets | lab sign | × the same factor, recorded per term; mismatch refused in `_apply_coil_reg` | **yes** (M3) |
 | `io/imas.py` `j_inductive = j_phi − j_BS − j_NBI − j_RF` | dd frame | positive frame (follows from the inputs) | via inputs |
 | `io/imas.py` `sawtooth.q0_dd` | dd COCOS | same (recorded raw; gate uses `\|q0_dd\|`) | no, documented |
 | `io/imas.py` `aux` rotation / `E_r` | lab signs | same | no, flagged (see "Not in this PR") |
@@ -119,8 +193,9 @@ array is the same object arithmetic as before. See "A/B identity" below.
 | `utils.li_value` (`sgn = sign(Ip)`), `structured_li_model` (`Ip_target_signed`) | sign-aware | same | no |
 | g-file path `F0 = abs(R_center·B_center)`, `Ip_target = abs(eqdsk.Ip)` | positive frame, split fitted in it | same | no |
 | writer: TokaMaker `save_eqdsk` (default COCOS 7) | `CURRENT > 0`, `BCENTR > 0` for every source | same | no, documented (below) |
-| `io/imas.py` `write_imas_draw` (IMAS export) | positive-frame `ip` and currents into the template | same | no, documented; orientation recorded on the archive |
+| `io/imas.py` `write_imas_draw` (IMAS export) | positive-frame `ip`, ψ, P′, FF′, `f`, q, currents into a source-frame template | restored to the source frame | **yes** (M4; M5 fixes the reconstruct ratio) |
 | `plotting._imas_input_profiles`, `plot_jphi` raw FUSE overlay | dd sign against a positive solve | × `sign(ip)` | **yes** (cosmetic) |
+| `plotting` g-file overlays (`plot_input_vs_recon`, recon diagnostic FF′, `plot_jphi` geqdsk) | raw g-file sign | × `sign(CURRENT)` | **yes** (cosmetic) |
 
 ## What sign the delivered g-file carries
 
@@ -131,16 +206,21 @@ example, the shipped synthetic example's input g-file has `BCENTR < 0`, and its
 bouquet baseline g-file has `BCENTR > 0`.
 
 - The delivered g-file carries **neither** the experiment's Ip sign **nor** its
-  Bt sign. That was already true for normal-orientation DIII-D-like sources
-  (Bt < 0) before this change, and this PR does not change it.
+  Bt sign, and so always has `Ip·Bt > 0`. That was already true for
+  normal-orientation DIII-D-like sources (Bt < 0) before this change, and this
+  PR does not change it. For such a source (`Ip·B0 < 0`) the delivered
+  field-line helicity is the opposite of the lab's.
 - For a reversed-Ip source the delivered g-file is `CURRENT > 0`, like every
   other bouquet g-file. It does not carry the experiment's negative Ip.
 
 **Recommendation: keep the writer as is in this hotfix**, and treat restoring
 the orientation as a separate, opt-in decision:
 
-- Static MHD quantities do not depend on the orientation. These are the
-  equilibrium, l_i, |q|, Δ′ and δW. Flipping Ip alone is a mirror reflection
+- Intrinsic axisymmetric MHD quantities do not depend on the orientation.
+  These are the equilibrium, l_i, |q|, and the Δ′ and δW of the plasma on its
+  own. The response to **3D fields** does: error-field and 3D-coil coupling
+  with real coil geometry and phasing, and NTV, depend on the field-line
+  helicity sign(Ip·Bt) relative to the coils. Flipping Ip alone is a mirror reflection
   φ → −φ, and flipping Ip and Bt together is a full field reversal. Both are
   symmetries of the MHD equations, so an EFIT-style consumer that only needs
   the equilibrium gets the same answer from the positive-frame g-file.
@@ -151,10 +231,12 @@ the orientation as a separate, opt-in decision:
   orientation. For example, a resistive-layer code needs the sign of
   ω_E relative to ω_*. This was already the situation for every source; the
   hotfix only makes the currents consistent.
+- The IMAS export now restores the source orientation (M4), because it writes
+  into a source-frame template and must agree with the fields it keeps.
 - **Proposed follow-up (not in this PR):** an opt-in
-  `export_bundle(..., orientation="source")` / `write_imas_draw(..., orientation="source")`.
-  It would restore the recorded orientation with
-  `Ip → s_I·Ip`, `ψ → s_I·ψ`, `F → s_B·F`, `q → s_I·s_B·q`, where
+  `export_bundle(..., orientation="source")` for g-files. It would restore the
+  recorded orientation with `Ip → s_I·Ip`, ψ → s_I·ψ (`PSIRZ`, `SIMAG`,
+  `SIBRY`), `P′ → s_I·P′`, `FF′ → s_I·FF′`, `F → s_B·F`, `q → s_I·s_B·q`, where
   `s_I = source_current_sign` and `s_B = source_b0_sign`. A matching option would
   let the flows be transformed into the delivered frame instead. Choosing
   between the two, and making one of them the default, is a physics decision
@@ -162,23 +244,43 @@ the orientation as a separate, opt-in decision:
 
 ## Tests
 
-All inputs are synthetic: the shipped D3D-like example dd and dds built
-in-process. `tests/_mirror_dd.py` mirrors a dd into all four (Ip, B0)
-orientations. It multiplies the currents by `s_ip`, `b0` by `s_b0` and `q` by
-`s_ip·s_b0`, and touches nothing else.
+All inputs are synthetic: the shipped D3D-like example dd, the synthetic
+TokaMaker g-file in `tests/data`, and dds built in-process.
+`tests/_mirror_dd.py` mirrors a dd into all four (Ip, B0) orientations with the
+full fixed-COCOS transform: every Ip-odd field (ψ, P′, FF′, currents, `ip`,
+poloidal field, `pf_active` coil currents, …) by `s_ip`, `b0`, F and the
+toroidal field by `s_b0`, and every q by `s_ip·s_b0`. Kinetics, pressure,
+geometry and rotation are untouched.
 
-- `tests/test_reversed_ip_current_sign.py` (fast, no solver, 33 tests):
+- `tests/test_reversed_ip_current_sign.py` (fast, no solver; 33 tests in the
+  original hotfix, see "Review fixes" for what changed):
   - Every orientation of the example dd (all 3 slices) and of a minimal dd reads
     to a **bit-identical** Baseline. The only difference is the dd's own
     `q0_dd`, in sign.
   - The sign is recorded and logged. An `ip > 0` read equals the pre-fix
-    formulas bit for bit. An inconsistent dd warns. User fixed currents follow
-    the dd.
+    formulas bit for bit. An inconsistent dd is refused (was: warns). User
+    fixed currents are positive-frame and identical for every orientation (was:
+    follow the dd).
+  - The mirror helper transforms every signed field of a dd that carries all
+    of them, and that dd reads bit-identically in all four orientations.
+  - g-file overlays: an Ip-reversed copy of the synthetic g-file overlays with
+    the normal one's sign.
   - `closure_sign_convention`, `close_ip`, `unrenormalise_q0` (q0_target > 0),
     the FUSE-total error, the SWB/FUSE peak ratio, the `floor_j_BS` clip and
     `floor_inductive_split` behave identically on mirrored reads. Each check
     comes with a **witness** that the pre-fix dd-frame inputs did not.
   - The plot overlay and the archive stamp.
+- `tests/test_imas_current_orientation.py` (fast, new): mixed-sign refusal and
+  its message, the override (`+1`, `-1`, validation, config round trip,
+  logging, recording, archive attr), the area weighting and its fallbacks,
+  `b0 == 0`, and the slice the sign is read at.
+- `tests/test_coil_targets.py::TestCoilTargetsAreInTheSolveFrame` (fast, new):
+  the installed coil regularisation for every mirror is identical to the
+  un-mirrored one; single application; override; mismatch refusal.
+- `tests/test_imas_export.py::TestReconstructFidelityValues` (fast, new, M5) and
+  `tests/test_imas_export_orientation.py` (fast, new, M4): the export of a
+  mirrored source equals the mirror of the normal export, field for field, and
+  re-reads to a bit-identical Baseline.
 - `tests/test_reversed_ip_solver.py` (`-m solver`): the full `prepare_baseline`
   of all four orientations, run under four closure paths:
   - `diff`;
@@ -196,7 +298,25 @@ orientations. It multiplies the currents by `s_ip`, `b0` by `s_b0` and `q` by
   the current, and the forward solve is deterministic at `nthreads=1`.
   Machine-precision *tolerance* would be weaker and is not needed.
 
-### Results
+### Results after the review fixes
+
+| suite | build | result |
+|---|---|---|
+| fast (`pytest`), macOS | this branch @ review-fix tip | `1127 passed, 49 deselected, 83 warnings` (was `1058 passed, 49 deselected, 69 warnings` at 84da10a on the same machine) |
+| `pytest -m solver tests/test_reversed_ip_solver.py` | this branch @ review-fix tip | **not yet run** (the mirror helper now also mirrors ψ, F, P′, FF′; to be run on the cluster) |
+| `pytest -m solver` (all other solver tests) | this branch @ review-fix tip | **not yet run** |
+
+For positive-Ip sources the review fixes were checked value-by-value, not by a
+solver run: every `Baseline` array and pre-existing scalar from
+`read_imas_baseline` is byte-identical (`tobytes`) before and after the fixes
+for the example dd (three slices, both B0 signs, with and without user fixed
+currents and the `jphi` anchor) and the minimal dd; the only addition is
+`source_current_sign_origin`. Coil targets for `ip > 0` are the stored values.
+The IMAS export for `ip > 0` changes only `f` (now `b0`'s sign) and, when the
+template has no q, q; M5 changes the reconstruct-fidelity parallel split for
+every source (the bug fix).
+
+### Results at the original hotfix commit (5827981, before the review fixes; reported by that run, not re-run here)
 
 These results use the production Linux build of OpenFUSIONToolkit (abbfc6f), single-threaded solver processes,
 and the fast suite on both Linux and macOS. Counts are verbatim.
@@ -236,7 +356,7 @@ gave `17 passed`.
 
 With the fix, all four orientations give the positive-orientation result bit for bit.
 
-### Loop branch
+### Loop branch (original hotfix commits only; the review fixes have not been cherry-picked or run there)
 
 The same commits were cherry-picked onto `feat/jbs-self-consistent-loop` with no code conflicts. The docs
 conflicted only in `CHANGES_SUMMARY.md` and `archive-schema.md`, and both entries were kept. The loop's
@@ -279,9 +399,23 @@ bootstrap opposing Ip.
 - **Flow orientation for downstream codes.** Rotation, `E_r`, and the E×B and
   diamagnetic directions stay in the source's lab signs. See the g-file section
   above.
-- **IMAS export orientation.** `write_imas_draw` writes positive-frame `ip` and
-  currents into the source's template. The source orientation is recorded on
-  the archive but is not restored.
+- **g-file orientation** (see above): delivered g-files stay `CURRENT > 0`,
+  `BCENTR > 0`; restoring the source orientation there is an open decision.
+- **IMAS export COCOS.** ψ / P′ / FF′ in the export are TokaMaker's COCOS-7
+  eqdsk values written into the IMAS template without a COCOS conversion
+  (pre-existing), and the written `profiles_1d` has no `j_tor`, so a re-read
+  of an export needs `anchor_jtor_to_equilibrium=False`.
+- **The ohmic closure's `sgn < 0` branch still prints** rather than raises. With
+  M1 it is reachable only through a `current_orientation` override whose
+  currents pass the reader's net-current check but whose FSA-weighted linear
+  total is negative; the `diff` path likewise only warns.
+- **Archive stamp timing (m1)**: the `_baseline` orientation attrs are still
+  written at the end of `generate()`, so an aborted run has none (the export
+  then falls back to `sign(template ip)` with a warning when negative).
+- **Downstream fast tests re-derive formulas (m4)** and **no draw-level
+  coverage of the mirrored IMAS path (m5)**: not addressed.
+- **Cross-shard pre-pass** does not compare `source_current_sign` (rebase note
+  on #62).
 - **Existing results on reversed-current sources are invalid** and must be
   regenerated. Every bouquet baseline, closure, draw and archive built from an
   `ip < 0` dd before this fix is affected.

@@ -2523,6 +2523,21 @@ class Bouquet:
                 # the same unpaired c.
                 sgn, _Ip_signed, _c_signed = closure_sign_convention(
                     ip_ind, ip_bs, ip_fix, _c_affine, Ip_t)
+                # The IMAS reader already brought every source current into
+                # the anchor's positive frame (Baseline.source_current_sign),
+                # so sgn is +1 on any dd whose currents agree with its own ip.
+                # -1 here means the components disagree with the frame they
+                # were normalised to -- report it rather than let the pairing
+                # above quietly re-sign a mixed-frame closure.
+                if sgn < 0.0:
+                    print("[imas SWB-split:ohmic] WARNING: the linear component "
+                          "total is NEGATIVE after the reader's current-"
+                          "orientation normalisation (source_current_sign="
+                          f"{float(getattr(bl, 'source_current_sign', 1.0)):+.0f}): "
+                          f"ohm={ip_ind / 1e6:+.4f} jBS={ip_bs / 1e6:+.4f} "
+                          f"fixed={ip_fix / 1e6:+.4f} MA -- the source's "
+                          "current profiles disagree with its plasma current",
+                          flush=True)
                 # Which channel absorbs the Ip closure -- "bootstrap"
                 # (default): keep j_ohmic exactly as FUSE diffused it,
                 #   lin(ohm) + s_BS * lin(bs) + lin(fix) + c = Ip_target;
@@ -2653,6 +2668,10 @@ class Bouquet:
                     # The data's current-direction convention, and the affine
                     # constant as it was actually paired with the target.
                     current_direction_sign=float(sgn),
+                    # What the reader multiplied the source currents by to
+                    # bring them into this (positive) frame; -1 = reversed-Ip
+                    # source.  current_direction_sign above is read AFTER it.
+                    source_current_sign=float(getattr(bl, "source_current_sign", 1.0)),
                     affine_pprime_term_c_signed=float(_c_signed),
                     fsa_roundtrip_Ip=_ip_roundtrip,
                     fsa_roundtrip_err_pct=_rt_err,
@@ -2808,7 +2827,9 @@ class Bouquet:
                        forward_solve_ip_err_pct=ip_err_pct,
                        jBS_baseline_mode=str(self.config.generation.jBS_baseline_mode),
                        bs_scale=float(getattr(bl, "bs_scale", 1.0)),
-                       ohm_scale=float(getattr(bl, "ohm_scale", 1.0)))
+                       ohm_scale=float(getattr(bl, "ohm_scale", 1.0)),
+                       source_current_sign=float(getattr(bl, "source_current_sign", 1.0)),
+                       source_b0_sign=getattr(bl, "source_b0_sign", None))
         if getattr(bl, "ip_closure", None):
             metrics["ip_closure"] = dict(bl.ip_closure)
             metrics["closure_limited"] = bool(
@@ -3468,6 +3489,14 @@ class Bouquet:
         # archive so the run is self-describing and load_config() can round-trip it.
         from .utils import write_provenance
         write_provenance(header, config=self.config, scan_key=gc.scan_key)
+        # IMAS path: the source's current orientation (what the reader
+        # multiplied every dd current by to reach bouquet's positive frame).
+        if type(self.config.source).__name__ == "ImasSource":
+            from .utils import stamp_source_orientation
+            stamp_source_orientation(
+                header, scan_key=gc.scan_key,
+                current_sign=float(getattr(bl, "source_current_sign", 1.0)),
+                b0_sign=getattr(bl, "source_b0_sign", None))
 
         return self.diagnostics
 

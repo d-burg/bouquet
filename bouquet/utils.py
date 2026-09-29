@@ -3170,6 +3170,37 @@ def write_provenance(h5path_or_header, config=None, scan_key=None):
                 grp.create_dataset("config_json", data=cj)
 
 
+#: What a delivered (archived / exported) equilibrium's current orientation is,
+#: stamped next to ``source_current_sign`` so the archive states its own frame.
+CURRENT_FRAME = ("positive-Ip: every solve is to |Ip| with F0 = |R*B| "
+                 "(TokaMaker native); the source's own orientation is "
+                 "source_current_sign (Ip) and source_b0_sign (B0)")
+
+
+def stamp_source_orientation(h5path_or_header, scan_key=None,
+                             current_sign=1.0, b0_sign=None):
+    """Record the source's current orientation on the ``_baseline`` group.
+
+    Writes ``source_current_sign`` (the factor the IMAS reader multiplied every
+    source current by: ``-1.0`` for a reversed-current source, else ``+1.0``),
+    ``source_b0_sign`` (when known) and ``current_frame`` (a plain statement
+    of the frame every archived current and eqdsk is in).  Additive attrs
+    only: no dataset and no existing attr is touched.  Called by
+    ``Bouquet.generate`` on the IMAS path; a no-op when the group is absent.
+    """
+    path = _resolve_h5(h5path_or_header)
+    bkey = _scan_key(scan_key)
+    grp_path = f"scan/{bkey}/_baseline" if bkey is not None else "_baseline"
+    with h5py.File(path, "a") as hf:
+        if grp_path not in hf:
+            return
+        grp = hf[grp_path]
+        grp.attrs["source_current_sign"] = float(current_sign)
+        if b0_sign is not None:
+            grp.attrs["source_b0_sign"] = float(b0_sign)
+        grp.attrs["current_frame"] = CURRENT_FRAME
+
+
 def load_config(h5path_or_header, scan_key=None):
     """Reconstruct the :class:`~bouquet.BouquetConfig` stored in an archive.
 

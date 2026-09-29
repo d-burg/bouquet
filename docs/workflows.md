@@ -426,11 +426,15 @@ bq.BouquetArchive("my_run.h5")["0"].extract("bundle/", formats=("geqdsk", "pfile
 b.export_ids("ids/", fidelity="exact")            # IMAS/OMAS source only
 ```
 
-Every exported equilibrium is in bouquet's positive-current frame (g-file
-`CURRENT > 0`, `BCENTR > 0`; IDS `ip > 0`), whatever the source's orientation;
-the source's own signs are on the archive (`source_current_sign`,
-`source_b0_sign` on `_baseline`) for a consumer that needs to restore them —
-see [physics-notes](physics-notes.md#current-and-field-orientation).
+Exported g-files, profiles and archive currents are in bouquet's
+positive-current frame (g-file `CURRENT > 0`, `BCENTR > 0`), whatever the
+source's orientation; the source's own signs are on the archive
+(`source_current_sign`, `source_b0_sign` on `_baseline`) for a consumer that
+needs to restore them. The **IMAS export** (`export_ids`) is the exception: it
+restores the source's orientation on every field it writes, so the exported
+dd is self-consistent with the template fields it keeps (`core_sources`,
+`pf_active`, `b0`) — see
+[physics-notes](physics-notes.md#current-and-field-orientation).
 
 The profiles JSON is source-agnostic and carries everything needed to rebuild
 the state elsewhere: the perturbed profiles and their units, scalar diagnostics

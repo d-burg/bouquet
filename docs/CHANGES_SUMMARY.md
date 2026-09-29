@@ -39,6 +39,14 @@ such a source.
 - A user-supplied `FixedComponentsConfig.j_NBI` / `j_RF` is defined in
   bouquet's positive-Ip frame (co-current positive) and used as given on both
   source paths; the IMAS reader does not multiply it by `sign(ip)`.
+- **The IMAS export is written in the source's frame.** `write_imas_draw`
+  used to write positive-frame `ip`, ψ, P′, FF′, `f`, q and currents into a
+  template that keeps source-frame `core_sources`, `pf_active` and `b0`, so a
+  re-read of a reversed-source export was off by 2|j_NBI| in `j_inductive`. It
+  now restores the source orientation (archive `source_current_sign`, template
+  `b0` and q-sign convention) on every field it writes, and refuses a template
+  whose orientation contradicts the archive. For `ip > 0` sources only `f`
+  changes, taking `b0`'s sign.
 - Delivered g-files are unchanged in convention (`CURRENT > 0`, `BCENTR > 0`,
   TokaMaker's COCOS 7, for every source); they do not carry the experiment's
   orientation. See

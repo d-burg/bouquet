@@ -1156,17 +1156,136 @@ def _eq_fsa_geom_on(eq_fsa, psiN_t, B0):
     return geom
 
 
+def _signed_b0(out, ie, ic):
+    """The template's own vacuum B0 (signed), equilibrium first; None if absent
+    or zero.  The writer keeps ``vacuum_toroidal_field`` as it is, so this is
+    the field orientation the exported F must agree with."""
+    for ids_name, it in (("equilibrium", ie), ("core_profiles", ic)):
+        vtf = out.get(ids_name, {}).get("vacuum_toroidal_field")
+        if vtf and vtf.get("b0") is not None:
+            b0 = np.atleast_1d(np.asarray(vtf["b0"], dtype=float))
+            if b0.size:
+                v = float(b0[min(it, b0.size - 1)])
+                if np.isfinite(v) and v != 0.0:
+                    return v
+    return None
+
+
+def _export_orientation(out, ie, ic, stamp):
+    """``(s_I, s_B, s_q)``: the SOURCE orientation an export is restored to.
+
+    bouquet's archive is in the positive-Ip frame (eqdsk ``CURRENT > 0``,
+    ``F > 0``, q > 0; every current co-Ip positive).  The template is the
+    source dd, in the source's own frame, and the writer keeps its fields that
+    it does not overwrite (``core_sources``, ``pf_active``,
+    ``vacuum_toroidal_field``, rotation, ...).  So every quantity the writer
+    DOES overwrite is taken back to that frame:
+
+      * ``s_I`` -- the Ip orientation: the archive's ``source_current_sign``
+        (the factor the reader applied; it is its own inverse), or, for an
+        archive with no stamp, ``sign(template ip)`` -- what the reader's
+        ``"auto"`` rule gives;
+      * ``s_B`` -- the sign of the template's own b0 (``+1`` if it has none);
+      * ``s_q`` -- the template's own q sign convention (sign of its
+        equilibrium q at this slice) where it carries q, else ``s_I * s_B``
+        (IMAS COCOS 11 / 17, where q carries sign(Ip*B0)).
+
+    Refuses a template whose ip or b0 sign contradicts the archive's stamp
+    (with the reader's ``"auto"`` rule): that template is not the source this
+    archive was generated from.  ``stamp`` is the ``_baseline`` attrs dict
+    (possibly empty).
+    """
+    ts = out["equilibrium"]["time_slice"][ie]
+    tpl_ip = ts.get("global_quantities", {}).get("ip")
+    try:
+        tpl_ip = float(tpl_ip)
+        tpl_s = (source_current_sign(tpl_ip)
+                 if np.isfinite(tpl_ip) and tpl_ip != 0.0 else None)
+    except (TypeError, ValueError):
+        tpl_s = None
+    b0 = _signed_b0(out, ie, ic)
+    s_B = 1.0 if b0 is None else (-1.0 if b0 < 0.0 else 1.0)
+
+    if "source_current_sign" in stamp:
+        s_I = float(stamp["source_current_sign"])
+        origin = stamp.get("source_current_sign_origin")
+        if isinstance(origin, bytes):
+            origin = origin.decode()
+        auto = origin in (None, ORIENTATION_ORIGIN_AUTO)
+        if auto and tpl_s is not None and tpl_s != s_I:
+            raise ValueError(
+                "write_imas_draw: the archive was generated from a source with "
+                f"source_current_sign = {s_I:+.0f} (sign of its ip), but this "
+                f"template's ip = {tpl_ip:+.6g} A has the opposite sign. It is "
+                "not the source dd this archive was built from; pass that dd as "
+                "the template.")
+        sb_stamp = stamp.get("source_b0_sign")
+        if sb_stamp is not None and b0 is not None and float(sb_stamp) != s_B:
+            raise ValueError(
+                "write_imas_draw: the archive was generated from a source with "
+                f"source_b0_sign = {float(sb_stamp):+.0f}, but this template's "
+                f"b0 = {b0:+.6g} T has the opposite sign. It is not the source "
+                "dd this archive was built from; pass that dd as the template.")
+    else:
+        s_I = 1.0 if tpl_s is None else tpl_s
+        if s_I < 0.0:
+            import warnings
+            warnings.warn(
+                "write_imas_draw: the archive carries no current-orientation "
+                "stamp (_baseline source_current_sign) and the template has "
+                "ip < 0. Assuming the archive is in bouquet's positive-Ip frame "
+                "and restoring the template's orientation (x -1). An IMAS "
+                "archive generated from a reversed-Ip source before the reader "
+                "normalised currents is NOT in that frame (and is invalid: "
+                "regenerate it).", stacklevel=3)
+
+    s_q = None
+    q_tpl = (ts.get("profiles_1d") or {}).get("q")
+    if q_tpl is not None:
+        try:
+            qa = np.asarray(q_tpl, dtype=float)
+            qm = float(np.nanmedian(qa)) if qa.size else float("nan")
+            if np.isfinite(qm) and qm != 0.0:
+                s_q = -1.0 if qm < 0.0 else 1.0
+        except (TypeError, ValueError):
+            s_q = None
+    if s_q is None:
+        s_q = s_I * s_B
+    return float(s_I), float(s_B), float(s_q)
+
+
 def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
                     scan_key=None, time=None, fidelity="auto"):
     """Reconstruct a perturbed IMAS/OMAS IDS for one draw from the bouquet HDF5.
 
-    Orientation: everything written here is in bouquet's positive-current
-    frame (the archived eqdsk's ``ip > 0`` and the archived currents), also
-    for a source written with ``ip < 0``; the template's own fields that are
-    not overwritten (``vacuum_toroidal_field``, rotation, ...) keep the
-    source's signs.  The source orientation is recorded on the archive
-    (``_baseline`` attrs ``source_current_sign`` / ``source_b0_sign``) and is
-    NOT restored here.
+    Orientation: the exported file is in the SOURCE's frame throughout.  The
+    archive is in bouquet's positive-Ip frame; the template (the source dd)
+    is in the source's own, and the fields the writer keeps from it --
+    ``core_sources`` (the beam ``j_parallel`` / ``current_parallel_inside``),
+    ``pf_active`` coil currents, ``vacuum_toroidal_field.b0``,
+    ``core_profiles.global_quantities``, rotation / ``E_r``, the
+    ``core_profiles`` psi grid -- stay as they are.  Every quantity the writer
+    overwrites is taken back to the source orientation to match them (see
+    :func:`_export_orientation` for how ``s_I``, ``s_B``, ``s_q`` are found):
+
+      * ``s_I`` (Ip): ``global_quantities`` ``ip`` / ``psi_axis`` /
+        ``psi_boundary``, ``profiles_1d`` ``psi`` / ``dpressure_dpsi`` /
+        ``f_df_dpsi``, ``profiles_2d`` ``psi``, and ``core_profiles`` ``j_tor``
+        / ``j_total`` / ``j_ohmic`` / ``j_bootstrap``;
+      * ``s_B`` (B0): ``profiles_1d.f``;
+      * ``s_q``: ``profiles_1d.q``, ``q_axis``, ``q_95``;
+      * even (unchanged): pressure, kinetics, l_i, betas, axis, boundary.
+
+    So re-reading an export with :func:`read_imas_baseline` gives the same
+    currents as re-reading the export of the un-mirrored source.  For a
+    source with ``ip > 0`` and ``b0 > 0`` every factor is ``+1`` and the
+    output is unchanged; for ``ip > 0``, ``b0 < 0`` the only change is that
+    ``f`` (and, when the template carries no q, q) now takes b0's sign.
+    Not addressed here (pre-existing): the equilibrium psi / P' / FF' are the
+    TokaMaker eqdsk's COCOS-7 values (psi decreasing outward for Ip > 0),
+    written into the template without a COCOS conversion; and the
+    equilibrium ``profiles_1d`` written carries no ``j_tor``, so re-reading an
+    export needs ``anchor_jtor_to_equilibrium=False``.
 
     Maps the draw's archived eqdsk to the ``equilibrium`` IDS
     (``profiles_1d`` / ``profiles_2d`` / ``global_quantities`` / ``boundary`` --
@@ -1247,6 +1366,9 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
     with h5py.File(h5, "r") as hf:
         if gp not in hf:
             raise KeyError(f"draw {draw_index} (scan {scan_key}) not in {h5}")
+        _bgp = (f"scan/{scan_key}/_baseline" if scan_key is not None
+                else "_baseline")
+        stamp = dict(hf[_bgp].attrs) if _bgp in hf else {}
         g = hf[gp]
         ne = np.asarray(g["n_e"][()]); te = np.asarray(g["T_e"][()])
         ni = np.asarray(g["n_i"][()]); ti = np.asarray(g["T_i"][()])
@@ -1268,30 +1390,33 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
             eq_fsa = {k: np.asarray(g[EQ_FSA_GROUP][k][()], dtype=float)
                       for k in g[EQ_FSA_GROUP]}
 
+    # --- source orientation to restore (see the docstring) -----------------
+    s_I, s_B, s_q = _export_orientation(out, ie, ic, stamp)
+
     # --- equilibrium IDS from the eqdsk (lossless to the eqdsk grid) ---------
     ts = eq_ids["time_slice"][ie]
     psi1d = geq.psi_axis + geq.psi_N * (geq.psi_boundary - geq.psi_axis)
     q95 = float(np.interp(0.95, geq.psi_N, geq.qpsi))
     ts["profiles_1d"] = {
-        "psi": psi1d.tolist(),
-        "q": geq.qpsi.tolist(),
+        "psi": (s_I * psi1d).tolist(),
+        "q": (s_q * np.asarray(geq.qpsi, dtype=float)).tolist(),
         "pressure": geq.pres.tolist(),
-        "f": geq.fpol.tolist(),
-        "dpressure_dpsi": geq.pprime.tolist(),
-        "f_df_dpsi": geq.ffprim.tolist(),
+        "f": (s_B * np.asarray(geq.fpol, dtype=float)).tolist(),
+        "dpressure_dpsi": (s_I * np.asarray(geq.pprime, dtype=float)).tolist(),
+        "f_df_dpsi": (s_I * np.asarray(geq.ffprim, dtype=float)).tolist(),
     }
     ts["profiles_2d"] = [{
         "grid_type": {"name": "rectangular", "index": 1},
         "grid": {"dim1": geq.R_grid.tolist(), "dim2": geq.Z_grid.tolist()},
         # psi_RZ is indexed [R][Z], matching IMAS dim1=R, dim2=Z
-        "psi": geq.psi_RZ.tolist(),
+        "psi": (s_I * np.asarray(geq.psi_RZ, dtype=float)).tolist(),
     }]
     gq = dict(ts.get("global_quantities", {}))
     gq.update(
-        ip=float(geq.Ip), psi_axis=float(geq.psi_axis),
-        psi_boundary=float(geq.psi_boundary),
+        ip=s_I * float(geq.Ip), psi_axis=s_I * float(geq.psi_axis),
+        psi_boundary=s_I * float(geq.psi_boundary),
         magnetic_axis={"r": float(geq.R_mag), "z": float(geq.Z_mag)},
-        q_axis=float(geq.qpsi[0]), q_95=q95,
+        q_axis=s_q * float(geq.qpsi[0]), q_95=s_q * q95,
         li_3=li3 if np.isfinite(li3) else geq.li.get("li(3)"),
         beta_normal=geq.betas.get("beta_n"), beta_pol=geq.betas.get("beta_p"),
         beta_tor=geq.betas.get("beta_t"),
@@ -1331,9 +1456,13 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
     base_jtor = (np.asarray(cp["j_tor"], dtype=float)
                  if "j_tor" in cp else None)
 
-    # j_tor is exact (bouquet stores toroidal current directly).
+    # j_tor is exact (bouquet stores toroidal current directly).  Every
+    # current below is computed in the archive's positive frame and written
+    # times s_I (the source's Ip orientation); the parallel conversion is
+    # sign-invariant (the template ratio c is even in s_I, and the exact path
+    # uses |B0|), so this is the source-frame current.
     jt_t = to_t(j_tor, peq)
-    cp["j_tor"] = jt_t.tolist()
+    cp["j_tor"] = (s_I * jt_t).tolist()
 
     # Parallel split (j_total / j_ohmic / j_bootstrap = IMAS <j.B>/B0). Two
     # fidelities (`fidelity` arg): EXACT uses the draw's own captured
@@ -1346,9 +1475,12 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
             geom = _eq_fsa_geom_on(eq_fsa, psiN_t, _imas_b0(out, ie, ic))
             if geom is not None:
                 from ..physics import toroidal_to_parallel
-                cp["j_total"] = toroidal_to_parallel(jt_t, geom=geom).tolist()
-                cp["j_ohmic"] = toroidal_to_parallel(to_t(j_ind, peq), geom=geom).tolist()
-                cp["j_bootstrap"] = toroidal_to_parallel(to_t(j_bs, peq), geom=geom).tolist()
+                cp["j_total"] = (s_I * toroidal_to_parallel(
+                    jt_t, geom=geom)).tolist()
+                cp["j_ohmic"] = (s_I * toroidal_to_parallel(
+                    to_t(j_ind, peq), geom=geom)).tolist()
+                cp["j_bootstrap"] = (s_I * toroidal_to_parallel(
+                    to_t(j_bs, peq), geom=geom)).tolist()
                 use_exact = True
         if fidelity == "exact" and not use_exact:
             raise ValueError(
@@ -1371,9 +1503,9 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
                 idx = np.arange(c.size)
                 c[~good] = np.interp(idx[~good], idx[good], c[good])
             with np.errstate(divide="ignore", invalid="ignore"):
-                cp["j_total"] = (jt_t / c).tolist()
-                cp["j_ohmic"] = (to_t(j_ind, peq) / c).tolist()
-                cp["j_bootstrap"] = (to_t(j_bs, peq) / c).tolist()
+                cp["j_total"] = (s_I * (jt_t / c)).tolist()
+                cp["j_ohmic"] = (s_I * (to_t(j_ind, peq) / c)).tolist()
+                cp["j_bootstrap"] = (s_I * (to_t(j_bs, peq) / c)).tolist()
 
     with open(out_path, "w") as fh:
         json.dump(out, fh)

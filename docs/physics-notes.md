@@ -276,9 +276,21 @@ for every source, normal or reversed:
   `B0 < 0` is also delivered with `BCENTR > 0`. This was already the convention
   before the normalisation above and is unchanged by it.
 - **archived currents** (`j_phi`, `j_BS`, `j_inductive`) are positive-frame.
-- **IMAS export** (`write_imas_draw` / `export_imas_drawset`) writes the draw's
-  positive-frame `ip` and currents into the source template; it does not
-  restore the source orientation.
+- **IMAS export** (`write_imas_draw` / `export_imas_drawset`) is written in the
+  **source's** frame. The template (the source dd) keeps its own
+  `core_sources`, `pf_active`, `vacuum_toroidal_field`, rotation and
+  `core_profiles.global_quantities`, so every field the writer overwrites is
+  taken back to the source orientation: `ip`, ψ (1-D, 2-D, axis, boundary), P′,
+  FF′ and the `core_profiles` currents by `s_I` (the archive's
+  `source_current_sign`, or `sign(template ip)` for an unstamped archive), `f`
+  by the sign of the template's `b0`, and q in the template's own q-sign
+  convention (`s_I·s_B` when it carries no q). A template whose ip or b0 sign
+  contradicts the archive's stamp is refused. Re-reading an export therefore
+  gives the same currents as the un-mirrored source's export. For `ip > 0`
+  nothing changes except that `f` now takes `b0`'s sign. Two pre-existing
+  limits remain: ψ / P′ / FF′ are TokaMaker's COCOS-7 eqdsk values written
+  without a COCOS conversion, and the written `profiles_1d` has no `j_tor`, so
+  a re-read needs `anchor_jtor_to_equilibrium=False`.
 
 Static MHD quantities (the equilibrium, l_i, q magnitude, Δ′, δW) do not depend
 on the frame: flipping Ip alone is a mirror reflection (φ → −φ) of the plasma

@@ -45,7 +45,11 @@ median, min, max and the per-draw values.
 **Pole rule** ``"majority_regular"``. The evaluator returns, per draw and per
 quantity, a ``regular`` boolean whose meaning the caller defines (W_t > 0, the
 rational surface exists, ...); bouquet supplies none. Irregular draws leave the
-statistic with reason ``irregular:<label>`` and are counted, never deleted. If
+statistic with reason ``irregular:<label>`` and are counted (``n_irregular``),
+never deleted (their finite values are kept in ``irregular_values``); whenever
+any are removed the band is conditional on the regular outcome, which a
+limitation line and the :func:`plot_band` annotation state. ``regular`` must be
+a real boolean (``"False"`` or NaN is refused, not coerced). If
 half or fewer of the ok draws are regular (``regular_fraction <= 1/2``) the
 record is ``gated``: the band is still computed and returned, but
 ``show=False`` and :func:`plot_band` draws the fraction instead of a band.
@@ -135,6 +139,9 @@ class BandRecord:
     n_ok: int = 0
     n_regular: int = 0
     n_used: int = 0
+    #: ok draws the pole rule removed (``n_ok - n_regular``); the band is
+    #: CONDITIONAL on the regular outcome whenever this is > 0
+    n_irregular: int = 0
     regular_fraction: float = _NAN
     # ---- statistic
     median: float = _NAN
@@ -155,6 +162,9 @@ class BandRecord:
     n_extreme: int = 0
     # ---- per draw
     values: dict = field(default_factory=dict)
+    #: finite values of the irregular draws, kept out of the statistic but
+    #: not thrown away (``{draw: value}``)
+    irregular_values: dict = field(default_factory=dict)
     dropped: list = field(default_factory=list)
     # ---- baseline overlay
     baseline_value: Optional[float] = None
@@ -210,8 +220,8 @@ def _jsonable(v):
 
 
 # columns written flat to CSV; the rest are JSON-encoded
-_JSON_COLS = ("percentiles", "values", "dropped", "closure_limited_reasons",
-              "provenance")
+_JSON_COLS = ("percentiles", "values", "irregular_values", "dropped",
+              "closure_limited_reasons", "provenance")
 
 
 class BandTable:
@@ -284,7 +294,8 @@ def _flat_row(r: BandRecord) -> dict:
 
 
 _INT_COLS = {"n_requested", "n_attempted", "n_stored", "n_selected",
-             "n_evaluated", "n_ok", "n_regular", "n_used", "n_extreme"}
+             "n_evaluated", "n_ok", "n_regular", "n_used", "n_extreme",
+             "n_irregular"}
 _BOOL_COLS = {"skew_flag", "below_floor", "no_band", "gated", "show",
               "baseline_outside_range", "closure_limited"}
 _FLOAT_COLS = {"regular_fraction", "median", "p16", "p84", "min", "max",
@@ -504,6 +515,15 @@ def _scalar_value(v, where):
         return _NAN
 
 
+def _strict_bool(v, where):
+    """``regular`` must be a real boolean: ``bool("False")`` is True and
+    ``bool(nan)`` is True, so anything else is refused rather than coerced."""
+    if isinstance(v, (bool, np.bool_)):
+        return bool(v)
+    raise TypeError(f"{where}: 'regular' must be True/False (bool or numpy.bool_), "
+                    f"got {v!r} of type {type(v).__name__}")
+
+
 def _classify(entry, label_default, where="value"):
     """``(reason_or_None, value, regular)`` for one draw's quantity entry."""
     if not isinstance(entry, Mapping):
@@ -511,7 +531,7 @@ def _classify(entry, label_default, where="value"):
     status = str(entry.get("status", "ok"))
     if status != "ok":
         return f"status:{status}", None, None
-    regular = bool(entry.get("regular", True))
+    regular = _strict_bool(entry.get("regular", True), where)
     value = _scalar_value(entry.get("value"), where)
     if not regular:
         label = entry.get("label") or label_default
@@ -714,6 +734,7 @@ def draw_band(archive, scan_key, evaluate, *, quantities=None,
     for q in qs:
         dropped = list(common_dropped)
         vals = {}
+        irr_vals = {}
         n_ok = n_reg = 0
         for d in to_eval:
             r = results[d]
@@ -731,6 +752,8 @@ def draw_band(archive, scan_key, evaluate, *, quantities=None,
             n_ok += 1
             if not regular:
                 dropped.append((d, reason))
+                if math.isfinite(value):
+                    irr_vals[int(d)] = float(value)
                 continue
             n_reg += 1
             if reason is not None:          # non_finite
@@ -750,7 +773,8 @@ def draw_band(archive, scan_key, evaluate, *, quantities=None,
             n_requested_source=ctx["n_requested_source"],
             n_attempted=ctx["n_attempted"], n_stored=len(stored),
             n_selected=len(sel), n_evaluated=n_evaluated, n_ok=n_ok,
-            n_regular=n_reg, regular_fraction=frac,
+            n_regular=n_reg, n_irregular=n_ok - n_reg, regular_fraction=frac,
+            irregular_values=irr_vals,
             percentiles=percentiles, percentile_method=method,
             gated=gated, values={int(d): float(vals[d]) for d in sorted(vals)},
             dropped=[(int(d), r) for d, r in dropped],
@@ -881,6 +905,14 @@ def _limitations(rec, ctx, meta, selection, require_filter, percentiles):
     if ctx["closure_limited"]:
         lim.append("The baseline Ip closure is flagged closure_limited: do not "
                    "pool this slice with non-limited slices.")
+    if rec.n_irregular > 0:
+        lim.append(
+            f"The band is CONDITIONAL on the regular outcome: {rec.n_irregular} "
+            f"of {rec.n_ok} ok draws were irregular (regular_fraction="
+            f"{rec.regular_fraction:.3f}) and are excluded from the statistic "
+            "(their finite values are kept in irregular_values). Near a pole the "
+            "irregular draws are the ones closest to it, so the band may be "
+            "biased toward the regular side.")
     if rec.n_used == 0:
         lim.append(f"n_used=0 ({rec.empty_reason}): no draw reached the "
                    "statistic, so there is no median and no band for this key.")
@@ -1138,7 +1170,8 @@ def plot_band(table, quantity, ax=None, x=None):
     Filled marker: n_used >= min_n. Hollow marker: ``below_floor``. No band
     where ``no_band``. No marker where ``show=False`` (gated, or no draws):
     the regular fraction (``n_regular/n_ok``) or the status is written there
-    instead. The baseline is overlaid dashed, never used as the centre.
+    instead. A shown band that excludes irregular draws is annotated with
+    ``"<n_regular>/<n_ok> reg."``: it is conditional on the regular outcome. The baseline is overlaid dashed, never used as the centre.
     ``x`` defaults to the scan keys as floats (their order when not numeric).
     Returns the axes.
     """
@@ -1177,6 +1210,9 @@ def plot_band(table, quantity, ax=None, x=None):
     tr = ax.get_xaxis_transform()
     for xi, r, s in zip(x, recs, shown):
         if s:
+            if r.n_irregular > 0:        # shown, but conditional on "regular"
+                ax.text(xi, 0.03, f"{r.n_regular}/{r.n_ok} reg.", transform=tr,
+                        ha="center", va="bottom", fontsize=7, color="C0")
             continue
         txt = ("n=0" if r.status == "empty"
                else r.status if r.status != "ok"

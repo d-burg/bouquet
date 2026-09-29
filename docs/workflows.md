@@ -450,7 +450,11 @@ reason (`not_selected`, `user:<reason>`, `status:<code>`, `irregular:<label>`,
 `non_finite`), and a `provenance` block (filters, thresholds, versions,
 limitations). Below `min_n=15` a record is flagged `below_floor` (shown hollow);
 below `hard_min=5` p16/p84 are NaN. If half or fewer of the ok draws are regular
-the record is `gated` (`show=False`); there is no magnitude cut. Fields an older
+the record is `gated` (`show=False`); there is no magnitude cut. Whenever any ok
+draw is irregular the band is conditional on the regular outcome: the record
+carries `n_irregular` and the irregular draws' values (`irregular_values`), a
+limitation line says so, and `plot_band` annotates `k/n reg.`. `regular` must
+be a real boolean (`"False"` or NaN raises `TypeError`). Fields an older
 archive does not record come back `None` or `"unrecorded"`. A requested key or
 quantity is never silently dropped: a key where no draw reaches the statistic
 (for example, the filters rejected every draw) comes back as `status="empty"`

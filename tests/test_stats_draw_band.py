@@ -556,3 +556,44 @@ def test_array_valued_quantity_raises_not_vanishes(tmp_path):
     ev["_baseline"] = {"x": _ok([1.0, 2.0, 3.0])}
     with pytest.raises(NonScalarQuantityError, match="baseline"):
         bq.draw_band(p, "1", ev)
+
+
+# --------------------------------------------------------------------------
+#  pole rule: a band conditional on "regular" says so
+# --------------------------------------------------------------------------
+def test_partly_irregular_band_is_shown_and_says_it_is_conditional(tmp_path):
+    p = _simple(tmp_path / "a.h5", 10)
+    ev = {d: {"x": _ok(float(d), regular=d < 7)} for d in range(10)}
+    ev[9]["x"]["value"] = float("nan")            # an irregular draw with no value
+    r = bq.draw_band(p, "1", ev)["x"]
+    assert (r.n_ok, r.n_regular, r.n_irregular, r.n_used) == (10, 7, 3, 7)
+    assert r.regular_fraction == pytest.approx(0.7)
+    assert r.show and not r.gated                 # thresholds unchanged: 0.7 > 1/2
+    assert r.irregular_values == {7: 7.0, 8: 8.0}
+    assert sorted(r.values) == list(range(7))     # irregular values stay out
+    lim = [s for s in r.provenance["limitations"] if "CONDITIONAL" in s]
+    assert len(lim) == 1 and "3 of 10" in lim[0] and "0.700" in lim[0]
+    mpl = pytest.importorskip("matplotlib")
+    mpl.use("Agg")
+    ax = bq.plot_band(bq.draw_bands([(p, "1")], {"1": ev}), "x")
+    assert "7/10 reg." in [t.get_text() for t in ax.texts]
+    # all regular: no limitation, no annotation
+    r = bq.draw_band(p, "1", _by_attr)["x"]
+    assert r.n_irregular == 0 and r.irregular_values == {}
+    assert not any("CONDITIONAL" in s for s in r.provenance["limitations"])
+
+
+@pytest.mark.parametrize("bad", ["False", "True", float("nan"), 0, 1, None])
+def test_regular_must_be_a_real_boolean(tmp_path, bad):
+    p = _simple(tmp_path / "a.h5", 6)
+    ev = {d: {"x": _ok(float(d))} for d in range(6)}
+    ev[3]["x"]["regular"] = bad
+    with pytest.raises(TypeError, match="draw 3 quantity 'x'.*regular"):
+        bq.draw_band(p, "1", ev)
+
+
+def test_numpy_bool_regular_is_accepted(tmp_path):
+    p = _simple(tmp_path / "a.h5", 6)
+    ev = {d: {"x": _ok(float(d), regular=np.bool_(d != 3))} for d in range(6)}
+    r = bq.draw_band(p, "1", ev)["x"]
+    assert r.n_irregular == 1 and (3, "irregular:not_regular") in r.dropped

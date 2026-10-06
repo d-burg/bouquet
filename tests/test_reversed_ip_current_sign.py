@@ -523,6 +523,42 @@ class TestRecordsAndOverlays:
         with h5py.File(q, "r") as hf:
             assert "_baseline" not in hf["scan/0"]
 
+    def test_generate_stamps_an_imas_source_subclass(self, tmp_path,
+                                                      monkeypatch):
+        """Copilot review on #67: Bouquet.generate() wrote the orientation
+        stamp only when type(source).__name__ == "ImasSource", so a subclass
+        of ImasSource got none.  It dispatches with isinstance like the rest
+        of run.py.  Solver-free: generate_bouquet is replaced by a recorder
+        that only creates the _baseline group the stamp is written to."""
+        import h5py
+        from test_until_n_inspec import _solverless_bouquet
+        from bouquet.utils import CURRENT_FRAME
+
+        class SubclassedImasSource(ImasSource):
+            pass
+
+        header = str(tmp_path / "sub")
+
+        def recorder(*a, **kw):
+            with h5py.File(header + ".h5", "a") as hf:
+                hf.require_group("scan/1/_baseline")
+            return []
+
+        b = _solverless_bouquet(header, monkeypatch, recorder, coil_sets={},
+                                n_equils=3, scan_key=1)
+        b.config.source = SubclassedImasSource(ids_path=mdd.EXAMPLE_DD,
+                                               time=mdd.EXAMPLE_TIME)
+        b.baseline.source_current_sign = -1.0
+        b.baseline.source_b0_sign = -1.0
+        b.baseline.source_current_sign_origin = "auto: sign(equilibrium ip)"
+        b.generate()
+        with h5py.File(header + ".h5", "r") as hf:
+            a = hf["scan/1/_baseline"].attrs
+            assert a["source_current_sign"] == -1.0
+            assert a["source_b0_sign"] == -1.0
+            assert a["source_current_sign_origin"] == "auto: sign(equilibrium ip)"
+            assert a["current_frame"] == CURRENT_FRAME
+
 
 class TestGfileOverlaysAreInTheSameFrame:
     """The reconstruction fits abs(Ip) and abs(<j_tor>); the raw g-file overlays

@@ -3639,7 +3639,8 @@ class Bouquet:
         write_provenance(header, config=self.config, scan_key=gc.scan_key)
         # IMAS path: the source's current orientation (what the reader
         # multiplied every dd current by to reach bouquet's positive frame).
-        if type(self.config.source).__name__ == "ImasSource":
+        from .config import ImasSource
+        if isinstance(self.config.source, ImasSource):
             from .utils import stamp_source_orientation
             stamp_source_orientation(
                 header, scan_key=gc.scan_key,

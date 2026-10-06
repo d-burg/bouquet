@@ -634,7 +634,14 @@ def test_baseline_positional_slots_unchanged_by_hollow_record():
     names = [f.name for f in dataclasses.fields(Baseline)]
     n_old = len(_BASELINE_FIELDS_BEFORE_HOLLOW_RECORD)
     assert tuple(names[:n_old]) == _BASELINE_FIELDS_BEFORE_HOLLOW_RECORD
-    assert names[n_old:] == ["core_pressure_hollow"]
+    # the record follows the old fields; anything appended after it (other
+    # lines add their own records the same way) must also carry a default,
+    # so the old positional argument list still constructs a Baseline
+    assert names[n_old] == "core_pressure_hollow"
+    _missing = dataclasses.MISSING
+    for f in dataclasses.fields(Baseline)[n_old:]:
+        assert (f.default is not _missing
+                or f.default_factory is not _missing), f.name
 
     # one distinct sentinel per pre-existing slot, passed positionally
     sentinels = [object() for _ in _BASELINE_FIELDS_BEFORE_HOLLOW_RECORD]

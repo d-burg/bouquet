@@ -125,6 +125,27 @@ def orientation_slice_index(dd: dict, t: Optional[float]) -> int:
     return _nearest_index(eq["time"], t, "equilibrium")
 
 
+def orientation_ip(dd: dict, t: Optional[float]) -> Optional[float]:
+    """Signed ``equilibrium`` ip at :func:`orientation_slice_index`, or None.
+
+    None when the dd carries no equilibrium ip there (no ``equilibrium``, no
+    time slices, no ``global_quantities.ip``) or the slice cannot be chosen
+    (several slices and ``t`` None).  ``sign`` of it is the ``"auto"``
+    orientation factor (:func:`source_current_sign`).
+    """
+    eq = dd.get("equilibrium") or {}
+    ts = eq.get("time_slice") or []
+    if not ts:
+        return None
+    if "time" not in eq:
+        eq = dict(eq, time=[0.0 if t is None else float(t)])
+    try:
+        i = orientation_slice_index(dict(dd, equilibrium=eq), t)
+        return float(ts[min(i, len(ts) - 1)]["global_quantities"]["ip"])
+    except (KeyError, TypeError, ValueError, IndexError):
+        return None
+
+
 # ===========================================================================
 #  Fast-pressure storage convention
 #

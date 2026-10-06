@@ -47,6 +47,22 @@ def _src(path, time=mdd.EXAMPLE_TIME, **kw):
     return ImasSource(ids_path=path, time=time, **kw)
 
 
+def _currents_stored_reversed():
+    """The example dd with ip > 0 but every current profile stored reversed:
+    the file ``current_orientation = -1`` exists for."""
+    dd = _example()
+    for c in dd["core_profiles"]["profiles_1d"]:
+        for k in ("j_tor", "j_total", "j_ohmic", "j_bootstrap",
+                  "j_non_inductive"):
+            c[k] = [-v for v in c[k]]
+    for s in dd["core_sources"]["source"]:
+        for pr in s["profiles_1d"]:
+            pr["j_parallel"] = [-v for v in pr["j_parallel"]]
+    for ts in dd["equilibrium"]["time_slice"]:
+        ts["profiles_1d"]["j_tor"] = [-v for v in ts["profiles_1d"]["j_tor"]]
+    return dd
+
+
 # ---------------------------------------------------------------------------
 #  1. a mixed-sign source is refused, and the refusal says why
 # ---------------------------------------------------------------------------
@@ -117,17 +133,7 @@ class TestOrientationOverride:
     def test_minus_one_reverses_the_stored_currents(self, tmp_path):
         """-1 on a file whose ip is positive but whose currents are all
         stored reversed: the read equals the consistent file's."""
-        dd = _example()
-        for c in dd["core_profiles"]["profiles_1d"]:
-            for k in ("j_tor", "j_total", "j_ohmic", "j_bootstrap",
-                      "j_non_inductive"):
-                c[k] = [-v for v in c[k]]
-        for s in dd["core_sources"]["source"]:
-            for pr in s["profiles_1d"]:
-                pr["j_parallel"] = [-v for v in pr["j_parallel"]]
-        for ts in dd["equilibrium"]["time_slice"]:
-            ts["profiles_1d"]["j_tor"] = [-v for v in ts["profiles_1d"]["j_tor"]]
-        p = _write(tmp_path, dd, "cur_rev.json")
+        p = _write(tmp_path, _currents_stored_reversed(), "cur_rev.json")
         with pytest.raises(ValueError, match="disagree in sign"):
             read_imas_baseline(_src(p))                   # auto refuses
         ref = _read(_write(tmp_path, _example(), "ref.json"))
@@ -293,3 +299,91 @@ class TestRecordedSigns:
                    anchor_jtor_to_equilibrium=False)
         assert bl.source_current_sign == -1.0
         assert trapezoid(bl.j_phi, bl.psi_N) > 0.0
+
+
+# ---------------------------------------------------------------------------
+#  5. the raw-source plot overlays use the configured orientation
+# ---------------------------------------------------------------------------
+class TestOverlaysHonourTheOverride:
+    """Copilot review on #67: both raw-dd overlays derived the factor from
+    sign(ip) and ignored ImasSource.current_orientation.  On a file with
+    ip > 0 whose currents are stored reversed, read with -1, the overlay
+    kept the raw (negative) j_tor and was drawn upside down against the
+    positive-frame baseline.  The consistent example file is the reference:
+    the -1 read of the reversed file equals its read, so its overlay must
+    too."""
+
+    def test_live_run_input_overlay(self, tmp_path):
+        from bouquet.plotting import _imas_input_profiles
+
+        ref = _imas_input_profiles(_src(_write(tmp_path, _example(), "r.json")))
+        p = _write(tmp_path, _currents_stored_reversed(), "cur_rev.json")
+        bl = read_imas_baseline(_src(p, current_orientation=-1))
+        assert bl.source_current_sign == -1.0
+        got = _imas_input_profiles(_src(p, current_orientation=-1))
+        assert np.array_equal(got[3], ref[3])
+        assert trapezoid(got[3], got[0]) > 0.0
+        # "auto" on the same file is the raw (ip > 0 -> +1) profile
+        raw = _imas_input_profiles(_src(p))
+        assert np.array_equal(raw[3], -ref[3])
+
+    @staticmethod
+    def _archive(tmp_path, name, stamp=None, cfg_orient=None):
+        """A minimal archive plot_jphi can read: a _baseline group at the
+        example time, optionally the orientation stamp and a config_json."""
+        import h5py
+        from bouquet.utils import stamp_source_orientation
+
+        h5 = str(tmp_path / name)
+        psi = np.linspace(0.0, 1.0, 21)
+        sk = str(int(round(mdd.EXAMPLE_TIME * 1000)))
+        with h5py.File(h5, "w") as hf:
+            b = hf.create_group(f"scan/{sk}/_baseline")
+            b["psi_N"] = psi
+            b["j_phi"] = 1.0e6 * (1.0 - psi ** 2)
+            b["j_BS"] = 1.0e5 * psi
+            if cfg_orient is not None:
+                cfg = BouquetConfig(
+                    source=ImasSource(ids_path="dd.json",
+                                      current_orientation=cfg_orient),
+                    solver=SolverConfig(mesh_path="m.h5"), output_header="x")
+                hf[f"scan/{sk}"].create_dataset("config_json", data=cfg.to_json())
+        if stamp is not None:
+            stamp_source_orientation(h5, scan_key=sk, current_sign=stamp)
+        return h5, sk
+
+    @staticmethod
+    def _overlay(h5, sk, source):
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from bouquet.plotting import plot_jphi
+
+        fig, ax = plot_jphi(h5, scan_key=sk, source=source)
+        try:
+            (line,) = [ln for ln in ax[0].get_lines()
+                       if ln.get_label().startswith("FUSE")]
+            return np.asarray(line.get_ydata(), float)
+        finally:
+            plt.close(fig)
+
+    @pytest.mark.parametrize("stamp,cfg_orient", [
+        (-1.0, None),        # the stamped attr
+        (None, -1),          # no stamp: the archived config's setting
+        (-1.0, "auto"),      # the stamp wins over an "auto" config
+    ], ids=["stamp", "config_json", "stamp_over_config"])
+    def test_archive_raw_source_overlay(self, tmp_path, stamp, cfg_orient):
+        h5r, skr = self._archive(tmp_path, "ref.h5")
+        ref = self._overlay(h5r, skr, _write(tmp_path, _example(), "r.json"))
+        assert trapezoid(ref, np.linspace(0.0, 1.0, ref.size)) > 0.0
+        p = _write(tmp_path, _currents_stored_reversed(), "cur_rev.json")
+        h5, sk = self._archive(tmp_path, "a.h5", stamp=stamp,
+                               cfg_orient=cfg_orient)
+        assert np.array_equal(self._overlay(h5, sk, p), ref)
+
+    def test_archive_without_records_falls_back_to_sign_ip(self, tmp_path):
+        h5r, skr = self._archive(tmp_path, "ref.h5")
+        ref = self._overlay(h5r, skr, _write(tmp_path, _example(), "r.json"))
+        p = _write(tmp_path, _currents_stored_reversed(), "cur_rev.json")
+        h5, sk = self._archive(tmp_path, "a.h5")
+        assert np.array_equal(self._overlay(h5, sk, p), -ref)

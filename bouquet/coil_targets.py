@@ -153,18 +153,8 @@ def _dd_ip_at(dd, time_s):
     orientation from (:func:`bouquet.io.imas.orientation_slice_index`: the
     equilibrium slice nearest the selected ``core_profiles`` slice, or nearest
     *time_s* when the dd has no ``core_profiles``), or None."""
-    from .io.imas import orientation_slice_index
-    eq = dd.get("equilibrium") or {}
-    ts = eq.get("time_slice") or []
-    if not ts:
-        return None
-    if "time" not in eq:
-        eq = dict(eq, time=[float(time_s)])
-    try:
-        i = orientation_slice_index(dict(dd, equilibrium=eq), float(time_s))
-        return float(ts[min(i, len(ts) - 1)]["global_quantities"]["ip"])
-    except (KeyError, TypeError, ValueError, IndexError):
-        return None
+    from .io.imas import orientation_ip
+    return orientation_ip(dd, float(time_s))
 
 
 def measured_from_pf_active(dd_path: str, time_s: float,

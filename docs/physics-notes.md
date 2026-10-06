@@ -221,7 +221,7 @@ negative value is printed as a warning).
 is the mirror image of the lab plasma, so its equilibrium coil currents are the
 lab ones with the sign reversed. `coil_targets.measured_from_pf_active`
 therefore multiplies every measured circuit current by the same factor
-(`sign(ip)` of the same dd at the same time, or its own explicit
+(`sign(ip)` of the same dd at the same slice the reader takes it from, or its own explicit
 `current_orientation=+1/-1`) and returns it with the factor recorded;
 `coil_reg_from_measured` copies the factor onto each `SolverConfig.coil_reg`
 term as `"source_current_sign"` without applying it again, so it reaches the
@@ -283,7 +283,9 @@ for every source, normal or reversed:
   COCOS 1 must detect.
 - **archived currents** (`j_phi`, `j_BS`, `j_inductive`) are positive-frame.
 - **plots** overlay raw source currents in the same positive frame as the
-  solve: on the IMAS path the dd `j_tor` times the reader's factor, on the
+  solve: on the IMAS path the dd `j_tor` times the reader's factor (the
+  configured `ImasSource.current_orientation`, or `sign(ip)` under `"auto"`;
+  from an archive, its stamped `source_current_sign`), on the
   g-file path the g-file `<j_tor>` (read in the source's declared COCOS) and
   `FF′` times `sign(CURRENT)` — so a reversed-Ip input is not drawn upside
   down. The reconstruction itself fits `abs(Ip)` and `abs(<j_tor>)`; `abs()`

@@ -1577,11 +1577,32 @@ def _gfile_input_ffprim(eq):
     return _gfile_current_sign(eq) * np.asarray(eq.ffprim, float)
 
 
+def _imas_current_sign(dd, time, current_orientation="auto"):
+    """The factor :func:`bouquet.io.imas.read_imas_baseline` brings this dd's
+    currents into bouquet's positive-current frame with, for overlaying raw dd
+    currents on solved / archived ones: an explicit
+    ``ImasSource.current_orientation`` (``+1`` / ``-1``) as given, else (for
+    ``"auto"``) ``sign(equilibrium ip)`` at the reader's own slice
+    (:func:`bouquet.io.imas.orientation_slice_index`); ``+1`` when the dd
+    carries no equilibrium ip."""
+    from .io.imas import (orientation_ip, parse_current_orientation,
+                          source_current_sign)
+    orient = parse_current_orientation(current_orientation)
+    if orient != "auto":
+        return float(orient)
+    ip = orientation_ip(dd, None if time is None else float(time))
+    return 1.0 if ip is None else source_current_sign(ip)
+
+
 def _imas_input_profiles(source):
-    r"""Raw input ``(psi_N, pressure[Pa], q)`` from the IDS ``equilibrium``
-    profiles_1d at ``source.time`` -- the values the IMAS forward solve starts
-    from (for the input-vs-solved comparison). ``q`` is ``None`` when the IDS
-    does not store it (some FUSE/OMAS exports omit equilibrium q)."""
+    r"""Raw input ``(psi_N, pressure[Pa], q, j_tor)`` from the IDS
+    ``equilibrium`` profiles_1d at ``source.time`` -- the values the IMAS
+    forward solve starts from (for the input-vs-solved comparison). ``q`` is
+    ``None`` when the IDS does not store it (some FUSE/OMAS exports omit
+    equilibrium q). ``j_tor`` (None when absent) is multiplied by the reader's
+    orientation factor -- ``source.current_orientation`` when set to ``+1`` /
+    ``-1``, else ``sign(equilibrium ip)`` -- so it is in the frame of the solved
+    profile it is overlaid on."""
     import json
     d = json.load(open(source.ids_path))
     eq = d["equilibrium"]
@@ -1593,11 +1614,10 @@ def _imas_input_profiles(source):
     psiN = (psi - psi[0]) / (psi[-1] - psi[0]) if psi[-1] != psi[0] else psi
     q = np.asarray(p1["q"], float) if "q" in p1 else None
     # j_tor in bouquet's positive-current frame -- the frame the solved
-    # profile it is overlaid on lives in (read_imas_baseline applies the same
-    # factor); identity for ip >= 0.
-    from .io.imas import source_current_sign
-    s = source_current_sign(
-        eq["time_slice"][ie].get("global_quantities", {}).get("ip", 1.0))
+    # profile it is overlaid on lives in: the factor read_imas_baseline
+    # applied (the configured current_orientation, or sign(ip) for "auto");
+    # identity for ip >= 0 under "auto".
+    s = _imas_current_sign(d, tt, getattr(source, "current_orientation", "auto"))
     jt = s * np.asarray(p1["j_tor"], float) if "j_tor" in p1 else None
     return psiN, np.asarray(p1["pressure"], float), q, jt
 
@@ -3618,8 +3638,12 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
         Scan group; defaults to the first scan in the file.
     source : str or None
         Raw input to overlay. IMAS ``dd_sim.json`` -> raw FUSE j_tor /
-        j_bootstrap / j_ohmic (toroidal). g-file -> its direct j_phi used as
-        the input reference in all three panels (no FUSE component split).
+        j_bootstrap / j_ohmic (toroidal), multiplied by the orientation
+        factor the archive's read applied (its stamped
+        ``source_current_sign``, else the archived
+        ``ImasSource.current_orientation``, else ``sign(equilibrium ip)``).
+        g-file -> its direct j_phi used as the input reference in all three
+        panels (no FUSE component split).
     source_kind : {'auto','imas','geqdsk'}
     selection : {'all','selected'}
     save : str or None
@@ -3638,6 +3662,23 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
         base_total = np.asarray(g["_baseline/j_phi"][:], float)
         base_jBS = (np.asarray(g["_baseline/j_BS"][:], float)
                     if "j_BS" in g["_baseline"] else None)
+        # the orientation factor the archive's IMAS read applied, for the raw
+        # source overlay below: the stamped _baseline attr, else the archived
+        # config's ImasSource.current_orientation (scan copy, else root)
+        _bl_attrs = g["_baseline"].attrs
+        _stamped_cs = (float(_bl_attrs["source_current_sign"])
+                       if "source_current_sign" in _bl_attrs else None)
+        _cfg_orient = None
+        _cfg_node = (g["config_json"] if "config_json" in g
+                     else hf["config_json"] if "config_json" in hf else None)
+        if _cfg_node is not None:
+            try:
+                _raw = _cfg_node[()]
+                _raw = _raw.decode() if isinstance(_raw, bytes) else str(_raw)
+                _cfg_orient = (json.loads(_raw).get("source") or {}).get(
+                    "current_orientation")
+            except (ValueError, TypeError, AttributeError):
+                _cfg_orient = None
         ids = [k for k in g if k.isdigit()]
         # IMAS / full-bootstrap archives (isolate_edge_jBS=False) store no edge
         # spike -- fall back to the full j_BS, so j_ind = total - j_BS - fixed
@@ -3667,20 +3708,30 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
         try:
             if kind == "imas":
                 from .physics import parallel_to_toroidal
-                from .io.imas import source_current_sign
+                from .io.imas import parse_current_orientation
                 _dd = json.load(open(source))
                 cp = _dd["core_profiles"]
                 ic = int(np.argmin(np.abs(np.asarray(cp["time"], float) - float(int(sk)) / 1000.0)))
                 c = cp["profiles_1d"][ic]
                 # the raw source currents in bouquet's positive-current frame
-                # (the frame the archived baseline and draws are in); the
-                # same factor read_imas_baseline applies, identity for ip >= 0
-                _eq = _dd.get("equilibrium", {})
-                _cs = 1.0
-                if _eq.get("time_slice"):
-                    _ie = int(np.argmin(np.abs(np.asarray(_eq["time"], float) - float(int(sk)) / 1000.0)))
-                    _cs = source_current_sign(
-                        _eq["time_slice"][_ie].get("global_quantities", {}).get("ip", 1.0))
+                # (the frame the archived baseline and draws are in), with the
+                # factor the archive's read applied, taken in this order:
+                #   1. the stamped _baseline attr source_current_sign
+                #      (stamp_source_orientation; authoritative),
+                #   2. the archived config's ImasSource.current_orientation,
+                #      when it is an explicit +1 / -1,
+                #   3. sign(equilibrium ip) of this dd (the "auto" rule; the
+                #      only option for an archive older than both records).
+                # Identity for ip >= 0 under "auto".
+                if _stamped_cs is not None:
+                    _cs = _stamped_cs
+                else:
+                    try:
+                        _o = parse_current_orientation(
+                            "auto" if _cfg_orient is None else _cfg_orient)
+                    except ValueError:
+                        _o = "auto"
+                    _cs = _imas_current_sign(_dd, float(int(sk)) / 1000.0, _o)
                 del _dd
                 p = np.asarray(c["grid"]["psi"], float); pN = (p - p[0]) / (p[-1] - p[0])
                 jtot = _cs * np.asarray(c["j_total"], float); jtor = _cs * np.asarray(c["j_tor"], float)

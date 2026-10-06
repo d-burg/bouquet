@@ -101,6 +101,7 @@ from .utils import (
     list_equilibrium_indices,
     read_eqdsk_from_bytes,
     write_provenance,
+    write_refused_scan,
     load_config,
 )
 
@@ -133,7 +134,9 @@ from .io.imas import (read_imas_baseline, read_imas_geometry,
                       write_imas_draw, export_imas_drawset,
                       detect_p_fast_convention, resolve_p_fast_reduction)
 from .run import Bouquet
-from .archive import BouquetArchive, ScanView, DrawView
+from .archive import BouquetArchive, ScanView, DrawView, BaselineView
+from .stats import (draw_band, draw_bands, draw_scalars, BandRecord,
+                    BandTable, plot_band)
 from .parallel import (parallel_generate, run_shard, merge_archives,
                        emit_slurm_script)
 
@@ -145,7 +148,10 @@ __all__ = [
     "__version__",
     # ---- class-based orchestrator (the primary entry point) ----
     "Bouquet",
-    "BouquetArchive", "ScanView", "DrawView",
+    "BouquetArchive", "ScanView", "DrawView", "BaselineView",
+    # ---- standard error bars from an archive (bouquet.stats) ----
+    "draw_band", "draw_bands", "draw_scalars", "BandRecord", "BandTable",
+    "plot_band",
     "BouquetConfig", "SolverConfig", "ReconstructionSource", "ImasSource",
     "FixedComponentsConfig", "UncertaintyConfig", "GenerationConfig",
     "FilterConfig",
@@ -162,7 +168,7 @@ __all__ = [
     "load_equilibrium", "load_equilibrium_by_path", "load_eq_fsa",
     "load_baseline_profiles",
     "discover_scan_keys", "count_equilibria", "list_equilibrium_indices",
-    "write_provenance", "load_config",
+    "write_provenance", "write_refused_scan", "load_config",
     # ---- post-process filtering ----
     "filter_coil_currents", "filter_coil_chi2", "measured_coil_currents",
     "resolve_coil_sigma", "CoilSigmaUnavailable", "coil_sigma_floor_fraction", "detect_device", "DEVICES",

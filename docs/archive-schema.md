@@ -22,6 +22,29 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     ├── config_json                    this slice's exact config
     │   attrs: [coil_filter]           'chi2' | 'legacy' -- which coil filter wrote
     │          [coil_sigma_model]      passes_coil_filter last (chi2: the sigma model JSON)
+    │          [boundary_rms_max_mm, boundary_max_max_mm, boundary_cut_source]
+    │                                  the LCFS cut filter_boundaries applied and where it
+    │                                  came from ('explicit' | 'device:<name>' | 'generic'
+    │                                  | 'disabled' = cut switched off, no threshold)
+    │          [n_requested, n_requested_source, generation_mode, n_attempted,
+    │           n_stored, attempt_outcomes_json, bouquet_version,
+    │           inspec_rms_max_mm, inspec_max_max_mm, inspec_cut_source,
+    │           merge_partial_json]
+    │                                  generation provenance (absent from older archives;
+    │                                  readers return None): requested vs attempted
+    │                                  vs stored; per-attempt outcome (stored |
+    │                                  solve_failed | post_align_failed); the version that
+    │                                  GENERATED the draws (read_generation_provenance());
+    │                                  until-N runs only: the LCFS bound the in-spec count
+    │                                  was taken against and its source (absent bound =
+    │                                  none; a merge refuses shards that disagree);
+    │                                  merge_partial_json marks a merge that knowingly
+    │                                  left workers out (--allow-missing)
+    │          [parallel_manifest_json] process-parallel runs: per-worker record
+    │          [refused_reason]        a slice refused before any draw (write_refused_scan;
+    │                                  run() / run_slices() write it when prepare_baseline
+    │                                  raises); a later baseline/draw write moves it to
+    │                                  [refused_reason_superseded]
     ├── _baseline/                     written once per scan point
     │   ├── eqdsk, [pfile]             raw byte-perfect g-file / p-file
     │   ├── psi_N, psi_N_kinetic
@@ -35,7 +58,8 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │   └── attrs: Ip_target, l_i_target, l_i_scale, source_kind, [diverted],
     │              [source_current_sign, source_b0_sign,
     │               source_current_sign_origin, current_frame],
-    │              [li_metrics_json, closure_limited]   baseline provenance (1.4+):
+    │              [li_metrics_json, closure_limited]   baseline provenance (absent
+    │              from older archives):
     │              Baseline.li_metrics as JSON, incl. the ip_closure health
     │              record on hybrid baselines; load_baseline_profiles() decodes
     │              it to li_metrics / ip_closure / closure_limited
@@ -57,6 +81,8 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
                    max_VSC_drift_pct, in_spec, inspec_*, l_i_target_used,
                    [diverted], [passes_coil_filter, passes_boundary_filter,
                    selected]           ← filter flags, written post-hoc
+                   [boundary_rms_mm, boundary_max_mm]  ← the draw's LCFS metric,
+                                       written when filter_boundaries applies a cut
 ```
 
 ## Conventions

@@ -41,6 +41,7 @@ from .sampling import (
 from .utils import (
     Ip_flux_integral_vs_target,
     Ip_fsa_weights,
+    capture_xpoints,
     eq_jphi_profile,
     fsa_current_geometry,
     pchip_derivative,
@@ -4595,15 +4596,14 @@ def generate_bouquet(
     # state (the same state baseline.eqdsk was saved from).  Stored so
     # plot_boundary_point_traces tracks true B_p=0 nulls instead of a
     # geometric corner guess on the saved boundary polyline.
-    try:
-        _bl_xpts, _bl_div = mygs.get_xpoints()
-        _bl_xpts = (np.asarray(_bl_xpts, dtype=float)
-                    if _bl_xpts is not None else None)
-    except Exception as _xexc:
-        print(f"  WARN: baseline get_xpoints() failed ({_xexc}); "
+    # capture_xpoints(), not a bare get_xpoints(): the wrapper hands back a
+    # VIEW onto the gs_equil struct, which every copy_eq/replace_eq swap
+    # frees under us (see utils.capture_xpoints).
+    _bl_xpts, _bl_div = capture_xpoints(mygs)
+    if _bl_xpts is None:
+        print(f"  NOTE: no baseline X-points captured; "
               f"plot_boundary_point_traces will fall back to the "
               f"axis-line intersection for top/bottom")
-        _bl_xpts, _bl_div = None, None
 
     # ---- What to archive as the baseline currents -----------------------
     # Default (geqdsk path / gate off): the anchored target profile
@@ -4941,7 +4941,7 @@ def generate_bouquet(
                     "unavailable (BNDDIAG=0 disables the trace that supplies "
                     "it). Re-enable the boundary diagnostic, pass "
                     "recon_lcfs_ref explicitly, or drop the LCFS bound "
-                    "(filtering.rms_max_mm=None) to target the coil spec "
+                    "(filtering.rms_max_mm='off') to target the coil spec "
                     "alone.")
         if _coil_kind == "chi2":
             _acc = _coil_model["acceptance"]
@@ -4973,6 +4973,7 @@ def generate_bouquet(
                   f"the initial allocation, not a minimum.")
     _n_inspec_seen = 0          # draws stored that pass BOTH filters
     _stopped_by_shared = False  # ended by stop_check() (shared until-N)
+    _attempt_outcomes = {}      # attempt index -> stored | solve_failed | ...
     _inspec_hit_target = False
 
     pbar = (
@@ -5279,6 +5280,7 @@ def generate_bouquet(
                     mygs.set_coil_reg(reg_terms=_sreg)
                 except Exception:
                     pass
+            _attempt_outcomes[int(count)] = "solve_failed"
             if pbar is not None:
                 pbar.update(1)
             continue
@@ -5711,6 +5713,7 @@ def generate_bouquet(
                         mygs.set_psi(_baseline_psi, update_bounds=True)
                 except Exception:
                     pass
+                _attempt_outcomes[int(count)] = "post_align_failed"
                 if pbar is not None:
                     pbar.update(1)
                 continue
@@ -5798,15 +5801,16 @@ def generate_bouquet(
         # TokaMaker's built-in X-point finder at this same (post-save)
         # solver state -- the authoritative B_p=0 saddle location for this
         # draw, stored for plot_boundary_point_traces.
-        try:
-            _draw_xpts, _draw_div = mygs.get_xpoints()
-            _draw_xpts = (np.asarray(_draw_xpts, dtype=float)
-                          if _draw_xpts is not None else None)
-        except Exception as _xexc:
-            print(f"  WARN: get_xpoints() failed ({_xexc}); "
-                  f"this draw's top/bottom traces fall back to the "
+        # capture_xpoints() copies: get_xpoints() returns a view onto the
+        # gs_equil struct, and capture_equilibrium_fsa below swaps (and so
+        # frees) that struct once per traced surface before this draw is
+        # archived -- a retained view reads freed heap by then, which is how
+        # the same seed produced two different archived x_points datasets.
+        _draw_xpts, _draw_div = capture_xpoints(mygs)
+        if _draw_xpts is None:
+            print(f"  NOTE: no X-points captured for this draw; "
+                  f"top/bottom traces fall back to the "
                   f"axis-line intersection")
-            _draw_xpts, _draw_div = None, None
         diagnostics['x_points'] = _draw_xpts
         diagnostics['diverted'] = _draw_div
 
@@ -6056,6 +6060,7 @@ def generate_bouquet(
             print(f"  WARNING: could not delete {full_path}: {exc}")
 
         all_diagnostics.append(diagnostics)
+        _attempt_outcomes[int(count)] = "stored"
 
         # ---- Proxy-bias warmstart for next draw ----
         # Keep the most recent successful draw's observed bias factor
@@ -6147,6 +6152,32 @@ def generate_bouquet(
 
     if pbar is not None:
         pbar.close()
+
+    # How these draws came to be, on the scan group: requested vs attempted
+    # vs stored, per-attempt outcome, and the generating version. Failed
+    # draws leave no group, so this is the only record of them.
+    try:
+        from .utils import stamp_generation_provenance
+        _n_att = len(_attempt_outcomes)
+        stamp_generation_provenance(
+            header, scan_key=scan_key,
+            n_requested=int(_until_n) if _until_n is not None else int(n_equils),
+            n_requested_source=("n_inspec_target" if _until_n is not None
+                                else "n_equils"),
+            generation_mode=("until_n" if _until_n is not None else "fixed"),
+            n_attempted=int(_n_att),
+            n_stored=int(sum(1 for v in _attempt_outcomes.values() if v == "stored")),
+            attempt_outcomes_json=_attempt_outcomes,
+            bouquet_version=str(__import__("bouquet").__version__),
+            # the LCFS bounds the until-N verdict above actually applied
+            # (None -> not recorded: a fixed-N loop applies no bound)
+            inspec_rms_max_mm=(None if _until_n is None or inspec_rms_max_mm is None
+                               else float(inspec_rms_max_mm)),
+            inspec_max_max_mm=(None if _until_n is None or inspec_max_max_mm is None
+                               else float(inspec_max_max_mm)),
+        )
+    except Exception as _pexc:
+        print(f"  WARN: generation provenance not stamped ({_pexc})")
 
     # The cap is a backstop, not an acceptance criterion: hitting it means the
     # requested ensemble was NOT delivered, so say so loudly rather than

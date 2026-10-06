@@ -58,6 +58,42 @@ such a source.
   positive frame (`× sign(CURRENT)`); `plot_input_vs_recon` reads the g-file in
   the source's declared COCOS.
 
+## Unreleased — the default LCFS boundary cut is now device-calibrated
+
+**For DIII-D the default boundary cut changes from 5.0 mm to 8.5 mm. This
+LOOSENS that acceptance criterion for DIII-D:** a draw whose LCFS deviates from
+the reconstruction by between 5.0 and 8.5 mm rms was rejected before and is
+accepted now, both by `Bouquet.filter()` and by the until-N loop's in-spec
+count. The 8.5 mm value is the across-slice 90th percentile (8.34 mm, rounded)
+of the LCFS rms displacement under the magnetics' stated noise in a
+pre-registered boundary-UQ study (`bouquet.devices.DEVICES["DIII-D"]`). Every
+other device, and any mesh whose coil set is not recognised, keeps the generic
+5.0 mm: a run that sets nothing on an unregistered device selects exactly what
+it did before.
+
+`FilterConfig.rms_max_mm` now takes:
+
+| setting | cut | stamped `boundary_cut_source` |
+|---|---|---|
+| `"auto"` *(default)* | the device's calibrated cut (DIII-D 8.5 mm), else 5.0 mm | `device:<name>` / `generic` |
+| a number | that number | `explicit` |
+| `"off"` | none | `disabled` |
+| `None` | none — its historical meaning, kept so configs written with `None` behave as before | `disabled` |
+
+- **To keep 5.0 mm on DIII-D**, set `filtering.rms_max_mm = 5.0` explicitly.
+- The device is taken from `config.device`, else detected from the mesh's (or
+  the archived baseline's) coil names; only an exact signature match counts.
+- The resolved cut is printed once per run, on screen (`[boundary cut] …`),
+  before the solver output is captured; an explicit `filter(rms_max_mm=…)` is
+  announced too. It is stamped on the scan group (`boundary_rms_max_mm`,
+  `boundary_cut_source`), and an until-N run also archives the bound its count
+  was taken against (`inspec_rms_max_mm`, `inspec_cut_source`, carried
+  through the parallel worker record and merge manifest). `filter()` warns if
+  it cuts at a different bound than the loop counted against.
+- Re-running `filter()` with default settings on a DIII-D archive you filtered
+  before this change can select **more** draws than it did. Quote the cut that
+  produced any in-spec fraction you report — `draw_band` provenance carries it.
+
 ## Unreleased — the default coil acceptance criterion changed
 
 **`Bouquet.filter()` now judges coil currents with a measurement-referenced χ²

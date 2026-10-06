@@ -415,14 +415,14 @@ def test_archived_in_spec_flag_uses_the_shared_predicate():
 def test_the_loop_and_the_filter_read_the_same_thresholds():
     """``Bouquet.generate`` must source the in-loop bounds from the same
     FilterConfig ``Bouquet.filter`` later cuts on -- otherwise the run stops
-    on a count the postprocess disagrees with."""
+    on a count the postprocess disagrees with. The boundary cut is checked
+    BEHAVIOURALLY, on the default device path, by
+    test_the_default_device_cut_is_the_same_number_in_loop_stamp_and_filter
+    (the source grep that stood here could not see a wrong value)."""
     from bouquet.run import Bouquet
     gen = inspect.getsource(Bouquet.generate)
-    assert "inspec_rms_max_mm=fc.rms_max_mm" in gen
     assert "n_inspec_target=gc.n_inspec_target" in gen
     assert "max_total_draws=gc.max_total_draws" in gen
-    flt = inspect.getsource(Bouquet.filter)
-    assert "rms_max_mm=rms" in flt and "fc.rms_max_mm" in flt
 
 
 def test_the_summary_states_delivered_vs_requested():
@@ -940,3 +940,228 @@ class TestDeliveredCount:
         assert until_n_delivered(diags) == 2
         assert until_n_delivered([]) == 0
         assert until_n_delivered(None) == 0
+
+
+# ==========================================================================
+#  THE identity on the DEFAULT boundary cut (device-calibrated), behavioural:
+#  the number the loop applies, the number stamped, the number filter() cuts
+# ==========================================================================
+_ENV_KEYS = ("sigma_ne", "sigma_te", "sigma_ni", "sigma_ti", "sigma_jphi",
+             "n_ls", "t_ls", "j_ls")
+
+
+def _solverless_bouquet(header, monkeypatch, recorder, *, coil_sets,
+                        filt=None, **gen):
+    """A real ``Bouquet`` whose ``generate()`` runs with the solver replaced
+    by *recorder* (called as generate_bouquet)."""
+    from types import SimpleNamespace
+    import bouquet.TokaMaker_interface as ti
+    import bouquet.baseline as blm
+    from bouquet.config import FilterConfig
+    from bouquet.run import Bouquet
+    monkeypatch.setattr(ti, "generate_bouquet", recorder)
+    monkeypatch.setattr(blm, "resolve_uncertainty",
+                        lambda cfg, bl: {k: None for k in _ENV_KEYS})
+    cfg = _mini_config(**gen)
+    cfg.output_header = header
+    cfg.filtering = FilterConfig(coil_daq_era="modern", **(filt or {}))
+    b = Bouquet(cfg)
+    monkeypatch.setattr(b, "_validate_workflow", lambda: None)
+    b.mygs = SimpleNamespace(coil_sets=coil_sets)
+    x = np.linspace(0.0, 1.0, 5)
+    b.baseline = SimpleNamespace(
+        psi_N=x, psi_N_kinetic=x, Zeff=np.full(5, 1.5), j_phi=x, j_inductive=x,
+        j_BS=x, jBS_diff=None, ne=x, te=x, ni=x, ti=x, Ip_target=1.0e6,
+        l_i_target=1.0, recon=None, pfile_bytes=None, eqdsk_bytes=None,
+        p_fast=None, j_NBI=None, j_RF=None)
+    return b
+
+
+def _generate_without_solver(header, monkeypatch, **filt):
+    """Until-N ``generate()`` on the DIII-D coil set with no filter setting
+    (the default path): returns ``(bouquet, kwargs the loop received)``."""
+    seen = {}
+
+    def recorder(*a, **kw):
+        seen.update(kw)
+        print("solver chatter")
+        return []
+
+    b = _solverless_bouquet(
+        header, monkeypatch, recorder, filt=filt,
+        coil_sets={c: None for c in TestConfiguredCoilPredicate.COILS},
+        n_inspec_target=5, n_equils=5, scan_key=1)
+    with pytest.warns(RuntimeWarning, match="did not reach its target"):
+        b.generate()                        # the recorder stores no draw
+    return b, seen
+
+
+def _straddling_with_a_device_margin():
+    """_straddling_draws plus a draw 7 mm out: in spec at the DIII-D 8.5 mm
+    cut, out at the generic 5.0 -- so the fixture tells the two apart."""
+    draws, radii = _straddling_draws()
+    draws.append(dict(draws[0]))
+    radii.append(1.007)
+    return draws, radii
+
+
+def test_the_default_device_cut_is_the_same_number_in_loop_stamp_and_filter(
+        tmp_path, monkeypatch, capsys):
+    header = str(tmp_path / "devcut")
+    draws, radii = _straddling_with_a_device_margin()
+    bl = _write_coil_archive(header + ".h5", draws, radius=radii)
+
+    b, seen = _generate_without_solver(header, monkeypatch)
+    applied = seen["inspec_rms_max_mm"]
+    assert applied == 8.5                   # DIII-D detected from the solver's coils
+    # announced where the user sees it, not swallowed into generation_log
+    out = capsys.readouterr().out
+    assert "[boundary cut] LCFS rms <= 8.5 mm (device:DIII-D" in out
+    assert "solver chatter" in (b.generation_log or "")
+    assert "[boundary cut]" not in (b.generation_log or "")
+    # archived next to the counts, as the SAME number
+    from bouquet.utils import read_generation_provenance
+    gp = read_generation_provenance(header, scan_key=1)
+    assert gp["inspec_rms_max_mm"] == applied
+    assert gp["inspec_cut_source"] == "device:DIII-D"
+
+    # a filter-only session (no solver) on the default config
+    with pytest.warns(UserWarning):         # nu 20 vs calibrated 18 (recorded)
+        post = _filter_selected(header, coil_daq_era="modern")
+    with h5py.File(header + ".h5", "r") as hf:
+        a = hf["scan/1"].attrs
+        assert a["boundary_rms_max_mm"] == applied
+        assert a["boundary_cut_source"] == "device:DIII-D"
+    from bouquet.TokaMaker_interface import _until_n_verdict
+    from bouquet.filtering import make_coil_predicate
+    pred, _, _ = make_coil_predicate("chi2", dict(TestConfiguredCoilPredicate.COILS),
+                                     era="modern")
+    inloop = set()
+    for i, cur in enumerate(draws):
+        ok, *_ = _until_n_verdict({"max_F_drift_pct": 0.5, "max_VSC_drift_pct": 0.5},
+                                  bl, _circle(r=radii[i]), pred, draw_currents=cur,
+                                  rms_max_mm=applied)
+        if ok:
+            inloop.add(i)
+    assert inloop == post, f"in-loop {sorted(inloop)} != selected {sorted(post)}"
+    assert 5 in post and 3 not in post      # the 8.5 mm cut, not 5.0, was applied
+
+
+def test_a_fixed_n_run_records_no_inloop_cut(tmp_path, monkeypatch):
+    from bouquet.utils import stamp_generation_provenance, read_generation_provenance
+    header = str(tmp_path / "fixed")
+    _write_coil_archive(header + ".h5", [dict(TestConfiguredCoilPredicate.COILS)])
+    stamp_generation_provenance(header, scan_key=1, inspec_rms_max_mm=3.0,
+                                inspec_cut_source="explicit")   # a stale record
+    b = _solverless_bouquet(header, monkeypatch, lambda *a, **k: [],
+                            coil_sets={}, n_equils=3, scan_key=1)
+    b.generate()
+    gp = read_generation_provenance(header, scan_key=1)
+    assert gp["inspec_rms_max_mm"] is None and gp["inspec_cut_source"] is None
+
+
+def test_an_explicit_filter_argument_is_announced_and_a_mismatch_warned(
+        tmp_path, monkeypatch, capsys):
+    from bouquet.config import FilterConfig
+    from bouquet.run import Bouquet
+    header = str(tmp_path / "argcut")
+    draws, radii = _straddling_with_a_device_margin()
+    _write_coil_archive(header + ".h5", draws, radius=radii)
+    _generate_without_solver(header, monkeypatch)          # loop counted at 8.5
+    capsys.readouterr()
+
+    class Gen:
+        scan_key = 1
+        n_inspec_target = 5
+
+    class Cfg:
+        output_header = header
+        filtering = FilterConfig(coil_daq_era="modern")
+        generation = Gen()
+        device = None
+        source = type("S", (), {})()
+    b = Bouquet.__new__(Bouquet)
+    b.config = Cfg()
+    with pytest.warns(UserWarning, match="differs from the until-N loop's"):
+        b.filter(rms_max_mm=5.0, plot=False)
+    out = capsys.readouterr().out
+    assert "[boundary cut] LCFS rms <= 5 mm (explicit filter(rms_max_mm=...) argument)" in out
+    with h5py.File(header + ".h5", "r") as hf:
+        assert hf["scan/1"].attrs["boundary_cut_source"] == "explicit"
+        assert hf["scan/1"].attrs["boundary_rms_max_mm"] == 5.0
+
+
+def test_a_filter_session_without_coil_names_uses_the_loops_recorded_device(tmp_path):
+    """No live solver and no archived coil names: the device the loop
+    resolved (recorded with its cut) decides, not a silent fallback to 5.0."""
+    from bouquet.run import Bouquet
+    from bouquet.utils import stamp_generation_provenance
+    header = str(tmp_path / "nonames")
+    with h5py.File(header + ".h5", "w") as hf:
+        hf.create_group("scan/1/_baseline")
+    stamp_generation_provenance(header, scan_key=1, generation_mode="until_n",
+                                inspec_rms_max_mm=8.5,
+                                inspec_cut_source="device:DIII-D")
+    cfg = _mini_config(scan_key=1)
+    cfg.output_header = header
+    assert Bouquet(cfg)._boundary_cut(quiet=True) == (8.5, "device:DIII-D")
+
+
+def test_an_unregistered_device_with_nothing_set_keeps_the_generic_five(
+        tmp_path, monkeypatch):
+    """Users who set nothing and whose device is unregistered: 5.0 mm, as
+    before the device calibration existed."""
+    seen = {}
+    header = str(tmp_path / "generic")
+    _write_coil_archive(header + ".h5", [dict(TestConfiguredCoilPredicate.COILS)])
+    b = _solverless_bouquet(header, monkeypatch, lambda *a, **k: seen.update(k) or [],
+                            coil_sets={"PF1": None, "PF2": None},
+                            n_inspec_target=2, n_equils=2, scan_key=1)
+    with pytest.warns(RuntimeWarning):
+        b.generate()
+    assert seen["inspec_rms_max_mm"] == 5.0
+    from bouquet.utils import read_generation_provenance
+    assert read_generation_provenance(header, scan_key=1)["inspec_cut_source"] == "generic"
+
+
+class _StopAfterBoundary(Exception):
+    pass
+
+
+@pytest.mark.parametrize("setting, expect", [
+    (3.0, (3.0, "explicit")),
+    ("auto", (8.5, "device:DIII-D")),
+    ("off", (None, "disabled")),
+    (None, (None, "disabled")),
+])
+def test_the_loop_and_the_filter_resolve_the_cut_the_same_way(
+        tmp_path, monkeypatch, setting, expect):
+    """Every setting kind: the bound generate() hands the loop, the bound
+    stamped as the loop's, and the bound filter() hands filter_boundaries are
+    one number with one source (behavioural; replaces a source grep)."""
+    from bouquet import filtering
+    header = str(tmp_path / "same")
+    _write_coil_archive(header + ".h5", [dict(TestConfiguredCoilPredicate.COILS)])
+    seen = {}
+    b = _solverless_bouquet(
+        header, monkeypatch, lambda *a, **k: seen.update(k) or [],
+        filt={"rms_max_mm": setting, "coil_filter": "legacy"},
+        coil_sets={c: None for c in TestConfiguredCoilPredicate.COILS},
+        n_inspec_target=2, n_equils=2, scan_key=1)
+    with pytest.warns(RuntimeWarning):
+        b.generate()
+    from bouquet.utils import read_generation_provenance
+    gp = read_generation_provenance(header, scan_key=1)
+    assert (seen["inspec_rms_max_mm"], gp["inspec_cut_source"]) == expect
+    assert gp["inspec_rms_max_mm"] == expect[0]
+
+    cut = {}
+
+    def spy(*a, **kw):
+        cut.update(rms=kw["rms_max_mm"], src=kw["cut_source"])
+        raise _StopAfterBoundary
+
+    monkeypatch.setattr(filtering, "filter_boundaries", spy)
+    with pytest.raises(_StopAfterBoundary):
+        b.filter(plot=False)
+    assert (cut["rms"], cut["src"]) == expect

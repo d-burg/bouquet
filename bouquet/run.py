@@ -3463,6 +3463,12 @@ class Bouquet:
         _jbs_range = (None if gc.jBS_scale_range is None
                       else (gc.jBS_scale_range[0] * _bs, gc.jBS_scale_range[1] * _bs))
 
+        # The LCFS boundary cut, resolved ONCE and OUTSIDE the output capture:
+        # the announcement must reach the user (inside the capture it went to
+        # generation_log only), and this one local is both what the until-N
+        # verdict applies and what is stamped on the archive below.
+        _cut_mm, _cut_source = self._boundary_cut()
+
         from .utils import capture_native_output
         verbose = bool(getattr(self.config, "verbose", False))
         with capture_native_output(enabled=not verbose) as _cap:
@@ -3512,7 +3518,7 @@ class Bouquet:
                 # does not disable the target.
                 n_inspec_target=gc.n_inspec_target,
                 max_total_draws=gc.max_total_draws,
-                inspec_rms_max_mm=fc.rms_max_mm,
+                inspec_rms_max_mm=_cut_mm,
                 # ...including the COIL criterion: same filter, same sigma,
                 # same acceptance numbers and -- via _coil_daq_era() -- the
                 # same era floor .filter() will resolve. A loop still counting
@@ -3570,6 +3576,22 @@ class Bouquet:
             )
         self.generation_log = _cap["text"] or None
 
+        # The cut the until-N loop counted against, next to the counts it
+        # produced (generation provenance). Only an until-N loop applies a cut
+        # while drawing; a fixed-N run records none (and clears a stale one).
+        from .utils import stamp_generation_provenance
+        _until = gc.n_inspec_target is not None
+        try:
+            stamp_generation_provenance(
+                header, scan_key=gc.scan_key,
+                inspec_rms_max_mm=(_cut_mm if _until else None),
+                inspec_cut_source=(_cut_source if _until else None))
+        except OSError as _exc:        # the draws are stored; say what is missing
+            import warnings as _w
+            _w.warn(f"the until-N boundary cut ({_cut_mm} mm, {_cut_source}) "
+                    f"was applied but could not be stamped on the archive: {_exc}",
+                    RuntimeWarning, stacklevel=2)
+
         # until-N outcome, OUTSIDE the capture: on the default quiet path the
         # in-loop prints and generate_bouquet's cap-missed RuntimeWarning were
         # swallowed into generation_log (capture_native_output redirects
@@ -3580,7 +3602,11 @@ class Bouquet:
             from .filtering import until_n_delivered
             _tgt = int(gc.n_inspec_target)
             _got = until_n_delivered(self.diagnostics)
-            _tries = len(self.diagnostics or [])
+            # attempts, not stored draws: failed draws leave no group, so the
+            # count comes from the generation-provenance stamp
+            from .utils import read_generation_provenance
+            _tries = read_generation_provenance(header, scan_key=gc.scan_key).get(
+                "n_attempted") or len(self.diagnostics or [])
             _shared_done = False
             if stop_check is not None:
                 try:
@@ -3643,7 +3669,7 @@ class Bouquet:
         """Per-draw l_i / LCFS-deviation / anchor-displacement traces for this run."""
         from .plotting import plot_traces as _f
         kwargs.setdefault("li_band", self.config.generation.l_i_tolerance)
-        kwargs.setdefault("rms_max_mm", self.config.filtering.rms_max_mm)
+        kwargs.setdefault("rms_max_mm", self._boundary_cut(quiet=True)[0])
         return _f(f"{self.config.output_header}.h5",
                   scan_key=self.config.generation.scan_key, **kwargs)
 
@@ -3656,7 +3682,9 @@ class Bouquet:
     def plot_spec_summary(self, **kwargs):
         """In-spec fraction summary (coil + boundary) for this run."""
         from .plotting import plot_spec_summary as _f
-        kwargs.setdefault("rms_max_mm", self.config.filtering.rms_max_mm)
+        _cut = self._boundary_cut(quiet=True)[0]
+        if _cut is not None:            # disabled: keep the plot's own scale
+            kwargs.setdefault("rms_max_mm", _cut)
         return _f(self.config.output_header,
                   scan_key=self.config.generation.scan_key, **kwargs)
 
@@ -3679,8 +3707,13 @@ class Bouquet:
             selection=selection, print_table=print_table)
 
     # ── stage 4: filter + export ----------------------------------------
-    def filter(self, rms_max_mm: Optional[float] = None, plot: bool = False) -> dict:
+    def filter(self, rms_max_mm=None, plot: bool = False) -> dict:
         """Mark the machine-realizable subset (coil + boundary filters).
+
+        ``rms_max_mm``: None (default) applies ``filtering.rms_max_mm``; a
+        number, ``"auto"`` or ``"off"`` overrides it for this call (see
+        :meth:`boundary_cut`). The cut applied is printed and stamped on the
+        archive with its source.
 
         Non-destructive: writes pass flags into the HDF5. Returns a summary dict.
         With ``plot=True`` the coil-drift and boundary distribution figures are
@@ -3691,10 +3724,17 @@ class Bouquet:
 
         header = self.config.output_header
         fc = self.config.filtering
-        rms = fc.rms_max_mm if rms_max_mm is None else rms_max_mm
 
         sk = self.config.generation.scan_key
         coil_filter_used = fc.coil_filter
+        # the boundary cut: the argument when given (a number, "auto" or
+        # "off"), else filtering.rms_max_mm -- the SAME resolution the until-N
+        # loop used (identity). Announced either way.
+        if rms_max_mm is None:
+            rms, rms_source = self._boundary_cut()
+        else:
+            rms, rms_source = self._boundary_cut(setting=rms_max_mm,
+                                                 origin="argument")
         if fc.coil_filter == "chi2":
             from .coil_spec import CoilSigmaUnavailable
             # the era sets the sigma floor, i.e. an acceptance criterion -- say
@@ -3736,8 +3776,10 @@ class Bouquet:
                 VSC_max_pct=fc.inspec_VSC_max * 100.0,
                 apply=True, plot=plot,
             )
+        self._check_against_inloop_cut(rms, rms_source)
         bnd_summary, bnd_fig = filter_boundaries(
             header, scan_key=sk, rms_max_mm=rms, apply=True, plot=plot,
+            cut_source=rms_source,
         )
         # one scan key -> each summary is a single {counts, draws} dict
         self._selection = {"coil": coil_summary, "boundary": bnd_summary,
@@ -3746,6 +3788,148 @@ class Bouquet:
             self._selection["figures"] = (coil_fig, bnd_fig)
         self._print_generation_summary(coil_summary, bnd_summary)
         return self._selection
+
+    def boundary_cut(self):
+        """``(rms_max_mm, source)`` of the LCFS boundary cut this run applies.
+
+        Resolved from ``filtering.rms_max_mm`` exactly as :meth:`generate`'s
+        until-N verdict and :meth:`filter` resolve it; ``rms_max_mm`` is None
+        when the cut is disabled (``source="disabled"``). Quiet: prints
+        nothing. Use it to draw the threshold a plot should show, e.g.
+        ``bq.plot_traces(h5, rms_max_mm=run.boundary_cut()[0])``.
+        """
+        return self._boundary_cut(quiet=True)
+
+    def _boundary_cut(self, quiet=False, setting=None, origin="config"):
+        """``(rms_max_mm, source)`` -- the LCFS boundary cut this run applies.
+
+        *setting* is ``filtering.rms_max_mm`` (``origin="config"``) or an
+        explicit :meth:`filter` argument (``origin="argument"``):
+
+        * a number -> that cut (``"explicit"``);
+        * ``"off"`` or ``None`` -> no cut (``(None, "disabled")``; ``None``
+          keeps its historical meaning, "no boundary cut");
+        * ``"auto"`` -> the device's calibrated value (``"device:<name>"``,
+          e.g. 8.5 mm on DIII-D from its boundary-UQ study) with the device
+          taken from ``config.device`` or detected from the mesh's coil
+          names, else the generic 5.0 mm (``"generic"``).
+
+        Used by :meth:`generate`'s until-N verdict and by :meth:`filter`, so
+        the two agree by construction. Printed once per resolution unless
+        *quiet*.
+        """
+        from .config import check_boundary_cut_setting
+        from .devices import boundary_cut_for
+        if origin == "config":
+            setting = self.config.filtering.rms_max_mm
+        check_boundary_cut_setting(
+            setting, "filtering.rms_max_mm" if origin == "config"
+            else "filter(rms_max_mm=...)")
+        if setting is None or setting == "off":
+            return self._announce_boundary_cut(None, "disabled", None, quiet,
+                                               origin, setting)
+        if not isinstance(setting, str):
+            return self._announce_boundary_cut(float(setting), "explicit", None,
+                                               quiet, origin, setting)
+        spec = self._boundary_cut_device()
+        val, src = boundary_cut_for(spec)
+        return self._announce_boundary_cut(val, src, spec, quiet, origin, setting)
+
+    def _check_against_inloop_cut(self, rms, rms_source):
+        """Warn when filter() cuts at a different boundary bound than the one
+        the until-N loop counted its target against (read from the archive):
+        the delivered count then does not describe this selection."""
+        import warnings
+        from .utils import read_generation_provenance
+        try:
+            gp = read_generation_provenance(self.config.output_header,
+                                            scan_key=self.config.generation.scan_key)
+        except OSError:
+            return
+        if gp.get("inspec_cut_source") is None:     # not an until-N run
+            return
+        loop = gp.get("inspec_rms_max_mm")
+        loop = None if loop is None else float(loop)
+        if loop != (None if rms is None else float(rms)):
+            fmt = lambda v, s: ("no boundary cut" if v is None else f"{v:g} mm") + f" ({s})"
+            warnings.warn(
+                "boundary cut differs from the until-N loop's: the loop counted "
+                f"its in-spec target against {fmt(loop, gp['inspec_cut_source'])} "
+                f"but filter() now cuts at {fmt(rms, rms_source)}, so the "
+                "delivered count does not describe this selection.",
+                UserWarning, stacklevel=3)
+
+    def _boundary_cut_device(self):
+        """The device whose calibrated cut ``"auto"`` resolves to, or None:
+        ``config.device``, else the live solver's coil names, else the
+        archived baseline's coil names (a filter-only session)."""
+        from .devices import resolve_device
+        names = None
+        try:
+            if self.mygs is not None and getattr(self.mygs, "coil_sets", None):
+                names = list(self.mygs.coil_sets)
+        except Exception:
+            names = None
+        if names is None:
+            # no live solver (e.g. a filter-only session): the archive's
+            # baseline carries the coil names the chi2 filter reads too
+            try:
+                import h5py
+                from .utils import _read_coil_names, _scan_key
+                bkey = _scan_key(self.config.generation.scan_key)
+                bl = f"scan/{bkey}/_baseline" if bkey is not None else "_baseline"
+                with h5py.File(f"{self.config.output_header}.h5", "r") as hf:
+                    if bl in hf:
+                        names = _read_coil_names(hf[bl]) or None
+            except OSError:
+                names = None
+        spec = resolve_device(self.config.device, names)
+        if spec is None and self.config.device is None and names is None:
+            # no coil names anywhere (e.g. the baseline coil read failed): the
+            # device the until-N loop resolved, as the archive recorded it
+            spec = self._archived_loop_device()
+        return spec
+
+    def _archived_loop_device(self):
+        from .devices import DEVICES
+        from .utils import read_generation_provenance
+        try:
+            src = read_generation_provenance(
+                self.config.output_header,
+                scan_key=self.config.generation.scan_key).get("inspec_cut_source")
+        except OSError:
+            return None
+        if isinstance(src, str) and src.startswith("device:"):
+            return DEVICES.get(src.split(":", 1)[1])
+        return None
+
+    def _announce_boundary_cut(self, val, src, spec, quiet, origin="config",
+                               setting=None):
+        """One announcement per resolved cut, every source alike."""
+        key = (val, src, origin)
+        if not quiet and getattr(self, "_boundary_cut_announced", None) != key:
+            self._boundary_cut_announced = key
+            where = ("filtering.rms_max_mm" if origin == "config"
+                     else "filter(rms_max_mm=...) argument")
+            if src == "disabled":
+                spelled = "None" if setting is None else repr(setting)
+                print(f"[boundary cut] DISABLED: no LCFS boundary cut ({where}="
+                      f"{spelled}"
+                      + ("; None keeps its historical meaning, 'off' is the "
+                         "explicit spelling, 'auto' the device/generic cut"
+                         if setting is None else "") + ")")
+            elif src == "explicit":
+                print(f"[boundary cut] LCFS rms <= {val:g} mm (explicit {where})")
+            elif src == "generic":
+                print(f"[boundary cut] LCFS rms <= {val:g} mm (generic: no device "
+                      "calibration; set config.device or filtering.rms_max_mm)")
+            else:
+                from .devices import GENERIC_BOUNDARY_RMS_MM
+                print(f"[boundary cut] LCFS rms <= {val:g} mm ({src} calibration: "
+                      f"{spec.boundary_provenance}; replaces the generic "
+                      f"{GENERIC_BOUNDARY_RMS_MM:g} mm; filtering.rms_max_mm "
+                      "overrides)")
+        return val, src
 
     def _coil_daq_era(self):
         """Acquisition era label for the era-dependent coil tolerance floor, or None.
@@ -3969,13 +4153,39 @@ class Bouquet:
         """
         self.setup_solver()                       # idempotent
         if self.baseline is None:
-            self.prepare_baseline()
+            try:
+                self.prepare_baseline()
+            except Exception as exc:
+                self._record_refusal(exc)         # then re-raise, unchanged
+                raise
         self.generate()
         self.filter()
         self.export()
         return self
 
-    def run_slices(self, times, scan_keys=None, header=None, export=False) -> dict:
+    def _record_refusal(self, exc):
+        """Write the slice as REFUSED (``write_refused_scan``) after
+        ``prepare_baseline`` raised, so a series reader reports it as
+        ``status="refused"`` rather than a gap. Returns the recorded reason,
+        or None when nothing could be recorded (flat layout, or the scan
+        already holds draws -- then the earlier draws stand)."""
+        import warnings
+        from .utils import write_refused_scan
+        sk = self.config.generation.scan_key
+        reason = f"prepare_baseline raised {type(exc).__name__}: {exc}"[:500]
+        if sk is None:
+            return None
+        try:
+            write_refused_scan(self.config.output_header, sk, reason)
+        except ValueError as e:               # already holds draws
+            warnings.warn(f"slice {sk!r} not marked refused: {e}", UserWarning,
+                          stacklevel=3)
+            return None
+        print(f"[refused] scan {sk!r}: {reason}")
+        return reason
+
+    def run_slices(self, times, scan_keys=None, header=None, export=False,
+                   on_refusal="raise") -> dict:
         """Sweep an IMAS time series into ONE archive, one ``scan_key`` per slice.
 
         Wraps the ``set_slice -> prepare_baseline -> generate -> filter`` loop
@@ -3987,7 +4197,19 @@ class Bouquet:
 
         Reconstruction sources have no time axis (:meth:`set_slice` raises on
         ``time``); build one :class:`Bouquet` per g-file instead.
+
+        A slice whose ``prepare_baseline`` raises (a closure refusal, a
+        failed gate, ...) is written to the archive as REFUSED
+        (:func:`~bouquet.utils.write_refused_scan`, with the exception as the
+        reason), so a later :func:`~bouquet.draw_bands` reports it as
+        ``status="refused"`` instead of a gap. ``on_refusal="raise"``
+        (default) then re-raises, as before; ``"record"`` records it in the
+        summary (``refused=<reason>``, no draws) and carries on with the next
+        slice.
         """
+        if on_refusal not in ("raise", "record"):
+            raise ValueError("on_refusal must be 'raise' or 'record', got "
+                             f"{on_refusal!r}")
         times = [float(t) for t in times]
         if scan_keys is None:
             scan_keys = [int(round(t * 1000)) for t in times]     # ms labels
@@ -4000,7 +4222,17 @@ class Bouquet:
         for t, sk in zip(times, scan_keys):
             self.set_slice(time=t)
             self.config.generation.scan_key = sk
-            self.prepare_baseline()
+            try:
+                self.prepare_baseline()
+            except Exception as exc:
+                reason = self._record_refusal(exc)
+                if on_refusal == "raise":
+                    raise
+                self.baseline = None
+                results[sk] = dict(time=t, n_all=0, n_sel=0, l_i=float("nan"),
+                                   Ip=float("nan"),
+                                   refused=reason or f"{type(exc).__name__}: {exc}")
+                continue
             self.generate()
             self.filter()
             bl = self.baseline

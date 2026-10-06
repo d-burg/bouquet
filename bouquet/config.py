@@ -1142,11 +1142,50 @@ def resolve_structured_preset(gc, warn: bool = True, stacklevel: int = 3):
     return _record(key, "default" if by_default else "explicit", applied)
 
 
+#: the two word settings of ``FilterConfig.rms_max_mm`` (besides a number / None)
+BOUNDARY_CUT_WORDS = ("auto", "off")
+
+
+def check_boundary_cut_setting(value, name="rms_max_mm"):
+    """Validate a boundary-cut setting: ``"auto"``, ``"off"``, ``None`` (=
+    ``"off"``) or a finite real number (not a bool). Returns it unchanged."""
+    import math
+    import numbers
+    if value is None:
+        return value
+    if isinstance(value, str):
+        if value not in BOUNDARY_CUT_WORDS:
+            raise ValueError(f"{name} must be 'auto', 'off', None or a number of "
+                             f"mm, got {value!r}")
+        return value
+    if (isinstance(value, bool) or not isinstance(value, numbers.Real)
+            or not math.isfinite(float(value))):
+        raise ValueError(f"{name} must be 'auto', 'off', None or a finite number "
+                         f"of mm, got {value!r}")
+    return value
+
+
 @dataclass
 class FilterConfig:
     """Postprocessing selection of the machine-realizable subset."""
 
-    rms_max_mm: float = 5.0
+    #: LCFS boundary-deviation cut [mm rms] applied by ``Bouquet.filter()`` and
+    #: by the until-N in-loop verdict (the same number, by construction).
+    #:
+    #: * ``"auto"`` (default) resolves to the DEVICE's calibrated cut
+    #:   (:attr:`bouquet.devices.DeviceSpec.boundary_rms_max_mm`; 8.5 mm on
+    #:   DIII-D from its boundary-UQ study) or, with no device calibration, to
+    #:   the generic 5.0 mm (:data:`bouquet.devices.GENERIC_BOUNDARY_RMS_MM`);
+    #: * a number is an explicit cut and always wins;
+    #: * ``"off"`` disables the boundary cut (loop and filter alike);
+    #: * ``None`` is the historical spelling of ``"off"`` and keeps meaning
+    #:   "no boundary cut", so configs written that way behave as they did.
+    #:
+    #: The resolved value and its source (``"explicit"``, ``"device:<name>"``,
+    #: ``"generic"`` or ``"disabled"``) are printed once and stamped on the
+    #: archive (``boundary_rms_max_mm`` / ``boundary_cut_source``), so a band
+    #: built later can say which cut defined its population.
+    rms_max_mm: Union[float, str, None] = "auto"
     # Coil filter used by Bouquet.filter():
     #   "chi2"   -> measurement-referenced chi2/nu <= chi2_max, with the per-coil
     #               sigma resolved from `coil_sigma` below (default: the device's
@@ -1181,6 +1220,7 @@ class FilterConfig:
     inspec_VSC_max: float = 0.02
 
     def __post_init__(self):
+        check_boundary_cut_setting(self.rms_max_mm, "filtering.rms_max_mm")
         if self.coil_filter not in ("chi2", "legacy"):
             raise ValueError("filtering.coil_filter must be 'chi2' or 'legacy'")
         if self.coil_daq_era is not None and not isinstance(self.coil_daq_era, str):

@@ -390,6 +390,14 @@ def run_shard(config, worker_id, n_workers, *, n_equils_total, seed_base,
         if budget is not None:
             rec.update(shared_target=int(tgt), local_target=budget["local_target"],
                        attempt_cap=budget["cap"], total_cap=budget["total_cap"])
+            # the LCFS bound this worker's in-spec count was taken against,
+            # as generate() stamped it on the shard (the value the loop used)
+            from .utils import read_generation_provenance
+            try:
+                _gp = read_generation_provenance(rec["path"], scan_key=scan_key)
+            except OSError:
+                _gp = {}
+            rec.update({k: _gp.get(k) for k in _INLOOP_CUT_KEYS})
         # Stamp the worker record on the shard so the merge (either launcher)
         # can build the run manifest from the shards alone.
         _write_worker_record(rec["path"], scan_key, rec)
@@ -400,6 +408,16 @@ def run_shard(config, worker_id, n_workers, *, n_equils_total, seed_base,
             os.dup2(_saved[1], 2)
             os.close(_saved[0])
             os.close(_saved[1])
+
+
+#: the until-N loop's boundary cut, as stamped on each shard's scan group
+_INLOOP_CUT_KEYS = ("inspec_rms_max_mm", "inspec_max_max_mm", "inspec_cut_source")
+
+
+def _attr_value(v):
+    if isinstance(v, bytes):
+        return v.decode()
+    return v.item() if hasattr(v, "item") else v
 
 
 def _write_worker_record(shard_path, scan_key, rec):
@@ -433,7 +451,7 @@ def _read_worker_record(src, base_path):
 #  merge per-worker shards into one archive
 # --------------------------------------------------------------------------
 def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
-                   baseline_match_rtol=1e-6, config=None):
+                   baseline_match_rtol=1e-6, config=None, missing_workers=None):
     """Concatenate per-worker shard archives into ``{out_header}.h5``.
 
     Draw groups are renumbered to a contiguous running index; under schema v2
@@ -458,6 +476,14 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
     draws accepted against different l_i targets. A listed shard that does not
     exist on disk raises (missing workers must be handled by the caller, not
     dropped silently).
+
+    ``missing_workers`` (a list of worker ids the caller knowingly left out,
+    e.g. the CLI's ``--allow-missing``) marks the result as a PARTIAL merge:
+    the manifest and the scan group carry ``merge_partial_json`` and
+    ``n_requested_source`` says so, since the run-level request was not
+    delivered by the shards merged. Shards whose worker records disagree on
+    the generation mode or the shared target, or that counted against
+    different boundary cuts, are refused before anything is written.
     """
     import warnings
     import h5py
@@ -478,7 +504,21 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
             return None
         return float(a["l_i_target"]), float(a["Ip_target"])
 
+    def _inloop_cut(src):
+        parent = src[base_path] if base_path else src
+        a = parent.attrs
+        return tuple(_attr_value(a[k]) if k in a else None for k in _INLOOP_CUT_KEYS)
+
+    def _mode(src):
+        rec = _read_worker_record(src, base_path)
+        if rec is None:
+            return None
+        return (("until_n", rec.get("shared_target"), rec.get("total_cap"))
+                if "shared_target" in rec else ("fixed", None, None))
+
     targets = []
+    cuts = {}
+    modes = {}
     for sp in shard_paths:
         if sp is None:
             continue
@@ -489,6 +529,25 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
                 "or drop the path explicitly from shard_paths.")
         with h5py.File(sp, "r") as src:
             targets.append((sp, _baseline_targets(src)))
+            cuts[sp] = _inloop_cut(src)
+            modes[sp] = _mode(src)
+    _mode_set = {m for m in modes.values() if m is not None}
+    if len(_mode_set) > 1:
+        raise RuntimeError(
+            "shards come from different generation set-ups (mode, shared "
+            "target, total cap): "
+            + "; ".join(f"{os.path.basename(sp)}: {m}" for sp, m in modes.items())
+            + ". Nothing was merged.")
+    # every shard's until-N count must have been taken against ONE boundary
+    # cut (a device detected on one node and not on another would mix them)
+    _distinct = {c for c in cuts.values() if c != (None, None, None)}
+    if len(_distinct) > 1:
+        raise RuntimeError(
+            "shards counted their in-spec draws against different boundary "
+            "cuts (inspec_rms_max_mm, inspec_max_max_mm, inspec_cut_source): "
+            + "; ".join(f"{os.path.basename(sp)}: {c}" for sp, c in cuts.items())
+            + ". Nothing was merged -- set filtering.rms_max_mm (or "
+            "config.device) explicitly and re-run.")
     present = [(sp, t) for sp, t in targets if t is not None]
     unchecked = [sp for sp, t in targets if t is None]
     if unchecked and present:
@@ -516,6 +575,7 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
 
     offset = 0
     workers = []
+    n_unrecorded = 0            # shards with no worker record (draws still merged)
     with h5py.File(out_path, "a") as out:
         if bkey is not None and base_path not in out:
             out.create_group(base_path)
@@ -529,7 +589,21 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
                 _wrec = _read_worker_record(src, base_path)
                 if _wrec is not None:
                     _wrec["first_index"] = offset      # where its draws land
+                    # the shard's own generation provenance (attempt outcomes)
+                    _pa = (src[base_path] if base_path else src).attrs
+                    _raw = _pa.get("attempt_outcomes_json", None)
+                    if _raw is not None:
+                        try:
+                            _wrec["attempt_outcomes"] = json.loads(
+                                _raw.decode() if isinstance(_raw, bytes) else str(_raw))
+                        except (ValueError, TypeError):
+                            pass
+                    for _k in ("n_attempted", "bouquet_version", *_INLOOP_CUT_KEYS):
+                        if _k in _pa:
+                            _wrec[_k] = _attr_value(_pa[_k])
                     workers.append(_wrec)
+                else:
+                    n_unrecorded += 1
                 idxs = sorted(
                     int(k) for k in parent.keys()
                     if k not in ("_baseline", "scan")
@@ -553,23 +627,64 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
     # Run manifest: one record per worker (attempts, in-spec, seed, caps).
     # For a shared until-N run this is the replay key -- re-running with each
     # worker's n_attempts as a fixed allocation regenerates the archive.
+    partial = (dict(missing_workers=sorted(int(w) for w in missing_workers),
+                    merged_workers=sorted(int(w["worker_id"]) for w in workers))
+               if missing_workers else None)
     if workers:
         shared = [w for w in workers if "shared_target" in w]
         manifest = dict(
             n_workers=len(workers), n_draws=int(offset), workers=workers,
+            n_shards_without_record=int(n_unrecorded), partial=partial,
             until_n=(dict(target=shared[0]["shared_target"],
                           total_cap=shared[0].get("total_cap"),
                           n_inspec_recorded=sum(int(w.get("n_inspec", 0))
-                                                for w in shared))
+                                                for w in shared),
+                          # the one boundary cut every shard counted against
+                          # (only when the shards recorded it)
+                          **({k: v for k, v in zip(_INLOOP_CUT_KEYS, next(iter(_distinct)))}
+                             if _distinct else {}))
                      if shared else None))
         with h5py.File(out_path, "a") as out:
             gp = base_path if base_path else "/"
             out[gp].attrs["parallel_manifest_json"] = json.dumps(manifest)
+        # run-level generation provenance, aggregated over the shards (the
+        # same record a serial run stamps; attempts summed, outcomes keyed by
+        # worker since shard attempt indices overlap)
+        from .utils import stamp_generation_provenance
+        _n_att = [w.get("n_attempted") for w in workers]
+        _vers = sorted({str(w["bouquet_version"]) for w in workers
+                        if w.get("bouquet_version") is not None})
+        stamp_generation_provenance(
+            out_header, scan_key=scan_key,
+            n_requested=(int(shared[0]["shared_target"]) if shared
+                         else (int(config.generation.n_equils) if config is not None
+                               else None)),
+            n_requested_source=(("n_inspec_target" if shared else "n_equils")
+                                + (" (PARTIAL merge: workers "
+                                   f"{partial['missing_workers']} missing)"
+                                   if partial else "")),
+            generation_mode=("until_n" if shared else "fixed"),
+            # attempts are known only if EVERY merged shard recorded them
+            n_attempted=(int(sum(int(a) for a in _n_att))
+                         if n_unrecorded == 0 and all(a is not None for a in _n_att)
+                         else None),
+            merge_partial_json=partial,
+            n_stored=int(offset),
+            attempt_outcomes_json={str(w["worker_id"]): w.get("attempt_outcomes")
+                                   for w in workers},
+            bouquet_version=(",".join(_vers) if _vers else None),
+            **dict(zip(_INLOOP_CUT_KEYS, next(iter(_distinct), (None, None, None)))),
+        )
         if shared:
             _u = manifest["until_n"]
             print(f"[until-N] merged {offset} draws from {len(workers)} "
                   f"workers; {_u['n_inspec_recorded']} in-spec recorded "
                   f"against a shared target of {_u['target']}.")
+
+    if partial and not workers:            # no worker records, still partial
+        from .utils import stamp_generation_provenance
+        stamp_generation_provenance(out_header, scan_key=scan_key,
+                                    merge_partial_json=partial)
 
     if cleanup:
         for sp in shard_paths:
@@ -947,7 +1062,8 @@ def _cli(argv=None):
         shard_list = [p for i, p in sorted(paths.items()) if i not in missing]
         out_path, n = merge_archives(shard_list, b["out_header"],
                                      scan_key=b["scan_key"], cleanup=True,
-                                     config=b["config"])
+                                     config=b["config"],
+                                     missing_workers=missing or None)
         print(f"merged {n} draws -> {out_path}")
         if b.get("ledger"):
             _led = FileYieldLedger(b["ledger"])

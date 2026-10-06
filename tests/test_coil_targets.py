@@ -646,3 +646,53 @@ class TestCoilTargetsAreInTheSolveFrame:
             meas = measured_from_pf_active(self._write(tmp_path, dd, "d.json"), 2.0)
         assert meas.current_sign == 1.0 and meas["F1A"] == 20.0
         assert "no equilibrium ip" in meas.current_sign_origin
+
+    def test_default_factor_matches_the_reader_with_asynchronous_time_bases(
+            self, tmp_path):
+        """Copilot review on #67: the reader reads the orientation at the
+        equilibrium slice nearest the SELECTED core_profiles slice, not the
+        one nearest the requested time.  With asynchronous IDS time bases the
+        two differ; measured_from_pf_active must take the reader's slice, or
+        targets built with all defaults are refused against the baseline.
+
+        Here t = 1.4 s selects core_profiles at 1.0 s, whose nearest
+        equilibrium slice (1.0 s) has ip < 0, while the equilibrium slice
+        nearest 1.4 s (1.45 s) has ip > 0.
+        """
+        import copy
+        import warnings
+        from test_imas_p_fast_convention import _minimal_dd
+        from bouquet.coil_targets import measured_from_pf_active
+        from bouquet.config import ImasSource
+        from bouquet.io.imas import read_imas_baseline
+
+        dd = _minimal_dd()
+        cp = dd["core_profiles"]["profiles_1d"][0]
+        for k in ("j_tor", "j_total", "j_ohmic", "j_bootstrap"):
+            cp[k] = [-v for v in cp[k]]                 # a reversed discharge
+        ts0 = dd["equilibrium"]["time_slice"][0]
+        ts0["profiles_1d"]["j_tor"] = [-v for v in ts0["profiles_1d"]["j_tor"]]
+        ts0["global_quantities"]["ip"] = -1.0e6
+        ts1 = copy.deepcopy(ts0)
+        ts1["time"] = 1.45
+        ts1["global_quantities"]["ip"] = +1.0e6
+        dd["equilibrium"]["time"] = [1.0, 1.45]
+        dd["equilibrium"]["time_slice"] = [ts0, ts1]
+        dd["equilibrium"]["vacuum_toroidal_field"]["b0"] = [-2.0, -2.0]
+        dd["core_profiles"]["time"] = [1.0, 3.0]
+        dd["core_profiles"]["profiles_1d"].append(copy.deepcopy(cp))
+        dd["pf_active"] = {"coil": [{"name": "F1A", "current": {
+            "time": [1.0, 1.45], "data": [-20.0, -20.0]}}]}
+        p = self._write(tmp_path, dd, "async.json")
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            bl = read_imas_baseline(ImasSource(ids_path=p, time=1.4),
+                                    p_fast_reduction="trace")
+        meas = measured_from_pf_active(p, 1.4)
+        assert bl.source_current_sign == -1.0
+        assert meas.current_sign == bl.source_current_sign
+        assert meas["F1A"] == 20.0
+        # all-default targets pass the baseline orientation check
+        spec = coil_reg_from_measured(meas, **D3D)
+        self._install(spec, bl_sign=bl.source_current_sign)

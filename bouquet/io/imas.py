@@ -101,6 +101,30 @@ def _nearest_index(time_array, t: Optional[float], what: str) -> int:
     return int(np.argmin(np.abs(ta - t)))
 
 
+def orientation_slice_index(dd: dict, t: Optional[float]) -> int:
+    """Index of the ``equilibrium`` slice a dd's current orientation is read at.
+
+    That is the equilibrium slice nearest the TIME of the ``core_profiles``
+    slice nearest ``t`` -- the slice the currents are read from -- so the sign
+    belongs to those currents even when the two IDSs have different time bases
+    (with a common time base, as in FUSE output, it is simply the equilibrium
+    slice nearest ``t``).  A dd without a ``core_profiles`` time base falls back
+    to the equilibrium slice nearest ``t``.
+
+    The one selection rule shared by :func:`read_imas_baseline` and
+    :func:`bouquet.coil_targets.measured_from_pf_active`, so the factor the
+    reader applies to the plasma currents and the one applied to the measured
+    coil currents cannot drift apart.
+    """
+    eq = dd["equilibrium"]
+    cp_t = np.atleast_1d(np.asarray(
+        (dd.get("core_profiles") or {}).get("time", []), dtype=float))
+    if cp_t.size:
+        ic = _nearest_index(cp_t, t, "core_profiles")
+        t = float(cp_t[min(ic, cp_t.size - 1)])
+    return _nearest_index(eq["time"], t, "equilibrium")
+
+
 # ===========================================================================
 #  Fast-pressure storage convention
 #
@@ -784,13 +808,11 @@ def read_imas_baseline(
     # being combined, with its own negative sign, with a bootstrap recomputed
     # on the positive anchor.  +1.0 (bit-identical read) for ip >= 0.
     # The sign is read at the equilibrium slice nearest the core_profiles
-    # slice the currents come from (the two IDSs choose their slices
-    # independently; with a common time base, as in FUSE output, this is the
-    # slice ``ie`` above).  ImasSource.current_orientation = +1/-1 replaces
+    # slice the currents come from (orientation_slice_index; the two IDSs
+    # choose their slices independently; with a common time base, as in FUSE
+    # output, this is the slice ``ie`` above).  ImasSource.current_orientation = +1/-1 replaces
     # it; either way the currents are checked against it further down.
-    _cp_t = np.atleast_1d(np.asarray(cp_ids["time"], dtype=float))
-    ie_s = (_nearest_index(eq["time"], float(_cp_t[min(ic, _cp_t.size - 1)]),
-                           "equilibrium") if _cp_t.size else ie)
+    ie_s = orientation_slice_index(dd, T)
     ip_signed = float(eq["time_slice"][ie_s]["global_quantities"].get(
         "ip", gq["ip"]))
     _orient = parse_current_orientation(

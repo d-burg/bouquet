@@ -50,7 +50,7 @@ pinned to the LAB current at W0 = 100 would drive the coils toward the
 wrong-sign vertical and shaping field.  :func:`measured_from_pf_active`
 therefore multiplies every circuit current by the same orientation factor the
 IMAS reader applies to the plasma currents (``sign(equilibrium ip)`` of the
-same dd at the same time, or an explicit ``current_orientation``), and it is
+same dd at the same slice, or an explicit ``current_orientation``), and it is
 the ONLY place that factor is applied: :func:`coil_reg_from_measured` records
 it on each term (``"source_current_sign"``) without applying it again, and
 :meth:`bouquet.run.Bouquet._apply_coil_reg` refuses a term whose recorded
@@ -149,16 +149,21 @@ class MeasuredCoilCurrents(dict):
 
 
 def _dd_ip_at(dd, time_s):
-    """Signed equilibrium ip at the slice nearest *time_s*, or None."""
+    """Signed equilibrium ip at the slice the IMAS reader takes the current
+    orientation from (:func:`bouquet.io.imas.orientation_slice_index`: the
+    equilibrium slice nearest the selected ``core_profiles`` slice, or nearest
+    *time_s* when the dd has no ``core_profiles``), or None."""
+    from .io.imas import orientation_slice_index
     eq = dd.get("equilibrium") or {}
     ts = eq.get("time_slice") or []
     if not ts:
         return None
-    t = np.atleast_1d(np.asarray(eq.get("time", [time_s]), dtype=float))
-    i = int(np.argmin(np.abs(t - float(time_s)))) if t.size > 1 else 0
+    if "time" not in eq:
+        eq = dict(eq, time=[float(time_s)])
     try:
+        i = orientation_slice_index(dict(dd, equilibrium=eq), float(time_s))
         return float(ts[min(i, len(ts) - 1)]["global_quantities"]["ip"])
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, IndexError):
         return None
 
 
@@ -174,9 +179,11 @@ def measured_from_pf_active(dd_path: str, time_s: float,
 
     Every current is multiplied by the orientation factor (see the module
     docstring): with ``current_orientation="auto"`` (default) the sign of the
-    SAME dd's ``equilibrium`` ip at the slice nearest *time_s* -- exactly the
-    factor :func:`bouquet.io.imas.read_imas_baseline` applies to the plasma
-    currents -- or ``+1`` / ``-1`` given explicitly (use the same value as
+    SAME dd's ``equilibrium`` ip at the slice the reader reads it at (the one
+    nearest the ``core_profiles`` slice selected for *time_s*, see
+    :func:`bouquet.io.imas.orientation_slice_index`) -- exactly the factor
+    :func:`bouquet.io.imas.read_imas_baseline` applies to the plasma
+    currents, also when the IDS time bases differ -- or ``+1`` / ``-1`` given explicitly (use the same value as
     ``ImasSource.current_orientation`` when you set that).  A dd that carries
     no equilibrium ip cannot be oriented: the currents are taken as given
     (factor ``+1``) and a warning says so.  The factor and its origin are on

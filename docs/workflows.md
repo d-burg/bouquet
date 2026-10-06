@@ -13,6 +13,7 @@ controls it. See [`../README.md`](../README.md) for the short version and
 - [until-N in-spec draws](#until-n-in-spec-draws)
 - [Workflow presets and the guard](#workflow-presets-and-the-guard)
 - [Reading an archive back](#reading-an-archive-back)
+- [Error bars from an archive](#error-bars-from-an-archive)
 - [Exporting draws](#exporting-draws)
 - [Timeseries sweeps](#timeseries-sweeps)
 - [Process-parallel generation](#process-parallel-generation)
@@ -69,7 +70,7 @@ logic map with a `file:line` anchor on every node:
 | Baseline | `prepare()` / `reconstruct()` / `prepare_baseline()` | Resolves the baseline from `config.source`. `reconstruct()` is the g-file-path alias (`setup_solver()` + `prepare_baseline()`) and prints the reconstruction-fidelity summary; `prepare()` is the source-agnostic form. The IMAS path does a single forward solve instead of a reconstruction. |
 | Guard | `verify_sigma0_consistency()` | Optional but recommended: one bootstrap solve confirming the *draw* pipeline reproduces the *baseline* j_BS split at σ=0. See [physics-notes.md](physics-notes.md#the-0-consistency-guard). |
 | Draws | `generate(n=None)` | Draws `n` (default `GenerationConfig.n_equils`) perturbations, solves each, archives to `{header}.h5`. Returns the per-draw diagnostics list. With `generation.n_inspec_target` set, keeps drawing until that many pass the filters — see [until-N](#until-n-in-spec-draws). |
-| Selection | `filter(rms_max_mm=None, plot=False)` | Applies the coil-drift and boundary-RMS filters, writing non-destructive pass flags into the archive. Returns a summary dict. |
+| Selection | `filter(rms_max_mm=None, plot=False)` | Applies the coil-drift and boundary-RMS filters, writing non-destructive pass flags into the archive. `rms_max_mm=None` applies `filtering.rms_max_mm`; a number, `"auto"` or `"off"` overrides it for this call (announced and stamped). Returns a summary dict. |
 | Export | `export()` / `export_bundle()` / `export_ids()` | Pruned `{header}_selected.h5`, a per-draw file bundle, or one IMAS/OMAS IDS per draw. |
 | All of it | `run()` | `setup_solver → prepare_baseline → generate → filter → export`, idempotent on the early stages. |
 
@@ -227,7 +228,7 @@ as an enormous sigma.
 
 | Knob | Default | Meaning |
 |---|---|---|
-| `rms_max_mm` | `5.0` | Boundary-RMS acceptance threshold |
+| `rms_max_mm` | `"auto"` | Boundary-RMS acceptance threshold [mm]. `"auto"` → the device's calibrated cut (DIII-D: **8.5 mm**, looser than the generic 5.0 mm), else the generic **5.0 mm**; a number is an explicit cut; `"off"` disables it (`None` = `"off"`, its historical meaning). `b.boundary_cut()` returns the resolved `(mm, source)`; the cut is printed once and stamped on the archive |
 | `coil_filter` | `"chi2"` | `"chi2"` = measurement-referenced coil filter; `"legacy"` = the ±`inspec_*` band |
 | `chi2_max`, `z_max` | `None` | `None` → the device's calibrated thresholds (DIII-D: χ²/ν ≤ 6.1, worst-coil \|z\| ≤ 6.3), else the generic 4 / 5 |
 | `coil_sigma` | `None` | Per-coil σ override (`{"floor","fraction"}`, `{coil: σ}`, callable, or a named device model); `None` → the device model |
@@ -335,7 +336,15 @@ Points worth knowing:
   thresholds in `config.filtering` at generation time. Passing a different
   bound to `filter(rms_max_mm=…)` later re-cuts the archive at the new
   criterion, and the selected count moves accordingly — that is the filters
-  working as designed, not the loop having miscounted.
+  working as designed, not the loop having miscounted. The loop's LCFS bound
+  is archived with the generation counts (`inspec_rms_max_mm` /
+  `inspec_cut_source`), so `filter()` warns when it cuts at a different one,
+  and a band's provenance carries both.
+- **The boundary cut is announced once per run, on screen.** `generate()`
+  resolves `filtering.rms_max_mm` before the solver output is captured and
+  prints `[boundary cut] …` with its value and source (`explicit`,
+  `device:<name>`, `generic` or `disabled`); an explicit `filter(rms_max_mm=…)`
+  argument is announced too.
 - **`run_slices` chases the target per slice.** Each slice gets its own N
   in-spec draws, which is usually what a timeseries sweep wants; budget the
   wall-clock as N-per-slice divided by the worst slice's yield.
@@ -420,6 +429,54 @@ Pre-v2 archives (written before 2026-07) are detected by the missing
 `load_equilibrium` raises a clear error. Regenerate them with the current
 package.
 
+## Error bars from an archive
+
+One recipe for every across-draw band (`bouquet.stats`): the population is the
+draws the stamped filters mark `selected` (an unfiltered archive raises unless
+`require_filter=False`), then per quantity status `"ok"`, `regular` and a finite
+value -- one number per draw (a one-element array counts as one; an
+array-valued quantity raises `NonScalarQuantityError` instead of vanishing, so
+band a profile as one named quantity per point); the statistic is the median with p16/p84 (`np.percentile`,
+`method="linear"`), min and max. The baseline is overlaid, never the centre.
+
+```python
+ar = bq.BouquetArchive("run.h5"); key = ar.scan_keys[0]
+sc = bq.draw_scalars(ar, key)             # q0, q95, rho(q=2/1), rho(q=3/1), l_i, beta_N, <P>
+def my_dprime(view):                      # user code; bouquet never sees the external code
+    res = run_my_code(view.eqdsk_bytes)   # same accessor on draws and on the baseline
+    return {"dp21": {"value": res.dp21, "status": res.status, "regular": res.has_q2}}
+band = bq.draw_band(ar, key, my_dprime, evaluator_meta={"code": "...", "grid": "..."})
+r = band["dp21"]; print(r.median, r.p16, r.p84, r.n_used, r.n_stored, r.n_requested, r.below_floor)
+t = bq.draw_bands([(ar, k) for k in ar.scan_keys], my_dprime)
+bq.plot_band(t, "dp21"); t.to_csv("dp21_bands.csv")
+```
+
+`evaluate` may also be a mapping `{draw: result}` (baseline under
+`"_baseline"`) to ingest results computed elsewhere. Every record carries the
+counts at each stage (`n_requested` … `n_used`), every dropped draw with its
+reason (`not_selected`, `user:<reason>`, `status:<code>`, `irregular:<label>`,
+`non_finite`), and a `provenance` block (filters, thresholds, versions,
+limitations). Below `min_n=15` a record is flagged `below_floor` (shown hollow);
+below `hard_min=5` p16/p84 are NaN. If half or fewer of the ok draws are regular
+the record is `gated` (`show=False`); there is no magnitude cut. Whenever any ok
+draw is irregular the band is conditional on the regular outcome: the record
+carries `n_irregular` and the irregular draws' values (`irregular_values`), a
+limitation line says so, and `plot_band` annotates `k/n reg.`. `regular` must
+be a real boolean (`"False"` or NaN raises `TypeError`). Fields an older
+archive does not record come back `None` or `"unrecorded"`. A requested key or
+quantity is never silently dropped: a key where no draw reaches the statistic
+(for example, the filters rejected every draw) comes back as `status="empty"`
+with `n_used=0`, no band and an `empty_reason` (`all_draws_rejected`,
+`none_evaluated`, `no_finite_values`, ...); a refused slice as `"refused"`; a
+missing archive or key as `"no_archive"`; a file that exists but cannot be
+opened (locked, still being written, corrupt) as `"unreadable"`. For
+`draw_scalars` q0/q95 the source of every used draw is in
+`provenance["q_source_by_draw"]`; a statistic mixing `eq_fsa` and g-file
+values, or a g-file baseline overlaid on `eq_fsa` draws (axis q0 vs
+innermost-surface q0), is stated in the limitations and marks
+`baseline_status` `"…:source_mismatch"`. `ScanView.spread()` remains the
+quick-look mean/std summary.
+
 ## Exporting draws
 
 Two targets for handing the ensemble to codes that don't read the HDF5
@@ -475,6 +532,16 @@ metrics = b.run_slices(times=[2.10, 2.20, 2.30],
 
 `scan_keys` defaults to the time in ms. Reconstruction sources have no time
 axis — build one `Bouquet` per g-file instead.
+
+A slice whose `prepare_baseline` raises (a closure refusal, a failed gate) is
+written into the archive as **refused** (`bq.write_refused_scan`, with the
+exception as `refused_reason`), so `draw_bands` reports it as
+`status="refused"` rather than a gap. By default the sweep then re-raises, as
+before; `run_slices(..., on_refusal="record")` records it in the summary
+(`refused=<reason>`) and moves on to the next slice. `Bouquet.run()` records a
+refusal the same way before re-raising. A later baseline or draw written into
+the same scan supersedes the refusal (kept as `refused_reason_superseded`).
+Parallel shards do not write refused records (a refused worker raises).
 
 ## Process-parallel generation
 

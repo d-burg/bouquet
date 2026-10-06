@@ -607,3 +607,38 @@ def test_a_failing_record_cannot_escape_either_call_site(monkeypatch):
     ach = ns["_cph"]["achieved"]["total"]
     assert ach["evaluated"] is False and "no equilibrium" in ach["reason"]
     assert ns["_cph"]["input"]["total"]["evaluated"] is True
+
+
+# The positional field order of ``Baseline`` before the hollowness record was
+# added.  ``Baseline`` is a public dataclass exported from ``bouquet`` and is
+# not keyword-only, so a new field must be appended after all of these: a
+# mid-list insertion would silently shift every later positional argument
+# (e.g. an auxiliary-profile dict landing in ``core_pressure_hollow``).
+_BASELINE_FIELDS_BEFORE_HOLLOW_RECORD = (
+    "psi_N", "j_phi", "j_inductive", "j_BS", "psi_N_kinetic", "ne", "te",
+    "ni", "ti", "Zeff", "Ip_target", "l_i_target", "provenance", "l_i_scale",
+    "j_NBI", "j_RF", "p_fast", "p_fast_meta", "bs_scale", "ohm_scale",
+    "ip_closure", "sawtooth", "jBS_diff", "p_equilibrium", "p_diff", "Z_imp",
+    "z_fast", "jphi_diff", "eqdsk_bytes", "pfile_bytes", "recon",
+    "li_metrics", "aux", "reconstruction_metrics", "reconstruction_log",
+)
+
+
+def test_baseline_positional_slots_unchanged_by_hollow_record():
+    """Every pre-existing field keeps its positional slot; the new record is
+    appended and defaults to None when callers pass the old argument list."""
+    import dataclasses
+
+    from bouquet import Baseline
+
+    names = [f.name for f in dataclasses.fields(Baseline)]
+    n_old = len(_BASELINE_FIELDS_BEFORE_HOLLOW_RECORD)
+    assert tuple(names[:n_old]) == _BASELINE_FIELDS_BEFORE_HOLLOW_RECORD
+    assert names[n_old:] == ["core_pressure_hollow"]
+
+    # one distinct sentinel per pre-existing slot, passed positionally
+    sentinels = [object() for _ in _BASELINE_FIELDS_BEFORE_HOLLOW_RECORD]
+    b = Baseline(*sentinels)
+    for name, val in zip(_BASELINE_FIELDS_BEFORE_HOLLOW_RECORD, sentinels):
+        assert getattr(b, name) is val, name
+    assert b.core_pressure_hollow is None

@@ -149,16 +149,6 @@ class Baseline:
     # the TokaMaker li_1; the IDS values are kept here for comparison/plots.
     li_metrics: Optional[dict] = None
 
-    # Core-pressure hollowness health record (see
-    # physics.core_pressure_hollow_record): how far the core pressure rises
-    # above its innermost-node value, and over what radial extent, measured on
-    # the INPUT pressure (total, and thermal species only) and on the ACHIEVED
-    # pressure of the converged equilibrium.  Descriptive and report-only:
-    # nothing reads it back, so no profile, solve, filter decision, in-spec or
-    # until-N count depends on it.  Also carried inside ``li_metrics`` so it
-    # reaches the archive.  None when the source path did not evaluate it.
-    core_pressure_hollow: Optional[dict] = None
-
     # auxiliary source-provided profiles available to the perturbation
     # switchboard -- rotation ('omega_tor', 'e_r'), transport ('chi_e',
     # 'chi_i') and impurity ('zeff') channels --
@@ -173,6 +163,19 @@ class Baseline:
     # full captured solver chatter from the reconstruction (when verbose=False),
     # kept available for debugging without cluttering the notebook output.
     reconstruction_log: Optional[str] = None
+
+    # Appended LAST on purpose: Baseline is a public, positionally
+    # constructible dataclass, so a new field must not shift the slots of
+    # the pre-existing ones (aux, reconstruction_metrics, ...).
+    # Core-pressure hollowness health record (see
+    # physics.core_pressure_hollow_record): how far the core pressure rises
+    # above its innermost-node value, and over what radial extent, measured on
+    # the INPUT pressure (total, and thermal species only) and on the ACHIEVED
+    # pressure of the converged equilibrium.  Descriptive and report-only:
+    # nothing reads it back, so no profile, solve, filter decision, in-spec or
+    # until-N count depends on it.  Also carried inside ``li_metrics`` so it
+    # reaches the archive.  None when the source path did not evaluate it.
+    core_pressure_hollow: Optional[dict] = None
 
     def __repr__(self):
         # concise summary -- the default dataclass repr dumps every numpy array,

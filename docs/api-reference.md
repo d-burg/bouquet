@@ -85,6 +85,7 @@ Details: [io-and-plotting.md](io-and-plotting.md).
 | `isotropize_fast_pressure()` | Anisotropic fast-pressure reduction for the isotropic GS solve (`method` is **required** — the two dd conventions differ by 3×) |
 | `detect_p_fast_convention()` / `resolve_p_fast_reduction()` | Which fast-pressure storage convention a dd was written in, and the reduction rule that follows (`bouquet.io.imas`) |
 | `fast_pressure_residual()` / `infer_fast_pressure()` | Fast-ion pressure accounting |
+| `core_pressure_health()` / `core_pressure_hollow_record()` | Report-only description of core-pressure hollowness (rise above the axis value, its extent); gates nothing |
 | `radial_field_from_impurity_force_balance()` | Impurity radial-force-balance E_r with propagated uncertainty |
 | `Hmode_profiles()` | Synthetic H-mode profile generator |
 

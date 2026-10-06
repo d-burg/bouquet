@@ -186,6 +186,19 @@ class Baseline:
     # kept available for debugging without cluttering the notebook output.
     reconstruction_log: Optional[str] = None
 
+    # Appended LAST on purpose: Baseline is a public, positionally
+    # constructible dataclass, so a new field must not shift the slots of
+    # the pre-existing ones (aux, reconstruction_metrics, ...).
+    # Core-pressure hollowness health record (see
+    # physics.core_pressure_hollow_record): how far the core pressure rises
+    # above its innermost-node value, and over what radial extent, measured on
+    # the INPUT pressure (total, and thermal species only) and on the ACHIEVED
+    # pressure of the converged equilibrium.  Descriptive and report-only:
+    # nothing reads it back, so no profile, solve, filter decision, in-spec or
+    # until-N count depends on it.  Also carried inside ``li_metrics`` so it
+    # reaches the archive.  None when the source path did not evaluate it.
+    core_pressure_hollow: Optional[dict] = None
+
     def __repr__(self):
         # concise summary -- the default dataclass repr dumps every numpy array,
         # which floods a notebook when `reconstruct()`/`prepare_baseline()` is the
@@ -1003,6 +1016,10 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     # Unchanged contract: the returned field is on the KINETIC grid.
     p_fast = p_fast_kin
 
+    # Report-only core-pressure hollowness record built inside the
+    # reconstruction (see physics.core_pressure_hollow_record).
+    _cph_recon = (result.get("quality") or {}).get("core_pressure_hollow")
+
     return Baseline(
         psi_N=psi_N,
         j_phi=j_phi,
@@ -1041,6 +1058,13 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
         recon=result,
         reconstruction_metrics=recon_metrics,
         reconstruction_log=_cap["text"] or None,
+        # Lifted out of the reconstruction's own quality block so both source
+        # paths expose the record under one name, and carried in li_metrics so
+        # store_baseline_profiles archives it (report-only; see
+        # physics.core_pressure_hollow_record).
+        core_pressure_hollow=_cph_recon,
+        li_metrics=({"core_pressure_hollow": _cph_recon}
+                    if _cph_recon else None),
     )
 
 

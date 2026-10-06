@@ -61,8 +61,10 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │              [li_metrics_json, closure_limited]   baseline provenance (absent
     │              from older archives):
     │              Baseline.li_metrics as JSON, incl. the ip_closure health
-    │              record on hybrid baselines; load_baseline_profiles() decodes
-    │              it to li_metrics / ip_closure / closure_limited
+    │              record on hybrid baselines and the report-only
+    │              core_pressure_hollow record; load_baseline_profiles()
+    │              decodes it to li_metrics / ip_closure / closure_limited /
+    │              core_pressure_hollow (each only when present)
     └── <count>/                       one group per accepted draw
         │                              (integer; gaps = rejected draws)
         ├── eqdsk, [pfile]             raw bytes, fixed names

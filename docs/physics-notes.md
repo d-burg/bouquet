@@ -18,6 +18,7 @@ covers the guarantees a user should know about and the knobs that change them.
 - [Z_eff-primary density scheme](#z_eff-primary-density-scheme)
 - [Corrective j_phi iteration](#corrective-j_phi-iteration)
 - [The structured closure and its l_i constraint](#the-structured-closure-and-its-l_i-constraint)
+- [Core-pressure hollowness record](#core-pressure-hollowness-record)
 
 ---
 
@@ -800,3 +801,54 @@ idempotent, and it records `structured_preset_in_force`,
 `structured_preset_source` and the fields it filled onto the config and into the
 closure record (`structured_preset`, `structured_preset_source`,
 `structured_preset_filled` in `Baseline.ip_closure`).
+
+---
+
+## Core-pressure hollowness record
+
+Every baseline carries `core_pressure_hollow`, a **report-only** description
+of the core shape of its pressure profile (`physics.core_pressure_hollow_record`
+on top of `physics.core_pressure_health`). It sits on
+`Baseline.core_pressure_hollow` and inside `Baseline.li_metrics`, so it is
+archived in `li_metrics_json` next to the `ip_closure` closure-health record,
+and `load_baseline_profiles` lifts it to top level. Archives written before it
+existed read as before, without the key. Draws do not carry it: the per-draw
+pressure is archived, and the same function can be applied to it offline.
+
+It describes what the profile does, not why. A pressure that rises off-axis can
+be physical (off-axis heating, an off-axis fast-ion population, impurity
+accumulation) or can come from how the inputs were fitted or composed; the
+record does not distinguish them. Nothing in bouquet reads it back: no
+profile, solve, filter decision, in-spec count or until-N count depends on it.
+
+**What is measured.** The innermost grid node stands in for the axis
+(`p_ref` at `psi_N_ref`). Over the core window `psi_N ≤ 0.5`:
+
+| field | meaning |
+|---|---|
+| `rise_frac` | `(max p − p_ref) / p_ref`: how far the core maximum exceeds the axis value, as a fraction of it. 0 when the axis is the core maximum |
+| `psi_N_of_max`, `rise_extent` | where the maximum sits, and `psi_N_of_max − psi_N_ref`, the radial distance over which the pressure climbs to it |
+| `positive_gradient_extent`, `positive_gradient_psi_N_max` | the summed psi_N width of the core intervals whose secant slope is positive, and the outer edge of the outermost one. Counts every positive secant, including grid-scale noise |
+| `component_shares` | each additive component's share of the total's positive core rise (they add to 1). Descriptive only |
+| `is_hollow` | `rise_frac > 0.01` — a convenience boolean |
+
+**Where it is evaluated.** `input.total` is the pressure handed to the
+solver, including fast ions and, on the IMAS path, the anchor offset.
+`input.thermal` is the thermal species alone (electrons + main ions +
+impurity). Note that this differs from the archived `pressure_thermal`, which
+holds electrons + main ions only. `achieved.total` is the pressure the converged
+equilibrium carries, read back on the same grid. `achieved.thermal` is always
+"not evaluated", because the solver holds one total pressure.
+
+**The threshold is a reporting choice, not an acceptance criterion.** The 1 %
+bar (`CORE_HOLLOW_RISE_FRAC`) sits an order of magnitude above 1e-3-level
+grid-scale wiggles, so a single noisy node does not set `is_hollow`. It is
+stored in the record's `definition` block, and the numbers it is derived from
+are always stored with it, so a reader can apply a different bar.
+
+**Not evaluated is never "not hollow".** Non-finite values, a grid that is not
+strictly monotone, fewer than 3 core nodes, a non-positive axis pressure, or an
+innermost node beyond `psi_N = 0.05` give `evaluated: False`, `is_hollow: None`
+and a `reason`. A failure while building the record is recorded, never raised.
+When an evaluated total is hollow, a `CorePressureHollowWarning` is emitted
+once. It says that nothing was modified.

@@ -837,3 +837,333 @@ def radial_field_from_cer(psi_N, n_carbon, t_carbon, omega_tor, v_pol,
         B_phi, Z_imp=Z_C, sigma_n_imp=sigma_n_carbon, sigma_t_imp=sigma_t_carbon,
         sigma_omega_tor=sigma_omega_tor, sigma_v_pol=sigma_v_pol)
 
+
+
+# =====================================================================
+#  Core-pressure hollowness: a report-only health record
+# =====================================================================
+#
+# The record DESCRIBES the core shape of a pressure profile.  It says whether,
+# and by how much, the pressure rises above its value at the innermost grid
+# node inside a stated core window.  It does not say why: a hollow core can be
+# physical (off-axis heating, an off-axis fast-ion population, impurity
+# accumulation) or can come from how the inputs were fitted or composed.
+# Nothing in bouquet reads it back: no profile, solve, filter decision,
+# in-spec count or until-N count depends on it.
+#
+# The recorded NUMBERS are the result.  ``is_hollow`` is a convenience boolean
+# derived from them by a reporting threshold; that threshold is a choice about
+# when to call a rise worth mentioning, not an acceptance criterion.
+
+#: Outer edge of the core window, in psi_N.  The maximum is searched, and the
+#: positive-gradient intervals are counted, over nodes with psi_N <= this.
+CORE_PSI_N = 0.5
+
+#: Reporting threshold on ``rise_frac`` for the ``is_hollow`` boolean.
+#: ``is_hollow`` is True when the core maximum exceeds the innermost-node
+#: value by MORE than 1 % of that value.  Chosen an order of magnitude above
+#: 1e-3-level grid-scale noise and interpolation wiggles, so a single noisy
+#: node does not set it.  It gates nothing -- it is a reporting choice, not an
+#: acceptance criterion -- and the numbers it is derived from are always
+#: recorded next to it, so a reader can apply any other threshold.
+CORE_HOLLOW_RISE_FRAC = 0.01
+
+#: The innermost grid node stands in for the magnetic axis.  If it lies
+#: further out than this in psi_N, the record is "not evaluated": a rise that
+#: happens inside the first node would be invisible, so a "not hollow" answer
+#: could be false.
+CORE_HOLLOW_MAX_REF_PSI_N = 0.05
+
+#: Minimum number of grid nodes inside the core window for the record to be
+#: evaluated.
+CORE_HOLLOW_MIN_CORE_NODES = 3
+
+#: The components summed into the THERMAL-only profile (all thermal species:
+#: electrons, main ions, the impurity).  Fast-ion pressure and any anchor
+#: offset are excluded.  Note this differs from the archived
+#: ``pressure_thermal`` dataset, which holds electrons + main ions only.
+THERMAL_PRESSURE_COMPONENTS = ("electron_thermal", "ion_thermal", "impurity")
+
+
+class CorePressureHollowWarning(UserWarning):
+    """Report-only notice from :func:`core_pressure_hollow_record`.
+
+    Emitted when a total pressure profile rises above its innermost-node value
+    by more than the reporting threshold inside the core window.  It changes
+    nothing: the profile is used exactly as it was built, and nothing is
+    filtered or rejected.
+    """
+
+
+def _hollow_not_evaluated(reason, **extra):
+    rec = {
+        "evaluated": False,
+        "reason": str(reason),
+        "is_hollow": None,
+        "rise_frac": None,
+        "p_ref": None,
+        "psi_N_ref": None,
+        "p_core_max": None,
+        "psi_N_of_max": None,
+        "rise_extent": None,
+        "positive_gradient_extent": None,
+        "positive_gradient_psi_N_max": None,
+        "n_core_nodes": None,
+        "component_shares": None,
+    }
+    rec.update(extra)
+    return rec
+
+
+def core_pressure_health(psi_N, pressure, components=None,
+                         psi_N_core=CORE_PSI_N,
+                         rise_threshold=CORE_HOLLOW_RISE_FRAC,
+                         max_ref_psi_N=CORE_HOLLOW_MAX_REF_PSI_N):
+    r"""Measure how far a pressure profile rises above its axis value in the core.
+
+    Descriptive only.  The function never modifies its inputs, never raises on
+    bad data (it returns a "not evaluated" record with a reason instead) and
+    its result is read by nothing else in bouquet.
+
+    Definition
+    ----------
+    The innermost grid node stands in for the axis: ``p_ref = p[i0]`` at
+    ``psi_N_ref = psi_N[i0]`` (``i0`` is the node with the smallest psi_N; a
+    descending grid is read in reverse, which reorders nothing in the caller's
+    arrays).  Over the core window ``psi_N <= psi_N_core``:
+
+    * ``rise_frac = (p_core_max - p_ref) / p_ref`` -- how far the core
+      maximum exceeds the axis value, as a fraction of the axis value.
+      Zero when the axis node is the core maximum.
+    * ``psi_N_of_max`` -- where that maximum sits; ``rise_extent =
+      psi_N_of_max - psi_N_ref`` is the radial distance over which the
+      pressure climbs to it.
+    * ``positive_gradient_extent`` -- the summed psi_N width of the core
+      intervals (both nodes inside the window) whose secant slope
+      ``Delta p / Delta psi_N`` is positive, and
+      ``positive_gradient_psi_N_max`` the outer edge of the outermost one.
+      This counts every positive secant, including ones produced by
+      grid-scale noise; ``rise_frac`` and ``rise_extent`` are the
+      noise-robust pair.
+    * ``component_shares`` (when *components* is given) -- for each named
+      additive component, ``sum_W Delta p_c / sum_W Delta p``, where ``W``
+      is the set of core intervals on which the TOTAL secant is positive.
+      The shares add to 1 when the components add to *pressure*.  They
+      describe how the rise is made up; they do not attribute a cause.
+
+    ``is_hollow = rise_frac > rise_threshold``.  This boolean is a reporting
+    convenience: the threshold (default :data:`CORE_HOLLOW_RISE_FRAC`, 1 %)
+    is a choice about what to call a rise, NOT an acceptance criterion, and
+    nothing is gated, filtered or modified on it.
+
+    Not evaluated (``evaluated`` False, ``is_hollow`` None, ``reason`` set)
+    when: the arrays are not matching 1-D arrays of at least 3 points; any
+    grid or pressure value is non-finite; the grid is not strictly monotone;
+    fewer than :data:`CORE_HOLLOW_MIN_CORE_NODES` nodes lie in the core
+    window; the innermost node lies beyond ``max_ref_psi_N``; or ``p_ref`` is
+    not positive.  A record that could not be evaluated never reads as
+    "not hollow".
+
+    Parameters
+    ----------
+    psi_N : array_like
+        Normalized poloidal flux of the pressure samples.
+    pressure : array_like
+        Pressure [Pa] on *psi_N*.
+    components : dict, optional
+        Named additive contributions to *pressure* on the same grid.
+    psi_N_core : float, optional
+        Outer edge of the core window (default :data:`CORE_PSI_N`).
+    rise_threshold : float, optional
+        Reporting threshold for ``is_hollow`` (default 0.01).
+    max_ref_psi_N : float, optional
+        Furthest psi_N the innermost node may sit at and still stand for the
+        axis (default :data:`CORE_HOLLOW_MAX_REF_PSI_N`).
+
+    Returns
+    -------
+    dict
+        JSON-serializable record (plain Python floats, ints, bools, None).
+    """
+    try:
+        x = np.array(psi_N, dtype=float, copy=True)
+        p = np.array(pressure, dtype=float, copy=True)
+    except (TypeError, ValueError) as exc:
+        return _hollow_not_evaluated(f"inputs are not numeric arrays ({exc})")
+    if x.ndim != 1 or p.shape != x.shape or x.size < 3:
+        return _hollow_not_evaluated(
+            f"need matching 1-D arrays of at least 3 points (got psi_N "
+            f"{x.shape}, pressure {p.shape})")
+    n_bad = int(np.count_nonzero(~np.isfinite(x)) + np.count_nonzero(~np.isfinite(p)))
+    if n_bad:
+        return _hollow_not_evaluated(
+            f"{n_bad} non-finite value(s) in psi_N or pressure")
+    dx = np.diff(x)
+    if np.all(dx < 0.0):
+        order = slice(None, None, -1)
+    elif np.all(dx > 0.0):
+        order = slice(None)
+    else:
+        return _hollow_not_evaluated("psi_N is not strictly monotone")
+    x = x[order]
+    p = p[order]
+
+    psi_N_ref = float(x[0])
+    if psi_N_ref > float(max_ref_psi_N):
+        return _hollow_not_evaluated(
+            f"innermost node at psi_N={psi_N_ref:.4g} is beyond "
+            f"{float(max_ref_psi_N):g}, so it cannot stand for the axis value",
+            psi_N_ref=psi_N_ref)
+    core = x <= float(psi_N_core)
+    n_core = int(np.count_nonzero(core))
+    if n_core < CORE_HOLLOW_MIN_CORE_NODES:
+        return _hollow_not_evaluated(
+            f"only {n_core} node(s) inside psi_N <= {float(psi_N_core):g} "
+            f"(need {CORE_HOLLOW_MIN_CORE_NODES})",
+            psi_N_ref=psi_N_ref, n_core_nodes=n_core)
+    p_ref = float(p[0])
+    if not p_ref > 0.0:
+        return _hollow_not_evaluated(
+            f"pressure at the innermost node is {p_ref:.6g}, not positive; "
+            f"a relative rise is undefined",
+            psi_N_ref=psi_N_ref, p_ref=p_ref, n_core_nodes=n_core)
+
+    k_max = int(np.argmax(p[core]))          # first occurrence on ties
+    p_core_max = float(p[core][k_max])
+    psi_N_of_max = float(x[core][k_max])
+    rise_frac = (p_core_max - p_ref) / p_ref
+
+    dp = np.diff(p)
+    in_core = core[:-1] & core[1:]
+    positive = in_core & (dp > 0.0)          # dx > 0 after reordering
+    pos_extent = float(np.sum(np.diff(x)[positive])) if np.any(positive) else 0.0
+    pos_edge = float(np.max(x[1:][positive])) if np.any(positive) else None
+
+    shares = None
+    if components:
+        total_rise = float(np.sum(dp[positive])) if np.any(positive) else 0.0
+        shares = {}
+        for name, arr in components.items():
+            try:
+                c = np.array(arr, dtype=float, copy=True)
+            except (TypeError, ValueError):
+                shares[str(name)] = None
+                continue
+            if c.shape != p.shape or not np.all(np.isfinite(c)) or total_rise <= 0.0:
+                shares[str(name)] = None
+                continue
+            c = c[order]
+            shares[str(name)] = float(np.sum(np.diff(c)[positive]) / total_rise)
+
+    return {
+        "evaluated": True,
+        "reason": None,
+        "is_hollow": bool(rise_frac > float(rise_threshold)),
+        "rise_frac": float(rise_frac),
+        "p_ref": p_ref,
+        "psi_N_ref": psi_N_ref,
+        "p_core_max": p_core_max,
+        "psi_N_of_max": psi_N_of_max,
+        "rise_extent": float(psi_N_of_max - psi_N_ref),
+        "positive_gradient_extent": pos_extent,
+        "positive_gradient_psi_N_max": pos_edge,
+        "n_core_nodes": n_core,
+        "component_shares": shares,
+    }
+
+
+def core_pressure_hollow_definition(psi_N_core=CORE_PSI_N,
+                                    rise_threshold=CORE_HOLLOW_RISE_FRAC,
+                                    max_ref_psi_N=CORE_HOLLOW_MAX_REF_PSI_N):
+    """The definition block stored with every ``core_pressure_hollow`` record."""
+    return {
+        "measure": ("rise_frac = (max p over psi_N <= psi_N_core - p_ref) / "
+                    "p_ref, p_ref = pressure at the innermost grid node"),
+        "psi_N_core": float(psi_N_core),
+        "rise_threshold": float(rise_threshold),
+        "max_ref_psi_N": float(max_ref_psi_N),
+        "min_core_nodes": int(CORE_HOLLOW_MIN_CORE_NODES),
+        "thermal_components": list(THERMAL_PRESSURE_COMPONENTS),
+        "kind": ("report-only: describes the observed profile and gates "
+                 "nothing; rise_threshold only sets the is_hollow "
+                 "convenience boolean"),
+    }
+
+
+def core_pressure_hollow_record(psi_N, input_total, input_components=None,
+                                achieved_total=None, achieved_psi_N=None,
+                                achieved_reason=None, warn=True, **kw):
+    """Assemble the per-slice ``core_pressure_hollow`` health record.
+
+    Evaluates :func:`core_pressure_health` on
+
+    * ``input.total`` -- the pressure handed to the solver;
+    * ``input.thermal`` -- the sum of the :data:`THERMAL_PRESSURE_COMPONENTS`
+      present in *input_components* (electrons + main ions + impurity; fast
+      ions and any anchor offset excluded), when a component breakdown with
+      at least the electron and main-ion terms is supplied;
+    * ``achieved.total`` -- the pressure the converged equilibrium carries
+      (*achieved_total* on *achieved_psi_N*, default *psi_N*);
+    * ``achieved.thermal`` -- always "not evaluated": the converged
+      equilibrium carries one total pressure, so its thermal part cannot be
+      separated.
+
+    Report-only: the inputs are not modified and nothing downstream reads the
+    record.  With *warn* True a :class:`CorePressureHollowWarning` is emitted
+    once if an evaluated TOTAL profile has ``is_hollow`` True.  Extra keyword
+    arguments go to :func:`core_pressure_health`.
+    """
+    import warnings
+
+    rec = {"definition": core_pressure_hollow_definition(
+        **{k: v for k, v in kw.items()
+           if k in ("psi_N_core", "rise_threshold", "max_ref_psi_N")})}
+
+    comps = dict(input_components or {})
+    total = core_pressure_health(psi_N, input_total, components=comps or None, **kw)
+    total["composition"] = sorted(comps) if comps else None
+    th_keys = [k for k in THERMAL_PRESSURE_COMPONENTS if k in comps]
+    if "electron_thermal" in th_keys and "ion_thermal" in th_keys:
+        try:
+            th = sum(np.asarray(comps[k], dtype=float) for k in th_keys)
+            thermal = core_pressure_health(
+                psi_N, th, components={k: comps[k] for k in th_keys}, **kw)
+        except Exception as exc:              # never let a report break a run
+            thermal = _hollow_not_evaluated(f"thermal sum failed ({exc})")
+        thermal["composition"] = th_keys
+    else:
+        thermal = _hollow_not_evaluated(
+            "no electron + main-ion component breakdown supplied")
+    rec["input"] = {"total": total, "thermal": thermal}
+
+    if achieved_total is not None:
+        ach = core_pressure_health(
+            psi_N if achieved_psi_N is None else achieved_psi_N,
+            achieved_total, **kw)
+    else:
+        ach = _hollow_not_evaluated(
+            achieved_reason or "no converged equilibrium pressure supplied")
+    rec["achieved"] = {
+        "total": ach,
+        "thermal": _hollow_not_evaluated(
+            "the converged equilibrium carries one total pressure; its "
+            "thermal part is not separable"),
+    }
+
+    msgs = []
+    for where, r in (("input", total), ("achieved", ach)):
+        if r.get("is_hollow"):
+            msgs.append(
+                f"{where} total pressure rises {100.0 * r['rise_frac']:.2f}% "
+                f"above its innermost-node value, to a maximum at psi_N="
+                f"{r['psi_N_of_max']:.3g}")
+    rec["warned"] = bool(warn and msgs)
+    if rec["warned"]:
+        warnings.warn(
+            "core_pressure_hollow: " + "; ".join(msgs)
+            + f" (reporting threshold {100.0 * rec['definition']['rise_threshold']:g}%"
+            " inside psi_N <= "
+            f"{rec['definition']['psi_N_core']:g}). Report-only: nothing was "
+            "modified, filtered or rejected.",
+            CorePressureHollowWarning, stacklevel=2)
+    return rec

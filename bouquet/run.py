@@ -2219,7 +2219,11 @@ class Bouquet:
         ne, te, ni, ti = k2e(bl.ne), k2e(bl.te), k2e(bl.ni), k2e(bl.ti)
         Zeff = np.clip(k2e(bl.Zeff), 1.0, None)
         p_total = EC * (ne * te + ni * ti)
+        # Per-component copies for the report-only core-pressure hollowness
+        # record; the composition arithmetic is untouched (so bit-identical).
+        _pc = {"electron_thermal": EC * ne * te, "ion_thermal": EC * ni * ti}
         if bl.p_fast is not None:
+            _pc["fast"] = k2e(bl.p_fast)
             p_total = p_total + k2e(bl.p_fast)
         # Impurity (carbon) thermal pressure + diff anchor so the baseline forward
         # solve uses the full dd equilibrium.pressure (mirrors generate_bouquet /
@@ -2228,8 +2232,10 @@ class Bouquet:
             from .physics import impurity_pressure
             _zf = getattr(bl, "z_fast", None)
             _ne_th = ne if _zf is None else np.maximum(ne - k2e(_zf), 0.0)
+            _pc["impurity"] = impurity_pressure(_ne_th, ni, ti, bl.Z_imp)
             p_total = p_total + impurity_pressure(_ne_th, ni, ti, bl.Z_imp)
         if getattr(bl, "p_diff", None) is not None:
+            _pc["anchor_diff"] = k2e(bl.p_diff)
             p_total = p_total + k2e(bl.p_diff)
 
         def solve_jphi(j_phi):
@@ -2892,7 +2898,29 @@ class Bouquet:
         tok_li1 = float(mygs.get_stats(lcfs_pad=psi_pad, li_normalization="std")["l_i"])
         tok_li3 = float(mygs.get_stats(lcfs_pad=psi_pad, li_normalization="iter")["l_i"])
 
+        # ---- core-pressure hollowness health record (report-only) ----------
+        # Describes the core shape of the INPUT pressure the solve above was
+        # handed (p_total, and its thermal species only) and of the ACHIEVED
+        # pressure the converged equilibrium carries, read back on the same
+        # grid (get_profiles only samples the converged state).  Nothing reads
+        # it back; any failure is recorded, never raised.
+        from .physics import core_pressure_hollow_record
+        try:
+            _p_ach, _ach_reason = None, None
+            try:
+                _p_ach = mygs.get_profiles(psi=psi_N)[3]
+            except Exception as exc:    # pragma: no cover - live-solver only
+                _ach_reason = f"get_profiles failed: {exc}"
+            _cph = core_pressure_hollow_record(
+                psi_N, p_total, input_components=_pc,
+                achieved_total=_p_ach, achieved_reason=_ach_reason)
+        except Exception as exc:        # pragma: no cover - defensive
+            _cph = {"unavailable": f"health record failed: {exc}"}
+        bl.core_pressure_hollow = _cph
+
         metrics = dict(bl.li_metrics or {})
+        # Archived with the baseline next to the ip_closure / sawtooth blocks.
+        metrics["core_pressure_hollow"] = _cph
         metrics.update(tokamaker_li_1=tok_li1, tokamaker_li_3=tok_li3,
                        forward_solve_nl_its=nl_its,
                        forward_solve_ip_err_pct=ip_err_pct,

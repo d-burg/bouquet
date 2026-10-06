@@ -3938,10 +3938,12 @@ def store_baseline_profiles(
         Baseline provenance (``Baseline.li_metrics``): the l_i comparison,
         forward-solve residuals, ``jBS_baseline_mode``, the closure scales
         and, on a hybrid (ohmic-mode) baseline, the full ``ip_closure``
-        health record including ``closure_limited`` and its reasons.
+        health record including ``closure_limited`` and its reasons, and
+        the report-only ``core_pressure_hollow`` record.
         Archived as the JSON attr ``li_metrics_json``;
         :func:`load_baseline_profiles` decodes it back to ``li_metrics``
-        and lifts ``ip_closure`` / ``closure_limited`` to top level.
+        and lifts ``ip_closure`` / ``closure_limited`` /
+        ``core_pressure_hollow`` to top level (each only when present).
         Values that are not JSON-native (numpy scalars/arrays, tuples) are
         converted; anything else is stringified rather than dropped.
 
@@ -4202,6 +4204,11 @@ def load_baseline_profiles(h5path_or_header, scan_key=None):
                 result["ip_closure"] = _meta["ip_closure"]
             if "closure_limited" in _meta:
                 result["closure_limited"] = bool(_meta["closure_limited"])
+            # Report-only core-pressure hollowness record (physics.
+            # core_pressure_hollow_record).  Archives written before it
+            # existed simply lack the key.
+            if isinstance(_meta.get("core_pressure_hollow"), dict):
+                result["core_pressure_hollow"] = _meta["core_pressure_hollow"]
     return result
 
 

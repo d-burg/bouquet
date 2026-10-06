@@ -58,6 +58,29 @@ such a source.
   positive frame (`× sign(CURRENT)`); `plot_input_vs_recon` reads the g-file in
   the source's declared COCOS.
 
+## Unreleased — a report-only core-pressure hollowness record
+
+Every baseline now records `core_pressure_hollow`, which describes whether and
+by how much the core pressure rises above its axis value. It **changes no
+results**. No profile, solve, filter decision, in-spec count or until-N count
+reads it. The pressure handed to the solver is bit-identical with and without
+it, and a test checks this on the real composition code.
+
+- **Measured:** `rise_frac = (max p over psi_N ≤ 0.5 − p_axis) / p_axis`, where
+  the maximum sits and the radial extent of the climb, and the summed width of
+  the positive-gradient core intervals. `is_hollow` is `rise_frac > 1 %`. That
+  bar is a reporting choice, not an acceptance criterion, and it is stored with
+  the numbers.
+- **Where:** on the input pressure (total, and thermal species alone) and on
+  the achieved pressure of the converged baseline, on both source paths. Bad
+  input gives "not evaluated" with a reason, never "not hollow".
+- **Stored:** `Baseline.core_pressure_hollow` and `li_metrics_json` on the
+  archived `_baseline` group, next to `ip_closure`. Older archives read
+  unchanged. Draws do not carry the record.
+- It describes the profile only. A hollow core can be physical, and the
+  record does not say why one is there. See
+  [physics-notes.md](physics-notes.md#core-pressure-hollowness-record).
+
 ## Unreleased — the default LCFS boundary cut is now device-calibrated
 
 **For DIII-D the default boundary cut changes from 5.0 mm to 8.5 mm. This

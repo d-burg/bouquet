@@ -23,6 +23,7 @@ Typical workflow
 >>> export_filtered("run.h5", "run_selected.h5")
 """
 import os
+import warnings
 
 import numpy as np
 import h5py
@@ -732,6 +733,12 @@ def filter_coil_currents(h5path_or_header, scan_key=None,
     apply : bool
         When True (default) write ``passes_coil_filter`` + refresh
         ``selected`` in the H5.  When False, compute + plot only.
+        NOTE: with ``apply=True`` this REPLACES whatever coil verdict is
+        already stored -- including the chi2 verdict that
+        :meth:`bouquet.run.Bouquet.filter` writes by default -- and warns
+        when it does.  To read the stored verdict use
+        :func:`read_filter_flags`; to re-cut hypothetically use
+        ``apply=False``.
     plot : bool
         When True (default) return a distribution figure.
 
@@ -768,6 +775,30 @@ def filter_coil_currents(h5path_or_header, scan_key=None,
                         "F_max_pct": fthr, "VSC_max_pct": vthr,
                         "passes": passed}
         if apply:
+            # Refuse to overwrite a chi2 verdict SILENTLY.  Since the chi2
+            # test became the default coil filter, the documented
+            # "run.filter(); filter_coil_currents(HEADER, ...)" sequence
+            # replaced the chi2 selection with this legacy band on every
+            # notebook that used it (default apply=True), and nothing said
+            # so.  The overwrite still happens when asked for -- this is a
+            # legitimate re-cut -- but it is announced, and the scan-level
+            # provenance attr is relabelled so the archive stays honest.
+            _bkey = _scan_key(sv)
+            _gp = f"scan/{_bkey}" if _bkey is not None else "/"
+            with h5py.File(h5path, "a") as hf:
+                if _gp in hf:
+                    _prev = hf[_gp].attrs.get("coil_filter", None)
+                    _prev = (_prev.decode() if isinstance(_prev, bytes)
+                             else _prev)
+                    if _prev == "chi2":
+                        warnings.warn(
+                            "filter_coil_currents(apply=True): overwriting the "
+                            "chi2 coil-filter verdict on this scan with the "
+                            "legacy +/-% band. If you only wanted the counts, "
+                            "read them back with read_filter_flags() or pass "
+                            "apply=False; the archive's coil_filter attr is now "
+                            "'legacy'.", stacklevel=2)
+                    hf[_gp].attrs["coil_filter"] = "legacy"
             _write_filter_result(h5path, sv, results, "passes_coil_filter")
         n_pass = sum(results.values())
         summary[sv] = {"n_total": len(results), "n_pass": n_pass,

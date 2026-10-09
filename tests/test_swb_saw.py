@@ -64,6 +64,17 @@ class TestConfig:
         assert swb_config_problems(_cfg()) == []          # saw off: not needed
         assert any("jphi_saw" in m for m in swb_config_problems(_cfg(swb_saw_q=1.025)))
 
+    def test_the_reset_is_refused_without_the_sawteeth_hold(self, saw_oft):
+        """C.md item 4: swb_saw_q with ImasSource.hold_sawteeth=False would
+        silently give jphi_saw = 0 -- refused as a problem by name."""
+        cfg = _cfg(swb_saw_q=1.025)
+        assert swb_config_problems(cfg) == []
+        cfg.source.hold_sawteeth = False
+        assert any("hold_sawteeth=False" in m
+                   for m in swb_config_problems(cfg))
+        cfg.generation.swb_saw_q = None           # no reset: no problem
+        assert not any("hold_sawteeth" in m for m in swb_config_problems(cfg))
+
     def test_roundtrip(self):
         cfg = _cfg(swb_saw_q=1.025, swb_saw_rule="fuse")
         g2 = BouquetConfig.from_json(cfg.to_json()).generation

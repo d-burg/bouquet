@@ -2005,6 +2005,14 @@ def swb_config_problems(config):
         p.append("this OpenFUSIONToolkit's solve_with_bootstrap lacks x/jphi_fixed/p_fixed")
     if gc.swb_saw_q is not None and "jphi_saw" not in _swb_params():
         p.append("swb_saw_q: this OpenFUSIONToolkit's solve_with_bootstrap lacks jphi_saw")
+    if (gc.swb_saw_q is not None and isinstance(config.source, ImasSource)
+            and not bool(getattr(config.source, "hold_sawteeth", True))):
+        # review PR70 (C.md item 4): the sawtooth reset reads the held
+        # sawteeth channel (j_sawteeth); with the hold off it is zero, so
+        # jphi_saw would be silently 0
+        p.append("swb_saw_q with ImasSource.hold_sawteeth=False: the reset "
+                 "needs the held sawteeth current (j_sawteeth), which the "
+                 "opt-out leaves at zero -- jphi_saw would silently be 0")
     return p
 
 

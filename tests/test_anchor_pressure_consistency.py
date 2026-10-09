@@ -25,9 +25,16 @@ import pytest
 _SRC = (Path(__file__).resolve().parents[1] / "bouquet"
         / "TokaMaker_interface.py")
 
-#: The two spellings of a thermal-only anchor, whitespace-tolerant.
-_THERMAL_PAX = re.compile(r"pax\s*=\s*pressure\s*\[\s*0\s*\]")
-_THERMAL_PP = re.compile(r"pchip_derivative\(\s*psi_N\s*,\s*pressure\s*\)")
+#: The spellings of a thermal-only anchor, whitespace-tolerant: the inline
+#: forms the module used before ``bouquet.edge_pressure`` (which must not come
+#: back) and the same mistake written through that module's helper (every
+#: P' / axis target of the module is now built there).
+_THERMAL_PAX = re.compile(
+    r"pax\s*=\s*pressure\s*\[\s*0\s*\]"
+    r"|solver_pax\(\s*pressure\s*,")
+_THERMAL_PP = re.compile(
+    r"pchip_derivative\(\s*psi_N\s*,\s*pressure\s*\)"
+    r"|solver_pp(?:rime|_profile)\(\s*psi_N\s*,\s*pressure\s*,")
 
 
 def _code_lines(src):
@@ -54,6 +61,9 @@ def test_no_solve_site_anchors_at_thermal_only_pressure():
     "pax = pressure[ 0 ]",
     "pchip_derivative(psi_N, pressure)",
     "pchip_derivative( psi_N , pressure )",
+    "pax=solver_pax(pressure, _edge)",
+    "solver_pp_profile(psi_N, pressure, psi_range, _edge)",
+    "solver_pprime( psi_N , pressure , psi_range, _edge)",
 ])
 def test_the_guard_regexes_catch_the_stock_spellings(variant):
     """Negative control: the exact pre-fix spellings (and spaced variants)
@@ -66,6 +76,11 @@ def test_the_guard_regexes_catch_the_stock_spellings(variant):
     "pax=float(pressure_solve[0])",
     "pchip_derivative(psi_N, pres_tmp)",
     "pchip_derivative(psi_N, pressure_solve)",
+    "pax=solver_pax(pres_tmp, _edge)",
+    "pax=solver_pax(pressure_solve, _edge)",
+    "solver_pp_profile(psi_N, pres_tmp, psi_range, _edge)",
+    "solver_pp_profile(psi_N, pressure_solve, _psi_range_b, _edge)",
+    "solver_pprime(psi_N, pres_tmp, psi_range, _edge)",
 ])
 def test_the_guard_regexes_pass_the_fixed_spellings(ok):
     """The consistent spellings must NOT match -- a guard that also fires on
@@ -78,6 +93,15 @@ def test_the_anchor_sites_use_the_full_pressure():
     jBS-delta cache anchor uses pressure_solve, as calls, not comments."""
     code = _code_lines(_SRC.read_text())
 
-    assert re.search(r"pchip_derivative\(\s*psi_N\s*,\s*pres_tmp\s*\)", code)
+    # (through the one helper that builds every P' and axis target since
+    # bouquet.edge_pressure: solver_pp_profile / solver_pprime / solver_pax)
     assert re.search(
-        r"pchip_derivative\(\s*psi_N\s*,\s*pressure_solve\s*\)", code)
+        r"solver_pp(?:rime|_profile)\(\s*psi_N\s*,\s*pres_tmp\s*,", code)
+    assert re.search(
+        r"solver_pp(?:rime|_profile)\(\s*psi_N\s*,\s*pressure_solve\s*,",
+        code)
+    assert re.search(r"solver_pax\(\s*pres_tmp\s*,", code)
+    assert re.search(r"solver_pax\(\s*pressure_solve\s*,", code)
+    # and no inline P' / axis-target construction is left in the module
+    assert not re.search(r"\[\s*-1\s*\]\s*=\s*0\.0", code)
+    assert not re.search(r"pax\s*=\s*(?:float\()?\w+\[\s*0\s*\]", code)

@@ -779,12 +779,12 @@
    "subsystem": "Configuration"
   },
   {
-   "id": "cfg.generationconfig.swb_iterations",
+   "id": "cfg.generationconfig.bootstrap_kwargs",
    "type": "knob",
-   "label": "swb_iterations: int = 3",
+   "label": "bootstrap_kwargs: dict = {}",
    "file": "bouquet/config.py",
-   "line": 385,
-   "desc": "solve_with_bootstrap self-consistency iterations",
+   "line": 936,
+   "desc": "Keyword options passed through to solve_with_bootstrap",
    "subsystem": "Configuration"
   },
   {
@@ -1244,10 +1244,10 @@
    "file": ""
   },
   {
-   "id": "cfg.swb_iterations",
+   "id": "cfg.bootstrap_kwargs",
    "type": "knob",
-   "label": "swb_iterations (SWB self-consistency)",
-   "desc": "H-mode bootstrap-iteration count inside SWB",
+   "label": "bootstrap_kwargs (SWB backend options)",
+   "desc": "Keyword options passed through to solve_with_bootstrap",
    "subsystem": "Per-draw solve (SWB / l_i / homotopy)",
    "file": ""
   },
@@ -1513,6 +1513,15 @@
    "subsystem": "Bouquet orchestrator / IMAS forward solve"
   },
   {
+   "id": "fn.coords",
+   "type": "transform",
+   "label": "coords (run coordinate at the OFT boundary)",
+   "file": "bouquet/coords.py",
+   "line": 1,
+   "desc": "Tags profiles with their coordinate; samples readbacks at the solver's psi_N for each node",
+   "subsystem": "Per-draw solve (SWB / l_i / homotopy)"
+  },
+  {
    "id": "ext.tokamaker_get_stats",
    "type": "input",
    "label": "mygs.get_stats (extract equilibrium state)",
@@ -1694,7 +1703,7 @@
    "label": "solve_with_bootstrap",
    "file": "bouquet/TokaMaker_interface.py",
    "line": 1627,
-   "desc": "solve_with_bootstrap(..., n_iterations=config.generation.swb",
+   "desc": "solve_with_bootstrap(..., **config.generation.bootstrap_kwargs)",
    "subsystem": "Configuration"
   },
   {
@@ -1759,6 +1768,15 @@
    "line": 386,
    "desc": "Reconstruction path: read g-file + kinetics, run GS solve, extract currents",
    "subsystem": "Baseline & uncertainty resolution"
+  },
+  {
+   "id": "cfg.reconstructionsource.coord",
+   "type": "knob",
+   "label": "coord: str = \"psi_n\"",
+   "file": "bouquet/config.py",
+   "line": 200,
+   "desc": "Run coordinate: psi_n, phi_n (g-file rhovn^2) or rho_tor",
+   "subsystem": "Configuration"
   },
   {
    "id": "fn.baseline._sigma_zeff_baseline",
@@ -2076,6 +2094,15 @@
    "subsystem": "IMAS/OMAS reader"
   },
   {
+   "id": "cfg.imassource.coord",
+   "type": "knob",
+   "label": "coord: str = \"psi_n\"",
+   "file": "bouquet/config.py",
+   "line": 247,
+   "desc": "Run coordinate: psi_n, phi_n (grid.rho_tor_norm^2; IDA fits by their own q) or rho_tor",
+   "subsystem": "Configuration"
+  },
+  {
    "id": "fn.imas.read_imas_geometry",
    "type": "transform",
    "label": "read_imas_geometry()",
@@ -2258,10 +2285,10 @@
   {
    "id": "fn.physics.parallel_to_toroidal",
    "type": "transform",
-   "label": "parallel_to_toroidal()",
+   "label": "jpar_to_jphi_tokamaker() / jtor_imas_to_jphi_tokamaker()",
    "file": "bouquet/physics.py",
    "line": 86,
-   "desc": "Converts <j.B>/B0 parallel to <j_phi/R>/<1/R> toroidal via c(psi)=j_tor/j_parallel",
+   "desc": "Exact IMAS -> TokaMaker jphi=<j_phi>: <j.B>/B0 -> F<1/R><J.B>/<B^2> (+ p'G on the bootstrap), j_tor via A5 (docs/current-conventions.md)",
    "subsystem": "IMAS/OMAS reader"
   },
   {
@@ -2770,10 +2797,10 @@
   {
    "id": "fn.tmi._swb_jbs_to_toroidal",
    "type": "transform",
-   "label": "_swb_jbs_to_toroidal",
+   "label": "SWB j_BS taken as-is",
    "file": "bouquet/TokaMaker_interface.py",
    "line": 790,
-   "desc": "Undo SWB's R_avg/F projection to recover <j_BS.B>, then parallel_to_toroidal (net 1/(<R><1/R>)); must be followed by smooth_jbs_transition and precede any further mygs.solve()",
+   "desc": "SWB j_BS / isolated_j_BS are already TokaMaker jphi (exact A7 in OFT); taken before any further mygs.solve(), then smooth_jbs_transition",
    "subsystem": "GS reconstruction"
   },
   {
@@ -4153,7 +4180,7 @@
    "label": "j_BS near-axis smoothed",
    "file": "bouquet/TokaMaker_interface.py",
    "line": 825,
-   "desc": "smooth_jbs_transition(): shared Gaussian repair of SWB's collapsed near-axis j_BS point; applied after every _swb_jbs_to_toroidal conversion (recon + all draw paths)",
+   "desc": "smooth_jbs_transition(): shared Gaussian repair of SWB's collapsed near-axis j_BS point; applied to every SWB bootstrap profile (recon + all draw paths)",
    "subsystem": "Shared quantities"
   },
   {
@@ -4683,7 +4710,7 @@
    "label": "pressure profile",
    "file": "bouquet/TokaMaker_interface.py",
    "line": 4852,
-   "desc": "pres_tmp = 1.6022e-19 * (ne*te + ni*ti) [Pa]",
+   "desc": "pres_tmp = e * (ne*te + ni*ti) [Pa] (e = physics.thermal_pressure_charge: ELEMENTARY_CHARGE under the loop, frozen 1.6022e-19 on the legacy path)",
    "subsystem": "Shared quantities"
   },
   {
@@ -5008,7 +5035,7 @@
    "file": "bouquet/TokaMaker_interface.py",
    "line": 825,
    "subsystem": "Shared quantities",
-   "desc": "Repairs SWB's collapsed innermost Sauter point: locate the leading flat shelf, Gaussian-filter a +/-10-index window about the shelf end, triangular-blend back. Applied after EVERY _swb_jbs_to_toroidal (recon + all draw paths) so a sigma=0 draw reproduces the baseline j_BS"
+   "desc": "Repairs SWB's collapsed innermost Sauter point: locate the leading flat shelf, Gaussian-filter a +/-10-index window about the shelf end, triangular-blend back. Applied to EVERY SWB bootstrap profile (recon + all draw paths) so a sigma=0 draw reproduces the baseline j_BS"
   },
   {
    "id": "fn.utils.pchip_interp",
@@ -5188,16 +5215,16 @@
    "file": "bouquet/io/imas.py",
    "line": 477,
    "subsystem": "Archive, filtering & plotting",
-   "desc": "Interpolate a captured eq_fsa block onto the template psi grid into the geom dict for toroidal_to_parallel; <1/R^2> only when captured, else the <B_phi^2> ~= <B^2> bracket"
+   "desc": "Interpolate a captured eq_fsa block onto the template psi grid into the geom dict for the exact current helpers; None unless F, <R>, <1/R>, <1/R^2>, <B^2>, p' were all captured"
   },
   {
    "id": "fn.physics.toroidal_to_parallel",
    "type": "transform",
-   "label": "toroidal_to_parallel()",
+   "label": "jphi_tokamaker_to_jtor_imas() / jphi_tokamaker_to_jpar()",
    "file": "bouquet/physics.py",
    "line": 194,
    "subsystem": "Archive, filtering & plotting",
-   "desc": "Inverse of parallel_to_toroidal: FSA toroidal j_phi -> IMAS <j.B>/B0 for the exported IDS"
+   "desc": "Exact TokaMaker jphi -> IMAS j_tor (A5) and <j.B>/B0 (A7 inverse, p'G removed from total/bootstrap) for the exported IDS"
   },
   {
    "id": "gate.ids_fidelity",
@@ -5938,10 +5965,10 @@
    "subsystem": "Configuration"
   },
   {
-   "src": "cfg.generationconfig.swb_iterations",
+   "src": "cfg.generationconfig.bootstrap_kwargs",
    "dst": "fn.TokaMaker_interface.solve_with_bootstrap",
    "kind": "data",
-   "desc": "Controls swb_iterations",
+   "desc": "Passes solve_with_bootstrap keyword options",
    "subsystem": "Configuration"
   },
   {
@@ -6302,10 +6329,10 @@
    "subsystem": "Per-draw solve (SWB / l_i / homotopy)"
   },
   {
-   "src": "cfg.swb_iterations",
+   "src": "cfg.bootstrap_kwargs",
    "dst": "ext.solve_with_bootstrap",
    "kind": "data",
-   "desc": "H-mode bootstrap-iteration count",
+   "desc": "solve_with_bootstrap keyword options",
    "subsystem": "Per-draw solve (SWB / l_i / homotopy)"
   },
   {
@@ -8335,7 +8362,7 @@
    "src": "input.kinetics",
    "dst": "qty.pressure",
    "kind": "data",
-   "desc": "Compute 1.6022e-19 * (ne*te + ni*ti)",
+   "desc": "Compute e * (ne*te + ni*ti) (e = physics.thermal_pressure_charge)",
    "subsystem": "GS reconstruction"
   },
   {
@@ -9455,21 +9482,21 @@
    "src": "qty.j_tor_parallel",
    "dst": "fn.physics.parallel_to_toroidal",
    "kind": "data",
-   "desc": "ratio method: c(psi)=j_tor/j_total",
+   "desc": "j_phi = A5(j_tor) on the paired slice's gm1/gm5/gm8/gm9 (or from profiles_2d)",
    "subsystem": "IMAS/OMAS reader"
   },
   {
    "src": "qty.j_tor_parallel",
    "dst": "qty.j_phi",
    "kind": "data",
-   "desc": "j_phi = j_tor (copy of authoritative total)",
+   "desc": "authoritative total, converted to TokaMaker jphi (A5)",
    "subsystem": "IMAS/OMAS reader"
   },
   {
    "src": "qty.j_total_parallel",
    "dst": "fn.physics.parallel_to_toroidal",
    "kind": "data",
-   "desc": "ratio method: c(psi)=j_tor/j_total",
+   "desc": "pairs the equilibrium slice (A6 reproduces j_tor); closure check",
    "subsystem": "IMAS/OMAS reader"
   },
   {
@@ -10934,6 +10961,27 @@
    "kind": "control",
    "desc": "Per-saddle weights",
    "subsystem": "Configuration"
+  },
+  {
+   "src": "cfg.reconstructionsource.coord",
+   "dst": "fn.baseline._resolve_reconstruction",
+   "kind": "control",
+   "desc": "Relabels the g-file and kinetic nodes in the run coordinate",
+   "subsystem": "Configuration"
+  },
+  {
+   "src": "cfg.imassource.coord",
+   "dst": "fn.imas.read_imas_baseline",
+   "kind": "control",
+   "desc": "Relabels the core_profiles nodes in the run coordinate",
+   "subsystem": "Configuration"
+  },
+  {
+   "src": "fn.coords",
+   "dst": "ext.solve_with_bootstrap",
+   "kind": "data",
+   "desc": "psi_N grid (+ coord) and tagged profiles",
+   "subsystem": "Per-draw solve (SWB / l_i / homotopy)"
   }
  ]
 }

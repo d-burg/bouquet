@@ -35,9 +35,8 @@ class TestReferenceScale:
         assert sigma0_reference_scale(None) == 1.0
 
     def test_center_is_the_range_midpoint(self):
-        # run.py re-centres the configured range on bl.bs_scale, so for
-        # gc.jBS_scale_range=(0.85, 1.15) and bs_scale=0.70 the passed
-        # range is (0.595, 0.805) and the uniform draws' mean is 0.70.
+        # The reference is the uniform draws' mean, the range midpoint (run.py
+        # hands bl.bs_scale over separately, applied after SWB).
         assert sigma0_reference_scale((0.595, 0.805)) == pytest.approx(0.70)
 
     def test_asymmetric_range_uses_its_own_mean(self):

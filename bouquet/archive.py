@@ -14,6 +14,8 @@ than hand-rolling h5 tree traversal + ``.eqdsk``-suffix scanning + byte parsing
     sc.selected, sc.excluded, sc.all     # lists of DrawView (per filter flags)
     d = sc[3]                            # DrawView (lazy)
     d.li1, d.li3, d.flags, d.attrs       # scalars + filter/spec metadata
+    d.jbs_loop, sc.baseline_jbs_loop     # self-consistent bootstrap records
+    sc.bootstrap_model                   # "self-consistent Redl bootstrap" / legacy
     d.profiles                           # dict of named arrays (psi_N, j_phi, ...)
     d.equilibrium()                      # parsed GEQDSKEquilibrium (stored bytes)
     d.pfile()                            # parsed PFile (None if absent)
@@ -40,9 +42,10 @@ from typing import Optional
 
 import numpy as np
 
-from .schema import EQDSK_DS, PFILE_DS, find_bytes_dataset
+from .schema import (EQDSK_DS, IFILE_DS, PFILE_DS, JBS_CONVERGED_ATTR,
+                     JBS_LOOP_JSON_ATTR, find_bytes_dataset)
 from .utils import (
-    _resolve_h5, _scan_key, _group_path,
+    _resolve_h5, _scan_key, _group_path, profile_coord,
     discover_scan_keys, list_equilibrium_indices, load_baseline_profiles,
     read_eqdsk_from_bytes,
 )
@@ -50,7 +53,7 @@ from .filtering import select_indices, _FILTER_FLAGS
 
 
 # Datasets that are not perturbed-profile arrays (excluded from DrawView.profiles).
-_NON_PROFILE = {"config_json", EQDSK_DS, PFILE_DS}
+_NON_PROFILE = {"config_json", EQDSK_DS, PFILE_DS, IFILE_DS}
 
 # Attr keys surfaced by DrawView.flags (same record shape as read_filter_flags).
 _FLAG_ATTRS = (*_FILTER_FLAGS, "selected")
@@ -109,8 +112,9 @@ class DrawView:
             import h5py
             with h5py.File(self._ar.path, "r") as hf:
                 a = hf[self._gp].attrs
+                # scalars as Python values; profiles (e.g. swb_j_saw) stay arrays
                 self._attrs_cache = {
-                    k: (a[k].item() if hasattr(a[k], "item") else a[k]) for k in a}
+                    k: (a[k].item() if getattr(a[k], "size", 0) == 1 else a[k]) for k in a}
         return dict(self._attrs_cache)
 
     @property
@@ -138,6 +142,24 @@ class DrawView:
     @property
     def selected(self) -> bool:
         return bool(self.attrs.get("selected", True))
+
+    # ---- self-consistent bootstrap record (schema v3) ----------------------
+    @property
+    def jbs_loop(self) -> Optional[dict]:
+        """The draw's self-consistent bootstrap record (the schema-v3
+        ``jbs_loop`` block, parsed), or ``None`` for a frozen-bootstrap draw
+        (a v2 archive, or ``jbs_self_consistent=False``)."""
+        import json
+        raw = self.attrs.get(JBS_LOOP_JSON_ATTR)
+        if raw is None:
+            return None
+        return json.loads(raw.decode() if isinstance(raw, bytes) else str(raw))
+
+    @property
+    def jbs_converged(self) -> Optional[bool]:
+        """``True``/``False`` for a loop draw; ``None`` for a frozen one."""
+        a = self.attrs
+        return bool(a[JBS_CONVERGED_ATTR]) if JBS_CONVERGED_ATTR in a else None
 
     # ---- profiles / bytes --------------------------------------------------
     @property
@@ -172,6 +194,11 @@ class DrawView:
     @property
     def eqdsk_bytes(self) -> Optional[bytes]:
         return self._read_bytes(".eqdsk")[".eqdsk"]
+
+    @property
+    def ifile_bytes(self) -> Optional[bytes]:
+        """OFT i-file bytes (``write_ifile=True`` runs), else ``None``."""
+        return self._read_bytes(".ifile")[".ifile"]
 
     @property
     def pfile_bytes(self) -> Optional[bytes]:
@@ -234,12 +261,18 @@ class DrawView:
         from .schema import PROFILE_UNITS, EQ_FSA_UNITS
         from .utils import load_eq_fsa
         prof = self.profiles
+        attrs = self.attrs
+        # profile attrs (swb_j_saw) go with the profiles; scalars stay JSON-safe
+        prof.update({k: attrs.pop(k) for k in [k for k, v in attrs.items() if isinstance(v, np.ndarray)]})
         doc = {
             "scan_key": _scan_key(self.scan_key),
             "count": self.count,
+            # coordinate of psi_N / psi_N_kinetic; eq_fsa/psi_N is always ψ_N
+            "profile_coord": (self.attrs.get("profile_coord")
+                              or profile_coord(self._ar.path, self.scan_key)),
             "profiles": {k: np.asarray(v).tolist() for k, v in prof.items()},
             "units": {k: PROFILE_UNITS.get(k, "") for k in prof},
-            "scalars": self.attrs,          # li, Ip, drifts, in_spec, ... (JSON-safe)
+            "scalars": attrs,               # li, Ip, drifts, in_spec, ... (JSON-safe)
             "coil_currents_A": self.coil_currents(),
         }
         fsa = load_eq_fsa(self._ar.path, self.count, scan_key=self.scan_key)
@@ -356,6 +389,42 @@ class ScanView:
             raise KeyError(f"scan {self.scan_key!r} was refused before any "
                            f"baseline was stored: {why}")
         return load_baseline_profiles(self._ar.path, scan_key=self.scan_key)
+
+    @property
+    def baseline_jbs_loop(self) -> Optional[dict]:
+        """The baseline's self-consistent bootstrap record (schema-v3
+        ``jbs_loop`` block on ``_baseline``), or ``None`` (frozen)."""
+        from .utils import load_jbs_loop
+        try:
+            return load_jbs_loop(self._ar.path, "_baseline",
+                                 scan_key=self.scan_key)
+        except KeyError:
+            return None
+
+    @property
+    def bootstrap_model(self) -> str:
+        """How this scan's bootstrap was computed, as a label:
+        ``"self-consistent Redl bootstrap"`` when the baseline or any draw
+        carries a ``jbs_loop`` block, else ``"frozen SWB bootstrap
+        (legacy)"`` (v2 archives, ``jbs_self_consistent=False``)."""
+        from .schema import bootstrap_label
+        if self.baseline_jbs_loop is not None:
+            return bootstrap_label(True)
+        return bootstrap_label(self._any_draw_jbs_loop())
+
+    def _any_draw_jbs_loop(self) -> bool:
+        """``True`` when any stored draw carries a ``jbs_loop`` block (the
+        value ``any(d.jbs_loop is not None for d in self.all)`` gives),
+        read within ONE file open: the per-draw views open the file once
+        per draw, so a scan-level label on a large legacy ensemble cost
+        O(N) opens."""
+        import h5py
+        from .schema import read_jbs_loop
+        idx = select_indices(self._ar.path, scan_key=self.scan_key,
+                             selection="all")
+        with h5py.File(self._ar.path, "r") as hf:
+            return any(read_jbs_loop(hf[_group_path(self.scan_key, i)])
+                       is not None for i in idx)
 
     def baseline_view(self) -> BaselineView:
         """The baseline behind the :class:`DrawView` accessors (bytes, parse)."""

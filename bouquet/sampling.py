@@ -31,12 +31,16 @@ from scipy.spatial.distance import cdist
 from scipy import integrate
 from scipy.stats import norm
 
-from .physics import q_ravg
+from .physics import ELEMENTARY_CHARGE_LEGACY, q_ravg
 from typing import Optional
 
 
 # ── physical constant used for pressure ────────────────────────────
-EC = 1.6022e-19  # [J/eV]
+#: [J/eV] Kept for back-compatibility of ``from bouquet.sampling import EC``:
+#: it is the FROZEN LEGACY value (``physics.ELEMENTARY_CHARGE_LEGACY``).  New
+#: code takes ``physics.ELEMENTARY_CHARGE`` or, where the legacy path must
+#: stay bit for bit, ``physics.thermal_pressure_charge(jbs_loop)``.
+EC = ELEMENTARY_CHARGE_LEGACY
 
 # ── default iteration caps (safety valves) ─────────────────────────
 _MAX_PRESSURE_ITER = int(1e5)
@@ -618,7 +622,20 @@ def verify_gpr_statistics(
 # ====================================================================
 #  Internal inductance proxy
 # ====================================================================
-def calc_cylindrical_li_proxy(mygs, j_phi_profile, psi_pad):
+def _proxy_readback(mygs, n_psi, psi_pad, x, coord):
+    """``(psi_N, f, fp, p, pp, ravgs)`` sampled at the run grid ``x``, or on
+    OFT's uniform padded grid of ``n_psi`` points when ``x`` is ``None``.
+    ``psi_N`` is the sampled ψ_N, the proxy's integration variable.
+    """
+    from .coords import readback_kw
+    kw = (dict(npsi=n_psi, psi_pad=psi_pad) if x is None
+          else readback_kw(mygs, x, coord, psi_pad))
+    psi_N, f, fp, p, pp = mygs.get_profiles(**kw)
+    ravgs = mygs.get_q(**kw)[2]
+    return np.asarray(psi_N, dtype=float), f, fp, p, pp, ravgs
+
+
+def calc_cylindrical_li_proxy(mygs, j_phi_profile, psi_pad, x=None, coord="psi_n"):
     """
     Calculates a proxy for internal inductance l_i(3) using 1D profiles.
 
@@ -630,16 +647,18 @@ def calc_cylindrical_li_proxy(mygs, j_phi_profile, psi_pad):
         The toroidal current density profile (perturbation target).
     psi_pad : float
         Padding inside the LCFS for profile queries.
+    x : array-like, optional
+        Run grid of ``j_phi_profile`` (``None``: OFT's uniform padded grid).
+    coord : str
+        Coordinate of ``x`` (see :mod:`bouquet.coords`).
 
     Returns
     -------
     li_proxy : float
         The estimated internal inductance.
     """
-    n_psi = len(j_phi_profile)
-
-    psi_N, f, fp, p, pp = mygs.get_profiles(npsi=n_psi, psi_pad=psi_pad)
-    _, qvals, ravgs_q, dl, rbounds, zbounds = mygs.get_q(npsi=n_psi, psi_pad=psi_pad)
+    psi_N, f, fp, p, pp, ravgs_q = _proxy_readback(mygs, len(j_phi_profile),
+                                                   psi_pad, x, coord)
     psi_range = mygs.psi_bounds[1] - mygs.psi_bounds[0]
 
     # 1. Unpack geometry from baseline
@@ -683,13 +702,14 @@ def calc_cylindrical_li_proxy(mygs, j_phi_profile, psi_pad):
     return li_proxy
 
 
-def get_li_proxy_geometry(mygs, n_psi, psi_pad):
+def get_li_proxy_geometry(mygs, n_psi, psi_pad, x=None, coord="psi_n"):
     """Pre-compute geometry arrays for :func:`calc_cylindrical_li_proxy_fast`.
 
     Call this **once** before a loop of proxy evaluations where the
     equilibrium state does not change between iterations (i.e.\\ no
     ``mygs.solve()`` calls in between).  The returned dict should be
-    passed to :func:`calc_cylindrical_li_proxy_fast`.
+    passed to :func:`calc_cylindrical_li_proxy_fast`.  ``x``/``coord`` as in
+    :func:`calc_cylindrical_li_proxy`.
 
     Returns
     -------
@@ -697,8 +717,7 @@ def get_li_proxy_geometry(mygs, n_psi, psi_pad):
         Geometry cache with keys ``psi_N``, ``R_avg``, ``dV``,
         ``V_enc``, ``V_tot``, ``r_eff``, ``dA``.
     """
-    psi_N, f, fp, p, pp = mygs.get_profiles(npsi=n_psi, psi_pad=psi_pad)
-    _, qvals, ravgs_q, dl, rbounds, zbounds = mygs.get_q(npsi=n_psi, psi_pad=psi_pad)
+    psi_N, f, fp, p, pp, ravgs_q = _proxy_readback(mygs, n_psi, psi_pad, x, coord)
     psi_range = mygs.psi_bounds[1] - mygs.psi_bounds[0]
 
     R_avg = q_ravg(ravgs_q, "<R>")

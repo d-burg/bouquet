@@ -698,10 +698,13 @@ class TestSawtoothGateInputs:
 
 class TestWorkflowGuard:
     def _config(self, mode, workflow="auto"):
-        from bouquet.config import (BouquetConfig, ImasSource, SolverConfig)
+        from bouquet.config import (BouquetConfig, GenerationConfig,
+                                    ImasSource, SolverConfig)
         cfg = BouquetConfig(source=ImasSource(ids_path="unused.json"),
                             solver=SolverConfig(mesh_path="unused.h5"),
-                            output_header="t")
+                            output_header="t",
+                            generation=GenerationConfig(
+                                reconstruction_engine="legacy"))
         cfg.generation.jBS_baseline_mode = mode
         cfg.generation.perturb_jind_in_anchor = True     # diff+C baseline rule
         cfg.generation.workflow = workflow

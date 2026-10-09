@@ -14,17 +14,23 @@ compare with ``compute_area_integral(calc_jtor_plasma)``.  Required: 0.1 %.
 Measured on the synthetic D3D-like baseline: **+0.0071 %** in both conventions.
 The same run pins the three properties the implementation depends on:
 
-  * ``get_q(psi=...)`` collapses SILENTLY onto the magnetic axis if the sample
-    grid includes ``psi_N = 0`` -- ``<R>`` constant to 2e-15 across all 257
-    surfaces, ``dV/dPsi`` constant, no exception.  ``fsa_current_geometry``
-    clips the grid and asserts against the collapse;
+  * the CLIPPED sampling grid gives a non-degenerate geometry -- which is the
+    property ``fsa_current_geometry``'s clipping exists to guarantee, the only
+    one bouquet's answer depends on, and the one that must hold on EVERY build.
+    On builds that reproduce the trap, ``get_q(psi=...)`` collapses SILENTLY
+    onto the magnetic axis when the sample grid includes ``psi_N = 0`` --
+    ``<R>`` constant to 2e-15 across all 257 surfaces, ``dV/dPsi`` constant, no
+    exception.  That demonstration is BUILD-dependent (not OFT-version
+    dependent -- the same OFT commit has been measured both ways on different
+    machines' builds), so it is gated on a measurement and skips, loudly, where
+    the build does not reproduce it.  The clipping stays either way;
   * ``dV/dPsi`` is per DIMENSIONAL psi (``int dV/dPsi dpsi`` recovers the
     volume to -0.25 %; the ``dpsi_N`` reading is out by +291 %);
-  * ``compute_flux_integral`` is NOT ``int_plasma f dA``.  It covers the whole
+  * ``compute_flux_integral`` is ``int_plasma f dA``: ``FI(1)`` is the plasma
+    cross-section.  An OFT build whose ``gs_flux_int`` covers the whole
     limiter region with the profile pinned at its LCFS value outside the
-    plasma, so ``FI(1) = 2.8385 m^2`` against a true plasma cross-section of
-    ``1.7901 m^2``.  That is where 7dc254b's "+12.9 % convention bias" came
-    from, and it is why the fix is a measure rather than a calibration.
+    plasma (``FI(1) = 2.8385 m^2`` against ``1.7901 m^2``, where 7dc254b's
+    "+12.9 % convention bias" came from) fails this.
 
 Runs on the synthetic D3D-like example (no proprietary data).
 """
@@ -193,7 +199,8 @@ def _probe(outdir):
                                eq_jphi_profile)
 
     b = bq.Bouquet.from_geqdsk(_GEQ, profiles=_PF, mesh=_MESH, nthreads=1,
-                               header=os.path.join(outdir, "fsa"), n_draws=1)
+                               header=os.path.join(outdir, "fsa"), n_draws=1,
+                               reconstruction_engine="legacy")
     b.setup_solver()
     bl = b.prepare_baseline()
     mygs = b.mygs
@@ -226,7 +233,8 @@ def _probe(outdir):
                                             pprime_sign=sgn, geom=geom),
             }
 
-    # the silent get_q collapse the clipping exists to avoid
+    # the silent get_q collapse the clipping exists to avoid, and -- the part
+    # that holds on EVERY build -- the clipped geometry it produces instead.
     try:
         fsa_current_geometry(mygs, psi_N, psi_pad=0.0)
         out["collapse_guard"] = None
@@ -236,6 +244,19 @@ def _probe(outdir):
     R_raw = np.asarray(ravgs["<R>"] if isinstance(ravgs, dict) else ravgs[0],
                        dtype=float)
     out["unclipped_R_span"] = float(np.ptp(R_raw))
+    # A surface the tracer fails on comes back as a zero row (get_q's output
+    # arrays are zero-initialised and a failed trace CYCLEs), so the raw span
+    # is not a collapse detector on its own -- see _unclipped_collapses.
+    R_pos = R_raw[R_raw > 0.0]
+    out["unclipped_R_span_traced"] = float(np.ptp(R_pos)) if R_pos.size else 0.0
+    out["unclipped_R_traced_mean"] = float(np.mean(R_pos)) if R_pos.size else 0.0
+    out["unclipped_n_untraced"] = int(R_raw.size - R_pos.size)
+    out["unclipped_n_surfaces"] = int(R_raw.size)
+    clipped = fsa_current_geometry(mygs, psi_N, want_pprime=False)
+    out["clipped_R_span"] = float(np.ptp(clipped["R_avg"]))
+    out["clipped_R_mean"] = float(np.mean(clipped["R_avg"]))
+    out["clipped_psi_q_ends"] = [float(clipped["psi_q"][0]),
+                                 float(clipped["psi_q"][-1])]
 
     out["Ip_after"] = float(mygs.compute_area_integral(mygs.calc_jtor_plasma()))
     with open(os.path.join(outdir, "fsa.json"), "w") as fh:
@@ -302,32 +323,169 @@ def test_dV_dpsi_is_per_dimensional_psi(measured):
     assert measured["live"]["vol_dpsiN"] / vol > 2.0
 
 
+#: A collapsed ``<R>`` is constant to ~2e-15 of its own magnitude; a healthy
+#: D3D-like geometry spans ~1.7 m.  Anything between the two is neither, so the
+#: build is classified on a threshold ten orders of magnitude clear of both.
+#: This is a build-detection threshold, not a physics tolerance.
+_COLLAPSE_REL = 1.0e-9
+
+
+def _unclipped_collapses(measured):
+    """Does THIS build exhibit the axis collapse?
+
+    Measured, never inferred from a version string.  ``OpenFUSIONToolkit
+    .__version__`` does not move with the surface-tracing code at all, and the
+    collapse has been observed to depend on the *build* (compiler, ISA,
+    platform) and not only on the source revision -- the same OFT commit
+    collapses on one machine's build and traces every surface on another's.
+
+    The raw span is not the detector: a surface the tracer fails on (the exact
+    separatrix is one, on some builds) returns ``<R> = 0``, which by itself
+    makes the span look healthy while every surface that WAS traced is still
+    pinned to the axis.  Judge only the traced surfaces.
+    """
+    if measured["unclipped_n_surfaces"] - measured["unclipped_n_untraced"] < 2:
+        return False
+    return (measured["unclipped_R_span_traced"]
+            <= _COLLAPSE_REL * measured["unclipped_R_traced_mean"])
+
+
+@pytest.mark.solver
+@solver_only
+def test_the_clipping_is_what_makes_the_geometry_well_posed(measured):
+    """The invariant, on EVERY OFT build: with the clipping in place the
+    sampled geometry is the real one.
+
+    This is the assertion bouquet's answer actually rests on.  Whether an
+    UNCLIPPED grid would have collapsed is a property of the OFT build (see
+    the test below); that the CLIPPED grid does not is a property of bouquet,
+    and it must hold on the legacy builds and the fixed ones alike.
+    """
+    assert measured["clipped_R_span"] > _COLLAPSE_REL * measured["clipped_R_mean"], (
+        f"the clipped grid produced a CONSTANT <R> "
+        f"({measured['clipped_R_mean']:.6f} m across the profile) -- "
+        "fsa_current_geometry's whole premise has failed on this build")
+    # ... and it is a physical span, not merely non-zero.  On the D3D-like
+    # baseline <R> runs 1.743 m (axis) -> 1.518 m (edge): a span of 0.224 m,
+    # 13.3 % of the mean, measured identically on every build tried.
+    assert measured["clipped_R_span"] > 0.1 * measured["clipped_R_mean"], (
+        f"<R> spans only {measured['clipped_R_span']:.4f} m about a mean of "
+        f"{measured['clipped_R_mean']:.4f} m -- expected ~0.224 m")
+    lo, hi = measured["clipped_psi_q_ends"]
+    assert lo > 0.0 and hi < 1.0, \
+        f"the sampling grid was not clipped off both endpoints: [{lo}, {hi}]"
+
+
 @pytest.mark.solver
 @solver_only
 def test_get_q_collapses_silently_on_an_unclipped_grid(measured):
-    """Regression guard for the trap ``fsa_current_geometry`` clips around: an
-    exact ``psi_N = 0`` sample makes every surface return the AXIS values, with
-    no exception raised by OFT."""
-    assert measured["unclipped_R_span"] < 1e-9, (
-        "get_q no longer collapses on an unclipped grid -- if OFT fixed this, "
-        "the clipping can stay but this test should be retired")
+    """The trap the clipping was written for, on the builds that have it.
+
+    An exact ``psi_N = 0`` sample makes every surface return the AXIS values,
+    with no exception raised by OFT -- the tracer starts from the axis, never
+    leaves it, and ``pt_last`` carries that onto every later surface.  Where it
+    bites, it is worth 37 % on the measure and is completely silent.
+
+    It is **not** a property of an OFT revision, so it is not something a
+    version check could gate on and not something an OFT upgrade retires: the
+    same OFT commit has been measured collapsing on one build and tracing every
+    surface on another.  The clipping therefore stays unconditionally, and this
+    test asks the build in front of it rather than assuming.  A skip here means
+    "this build did not reproduce the trap", never "the trap is fixed".
+    """
+    if not _unclipped_collapses(measured):
+        pytest.skip(
+            "this build does not reproduce the axis collapse: an unclipped "
+            f"grid traced {measured['unclipped_n_surfaces'] - measured['unclipped_n_untraced']}"
+            f"/{measured['unclipped_n_surfaces']} surfaces with a <R> span of "
+            f"{measured['unclipped_R_span_traced']:.4f} m.  Nothing is retired "
+            "by this -- the collapse is build-dependent, fsa_current_geometry "
+            "still clips, and the guard is covered without a solver by "
+            "test_the_collapse_guard_fires_on_a_constant_R_geometry.")
     assert measured["collapse_guard"], \
         "fsa_current_geometry accepted psi_pad=0 instead of raising"
     assert "collapsed" in measured["collapse_guard"]
 
 
+# ---------------------------------------------------------------------------
+#  fast: the collapse GUARD itself, on every build and with no solver
+# ---------------------------------------------------------------------------
+class _ConstantRGeom:
+    """An ``eq`` whose ``get_q`` reports the same ``<R>`` on every surface.
+
+    Exactly what a collapsed surface tracer returns.  Keeping this as a stub
+    means the guard in :func:`bouquet.utils.fsa_current_geometry` is exercised
+    on every OFT build -- including the ones that do not reproduce the collapse
+    for the solver test above to trigger.
+    """
+
+    psi_bounds = (0.0, 1.5)
+
+    def __init__(self, R0=1.7655, n=257):
+        self._R0 = float(R0)
+        self._n = int(n)
+
+    def get_q(self, psi=None):
+        x = np.asarray(psi, dtype=float)
+        ones = np.ones_like(x)
+        return (None, None, {"<R>": self._R0 * ones,
+                             "<1/R>": ones / self._R0,
+                             "<1/R^2>": ones / self._R0 ** 2,
+                             "dV/dPsi": 12.0 * ones}, None, None, None)
+
+    def get_profiles(self, psi=None, npsi=None, psi_pad=None):
+        x = np.asarray(psi, dtype=float)
+        z = np.zeros_like(x)
+        return (x, z, z, z, z)
+
+
+def test_the_collapse_guard_fires_on_a_constant_R_geometry():
+    """A constant ``<R>`` must raise, not be integrated into a plausible I_p.
+
+    The collapse is silent at the OFT boundary -- no exception, no warning,
+    just wrong numbers (37 % on the measure when it was found) -- so this
+    guard is the only thing standing between it and a passing threshold gate.
+    """
+    from bouquet.utils import fsa_current_geometry
+
+    psi_N = np.linspace(0.0, 1.0, 257)
+    with pytest.raises(RuntimeError, match="collapsed"):
+        fsa_current_geometry(_ConstantRGeom(), psi_N)
+
+
+def test_a_genuinely_sheared_geometry_does_not_trip_the_guard():
+    """The other half: the guard must not fire on a real geometry.  A stub
+    with a realistic ``<R>`` shear passes through and keeps its arrays."""
+    from bouquet.utils import fsa_current_geometry
+
+    class _Sheared(_ConstantRGeom):
+        def get_q(self, psi=None):
+            x = np.asarray(psi, dtype=float)
+            ones = np.ones_like(x)
+            R = self._R0 * (1.0 - 0.25 * x)          # axis -> edge shear
+            return (None, None, {"<R>": R, "<1/R>": ones / R,
+                                 "<1/R^2>": ones / R ** 2,
+                                 "dV/dPsi": 12.0 * ones}, None, None, None)
+
+    psi_N = np.linspace(0.0, 1.0, 129)
+    geom = fsa_current_geometry(_Sheared(), psi_N)
+    assert np.ptp(geom["R_avg"]) > 0.1
+    # the grid the getters were called on is clipped, the returned psi_N is not
+    assert geom["psi_q"][0] > 0.0 and geom["psi_q"][-1] < 1.0
+    assert geom["psi_N"][0] == 0.0 and geom["psi_N"][-1] == 1.0
+
+
 @pytest.mark.solver
 @solver_only
-def test_compute_flux_integral_is_not_the_plasma_area(measured):
-    """Documents defect 3 of ``_AnchorIpRenorm``: the mesh flux integral covers
-    the limiter region, not the plasma, so it is not an I_p measure for a
-    profile with a finite edge value."""
+def test_compute_flux_integral_is_the_plasma_area(measured):
+    """The mesh flux integral covers the plasma only.  A limiter-wide
+    ``gs_flux_int`` gives FI(1) = 1.59x the plasma area (defect 3 of
+    ``_AnchorIpRenorm``) and fails."""
     fi_one = float(measured["flux_integral_of_one"])
     area = float(measured["live"]["plasma_area"])
-    assert fi_one / area > 1.4, (
-        f"compute_flux_integral(1) = {fi_one:.5f} m^2 is no longer much larger "
-        f"than the plasma cross-section {area:.5f} m^2 -- if OFT changed the "
-        f"interpolator's off-plasma behaviour, revisit the measure's rationale")
+    assert abs(fi_one / area - 1.0) <= 1e-2, (
+        f"compute_flux_integral(1) = {fi_one:.5f} m^2 vs plasma cross-section "
+        f"{area:.5f} m^2 -- is this OFT build's gs_flux_int limiter-wide?")
 
 
 if __name__ == "__main__":

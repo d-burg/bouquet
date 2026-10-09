@@ -46,6 +46,9 @@ SIGMA_IND_UP = (0.10, 0.10, 0.10, 0.40)
 
 
 def _cfg(**kw):
+    # structured_preset is a legacy-path setting (the unified engine
+    # refuses it)
+    kw.setdefault("reconstruction_engine", "legacy")
     return GenerationConfig(structured_preset=PRESET, **kw)
 
 
@@ -229,6 +232,7 @@ class TestSerialisation:
                             solver=SolverConfig(mesh_path="unused.h5"),
                             output_header="t",
                             generation=GenerationConfig(
+                                reconstruction_engine="legacy",
                                 structured_preset=PRESET,
                                 closure_channel="structured",
                                 structured_li_target=0.92))
@@ -399,6 +403,7 @@ class TestOptOut:
                             solver=SolverConfig(mesh_path="unused.h5"),
                             output_header="t",
                             generation=GenerationConfig(
+                                reconstruction_engine="legacy",
                                 closure_channel="structured",
                                 structured_preset=STRUCTURED_PRESET_NONE))
         back = BouquetConfig.from_json(cfg.to_json()).generation
@@ -588,7 +593,8 @@ class TestResolutionIsRecordedAndIdempotent:
     def test_provenance_round_trips_through_serialisation(self):
         from bouquet.config import BouquetConfig, ImasSource, SolverConfig
         with pytest.warns(UserWarning):
-            gen = GenerationConfig(closure_channel="structured")
+            gen = GenerationConfig(reconstruction_engine="legacy",
+                                   closure_channel="structured")
         cfg = BouquetConfig(source=ImasSource(ids_path="unused.json"),
                             solver=SolverConfig(mesh_path="unused.h5"),
                             output_header="t", generation=gen)

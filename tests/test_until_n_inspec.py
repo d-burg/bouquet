@@ -47,6 +47,8 @@ def _circle(n=360, r=1.0, cx=1.7, cz=0.0):
 
 
 def _mini_config(**gen):
+    # the legacy draws' until-N loop (generate_bouquet is the recorder here)
+    gen.setdefault("reconstruction_engine", "legacy")
     return BouquetConfig(
         source=ReconstructionSource(geqdsk_path="g.geqdsk",
                                     profiles_path="p.peqdsk"),
@@ -256,7 +258,9 @@ def test_the_identity_holds_on_the_real_golden_archive(tmp_path):
                 float(d.attrs["inspec_F_max"]) * 100.0,
                 float(d.attrs["inspec_VSC_max"]) * 100.0,
                 rms_max_mm=rms_max_mm)
-            if ok:
+            # the engine's until-N verdict also ANDs its post-hoc draw band
+            # (engine_draws: ``until_n``); a legacy draw carries no band
+            if ok and bool(d.attrs.get("passes_draw_band", True)):
                 inloop.add(k)
 
     assert inloop == post, f"in-loop {sorted(inloop)} != selected {sorted(post)}"

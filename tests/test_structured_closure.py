@@ -572,10 +572,13 @@ class TestShippedDefaults:
         assert g.structured_weights is None
 
     def test_knobs_round_trip_through_config_serialisation(self):
-        from bouquet.config import BouquetConfig, ImasSource, SolverConfig
+        from bouquet.config import (BouquetConfig, GenerationConfig,
+                                    ImasSource, SolverConfig)
         cfg = BouquetConfig(source=ImasSource(ids_path="unused.json"),
                             solver=SolverConfig(mesh_path="unused.h5"),
-                            output_header="t")
+                            output_header="t",
+                            generation=GenerationConfig(
+                                reconstruction_engine="legacy"))
         cfg.generation.closure_channel = "structured"
         cfg.generation.structured_basis = dict(kind="gaussian",
                                                centres=[0.2, 0.8],
@@ -595,10 +598,13 @@ class TestWorkflowWhitelists:
     """
 
     def _config(self, channel):
-        from bouquet.config import BouquetConfig, ImasSource, SolverConfig
+        from bouquet.config import (BouquetConfig, GenerationConfig,
+                                    ImasSource, SolverConfig)
         cfg = BouquetConfig(source=ImasSource(ids_path="unused.json"),
                             solver=SolverConfig(mesh_path="unused.h5"),
-                            output_header="t")
+                            output_header="t",
+                            generation=GenerationConfig(
+                                reconstruction_engine="legacy"))
         cfg.generation.jBS_baseline_mode = "ohmic"
         cfg.generation.perturb_jind_in_anchor = True
         cfg.generation.workflow = "custom"      # downgrade baseline-only refusal

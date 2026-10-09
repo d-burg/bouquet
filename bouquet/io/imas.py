@@ -10,21 +10,26 @@ Field mapping (verified against a D3D FUSE run)::
     equilibrium.time_slice[t].global_quantities.ip            -> Ip_target
     equilibrium.time_slice[t].global_quantities.li_3          -> l_i_target
     core_profiles.profiles_1d[t].grid.psi                     -> normalised -> psi_N
-    core_profiles.profiles_1d[t].j_total                      -> total PARALLEL current
-    core_profiles.profiles_1d[t].j_tor                        -> total TOROIDAL current
-    core_profiles.profiles_1d[t].j_ohmic                      -> inductive (parallel)
-    core_profiles.profiles_1d[t].j_bootstrap                  -> bootstrap (parallel)
+    core_profiles.profiles_1d[t].j_total                      -> total <J.B>/B0
+    core_profiles.profiles_1d[t].j_tor                        -> total IMAS j_tor
+    core_profiles.profiles_1d[t].j_ohmic                      -> (unused: residual)
+    core_profiles.profiles_1d[t].j_bootstrap                  -> bootstrap <J.B>/B0
+    equilibrium.time_slice[k].profiles_1d.{f,gm1,gm5,gm8,gm9,dpressure_dpsi}
+                                                              -> conversion geometry
     core_profiles.profiles_1d[t].electrons.{density_thermal,temperature}
     core_profiles.profiles_1d[t].ion[*].{density_thermal,temperature,element[].z_n}
     core_profiles.profiles_1d[t].{electrons,ion[*]}.pressure_fast_{perpendicular,parallel}
-    core_sources.source[*].profiles_1d[t].j_parallel          -> beam-source j_NBI only
+    core_sources.source[*].profiles_1d[t].j_parallel          -> j_NBI (beam), j_RF (EC/LH/IC),
+                                                                 j_other (fusion, runaways, sawteeth)
 
-Currents are converted parallel->toroidal (see :func:`bouquet.physics.parallel_to_toroidal`)
-via the per-surface factor c = j_tor/j_total, and fast pressure is isotropized
-(see :func:`bouquet.physics.isotropize_fast_pressure`). The total j_phi is set to
-the authoritative toroidal ``j_tor`` and the inductive component is taken as the
-residual ``j_phi - j_BS - j_NBI - j_RF`` so the decomposition sums exactly and Ip
-is preserved.
+Currents are converted exactly to TokaMaker ``jphi`` = <j_phi> (bouquet's
+convention; :mod:`bouquet.physics` docstring, ``docs/current-conventions.md``)
+with the geometry of the equilibrium slice FUSE paired with the core_profiles
+slice: the total from IMAS ``j_tor`` (A5), the bootstrap as its field-aligned
+part plus the pressure term p'G (A7), each driven source as its field-aligned
+part.  The inductive component is the residual
+``j_phi - j_BS - j_NBI - j_RF - j_other`` so the decomposition sums exactly.
+Fast pressure is isotropized (see :func:`bouquet.physics.isotropize_fast_pressure`).
 
 Current orientation: bouquet works in ONE positive-current frame.  The
 TokaMaker anchor is always solved to ``|Ip|`` with ``F0 = |r0*b0|`` (see
@@ -52,40 +57,390 @@ origin is recorded as ``Baseline.source_current_sign_origin``.
 
 Note: ``j_BS`` read here is the FUSE bootstrap baseline, but it is *overridden*
 when ``GenerationConfig.recalculate_j_BS`` is True -- bouquet then recomputes
-bootstrap per draw via TokaMaker ``solve_with_bootstrap`` (whose output is also
-parallel and must be converted to toroidal; see ``parallel_to_toroidal``).
+bootstrap per draw via TokaMaker ``solve_with_bootstrap``, whose output is
+already TokaMaker ``jphi``.
 """
 
 from __future__ import annotations
 
+import functools
+import json
+import os
 from typing import Optional, TYPE_CHECKING
 
 import numpy as np
 
-from ..physics import (effective_impurity_charge, impurity_pressure,
+from ..physics import (fast_ion_density_equivalent, impurity_pressure,
                        impurity_charge_with_fast_ions,
-                       isotropize_fast_pressure, main_ion_density_from_zeff,
-                       parallel_to_toroidal)
+                       isotropize_fast_pressure,
+                       jpar_to_jphi_tokamaker,
+                       jphi_tokamaker_pressure_term,
+                       jphi_tokamaker_to_jpar,
+                       jphi_tokamaker_to_jtor_imas,
+                       jtor_imas_to_jphi_tokamaker,
+                       main_ion_density_from_zeff)
 
-# Elementary charge [C]: thermal pressure p = e * sum_s(n_s * T_s).
-_EC = 1.602176634e-19
+from ..physics import ELEMENTARY_CHARGE as _EC  # p = e * sum_s(n_s * T_s)
 
 if TYPE_CHECKING:
     from ..config import ImasSource, FixedComponentsConfig
     from ..baseline import Baseline
 
+
+@functools.lru_cache(maxsize=2)
+def _cached_dd(ids_path: str, _mtime_ns: int, _size: int) -> dict:
+    """Parsed ``dd_sim.json`` (up to ~1 GB), cached per (path, mtime, size):
+    a slice sweep reads one file once.  Shared: callers must not mutate it."""
+    with open(ids_path, "rb") as fh:
+        return json.loads(fh.read())
+
+
+def _load_dd(ids_path: str) -> dict:
+    """``dd_sim.json`` at ``ids_path``, via :func:`_cached_dd`."""
+    st = os.stat(ids_path)
+    return _cached_dd(ids_path, st.st_mtime_ns, st.st_size)
+
 # Core-source identifier index for neutral-beam current drive.
 NBI_SOURCE_INDEX = 2          # neutral beam injection -> summed into j_NBI
 # Core-source identifier index for the sawtooth model (IMAS core_sources
-# identifier enumeration).  NOT summed into any current here: it is read only as
-# a slice-level FLAG -- "is the source's sawtooth model doing anything at this
-# time?" -- for the closure_channel="sawtooth_bootstrap" gate, which pins q0
-# only where sawteeth make q0 ~ 1 a physical fact rather than a model artefact.
+# identifier enumeration).  Its current is held fixed in j_other (share also in
+# j_sawteeth), and it is read as a slice-level FLAG for the
+# closure_channel="sawtooth_bootstrap" gate, which pins q0 only where sawteeth
+# make q0 ~ 1 a physical fact rather than a model artefact.
 SAWTOOTH_SOURCE_INDEX = 701
-# NOTE: j_RF is NOT computed internally (RF is the least-common input). It is
-# left as zeros and accepted as a user-supplied array via
-# FixedComponentsConfig.j_RF. See the "revisit RF" flag in the project notes
-# if/when internal EC/IC/LH summation is wanted.
+
+#: The time-match window [s] when NEITHER time base has a local step (a
+#: single-time core_sources entry on a single-time core_profiles base, or a
+#: single-time core_sources slice on a single-time core_profiles).
+#: Owner-approved 2026-10-07, replacing a window of a few float ulp:
+#: rounding-level mismatches of millisecond-stored times are MATCHES, with
+#: their dt recorded; the off_before_record (entry's own time after the
+#: slice) and refusal (entry's own time before the slice, carrying current)
+#: rules apply only beyond it.  When either base has a local step the
+#: half-step window is used and this floor plays no part.
+IMAS_SINGLE_TIME_WINDOW_S = 1e-5
+
+
+def _local_step(grid, k, toward):
+    """The local time-step of the sorted, distinct *grid* at node *k*, on
+    the side of the time *toward* (the interval it lies in; at an end of the
+    grid, the end interval).  ``None`` for a grid of fewer than two times."""
+    if grid.size < 2:
+        return None
+    if toward >= grid[k]:
+        return float(grid[k + 1] - grid[k] if k + 1 < grid.size
+                     else grid[k] - grid[k - 1])
+    return float(grid[k] - grid[k - 1] if k > 0 else grid[1] - grid[0])
+
+
+def _entry_time_window(times, t_slice, base_times=None):
+    """``(k, dt, half_step)`` for matching a core_sources entry to the slice
+    time *t_slice* by its OWN per-slice *times*: *k* is the entry's slice
+    NEAREST t_slice, ``dt`` its distance, and ``half_step`` the acceptance
+    window -- HALF the local time-step of the entry's own time grid (the
+    interval t_slice lies in, or the end interval past either end).  An
+    entry with a single time uses the local step of *base_times* (the
+    core_profiles time base) at the node nearest t_slice, on the entry's
+    side.  When neither grid has a step (a single-time entry on a
+    single-time base) the window is :data:`IMAS_SINGLE_TIME_WINDOW_S`
+    (10 us, owner-approved 2026-10-07; it was a few float ulp).
+
+    The rule (owner-approved 2026-10-06, replacing the 1e-6 s absolute
+    match of 2026-10-05; the half-step value is recorded, to be confirmed):
+    nearest own slice, accepted within half a local step, otherwise the
+    caller REFUSES a driven entry carrying current near that time -- a
+    driven current is never dropped to zero and never read at another time.
+    Refinement (2026-10-06): an entry carrying no current on the slices
+    BRACKETING the time (:func:`_entry_bracketing_slices`) is OFF there,
+    not missing -- it contributes zero and is stamped, not refused."""
+    tt = np.asarray(times, dtype=float)
+    t_slice = float(t_slice)
+    k = int(np.argmin(np.abs(tt - t_slice)))
+    dt = abs(float(tt[k]) - t_slice)
+    grid = np.unique(tt)
+    if grid.size >= 2:
+        kg = int(np.argmin(np.abs(grid - tt[k])))
+        step = _local_step(grid, kg, t_slice)
+    else:
+        step = None
+        if base_times is not None:
+            bg = np.unique(np.asarray(base_times, dtype=float))
+            if bg.size >= 2:
+                kb = int(np.argmin(np.abs(bg - t_slice)))
+                step = _local_step(bg, kb, float(tt[k]))
+    if step is None:
+        half = IMAS_SINGLE_TIME_WINDOW_S
+    else:
+        half = 0.5 * step
+    return k, dt, half
+
+
+def _entry_bracketing_slices(times, t_slice):
+    """Indices of a core_sources entry's own slices that BRACKET the slice
+    time *t_slice* on the entry's OWN time grid *times*: its nearest own
+    slice at or before t_slice and its nearest own slice at or after it
+    (every slice sharing that time, should the grid repeat one).  When
+    t_slice lies outside the entry's time range only the nearest END slice
+    exists, and only it is returned.
+
+    Used when no own slice lies within half a local step of t_slice
+    (:func:`_entry_time_window`): an entry whose ``j_parallel`` is absent or
+    identically zero on every bracketing slice is OFF at that time (a model
+    source idle there, e.g. one whose grid starts a step after the IDS time
+    base), not a missing input -- it contributes zero.  If any bracketing
+    slice carries current the caller still refuses (refinement of the
+    half-step rule, 2026-10-06)."""
+    tt = np.asarray(times, dtype=float)
+    t_slice = float(t_slice)
+    out = []
+    below = tt <= t_slice
+    if np.any(below):
+        out.extend(np.flatnonzero(tt == tt[below].max()).tolist())
+    above = tt >= t_slice
+    if np.any(above):
+        out.extend(np.flatnonzero(tt == tt[above].min()).tolist())
+    return sorted(set(int(k) for k in out))
+
+
+def _carries_current(q):
+    """Whether one ``profiles_1d`` slice carries a non-zero (or non-finite)
+    ``j_parallel``."""
+    jp = q.get("j_parallel")
+    return jp is not None and bool(np.any(np.asarray(jp, float) != 0.0))
+
+
+def _entry_off_near(s, t_slice):
+    """``None`` when the core_sources entry *s* carries current on a slice
+    bracketing *t_slice* (or cannot be judged: no per-slice times), else
+    the provenance reason it is OFF near that time
+    (:func:`_entry_bracketing_slices`)."""
+    pr = s.get("profiles_1d", [])
+    times = [q.get("time") for q in pr]
+    if t_slice is None or not pr or any(t is None for t in times):
+        return None
+    br = _entry_bracketing_slices(times, t_slice)
+    if any(_carries_current(pr[k]) for k in br):
+        return None
+    at = ", ".join(f"{float(times[k]):.9g}" for k in br)
+    return (f"off near the slice: no current on its bracketing slices at "
+            f"{at} s (t = {float(t_slice):.9g} s; no own slice within half "
+            "a time-step) -- a source idle at this time, contributing zero")
+
+
+def _entry_time_why(t_slice, times, k, dt, half):
+    """Why an entry has no slice within half a step of *t_slice*."""
+    tt = np.asarray(times, dtype=float)
+    return (f"no profiles_1d slice within half a time-step of t = "
+            f"{t_slice:.9g} s (nearest own time {float(tt[k]):.9g} s, "
+            f"|dt| = {dt:.3g} s > {half:.3g} s, half its local time-step; "
+            f"its own times span {tt.min():.9g}-{tt.max():.9g} s)")
+
+
+def _entry_time_refusal(who, idn, why):
+    """The refusal text for a driven entry with no slice at this time."""
+    return (f"{who}: core_sources {idn.get('name')!r} (index "
+            f"{idn.get('index')}) carries a non-zero j_parallel but has "
+            f"{why}, and carries current on its own slices bracketing that "
+            "time.  Refusing rather than reading its current at another "
+            "time or dropping it to zero (the half-step match rule, "
+            "owner-approved 2026-10-06)")
+
+
+def _half_local_step(times, t_at, toward):
+    """HALF the local step of the time grid *times* at its node nearest
+    *t_at*, on the side of *toward* (:func:`_local_step`), or ``None`` for a
+    grid of fewer than two distinct times."""
+    if times is None:
+        return None
+    grid = np.unique(np.asarray(times, dtype=float))
+    if grid.size < 2:
+        return None
+    k = int(np.argmin(np.abs(grid - float(t_at))))
+    return 0.5 * _local_step(grid, k, float(toward))
+
+
+#: The time rule of the core_sources reads (owner decision 2026-10-06),
+#: stamped on every record.
+SOURCE_TIME_RULE = (
+    "core_sources slice: nearest the core_profiles slice read, within half "
+    "the local core_profiles time-step, else refused; entry: nearest own "
+    "slice within half its own local step AND within half the local "
+    "core_profiles step of the core_profiles slice time (never "
+    "interpolated); before the entry's first own time: off "
+    "(off_before_record); past its last own time: refused when that slice "
+    "carries current; idle on its bracketing own slices: off; with no "
+    "local step on either time base the window is 1e-05 s "
+    "(IMAS_SINGLE_TIME_WINDOW_S)")
+
+
+def _cp_window(cp_times, src_times, t_cp, toward):
+    """``(half, basis)``: the core_profiles window at the core_profiles
+    slice time *t_cp* -- half its local step on the side of *toward*; a
+    single-time core_profiles uses the core_sources' own local step, and
+    two single-time bases :data:`IMAS_SINGLE_TIME_WINDOW_S` (10 us,
+    owner-approved 2026-10-07; it was a few float ulp)."""
+    h = _half_local_step(cp_times, t_cp, toward)
+    if h is not None:
+        return h, "half the local core_profiles time-step"
+    h = _half_local_step(src_times, t_cp, toward)
+    if h is not None:
+        return h, ("half the local core_sources time-step (core_profiles "
+                   "has a single time)")
+    return (IMAS_SINGLE_TIME_WINDOW_S,
+            "the single-time floor IMAS_SINGLE_TIME_WINDOW_S (single-time "
+            "core_profiles and core_sources)")
+
+
+def core_sources_slice(src_ids, cp_times, ic, T=None, who="IMAS reader"):
+    """``(isrc, t_src, record)``: the core_sources slice read with the
+    core_profiles slice *ic* (owner decision 2026-10-06).
+
+    The slice is the core_sources time NEAREST the core_profiles slice
+    actually read (``cp_times[ic]``), and it must lie within HALF the local
+    core_profiles time-step of it (:func:`_cp_window`), else ``ValueError``
+    naming both times -- a single-time core_sources is no longer read at
+    any requested time.  A core_sources with no time base is read by index
+    (``ic``), as before.  The record carries both times, ``dt`` (core_sources
+    minus core_profiles), the window and its basis, and the rule."""
+    tb = src_ids.get("time")
+    cpt = (None if cp_times is None or not len(cp_times)
+           else np.asarray(cp_times, dtype=float))
+    t_cp = None if cpt is None else float(cpt[min(ic, cpt.size - 1)])
+    if not tb:
+        return ic, None, dict(core_profiles_time=t_cp,
+                              core_sources_time=None, dt=None, window=None,
+                              rule="by index: core_sources carries no time "
+                                   "base")
+    tt = np.asarray(tb, dtype=float)
+    if t_cp is None:
+        isrc = _nearest_index(tt, T, "core_sources")
+        return isrc, float(tt[isrc]), dict(
+            core_profiles_time=None, core_sources_time=float(tt[isrc]),
+            dt=None, window=None,
+            rule="nearest the requested time (core_profiles has no time "
+                 "base)")
+    isrc = int(np.argmin(np.abs(tt - t_cp)))
+    t_src = float(tt[isrc])
+    dt = t_src - t_cp
+    half, basis = _cp_window(cpt, tt, t_cp, t_src)
+    rec = dict(core_profiles_time=t_cp, core_sources_time=t_src, dt=dt,
+               window=half, window_basis=basis, rule=SOURCE_TIME_RULE)
+    if abs(dt) > half:
+        raise ValueError(
+            f"{who}: the core_sources slice nearest the core_profiles slice "
+            f"read (t = {t_cp:.9g} s) is at t = {t_src:.9g} s: |dt| = "
+            f"{abs(dt):.3g} s > {half:.3g} s, {basis} (core_sources times "
+            f"span {tt.min():.9g}-{tt.max():.9g} s).  Refusing rather than "
+            "reading the driven currents at another time (owner decision "
+            "2026-10-06)")
+    return isrc, t_src, rec
+
+
+def _source_slice_at(s, isrc, t_slice, n_time, base_times=None, *,
+                     t_cp=None, cp_half=None, rec=None):
+    """``(profile, how)``: a ``core_sources`` entry's ``profiles_1d`` at the
+    slice *isrc* (time *t_slice*), or ``(None, why)`` when the entry has no
+    slice within half a local time-step of that time
+    (:func:`_entry_time_window`; the CALLER decides: a beam entry is
+    refused unless it is off -- :func:`_entry_off_before_record`,
+    :func:`_entry_off_near`).  An entry carrying its own per-slice times is
+    matched BY TIME to its nearest slice (a model's entry may start later
+    than the IDS time base, so the list index is not the slice); one without
+    them must have exactly the IDS's number of slices, or it cannot be
+    aligned and is refused (``ValueError``) -- never its first slice taken
+    in place of a missing one.  The rule of
+    ``bouquet.adapters._ids_source_slice``.
+
+    Owner decision 2026-10-06: the matched own slice must ALSO lie within
+    *cp_half* (half the local core_profiles step) of the core_profiles
+    slice time *t_cp* (default: *t_slice*), so a coarse own grid or a
+    constant offset cannot pass on the entry's own step alone.  *rec*, a
+    dict, receives the match: matched own time, ``dt`` (own minus
+    core_profiles time), both windows, the bracketing own times, the
+    entry's first / last own time and the status."""
+    pr = s.get("profiles_1d", [])
+    idn = s.get("identifier", {}) or {}
+    if rec is None:
+        rec = {}
+    rec.update(name=idn.get("name"), index=idn.get("index"))
+    if not pr:
+        rec.update(status="no_profiles")
+        return None, "no profiles_1d"
+    times = [q.get("time") for q in pr]
+    if t_slice is not None and all(t is not None for t in times):
+        tt = np.asarray(times, dtype=float)
+        t_ref = float(t_slice if t_cp is None else t_cp)
+        k, dt, half = _entry_time_window(times, t_slice, base_times)
+        br = _entry_bracketing_slices(times, t_slice)
+        rec.update(own_time_nearest=float(tt[k]),
+                   dt=float(tt[k]) - t_ref, window_own=float(half),
+                   window_core_profiles=(None if cp_half is None
+                                         else float(cp_half)),
+                   bracketing_own_times=[float(tt[j]) for j in br],
+                   first_own_time=float(tt.min()),
+                   last_own_time=float(tt.max()))
+        if dt > half:
+            rec.update(status="unmatched")
+            return None, _entry_time_why(t_slice, times, k, dt, half)
+        if cp_half is not None and abs(float(tt[k]) - t_ref) > cp_half:
+            rec.update(status="unmatched")
+            return None, (
+                f"no profiles_1d slice within half the local core_profiles "
+                f"time-step of t = {t_ref:.9g} s (nearest own time "
+                f"{float(tt[k]):.9g} s, |dt| = "
+                f"{abs(float(tt[k]) - t_ref):.3g} s > {cp_half:.3g} s, half "
+                f"the local core_profiles step; within its own half-step "
+                f"{half:.3g} s; its own times span {tt.min():.9g}-"
+                f"{tt.max():.9g} s)")
+        rec.update(status="matched", matched_time=float(tt[k]))
+        return pr[k], "matched by time"
+    if n_time is not None and len(pr) != n_time:
+        raise ValueError(
+            f"IMAS reader: core_sources {idn.get('name')!r} (index "
+            f"{idn.get('index')}) has {len(pr)} profiles_1d slices for "
+            f"{n_time} core_sources times and no per-slice time: it cannot be "
+            "aligned with the slice read")
+    if isrc >= len(pr):
+        raise ValueError(
+            f"IMAS reader: core_sources {idn.get('name')!r} (index "
+            f"{idn.get('index')}) has no profiles_1d slice {isrc}")
+    rec.update(status="matched", matched_time=t_slice, dt=(
+        None if (t_slice is None or t_cp is None) else
+        float(t_slice) - float(t_cp)), rule_entry="by index")
+    return pr[isrc], "by index"
+
+
+def _entry_off_before_record(s, t_slice):
+    """The entry's FIRST own time when the slice time *t_slice* lies before
+    it (the entry has no record before its first own sample: it is OFF at
+    that time -- owner decision 2026-10-06), else ``None``.  Judged only on
+    an entry carrying per-slice times."""
+    pr = s.get("profiles_1d", [])
+    times = [q.get("time") for q in pr]
+    if t_slice is None or not pr or any(t is None for t in times):
+        return None
+    first = float(np.min(np.asarray(times, dtype=float)))
+    return first if float(t_slice) < first else None
+
+
+_OFF_BEFORE_ANNOUNCED = set()
+
+
+def _announce_off_before(who, idn, first, t_slice, key=None):
+    """Print and warn ONCE per run (per source file and entry) that a driven
+    entry is off before its first own time."""
+    import warnings
+    tag = (key, idn.get("name"), idn.get("index"), float(first))
+    if tag in _OFF_BEFORE_ANNOUNCED:
+        return
+    _OFF_BEFORE_ANNOUNCED.add(tag)
+    msg = (f"{who}: core_sources {idn.get('name')!r} (index "
+           f"{idn.get('index')}) has no record before its first own time "
+           f"{float(first):.9g} s: it is OFF (zero) at t = "
+           f"{float(t_slice):.9g} s and at every earlier slice, stamped "
+           "off_before_record (owner decision 2026-10-06)")
+    print(f"[imas] NOTE {msg}", flush=True)
+    warnings.warn(msg, UserWarning, stacklevel=3)
 
 
 def _nearest_index(time_array, t: Optional[float], what: str) -> int:
@@ -433,6 +788,32 @@ def _warn_missing_parallel(species_labels, rule: str):
         f"pressure_fast_parallel. {detail}", stacklevel=3)
 
 
+def _phi_n_from_rho(rho, psi_N, where):
+    """Φ_N of nodes at ψ_N ``psi_N`` from their ``rho_tor_norm``: ρ², normalised
+    to [0, 1].
+
+    Refuses a missing ``rho`` or the ``sqrt(psi_N)`` placeholder some writers
+    store: neither says where the nodes sit in Φ_N.
+    """
+    if rho is None or np.shape(rho) != np.shape(psi_N):
+        raise ValueError(f"coord='phi_n' needs {where} rho_tor_norm "
+                         "on the same nodes as its psi")
+    rho = np.asarray(rho, dtype=float)
+    if not np.all(np.diff(rho) > 0):
+        raise ValueError(f"coord='phi_n': {where} rho_tor_norm is not strictly increasing")
+    if np.allclose(rho, np.sqrt(np.clip(psi_N, 0.0, None)), rtol=0, atol=1e-6):
+        raise ValueError(f"coord='phi_n': {where} rho_tor_norm is the sqrt(psi_N) "
+                         "placeholder, not a toroidal-flux coordinate")
+    phi = rho ** 2
+    return (phi - phi[0]) / (phi[-1] - phi[0])
+
+
+def _dd_phi_n(cp, psi_N):
+    """Φ_N of the core_profiles nodes (:func:`_phi_n_from_rho` of ``grid``)."""
+    return _phi_n_from_rho(cp.get("grid", {}).get("rho_tor_norm"), psi_N,
+                           "core_profiles grid")
+
+
 def _override(arr, src_psi, dst_psi):
     """Resample a user-supplied fixed-component array onto the baseline grid."""
     arr = np.asarray(arr, dtype=float)
@@ -596,6 +977,232 @@ def _refuse_mixed_orientation(bad, ip, cur_sign, origin):
         "used. Otherwise fix the file.")
 
 
+#: equilibrium.profiles_1d fields the current conversions need (IMAS.jl names).
+_FUSE_GEOM_FIELDS = ("rho_tor_norm", "f", "gm1", "gm5", "gm8", "gm9",
+                     "dpressure_dpsi")
+
+
+def _fsa_from_profiles_2d(ts, nlevels=257):
+    """gm1, gm5, gm8, gm9 of an equilibrium slice on its profiles_1d psi, by
+    flux-surface tracing of the rectangular ``profiles_2d.psi`` (COCOS 11).
+
+    For producers that omit the averages; FUSE writes them.  Against FUSE's own
+    (rt50, 65x65 psi): median 1e-4, <3e-3 inside psi_N 0.95, ~2 % at the
+    separatrix; the converted currents agree to 2e-4 of their peak.
+    """
+    from .geqdsk import GEQDSKEquilibrium
+    p1 = ts["profiles_1d"]
+    p2 = next((p for p in ts.get("profiles_2d") or []
+               if (p.get("grid_type") or {}).get("index") == 1 and p.get("psi")),
+              None)
+    if p2 is None:
+        raise ValueError("no rectangular profiles_2d.psi to compute them from")
+    if not p1.get("f"):
+        raise ValueError("profiles_1d.f is needed to compute <B^2>")
+    R = np.asarray(p2["grid"]["dim1"], dtype=float)
+    Z = np.asarray(p2["grid"]["dim2"], dtype=float)
+    for name, x in (("dim1", R), ("dim2", Z)):
+        if not np.allclose(np.diff(x), x[1] - x[0], rtol=1e-6, atol=0):
+            raise ValueError(f"profiles_2d grid {name} is not uniform")
+    # traced with psi rising from axis to edge: a mirrored slice traces the
+    # same arrays (the averages do not depend on the psi sign)
+    sg = -1.0 if float(p1["psi"][-1]) < float(p1["psi"][0]) else 1.0
+    psi = sg * np.asarray(p1["psi"], dtype=float)
+    pn = (psi - psi[0]) / (psi[-1] - psi[0])
+    pn_u = np.linspace(0.0, 1.0, R.size)
+
+    def on_u(key, s=1.0):               # geqdsk 1-D profiles: uniform psi_N, NW
+        v = p1.get(key)
+        return (s * np.interp(pn_u, pn, np.asarray(v, dtype=float)) if v
+                else np.zeros(R.size))
+
+    ax = ts["global_quantities"]["magnetic_axis"]
+    ob = (ts.get("boundary") or {}).get("outline") or {}
+    rb = np.asarray(ob.get("r", []), dtype=float)
+    zb = np.asarray(ob.get("z", []), dtype=float)
+    raw = dict(NW=R.size, NH=Z.size, RLEFT=R[0], RDIM=R[-1] - R[0],
+               ZMID=0.5 * (Z[0] + Z[-1]), ZDIM=Z[-1] - Z[0],
+               SIMAG=psi[0], SIBRY=psi[-1], RMAXIS=float(ax["r"]), ZMAXIS=float(ax["z"]),
+               FPOL=on_u("f"), PRES=on_u("pressure"),
+               PPRIME=on_u("dpressure_dpsi", sg), FFPRIM=on_u("f_df_dpsi", sg),
+               QPSI=on_u("q"),
+               PSIRZ=sg * np.asarray(p2["psi"], dtype=float).T,  # [R][Z] -> [Z][R]
+               RBBBS=rb, ZBBBS=zb, RLIM=rb, ZLIM=zb,
+               CURRENT=0.0, RCENTR=float(ax["r"]), BCENTR=0.0)
+    avg = GEQDSKEquilibrium.from_raw(raw, cocos=11, nlevels=nlevels).averages
+    pn_l = np.linspace(0.0, 1.0, nlevels)
+    return {gm: np.interp(pn, pn_l, avg[key]) for gm, key in
+            (("gm1", "1/R**2"), ("gm5", "Btot**2"), ("gm8", "R"), ("gm9", "1/R"))}
+
+
+def _derive_geom_fields(ts, missing):
+    """``missing`` derivable profiles_1d fields of an equilibrium slice:
+    rho_tor_norm from phi (or q), dpressure_dpsi from pressure, gm's from
+    profiles_2d (:func:`_fsa_from_profiles_2d`)."""
+    from scipy.interpolate import CubicSpline
+    p1 = ts["profiles_1d"]
+    # splines in sg*psi, rising from axis to edge in either orientation
+    sg = -1.0 if float(p1["psi"][-1]) < float(p1["psi"][0]) else 1.0
+    psi = sg * np.asarray(p1["psi"], dtype=float)
+    out = {}
+    if "rho_tor_norm" in missing:
+        if p1.get("phi"):
+            phi = np.asarray(p1["phi"], dtype=float)
+        elif p1.get("q"):
+            phi = CubicSpline(psi, np.asarray(p1["q"], dtype=float)).antiderivative()(psi)
+            phi = phi - phi[0]
+        else:
+            raise ValueError("rho_tor_norm needs profiles_1d phi or q")
+        out["rho_tor_norm"] = np.sqrt(np.abs(phi / phi[-1]))
+    if "dpressure_dpsi" in missing:
+        if not p1.get("pressure"):
+            raise ValueError("dpressure_dpsi needs profiles_1d pressure")
+        out["dpressure_dpsi"] = sg * CubicSpline(
+            psi, np.asarray(p1["pressure"], dtype=float)).derivative()(psi)
+    if any(g in missing for g in ("gm1", "gm5", "gm8", "gm9")):
+        out.update(_fsa_from_profiles_2d(ts))
+    return out
+
+
+def _slice_b0(eq, k):
+    """Signed ``equilibrium.vacuum_toroidal_field.b0`` at slice ``k``."""
+    b0 = eq["vacuum_toroidal_field"]["b0"]
+    if isinstance(b0, list):
+        return float(b0[min(k, len(b0) - 1)])
+    return float(b0)
+
+
+def _imasjl_cubic(x, y, xq):
+    """IMAS.jl ``cubic_interp1d``: FastInterpolations cubic spline with the
+    default ``CubicFit`` ends (end slopes from the cubic through the 4 end
+    points), extended beyond the ends.  Matches FUSE's ``core_profiles.j_tor``
+    to machine precision where a natural spline misses by ~5e-3 at the edge."""
+    from scipy.interpolate import CubicSpline
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+
+    def slope(xs, ys, x0):
+        return np.polyfit(xs - x0, ys, 3)[-2]
+
+    bc = ((1, slope(x[:4], y[:4], x[0])), (1, slope(x[-4:], y[-4:], x[-1])))
+    return CubicSpline(x, y, bc_type=bc)(np.asarray(xq, dtype=float))
+
+
+def _fuse_current_geometry(eq, k, rho=None):
+    """Current-convention ``geom`` (:mod:`bouquet.physics`) of FUSE equilibrium
+    slice ``k``, on its own grid (``rho=None``) or interpolated in rho_tor_norm
+    onto ``rho`` exactly as IMAS.jl ``JparB_2_JtoR`` does (:func:`_imasjl_cubic`).
+
+    COCOS 11: p' = -2*pi*dpressure_dpsi; ``B0`` is the slice's signed b0, so
+    ``geom`` takes IMAS <J.B>/B0 directly.  Fields a producer omitted are
+    derived (:func:`_derive_geom_fields`).
+    """
+    ts = eq["time_slice"][k]
+    p1 = ts["profiles_1d"]
+    missing = [f for f in _FUSE_GEOM_FIELDS if not p1.get(f)]
+    get = {f: np.asarray(p1[f], dtype=float)
+           for f in _FUSE_GEOM_FIELDS if f not in missing}
+    if missing:
+        try:
+            if "f" in missing:
+                raise ValueError("f is not derivable")
+            get.update(_derive_geom_fields(ts, missing))
+        except (ValueError, KeyError, TypeError, IndexError) as exc:
+            raise ValueError(
+                f"equilibrium.time_slice[{k}].profiles_1d lacks {missing} "
+                f"({exc}): the IMAS -> TokaMaker current conversion needs f and "
+                "the flux-surface averages gm1=<1/R^2>, gm5=<B^2>, gm8=<R>, "
+                "gm9=<1/R> (FUSE writes them), or a rectangular profiles_2d.psi "
+                "with magnetic_axis to compute them from") from exc
+    if rho is None:
+        at = get
+    else:
+        x = get["rho_tor_norm"]
+        o = np.argsort(x)
+        at = {f: _imasjl_cubic(x[o], v[o], rho)
+              for f, v in get.items() if f != "rho_tor_norm"}
+    return {"F": at["f"], "avg_R": at["gm8"], "avg_inv_R": at["gm9"],
+            "avg_inv_R2": at["gm1"], "avg_B2": at["gm5"],
+            "pprime": -2.0 * np.pi * at["dpressure_dpsi"],
+            "B0": _slice_b0(eq, k)}
+
+
+def _jtor_from_jpar(j_par, geom):
+    """IMAS ``j_tor`` of a total/bootstrap <J.B>/B0 (A6, IMAS.jl
+    ``Jpar_2_Jtor(..., includes_bootstrap=true)``)."""
+    return jphi_tokamaker_to_jtor_imas(
+        jpar_to_jphi_tokamaker(j_par, geom)
+        + jphi_tokamaker_pressure_term(geom), geom)
+
+
+def _paired_current_geometry(eq, cp, t_cp, j_total=None, j_tor=None):
+    """``(geom, meta)`` on the core_profiles grid from the equilibrium slice
+    FUSE paired with the core_profiles slice at ``t_cp``.
+
+    FUSE evaluates ``core_profiles.j_tor`` (IMAS.jl ``Jpar_2_Jtor``) against
+    the equilibrium slice current at that time, which on a time-dependent run
+    is the PREVIOUS slice (measured: t_cp - dt_eq on every slice of a
+    FUSE D3D run).  Candidates are the nearest slice and the last one before
+    ``t_cp``; the one whose geometry reproduces ``j_tor`` from ``j_total`` (A6)
+    wins.  ``meta`` records the choice and its mismatch (median relative).
+    """
+    te = np.asarray(eq["time"], dtype=float)
+    if not cp["grid"].get("rho_tor_norm"):
+        raise ValueError("core_profiles grid lacks rho_tor_norm, the "
+                         "coordinate the IMAS current conversion uses")
+    rho = np.asarray(cp["grid"]["rho_tor_norm"], dtype=float)
+    k_near = int(np.argmin(np.abs(te - t_cp)))
+    cands = [k_near]
+    before = np.nonzero(te < t_cp - 1e-9 * max(1.0, abs(t_cp)))[0]
+    if before.size and int(before[-1]) != k_near:
+        cands.append(int(before[-1]))
+    best, err = None, None
+    for k in cands:
+        try:
+            geom = _fuse_current_geometry(eq, k, rho)
+        except ValueError as exc:
+            err = exc
+            continue
+        mis = np.nan
+        if j_total is not None and j_tor is not None:
+            jt = np.asarray(j_tor, dtype=float)
+            ok = np.abs(jt) > 1e-3 * np.max(np.abs(jt))
+            if np.any(ok):
+                mis = float(np.median(np.abs(
+                    _jtor_from_jpar(j_total, geom)[ok] / jt[ok] - 1.0)))
+        if best is None or (np.isfinite(mis) and not mis >= best[2]):
+            best = (k, geom, mis)
+    if best is None:
+        raise err
+    k, geom, mis = best
+    return geom, {"index": k, "time": float(te[k]), "t_core_profiles": float(t_cp),
+                  "jtor_mismatch": mis}
+
+
+def current_frame(eq, cp, t_cp, cur_sign, ip_signed):
+    """``(m, s, geom, meta)``: the frame the dd's currents are converted in.
+
+    The conversions run in the frame of the dd's geometry (its signed F, B0
+    and p'): ``m * current`` is in it, and ``s * converted`` is in bouquet's
+    positive-current frame.  A consistent dd (and every ``"auto"`` read):
+    ``m = 1``, ``s = cur_sign = sign(ip)``.  An orientation factor
+    ``cur_sign`` that disagrees with sign(ip) leaves two readings -- ip alone
+    stored reversed (``m = 1``, ``s = cur_sign``) or the currents alone
+    (``m = -1``, ``s = sign(ip)``) -- and the one whose ``j_total``
+    reproduces ``j_tor`` on the geometry (A6, :func:`_paired_current_geometry`)
+    is taken.  ``geom, meta``: that geometry and its pairing record."""
+    jt = np.asarray(cp["j_total"], dtype=float)
+    jtor = np.asarray(cp["j_tor"], dtype=float)
+    s_ip = source_current_sign(ip_signed)
+    geom, meta = _paired_current_geometry(eq, cp, t_cp, jt, jtor)
+    if cur_sign == s_ip:
+        return 1.0, s_ip, geom, meta
+    g2, meta2 = _paired_current_geometry(eq, cp, t_cp, -jt, -jtor)
+    if meta2["jtor_mismatch"] < meta["jtor_mismatch"]:
+        return -1.0, s_ip, g2, meta2                 # the currents reversed
+    return 1.0, float(cur_sign), geom, meta          # ip reversed
+
+
 def read_imas_geometry(source: "ImasSource"):
     """Return ``(F0, boundary_RZ)`` from a FUSE IDS for TokaMaker setup.
 
@@ -604,10 +1211,7 @@ def read_imas_geometry(source: "ImasSource"):
     :meth:`Bouquet.setup_solver` when the source is an :class:`ImasSource`
     (replacing the g-file that the reconstruction path reads F0/boundary from).
     """
-    import json
-
-    with open(source.ids_path) as fh:
-        dd = json.load(fh)
+    dd = _load_dd(source.ids_path)
     eq = dd["equilibrium"]
     ie = _nearest_index(eq["time"], source.time, "equilibrium")
     vtf = eq["vacuum_toroidal_field"]
@@ -731,42 +1335,265 @@ def _validate_pressure_completeness(cp, ne, te, ni, ti, p_fast, p_imp,
             raise ValueError(msg)
 
 
-def _read_ida_omega(path, time_s, psi_N):
+def _read_ida_omega(path, time_s, psi_N, place=None):
     """IDA toroidal rotation (omega_tor_12C6) resampled onto psi_N; None if absent.
-    Mirrors read_ida's nearest-time selection (IDA time is ms; ``time_s`` is s)."""
+    Mirrors read_ida's nearest-time selection (IDA time is ms; ``time_s`` is s)
+    and, on the ensemble layout, its sample mean and shared radial grid.
+    ``place`` (IDA-grid array -> run nodes) replaces the psi_N interpolation."""
     try:
         import h5py
         with h5py.File(path, "r") as f:
             if "omega_tor_12C6" not in f:
                 return None
-            it = np.asarray(f["time"], dtype=float)            # ms
+            it = np.asarray(f["time"][:], dtype=float).ravel()   # ms
             tms = (time_s * 1e3) if time_s is not None else float(it[0])
             j = int(np.argmin(np.abs(it - tms)))
-            ipsi = np.asarray(f["psi_n"], dtype=float)
-            om = np.asarray(f["omega_tor_12C6"], dtype=float)[j]
-            return np.interp(psi_N, ipsi, om)
-    except Exception:
+            om = np.asarray(f["omega_tor_12C6"][j], dtype=float)
+            if om.ndim == 2:            # ensemble: (n_samples, n_radial)
+                om = om.mean(axis=0)
+                ipsi = np.asarray(f["psi_n"][j], dtype=float)[0]
+            else:
+                ipsi = np.asarray(f["psi_n"][:], dtype=float)
+            return place(om) if place is not None else np.interp(psi_N, ipsi, om)
+    except Exception as e:
+        import warnings
+        warnings.warn(f"_read_ida_omega: {path!r} rotation not read "
+                      f"({type(e).__name__}: {e}); omega left to FUSE")
         return None
 
 
-def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impurity_Z):
-    """IDA-hybrid kinetics: replace FUSE ne/Te/Ti (+omega) with IDA fits, resampled
-    onto the FUSE ``psi_N`` grid (single-grid; keeps psi_N == psi_N_kinetic).
+#: psi_N points of the advisory IDA-vs-dd total-ni check: interior (an edge
+#: ratio reports the edge model) and the axis (where a beam peaks).  The last
+#: point also bounds the core :func:`_dd_zeff` classifies Z_eff on.
+NI_FAST_GATE_PSI_N = (0.0, 0.2, 0.4, 0.6, 0.8)
 
-    Z_eff stays FUSE (IDA's reported Z_eff is internally inconsistent with its own
-    carbon density), and ni is re-derived from the FUSE Z_eff under single-impurity
-    quasineutrality applied to the IDA electron density. Returns
-    ``(ne, te, ti, ni, omega_tor_or_None)``.
+#: Relative IDA-vs-dd TOTAL ni disagreement, at any of
+#: :data:`NI_FAST_GATE_PSI_N`, above which the subtraction warns.  Advisory
+#: only: the subtraction runs regardless.
+NI_FAST_RTOL = 1e-2
+
+#: rho at which the dd's psi_N(rho_tor_norm) is compared with the LCFS
+#: g-file's (FUSE holds profiles fixed in rho while solving its own equilibrium).
+PSI_RHO_GATE_RHO = (0.2, 0.4, 0.6, 0.8, 0.9)
+
+#: Largest |psi_N_dd - psi_N_g| at :data:`PSI_RHO_GATE_RHO` before the reader
+#: warns.  Advisory only.
+PSI_RHO_DRIFT_TOL = 2e-2
+
+
+def _psi_rho_drift(psi_N, rho, gfile):
+    """The dd's psi_N(rho) against the g-file's, at :data:`PSI_RHO_GATE_RHO`.
+
+    Returns a dict: ``gate`` (rho -> psi_N_dd - psi_N_g), ``max_abs``,
+    ``rho_worst``, ``exceeds`` and a one-line ``evidence``; ``None`` without a
+    usable rho grid.
+    """
+    from .geqdsk import read_geqdsk
+    rho = np.asarray(rho, dtype=float)
+    if rho.shape != np.shape(psi_N) or not np.all(np.diff(rho) > 0):
+        return None
+    if np.allclose(rho, np.sqrt(np.clip(psi_N, 0.0, None)), rtol=0, atol=1e-6):
+        # a placeholder grid, not the dd's equilibrium: nothing to compare
+        return {"gate": None, "max_abs": None, "rho_worst": None, "gfile": str(gfile),
+                "exceeds": False, "placeholder": True,
+                "evidence": "dd rho_tor_norm is the sqrt(psi_N) placeholder; not compared"}
+    g = read_geqdsk(gfile)
+    rho_g = np.asarray(g.rhovn, dtype=float)
+    psi_g = np.linspace(0.0, 1.0, rho_g.size)
+    pts = np.asarray(PSI_RHO_GATE_RHO, dtype=float)
+    d = np.interp(pts, rho, psi_N) - np.interp(pts, rho_g, psi_g)
+    iw = int(np.argmax(np.abs(d)))
+    return {"gate": dict(zip(PSI_RHO_GATE_RHO, d.tolist())),
+            "max_abs": float(abs(d[iw])), "rho_worst": float(pts[iw]),
+            "gfile": str(gfile), "exceeds": float(abs(d[iw])) > PSI_RHO_DRIFT_TOL,
+            "placeholder": False,
+            "evidence": (
+                f"dd psi_N(rho) differs from the g-file's by {d[iw]:+.3f} at "
+                f"rho={pts[iw]:g} (psi_N {np.interp(pts[iw], rho, psi_N):.3f} "
+                f"vs {np.interp(pts[iw], rho_g, psi_g):.3f}; "
+                f"tol {PSI_RHO_DRIFT_TOL:g})")}
+
+
+#: Relative core mismatch above which a stored Z_eff matches neither numerator.
+ZEFF_CONVENTION_RTOL = 1e-2
+
+
+def _dd_zeff(cp, zeff_th, z2_fast, ne, psi_N):
+    """``(zeff, includes_fast)``: the Z_eff the dd's own bootstrap consumed.
+
+    A stored ``cp1d.zeff`` may or may not include the fast ions in its
+    numerator (IMAS's expression does; FUSE may have stored it before the
+    beam), so it is classified against both on the core (``psi_N <= 0.8``).
+    """
+    if "zeff" not in cp:
+        zeff_all = zeff_th + z2_fast / np.clip(ne, 1e-30, None)
+        return zeff_all, bool(np.any(z2_fast))
+    stored = np.asarray(cp["zeff"], dtype=float)
+    if not np.any(z2_fast):
+        return stored, False
+    zeff_all = zeff_th + z2_fast / np.clip(ne, 1e-30, None)
+    core = np.asarray(psi_N, dtype=float) <= NI_FAST_GATE_PSI_N[-1]
+    _s = np.abs(stored[core])
+    d_th = float(np.max(np.abs(stored - zeff_th)[core] / _s))
+    d_all = float(np.max(np.abs(stored - zeff_all)[core] / _s))
+    includes = d_all < d_th
+    if min(d_th, d_all) > ZEFF_CONVENTION_RTOL:
+        import warnings
+        warnings.warn(
+            f"core_profiles.zeff matches neither Z_eff numerator on the core "
+            f"(thermal-only {d_th:.1e}, thermal+fast {d_all:.1e}); taking the "
+            f"closer ({'thermal+fast' if includes else 'thermal-only'}). A zeff "
+            f"stored before the dd's ne or ion densities were last changed "
+            f"does this.")
+    return stored, includes
+
+
+def _subtract_fast_ni(psi_N, ni, ni_fuse_thermal, z_fast, z2_fast, impurity_Z):
+    """Thermal ``(ni, meta)`` from a MEASURED (total) ni.
+
+    Neither VB Z_eff nor CER carbon tells a beam ion from a thermal one, and
+    everything downstream takes ni as thermal, so the subtraction of
+    :func:`fast_ion_density_equivalent` is unconditional; ``sigma_ni`` keeps
+    its absolute error (the removed density is a FUSE quantity with no IDA
+    error).  Advisory cross-check: the IDA ni against the dd's total ni at
+    :data:`NI_FAST_GATE_PSI_N`; beyond :data:`NI_FAST_RTOL` it warns.
+    ``meta``: ``applied``, ``agrees``, ``gate`` (per-point deviations),
+    ``evidence``.
+    """
+    ni = np.asarray(ni, dtype=float)
+    ni_fast = fast_ion_density_equivalent(z_fast, z2_fast, impurity_Z)
+    if not np.any(ni_fast):
+        return ni, {"applied": False, "agrees": None, "mismatch": None,
+                    "gate": None, "evidence": "dd carries no fast-ion population"}
+    ni_total = np.asarray(ni_fuse_thermal, dtype=float) + ni_fast
+    pts = np.asarray(NI_FAST_GATE_PSI_N, dtype=float)
+    a = np.interp(pts, np.asarray(psi_N, dtype=float), ni)
+    b = np.interp(pts, np.asarray(psi_N, dtype=float), ni_total)
+    gate = mismatch = agrees = None
+    if np.all(np.abs(b) > 0.0):
+        gate = dict(zip(NI_FAST_GATE_PSI_N, (np.abs(a - b) / np.abs(b)).tolist()))
+        mismatch = float(max(gate.values()))
+        agrees = mismatch <= NI_FAST_RTOL
+    ni_th = np.maximum(ni - ni_fast, 0.0)
+    if agrees is None:
+        evidence = ("dd main-ion density vanishes at a check point; "
+                    "cross-check skipped")
+    elif agrees:
+        evidence = (f"IDA ni matches the dd TOTAL ni to {mismatch:.2e} over "
+                    f"psi_N={NI_FAST_GATE_PSI_N}")
+    else:
+        worst = max(gate, key=gate.get)
+        evidence = (f"IDA ni differs from the dd TOTAL ni by {mismatch:.2e} "
+                    f"at psi_N={worst:g} (> {NI_FAST_RTOL:.0e}): the beam "
+                    f"density comes from a plasma that is not the IDA one")
+    return ni_th, {
+        "applied": True, "agrees": agrees, "mismatch": mismatch, "gate": gate,
+        "fast_fraction_peak": float(np.max(ni_fast / np.maximum(ni, 1e-30))),
+        "evidence": evidence}
+
+
+def _hybrid_timing(source, T, t_eq, t_cp, aux, tol=1e-6):
+    """ida_hybrid: the IDA read time (``source.ida_time``, else ``T``), recording the dd
+    slice times on ``aux``. Warns when ``T`` is not a slice both core_profiles and
+    equilibrium hold exactly (a FUSE macro step): j_bootstrap is then not from the
+    slice asked for."""
+    t_eq, t_cp = float(t_eq), float(t_cp)
+    aux["fuse_time_cp"], aux["fuse_time_eq"] = t_cp, t_eq
+    if T is not None and (abs(t_cp - T) > tol or abs(t_eq - t_cp) > tol):
+        import warnings
+        warnings.warn(f"ida_hybrid: time={T} s is not a dd macro step (core_profiles "
+                      f"{t_cp} s, equilibrium {t_eq} s); its j_bootstrap was not computed "
+                      f"on the IDA slice it is paired with")
+    t_ida = getattr(source, "ida_time", None)
+    return T if t_ida is None else float(t_ida)
+
+
+def _check_replay_pairing(ids_path, aux, tol=1e-6):
+    """``aux['pairing_consistent']``: whether FUSE's own replay_pairing (ida_provenance.json
+    beside ``ids_path``) says dd j_bootstrap at ``aux['fuse_time_cp']`` was computed on
+    ``aux['ida_time_used']``; None when no table. Read only, never derived."""
+    import json
+    import os
+    aux["pairing_consistent"] = None
+    path = os.path.join(os.path.dirname(os.path.abspath(ids_path)), "ida_provenance.json")
+    try:
+        with open(path) as fh:
+            rows = json.load(fh).get("replay_pairing")
+    except (OSError, ValueError):
+        return
+    if not rows:
+        return
+    row = min(rows, key=lambda r: abs(float(r["t_sim"]) - aux["fuse_time_cp"]))
+    if abs(float(row["t_sim"]) - aux["fuse_time_cp"]) > tol:
+        return
+    ok = row["ida_time"] is not None and abs(float(row["ida_time"]) - aux["ida_time_used"]) <= tol
+    aux["pairing_consistent"] = ok
+    aux["replayed_ida_time"] = row["ida_time"]
+    if not ok:
+        import warnings
+        warnings.warn(f"ida_hybrid: dd j_bootstrap at {aux['fuse_time_cp']} s was computed on "
+                      f"IDA {row['ida_time']} ({row['outcome']}), not the IDA slice read "
+                      f"({aux['ida_time_used']} s)")
+
+
+def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impurity_Z,
+                         ni_source="all", zeff_from_fuse=False,
+                         z_fast=None, z2_fast=None, x_phi=None):
+    """IDA-hybrid kinetics: replace FUSE ne/ni/Te/Ti/Zeff (+omega) with IDA fits,
+    resampled onto the FUSE ``psi_N`` grid (psi_N == psi_N_kinetic).
+
+    Zeff and ni both default to IDA: Zeff measured directly (``zeff_from_fuse=True``
+    keeps the FUSE Zeff instead); ni via ``ni_source`` ("Zeff"/"CER"/"all", with
+    Jacobian-propagated sigma_ni -- see :func:`bouquet.io.ida.read_ida`). The
+    "Zeff"/"all" dilution always uses IDA's own Zeff regardless of
+    ``zeff_from_fuse``.
+
+    With the fast charge moments ``z_fast``/``z2_fast`` the IDA TOTAL ni is
+    always converted to a THERMAL one; see :func:`_subtract_fast_ni`.
+
+    Returns ``(ne, te, ti, ni, zeff, omega_or_None, sigma_ne, sigma_te, sigma_ni,
+    sigma_ti, ida, ni_fast_meta)`` on ``psi_N``; ``ida`` is handed back so
+    ``resolve_uncertainty`` reuses this slice instead of re-reading the file.
+    ``x_phi`` (the run nodes' Φ_N) places the IDA fits by their Φ_N from the
+    file's own q (:func:`bouquet.coords.phi_n_from_q`); the map
+    ``(ida psi_N, ida Φ_N)`` is a 13th element (``None`` without ``x_phi``).
     """
     from .ida import read_ida
-    ida = read_ida(ida_path, time=time, impurity_Z=impurity_Z)
+    ida = read_ida(ida_path, time=time, impurity_Z=impurity_Z, ni_source=ni_source)
     _ipsi = np.asarray(ida.psi_N, dtype=float)
-    g = lambda a: np.interp(psi_N, _ipsi, np.asarray(a, dtype=float))
+    ida_map = None
+    if x_phi is None:
+        g = lambda a: np.interp(psi_N, _ipsi, np.asarray(a, dtype=float))
+    else:
+        if ida.q is None:
+            raise ValueError(f"coord='phi_n': {ida_path!r} carries no q, so its "
+                             "profiles cannot be placed in Phi_N")
+        from ..coords import phi_n_from_q
+        _in, _iphi = phi_n_from_q(_ipsi, ida.q, bracket=True)
+        _n = int(np.count_nonzero(_ipsi <= 1.0))     # psi_map: inside the LCFS only
+        ida_map = (_ipsi[_in][:_n], _iphi[:_n])
+        g = lambda a: np.interp(x_phi, _iphi, np.asarray(a, dtype=float)[_in])
     ne, te, ti = g(ida.ne), g(ida.te), g(ida.ti)
-    # ni from FUSE Z_eff + IDA ne (single-impurity dilution; Z_imp = machine charge)
-    ni = main_ion_density_from_zeff(ne, np.clip(Zeff_fuse, 1.0, impurity_Z), impurity_Z)
-    omega = _read_ida_omega(ida_path, time, psi_N)
-    return ne, te, ti, ni, omega
+    zeff = np.asarray(Zeff_fuse, dtype=float) if zeff_from_fuse else g(ida.Zeff)
+    # read_ida's ni is main_ion_density_from_zeff of its (ne, Z_eff): rebuilt
+    # from the interpolated pair so it stays quasineutral between IDA's nodes.
+    ni = main_ion_density_from_zeff(
+        ne, np.clip(g(ida.Zeff), 1.0, impurity_Z), impurity_Z)
+    sigma_ne, sigma_te, sigma_ni, sigma_ti = (
+        g(ida.sigma_ne), g(ida.sigma_te), g(ida.sigma_ni), g(ida.sigma_ti))
+    # The ni_source ni is a TOTAL deuteron density; everything downstream
+    # takes ni as thermal once the dd carries a beam.
+    if z_fast is not None:
+        ni, ni_fast_meta = _subtract_fast_ni(
+            psi_N, ni, np.asarray(ni_fuse, dtype=float),
+            z_fast, z2_fast, impurity_Z)
+    else:
+        ni_fast_meta = {"applied": False, "agrees": None, "mismatch": None,
+                        "gate": None,
+                        "evidence": "no fast-ion charge moments supplied"}
+    omega = _read_ida_omega(ida_path, time, psi_N, place=None if x_phi is None else g)
+    return (ne, te, ti, ni, zeff, omega, sigma_ne, sigma_te, sigma_ni,
+            sigma_ti, ida, ni_fast_meta, ida_map)
 
 
 def read_imas_baseline(
@@ -788,13 +1615,16 @@ def read_imas_baseline(
     determined.  An explicit ``"sum"`` / ``"trace"`` / ``"mean"`` / ``"perp"``
     always wins and is applied silently.  The rule that was used, and how it was
     chosen, are recorded on :attr:`Baseline.p_fast_meta`.
+
+    Every driven ``core_sources`` current is held fixed, classified as the
+    engine's IDS adapter does (:func:`bouquet.adapters._ids_driven_currents`):
+    beams in ``j_NBI``, EC/LH/IC in ``j_RF``, fusion, runaways, sawteeth and
+    unknown indices in ``j_other`` (its sawteeth share also in ``j_sawteeth``).
+    Aggregate and bootstrap-like entries are never added.
     """
-    import json
     from ..baseline import Baseline
 
-    with open(source.ids_path, "rb") as fh:
-        raw_bytes = fh.read()
-    dd = json.loads(raw_bytes)
+    dd = _load_dd(source.ids_path)
     T = source.time
 
     # Which fast-pressure convention this dd was written in (factor of 3).
@@ -858,39 +1688,127 @@ def read_imas_baseline(
     psi = np.asarray(cp["grid"]["psi"], dtype=float)
     psi_N = (psi - psi[0]) / (psi[-1] - psi[0])   # 0 (axis) -> 1 (boundary)
     n = psi_N.size
+    # Run grid: the same nodes, labelled in the run coordinate.  Every dd
+    # profile below is read on the nodes' psi_N; a toroidal-flux run only
+    # relabels them.  IDA fits are placed by their own Phi_N in such a run.
+    from .. import coords as _coords
+    coord = _coords.run_coord(getattr(source, "coord", _coords.PSI))
+    x_run = psi_N if coord == _coords.PSI else _dd_phi_n(cp, psi_N)
 
-    # Currents in bouquet's positive-current frame (cur_sign, above).  The
-    # parallel->toroidal ratio j_tor/j_total is sign-invariant, so flipping the
-    # inputs here is exactly (bitwise) the same as flipping every derived
-    # toroidal component afterwards.
-    j_total = cur_sign * np.asarray(cp["j_total"], dtype=float)   # total parallel
-    j_tor = cur_sign * np.asarray(cp["j_tor"], dtype=float)       # total toroidal (authoritative)
-    j_ohmic = cur_sign * np.asarray(cp["j_ohmic"], dtype=float)   # parallel (unused: inductive = residual)
-    j_boot = cur_sign * np.asarray(cp["j_bootstrap"], dtype=float)  # parallel
+    # The conversions below run in the frame of the dd's geometry: the
+    # currents times _m, the results times s_ip (current_frame).
+    _m, s_ip, cur_geom, cur_meta = current_frame(
+        eq, cp, float(cp_ids["time"][ic]), cur_sign, ip_signed)
+    j_total = _m * np.asarray(cp["j_total"], dtype=float)     # total <J.B>/B0
+    j_tor = _m * np.asarray(cp["j_tor"], dtype=float)         # total IMAS j_tor
+    j_boot = _m * np.asarray(cp["j_bootstrap"], dtype=float)  # <J.B>/B0 (inductive = residual)
 
-    def to_toroidal(j_par):
-        return parallel_to_toroidal(j_par, j_parallel_total=j_total, j_tor_total=j_tor)
+    # Exact conversions to TokaMaker jphi on the geometry FUSE used for this
+    # core_profiles slice (see _paired_current_geometry).
+    p_term = jphi_tokamaker_pressure_term(cur_geom)       # p'G -> bootstrap
 
-    j_BS = to_toroidal(j_boot)
+    def to_jphi(j_par):
+        return jpar_to_jphi_tokamaker(j_par, cur_geom)
+    j_BS = to_jphi(j_boot) + p_term
 
     # --- NBI: sum beam-source parallel currents, then convert ---
+    # Each beam entry is read at the core_sources slice TIME, not at its list
+    # index (owner-approved 2026-10-05, the sawteeth entry's rule below and
+    # the engine IDS adapter's): an entry carrying its own per-slice times is
+    # matched to its NEAREST own slice -- one that starts later than the IDS
+    # time base was read one slice late, and a slice past its end from its
+    # FIRST slice.  The match is accepted within HALF the entry's local
+    # time-step (the core_profiles step for a single-time entry); otherwise
+    # the read is REFUSED (owner-approved 2026-10-06: before, a 1e-6 s
+    # absolute match dropped the beam to zero with a warning on any larger
+    # mismatch) -- unless the entry carries no current on its own slices
+    # bracketing the time: then it is off there, not missing (refinement of
+    # 2026-10-06).  One without per-slice times must have the IDS's slice
+    # count, or it cannot be aligned and is refused.
+    # Owner decision 2026-10-06: the core_sources slice is the one nearest
+    # the core_profiles slice READ and must lie within half the local
+    # core_profiles step of it (core_sources_slice; a single-time
+    # core_sources is no longer read at any time); an entry's matched own
+    # slice must also lie within that half-step of the core_profiles time;
+    # an entry whose own record starts AFTER the slice time is OFF there
+    # (off_before_record, announced once); dt and the bracketing own times
+    # are recorded (Baseline.source_time_match).
     src_ids = dd.get("core_sources", {})
-    isrc = _nearest_index(src_ids["time"], T, "core_sources") if src_ids.get("time") else ic
+    isrc, _src_t, _slice_rec = core_sources_slice(
+        src_ids, cp_ids.get("time"), ic, T, who="IMAS reader")
+    _src_tb = src_ids.get("time")
+    _src_nt = None if not _src_tb else len(_src_tb)
+    _t_cp = _slice_rec["core_profiles_time"]
+    _cp_half = (None if (_t_cp is None or _src_t is None) else
+                _cp_window(cp_ids.get("time"), _src_tb, _t_cp, _src_t)[0])
+    source_time_match = dict(core_sources=_slice_rec, entries=[])
     jnbi_par = np.zeros(n)
     for s in src_ids.get("source", []):
         if s.get("identifier", {}).get("index") == NBI_SOURCE_INDEX:
             pr = s.get("profiles_1d", [])
             if pr:
-                idx = isrc if len(pr) > isrc else 0
-                jnbi_par = jnbi_par + np.asarray(pr[idx]["j_parallel"], dtype=float)
-    j_NBI = to_toroidal(cur_sign * jnbi_par)
-    j_RF = np.zeros(n)   # never computed internally; user-supplied only
+                _erec = {}
+                source_time_match["entries"].append(_erec)
+                q_nbi, how = _source_slice_at(s, isrc, _src_t, _src_nt,
+                                              cp_ids.get("time"), t_cp=_t_cp,
+                                              cp_half=_cp_half, rec=_erec)
+                if q_nbi is None:
+                    _erec["reason"] = how
+                    if not any(_carries_current(qq) for qq in pr):
+                        _erec["status"] = "zero"
+                        continue
+                    # idle on the own slices bracketing this time: off
+                    # here, nothing to drop (refinement of 2026-10-06)
+                    if _entry_off_near(s, _src_t) is not None:
+                        _erec["status"] = "off_idle"
+                        continue
+                    # before its first own time (which carries current):
+                    # OFF (owner decision 2026-10-06), stamped and
+                    # announced once
+                    _first = _entry_off_before_record(s, _src_t)
+                    if _first is not None:
+                        _erec.update(status="off_before_record",
+                                     first_own_time=_first)
+                        _announce_off_before("IMAS reader",
+                                             s.get("identifier") or {},
+                                             _first, _src_t,
+                                             key=str(source.ids_path))
+                        continue
+                    raise ValueError(_entry_time_refusal(
+                        "IMAS reader", s.get("identifier") or {}, how))
+                jnbi_par = jnbi_par + np.asarray(q_nbi["j_parallel"], dtype=float)
+    j_NBI = s_ip * to_jphi(_m * jnbi_par)
+    # every other driven entry by the engine IDS adapter's classification
+    # (the beams are j_NBI above); the sawteeth entry by the gate's rule below (no slice within half a step:
+    # not active here, zero)
+    from ..adapters import _ids_driven_currents
+    _cpt = cp_ids.get("time")
+
+    def _is_saw(s):
+        return (s.get("identifier") or {}).get("index") == SAWTOOTH_SOURCE_INDEX
+    _parts = _ids_driven_currents(dict(src_ids, source=[
+        s for s in src_ids.get("source", []) if not _is_saw(s) and
+        (s.get("identifier") or {}).get("index") != NBI_SOURCE_INDEX]),
+        isrc, n, 1.0, _cpt)[0]
+    _saw = np.zeros(n)
+    for s in src_ids.get("source", []):
+        if _is_saw(s) and s.get("profiles_1d"):
+            q_saw, _ = _source_slice_at(s, isrc, _src_t, _src_nt, _cpt)
+            if q_saw is not None and q_saw.get("j_parallel") is not None:
+                _saw = _saw + np.asarray(q_saw["j_parallel"], dtype=float)
+    j_RF = s_ip * to_jphi(_m * _parts["rf"])
+    j_other = s_ip * to_jphi(_m * (_parts["other"] + _saw))
+    j_sawteeth = s_ip * to_jphi(_m * _saw)
 
     # --- sawtooth model presence/amplitude at this slice (gate input only) ----
     # Read here because the dd (100s of MB) is not retained past this function.
     # "active" means the source EXISTS and carries a non-zero j_parallel at this
-    # time index: a declared-but-idle sawtooth source (all zeros before onset)
-    # must NOT admit a ramp slice to the q0 pin.
+    # SLICE TIME: a declared-but-idle sawtooth source (all zeros before onset)
+    # must NOT admit a ramp slice to the q0 pin.  The entry is read at the
+    # core_sources slice TIME, not at the list index (owner-approved
+    # 2026-10-05, the rule of the engine IDS adapter): a model's sawteeth
+    # entry may start later than the IDS time base -- it was then read one
+    # slice late, and at the last slice from its FIRST slice.
     sawtooth = {"source_index": SAWTOOTH_SOURCE_INDEX, "present": False,
                 "j_par_max_abs": 0.0, "active": False, "q0_dd": None}
     for s in src_ids.get("source", []):
@@ -898,8 +1816,19 @@ def read_imas_baseline(
             sawtooth["present"] = True
             pr = s.get("profiles_1d", [])
             if pr:
-                jsaw = np.asarray(pr[isrc if len(pr) > isrc else 0]
-                                  .get("j_parallel", []), dtype=float)
+                _erec = {}
+                source_time_match["entries"].append(_erec)
+                q_saw, how = _source_slice_at(s, isrc, _src_t, _src_nt,
+                                              cp_ids.get("time"), t_cp=_t_cp,
+                                              cp_half=_cp_half, rec=_erec)
+                sawtooth["slice"] = how
+                if q_saw is None:
+                    _erec["reason"] = how
+                    # no slice of the entry within half a step of this
+                    # time: not active here (a gate FLAG, not a current --
+                    # recorded in sawtooth["slice"], not refused)
+                    continue
+                jsaw = np.asarray(q_saw.get("j_parallel", []), dtype=float)
                 if jsaw.size and np.any(np.isfinite(jsaw)):
                     sawtooth["j_par_max_abs"] = max(
                         sawtooth["j_par_max_abs"],
@@ -918,7 +1847,12 @@ def read_imas_baseline(
     ti = None
     main_ion = None
     zeff_num = np.zeros(n)
-    z_fast = np.zeros(n)          # charge carried by fast ions
+    # The two charge moments of the fast population.  Quasineutrality weights
+    # each fast species by Z_s, a measured Z_eff's numerator by Z_s^2, so both
+    # are needed and neither implies the other (see physics.
+    # fast_ion_density_equivalent).  No beam charge is assumed anywhere.
+    z_fast = np.zeros(n)          # sum_s Z_s   n_s^fast  [m^-3]
+    z2_fast = np.zeros(n)         # sum_s Z_s^2 n_s^fast  [m^-3]
     # pressure_fast_* and density_fast are independent fields: a dd can carry
     # one without the other, and a species with fast pressure but no fast
     # density gets the full p_fast treatment and ZERO dilution correction.
@@ -928,7 +1862,9 @@ def read_imas_baseline(
         n_s = np.asarray(ion["density_thermal"], dtype=float)
         zeff_num += n_s * Z * Z
         if "density_fast" in ion:
-            z_fast += Z * np.asarray(ion["density_fast"], dtype=float)
+            _nf = np.asarray(ion["density_fast"], dtype=float)
+            z_fast += Z * _nf
+            z2_fast += Z * Z * _nf
         p_fast_s = _isotropic_fast_pressure(
             ion, p_fast_rule, n, _no_par, str(ion.get("label", f"Z={Z:g}")))
         if np.any(p_fast_s) and not np.any(
@@ -953,13 +1889,22 @@ def read_imas_baseline(
             "full while the fast-ion dilution correction for those species is "
             "zero, so Z_imp / nz / p_imp retain the fast-ion bias. Fill "
             "core_profiles.ion[].density_fast to enable the correction.")
-    Zeff = zeff_num / ne
+    # Thermal-only numerator over the full ne: the convention
+    # impurity_charge_with_fast_ions inverts, built here from the dd's own
+    # densities so it holds by construction.
+    Zeff_th = zeff_num / ne
+    # The dd's bootstrap Z_eff and its convention (see _dd_zeff).  Zeff is its
+    # recomputation from the densities -- bit-identical to Zeff_th without a
+    # beam -- and is what the baseline solve and the draws are handed.
+    zeff_dd, dd_zeff_includes_fast = _dd_zeff(cp, Zeff_th, z2_fast, ne, psi_N)
+    Zeff = (Zeff_th + z2_fast / np.clip(ne, 1e-30, None)
+            if dd_zeff_includes_fast else Zeff_th)
 
     # --- auxiliary source-provided profiles for the switchboard ---------------
     # Read whatever this source carries (production FUSE files have rotation;
     # chi/E_r are typically absent and supplied via aux_baselines). All on the
     # core_profiles grid (== psi_N_kinetic for IMAS).
-    aux = {"zeff": np.asarray(cp["zeff"], dtype=float) if "zeff" in cp else Zeff}
+    aux = {"zeff": zeff_dd}
     if main_ion is not None and "rotation_frequency_tor" in main_ion:
         aux["omega_tor"] = np.asarray(main_ion["rotation_frequency_tor"], dtype=float)
     if "e_field" in cp and "radial" in cp["e_field"]:
@@ -977,20 +1922,74 @@ def read_imas_baseline(
             if "d" in ctsl.get("total_ion_energy", {}):
                 aux["chi_i"] = np.asarray(ctsl["total_ion_energy"]["d"], dtype=float)
 
-    # --- IDA-hybrid: swap FUSE ne/Te/Ti/omega for externally-fit IDA profiles -----
-    # Z_eff/ni-dilution stay FUSE; p_fast/currents/equilibrium/anchors stay FUSE.
-    # Done before the pressure block so p_recon/Z_imp/p_imp use the IDA kinetics.
-    if kinetic_source == "ida_hybrid" and getattr(source, "ida_path", None):
-        ne, te, ti, ni, _omega = _merge_ida_kinetics(
-            psi_N, ne, ni, Zeff, source.ida_path, T,
-            getattr(source, "impurity_Z", 6.0))
+    # --- IDA-hybrid: swap FUSE ne/Te/Ti/Zeff/omega for externally-fit IDA profiles ---
+    # ni via source.ni_source; Zeff from IDA unless source.zeff_from_fuse. Done
+    # before the pressure block so p_recon/Z_imp/p_imp use the IDA kinetics.
+    use_ida = bool(kinetic_source == "ida_hybrid" and getattr(source, "ida_path", None))
+    zeff_includes_fast = dd_zeff_includes_fast
+    # Geometry guard: does the dd place its profiles where the g-file does?
+    _drift = None
+    if getattr(source, "LCFS_geqdsk", None) and "rho_tor_norm" in cp["grid"]:
+        _drift = _psi_rho_drift(psi_N, cp["grid"]["rho_tor_norm"], source.LCFS_geqdsk)
+        aux["psi_rho_drift"] = _drift
+        if _drift is not None and _drift["exceeds"]:
+            import warnings
+            warnings.warn(
+                f"{_drift['evidence']}: the dd's equilibrium is not the g-file's, "
+                "so its profiles and sources sit at shifted psi_N"
+                + (f" against the IDA kinetics (placed by IDA "
+                   f"{'psi_N' if coord == _coords.PSI else 'Phi_N'})"
+                   if use_ida else ""))
+    if use_ida:
+        T_ida = _hybrid_timing(source, T, eq["time"][ie], cp_ids["time"][ic], aux)
+        (ne, te, ti, ni, Zeff, _omega,
+         sigma_ne_ida, sigma_te_ida, sigma_ni_ida, sigma_ti_ida,
+         _ida_read, _ni_fast_meta, _ida_map) = _merge_ida_kinetics(
+            psi_N, ne, ni, Zeff, source.ida_path, T_ida,
+            getattr(source, "impurity_Z", 6.0),
+            ni_source=getattr(source, "ni_source", "all"),
+            zeff_from_fuse=getattr(source, "zeff_from_fuse", False),
+            z_fast=z_fast, z2_fast=z2_fast,
+            x_phi=None if coord == _coords.PSI else x_run)
+        if _ni_fast_meta["agrees"] is False and _drift is not None and _drift["exceeds"]:
+            _ni_fast_meta["evidence"] += (
+                f"; likely the psi_N(rho) drift ({_drift['evidence']})")
+        aux["ni_fast_meta"] = _ni_fast_meta
+        # Loud: the subtraction moves ni, and a failed cross-check means the
+        # beam density belongs to a plasma that is not quite the IDA one.
+        if _ni_fast_meta["applied"]:
+            print(f"  [ni] thermal ni: subtracted the dd fast-ion equivalent "
+                  f"(peak fast fraction "
+                  f"{_ni_fast_meta['fast_fraction_peak']:.1%}); "
+                  f"{_ni_fast_meta['evidence']}")
+            if _ni_fast_meta["agrees"] is False:
+                import warnings
+                warnings.warn(f"ida_hybrid: {_ni_fast_meta['evidence']}; "
+                              f"subtracted anyway")
         if _omega is not None:
             aux["omega_tor"] = _omega
+        aux["zeff"] = Zeff   # keep the switchboard's zeff baseline consistent
+        # IDA's Z_eff is MEASURED, so its numerator counts the fast ions;
+        # zeff_from_fuse carries the dd's own convention over with its value.
+        if not getattr(source, "zeff_from_fuse", False):
+            zeff_includes_fast = True
+        # Read once, shared: resolve_uncertainty reuses this instead of
+        # opening the same file again (and possibly at another slice).
+        aux["ida_profiles"] = (str(source.ida_path), _ida_read)
+        aux["ida_time_used"] = float(_ida_read.time)
+        _check_replay_pairing(source.ids_path, aux)
+        aux["sigma_ne_ida"] = sigma_ne_ida
+        aux["sigma_te_ida"] = sigma_te_ida
+        aux["sigma_ni_ida"] = sigma_ni_ida
+        aux["sigma_ti_ida"] = sigma_ti_ida
 
     # --- user overrides for fixed additive components ---
     if fixed is not None:
+        # fixed.psi_N given on psi_N ("psi_n") goes through the dd's own map
+        _fx = _coords.to_run_grid(fixed.psi_N, getattr(fixed, "coord", "run"),
+                                  None if coord == _coords.PSI else (psi_N, x_run))
         if fixed.p_fast is not None:
-            p_fast = _override(fixed.p_fast, fixed.psi_N, psi_N)
+            p_fast = _override(fixed.p_fast, _fx, x_run)
             p_fast_meta = {**p_fast_meta, "rule": None, "basis": "user-override",
                            "evidence": "FixedComponentsConfig.p_fast supplied; the "
                                        "dd fast-pressure fields were not read"}
@@ -1000,9 +1999,12 @@ def read_imas_baseline(
         # the dd's orientation factor: the same array means the same physics
         # on both source paths and for either orientation of the source.
         if fixed.j_NBI is not None:
-            j_NBI = _override(fixed.j_NBI, fixed.psi_N, psi_N)
+            j_NBI = _override(fixed.j_NBI, _fx, x_run)
         if fixed.j_RF is not None:
-            j_RF = _override(fixed.j_RF, fixed.psi_N, psi_N)
+            j_RF = _override(fixed.j_RF, _fx, x_run)
+        if getattr(fixed, "j_other", None) is not None:
+            j_other = _override(fixed.j_other, _fx, x_run)
+            j_sawteeth = np.zeros_like(j_other)   # no longer a known part of it
 
     # The deferred factor-of-3 warning: the convention was undeterminable AND the
     # fast pressure it scales is non-zero AND it came from the dd (a user-supplied
@@ -1012,18 +2014,39 @@ def read_imas_baseline(
         warn_p_fast_undetermined(p_fast_meta["rule"])
         p_fast_meta = {**p_fast_meta, "warned": True}
 
-    # Authoritative toroidal total; inductive absorbs the residual so the
-    # decomposition sums exactly and Ip is preserved.
-    j_phi = j_tor.copy()
-    j_inductive = j_phi - j_BS - j_NBI - j_RF
+    # Authoritative total (IMAS j_tor -> TokaMaker jphi, A5); inductive absorbs
+    # the residual so the decomposition sums exactly.  Every conversion above
+    # runs in the dd's own orientation (its signed F, B0 and p'); the results
+    # are then put into bouquet's positive-current frame by s_ip (A5 and A7
+    # are odd in a whole-dd reversal, so this is exact).
+    j_phi_dd = jtor_imas_to_jphi_tokamaker(j_tor, cur_geom)
+    _pk = float(np.max(np.abs(j_phi_dd)))
+    _closure = float(np.max(np.abs(to_jphi(j_total) + p_term - j_phi_dd))) / _pk
+    _dconv = (j_phi_dd - j_tor) / _pk
+    j_phi = s_ip * j_phi_dd
+    j_BS = s_ip * j_BS
+    j_inductive = j_phi - j_BS - j_NBI - j_RF - j_other
+    print(f"  [imas] currents -> TokaMaker jphi on equilibrium t="
+          f"{cur_meta['time']:.4f} s (core_profiles t="
+          f"{cur_meta['t_core_profiles']:.4f} s; j_tor reproduced to "
+          f"{cur_meta['jtor_mismatch']:.1e}); j_total closure "
+          f"{_closure:.1e} of peak; jphi - j_tor: axis {_dconv[0]:+.2%}, "
+          f"max {_dconv[np.argmax(np.abs(_dconv))]:+.2%} of peak")
+    if not cur_meta["jtor_mismatch"] <= 1e-3:
+        import warnings
+        warnings.warn(
+            f"core_profiles.j_tor is not reproduced from j_total by any "
+            f"candidate equilibrium slice (best t={cur_meta['time']:.4f} s, "
+            f"median mismatch {cur_meta['jtor_mismatch']:.1e}); the current "
+            "split may carry a geometry/time-pairing error")
     if cur_sign < 0.0:
         _why = (f"source ip = {ip_signed / 1e6:+.4f} MA < 0 (reversed current "
                 "in the dd's own COCOS)" if cur_origin == ORIENTATION_ORIGIN_AUTO
                 else "ImasSource.current_orientation = -1 (override; source ip "
                      f"= {ip_signed / 1e6:+.4f} MA)")
         print(f"[imas] {_why}: every dd current profile "
-              "(j_total, j_tor, j_ohmic, j_bootstrap, NBI j_parallel, "
-              "equilibrium j_tor) multiplied by -1 "
+              "(j_tor, j_bootstrap, NBI j_parallel, equilibrium j_tor; each "
+              "converted in the dd's own frame) multiplied by -1 "
               "into bouquet's positive-current frame (Baseline."
               "source_current_sign = -1); user-supplied FixedComponentsConfig "
               "j_NBI/j_RF are already co-Ip positive and are not", flush=True)
@@ -1043,7 +2066,19 @@ def read_imas_baseline(
     psi_eq = np.asarray(eqp1["psi"], dtype=float)
     psiN_eq = (psi_eq - psi_eq[0]) / (psi_eq[-1] - psi_eq[0])
     _o = np.argsort(psiN_eq)
-    p_equilibrium = np.interp(psi_N, psiN_eq[_o],
+    # Nodes of equilibrium.profiles_1d in the run coordinate: its own Φ_N
+    # (rho_tor_norm², else from its q) in a toroidal-flux run.
+    x_eq, x_at = psiN_eq[_o], psi_N
+    if coord != _coords.PSI:
+        _rho = eqp1.get("rho_tor_norm")
+        if _rho is None and "q" in eqp1:
+            x_eq = _coords.phi_n_from_q(x_eq, np.asarray(eqp1["q"], dtype=float)[_o])[1]
+        else:
+            if _rho is not None and np.size(_rho) == _o.size:
+                _rho = np.asarray(_rho, dtype=float)[_o]
+            x_eq = _phi_n_from_rho(_rho, x_eq, "equilibrium profiles_1d")
+        x_at = x_run
+    p_equilibrium = np.interp(x_at, x_eq,
                               np.asarray(eqp1["pressure"], dtype=float)[_o])
     # The dd's OWN axis q -- taken at the SMALLEST psi_N (via the same ordering
     # the pressure uses), not blindly at index 0, since profiles_1d need not be
@@ -1058,7 +2093,10 @@ def read_imas_baseline(
     # electrons -- without that the inversion recovers only half the bias
     # (see impurity_charge_with_fast_ions).  The Zeff consumed by the
     # bootstrap / forward solve deliberately stays the full-ne one.
-    Z_imp, ne_th = impurity_charge_with_fast_ions(ne, ni, Zeff, z_fast)
+    Z_imp, ne_th = impurity_charge_with_fast_ions(ne, ni, Zeff_th, z_fast)
+    if use_ida:
+        # ni was built at source.impurity_Z (read_ida): that IS the impurity charge
+        Z_imp = float(getattr(source, "impurity_Z", 6.0))
     p_imp = impurity_pressure(ne_th, ni, ti, Z_imp)
     p_recon = _EC * (ne * te + ni * ti) + p_imp + p_fast
     # p_diff anchors the solve thermal pressure to the FUSE equilibrium.pressure.
@@ -1074,7 +2112,7 @@ def read_imas_baseline(
                                         p_fast_meta=p_fast_meta)
 
     # --- total-current anchor: equilibrium.j_tor vs core_profiles.j_tor --------
-    # core_profiles.j_tor (== j_phi here) is the transport parallel-current sum
+    # core_profiles.j_tor (-> j_phi here) is the transport parallel-current sum
     # (QED-diffused ohmic + Sauter bootstrap + NBI) converted to toroidal; it
     # differs from the GS-consistent equilibrium.j_tor (which GPEC reads) from
     # ~q=2 outward (the equilibrium carries more pedestal current). jphi_diff
@@ -1084,8 +2122,12 @@ def read_imas_baseline(
     # the same Ip), so it redistributes rather than adds net current.
     jphi_diff = None
     if anchor_jtor_to_equilibrium:
-        eq_jtor = cur_sign * np.interp(psi_N, psiN_eq[_o],
-                                       np.asarray(eqp1["j_tor"], dtype=float)[_o])
+        # IMAS j_tor -> TokaMaker jphi on the slice's own grid (exact, in the
+        # dd's frame), then onto the run nodes, in the positive frame.
+        eq_jphi = jtor_imas_to_jphi_tokamaker(
+            _m * np.asarray(eqp1["j_tor"], dtype=float),
+            _fuse_current_geometry(eq, ie))
+        eq_jtor = s_ip * np.interp(x_at, x_eq, eq_jphi[_o])
         jphi_diff = eq_jtor - j_phi
 
     # --- orientation consistency: REFUSE a mixed-sign source ---------------
@@ -1116,19 +2158,28 @@ def read_imas_baseline(
         _refuse_mixed_orientation(_bad, ip_signed, cur_sign, cur_origin)
 
     return Baseline(
-        psi_N=psi_N,
+        psi_N=x_run,
         j_phi=j_phi,
         j_inductive=j_inductive,
         j_BS=j_BS,
-        psi_N_kinetic=psi_N,
+        psi_N_kinetic=x_run,
+        coord=coord,
+        # IDA sigmas follow the IDA fits: through the file's own map when the
+        # fits were placed by it, else through the dd's.
+        psi_map=(None if coord == _coords.PSI else
+                 _ida_map if use_ida else (psi_N, x_run)),
         ne=ne, te=te, ni=ni, ti=ti, Zeff=Zeff,
         Ip_target=Ip_target,
         l_i_target=l_i_target,
         provenance="imas",
         j_NBI=j_NBI,
         j_RF=j_RF,
+        j_other=j_other,
+        j_sawteeth=j_sawteeth,
         p_fast=p_fast,
         z_fast=(z_fast if np.any(z_fast) else None),
+        z2_fast=(z2_fast if np.any(z_fast) else None),
+        zeff_includes_fast=zeff_includes_fast,
         p_equilibrium=p_equilibrium,
         p_diff=p_diff,
         Z_imp=Z_imp,
@@ -1145,26 +2196,26 @@ def read_imas_baseline(
         source_current_sign=cur_sign,
         source_current_sign_origin=cur_origin,
         source_b0_sign=b0_sign,
+        source_time_match=source_time_match,
     )
 
 
 # ===========================================================================
 #  Perturbed-draw IMAS/OMAS write-back
 #
-#  Current-split fidelity: the parallel split (j_ohmic/j_bootstrap/j_total) is
-#  now EXACT per draw (fidelity="exact"/"auto") -- it uses the draw's OWN
-#  flux-surface geometry, captured from the live TokaMaker equilibrium at
-#  generate time (physics.capture_equilibrium_fsa -> the eq_fsa archive block)
-#  and applied via physics.toroidal_to_parallel. The legacy baseline-ratio
-#  c(psi)=j_tor/j_total (fidelity="reconstruct") is kept as a fallback for
-#  archives written without capture. j_tor is exact either way.
+#  Current fidelity: bouquet arrays are TokaMaker jphi; core_profiles j_tor
+#  (IMAS convention) and the parallel split j_total / j_bootstrap / j_ohmic
+#  (<J.B>/B0) are converted exactly (physics module docstring) with the draw's
+#  OWN flux-surface geometry, captured from the live TokaMaker equilibrium at
+#  generate time (physics.capture_equilibrium_fsa -> the eq_fsa archive block),
+#  for fidelity="exact"/"auto".  fidelity="reconstruct" (archives without a
+#  complete capture) applies the same formulas with the TEMPLATE's baseline
+#  equilibrium geometry -- exact only when the draw's geometry matches it.
 #
-#  Remaining refinements (not blockers): (1) the EQUILIBRIUM IDS profiles_2d
-#  still come from the archived 257^2 eqdsk (lossless to that grid,
-#  machine-precision GS) rather than the live FE fields -- a direct OFT ODS
-#  export would upgrade this; (2) exact <1/R^2> is computed by flux-surface
-#  quadrature since TokaMaker does not yet expose it
-#  (OpenFUSIONToolkit/OpenFUSIONToolkit#312) -- when it does, read it directly.
+#  Remaining refinement (not a blocker): the EQUILIBRIUM IDS profiles_2d still
+#  come from the archived 257^2 eqdsk (lossless to that grid, machine-precision
+#  GS) rather than the live FE fields -- a direct OFT ODS export would upgrade
+#  this.
 # ===========================================================================
 def _imas_b0(out, ie, ic):
     """Reference vacuum field B0 for the IMAS <j.B>/B0 normalisation.
@@ -1181,22 +2232,99 @@ def _imas_b0(out, ie, ic):
     return 1.0
 
 
+#: eq_fsa keys of the draw's own kappa, and of its exact IMAS j_tor (A5;
+#: captures before avg_R/pprime lack the last two).
+_EQ_FSA_KAPPA_KEYS = ("F", "avg_inv_R", "avg_B2")
+_EQ_FSA_GEOM_KEYS = _EQ_FSA_KAPPA_KEYS + ("avg_R", "avg_inv_R2", "pprime")
+
+
+def _positive_frame_geom(geom, s_I):
+    """A dd-frame current ``geom`` (:func:`_fuse_current_geometry`) in bouquet's
+    positive-current frame: ``|F|``, ``|B0|`` and ``p'`` times ``s_I``
+    (dp/dpsi flips with psi, i.e. with Ip)."""
+    g = dict(geom)
+    g["F"] = np.abs(np.asarray(g["F"], dtype=float))
+    g["B0"] = abs(float(g.get("B0", 1.0)))
+    g["pprime"] = float(s_I) * np.asarray(g["pprime"], dtype=float)
+    return g
+
+
 def _eq_fsa_geom_on(eq_fsa, psiN_t, B0):
     """Interpolate a captured eq_fsa block onto the template psi grid -> geom
-    dict for :func:`bouquet.physics.toroidal_to_parallel`. ``None`` if the
-    block lacks the required FSA metrics (caller then reconstructs)."""
-    try:
-        src = np.asarray(eq_fsa["psi_N"], dtype=float)
-        F = np.interp(psiN_t, src, np.asarray(eq_fsa["F"], dtype=float))
-        avg_inv_R = np.interp(psiN_t, src, np.asarray(eq_fsa["avg_inv_R"], dtype=float))
-        avg_B2 = np.interp(psiN_t, src, np.asarray(eq_fsa["avg_B2"], dtype=float))
-    except (KeyError, TypeError):
+    for the current-convention helpers (:mod:`bouquet.physics`), with the
+    :data:`_EQ_FSA_GEOM_KEYS` it carries; ``None`` if it lacks any of
+    :data:`_EQ_FSA_KAPPA_KEYS`."""
+    if any(eq_fsa.get(k) is None for k in _EQ_FSA_KAPPA_KEYS):
         return None
-    geom = {"F": F, "avg_inv_R": avg_inv_R, "avg_B2": avg_B2, "B0": float(B0)}
-    if eq_fsa.get("avg_inv_R2") is not None:     # exact bracket when captured
-        geom["avg_inv_R2"] = np.interp(
-            psiN_t, src, np.asarray(eq_fsa["avg_inv_R2"], dtype=float))
+    src = np.asarray(eq_fsa["psi_N"], dtype=float)
+    geom = {k: np.interp(psiN_t, src, np.asarray(eq_fsa[k], dtype=float))
+            for k in _EQ_FSA_GEOM_KEYS if eq_fsa.get(k) is not None}
+    geom["B0"] = float(B0)
     return geom
+
+
+#: COCOS of the eqdsk bytes bouquet archives per draw (TokaMaker's
+#: ``save_eqdsk``): psi decreasing outward for Ip > 0, per radian.
+ARCHIVE_EQDSK_COCOS = 7
+
+_P_TERM_CACHE = {}
+
+
+def archived_pressure_term(eqdsk_bytes, psi_N):
+    """The pressure-driven ``<j_phi>`` part ``p'(<R> - F^2<1/R>/<B^2>)``
+    (:func:`bouquet.engine.pressure_term`) of an ARCHIVED draw eqdsk, in the
+    archive's positive frame, interpolated onto *psi_N*.
+
+    ``p'``, ``F``, ``<R>``, ``<1/R>``, ``<B^2>`` come from the eqdsk's own
+    traced flux surfaces read as :data:`ARCHIVE_EQDSK_COCOS`
+    (:func:`bouquet.adapters.gfile_parallel_current`, which refuses an
+    eqdsk whose ``<j_phi>`` does not carry its own Ip's sign).  The archived
+    ``j_BS`` carries this term; the IDS exporter subtracts it before
+    converting to ``<j.B>``.  Cached per
+    eqdsk content (the trace takes ~2 s)."""
+    import hashlib
+    from ..adapters import gfile_parallel_current
+    from ..engine import pressure_term
+    from .geqdsk import GEQDSKEquilibrium
+    raw = bytes(eqdsk_bytes)
+    key = hashlib.sha256(raw).hexdigest()
+    hit = _P_TERM_CACHE.get(key)
+    if hit is None:
+        geq = GEQDSKEquilibrium.from_bytes(raw, cocos=ARCHIVE_EQDSK_COCOS)
+        _jB, parts = gfile_parallel_current(geq)
+        hit = (np.asarray(geq.psi_N, dtype=float), pressure_term(parts))
+        if len(_P_TERM_CACHE) > 64:
+            _P_TERM_CACHE.clear()
+        _P_TERM_CACHE[key] = hit
+    return np.interp(np.asarray(psi_N, dtype=float), hit[0], hit[1])
+
+
+def _slice_in_time(node, t, n=0, i=0):
+    """Cut an IDS tree in place to the samples nearest ``t`` [s].
+
+    An array of structures whose elements carry a scalar ``time`` keeps the
+    element nearest ``t`` on those times (a core_sources source can hold fewer
+    slices than its IDS).  Any other list as long as the innermost enclosing
+    ``time`` array -- the IDS's, or a signal's own -- keeps that array's entry
+    nearest ``t``, as does the ``time`` array itself.
+    """
+    if isinstance(node, list):
+        for v in node:
+            if isinstance(v, (dict, list)):
+                _slice_in_time(v, t, n, i)
+        return
+    if isinstance(node.get("time"), list):
+        n = len(node["time"])
+        i = _nearest_index(node["time"], t, "time") if n else 0
+    for k, v in node.items():
+        if v and isinstance(v, list) and all(
+                isinstance(e, dict) and isinstance(e.get("time"), (int, float))
+                for e in v):
+            node[k] = [v[_nearest_index([e["time"] for e in v], t, k)]]
+        elif isinstance(v, list) and len(v) == n > 1:
+            node[k] = [v[i]]
+        elif isinstance(v, (dict, list)):
+            _slice_in_time(v, t, n, i)
 
 
 def _signed_b0(out, ie, ic):
@@ -1333,21 +2461,29 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
     Maps the draw's archived eqdsk to the ``equilibrium`` IDS
     (``profiles_1d`` / ``profiles_2d`` / ``global_quantities`` / ``boundary`` --
     lossless to the eqdsk grid, machine-precision GS) and the draw's ``.h5``
-    kinetics/currents to ``core_profiles``. ``j_tor`` is exact.
+    kinetics/currents to ``core_profiles``.  The written IDS holds only that
+    time slice: every time series in the template is cut to its sample
+    nearest ``time`` (:func:`_slice_in_time`), keeping the template's structure.
 
-    The parallel split (``j_total`` / ``j_ohmic`` / ``j_bootstrap`` =
-    IMAS ``<j.B>/B0``) fidelity is set by ``fidelity``:
+    bouquet's arrays are TokaMaker ``jphi``; they are written as IMAS
+    ``j_tor`` (A5) and the parallel split ``j_total`` / ``j_ohmic`` /
+    ``j_bootstrap`` as ``<J.B>/B0`` (A7; see the :mod:`bouquet.physics`
+    docstring).  No exported parallel current carries the pressure-driven
+    ``p'G`` (its ``<j.B>`` is zero): an engine draw's stored ``<j.B>`` parts
+    (``jB_parallel/``) are written as they are; otherwise ``p'G`` comes off
+    the archived ``j_BS``, which carries it.
+    ``j_total = j_ohmic + j_bootstrap + driven``, and ``j_non_inductive``
+    (when in the template) is ``j_total - j_ohmic``.  The geometry is set by
+    ``fidelity``:
 
-      * ``"exact"``       -- convert each toroidal component with the draw's OWN
-        captured flux-surface geometry (``eq_fsa`` block, from
-        ``capture_live_eq=True`` at generate time) via
-        :func:`bouquet.physics.toroidal_to_parallel`. Raises if the block is
-        absent.
-      * ``"reconstruct"`` -- the interim baseline ratio ``c = j_tor/j_total``
-        from the template (exact only when the draw's flux geometry matches the
-        baseline's).
-      * ``"auto"`` (default) -- exact when the ``eq_fsa`` block is present,
-        else reconstruct.
+      * ``"exact"``       -- the draw's OWN captured flux-surface geometry
+        (``eq_fsa`` block, from ``capture_live_eq=True`` at generate time).
+        Raises if the block is absent or predates ``avg_R``/``pprime``.
+      * ``"reconstruct"`` -- the template's baseline equilibrium geometry
+        (exact only when the draw's flux geometry matches the baseline's).
+      * ``"auto"`` (default) -- exact when a complete ``eq_fsa`` block is
+        present; with an older block (no ``avg_R``/``pprime``) its own kappa
+        and the template's geometry for ``j_tor`` (warns); else reconstruct.
 
     Parameters
     ----------
@@ -1391,6 +2527,9 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
     ie = _nearest_index(eq_ids["time"], time, "equilibrium")
     cp_ids = out["core_profiles"]
     ic = _nearest_index(cp_ids["time"], time, "core_profiles")
+    # Only the exported slice is written: every time series is cut to it.
+    _slice_in_time(out, eq_ids["time"][ie] if time is None else time)
+    ie = ic = 0
 
     h5 = _resolve_h5(h5path_or_header)
     if scan_key is None:
@@ -1422,11 +2561,15 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
         zeff = np.asarray(g["aux_zeff"][()]) if "aux_zeff" in g else None
         li1 = float(g.attrs.get("l_i(1)", np.nan))
         li3 = float(g.attrs.get("l_i(3)", np.nan))
-        from ..schema import find_bytes_dataset, EQ_FSA_GROUP
+        from ..schema import (find_bytes_dataset, EQ_FSA_GROUP,
+                              read_jB_parallel)
         eqk = find_bytes_dataset(g)
         if eqk is None:
             raise KeyError(f"draw {draw_index} has no archived eqdsk")
-        geq = read_eqdsk_from_bytes(bytes(g[eqk][()]), read_geqdsk)
+        eq_bytes = bytes(g[eqk][()])
+        geq = read_eqdsk_from_bytes(eq_bytes, read_geqdsk)
+        # the engine draw's stored PARALLEL parts (schema jB_parallel/)
+        jB_par = read_jB_parallel(g)
         # optional captured live-equilibrium FSA block (exact conversion)
         eq_fsa = None
         if EQ_FSA_GROUP in g:
@@ -1435,6 +2578,17 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
 
     # --- source orientation to restore (see the docstring) -----------------
     s_I, s_B, s_q = _export_orientation(out, ie, ic, stamp)
+
+    # Baseline (template) geometry for fidelity="reconstruct", read before the
+    # slice is overwritten with the draw's eqdsk.
+    cp = cp_ids["profiles_1d"][ic]
+    tmpl_geom = None
+    if fidelity != "exact":
+        try:
+            tmpl_geom = _fuse_current_geometry(
+                eq_ids, ie, cp["grid"]["rho_tor_norm"])
+        except (KeyError, TypeError, ValueError):
+            tmpl_geom = None
 
     # --- equilibrium IDS from the eqdsk (lossless to the eqdsk grid) ---------
     ts = eq_ids["time_slice"][ie]
@@ -1471,12 +2625,24 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
                                   "z": geq.boundary_Z.tolist()}}
 
     # --- core_profiles from the draw (kinetics + currents) ------------------
-    cp = cp_ids["profiles_1d"][ic]
     psi = np.asarray(cp["grid"]["psi"], dtype=float)
     psiN_t = (psi - psi[0]) / (psi[-1] - psi[0])
+    # The draw's arrays are on the archive's run grid: a phi_n archive lands on
+    # the template's own Phi_N nodes (grid.rho_tor_norm**2).
+    # The draw's ψ_N at those nodes (its eqdsk's own Φ_N map) addresses its
+    # flux-surface geometry and is written as grid.psi.
+    from ..utils import profile_coord
+    x_t = psiN_fsa = psiN_t
+    if profile_coord(h5, scan_key) != "psi_n":
+        x_t = _dd_phi_n(cp, psiN_t)
+        phi_g = np.asarray(geq.rhovn, dtype=float) ** 2
+        phi_g = (phi_g - phi_g[0]) / (phi_g[-1] - phi_g[0])
+        psiN_fsa = np.interp(x_t, phi_g, np.asarray(geq.psi_N, dtype=float))
+        cp["grid"]["psi"] = (geq.psi_axis + psiN_fsa
+                             * (geq.psi_boundary - geq.psi_axis)).tolist()
 
-    def to_t(arr, src):     # interp draw array (on src grid) -> template psi grid
-        return np.interp(psiN_t, src, arr)
+    def to_t(arr, src):     # interp draw array (on src grid) -> template grid
+        return np.interp(x_t, src, arr)
 
     cp["electrons"]["density_thermal"] = to_t(ne, pkin).tolist()
     cp["electrons"]["temperature"] = to_t(te, pkin).tolist()
@@ -1488,67 +2654,62 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
     if zeff is not None:
         cp["zeff"] = to_t(zeff, pkin).tolist()
 
-    # The template's own toroidal/parallel totals, captured BEFORE j_tor is
-    # overwritten below: the reconstruct fidelity's ratio c = j_tor/j_total
-    # is the TEMPLATE's (baseline) geometry factor.  Reading cp["j_tor"] after
-    # the overwrite made c = draw j_tor / template j_total, i.e. the exported
-    # j_total came out as the template's verbatim and j_ohmic / j_bootstrap
-    # were scaled by template j_total / draw j_tor.
-    base_jtot = (np.asarray(cp["j_total"], dtype=float)
-                 if "j_total" in cp else None)
-    base_jtor = (np.asarray(cp["j_tor"], dtype=float)
-                 if "j_tor" in cp else None)
-
-    # j_tor is exact (bouquet stores toroidal current directly).  Every
-    # current below is computed in the archive's positive frame and written
-    # times s_I (the source's Ip orientation); the parallel conversion is
-    # sign-invariant (the template ratio c is even in s_I, and the exact path
-    # uses |B0|), so this is the source-frame current.
-    jt_t = to_t(j_tor, peq)
-    cp["j_tor"] = (s_I * jt_t).tolist()
-
-    # Parallel split (j_total / j_ohmic / j_bootstrap = IMAS <j.B>/B0). Two
-    # fidelities (`fidelity` arg): EXACT uses the draw's own captured
-    # flux-surface geometry (eq_fsa) via physics.toroidal_to_parallel;
-    # RECONSTRUCT falls back to the interim baseline ratio c=j_tor/j_total from
-    # the template (exact only when the draw's flux geometry matches baseline).
-    if base_jtot is not None:
-        use_exact = False
-        if fidelity in ("auto", "exact") and eq_fsa is not None:
-            geom = _eq_fsa_geom_on(eq_fsa, psiN_t, _imas_b0(out, ie, ic))
-            if geom is not None:
-                from ..physics import toroidal_to_parallel
-                cp["j_total"] = (s_I * toroidal_to_parallel(
-                    jt_t, geom=geom)).tolist()
-                cp["j_ohmic"] = (s_I * toroidal_to_parallel(
-                    to_t(j_ind, peq), geom=geom)).tolist()
-                cp["j_bootstrap"] = (s_I * toroidal_to_parallel(
-                    to_t(j_bs, peq), geom=geom)).tolist()
-                use_exact = True
-        if fidelity == "exact" and not use_exact:
+    # Currents (TokaMaker jphi on the draw grid -> template grid -> IMAS),
+    # converted in the archive's positive frame (|F|, |B0|, positive-frame p')
+    # and written times s_I: the source-frame current.  kappa is the draw's
+    # own (eq_fsa); so is the IMAS j_tor (A5) when the block carries avg_R
+    # and pprime, else the template's (baseline) geometry is used.
+    geom = None
+    if fidelity in ("auto", "exact") and eq_fsa is not None:
+        geom = _eq_fsa_geom_on(eq_fsa, psiN_fsa, _imas_b0(out, ie, ic))
+    full = geom is not None and all(k in geom for k in _EQ_FSA_GEOM_KEYS)
+    a5 = geom
+    if not full:
+        if fidelity == "exact":
             raise ValueError(
                 f"fidelity='exact' requested but draw {draw_index} has no "
-                "captured eq_fsa block (generate with capture_live_eq=True). "
-                "Use fidelity='auto' to fall back to the baseline-ratio "
-                "reconstruction.")
-        if not use_exact:                      # baseline-ratio reconstruction
-            if base_jtor is None:
-                raise ValueError(
-                    "fidelity='reconstruct' needs the template's own "
-                    "core_profiles j_tor to form the ratio c = j_tor/j_total; "
-                    "the template has none. Use an archive with a captured "
-                    "eq_fsa block (fidelity='exact').")
-            eps = 1e-9 * np.nanmax(np.abs(base_jtot)) if base_jtot.size else 0.0
-            good = np.abs(base_jtot) > eps
-            c = np.ones_like(base_jtot)
-            c[good] = base_jtor[good] / base_jtot[good]
-            if not np.all(good):
-                idx = np.arange(c.size)
-                c[~good] = np.interp(idx[~good], idx[good], c[good])
-            with np.errstate(divide="ignore", invalid="ignore"):
-                cp["j_total"] = (s_I * (jt_t / c)).tolist()
-                cp["j_ohmic"] = (s_I * (to_t(j_ind, peq) / c)).tolist()
-                cp["j_bootstrap"] = (s_I * (to_t(j_bs, peq) / c)).tolist()
+                "complete captured eq_fsa block (needs "
+                f"{list(_EQ_FSA_GEOM_KEYS)}; generate with capture_live_eq="
+                "True). Use fidelity='auto' to fall back to the template "
+                "(baseline) geometry.")
+        if eq_fsa is not None:
+            import warnings
+            warnings.warn(
+                f"draw {draw_index}: eq_fsa block lacks "
+                f"{[k for k in _EQ_FSA_GEOM_KEYS if eq_fsa.get(k) is None]}; "
+                + ("j_tor" if geom is not None else "currents")
+                + " converted with the template (baseline) geometry")
+        if tmpl_geom is None:
+            raise ValueError(
+                f"draw {draw_index}: no complete eq_fsa block, and the "
+                "template-geometry conversion needs the template equilibrium's "
+                f"{list(_FUSE_GEOM_FIELDS)} (and core_profiles rho_tor_norm) "
+                "at the exported slice")
+        # the template's geometry is in the dd's own orientation: bring it
+        # into the archive's positive frame first
+        a5 = _positive_frame_geom(tmpl_geom, s_I)
+        geom = a5 if geom is None else geom
+    jphi_t = to_t(j_tor, peq)
+    cp["j_tor"] = (s_I * jphi_tokamaker_to_jtor_imas(jphi_t, a5)).tolist()
+    if fidelity in ("auto", "exact") and jB_par is not None:
+        src = np.asarray(jB_par.get("psi_N", peq), dtype=float)
+        b0 = _imas_b0(out, ie, ic)
+        ohm, bs, drv = (to_t(np.asarray(jB_par[k], dtype=float), src) / b0
+                        for k in ("jB_inductive", "jB_BS", "jB_NBI"))
+        drv = drv + to_t(np.asarray(jB_par["jB_RF"], dtype=float), src) / b0
+    else:
+        jt_ind, jt_bs = to_t(j_ind, peq), to_t(j_bs, peq)
+        # p'G of the archived eqdsk (what a reader of this IDS recovers)
+        # comes off j_BS, which carries it
+        ohm = jphi_tokamaker_to_jpar(jt_ind, geom)
+        bs = jphi_tokamaker_to_jpar(
+            jt_bs - archived_pressure_term(eq_bytes, psiN_fsa), geom)
+        drv = jphi_tokamaker_to_jpar(jphi_t - jt_ind - jt_bs, geom)
+    cp["j_ohmic"] = (s_I * ohm).tolist()
+    cp["j_bootstrap"] = (s_I * bs).tolist()
+    cp["j_total"] = (s_I * (ohm + bs + drv)).tolist()
+    if "j_non_inductive" in cp:
+        cp["j_non_inductive"] = (s_I * (bs + drv)).tolist()
 
     with open(out_path, "w") as fh:
         json.dump(out, fh)
@@ -1563,7 +2724,7 @@ def export_imas_drawset(h5path_or_header, template_ids_path, out_dir,
     Files are ``{out_dir}/{header}_draw{idx}.json``. ``selection`` is
     ``"selected"`` (in-spec only) or ``"all"``. ``fidelity`` is forwarded to
     :func:`write_imas_draw` (``"auto"`` -> exact per-draw conversion when the
-    archive carries the captured ``eq_fsa`` block, else baseline-ratio).
+    archive carries a complete ``eq_fsa`` block, else the template geometry).
 
     Operates on a single scan.  Pass ``scan_key`` to select it; the default
     ``scan_key=None`` is the flat layout, and is only unambiguous when the

@@ -11,7 +11,8 @@ Docstrings in the source are authoritative; this page is a map.
 | `Bouquet.from_geqdsk()` / `Bouquet.from_imas()` | Minimal constructors for the two baseline sources; auto-apply the validated workflow preset for each path |
 | `Bouquet.describe()` | Print the configuration, non-default knobs only |
 | `Bouquet.verify_sigma0_consistency()` | σ=0 regression guard on the draw-pipeline bootstrap split (one solve) |
-| `Bouquet.run_slices()` | Multi-slice IMAS sweep into one archive, one `scan_key` per slice; a refused slice is recorded as such (`on_refusal="raise"` default / `"record"` to continue) |
+| `Bouquet.run_slices()` | Multi-slice IMAS sweep into one archive, one `scan_key` per slice; a refused slice is recorded as such (reason + time) and the sweep continues (`on_refusal="record"`, the default since 2026-10-06; `"raise"` stops at the first) |
+| `Bouquet.save_baseline_eqdsk(path)` | Write the reconstruction's own equilibrium (the live state `prepare_baseline()` left; refused after a later solve) as a g-file in the same pressure frame as the archive's: `PRES` carries the baseline's `p_sep` under `separatrix_pressure="offset"`. A bare `mygs.save_eqdsk` writes the solver frame (`PRES` zero at the boundary) |
 | `Bouquet.export_bundle()` / `Bouquet.export_ids()` | Per-draw file bundle (geqdsk / pfile / profiles JSON), or one IMAS/OMAS IDS per draw (`fidelity="exact"` uses the captured `eq_fsa` geometry) |
 | `Bouquet.selected_indices()` / `Bouquet.output_spread()` | Post-generation introspection |
 | `Bouquet.plot_baseline()` / `.plot_bouquet()` / `.plot_traces()` / `.plot_coil_currents()` / `.plot_spec_summary()` | Bound plotting |
@@ -81,7 +82,9 @@ Details: [io-and-plotting.md](io-and-plotting.md).
 
 | Function | Description |
 |---|---|
-| `parallel_to_toroidal()` / `toroidal_to_parallel()` | Current-convention conversion, both directions, FSA-geometry aware |
+| `parallel_to_toroidal()` / `toroidal_to_parallel()` | Current-convention conversion `⟨j_φ⟩ = κ⟨j·B⟩`, `κ = F⟨1/R⟩/⟨B²⟩` (`field_aligned_conversion`), and its exact inverse; or the source's own `j_tor/j_total` ratio |
+| `jpar_to_jphi_tokamaker()` / `jphi_tokamaker_to_jpar()` / `jphi_tokamaker_pressure_term()` | ⟨J·B⟩ ↔ TokaMaker `jphi` (field-aligned part) and the pressure term p′G ([current-conventions.md](current-conventions.md) A7) |
+| `jtor_imas_to_jphi_tokamaker()` / `jphi_tokamaker_to_jtor_imas()` | IMAS `j_tor` ↔ TokaMaker `jphi` (A5) |
 | `isotropize_fast_pressure()` | Anisotropic fast-pressure reduction for the isotropic GS solve (`method` is **required** — the two dd conventions differ by 3×) |
 | `detect_p_fast_convention()` / `resolve_p_fast_reduction()` | Which fast-pressure storage convention a dd was written in, and the reduction rule that follows (`bouquet.io.imas`) |
 | `fast_pressure_residual()` / `infer_fast_pressure()` | Fast-ion pressure accounting |

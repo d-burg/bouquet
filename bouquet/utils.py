@@ -378,18 +378,94 @@ def safe_save_eqdsk(mygs, filename, **kwargs):
     return _snapshot_save(mygs, mygs.save_eqdsk, filename, **kwargs)
 
 
-def try_save_ifile(mygs, filename, **kwargs):
+class SnapshotRestoreError(RuntimeError):
+    """Restoring the equilibrium snapshot after a wrapped save failed: the
+    solver may be left in the state the save's tracer moved it to, so the
+    caller must not carry on from it (#74 review B5).  The restore error is
+    chained as ``__cause__``."""
+
+
+#: The frame of every archived i-file (issue #68): bouquet solves in the
+#: positive-Ip frame (|F0|, Ip > 0), so a reversed-Ip/Bt discharge's i-file
+#: carries the positive-frame helicity.  Map back with the scan's
+#: ``_baseline`` attrs ``source_current_sign`` / ``source_b0_sign``.
+IFILE_FRAME = ("bouquet positive-Ip frame (|F0|, Ip > 0; issue #68): map to "
+               "the experiment with the _baseline attrs source_current_sign "
+               "/ source_b0_sign")
+
+
+def try_save_ifile(mygs, filename, record=None, **kwargs):
     r'''Snapshot/restore-wrapped `mygs.save_ifile` (see :func:`safe_save_eqdsk`),
     returning `filename`; on failure warn, remove any partial file and return
-    None (the i-file is optional; the run continues without it).'''
+    None (the i-file is optional; the run continues without it).  The
+    failure text goes to ``record["ifile_error"]`` when a dict is given.  A
+    failed RESTORE of the snapshot is not swallowed: it raises
+    :class:`SnapshotRestoreError`.'''
     try:
         _snapshot_save(mygs, mygs.save_ifile, filename, **kwargs)
         return filename
+    except SnapshotRestoreError:
+        if os.path.exists(filename):
+            os.remove(filename)
+        raise
     except Exception as exc:
-        print(f"  WARN: save_ifile failed ({exc}); stored without an i-file")
+        msg = f"save_ifile failed ({type(exc).__name__}: {exc}); stored without an i-file"
+        print(f"  WARN: {msg}")
+        import warnings
+        warnings.warn(msg, RuntimeWarning, stacklevel=2)
+        if record is not None:
+            record["ifile_error"] = str(msg)[:500]
         if os.path.exists(filename):
             os.remove(filename)
         return None
+
+
+def save_state_ifile(mygs, filename, *, npsi, ntheta, psi_pad, p_sep,
+                     orientation=None):
+    r'''The OFT i-file of ``mygs``'s current state, carrying the SAME
+    pressure frame as the g-file bouquet writes of that state: the
+    separatrix pressure ``p_sep`` is passed as ``lcfs_pressure`` exactly as
+    :func:`bouquet.edge_pressure.lcfs_kwargs` passes it to ``save_eqdsk``
+    (#74 review B1), with the same ``lcfs_pad``.  Returns ``(path or None,
+    record)``; the record (``ifile_written``, ``ifile_error``, the grid,
+    the ``lcfs_pressure`` handed over, the frame and the source orientation
+    signs) is stamped on the archive group by the caller.'''
+    from .edge_pressure import lcfs_kwargs
+    rec = dict(ifile_written=False, ifile_error=None, ifile_npsi=int(npsi),
+               ifile_ntheta=int(ntheta), ifile_lcfs_pad=float(psi_pad),
+               ifile_lcfs_pressure=float(p_sep), ifile_frame=IFILE_FRAME)
+    for k, v in (orientation or {}).items():
+        if v is not None:
+            rec[f"ifile_{k}"] = float(v)
+    path = try_save_ifile(mygs, filename, record=rec, npsi=int(npsi),
+                          ntheta=int(ntheta), lcfs_pad=psi_pad,
+                          **lcfs_kwargs(p_sep))
+    rec["ifile_written"] = path is not None
+    return path, rec
+
+
+def read_ifile(data):
+    r'''Parse OFT i-file bytes (``save_ifile``; Fortran sequential
+    unformatted, little-endian, 4-byte record markers): ``dict(npsi, ntheta,
+    psi, f, p, q, R, Z)`` -- ``psi`` / ``f`` / ``p`` / ``q`` per flux surface
+    (``p`` in Pa, including the ``lcfs_pressure`` handed to the writer),
+    ``R`` / ``Z`` the surfaces.  Double or single precision.'''
+    import struct
+    buf = bytes(data)
+    recs, pos = [], 0
+    while pos < len(buf):
+        (n,) = struct.unpack_from("<i", buf, pos)
+        recs.append(buf[pos + 4:pos + 4 + n])
+        pos += 8 + n
+    npsi, ntheta = struct.unpack("<ii", recs[0])
+    dt = "<f8" if len(recs[1]) == 8 * npsi else "<f4"
+    cols = [np.frombuffer(r, dtype=dt).astype(float) for r in recs[1:5]]
+    rz = [np.frombuffer(r, dtype=dt).astype(float) for r in recs[5:7]]
+    out = dict(npsi=int(npsi), ntheta=int(ntheta), psi=cols[0], f=cols[1],
+               p=cols[2], q=cols[3])
+    if len(rz) == 2:
+        out["R"], out["Z"] = rz
+    return out
 
 
 def _snapshot_save(mygs, save, filename, **kwargs):
@@ -399,7 +475,12 @@ def _snapshot_save(mygs, save, filename, **kwargs):
     try:
         return save(filename, **kwargs)
     finally:
-        mygs.replace_eq(source_eq=saved)
+        try:
+            mygs.replace_eq(source_eq=saved)
+        except Exception as exc:
+            raise SnapshotRestoreError(
+                f"restoring the equilibrium after {getattr(save, '__name__', 'a save')}"
+                f"({filename!r}) failed: {type(exc).__name__}: {exc}") from exc
 
 
 #: Size of the Fortran ``x_points`` buffer (``max_xpoints`` in

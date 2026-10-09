@@ -7670,6 +7670,10 @@ class Bouquet(SwbBaseline):
                 write_ifile=gc.write_ifile,
                 ifile_npsi=gc.ifile_npsi,
                 ifile_ntheta=gc.ifile_ntheta,
+                ifile_orientation=dict(
+                    source_current_sign=getattr(bl, "source_current_sign",
+                                                None),
+                    source_b0_sign=getattr(bl, "source_b0_sign", None)),
                 scan_key=gc.scan_key,
                 pfile_bytes=bl.pfile_bytes,
                 baseline_eqdsk_bytes=bl.eqdsk_bytes,

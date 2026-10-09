@@ -284,10 +284,18 @@ class DrawView:
     def extract(self, out_dir: str, formats=("geqdsk",)) -> dict:
         """Write per-draw files to ``out_dir``; return ``{format: path}``.
 
-        Formats: ``"geqdsk"`` / ``"pfile"`` (raw stored bytes) and
+        Formats: ``"geqdsk"`` / ``"pfile"`` / ``"ifile"`` (raw stored bytes;
+        the OFT i-file of a ``write_ifile=True`` run, in bouquet's
+        positive-Ip frame -- see the group's ``ifile_*`` attrs) and
         ``"profiles"`` (a self-describing JSON of profiles + scalars + coils +
-        eq_fsa; see :meth:`profiles_doc`). Missing payloads are skipped.
+        eq_fsa; see :meth:`profiles_doc`). Missing payloads are skipped; an
+        unknown format is refused.
         """
+        unknown = set(formats) - {"geqdsk", "pfile", "ifile", "profiles"}
+        if unknown:
+            raise ValueError(f"extract: unknown format(s) {sorted(unknown)}; "
+                             "expected 'geqdsk', 'pfile', 'ifile' or "
+                             "'profiles'")
         os.makedirs(out_dir, exist_ok=True)
         stem = f"{self._ar.header_basename}_{_scan_key(self.scan_key)}_{self.count}"
         paths = {}
@@ -306,6 +314,13 @@ class DrawView:
                     with open(p, "wb") as fh:
                         fh.write(pf)
                     paths["pfile"] = os.path.abspath(p)
+        if "ifile" in formats:
+            ib = self.ifile_bytes
+            if ib is not None:
+                p = os.path.join(out_dir, stem + ".ifile")
+                with open(p, "wb") as fh:
+                    fh.write(ib)
+                paths["ifile"] = os.path.abspath(p)
         if "profiles" in formats:
             import json
             p = os.path.join(out_dir, stem + "_profiles.json")

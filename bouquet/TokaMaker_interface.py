@@ -50,7 +50,9 @@ from .utils import (
     select_closed_lcfs,
     store_equilibrium,
     store_baseline_profiles,
-    try_save_ifile,
+    save_state_ifile,
+    SnapshotRestoreError,
+    stamp_group_attrs,
     store_baseline_state,
     _scan_key,
     _shape_from_boundary,
@@ -175,6 +177,11 @@ DRAW_REJECTION_REASONS = {
     "eqdsk_save_failed": "the draw's g-file could not be written "
                          "(save_eqdsk failed on the delivered state); the "
                          "state is restored and the draw is not archived",
+    # write_ifile: restoring the equilibrium after the i-file save failed
+    "ifile_restore_failed": "restoring the solver state after the draw's "
+                            "i-file save failed (write_ifile): the state the "
+                            "save's tracer left is not trusted, the warm "
+                            "start is restored and the draw is not archived",
 }
 
 
@@ -5210,6 +5217,9 @@ def generate_bouquet(
     write_ifile=False,
     ifile_npsi=129,
     ifile_ntheta=257,
+    # the source orientation stamped with every i-file (issue #68):
+    # {"source_current_sign": .., "source_b0_sign": ..} (None: not stamped)
+    ifile_orientation=None,
     # Archive the ACHIEVED FSA j_phi of each converged solve (baseline + every
     # draw) instead of the prescribed target profile. Set on the IMAS path,
     # where the single-pass jphi-linterp solve lands a few % off its anchor, so
@@ -5475,6 +5485,14 @@ def generate_bouquet(
         warnings.warn(_byp_msg, RuntimeWarning, stacklevel=2)
 
     _edge = resolve_edge_pressure(edge_pressure)
+    # write_ifile: refuse up front, not one WARN per draw (#74 review B4)
+    if write_ifile and not callable(getattr(mygs, "save_ifile", None)):
+        raise RuntimeError(
+            "GenerationConfig.write_ifile=True needs a TokaMaker with "
+            "save_ifile (OFT main since #151); this solver has none -- "
+            "update OFT or set write_ifile=False")
+    _ifile_kw = dict(npsi=int(ifile_npsi), ntheta=int(ifile_ntheta),
+                     psi_pad=psi_pad, orientation=ifile_orientation)
     # ---- rejected draw attempts: one record each, a summary at the end ----
     _rejections = rejection_log if rejection_log is not None else []
     _masked_at_start = dict(ANCHOR_MASKED_FAILURES)
@@ -5589,6 +5607,8 @@ def generate_bouquet(
     _baseline_coils = None
     _recon_Ip = None
     baseline_ifile_bytes = None  # set with the warmstart baseline.eqdsk re-save
+    # the baseline i-file's stamp (write_ifile): set where it is traced
+    _bl_ifile_rec = None
     # self-consistent loop: l_i / q0 / q95 of the jphi-linterp baseline
     # re-solve below (None when it is not run)
     _J_state = None
@@ -6149,6 +6169,20 @@ def generate_bouquet(
                 with _tmp_patch2.NamedTemporaryFile(
                         suffix='.geqdsk', delete=False) as _tf:
                     _tmp_eqdsk_path = _tf.name
+                # The baseline i-file FIRST, snapshot-wrapped, so it is
+                # traced from the very state the bare save_eqdsk below
+                # writes (that save's tracer may move the state; #74
+                # review B6), with the same lcfs_pressure / lcfs_pad as
+                # that g-file (B1).  Nothing changes when write_ifile is
+                # off: the state the eqdsk save sees is the same.
+                if write_ifile:
+                    _bl_if_path, _bl_ifile_rec = save_state_ifile(
+                        mygs, _tmp_eqdsk_path + '.ifile',
+                        p_sep=_edge.p_offset(pressure_solve), **_ifile_kw)
+                    if _bl_if_path is not None:
+                        with open(_bl_if_path, 'rb') as _if:
+                            _bl_if_bytes = _if.read()
+                        os.unlink(_bl_if_path)
                 # nr/nz=257 matches the per-draw save_eqdsk call
                 # inside the per-draw loop further down, so the
                 # baseline and per-draw eqdsks have the same grid
@@ -6172,13 +6206,13 @@ def generate_bouquet(
                 # converged eqdsk + Ip into the H5 _baseline group.
                 baseline_eqdsk_bytes = _new_eqdsk_bytes
                 initial_Ip_target = _new_eq_Ip
-                if write_ifile and try_save_ifile(
-                        mygs, _tmp_eqdsk_path + '.ifile',
-                        npsi=int(ifile_npsi), ntheta=int(ifile_ntheta),
-                        lcfs_pad=psi_pad):
-                    with open(_tmp_eqdsk_path + '.ifile', 'rb') as _if:
-                        baseline_ifile_bytes = _if.read()
-                    os.unlink(_tmp_eqdsk_path + '.ifile')
+                if write_ifile and _bl_ifile_rec is not None \
+                        and _bl_ifile_rec["ifile_written"]:
+                    # archived with the eqdsk it was traced beside
+                    baseline_ifile_bytes = _bl_if_bytes
+                    _bl_ifile_rec["ifile_state"] = (
+                        "the warm-start baseline state (the archived "
+                        "baseline eqdsk's)")
                 if abs(_new_eq_Ip - _old_initial_Ip) > 1.0:
                     _shift_pct = (
                         100.0 * (_new_eq_Ip - _old_initial_Ip)
@@ -6197,10 +6231,20 @@ def generate_bouquet(
                     os.unlink(_tmp_eqdsk_path)
                 except Exception:
                     pass
+            except SnapshotRestoreError:
+                raise                  # the solver state is not trustworthy
             except Exception as _eq_patch_exc:
                 print(f"  [warmstart] baseline.eqdsk re-save skipped "
                       f"({_eq_patch_exc}); H5 baseline will retain "
                       f"the pre-bouquet snapshot")
+                if write_ifile:
+                    # no i-file of a state the archive does not hold
+                    baseline_ifile_bytes = None
+                    _bl_ifile_rec = dict(
+                        (_bl_ifile_rec or {}), ifile_written=False,
+                        ifile_error=("the baseline eqdsk re-save failed "
+                                     f"({_eq_patch_exc}); no i-file of the "
+                                     "archived (pre-bouquet) state"))
             if os.environ.get('PINJ_PROBE', '0') == '1':
                 try:
                     _gs0 = mygs.get_stats(li_normalization='iter',
@@ -6360,6 +6404,40 @@ def generate_bouquet(
     # VIEW onto the gs_equil struct, which every copy_eq/replace_eq swap
     # frees under us (see utils.capture_xpoints).
     _bl_xpts, _bl_div = capture_xpoints(mygs)
+    # write_ifile with no warm-start re-save (coil_drift=None): the baseline
+    # i-file of THIS state -- the recon-converged state these coils and
+    # X-points are captured at -- so every route archives one (#74 review
+    # B2); a failed re-save is stamped above instead, never silently absent
+    if write_ifile and _bl_ifile_rec is None and coil_drift is not None:
+        # the warm-start capture failed before the baseline re-save: the
+        # archive keeps the pre-bouquet eqdsk, of a state no longer held
+        _bl_ifile_rec = dict(
+            ifile_written=False,
+            ifile_error=("the warm-start capture failed before the baseline "
+                         "eqdsk re-save; no i-file of the archived "
+                         "(pre-bouquet) state"))
+    if write_ifile and _bl_ifile_rec is None:
+        import tempfile as _tmp_if
+        with _tmp_if.NamedTemporaryFile(suffix='.ifile',
+                                        delete=False) as _tf:
+            _bl_if_path0 = _tf.name
+        _bl_if_path, _bl_ifile_rec = save_state_ifile(
+            mygs, _bl_if_path0, p_sep=_edge.p_offset(pressure_solve),
+            **_ifile_kw)
+        if _bl_if_path is not None:
+            with open(_bl_if_path, 'rb') as _if:
+                baseline_ifile_bytes = _if.read()
+            os.unlink(_bl_if_path)
+            _bl_ifile_rec["ifile_state"] = (
+                "the recon-converged state on entry to generate_bouquet "
+                "(no warm-start re-save: coil_drift=None)")
+        elif os.path.exists(_bl_if_path0):
+            os.unlink(_bl_if_path0)
+    if write_ifile and not (_bl_ifile_rec or {}).get("ifile_written"):
+        warnings.warn(
+            "write_ifile=True but the baseline has no i-file: "
+            f"{(_bl_ifile_rec or {}).get('ifile_error')}", RuntimeWarning,
+            stacklevel=2)
     if _bl_xpts is None:
         print(f"  NOTE: no baseline X-points captured; "
               f"plot_boundary_point_traces will fall back to the "
@@ -6441,6 +6519,8 @@ def generate_bouquet(
         baseline_meta=baseline_meta,
         profile_coord=coord,
     )
+    if write_ifile and _bl_ifile_rec is not None:
+        stamp_group_attrs(header, scan_key, None, _bl_ifile_rec)
 
     # ---- the ONE reconstruction state (self-consistent loop) ------------
     # What the reconstruction recorded (delivered_state: l_i == l_i_target,
@@ -7830,13 +7910,32 @@ def generate_bouquet(
                 pbar.update(1)
             continue
 
-        # Optional OFT i-file for GPEC eq_type='ldp_i', from the same state.
-        ifile_path = None
+        # Optional OFT i-file for GPEC eq_type='ldp_i', from the same state
+        # and with the same lcfs_pressure (this draw's own p_sep) and
+        # lcfs_pad as the g-file just written (#74 review B1).  A failed
+        # save is stamped on the draw (ifile_written=False, ifile_error); a
+        # failed state RESTORE rejects the draw like a failed g-file save.
+        ifile_path, _ifile_rec = None, None
         if write_ifile:
-            ifile_path = try_save_ifile(
-                mygs, os.path.abspath(f"{header}_count={count}.ifile"),
-                npsi=int(ifile_npsi), ntheta=int(ifile_ntheta),
-                lcfs_pad=psi_pad)
+            try:
+                ifile_path, _ifile_rec = save_state_ifile(
+                    mygs, os.path.abspath(f"{header}_count={count}.ifile"),
+                    p_sep=_p_lcfs, **_ifile_kw)
+            except SnapshotRestoreError as _if_exc:
+                _reject(count, "ifile_restore_failed", "save", _if_exc)
+                try:
+                    if _warmstart_eq_snap is not None:
+                        mygs.replace_eq(source_eq=_warmstart_eq_snap)
+                    else:
+                        mygs.set_coil_currents(_baseline_coils)
+                        mygs.set_psi(_baseline_psi, update_bounds=True)
+                except Exception:
+                    pass
+                if os.path.exists(eqdsk_filename):
+                    os.remove(eqdsk_filename)
+                if pbar is not None:
+                    pbar.update(1)
+                continue
 
         # Capture a high-resolution LCFS trace at the SAME mygs state
         # we just saved the eqdsk from.  The eqdsk's RBBBS/ZBBBS is only
@@ -8174,6 +8273,8 @@ def generate_bouquet(
             profile_coord=coord,
             ifile_filepath=ifile_path,
         )
+        if _ifile_rec is not None:
+            stamp_group_attrs(header, scan_key, count, _ifile_rec)
         # the method's own per-draw record (engine block, swb attrs)
         _m.store_draw(header, count, scan_key, diagnostics)
         # the draw's edge-pressure record: its p_sep and both pressure frames

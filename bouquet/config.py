@@ -1462,8 +1462,13 @@ class GenerationConfig:
     # the template geometry).  The quadrature adds ~65 surface traces/draw;
     # set False to skip that cost.
     capture_exact_inv_R2: bool = True
-    # Also archive an OFT i-file (save_ifile: R,Z on flux surfaces, F, p, q, FF', p')
-    # for GPEC eq_type='ldp_i' next to the eqdsk; needs an OFT with GPECf_interface.
+    # Also archive an OFT i-file (TokaMaker.save_ifile, OFT main since #151: psi, F, p,
+    # q per flux surface and R,Z on the surfaces) for GPEC eq_type='ldp_i', per stored
+    # draw and for the baseline, from the same state and with the same lcfs_pressure
+    # (p_sep) and lcfs_pad as that state's g-file.  Refused at generate() when the
+    # solver has no save_ifile.  Each group is stamped ifile_written / ifile_error /
+    # ifile_npsi / ifile_ntheta / ifile_lcfs_pressure / ifile_frame (positive-Ip frame,
+    # issue #68).  About 0.5 MB per draw at the default grid.
     write_ifile: bool = False
     ifile_npsi: int = 129
     ifile_ntheta: int = 257
@@ -1527,8 +1532,14 @@ class GenerationConfig:
         from .edge_pressure import validate_edge_pressure_settings
         validate_edge_pressure_settings(self.edge_pprime_pin,
                                         self.separatrix_pressure)
-        _m = self.draw_solve_maxits
         import numbers
+        for _n in ("ifile_npsi", "ifile_ntheta"):
+            _v = getattr(self, _n)
+            # the OFT sampler divides by n - 1
+            if isinstance(_v, bool) or not isinstance(
+                    _v, numbers.Integral) or _v < 2:
+                raise ValueError(f"{_n}={_v!r} must be an integer >= 2")
+        _m = self.draw_solve_maxits
         if _m is not None and (isinstance(_m, bool) or not isinstance(
                 _m, numbers.Integral) or _m < 1):
             raise ValueError(f"draw_solve_maxits={_m!r} must be an integer "

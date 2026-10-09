@@ -217,7 +217,8 @@ def test_a_masked_resample_loop_failure_has_its_own_counter():
 
 def test_every_rejection_path_of_the_draw_loop_records_a_reason():
     """Every `continue` exit of generate_bouquet's draw loop (the draw, the
-    post-align checks, a failed g-file save) records a rejection first --
+    post-align checks, a failed g-file save, a failed state restore after
+    the i-file save) records a rejection first --
     there is no silent rejection path."""
     import ast
     import inspect
@@ -237,6 +238,6 @@ def test_every_rejection_path_of_the_draw_loop_records_a_reason():
                 yield from exits(c)
     lines = src.splitlines(keepends=True)
     segs = ["".join(lines[:c.lineno - 1]) for c in exits(loop)]
-    assert len(segs) == 3, len(segs)
+    assert len(segs) == 4, len(segs)
     for seg in segs:
         assert "_reject(" in seg[-3000:]

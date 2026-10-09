@@ -246,6 +246,19 @@ map to the original history on the archival tag
   template's PAIRED slice.  The reader stamps the pairing
   (`li_metrics["imas_current_conversion"]`: `equilibrium_time`,
   `core_profiles_time`, `jtor_mismatch`).
+- **An exported draw writes every thermal species its solve used**
+  (`write_imas_draw`): the main ion AND the one effective impurity of charge
+  `Z_imp` at the main-ion `T_i`, `n_z = (n_e - z_fast - n_i)/Z_imp` (the
+  archive's `Z_imp` / `z_fast`).  Before, only the main ion was written and
+  the template's impurity kept, so a draw whose `n_i` / `Z_eff` / `T_i`
+  differ from the template's -- every ida_hybrid draw -- was exported
+  non-quasineutral with a `Z_eff` that was not the drawn one, and the default
+  reader refused it ("thermal species gap 10.8 % > 2 %" on a real dd).
+  Thermal species the solve did not carry (further impurities, a second
+  hydrogenic species) are written with zero thermal density; an impurity of
+  another charge is relabelled to `Z_imp`.  Recorded under
+  `bouquet_species_model` in `core_profiles.code.parameters`.  An archive
+  without `Z_imp` keeps the template's impurity, as before.
 
 ### Reproducing a run made before this release; what moves on the default path
 

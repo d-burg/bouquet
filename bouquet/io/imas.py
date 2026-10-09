@@ -217,12 +217,14 @@ def _get_export_window(node):
     return legacy if isinstance(legacy, dict) else None
 
 
-def _set_export_window(node, meta):
+def _set_export_window(node, meta, key=None):
     """Record the export window block *meta* in *node*'s schema-legal
     ``code.parameters`` string (JSON), keeping what the template had there
     (its JSON keys, or its text under
-    :data:`IMAS_EXPORT_TEMPLATE_PARAMETERS_KEY`)."""
+    :data:`IMAS_EXPORT_TEMPLATE_PARAMETERS_KEY`).  ``key`` (default
+    :data:`IMAS_EXPORT_TIME_WINDOW_KEY`) names the block."""
     import json
+    key = IMAS_EXPORT_TIME_WINDOW_KEY if key is None else key
     code = node.get("code")
     if not isinstance(code, dict):
         code = node["code"] = {}
@@ -235,9 +237,9 @@ def _set_export_window(node, meta):
             obj = None
         if not isinstance(obj, dict):
             obj = {IMAS_EXPORT_TEMPLATE_PARAMETERS_KEY: par}
-    obj[IMAS_EXPORT_TIME_WINDOW_KEY] = meta
+    obj[key] = meta
     code["parameters"] = json.dumps(obj)
-    node.pop(IMAS_EXPORT_TIME_WINDOW_KEY, None)
+    node.pop(key, None)
 
 
 def _drop_export_window(node):
@@ -3237,6 +3239,90 @@ def _export_orientation(out, ie, ic, stamp):
     return float(s_I), float(s_B), float(s_q)
 
 
+#: Key (in ``core_profiles.code.parameters``, JSON) of an exported draw's
+#: ion-species record (:func:`_write_draw_ion_species`).
+IMAS_EXPORT_SPECIES_KEY = "bouquet_species_model"
+
+#: The species model every bouquet solve uses, which an exported draw
+#: writes (:func:`_write_draw_ion_species`).
+DRAW_SPECIES_MODEL = (
+    "electrons (n_e, T_e); one hydrogenic main ion (thermal n_i, T_i); ONE "
+    "effective impurity of charge Z_imp at the main-ion T_i with "
+    "n_z = max(n_e - z_fast - n_i, 0) / Z_imp (physics.impurity_pressure on "
+    "n_e - z_fast); the fast population (density_fast, pressure_fast_*) "
+    "held fixed as the template's")
+
+
+def _write_draw_ion_species(cp, ni_t, ti_t, ne_t, z_fast_t, Z_imp):
+    """Write a draw's thermal ion species into the core_profiles slice *cp*
+    (on the template grid) as the solve used them (:data:`DRAW_SPECIES_MODEL`),
+    so the export is self-consistent: quasineutral, with the drawn Z_eff,
+    and with the reader's single-impurity pressure equal to the species sum.
+
+    The main ion is the first ``z_n == 1`` species.  With ``Z_imp`` (the
+    archive's per-draw / baseline ``Z_imp``), the impurity is the template's
+    non-hydrogenic species of that charge; failing one, its first other
+    thermal species, relabelled to ``Z_imp`` (the solve's effective
+    impurity; a species is added when the template has none).  Every other
+    thermal species the solve did not carry (further impurities, a second
+    hydrogenic species) gets zero thermal density.  Fast densities and
+    pressures are untouched.  Without ``Z_imp`` (an archive that predates
+    it, or a baseline with no dilution information) only the main ion is
+    written and the template's impurities are kept, as before.  Returns the
+    record written under :data:`IMAS_EXPORT_SPECIES_KEY`."""
+    ions = cp.get("ion") or []
+    main = next((ion for ion in ions
+                 if float(ion["element"][0]["z_n"]) == 1.0), None)
+    if main is None:
+        raise ValueError("write_imas_draw: the template core_profiles has no "
+                         "hydrogenic (z_n = 1) main ion to write the draw's "
+                         "n_i into")
+    main["density_thermal"] = np.asarray(ni_t, dtype=float).tolist()
+    main["temperature"] = np.asarray(ti_t, dtype=float).tolist()
+    rec = dict(model=DRAW_SPECIES_MODEL, main_ion=str(main.get("label")),
+               Z_imp=None if not Z_imp else float(Z_imp), impurity=None,
+               impurity_relabelled_from=None, zeroed=[])
+    if not Z_imp:
+        rec["impurity"] = ("template's kept: the archive carries no Z_imp "
+                           "(no single-impurity model to write)")
+        return rec
+    Z_imp = float(Z_imp)
+    ne_th = np.maximum(np.asarray(ne_t, dtype=float) - (
+        0.0 if z_fast_t is None else np.asarray(z_fast_t, dtype=float)), 0.0)
+    nz = np.clip((ne_th - np.asarray(ni_t, dtype=float)) / Z_imp, 0.0, None)
+
+    def thermal(ion):
+        d = ion.get("density_thermal")
+        return d is not None and bool(np.any(np.asarray(d, dtype=float)))
+    others = [ion for ion in ions if ion is not main
+              and float(ion["element"][0]["z_n"]) != 1.0]
+    imp = next((ion for ion in others if np.isclose(
+        float(ion["element"][0]["z_n"]), Z_imp, rtol=1e-9, atol=0.0)), None)
+    if imp is None:
+        imp = next((ion for ion in others if thermal(ion)),
+                   others[0] if others else None)
+        if imp is None:
+            imp = {"label": "impurity", "element": [{"z_n": Z_imp}]}
+            ions.append(imp)
+            cp["ion"] = ions
+            rec["impurity_relabelled_from"] = "(added: no impurity species)"
+        else:
+            rec["impurity_relabelled_from"] = dict(
+                label=imp.get("label"), z_n=float(imp["element"][0]["z_n"]))
+            imp["element"][0]["z_n"] = Z_imp
+            imp["label"] = f"impurity_Z{Z_imp:g}"
+    imp["density_thermal"] = nz.tolist()
+    imp["temperature"] = np.asarray(ti_t, dtype=float).tolist()
+    rec["impurity"] = str(imp.get("label"))
+    for ion in ions:
+        if ion is main or ion is imp or not thermal(ion):
+            continue
+        ion["density_thermal"] = np.zeros_like(
+            np.asarray(ion["density_thermal"], dtype=float)).tolist()
+        rec["zeroed"].append(str(ion.get("label")))
+    return rec
+
+
 def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
                     scan_key=None, time=None, fidelity="auto"):
     """Reconstruct a perturbed IMAS/OMAS IDS for one draw from the bouquet HDF5.
@@ -3422,6 +3508,17 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
         j_ind = np.asarray(g["j_inductive"][()])
         j_bs = np.asarray(g["j_BS"][()])
         zeff = np.asarray(g["aux_zeff"][()]) if "aux_zeff" in g else None
+        # the solve's species model (per draw, else the baseline's): the
+        # effective impurity charge and the fast-ion charge density it was
+        # assembled with (_write_draw_ion_species)
+        Z_imp_d = g.attrs.get("Z_imp", stamp.get("Z_imp"))
+        z_fast_d, zf_x = None, pkin
+        if "z_fast" in g:
+            z_fast_d = np.asarray(g["z_fast"][()], dtype=float)
+        elif _bgp in hf and "z_fast" in hf[_bgp]:
+            z_fast_d = np.asarray(hf[_bgp]["z_fast"][()], dtype=float)
+            if "psi_N_kinetic" in hf[_bgp]:
+                zf_x = np.asarray(hf[_bgp]["psi_N_kinetic"][()], dtype=float)
         li1 = float(g.attrs.get("l_i(1)", np.nan))
         li3 = float(g.attrs.get("l_i(3)", np.nan))
         from ..schema import (find_bytes_dataset, EQ_FSA_GROUP,
@@ -3536,11 +3633,15 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
 
     cp["electrons"]["density_thermal"] = to_t(ne, pkin).tolist()
     cp["electrons"]["temperature"] = to_t(te, pkin).tolist()
-    for ion in cp["ion"]:
-        if float(ion["element"][0]["z_n"]) == 1.0:
-            ion["density_thermal"] = to_t(ni, pkin).tolist()
-            ion["temperature"] = to_t(ti, pkin).tolist()
-            break
+    # every thermal species the solve used, as it used them (main ion, the
+    # one effective impurity on ne - z_fast at T_i); before, only the main
+    # ion was written and the template's impurity stayed, so an export whose
+    # n_i / Z_eff differ from the template's (an ida_hybrid draw) was not
+    # quasineutral and the reader refused it (thermal species gap)
+    species = _write_draw_ion_species(
+        cp, to_t(ni, pkin), to_t(ti, pkin), to_t(ne, pkin),
+        None if z_fast_d is None else to_t(z_fast_d, zf_x), Z_imp_d)
+    _set_export_window(cp_ids, species, key=IMAS_EXPORT_SPECIES_KEY)
     if zeff is not None:
         cp["zeff"] = to_t(zeff, pkin).tolist()
 

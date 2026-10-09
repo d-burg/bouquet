@@ -162,6 +162,15 @@ DRAW holds one equilibrium slice -- the draw's own, whose geometry its
 currents are written on -- and records the template slice the template's
 currents were paired with (used by `fidelity="reconstruct"`).
 
+An exported draw writes the thermal species its solve used: electrons, the
+hydrogenic main ion, and one effective impurity of charge `Z_imp` at the
+main-ion temperature with `n_z = (n_e - z_fast - n_i)/Z_imp` (so the export
+is quasineutral, carries the drawn `Z_eff`, and passes the reader's
+species-completeness check).  Any other thermal species of the template is
+written with zero thermal density (an impurity of another charge is
+relabelled to `Z_imp`); the fast population is the template's.  The record
+sits under `bouquet_species_model` in `core_profiles.code.parameters`.
+
 Current-convention conversions are in `bouquet.physics`
 ([current-conventions.md](current-conventions.md)):
 `jtor_imas_to_jphi_tokamaker()` / `jphi_tokamaker_to_jtor_imas()`,

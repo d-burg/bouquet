@@ -23,6 +23,11 @@ resolution (`git log origin/main..HEAD`).
   (engine-dependent defaults resolved at `prepare_baseline()`) changes
   nothing that a configuration naming its engine at construction, or a
   stored configuration, runs with, so those numbers stand for it.
+- **Goldens are build-specific:** each golden fixture records the OFT build
+  that generated it; the golden tests compare at unchanged bars on every
+  build and name both builds on a mismatch (warning on a pass, failure
+  message on a failure; [`tests/golden/README.md`](../tests/golden/README.md),
+  "Build-specific goldens").
 - **Solver suite at the tip:** re-run after the reconstruction pass ceiling
   change 8 -> 12 (`fe53920`, owner-approved).
 

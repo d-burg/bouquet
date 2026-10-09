@@ -120,6 +120,51 @@ The committed fixture passes the extended guard as it stands (it predates the
 path-free record, so its loop records carry the scrubbed basename
 `oft_build.path = "OpenFUSIONToolkit"`).
 
+## Build-specific goldens
+
+The goldens record the OFT build they were generated with, and are valid
+for that build only. The record is `provenance.oft` of
+`golden_manifest.json` and of `D3Dlike_Hmode_legacy_golden.json`:
+`build_id` as stated through `BOUQUET_OFT_BUILD_ID` when slimming,
+`library_sha256` and `sources_sha256` as measured. The policy (owner
+decision, 2026-10-09):
+
+* Every golden comparison runs at its existing bar, on every build.
+  `tests/_harness.golden_build_check` compares the installed library's
+  SHA-256 (`bouquet.jbs_loop.oft_build_info()`) with the fixture's
+  `library_sha256`; the `build_id` comparison is informational. A fixture
+  with no `library_sha256` is "unstamped" and counts as a mismatch.
+* Same build: a pass is a pass, a failure is a regression.
+* Different build: a pass passes with a `GoldenBuildMismatchWarning` that
+  names both builds; a failure FAILS (never xfail, never skip), its message
+  starting with `OFT build mismatch: fixture generated with
+  <build_id>/<sha8>, installed <build_id>/<sha8>` and the commands below,
+  followed by the original failure.
+* No band and no tolerance depends on the build.
+
+Known cross-build deviation: the mode-1 replay of the legacy golden in
+`tests/test_systematics.py` (pinned baseline, bar 0.3 %) gives a maximum
+coil drift of 0.027 % on the build the golden was generated with, and
+1.45 % on OFT builds that evaluate the edge FF' from an exact per-node
+`<R>` at the diverted LCFS node: the lower coils move, the boundary stays
+within its bar. Which edge convention is right is an open physics
+question; until it is answered, regenerate on the build in use, never widen
+the bar.
+
+Regenerating on the installed build (the commands the mismatch message
+prints; steps as in "Updating the golden set" above):
+
+```bash
+# the h5 fixture + golden_manifest.json (+ rng_stream_manifest.json)
+OMP_NUM_THREADS=1 python tests/golden/regenerate_golden_run.py RUN_DIR --reconstruction-engine unified --verbose
+BOUQUET_OFT_BUILD_ID=<installed build> python tests/golden/make_golden_fixture.py --source RUN_DIR/D3Dlike_Hmode_golden.h5
+# the legacy JSON golden
+OMP_NUM_THREADS=1 python tests/golden/regenerate_golden_run.py RUN_DIR --reconstruction-engine legacy --verbose
+BOUQUET_OFT_BUILD_ID=<installed build> python tests/golden/make_golden_fixture.py --legacy-json --source RUN_DIR/D3Dlike_Hmode_golden.h5
+```
+
+and review the git diff of the manifest / JSON before committing.
+
 ## The current fixture (unified-engine default, 2026-10-07)
 
 The h5 fixture is a run of the unified engine, the default reconstruction

@@ -145,16 +145,18 @@ engine never reads back to their defaults (printed and recorded in the run's
 * `rng_stream_manifest.json` is pinned from this fixture's baseline.
 * Validation of the fixture and the suites at `1a15685`:
   [docs/validation-provenance.md](../../docs/validation-provenance.md).
-* **The bouquet stamp reads dirty.** The fixture and both manifests stamp
-  bouquet commit `7bd48fb` with `dirty: true`. The branch was re-ordered
-  after generation: `7bd48fb` is the pre-reorder name of the commit whose
-  tree is now `8285201` (the trees are identical). The generator edits the
-  run used (`--reconstruction-engine`, `--legacy-json`) were not yet
-  committed when the run was made, and were committed together with the
-  fixture in `1a15685`; the fixture is regenerable from `1a15685`'s tree.
-  (`3d974e6` later changes how the generator's engine switch records
-  `isolate_edge_jBS` -- that field now defaults to `None` and is resolved
-  per engine -- not what runs: it still records and applies False -> True.)
+* **Regenerated 2026-10-09 on the integration branch** (commit `e838f12`,
+  clean tree) after two declared changes to the default bootstrap evaluator:
+  the geometric Redl `eps = (R_max - R_min)/(2<R>)` became the default and
+  the pressure-driven current `p'G` is archived as its own `j_pressure`
+  bucket (version tag `evaluate_jBS/4`). Same recipe, same seed, same yield
+  (20 attempts, 17 archived, 4 in spec); the in-spec draw set and the
+  reconstruction's coil currents moved with the bootstrap, l_i by 0.007 %.
+  The OFT stamp (`build_id`, `library_sha256`) is the same fixed build as
+  before. The earlier fixture (2026-10-07, bouquet `7bd48fb`/`8285201`,
+  `1a15685`) is in the history of this file.
+* The legacy record `D3Dlike_Hmode_legacy_golden.json` is regenerated
+  separately (see its own stamp).
 
 ## Why input-current archival: the mode-1 coil drift
 

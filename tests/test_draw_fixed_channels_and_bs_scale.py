@@ -317,3 +317,20 @@ def test_the_baseline_way_guard_holds_the_draws_fixed_current(
         share = np.max(_J_OTHER) / np.max(np.abs(bl.j_phi))
         assert gap == pytest.approx(share, rel=1e-6)
         assert not out["passed_baseline_way"]
+
+
+def test_a_legacy_draw_carries_the_kinetic_samplers_record(toy):
+    """PR #56 B3/B4/B7 (integration hook): every legacy draw's diagnostics
+    carry the shared sampler's record (version + clip counters), which
+    generate_bouquet archives as the draw group's ``kinetic_sampler_json``."""
+    from bouquet.kinetic_sampler import CLIP_COUNTERS, KINETIC_SAMPLER_VERSION
+    req = _reconstruct(toy, _J_NBI + _J_OTHER)
+    b = _bouquet(toy)
+    _deliver(b, "diff", req)
+    d = _draw(b, _settings())
+    ks = d["kinetic_sampler"]
+    assert ks["version"] == KINETIC_SAMPLER_VERSION
+    assert set(ks["clips"]) == set(CLIP_COUNTERS)
+    assert ks["clipped"] is False          # sigma = 0: nothing clipped
+    import json
+    assert json.loads(json.dumps(ks)) == ks   # archivable as JSON

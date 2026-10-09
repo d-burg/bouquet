@@ -152,6 +152,8 @@ def test_sigma0_draw_inputs_are_the_baseline_inputs():
     assert rng.bit_generator.state == state          # no draws consumed
     assert out[6]["swb_alpha"] == pytest.approx(1.04, rel=1e-12)
     assert np.array_equal(out[5], out[6]["j_inductive"] + out[6]["j_BS"])
+    # nothing was sampled, so no sampler record is archived (PR #56 hook)
+    assert out[6]["kinetic_sampler"] is None
 
 
 def test_p_fixed_is_fast_plus_carbon():

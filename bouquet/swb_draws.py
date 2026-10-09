@@ -90,6 +90,7 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
         ne_eq, te_eq = _kin_to_eq(ne), _kin_to_eq(te)
         ni_eq, ti_eq = _kin_to_eq(ni), _kin_to_eq(ti)
         aux_out = {}
+        _ks = None          # nothing sampled
     else:
         _k = draw_kinetics(
             mygs, psi_N, pressure, ne, te, ni, ti,
@@ -104,6 +105,7 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
         ne_p, te_p, ni_p, ti_p = _k["ne"], _k["te"], _k["ni"], _k["ti"]
         ne_eq, te_eq, ni_eq, ti_eq = _k["ne_eq"], _k["te_eq"], _k["ni_eq"], _k["ti_eq"]
         Zeff, aux_out = _k["Zeff"], _k["aux"]
+        _ks = _k.get("kinetic_sampler")
 
     jind_seed = np.asarray(jind_seed, dtype=float)
     j_seed, n_tries = jind_seed, 0
@@ -160,6 +162,8 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
         "r2_ip_scale": None,
         "r2_f_ind": None,
         "aux": aux_out,
+        # the sampler version + clip counters (PR #56; None at sigma=0)
+        "kinetic_sampler": _ks,
         "swb_alpha": alpha,
         "jind_resamples": int(n_tries),
         "j_pressure": (None if res.get("j_pressure") is None

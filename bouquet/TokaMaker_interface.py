@@ -2582,7 +2582,8 @@ def draw_kinetics(mygs, psi_N, pressure, ne, te, ni, ti,
         Zeff = np.clip(kin_to_eq(aux_out["zeff"]), 1.0, None)
     return dict(ne=kd.ne, te=kd.te, ni=kd.ni, ti=kd.ti,
                 ne_eq=ne_eq, te_eq=te_eq, ni_eq=ni_eq, ti_eq=ti_eq,
-                pressure=pres, Zeff=Zeff, aux=aux_out)
+                pressure=pres, Zeff=Zeff, aux=aux_out,
+                kinetic_sampler=kd.record())
 
 
 # ====================================================================
@@ -5049,6 +5050,9 @@ def perturb_kinetic_equilibrium(
         # (issue #23); see _AnchorIpRenorm.inductive_share.
         "r2_f_ind": _r2_f_ind_used,
         "aux": aux_out,
+        # the shared sampler's version (kinetic_sampler/2) and this draw's
+        # clip counters (PR #56 B3/B4/B7), archived by generate_bouquet
+        "kinetic_sampler": _kd.record(),
     }
     if _jbs_bypass is not None:
         diagnostics["jbs_loop"] = dict(
@@ -8368,6 +8372,14 @@ def generate_bouquet(
         )
         if _ifile_rec is not None:
             stamp_group_attrs(header, scan_key, count, _ifile_rec)
+        # the kinetic sampler's version + clip counters (legacy and swb
+        # draws; the engine archives its own in its draw record)
+        if diagnostics.get("kinetic_sampler") is not None:
+            import json
+            from .schema import KINETIC_SAMPLER_JSON_ATTR
+            stamp_group_attrs(header, scan_key, count, {
+                KINETIC_SAMPLER_JSON_ATTR: json.dumps(
+                    diagnostics["kinetic_sampler"])})
         # a rescued draw says so in the archive (owner decision D5); nothing
         # is written while the rescue is off
         _rescue_stamp = (solve_guard.draw_stamp(count)

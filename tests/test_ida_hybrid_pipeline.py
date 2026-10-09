@@ -152,6 +152,12 @@ def _probe(work, method):
         arr[f"run_{f}"] = getattr(rb, f)
     if getattr(rb, "jBS_diff", None) is not None:
         arr["run_jBS_diff"] = rb.jBS_diff
+    # the third current bucket (p'G as its own j_pressure) and the held
+    # "other" channel: present on the swb Baseline, absent on legacy, where
+    # p'G still rides inside j_inductive in memory
+    for f in ("j_pressure", "j_other"):
+        if getattr(rb, f, None) is not None:
+            arr[f"run_{f}"] = getattr(rb, f)
     np.savez(os.path.join(work, "probe.npz"),
              **{k: np.asarray(v, float) for k, v in arr.items() if v is not None})
     with open(os.path.join(work, "probe.json"), "w") as fh:
@@ -199,6 +205,9 @@ class TestPrepared:
         _, a = run
         tot = a["run_j_inductive"] + a["run_j_BS"] + a["run_j_NBI"] + a["run_j_RF"]
         tot = tot + a.get("run_jBS_diff", 0.0)
+        # swb keeps p'G as its own bucket (j_pressure) and holds j_other;
+        # legacy carries p'G inside j_inductive, so the keys are absent there
+        tot = tot + a.get("run_j_pressure", 0.0) + a.get("run_j_other", 0.0)
         np.testing.assert_allclose(tot, a["run_j_phi"], rtol=0,
                                    atol=1e-9 * np.max(np.abs(a["run_j_phi"])))
 

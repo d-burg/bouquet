@@ -46,6 +46,16 @@ in the engine record, and on the archive's `_baseline` attr
 archive views print it. See docs/workflows.md, "Experimental features and their
 validation status".
 
+## Unreleased — IMAS ψ_N readbacks sample at the dd's own nodes (owner decision E5, 2026-10-09)
+
+The IMAS reader's ψ_N route (PR #64) samples every profile at the dd's own
+radial nodes instead of pairing indices onto a uniform ψ_N grid. On a dd whose
+grid is uniform in ρ rather than ψ_N the old index pairing misplaced nodes by
+up to Δψ_N ≈ 0.14, which shifted readbacks by up to 85 % of the bootstrap
+peak and 30 % of the pressure; on a ψ_N-uniform dd (the D3D-like example) the
+two agree exactly. The node-based sampling is the declared default; no option
+restores the index pairing.
+
 ## Unreleased — cross-file hooks of the integrated #56–#75 chain (2026-10-09)
 
 ### Legacy `solve_with_bootstrap` results converted to the field-aligned bootstrap (PR #64 B1; legacy numbers move)

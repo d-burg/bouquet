@@ -15,6 +15,8 @@ import sys
 
 import pytest
 
+import _harness
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _GOLDEN_DIR = os.path.join(_HERE, "golden")
 _JSON = os.path.join(_GOLDEN_DIR, "D3Dlike_Hmode_legacy_golden.json")
@@ -48,6 +50,9 @@ def test_it_says_what_built_it(doc):
     assert prov["oft"].get("library_sha256") or \
         prov["oft"].get("sources_sha256"), prov["oft"]
     assert prov["generator_args"].get("jphi_archival") == "input"
+    # the replay (tests/test_systematics.py) keys its comparison on the
+    # compiled library's digest; without one the fixture reads "unstamped"
+    assert _harness.golden_build_check(doc, installed={}).stamped, prov["oft"]
 
 
 def test_the_draw_record_is_complete(doc):

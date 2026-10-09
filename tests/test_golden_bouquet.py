@@ -65,6 +65,17 @@ def _iter_scans(manifest):
         yield bkey, _scan_args(bkey), entry
 
 
+def _golden_comparison(manifest):
+    """The goldens are build-specific (``tests/golden/README.md``,
+    "Build-specific goldens"): each comparison below runs at its own bar, and
+    a fixture generated with another OFT build than the installed one is
+    named -- a warning on a pass, the first lines of the message on a
+    failure.  These comparisons read the stored fixture only (no solve)."""
+    return _harness.golden_comparison(
+        manifest, regenerate=_harness.REGENERATE_H5_GOLDEN,
+        fixture_only=True)
+
+
 # ---------------------------------------------------------------------------
 #  structural
 # ---------------------------------------------------------------------------
@@ -104,23 +115,24 @@ def test_geqdsks_retained_per_manifest(manifest):
 # ---------------------------------------------------------------------------
 def test_draw_scalars_match_manifest(manifest, tol):
     prov = _harness.golden_provenance_banner(_SLIM)
-    with h5py.File(_SLIM, "r") as hf:
-        for bkey, sv, entry in _iter_scans(manifest):
-            prefix = f"scan/{bkey}/" if sv is not None else ""
-            for sidx, exp in entry["draws"].items():
-                a = hf[f"{prefix}{sidx}"].attrs
-                where = f"draw {sidx}\n{prov}"
-                assert a["l_i(1)"] == pytest.approx(
-                    exp["l_i(1)"], abs=tol["l_i_atol"]), where
-                assert a["l_i(3)"] == pytest.approx(
-                    exp["l_i(3)"], abs=tol["l_i_atol"]), where
-                assert a["Ip"] == pytest.approx(
-                    exp["Ip"], rel=tol["Ip_rtol"]), where
-                assert a["max_F_drift_pct"] == pytest.approx(
-                    exp["max_F_drift_pct"], abs=tol["drift_atol"]), where
-                assert a["max_VSC_drift_pct"] == pytest.approx(
-                    exp["max_VSC_drift_pct"], abs=tol["drift_atol"]), where
-                assert bool(a["in_spec"]) == exp["in_spec"], where
+    with _golden_comparison(manifest):
+        with h5py.File(_SLIM, "r") as hf:
+            for bkey, sv, entry in _iter_scans(manifest):
+                prefix = f"scan/{bkey}/" if sv is not None else ""
+                for sidx, exp in entry["draws"].items():
+                    a = hf[f"{prefix}{sidx}"].attrs
+                    where = f"draw {sidx}\n{prov}"
+                    assert a["l_i(1)"] == pytest.approx(
+                        exp["l_i(1)"], abs=tol["l_i_atol"]), where
+                    assert a["l_i(3)"] == pytest.approx(
+                        exp["l_i(3)"], abs=tol["l_i_atol"]), where
+                    assert a["Ip"] == pytest.approx(
+                        exp["Ip"], rel=tol["Ip_rtol"]), where
+                    assert a["max_F_drift_pct"] == pytest.approx(
+                        exp["max_F_drift_pct"], abs=tol["drift_atol"]), where
+                    assert a["max_VSC_drift_pct"] == pytest.approx(
+                        exp["max_VSC_drift_pct"], abs=tol["drift_atol"]), where
+                    assert bool(a["in_spec"]) == exp["in_spec"], where
 
 
 def test_the_fixture_says_what_built_it(manifest):
@@ -149,6 +161,11 @@ def test_the_fixture_says_what_built_it(manifest):
     assert oft.get("sources_sha256") or oft.get("library_sha256"), \
         "no measured OFT identity was recorded (a stated commit alone can " \
         "be wrong about the build that actually ran)"
+    # the build-keyed golden policy compares the compiled library's digest:
+    # a fixture without one reads as "unstamped", a mismatch on every build
+    assert _harness.golden_build_check(manifest, installed={}).stamped, (
+        "the manifest's provenance.oft carries no library_sha256, so the "
+        "golden comparisons cannot tell which OFT build made it")
 
 
 def test_the_fixture_is_a_self_consistent_bootstrap_run():
@@ -194,52 +211,55 @@ def test_the_fixture_archives_the_input_current(manifest):
 
 
 def test_coil_currents_match_manifest(manifest, tol):
-    with h5py.File(_SLIM, "r") as hf:
-        for bkey, sv, entry in _iter_scans(manifest):
-            prefix = f"scan/{bkey}/" if sv is not None else ""
-            for sidx, exp in entry["draws"].items():
-                if "coil_currents" not in exp:
-                    continue
-                grp = hf[f"{prefix}{sidx}"]
-                names = [n.decode() if isinstance(n, bytes) else str(n) for n in grp["coil_names"][()]]
-                vals = np.asarray(grp["coil_currents"][()], dtype=float)
-                got = {n: float(v) for n, v in zip(names, vals)}
-                assert set(got) == set(exp["coil_currents"])
-                for n, v in exp["coil_currents"].items():
-                    assert got[n] == pytest.approx(v, abs=tol["coil_atol_A"])
+    with _golden_comparison(manifest):
+        with h5py.File(_SLIM, "r") as hf:
+            for bkey, sv, entry in _iter_scans(manifest):
+                prefix = f"scan/{bkey}/" if sv is not None else ""
+                for sidx, exp in entry["draws"].items():
+                    if "coil_currents" not in exp:
+                        continue
+                    grp = hf[f"{prefix}{sidx}"]
+                    names = [n.decode() if isinstance(n, bytes) else str(n) for n in grp["coil_names"][()]]
+                    vals = np.asarray(grp["coil_currents"][()], dtype=float)
+                    got = {n: float(v) for n, v in zip(names, vals)}
+                    assert set(got) == set(exp["coil_currents"])
+                    for n, v in exp["coil_currents"].items():
+                        assert got[n] == pytest.approx(v, abs=tol["coil_atol_A"])
 
 
 def test_xpoints_match_manifest(manifest, tol):
-    with h5py.File(_SLIM, "r") as hf:
-        for bkey, sv, entry in _iter_scans(manifest):
-            prefix = f"scan/{bkey}/" if sv is not None else ""
-            # baseline
-            if "x_points" in entry["baseline"]:
-                xp = np.asarray(hf[f"{prefix}_baseline/x_points"][()],
-                                dtype=float)
-                np.testing.assert_allclose(
-                    xp, np.asarray(entry["baseline"]["x_points"]),
-                    atol=tol["xpoint_atol_m"])
-            for sidx, exp in entry["draws"].items():
-                if "x_points" not in exp:
-                    continue
-                xp = np.asarray(hf[f"{prefix}{sidx}/x_points"][()], dtype=float)
-                np.testing.assert_allclose(
-                    xp, np.asarray(exp["x_points"]), atol=tol["xpoint_atol_m"])
+    with _golden_comparison(manifest):
+        with h5py.File(_SLIM, "r") as hf:
+            for bkey, sv, entry in _iter_scans(manifest):
+                prefix = f"scan/{bkey}/" if sv is not None else ""
+                # baseline
+                if "x_points" in entry["baseline"]:
+                    xp = np.asarray(hf[f"{prefix}_baseline/x_points"][()],
+                                    dtype=float)
+                    np.testing.assert_allclose(
+                        xp, np.asarray(entry["baseline"]["x_points"]),
+                        atol=tol["xpoint_atol_m"])
+                for sidx, exp in entry["draws"].items():
+                    if "x_points" not in exp:
+                        continue
+                    xp = np.asarray(hf[f"{prefix}{sidx}/x_points"][()], dtype=float)
+                    np.testing.assert_allclose(
+                        xp, np.asarray(exp["x_points"]), atol=tol["xpoint_atol_m"])
 
 
 def test_boundary_deviations_match_manifest(manifest, tol):
     """filter_boundaries (apply=False) must reproduce the manifest RMS/max."""
-    for bkey, sv, entry in _iter_scans(manifest):
-        summ, _ = filter_boundaries(_SLIM, scan_key=sv, apply=False,
-                                    plot=False)
-        draws = summ["draws"]
-        for sidx, exp in entry["draws"].items():
-            got = draws[int(sidx)]
-            assert got["rms_mm"] == pytest.approx(
-                exp["bnd_rms_mm"], abs=tol["bnd_atol_mm"])
-            assert got["max_mm"] == pytest.approx(
-                exp["bnd_max_mm"], abs=tol["bnd_atol_mm"])
+    with _golden_comparison(manifest):
+        for bkey, sv, entry in _iter_scans(manifest):
+            summ, _ = filter_boundaries(_SLIM, scan_key=sv, apply=False,
+                                        plot=False)
+            draws = summ["draws"]
+            for sidx, exp in entry["draws"].items():
+                got = draws[int(sidx)]
+                assert got["rms_mm"] == pytest.approx(
+                    exp["bnd_rms_mm"], abs=tol["bnd_atol_mm"])
+                assert got["max_mm"] == pytest.approx(
+                    exp["bnd_max_mm"], abs=tol["bnd_atol_mm"])
 
 
 # ---------------------------------------------------------------------------
@@ -271,21 +291,22 @@ def test_geqdsk_parse_and_ip(manifest, tol):
     """
     from bouquet import read_geqdsk
     from bouquet.utils import read_eqdsk_from_bytes
-    n = 0
-    for raw, exp_ip, label in _iter_stored_geqdsks(manifest):
-        eq = read_eqdsk_from_bytes(raw, read_geqdsk)
-        assert abs(eq.Ip) == pytest.approx(abs(exp_ip), rel=1e-4), label
-        # closed, non-trivial boundary contour
-        assert len(eq.boundary_R) == len(eq.boundary_Z)
-        assert len(eq.boundary_R) > 10, label
-        # magnetic axis sits inside the boundary's radial extent
-        assert eq.boundary_R.min() < eq.R_mag < eq.boundary_R.max(), label
-        # normalised flux is well-formed
-        psi_N = np.asarray(eq.psi_N, dtype=float)
-        assert psi_N[0] == pytest.approx(0.0, abs=1e-6), label
-        assert np.all(np.diff(psi_N) > 0), label
-        n += 1
-    assert n >= 1, "no retained geqdsks were exercised"
+    with _golden_comparison(manifest):
+        n = 0
+        for raw, exp_ip, label in _iter_stored_geqdsks(manifest):
+            eq = read_eqdsk_from_bytes(raw, read_geqdsk)
+            assert abs(eq.Ip) == pytest.approx(abs(exp_ip), rel=1e-4), label
+            # closed, non-trivial boundary contour
+            assert len(eq.boundary_R) == len(eq.boundary_Z)
+            assert len(eq.boundary_R) > 10, label
+            # magnetic axis sits inside the boundary's radial extent
+            assert eq.boundary_R.min() < eq.R_mag < eq.boundary_R.max(), label
+            # normalised flux is well-formed
+            psi_N = np.asarray(eq.psi_N, dtype=float)
+            assert psi_N[0] == pytest.approx(0.0, abs=1e-6), label
+            assert np.all(np.diff(psi_N) > 0), label
+            n += 1
+        assert n >= 1, "no retained geqdsks were exercised"
 
 
 def test_geqdsk_separatrix_is_coarse(manifest):
@@ -344,9 +365,10 @@ def test_coil_filter_reproduces_in_spec(tmp_path, manifest):
                     and rec.get("passes_draw_band", True)), (sv, i, rec)
         assert summ[sv]["n_pass"] == n_coil
         n_spec[sv] = sum(bool(r.get("in_spec")) for r in drect.values())
-    # counts line up with the manifest
-    for bkey, sv, entry in _iter_scans(manifest):
-        assert n_spec[sv] == entry["n_in_spec"]
+    with _golden_comparison(manifest):
+        # counts line up with the manifest
+        for bkey, sv, entry in _iter_scans(manifest):
+            assert n_spec[sv] == entry["n_in_spec"]
 
 
 def test_selection_partition(tmp_path, manifest):

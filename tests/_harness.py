@@ -184,3 +184,191 @@ def legacy_golden_provenance_banner(json_path):
     if not flat:
         return f"{head}\n  NONE STAMPED"
     return head + "\n" + "\n".join(f"  {k} = {flat[k]}" for k in sorted(flat))
+
+
+# ---------------------------------------------------------------------------
+#  Build-specific goldens: which OFT build made the fixture, which is installed
+# ---------------------------------------------------------------------------
+#: The regeneration recipe of the h5 golden + its manifest, verbatim from
+#: ``tests/golden/README.md`` ("Build-specific goldens").
+REGENERATE_H5_GOLDEN = (
+    "OMP_NUM_THREADS=1 python tests/golden/regenerate_golden_run.py RUN_DIR "
+    "--reconstruction-engine unified --verbose\n"
+    "BOUQUET_OFT_BUILD_ID=<installed build> python "
+    "tests/golden/make_golden_fixture.py --source "
+    "RUN_DIR/D3Dlike_Hmode_golden.h5")
+
+#: The regeneration recipe of the slim LEGACY golden JSON, verbatim from
+#: ``tests/golden/README.md`` ("Build-specific goldens").
+REGENERATE_LEGACY_GOLDEN = (
+    "OMP_NUM_THREADS=1 python tests/golden/regenerate_golden_run.py RUN_DIR "
+    "--reconstruction-engine legacy --verbose\n"
+    "BOUQUET_OFT_BUILD_ID=<installed build> python "
+    "tests/golden/make_golden_fixture.py --legacy-json --source "
+    "RUN_DIR/D3Dlike_Hmode_golden.h5")
+
+
+class GoldenBuildMismatchWarning(UserWarning):
+    """A golden comparison passed, but against a fixture generated with a
+    different OFT build than the one installed."""
+
+
+def _sha8(sha):
+    return sha[:8] if isinstance(sha, str) and sha else None
+
+
+class BuildMatch:
+    """The outcome of :func:`golden_build_check`.
+
+    ``matches`` is the verdict: the installed OFT library's SHA-256 equals
+    the one stamped in the fixture (the primary identity: the compiled
+    object, measured, not stated).  ``build_id_matches`` is informational
+    only (a stated name can be wrong about the build that ran; ``None`` when
+    either side states none).  ``stamped`` is False for a fixture that
+    carries no ``library_sha256``: it is always a mismatch, worded
+    "unstamped", because its build cannot be read off it.
+    """
+
+    def __init__(self, fixture, installed):
+        fixture = dict(fixture or {})
+        installed = dict(installed or {})
+        self.fixture_build_id = fixture.get("build_id")
+        self.fixture_sha256 = fixture.get("library_sha256") or None
+        self.installed_build_id = installed.get("build_id")
+        self.installed_sha256 = installed.get("library_sha256") or None
+        self.stamped = self.fixture_sha256 is not None
+        self.matches = (self.stamped and self.installed_sha256 is not None
+                        and self.fixture_sha256 == self.installed_sha256)
+        self.build_id_matches = (
+            None if not (self.fixture_build_id and self.installed_build_id)
+            else self.fixture_build_id == self.installed_build_id)
+
+    @staticmethod
+    def _name(build_id, sha, missing):
+        if sha is None:
+            return f"{build_id or 'no build id'}/{missing}"
+        return f"{build_id or 'no build id'}/{_sha8(sha)}"
+
+    @property
+    def fixture_name(self):
+        return self._name(self.fixture_build_id, self.fixture_sha256,
+                          "unstamped")
+
+    @property
+    def installed_name(self):
+        return self._name(self.installed_build_id, self.installed_sha256,
+                          "unavailable")
+
+    def describe(self):
+        return (f"fixture generated with {self.fixture_name}, "
+                f"installed {self.installed_name}")
+
+    def mismatch_block(self, regenerate):
+        """The block a failing comparison's message starts with when the
+        builds differ (owner policy, 2026-10-09)."""
+        what = ("OFT build mismatch" if self.stamped
+                else "OFT build mismatch (the fixture is unstamped: no "
+                     "library_sha256 in its provenance)")
+        return (f"{what}: {self.describe()}; goldens are build-specific "
+                "(edge FF' from per-node <R> moved the lower coils ~1.4 % "
+                "between builds); regenerate with:\n"
+                + "\n".join("    " + ln for ln in regenerate.splitlines())
+                + "\nand review the diff before committing.")
+
+    def __repr__(self):                              # pragma: no cover
+        return (f"BuildMatch(matches={self.matches}, stamped={self.stamped}, "
+                f"{self.describe()})")
+
+
+def _fixture_oft_stamp(manifest):
+    """``provenance.oft`` of a golden manifest / legacy golden JSON, given
+    as the parsed dict or a path to it (``{}`` when there is none)."""
+    import json
+    if isinstance(manifest, (str, os.PathLike)):
+        with open(manifest) as fh:
+            manifest = json.load(fh)
+    prov = (manifest or {}).get("provenance") or {}
+    return prov.get("oft") or {}
+
+
+def installed_oft_build():
+    """``{build_id, library_sha256}`` of the installed OpenFUSIONToolkit.
+
+    ``library_sha256`` from :func:`bouquet.jbs_loop.oft_build_info`;
+    ``build_id`` is the operator-stated ``BOUQUET_OFT_BUILD_ID`` when set
+    (the name the fixture stamps), else ``oft_build_info``'s own.  A record
+    cached before OFT became importable in this process is re-measured
+    once rather than read back as "unavailable".
+    """
+    from bouquet import jbs_loop
+    info = jbs_loop.oft_build_info()
+    if not info.get("library_sha256"):
+        jbs_loop._OFT_BUILD_CACHE.pop("info", None)
+        info = jbs_loop.oft_build_info()
+    return {"build_id": os.environ.get("BOUQUET_OFT_BUILD_ID")
+            or info.get("build_id"),
+            "library_sha256": info.get("library_sha256")}
+
+
+def golden_build_check(manifest, installed=None):
+    """Compare the OFT build a golden fixture was generated with (its
+    manifest's ``provenance.oft``) with the installed one.
+
+    *manifest*: the parsed manifest / legacy golden JSON, or its path.
+    *installed*: ``{build_id, library_sha256}``; default
+    :func:`installed_oft_build`.  Returns a :class:`BuildMatch`.
+    """
+    if installed is None:
+        installed = installed_oft_build()
+    return BuildMatch(_fixture_oft_stamp(manifest), installed)
+
+
+class golden_comparison:
+    """Run a golden comparison at its existing bars, keyed on the OFT build.
+
+    ::
+
+        with _harness.golden_comparison(manifest, regenerate=...):
+            assert value < BAR
+
+    * builds match, comparison passes -> pass;
+    * builds match, comparison fails -> the failure, unchanged (a
+      regression);
+    * builds differ, comparison passes -> pass, with a
+      :class:`GoldenBuildMismatchWarning` naming both builds;
+    * builds differ, comparison fails -> FAIL, the message prefixed with
+      :meth:`BuildMatch.mismatch_block`, then the original failure.
+
+    Nothing is skipped or xfailed and no bar is touched: the outcome of the
+    comparison is the outcome of the test.  *fixture_only*: the comparison
+    reads stored values only (no solve), which the message then says, since
+    the installed build cannot by itself move such a comparison.
+    """
+
+    def __init__(self, manifest, *, regenerate, fixture_only=False,
+                 installed=None):
+        self.match = golden_build_check(manifest, installed=installed)
+        self.regenerate = regenerate
+        self.fixture_only = fixture_only
+
+    def __enter__(self):
+        return self.match
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.match.matches:
+            return False
+        if exc_type is None:
+            import warnings
+            warnings.warn(GoldenBuildMismatchWarning(
+                f"OFT build mismatch: {self.match.describe()}; the golden "
+                "comparison passed at its existing bars, but goldens are "
+                "build-specific"), stacklevel=2)
+            return False
+        if not issubclass(exc_type, AssertionError):
+            return False
+        block = self.match.mismatch_block(self.regenerate)
+        if self.fixture_only:
+            block += ("\n(This comparison reads the stored fixture only, "
+                      "with no solve: the installed build cannot by itself "
+                      "explain its failure.)")
+        raise AssertionError(f"{block}\n\n{exc}") from exc

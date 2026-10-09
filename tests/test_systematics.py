@@ -431,32 +431,49 @@ def replay(tmp_path_factory):
     return results
 
 
+def _golden_comparison():
+    """The legacy golden is build-specific (``tests/golden/README.md``,
+    "Build-specific goldens"): every mode compares at its own bar, and a
+    fixture generated with another OFT build than the installed one is named
+    -- a warning on a pass, the first lines of the message on a failure."""
+    return _harness.golden_comparison(
+        _GOLDEN, regenerate=_harness.REGENERATE_LEGACY_GOLDEN)
+
+
 def test_mode1_pinned_baseline_reproduces_baseline(replay):
     base = replay["base"]
-    assert replay["mode1"] is not None, "mode-1 baseline replay produced no equilibrium"
-    rms = _bnd_rms_mm(base["recon_lcfs"], replay["mode1"]["pert_lcfs"])
-    print(f"[replay mode1] baseline RMS = {rms:.4f} mm (limit {_BND_RMS_MAX_MM})")
-    assert rms < _BND_RMS_MAX_MM
-    maxd = max(100.0 * abs(replay["mode1"]["coils"][c] - base["coils"][c])
-               / max(abs(base["coils"][c]), 1.0) for c in base["coils"])
-    print(f"[replay mode1] max coil drift = {maxd:.4f}% (limit {_COIL_DRIFT_MAX_PCT})")
-    assert maxd < _COIL_DRIFT_MAX_PCT
+    with _golden_comparison():
+        assert replay["mode1"] is not None, \
+            "mode-1 baseline replay produced no equilibrium"
+        rms = _bnd_rms_mm(base["recon_lcfs"], replay["mode1"]["pert_lcfs"])
+        print(f"[replay mode1] baseline RMS = {rms:.4f} mm "
+              f"(limit {_BND_RMS_MAX_MM})")
+        assert rms < _BND_RMS_MAX_MM
+        maxd = max(100.0 * abs(replay["mode1"]["coils"][c] - base["coils"][c])
+                   / max(abs(base["coils"][c]), 1.0) for c in base["coils"])
+        print(f"[replay mode1] max coil drift = {maxd:.4f}% "
+              f"(limit {_COIL_DRIFT_MAX_PCT})")
+        assert maxd < _COIL_DRIFT_MAX_PCT
 
 
 def test_mode2_pinned_pressure_no_systematic(replay):
     """Pressure-only (j_phi pinned): bounded shift, signed-mean ~0 (no bias)."""
     base = replay["base"]
     devs = []
-    for i, r in replay["mode2"].items():
-        if r is None:
-            continue
-        rms = _bnd_rms_mm(base["recon_lcfs"], r["pert_lcfs"])
-        print(f"[replay mode2] draw {i}: pressure-only boundary RMS = {rms:.3f} mm")
-        assert rms < _MODE2_BND_MAX_MM, f"draw {i}: pressure shift {rms:.2f} mm too large"
-        devs.append(rms)
-    assert devs, "no mode-2 draws produced an equilibrium"
-    # bounded above; (signed-mean check is a placeholder for a larger-N run)
-    assert np.mean(devs) < _MODE2_BND_MAX_MM
+    with _golden_comparison():
+        for i, r in replay["mode2"].items():
+            if r is None:
+                continue
+            rms = _bnd_rms_mm(base["recon_lcfs"], r["pert_lcfs"])
+            print(f"[replay mode2] draw {i}: pressure-only boundary RMS = "
+                  f"{rms:.3f} mm")
+            assert rms < _MODE2_BND_MAX_MM, \
+                f"draw {i}: pressure shift {rms:.2f} mm too large"
+            devs.append(rms)
+        assert devs, "no mode-2 draws produced an equilibrium"
+        # bounded above; (signed-mean check is a placeholder for a larger-N
+        # run)
+        assert np.mean(devs) < _MODE2_BND_MAX_MM
 
 
 def test_mode3_production_reproduces_golden(replay):
@@ -472,36 +489,37 @@ def test_mode3_production_reproduces_golden(replay):
     base = replay["base"]
     prov = _harness.legacy_golden_provenance_banner(_GOLDEN)
     n_checked = 0
-    for i, d in replay["draws"].items():
-        r = replay["mode3"][i]
-        if r is None:
-            continue
-        n_checked += 1
-        rms_replay = _bnd_rms_mm(base["recon_lcfs"], r["pert_lcfs"])
-        rms_golden = d["bnd_rms_mm"]
-        print(f"[replay mode3] draw {i}: boundary RMS replay={rms_replay:.3f} "
-              f"golden={rms_golden:.3f} mm  li(3) replay={r['li3']:.4f} "
-              f"golden={d['li3']:.4f}  li(1) replay={r['li1']:.4f} "
-              f"golden={d['li1']:.4f}")
-        assert abs(rms_replay - rms_golden) < _MODE3_BND_RMS_MM, (
-            f"draw {i}: boundary RMS replay {rms_replay:.3f} mm vs golden "
-            f"{rms_golden:.3f} mm (bar {_MODE3_BND_RMS_MM} mm)\n{prov}")
-        # li(3) is the estimator the replay targets (issue #20); li(1) is
-        # checked too so a convention drift between the two shows up here.
-        # Both against the SAME _MODE3_LI_REL -- the bar is not widened.
-        assert abs(r["li3"] - d["li3"]) / d["li3"] < _MODE3_LI_REL, (
-            f"draw {i}: l_i(3) replay {r['li3']:.6f} vs golden "
-            f"{d['li3']:.6f} ({100 * abs(r['li3'] - d['li3']) / d['li3']:.2f} "
-            f"%, bar {100 * _MODE3_LI_REL:.0f} %)\n{prov}")
-        assert abs(r["li1"] - d["li1"]) / d["li1"] < _MODE3_LI_REL, (
-            f"draw {i}: l_i(1) replay {r['li1']:.6f} vs golden "
-            f"{d['li1']:.6f} ({100 * abs(r['li1'] - d['li1']) / d['li1']:.2f} "
-            f"%, bar {100 * _MODE3_LI_REL:.0f} %).  l_i(3) moved "
-            f"{100 * abs(r['li3'] - d['li3']) / d['li3']:.2f} % -- an l_i(1)-"
-            "only miss is edge-localised, so suspect the j_BS/solver build "
-            f"before suspecting a bouquet change.\n{prov}")
-        if np.isfinite(d["Ip"]) and np.isfinite(r["Ip"]):
-            assert abs(r["Ip"] - d["Ip"]) / abs(d["Ip"]) < _MODE3_IP_REL, (
-                f"draw {i}: Ip replay {r['Ip']:.1f} vs golden {d['Ip']:.1f}"
-                f"\n{prov}")
-    assert n_checked >= 1, "no mode-3 draws reproduced an equilibrium"
+    with _golden_comparison():
+        for i, d in replay["draws"].items():
+            r = replay["mode3"][i]
+            if r is None:
+                continue
+            n_checked += 1
+            rms_replay = _bnd_rms_mm(base["recon_lcfs"], r["pert_lcfs"])
+            rms_golden = d["bnd_rms_mm"]
+            print(f"[replay mode3] draw {i}: boundary RMS replay={rms_replay:.3f} "
+                  f"golden={rms_golden:.3f} mm  li(3) replay={r['li3']:.4f} "
+                  f"golden={d['li3']:.4f}  li(1) replay={r['li1']:.4f} "
+                  f"golden={d['li1']:.4f}")
+            assert abs(rms_replay - rms_golden) < _MODE3_BND_RMS_MM, (
+                f"draw {i}: boundary RMS replay {rms_replay:.3f} mm vs golden "
+                f"{rms_golden:.3f} mm (bar {_MODE3_BND_RMS_MM} mm)\n{prov}")
+            # li(3) is the estimator the replay targets (issue #20); li(1) is
+            # checked too so a convention drift between the two shows up here.
+            # Both against the SAME _MODE3_LI_REL -- the bar is not widened.
+            assert abs(r["li3"] - d["li3"]) / d["li3"] < _MODE3_LI_REL, (
+                f"draw {i}: l_i(3) replay {r['li3']:.6f} vs golden "
+                f"{d['li3']:.6f} ({100 * abs(r['li3'] - d['li3']) / d['li3']:.2f} "
+                f"%, bar {100 * _MODE3_LI_REL:.0f} %)\n{prov}")
+            assert abs(r["li1"] - d["li1"]) / d["li1"] < _MODE3_LI_REL, (
+                f"draw {i}: l_i(1) replay {r['li1']:.6f} vs golden "
+                f"{d['li1']:.6f} ({100 * abs(r['li1'] - d['li1']) / d['li1']:.2f} "
+                f"%, bar {100 * _MODE3_LI_REL:.0f} %).  l_i(3) moved "
+                f"{100 * abs(r['li3'] - d['li3']) / d['li3']:.2f} % -- an l_i(1)-"
+                "only miss is edge-localised, so suspect the j_BS/solver build "
+                f"before suspecting a bouquet change.\n{prov}")
+            if np.isfinite(d["Ip"]) and np.isfinite(r["Ip"]):
+                assert abs(r["Ip"] - d["Ip"]) / abs(d["Ip"]) < _MODE3_IP_REL, (
+                    f"draw {i}: Ip replay {r['Ip']:.1f} vs golden {d['Ip']:.1f}"
+                    f"\n{prov}")
+        assert n_checked >= 1, "no mode-3 draws reproduced an equilibrium"

@@ -113,7 +113,6 @@ is a navigational summary of the defaults.
 | `isoflux_pts`, `isoflux_weights` | `None` | Boundary constraint points; default from the source boundary |
 | `saddle_targets`, `saddle_weights` | `None` | Opt-in X-point pins. Without them a diverted forward solve typically rounds the boundary corner by a few cm |
 | `coil_vsc` | `{"F9A": 1.0, "F9B": -1.0}` | Antisymmetric vertical-stability channel definition |
-| `region_overrides` | `None` | Special-case mesh cond/coil dict edits |
 
 ### Ion and Z_eff fields of the sources (`b.source`, PR #56)
 

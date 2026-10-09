@@ -19,8 +19,10 @@ Two things are tested here without a live solver:
   grid, and -- the defect-A regression -- that the same physical profiles
   sampled on a uniform and on a strongly non-uniform psi_N grid give the same
   j_BS(psi_N) to interpolation accuracy, while the legacy "evenly sampled"
-  reading of the non-uniform array does not.  Needs OFT's pure-Python
-  ``bootstrap`` module (Redl); skipped with a reason when OFT is absent.
+  reading of the non-uniform array does not.  The tests that evaluate
+  j_BS need OFT's pure-Python ``bootstrap`` module (Redl) and are skipped
+  with a reason when OFT is absent (the ``oft_bootstrap`` fixture); the
+  kernel tests, the input refusals and the mocked-solver tests do not.
 
 The live halves (bit-level agreement with ``solve_with_bootstrap``'s first
 pass, the loop in every baseline mode, the sigma=0 invariants, the MSE stage)
@@ -660,10 +662,19 @@ def test_the_first_pass_without_a_previous_l_i_cannot_pass():
 # ---------------------------------------------------------------------------
 #  the evaluator on a mock equilibrium
 # ---------------------------------------------------------------------------
-_bs = pytest.importorskip(
-    "OpenFUSIONToolkit.TokaMaker.bootstrap",
-    reason="evaluate_jBS wraps OFT's pure-Python Redl implementation; "
-           "OpenFUSIONToolkit is not importable here")
+@pytest.fixture
+def oft_bootstrap():
+    """OFT's pure-Python ``bootstrap`` module (Redl), or a skip.
+
+    Only the tests that evaluate j_BS past the input checks need it; the
+    kernel tests above and the refusal / mocked-solver tests below run
+    without OFT (the fast CI suite has none)."""
+    return pytest.importorskip(
+        "OpenFUSIONToolkit.TokaMaker.bootstrap",
+        reason="evaluate_jBS wraps OFT's pure-Python Redl implementation; "
+               "OpenFUSIONToolkit is not importable here")
+
+
 
 
 class _MockEq:
@@ -746,6 +757,7 @@ def _kin(x):
     return ne, te, ni, ti, zeff
 
 
+@pytest.mark.usefixtures("oft_bootstrap")
 def test_geometry_is_sampled_on_the_callers_surfaces_without_repeats():
     """The IMAS-type grid [0, 1.73e-4, 6.92e-4, 1.557e-3, ...] puts three
     surfaces inside psi_pad = 1e-3: they must NOT be merged or dropped (each
@@ -774,6 +786,7 @@ def test_geometry_is_sampled_on_the_callers_surfaces_without_repeats():
     assert len(np.unique(d["j_dot_B"][:3])) == 3
 
 
+@pytest.mark.usefixtures("oft_bootstrap")
 def test_gradients_are_on_the_true_grid_and_the_current_flux_range():
     from bouquet.physics import evaluate_jBS
     x = np.linspace(0, 1, 201)
@@ -786,6 +799,7 @@ def test_gradients_are_on_the_true_grid_and_the_current_flux_range():
     np.testing.assert_allclose(j2, 0.5 * j1, rtol=1e-12, atol=1e-9)
 
 
+@pytest.mark.usefixtures("oft_bootstrap")
 def test_legacy_array_layout_gives_the_same_answer():
     from bouquet.physics import evaluate_jBS
     x = np.linspace(0, 1, 151)
@@ -794,6 +808,7 @@ def test_legacy_array_layout_gives_the_same_answer():
     np.testing.assert_array_equal(ja, jb)
 
 
+@pytest.mark.usefixtures("oft_bootstrap")
 def test_b_uniform_and_non_uniform_grids_agree_defect_A_regression():
     """(b): the same physical profiles on a uniform and on a rho-uniform
     (strongly non-uniform) psi_N grid give the same j_BS(psi_N) to
@@ -840,6 +855,7 @@ def test_evaluate_refuses_bad_grids_by_name():
         evaluate_jBS(_MockEq(), x, *k, psi_pad=0.0)
 
 
+@pytest.mark.usefixtures("oft_bootstrap")
 def test_draw_composer_reproduces_the_legacy_composition_rules():
     """The per-draw composition: scale on the (isolated) spike only, floor,
     jBS_diff outside delta mode; delta mode = baseline + (scale*raw - ref)."""

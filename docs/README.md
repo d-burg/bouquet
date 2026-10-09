@@ -24,8 +24,7 @@ install it, and a working quickstart. These pages carry the depth.
 | [flowchart/](flowchart/) | The rendered physics workflow and the 550-node interactive logic map ([view](https://d-burg.github.io/bouquet/flowchart/)) |
 | [CI.md](CI.md) | Fast vs. solver test tiers, the manual pre-merge gate, branch protection |
 | [CHANGES_SUMMARY.md](CHANGES_SUMMARY.md) | Historical change summaries by development round |
-| [validation-provenance.md](validation-provenance.md) | The unified-engine branch's chapter commits against the archival tag's history, and where its validation numbers were measured |
-| [ISSUE_jphi_edge_reconstruction.md](ISSUE_jphi_edge_reconstruction.md) | Open issue: `jphi-linterp` edge/separatrix handling and the σ=0 boundary floor |
+| [validation-provenance.md](validation-provenance.md) | What the unified-engine branch was validated on, at which code revision, and the aggregate results |
 | [proposals/](proposals/) | Design proposals |
 
 ## Examples

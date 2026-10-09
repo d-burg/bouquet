@@ -169,35 +169,6 @@ def _lcfs_from_psi(mygs, psi_arr, isoflux_fallback, psi_lcfs_val=None):
     return isoflux_fallback
 
 
-def _core_contours(mygs, ax, psi_raw, nlevels=9):
-    r"""Overplot core flux surface contours on *ax*.
-
-    Normalises *psi_raw* by its own min/max and draws *nlevels* contours
-    between :math:`\hat{\psi} = 0.1` and :math:`0.9`.
-
-    .. note::
-        Requires ``mygs`` to be set as a module-level (or notebook-level)
-        name before calling.
-
-    Parameters
-    ----------
-    ax : matplotlib.axes.Axes
-        Target axes.
-    psi_raw : ndarray
-        Raw poloidal flux on the TokaMaker mesh.
-    nlevels : int
-        Number of contour levels.
-    """
-    _p_lo = psi_raw.min()
-    _p_hi = psi_raw.max()
-    if abs(_p_hi - _p_lo) < 1e-10:
-        return
-    _psi_n = (psi_raw - _p_lo) / (_p_hi - _p_lo)
-    ax.tricontour(mygs.r[:, 0], mygs.r[:, 1], mygs.lc, _psi_n,
-                  levels=np.linspace(0.1, 0.9, nlevels),
-                  colors='steelblue', linewidths=0.5, alpha=0.4)
-
-
 def _isoflux_deviation_plot(ax, fig, iso_pts, lcfs_pts, R_bnd, Z_bnd,
                              max_dev_mm=10.0, max_seg_len=0.1):
     """Colour-coded boundary deviation. Returns (devs, max_mm, rms_mm)."""
@@ -1137,28 +1108,6 @@ def _has_aux(h5path, scan_key=None):
         return False
     except Exception:
         return False
-
-
-def _source_kind(h5path, scan_key=None):
-    r"""Return the stored provenance marker (``'imas'`` / ``'geqdsk'``) written
-    on the baseline group, or ``None`` for archives generated before it existed.
-
-    This is the robust path discriminator -- independent of the source-decoupled
-    aux switchboard, so it is not fooled by a geqdsk run that supplies
-    ``omega_tor`` / ``chi``. Plotting falls back to :func:`_has_aux` when the
-    marker is absent (older archives).
-    """
-    try:
-        from .utils import _scan_key
-        bkey = _scan_key(scan_key)
-        bl_path = f"scan/{bkey}/_baseline" if bkey is not None else "_baseline"
-        with h5py.File(h5path, "r") as hf:
-            if bl_path in hf and "source_kind" in hf[bl_path].attrs:
-                v = hf[bl_path].attrs["source_kind"]
-                return v.decode() if isinstance(v, bytes) else str(v)
-        return None
-    except Exception:
-        return None
 
 
 _PSI_XLABELS = (r"$\psi_N$", r"$\hat{\psi}$")

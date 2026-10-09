@@ -162,11 +162,17 @@ def test_post_homotopy_rejects_what_its_passes_cannot_recover(recon):
 def test_the_rollback_restores_the_last_good_stage(tmp_path, monkeypatch):
     """Pass 2 fails leaving a corrupted state behind (as the solver does);
     the rollback must put back the pass-1 STATE (set_psi) before its
-    re-solve: the archived draw is then exactly the pass-1 equilibrium.  The
-    stand-in's get_psi / set_psi really save and restore its state."""
+    re-solve.  The archived draw is therefore the pass-1 state re-solved
+    once (set_psi alone leaves the flux-surface averages stale, so the
+    rollback solves on purpose): the reference is that same operation run
+    on an untouched copy of the pass-1 state, compared exactly.  Comparing
+    against the pass-1 l_i itself is one solve short: the toy's fixed-point
+    loop moves by a few ulp on a re-solve from its own converged state, and
+    which way depends on the CPU's exp/pow code paths.  The stand-in's
+    get_psi / set_psi really save and restore its state."""
     from _engine_fake_gs import FakeTokaMaker
     snaps = {}
-    box = dict(n_h=0, li_pass1=None)
+    box = dict(n_h=0, li_pass1=None, li_resolve1=None)
 
     def get_psi(self, normalized=True):
         tok = len(snaps) + 1
@@ -198,6 +204,11 @@ def test_the_rollback_restores_the_last_good_stage(tmp_path, monkeypatch):
         r = real_solve(self, *a, **k)
         if box["n_h"] == 1 and box["li_pass1"] is None:
             box["li_pass1"] = float(self.toy.state["li"])
+            # the rollback's own operation (restore, then one solve) on an
+            # untouched copy of the pass-1 state
+            probe = copy.deepcopy(self.toy)
+            probe.solve(np.asarray(probe.state["R"]))
+            box["li_resolve1"] = float(probe.state["li"])
         return r
 
     monkeypatch.setattr(FakeTokaMaker, "solve", solve)
@@ -231,7 +242,12 @@ def test_the_rollback_restores_the_last_good_stage(tmp_path, monkeypatch):
     assert len(seen) == 3                          # pass 1, pass 2, rollback
     arch = diags[0]["engine"]["archived"]
     assert box["li_pass1"] is not None
-    assert arch["l_i_3"] == box["li_pass1"]
+    # the archive holds the restored-and-re-solved pass-1 state, exactly
+    assert arch["l_i_3"] == box["li_resolve1"]
+    # and the corrupted pass-2 shape did not leak through: l_i moved back
+    # to within re-solve noise of pass 1 (the mutant without set_psi is off
+    # by ~6e-2 relative)
+    assert abs(arch["l_i_3"] - box["li_pass1"]) < 1e-10 * box["li_pass1"]
 
 
 # ---------------------------------------------------------------------------

@@ -145,9 +145,6 @@ class EdgePressure:
     def pprime(self, psi_N, pressure, psi_range):
         return solver_pprime(psi_N, pressure, psi_range, self)
 
-    def pp_profile(self, psi_N, pressure, psi_range):
-        return solver_pp_profile(psi_N, pressure, psi_range, self)
-
     def pax(self, pressure) -> float:
         return solver_pax(pressure, self)
 

@@ -290,13 +290,6 @@ def gfile_parallel_current(eqdsk):
                     frame_identity_max_rel=float(np.max(np.abs(ident)) / scale))
 
 
-def _gfile_geometry_from_parts(parts):
-    """The composition geometry (:func:`bouquet.engine.compose`) built from a
-    g-file's own surface averages."""
-    return dict(F=parts["F"], R_avg=parts["R_avg"], inv_R=parts["inv_R"],
-                B2=parts["B2"], pprime=parts["pprime"])
-
-
 def mse_rows(gc, signs=None):
     """The MSE row block of a :class:`GenerationConfig`, or ``None``.
 

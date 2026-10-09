@@ -55,9 +55,8 @@ def require_integer_count(value, name):
 class SolverConfig:
     """TokaMaker setup -- everything needed to stand up ``mygs``.
 
-    ``cond_dict`` / ``coil_dict`` normally come straight from the mesh file and
-    need no adjustment; they are intentionally *not* surfaced here. Pass
-    ``region_overrides`` only in the special cases where you must tweak them.
+    ``cond_dict`` / ``coil_dict`` come straight from the mesh file and are
+    intentionally *not* surfaced here.
     """
 
     mesh_path: str
@@ -109,7 +108,6 @@ class SolverConfig:
     # selection if a forward-mode or warm-started baseline is ever added. To move
     # the baseline's coils use coil_reg (see bouquet.coil_targets), not this.
     coil_init: Optional[dict] = None
-    region_overrides: Optional[dict] = None          # special-case cond/coil dict edits
 
     def __post_init__(self):
         """Validate the coil settings here, not inside ``setup_solver``.

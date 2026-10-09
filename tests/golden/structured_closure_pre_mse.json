@@ -1,0 +1,3583 @@
+{
+"about": "structured closure outputs WITHOUT the MSE term, written by tests/test_structured_mse_optin.py on the commit before the MSE term; see its docstring",
+"bouquet_version": "1.3.1",
+"outputs": {
+"__dict__": {
+"hard": {
+"__dict__": {
+"A_row": {
+"__arr__": [
+"0x1.a1d6bf620403ep+17",
+"0x1.5233524885d6bp+17",
+"0x1.05e51d7378d14p+16",
+"0x1.69fd596ee02cap+14"
+],
+"shape": [
+4
+]
+},
+"B_row": {
+"__arr__": [
+"0x1.7afeff368a8c7p+12",
+"0x1.0ca12883b1ca2p+13",
+"0x1.ba669a1840ca8p+14",
+"0x1.04d005eab6436p+15"
+],
+"shape": [
+4
+]
+},
+"Ip_hybrid": {
+"__f__": "0x1.8f8dcadcc2d3bp+18"
+},
+"Ip_lin_bs": {
+"__f__": "0x1.590fcc0ef3b69p+15"
+},
+"Ip_lin_fix": {
+"__f__": "0x1.8389851dea7bep+14"
+},
+"Ip_lin_ind": {
+"__f__": "0x1.3c9773aa656e0p+18"
+},
+"a": {
+"__arr__": [
+"0x1.86eace989f3a1p-8",
+"0x1.8b83321f59047p-5",
+"0x1.fe75d156a16c9p-5",
+"0x1.089547fb1c99fp-4"
+],
+"shape": [
+4
+]
+},
+"axis_residual": null,
+"b": {
+"__arr__": [
+"0x1.15036bcca265bp-6",
+"0x1.05cb13da118d6p-7",
+"0x1.02af74e5d9071p-7",
+"0x1.e8043a4427199p-11"
+],
+"shape": [
+4
+]
+},
+"basis": {
+"__dict__": {
+"centres": {
+"__arr__": [
+"0x1.3333333333333p-3",
+"0x1.ccccccccccccdp-2",
+"0x1.8000000000000p-1",
+"0x1.e666666666666p-1"
+],
+"shape": [
+4
+]
+},
+"kind": "gaussian",
+"widths": {
+"__arr__": [
+"0x1.999999999999ap-3",
+"0x1.999999999999ap-3",
+"0x1.999999999999ap-3",
+"0x1.999999999999ap-3"
+],
+"shape": [
+4
+]
+}
+}
+},
+"basis_K": {
+"__int__": 4
+},
+"basis_phi0": null,
+"bs_scale_eff": {
+"__f__": "0x1.0277cc00b5adbp+0"
+},
+"bs_scale_eff_basis": "Ip-weighted mean lin(s*j)/lin(j)",
+"constraint_cond": {
+"__f__": "0x1.0000000000000p+0"
+},
+"constraint_singular_values": {
+"__arr__": [
+"0x1.585a21567e6f1p+0"
+],
+"shape": [
+1
+]
+},
+"constraints": {
+"__seq__": [
+"Ip"
+],
+"tuple": true
+},
+"deficit": {
+"__f__": "0x1.ebc234c0efca0p+13"
+},
+"ip_residual": {
+"__f__": "0x0.0p+0"
+},
+"ip_residual_pct": {
+"__f__": "0x0.0p+0"
+},
+"kkt_cond": {
+"__f__": "0x1.0000000000000p+0"
+},
+"kkt_singular_values": {
+"__arr__": [
+"0x1.c17d32ca79d1ep+1"
+],
+"shape": [
+1
+]
+},
+"li_anchor": null,
+"li_anchor_at_target_Ip": null,
+"li_gradient": null,
+"li_kind": null,
+"li_predicted": null,
+"li_predictor_residual": null,
+"li_target": null,
+"n_sign_iter": {
+"__int__": 0
+},
+"ohm_scale_eff": {
+"__f__": "0x1.0c170fc5c6909p+0"
+},
+"ohm_scale_eff_basis": "Ip-weighted mean lin(s*j)/lin(j)",
+"one_sided_ind": false,
+"s_bs": {
+"__sum__": {
+"n": 201,
+"shape": [
+201
+],
+"stats": [
+"0x1.97c993f044c0bp+7",
+"-0x1.c16b490e42e42p+4",
+"0x1.039263739a8c1p+0",
+"0x1.0145774f78461p+0",
+"0x1.0145774f78461p+0",
+"0x1.053021a12fc2cp+0",
+"0x1.cc36c75ac9ebfp+3"
+]
+}
+},
+"s_ind": {
+"__sum__": {
+"n": 201,
+"shape": [
+201
+],
+"stats": [
+"0x1.afacc57e7f88ep+7",
+"-0x1.d4bc944340106p+4",
+"0x1.024fbeccfe88fp+0",
+"0x1.184bf450e3731p+0",
+"0x1.024fbeccfe88fp+0",
+"0x1.1ea51d1c6bff4p+0",
+"0x1.e777293563a38p+3"
+]
+}
+},
+"sigma_ind_up": null,
+"sign_pattern": null,
+"solver": "hard-KKT",
+"structure_bs": {
+"__f__": "0x1.15394fa14c095p-8"
+},
+"structure_ind": {
+"__f__": "0x1.0aab1edb05c5dp-5"
+},
+"weights_bs": {
+"__arr__": [
+"0x1.0000000000000p+0",
+"0x1.8000000000000p+1",
+"0x1.4000000000000p+3",
+"0x1.9000000000000p+6"
+],
+"shape": [
+4
+]
+},
+"weights_ind": {
+"__arr__": [
+"0x1.9000000000000p+6",
+"0x1.4000000000000p+3",
+"0x1.8000000000000p+1",
+"0x1.0000000000000p+0"
+],
+"shape": [
+4
+]
+},
+"weights_ind_up": null,
+"weights_name": "physics-prior"
+}
+},
+"hard_axis": {
+"__dict__": {
+"A_row": {
+"__arr__": [
+"0x1.a1d6bf620403ep+17",
+"0x1.5233524885d6bp+17",
+"0x1.05e51d7378d14p+16",
+"0x1.69fd596ee02cap+14"
+],
+"shape": [
+4
+]
+},
+"B_row": {
+"__arr__": [
+"0x1.7afeff368a8c7p+12",
+"0x1.0ca12883b1ca2p+13",
+"0x1.ba669a1840ca8p+14",
+"0x1.04d005eab6436p+15"
+],
+"shape": [
+4
+]
+},
+"Ip_hybrid": {
+"__f__": "0x1.8f8dcadcc2d3bp+18"
+},
+"Ip_lin_bs": {
+"__f__": "0x1.590fcc0ef3b69p+15"
+},
+"Ip_lin_fix": {
+"__f__": "0x1.8389851dea7bep+14"
+},
+"Ip_lin_ind": {
+"__f__": "0x1.3c9773aa656e0p+18"
+},
+"a": {
+"__arr__": [
+"0x1.8d229fd1c15bdp-6",
+"0x1.6480fffcbcd20p-5",
+"0x1.c2c2710c3d26dp-6",
+"0x1.c57ed4d4ca78cp-6"
+],
+"shape": [
+4
+]
+},
+"axis_residual": {
+"__f__": "0x0.0p+0"
+},
+"b": {
+"__arr__": [
+"0x1.f9a6b8a2e0d44p-5",
+"0x1.5d8645dabacddp-8",
+"0x1.bba48a29e78ebp-9",
+"0x1.a1b13ec7d55aap-12"
+],
+"shape": [
+4
+]
+},
+"basis": {
+"__dict__": {
+"centres": {
+"__arr__": [
+"0x1.3333333333333p-3",
+"0x1.ccccccccccccdp-2",
+"0x1.8000000000000p-1",
+"0x1.e666666666666p-1"
+],
+"shape": [
+4
+]
+},
+"kind": "gaussian",
+"widths": {
+"__arr__": [
+"0x1.999999999999ap-3",
+"0x1.999999999999ap-3",
+"0x1.999999999999ap-3",
+"0x1.999999999999ap-3"
+],
+"shape": [
+4
+]
+}
+}
+},
+"basis_K": {
+"__int__": 4
+},
+"basis_phi0": {
+"__arr__": [
+"0x1.827a561889716p-1",
+"0x1.45e031007d65fp-4",
+"0x1.cf6128ab46776p-11",
+"0x1.a706357832735p-17"
+],
+"shape": [
+4
+]
+},
+"bs_scale_eff": {
+"__f__": "0x1.0311557f6f984p+0"
+},
+"bs_scale_eff_basis": "Ip-weighted mean lin(s*j)/lin(j)",
+"constraint_cond": {
+"__f__": "0x1.97a7c71ba837bp+1"
+},
+"constraint_singular_values": {
+"__arr__": [
+"0x1.9a3c07f7ed0b6p+0",
+"0x1.019ea07834214p-1"
+],
+"shape": [
+2
+]
+},
+"constraints": {
+"__seq__": [
+"Ip",
+"axis current (q0)"
+],
+"tuple": true
+},
+"deficit": {
+"__f__": "0x1.ebc234c0efca0p+13"
+},
+"ip_residual": {
+"__f__": "0x0.0p+0"
+},
+"ip_residual_pct": {
+"__f__": "0x0.0p+0"
+},
+"kkt_cond": {
+"__f__": "0x1.eef0f78079d80p+1"
+},
+"kkt_singular_values": {
+"__arr__": [
+"0x1.c76c9b9bae146p+1",
+"0x1.d71ef81262635p-1"
+],
+"shape": [
+2
+]
+},
+"li_anchor": null,
+"li_anchor_at_target_Ip": null,
+"li_gradient": null,
+"li_kind": null,
+"li_predicted": null,
+"li_predictor_residual": null,
+"li_target": null,
+"n_sign_iter": {
+"__int__": 0
+},
+"ohm_scale_eff": {
+"__f__": "0x1.0c0224c210b02p+0"
+},
+"ohm_scale_eff_basis": "Ip-weighted mean lin(s*j)/lin(j)",
+"one_sided_ind": false,
+"s_bs": {
+"__sum__": {
+"n": 201,
+"shape": [
+201
+],
+"stats": [
+"0x1.9d5b789f67f3ap+7",
+"-0x1.cae898afb8bbap+4",
+"0x1.0c7d8569b5f06p+0",
+"0x1.008f49e456573p+0",
+"0x1.008f49e456573p+0",
+"0x1.1044feeead41bp+0",
+"0x1.d29cc204f2cc7p+3"
+]
+}
+},
+"s_ind": {
+"__sum__": {
+"n": 201,
+"shape": [
+201
+],
+"stats": [
+"0x1.a6d6158eba181p+7",
+"-0x1.cf659911336f8p+4",
+"0x1.05daea0d1f762p+0",
+"0x1.0aaa6dddab6c3p+0",
+"0x1.05daea0d1f762p+0",
+"0x1.0ff032c628579p+0",
+"0x1.dd37d0c3f9180p+3"
+]
+}
+},
+"sigma_ind_up": null,
+"sign_pattern": null,
+"solver": "hard-KKT",
+"structure_bs": {
+"__f__": "0x1.302f7693f35c6p-6"
+},
+"structure_ind": {
+"__f__": "0x1.a641449352b20p-7"
+},
+"weights_bs": {
+"__arr__": [
+"0x1.0000000000000p+0",
+"0x1.8000000000000p+1",
+"0x1.4000000000000p+3",
+"0x1.9000000000000p+6"
+],
+"shape": [
+4
+]
+},
+"weights_ind": {
+"__arr__": [
+"0x1.9000000000000p+6",
+"0x1.4000000000000p+3",
+"0x1.8000000000000p+1",
+"0x1.0000000000000p+0"
+],
+"shape": [
+4
+]
+},
+"weights_ind_up": null,
+"weights_name": "physics-prior"
+}
+},
+"hard_up": {
+"__dict__": {
+"A_row": {
+"__arr__": [
+"0x1.a1d6bf620403ep+17",
+"0x1.5233524885d6bp+17",
+"0x1.05e51d7378d14p+16",
+"0x1.69fd596ee02cap+14"
+],
+"shape": [
+4
+]
+},
+"B_row": {
+"__arr__": [
+"0x1.7afeff368a8c7p+12",
+"0x1.0ca12883b1ca2p+13",
+"0x1.ba669a1840ca8p+14",
+"0x1.04d005eab6436p+15"
+],
+"shape": [
+4
+]
+},
+"Ip_hybrid": {
+"__f__": "0x1.8f8dcadcc2d3bp+18"
+},
+"Ip_lin_bs": {
+"__f__": "0x1.590fcc0ef3b69p+15"
+},
+"Ip_lin_fix": {
+"__f__": "0x1.8389851dea7bep+14"
+},
+"Ip_lin_ind": {
+"__f__": "0x1.3c9773aa656e0p+18"
+},
+"a": {
+"__arr__": [
+"0x1.08e8c20c244e9p-5",
+"0x1.acd652125828ep-6",
+"0x1.4c15015dbac9bp-7",
+"0x1.cb007531c1edcp-5"
+],
+"shape": [
+4
+]
+},
+"axis_residual": null,
+"b": {
+"__arr__": [
+"0x1.77712dfabb38dp-4",
+"0x1.62d061dc5c0fcp-5",
+"0x1.5e9a0f7071367p-5",
+"0x1.4ab5a752279f7p-8"
+],
+"shape": [
+4
+]
+},
+"basis": {
+"__dict__": {
+"centres": {
+"__arr__": [
+"0x1.3333333333333p-3",
+"0x1.ccccccccccccdp-2",
+"0x1.8000000000000p-1",
+"0x1.e666666666666p-1"
+],
+"shape": [
+4
+]
+},
+"kind": "gaussian",
+"widths": {
+"__arr__": [
+"0x1.999999999999ap-3",
+"0x1.999999999999ap-3",
+"0x1.999999999999ap-3",
+"0x1.999999999999ap-3"
+],
+"shape": [
+4
+]
+}
+}
+},
+"basis_K": {
+"__int__": 4
+},
+"basis_phi0": null,
+"bs_scale_eff": {
+"__f__": "0x1.0d6126ac5bc6cp+0"
+},
+"bs_scale_eff_basis": "Ip-weighted mean lin(s*j)/lin(j)",
+"constraint_cond": {
+"__f__": "0x1.0000000000000p+0"
+},
+"constraint_singular_values": {
+"__arr__": [
+"0x1.585a21567e6f1p+0"
+],
+"shape": [
+1
+]
+},
+"constraints": {
+"__seq__": [
+"Ip"
+],
+"tuple": true
+},
+"deficit": {
+"__f__": "0x1.ebc234c0efca0p+13"
+},
+"ip_residual": {
+"__f__": "0x0.0p+0"
+},
+"ip_residual_pct": {
+"__f__": "0x0.0p+0"
+},
+"kkt_cond": {
+"__f__": "0x1.0000000000000p+0"
+},
+"kkt_singular_values": {
+"__arr__": [
+"0x1.82193039d122bp+0"
+],
+"shape": [
+1
+]
+},
+"li_anchor": null,
+"li_anchor_at_target_Ip": null,
+"li_gradient": null,
+"li_kind": null,
+"li_predicted": null,
+"li_predictor_residual": null,
+"li_target": null,
+"n_sign_iter": {
+"__int__": 2
+},
+"ohm_scale_eff": {
+"__f__": "0x1.0a9a7e1d22dc0p+0"
+},
+"ohm_scale_eff_basis": "Ip-weighted mean lin(s*j)/lin(j)",
+"one_sided_ind": true,
+"s_bs": {
+"__sum__": {
+"n": 201,
+"shape": [
+201
+],
+"stats": [
+"0x1.b1600e6113422p+7",
+"-0x1.e13b4e63a69bdp+4",
+"0x1.135d29231a901p+0",
+"0x1.06e471bd46157p+0",
+"0x1.06e471bd46157p+0",
+"0x1.1c202dc81cf0cp+0",
+"0x1.e93484893a44cp+3"
+]
+}
+},
+"s_ind": {
+"__sum__": {
+"n": 201,
+"shape": [
+201
+],
+"stats": [
+"0x1.a4d7c0a1ccdf6p+7",
+"-0x1.cc7cce0908aecp+4",
+"0x1.07141001e48acp+0",
+"0x1.0f7fb5167b5bep+0",
+"0x1.07141001e48acp+0",
+"0x1.106d387bf45c5p+0",
+"0x1.daf62111bfb96p+3"
+]
+}
+},
+"sigma_ind_up": {
+"__arr__": [
+"0x1.999999999999ap-4",
+"0x1.999999999999ap-4",
+"0x1.999999999999ap-4",
+"0x1.999999999999ap-2"
+],
+"shape": [
+4
+]
+},
+"sign_pattern": {
+"__seq__": [
+true,
+true,
+true,
+true
+],
+"tuple": true
+},
+"solver": "hard-KKT",
+"structure_bs": {
+"__f__": "0x1.77ba37c32e2b5p-6"
+},
+"structure_ind": {
+"__f__": "0x1.87406fd4a0186p-8"
+},
+"weights_bs": {
+"__arr__": [
+"0x1.0000000000000p+0",
+"0x1.8000000000000p+1",
+"0x1.4000000000000p+3",
+"0x1.9000000000000p+6"
+],
+"shape": [
+4
+]
+},
+"weights_ind": {
+"__arr__": [
+"0x1.9000000000000p+6",
+"0x1.4000000000000p+3",
+"0x1.8000000000000p+1",
+"0x1.0000000000000p+0"
+],
+"shape": [
+4
+]
+},
+"weights_ind_up": {
+"__arr__": [
+"0x1.8ffffffffffffp+6",
+"0x1.8ffffffffffffp+6",
+"0x1.8ffffffffffffp+6",
+"0x1.8ffffffffffffp+2"
+],
+"shape": [
+4
+]
+},
+"weights_name": "physics-prior"
+}
+},
+"p_default": {
+"__dict__": {
+"bs_scale": {
+"__f__": "0x1.046158779633ap+0"
+},
+"j_BS": {
+"__sum__": {
+"n": 201,
+"shape": [
+201
+],
+"stats": [
+"0x1.058ef3b0b0d62p+23",
+"-0x1.5fb7106d207f2p+18",
+"0x1.3be5b237d06d9p+14",
+"0x1.f6ac3a995e757p+14",
+"0x1.5ab32b50e09d6p+12",
+"0x1.2ae4b12547cc6p+18",
+"0x1.288366f006afdp+20"
+]
+}
+},
+"j_inductive": {
+"__sum__": {
+"n": 201,
+"shape": [
+201
+],
+"stats": [
+"0x1.ff4b6b32148dap+25",
+"-0x1.8ab2e65740e10p+23",
+"0x1.8c980dab7ca19p+19",
+"0x1.aae3f4b2582dap+9",
+"0x1.aae3f4b2582dap+9",
+"0x1.8c980dab7ca19p+19",
+"0x1.668e7534dbd70p+22"
+]
+}
+},
+"j_phi": {
+"__sum__": {
+"n": 201,
+"shape": [
+201
+],
+"stats": [
+"0x1.333934d25394cp+26",
+"-0x1.b7fe7fff7ec10p+23",
+"0x1.c5d7f80a07f1dp+19",
+"0x1.0201e052abceap+15",
+"0x1.0201e052abceap+15",
+"0x1.c5d7f80a07f1dp+19",
+"0x1.98099b3b4ade7p+22"
+]
+}
+},
+"n_solves": {
+"__int__": 1
+},
+"ohm_scale": {
+"__f__": "0x1.0bc62a58c18fdp+0"
+},
+"record": {
+"__dict__": {
+"closure_limited": false,
+"closure_limited_reasons": {
+"__arr__": [],
+"shape": [
+0
+]
+},
+"j_bs0": {
+"__f__": "0x1.3560000000000p+14"
+},
+"j_fix0": {
+"__f__": "0x1.7b05e66666667p+16"
+},
+"j_ind0": {
+"__f__": "0x1.80c7c19b24cb3p+19"
+},
+"j_ref0_achieved": {
+"__f__": "0x1.b9d37e67f1980p+19"
+},
+"j_ref0_requested": {
+"__f__": "0x1.b9d37e67f1980p+19"
+},
+"j_ref0_used": {
+"__f__": "0x1.b9d37e67f1980p+19"
+},
+"j_renorm_ratio": {
+"__f__": "0x1.0000000000000p+0"
+},
+"n_extra_solves": {
+"__int__": 0
+},
+"ohm_scale_is_effective_mean": true,
+"q0_anchor": {
+"__f__": "0x1.3333333333333p+0"
+},
+"q0_dd": null,
+"q0_gate": {
+"__f__": "0x1.199999999999ap+0"
+},
+"q0_gate_basis": "|q0_target| (source carries no axis q)",
+"q0_target": {
+"__f__": "0x1.3333333333333p+0"
+},
+"q0_target_psi_N": {
+"__f__": "0x1.47ae147ae147bp-7"
+},
+"q0_target_source": "same reference as sawtooth_bootstrap: q0_anchor * (j_achieved0/j_requested0), un-renormalised onto the source's own current; get_q at the psi_pad-clipped axis",
+"sawtooth_active": false,
+"sawtooth_j_par_max_abs": {
+"__f__": "0x0.0p+0"
+},
+"sawtooth_present": false,
+"sawtooth_verdict": "gate rejected -> Ip row only (minimal-norm radial closure; NOT a bootstrap fallback)",
+"structured_axis_residual": null,
+"structured_basis": {
+"__dict__": {
+"centres": {
+"__arr__": [
+"0x1.3333333333333p-3",
+"0x1.ccccccccccccdp-2",
+"0x1.8000000000000p-1",
+"0x1.e666666666666p-1"
+],
+"shape": [
+4
+]
+},
+"kind": "gaussian",
+"widths": {
+"__arr__": [
+"0x1.999999999999ap-3",
+"0x1.999999999999ap-3",
+"0x1.999999999999ap-3",
+"0x1.999999999999ap-3"
+],
+"shape": [
+4
+]
+}
+}
+},
+"structured_bs_scale_eff_basis": "Ip-weighted mean lin(s*j)/lin(j)",
+"structured_coeffs_a": {
+"__arr__": [
+"0x1.26278c53e6ed4p-5",
+"0x1.dc2dff5d88fc2p-6",
+"0x1.70be373006273p-7",
+"0x1.fdaca35fa2a42p-5"
+],
+"shape": [
+4
+]
+},
+"structured_coeffs_b": {
+"__arr__": [
+"0x1.a0e3d1d3b5604p-6",
+"0x1.a980d6d4d7c55p-7",
+"0x1.5e606744f6732p-7",
+"0x1.6f3813566e95ep-8"
+],
+"shape": [
+4
+]
+},
+"structured_constraint_cond": null,
+"structured_constraints": {
+"__seq__": [
+"Ip (soft)"
+],
+"tuple": false
+},
+"structured_deficit": {
+"__f__": "0x1.ebc234c0efca0p+13"
+},
+"structured_gn_iterations": {
+"__int__": 2
+},
+"structured_ip_posterior": {
+"__f__": "0x1.8f7c3b5e8572bp+18"
+},
+"structured_ip_residual": {
+"__f__": "-0x1.18f7e3d610000p+6"
+},
+"structured_ip_residual_pct": {
+"__f__": "-0x1.1948338a4c610p-6"
+},
+"structured_ip_sigma": {
+"__f__": "0x1.ff6dd076bbf04p+10"
+},
+"structured_ip_sigma_frac": {
+"__f__": "0x1.47ae147ae147bp-8"
+},
+"structured_kkt_cond": null,
+"structured_li_anchor": null,
+"structured_li_anchor_at_target_Ip": null,
+"structured_li_geometry": null,
+"structured_li_kind": null,
+"structured_li_predicted": null,
+"structured_li_predictor_residual": null,
+"structured_li_sigma": null,
+"structured_li_target": null,
+"structured_li_target_source": null,
+"structured_li_tol": {
+"__f__": "0x1.47ae147ae147bp-8"
+},
+"structured_n_sign_iter": {
+"__int__": 2
+},
+"structured_objective": {
+"__f__": "0x1.0e76a7b63670dp-2"
+},
+"structured_ohm_scale_eff_basis": "Ip-weighted mean lin(s*j)/lin(j)",
+"structured_one_sided_ind": true,
+"structured_preset": "li_soft_onesided",
+"structured_preset_filled": "structured_ip_sigma_frac, structured_sigma_ind_up, structured_soft, structured_weights",
+"structured_preset_source": "default",
+"structured_prior_chi2": {
+"__f__": "0x1.0d419820b3cd0p-2"
+},
+"structured_residual_sigma_Ip": null,
+"structured_residual_sigma_Ip_model": {
+"__f__": "-0x1.1948338a4c610p-5"
+},
+"structured_residual_sigma_axis": null,
+"structured_residual_sigma_li": null,
+"structured_residual_sigma_li_model": null,
+"structured_s_bs_at": {
+"__dict__": {
+"0.00": {
+"__f__": "0x1.0565a1a434124p+0"
+},
+"0.20": {
+"__f__": "0x1.07e61be29337ep+0"
+},
+"0.40": {
+"__f__": "0x1.06d435782cf1ap+0"
+},
+"0.60": {
+"__f__": "0x1.05676e2b7609dp+0"
+},
+"0.80": {
+"__f__": "0x1.047ce4be70af8p+0"
+},
+"0.95": {
+"__f__": "0x1.033e30c87e2e7p+0"
+},
+"1.00": {
+"__f__": "0x1.02d3844461a6cp+0"
+}
+}
+},
+"structured_s_bs_max": {
+"__f__": "0x1.07ed371d7ccefp+0"
+},
+"structured_s_bs_min": {
+"__f__": "0x1.02d3844461a6cp+0"
+},
+"structured_s_bs_profile": {
+"__sum__": {
+"n": 201,
+"shape": [
+201
+],
+"stats": [
+"0x1.9b3097045163cp+7",
+"-0x1.c5458e5ff1c55p+4",
+"0x1.0565a1a434124p+0",
+"0x1.02d3844461a6cp+0",
+"0x1.02d3844461a6cp+0",
+"0x1.07ed371d7ccefp+0",
+"0x1.d00e7e1ee5815p+3"
+]
+}
+},
+"structured_s_ind_at": {
+"__dict__": {
+"0.00": {
+"__f__": "0x1.07dc1c033ddddp+0"
+},
+"0.20": {
+"__f__": "0x1.0c6536dd69356p+0"
+},
+"0.40": {
+"__f__": "0x1.0c67ed2411cadp+0"
+},
+"0.60": {
+"__f__": "0x1.0bf795dd5b981p+0"
+},
+"0.80": {
+"__f__": "0x1.107869740c0c3p+0"
+},
+"0.95": {
+"__f__": "0x1.120107f45f87bp+0"
+},
+"1.00": {
+"__f__": "0x1.1135bb536ba1fp+0"
+}
+}
+},
+"structured_s_ind_max": {
+"__f__": "0x1.123d77418162ep+0"
+},
+"structured_s_ind_min": {
+"__f__": "0x1.07dc1c033ddddp+0"
+},
+"structured_s_ind_profile": {
+"__sum__": {
+"n": 201,
+"shape": [
+201
+],
+"stats": [
+"0x1.a6ec482d72b6cp+7",
+"-0x1.ce80f858fe72ap+4",
+"0x1.07dc1c033ddddp+0",
+"0x1.1135bb536ba1fp+0",
+"0x1.07dc1c033ddddp+0",
+"0x1.123d77418162ep+0",
+"0x1.dd502a8a3005ap+3"
+]
+}
+},
+"structured_sigma_ind_up": {
+"__arr__": [
+"0x1.999999999999ap-4",
+"0x1.999999999999ap-4",
+"0x1.999999999999ap-4",
+"0x1.999999999999ap-2"
+],
+"shape": [
+4
+]
+},
+"structured_sign_pattern": "++++",
+"structured_soft": true,
+"structured_solver": "soft-GaussNewton",
+"structured_structure_bs": {
+"__f__": "0x1.5a72e7e90abc6p-8"
+},
+"structured_structure_ind": {
+"__f__": "0x1.b271e221cbe7bp-8"
+},
+"structured_weights_bs": {
+"__arr__": [
+"0x1.0000000000000p+2",
+"0x1.638e38e38e38ep+3",
+"0x1.638e38e38e38ep+5",
+"0x1.8ffffffffffffp+6"
+],
+"shape": [
+4
+]
+},
+"structured_weights_ind": {
+"__arr__": [
+"0x1.8ffffffffffffp+6",
+"0x1.8ffffffffffffp+2",
+"0x1.8ffffffffffffp+2",
+"0x1.8ffffffffffffp+2"
+],
+"shape": [
+4
+]
+},
+"structured_weights_name": "sigma ladder (soft)"
+}
+},
+"state": null
+}
+},
+"p_li": {
+"__dict__": {
+"bs_scale": {
+"__f__": "0x1.f6e029f60d87fp-1"
+},
+"j_BS": {
+"__sum__": {
+"n": 201,
+"shape": [
+201
+],
+"stats": [
+"0x1.f95e352ec93a0p+22",
+"-0x1.5d26ae1e62e01p+18",
+"0x1.41ac587dde897p+14",
+"0x1.e55c681305e49p+14",
+"0x1.49f7868926498p+12",
+"0x1.1ddca43924717p+18",
+"0x1.1be283a86f8a3p+20"
+]
+}
+},
+"j_inductive": {
+"__sum__": {
+"n": 201,
+"shape": [
+201
+],
+"stats": [
+"0x1.00c9ee57dabe2p+26",
+"-0x1.8fdbf5f7a0040p+23",
+"0x1.989ec94957849p+19",
+"0x1.6c56137b79cf1p+9",
+"0x1.6c56137b79cf1p+9",
+"0x1.989ec94957849p+19",
+"0x1.6e8f951116386p+22"
+]
+}
+},
+"j_phi": {
+"__sum__": {
+"n": 201,
+"shape": [
+201
+],
+"stats": [
+"0x1.3341726dfa84fp+26",
+"-0x1.bd130c8d67f6fp+23",
+"0x1.d20ce8da1345bp+19",
+"0x1.f0bf7f1548197p+14",
+"0x1.f0bf7f1548197p+14",
+"0x1.d20ce8da1345bp+19",
+"0x1.9f32be0a3ca58p+22"
+]
+}
+},
+"n_solves": {
+"__int__": 2
+},
+"ohm_scale": {
+"__f__": "0x1.0cbffe1d2e24fp+0"
+},
+"record": {
+"__dict__": {
+"Ip_hybrid": {
+"__f__": "0x1.8f2f7a6af19edp+18"
+},
+"bs_scale": {
+"__f__": "0x1.f6e029f60d87fp-1"
+},
+"closure_limited": false,
+"closure_limited_reasons": {
+"__arr__": [],
+"shape": [
+0
+]
+},
+"closure_limited_thresholds": {
+"__dict__": {
+"bs_scale_min": {
+"__f__": "0x1.0000000000000p-1"
+},
+"mismatch_max_pct": {
+"__f__": "0x1.4000000000000p+3"
+}
+}
+},
+"f_BS_closed": {
+"__f__": "0x1.b24accc9ee582p-4"
+},
+"f_BS_unscaled": {
+"__f__": "0x1.ba2c119d45a0cp-4"
+},
+"j_bs0": {
+"__f__": "0x1.3560000000000p+14"
+},
+"j_fix0": {
+"__f__": "0x1.7b05e66666667p+16"
+},
+"j_ind0": {
+"__f__": "0x1.80c7c19b24cb3p+19"
+},
+"j_ref0_achieved": {
+"__f__": "0x1.b9d37e67f1980p+19"
+},
+"j_ref0_requested": {
+"__f__": "0x1.b9d37e67f1980p+19"
+},
+"j_ref0_used": {
+"__f__": "0x1.b9d37e67f1980p+19"
+},
+"j_renorm_ratio": {
+"__f__": "0x1.0000000000000p+0"
+},
+"n_extra_solves": {
+"__int__": 1
+},
+"ohm_scale": {
+"__f__": "0x1.0cbffe1d2e24fp+0"
+},
+"ohm_scale_is_effective_mean": true,
+"q0_anchor": {
+"__f__": "0x1.3333333333333p+0"
+},
+"q0_dd": null,
+"q0_gate": {
+"__f__": "0x1.199999999999ap+0"
+},
+"q0_gate_basis": "|q0_target| (source carries no axis q)",
+"q0_target": {
+"__f__": "0x1.3333333333333p+0"
+},
+"q0_target_psi_N": {
+"__f__": "0x1.47ae147ae147bp-7"
+},
+"q0_target_source": "same reference as sawtooth_bootstrap: q0_anchor * (j_achieved0/j_requested0), un-renormalised onto the source's own current; get_q at the psi_pad-clipped axis",
+"raw_components_ip_mismatch_pct": {
+"__f__": "-0x1.ec4ec4ec4ec57p+1"
+},
+"sawtooth_active": false,
+"sawtooth_j_par_max_abs": {
+"__f__": "0x0.0p+0"
+},
+"sawtooth_present": false,
+"sawtooth_verdict": "structured predictor + 1 corrector solve (l_i)",
+"structured_axis_residual": null,
+"structured_basis": {
+"__dict__": {
+"centres": {
+"__arr__": [
+"0x1.3333333333333p-3",
+"0x1.ccccccccccccdp-2",
+"0x1.8000000000000p-1",
+"0x1.e666666666666p-1"
+],
+"shape": [
+4
+]
+},
+"kind": "gaussian",
+"widths": {
+"__arr__": [
+"0x1.999999999999ap-3",
+"0x1.999999999999ap-3",
+"0x1.999999999999ap-3",
+"0x1.999999999999ap-3"
+],
+"shape": [
+4
+]
+}
+}
+},
+"structured_bs_scale_eff_basis": "Ip-weighted mean lin(s*j)/lin(j)",
+"structured_coeffs_a": {
+"__arr__": [
+"0x1.36a5d9a35ec3bp-4",
+"0x1.e97ba4bcf5649p-6",
+"-0x1.cd189f6cd38b3p-5",
+"-0x1.05654119feeefp-4"
+],
+"shape": [
+4
+]
+},
+"structured_coeffs_b": {
+"__arr__": [
+"0x1.a2cb518026228p-5",
+"-0x1.5e0a4a16202dcp-9",
+"-0x1.73e44cbbf203dp-6",
+"-0x1.a78629a958ceep-7"
+],
+"shape": [
+4
+]
+},
+"structured_constraint_cond": null,
+"structured_constraints": {
+"__seq__": [
+"Ip (soft)",
+"l_i (li_1, soft)"
+],
+"tuple": false
+},
+"structured_corrector_targets": {
+"__seq__": [
+"l_i"
+],
+"tuple": false
+},
+"structured_deficit": {
+"__f__": "0x1.ebc234c0efca0p+13"
+},
+"structured_gn_iterations": {
+"__int__": 4
+},
+"structured_ip_measured_residual_pct": {
+"__f__": "-0x1.79ad9cd73def9p-4"
+},
+"structured_ip_posterior": {
+"__f__": "0x1.8f2f7a6af19edp+18"
+},
+"structured_ip_residual": {
+"__f__": "-0x1.7941c744d3800p+8"
+},
+"structured_ip_residual_pct": {
+"__f__": "-0x1.79ad9cd73def9p-4"
+},
+"structured_ip_sigma": {
+"__f__": "0x1.ff6dd076bbf04p+10"
+},
+"structured_ip_sigma_frac": {
+"__f__": "0x1.47ae147ae147bp-8"
+},
+"structured_kkt_cond": null,
+"structured_li_achieved_corrected": {
+"__f__": "0x1.4087fcc7a75f1p+3"
+},
+"structured_li_achieved_predictor": {
+"__f__": "0x1.534d67970482ep+3"
+},
+"structured_li_anchor": {
+"__f__": "0x1.3b780d0047e86p+3"
+},
+"structured_li_anchor_at_target_Ip": null,
+"structured_li_corrector_achieved": {
+"__arr__": [
+"0x1.534d67970482ep+3",
+"0x1.4087fcc7a75f1p+3"
+],
+"shape": [
+2
+]
+},
+"structured_li_corrector_ratio": {
+"__f__": "0x1.e0cbd6eae34b4p-1"
+},
+"structured_li_corrector_row": {
+"__f__": "0x1.34c3047fc1605p+3"
+},
+"structured_li_corrector_row_factor": {
+"__f__": "0x1.f027230efcb3bp-1"
+},
+"structured_li_corrector_rows": {
+"__arr__": [
+"0x1.3e9fa6bb29e82p+3",
+"0x1.34c3047fc1605p+3"
+],
+"shape": [
+2
+]
+},
+"structured_li_estimator": "utils.li_achieved: TokaMaker get_globals (Bp_vol, vol, Ip) in the target's normalisation, perimeter=3.7699111843077517 m from the anchor's traced LCFS contour (NOT get_stats' dl)",
+"structured_li_gain_exponents": {
+"__arr__": [
+"0x1.0000000000000p+1"
+],
+"shape": [
+1
+]
+},
+"structured_li_gain_law": "row' = row * (target/achieved)**(1/p), p = 2 (parameter-free: Delta_psi ~ sqrt(l_i), so achieved ~ row**2); step 2 (when enabled) uses this slice's own log-secant p",
+"structured_li_geometry": {
+"__dict__": {
+"R_axis": {
+"__f__": "0x1.b333333333333p+0"
+},
+"dpsi_dpsiN": {
+"__f__": "0x1.ccccccccccccdp-1"
+},
+"perimeter": {
+"__f__": "0x1.e28c731eb6950p+1"
+},
+"perimeter_get_stats_dl": {
+"__f__": "0x1.e75fc630f0ba5p+1"
+},
+"perimeter_ratio_dl_over_L": {
+"__f__": "0x1.028f5c28f5c29p+0"
+},
+"perimeter_source": "synthetic circle",
+"psi_pad": {
+"__f__": "0x1.0624dd2f1a9fcp-10"
+},
+"vol": {
+"__f__": "0x1.54f503e53e9b5p+3"
+}
+}
+},
+"structured_li_kind": "li_1",
+"structured_li_max_corrector_steps": {
+"__int__": 1
+},
+"structured_li_predicted": {
+"__f__": "0x1.349c6aa58bddcp+3"
+},
+"structured_li_predictor_residual": {
+"__f__": "-0x1.6e774fb082000p-7"
+},
+"structured_li_residual": {
+"__f__": "0x1.e8560c7d76f00p-5"
+},
+"structured_li_residual_corrected": {
+"__f__": "0x1.e8560c7d76f00p-5"
+},
+"structured_li_residual_predictor": {
+"__f__": "0x1.4adc0dbda9ac0p-1"
+},
+"structured_li_sigma": {
+"__f__": "0x1.47ae147ae147bp-5"
+},
+"structured_li_solved": {
+"__f__": "0x1.4087fcc7a75f1p+3"
+},
+"structured_li_solved_get_stats": {
+"__f__": "0x1.56044bbf23447p+3"
+},
+"structured_li_solved_predictor": {
+"__f__": "0x1.534d67970482ep+3"
+},
+"structured_li_solved_residual": {
+"__f__": "0x1.e8560c7d76f00p-5"
+},
+"structured_li_target": {
+"__f__": "0x1.3e9fa6bb29e82p+3"
+},
+"structured_li_target_source": "GenerationConfig.structured_li_target -- a plain caller input; bouquet applies no cross-code definition offset to it",
+"structured_li_tol": {
+"__f__": "0x1.47ae147ae147bp-8"
+},
+"structured_n_sign_iter": {
+"__int__": 2
+},
+"structured_objective": {
+"__f__": "0x1.efabe15fde7f3p+1"
+},
+"structured_ohm_scale_eff_basis": "Ip-weighted mean lin(s*j)/lin(j)",
+"structured_one_sided_ind": true,
+"structured_preset": "li_soft_onesided",
+"structured_preset_filled": "structured_ip_sigma_frac, structured_li_sigma, structured_sigma_ind_up, structured_soft, structured_weights",
+"structured_preset_source": "default",
+"structured_prior_chi2": {
+"__f__": "0x1.cdd5fee232806p+1"
+},
+"structured_residual_sigma_Ip": {
+"__f__": "-0x1.79ad9cd73def9p-3"
+},
+"structured_residual_sigma_Ip_model": {
+"__f__": "-0x1.79ad9cd73def9p-3"
+},
+"structured_residual_sigma_axis": null,
+"structured_residual_sigma_li": {
+"__f__": "0x1.7d8339c204eb8p+0"
+},
+"structured_residual_sigma_li_model": {
+"__f__": "-0x1.1e4d3641e5900p-2"
+},
+"structured_roundtrip_post_corrector_err_pct": {
+"__f__": "0x0.0p+0"
+},
+"structured_roundtrip_post_corrector_reference": "the closure's own posterior Ip",
+"structured_s_bs_at": {
+"__dict__": {
+"0.00": {
+"__f__": "0x1.0a2d2d31a4cd3p+0"
+},
+"0.20": {
+"__f__": "0x1.0c3c504563daap+0"
+},
+"0.40": {
+"__f__": "0x1.03ff44a70830ap+0"
+},
+"0.60": {
+"__f__": "0x1.f6d8f082dbfe7p-1"
+},
+"0.80": {
+"__f__": "0x1.ef9430196187bp-1"
+},
+"0.95": {
+"__f__": "0x1.f2485479aa7b0p-1"
+},
+"1.00": {
+"__f__": "0x1.f3d324655bc7ap-1"
+}
+}
+},
+"structured_s_bs_max": {
+"__f__": "0x1.0ccf52e149d01p+0"
+},
+"structured_s_bs_min": {
+"__f__": "0x1.ef8d305357cbfp-1"
+},
+"structured_s_bs_profile": {
+"__sum__": {
+"n": 201,
+"shape": [
+201
+],
+"stats": [
+"0x1.93c44e7b2e28cp+7",
+"-0x1.c1090eca8128ap+4",
+"0x1.0a2d2d31a4cd3p+0",
+"0x1.f3d324655bc7ap-1",
+"0x1.ef8d305357cbfp-1",
+"0x1.0ccf52e149d01p+0",
+"0x1.c7e65b271186ap+3"
+]
+}
+},
+"structured_s_ind_at": {
+"__dict__": {
+"0.00": {
+"__f__": "0x1.0fdc6f8dc9c5bp+0"
+},
+"0.20": {
+"__f__": "0x1.15f9d47d894aap+0"
+},
+"0.40": {
+"__f__": "0x1.0cd0017e08a14p+0"
+},
+"0.60": {
+"__f__": "0x1.f1d0eed7a87fdp-1"
+},
+"0.80": {
+"__f__": "0x1.cee981a00c11ep-1"
+},
+"0.95": {
+"__f__": "0x1.ce8868ebbcfb9p-1"
+},
+"1.00": {
+"__f__": "0x1.d259b28991ac3p-1"
+}
+}
+},
+"structured_s_ind_max": {
+"__f__": "0x1.1605beb4c015dp+0"
+},
+"structured_s_ind_min": {
+"__f__": "0x1.cb7e54edafac3p-1"
+},
+"structured_s_ind_profile": {
+"__sum__": {
+"n": 201,
+"shape": [
+201
+],
+"stats": [
+"0x1.91fd0b0bbaf80p+7",
+"-0x1.c3ce1f76c1dd8p+4",
+"0x1.0fdc6f8dc9c5bp+0",
+"0x1.d259b28991ac3p-1",
+"0x1.cb7e54edafac3p-1",
+"0x1.1605beb4c015dp+0",
+"0x1.c6de91aa919a3p+3"
+]
+}
+},
+"structured_sigma_ind_up": {
+"__arr__": [
+"0x1.999999999999ap-4",
+"0x1.999999999999ap-4",
+"0x1.999999999999ap-4",
+"0x1.999999999999ap-2"
+],
+"shape": [
+4
+]
+},
+"structured_sign_pattern": "++--",
+"structured_soft": true,
+"structured_solver": "soft-GaussNewton",
+"structured_structure_bs": {
+"__f__": "0x1.a1ab28c41934bp-6"
+},
+"structured_structure_ind": {
+"__f__": "0x1.8e32925ace4c6p-5"
+},
+"structured_weights_bs": {
+"__arr__": [
+"0x1.0000000000000p+2",
+"0x1.638e38e38e38ep+3",
+"0x1.638e38e38e38ep+5",
+"0x1.8ffffffffffffp+6"
+],
+"shape": [
+4
+]
+},
+"structured_weights_ind": {
+"__arr__": [
+"0x1.8ffffffffffffp+6",
+"0x1.8ffffffffffffp+2",
+"0x1.8ffffffffffffp+2",
+"0x1.8ffffffffffffp+2"
+],
+"shape": [
+4
+]
+},
+"structured_weights_name": "sigma ladder (soft)"
+}
+},
+"state": {
+"__seq__": [
+"Ip_signed",
+"axis",
+"basis",
+"c_signed",
+"gated",
+"ip_bs",
+"ip_fix",
+"ip_ind",
+"ip_sigma",
+"j_BS_swb",
+"j_fixed",
+"j_ind",
+"li_geom",
+"li_kind",
+"li_max_corrector_steps",
+"li_sigma",
+"li_target",
+"li_tol",
+"psi_geom",
+"psi_pad",
+"psi_q",
+"q0_target",
+"q0_tol",
+"sigma_bs",
+"sigma_ind",
+"sigma_ind_up",
+"soft",
+"w_lin",
+"weights"
+],
+"tuple": false
+}
+}
+},
+"p_li2": {
+"__dict__": {
+"bs_scale": {
+"__f__": "0x1.f8e8612b5fca5p-1"
+},
+"j_BS": {
+"__sum__": {
+"n": 201,
+"shape": [
+201
+],
+"stats": [
+"0x1.fb603281580a2p+22",
+"-0x1.5cde58d0bd271p+18",
+"0x1.407566e3e5e23p+14",
+"0x1.e781ab778f251p+14",
+"0x1.4bf9de26f3d88p+12",
+"0x1.1f77fbca8f070p+18",
+"0x1.1d6e283d4c6c3p+20"
+]
+}
+},
+"j_inductive": {
+"__sum__": {
+"n": 201,
+"shape": [
+201
+],
+"stats": [
+"0x1.00a607debbd82p+26",
+"-0x1.8ef677b0535dap+23",
+"0x1.9633d5ed78c8bp+19",
+"0x1.7666915147151p+9",
+"0x1.7666915147151p+9",
+"0x1.9633d5ed78c8bp+19",
+"0x1.6cf0d83314baep+22"
+]
+}
+},
+"j_phi": {
+"__sum__": {
+"n": 201,
+"shape": [
+201
+],
+"stats": [
+"0x1.333dabca048bfp+26",
+"-0x1.bc2b4b9bae22ep+23",
+"0x1.cf983df164c49p+19",
+"0x1.f33546687fc42p+14",
+"0x1.f33546687fc42p+14",
+"0x1.cf983df164c49p+19",
+"0x1.9dad6c29db1d1p+22"
+]
+}
+},
+"n_solves": {
+"__int__": 3
+},
+"ohm_scale": {
+"__f__": "0x1.0ca6952ebedd9p+0"
+},
+"record": {
+"__dict__": {
+"Ip_hybrid": {
+"__f__": "0x1.8f3be1044cb81p+18"
+},
+"bs_scale": {
+"__f__": "0x1.f8e8612b5fca5p-1"
+},
+"closure_limited": false,
+"closure_limited_reasons": {
+"__arr__": [],
+"shape": [
+0
+]
+},
+"closure_limited_thresholds": {
+"__dict__": {
+"bs_scale_min": {
+"__f__": "0x1.0000000000000p-1"
+},
+"mismatch_max_pct": {
+"__f__": "0x1.4000000000000p+3"
+}
+}
+},
+"f_BS_closed": {
+"__f__": "0x1.b40c11399a917p-4"
+},
+"f_BS_unscaled": {
+"__f__": "0x1.ba2c119d45a0cp-4"
+},
+"j_bs0": {
+"__f__": "0x1.3560000000000p+14"
+},
+"j_fix0": {
+"__f__": "0x1.7b05e66666667p+16"
+},
+"j_ind0": {
+"__f__": "0x1.80c7c19b24cb3p+19"
+},
+"j_ref0_achieved": {
+"__f__": "0x1.b9d37e67f1980p+19"
+},
+"j_ref0_requested": {
+"__f__": "0x1.b9d37e67f1980p+19"
+},
+"j_ref0_used": {
+"__f__": "0x1.b9d37e67f1980p+19"
+},
+"j_renorm_ratio": {
+"__f__": "0x1.0000000000000p+0"
+},
+"n_extra_solves": {
+"__int__": 2
+},
+"ohm_scale": {
+"__f__": "0x1.0ca6952ebedd9p+0"
+},
+"ohm_scale_is_effective_mean": true,
+"q0_anchor": {
+"__f__": "0x1.3333333333333p+0"
+},
+"q0_dd": null,
+"q0_gate": {
+"__f__": "0x1.199999999999ap+0"
+},
+"q0_gate_basis": "|q0_target| (source carries no axis q)",
+"q0_target": {
+"__f__": "0x1.3333333333333p+0"
+},
+"q0_target_psi_N": {
+"__f__": "0x1.47ae147ae147bp-7"
+},
+"q0_target_source": "same reference as sawtooth_bootstrap: q0_anchor * (j_achieved0/j_requested0), un-renormalised onto the source's own current; get_q at the psi_pad-clipped axis",
+"raw_components_ip_mismatch_pct": {
+"__f__": "-0x1.ec4ec4ec4ec57p+1"
+},
+"sawtooth_active": false,
+"sawtooth_j_par_max_abs": {
+"__f__": "0x0.0p+0"
+},
+"sawtooth_present": false,
+"sawtooth_verdict": "structured predictor + 2 corrector solves (l_i)",
+"structured_axis_residual": null,
+"structured_basis": {
+"__dict__": {
+"centres": {
+"__arr__": [
+"0x1.3333333333333p-3",
+"0x1.ccccccccccccdp-2",
+"0x1.8000000000000p-1",
+"0x1.e666666666666p-1"
+],
+"shape": [
+4
+]
+},
+"kind": "gaussian",
+"widths": {
+"__arr__": [
+"0x1.999999999999ap-3",
+"0x1.999999999999ap-3",
+"0x1.999999999999ap-3",
+"0x1.999999999999ap-3"
+],
+"shape": [
+4
+]
+}
+}
+},
+"structured_bs_scale_eff_basis": "Ip-weighted mean lin(s*j)/lin(j)",
+"structured_coeffs_a": {
+"__arr__": [
+"0x1.167f541ffd0f6p-4",
+"0x1.cb26a0ee193c0p-6",
+"-0x1.109000463b9bfp-5",
+"-0x1.95b78fe6e54ffp-5"
+],
+"shape": [
+4
+]
+},
+"structured_coeffs_b": {
+"__arr__": [
+"0x1.784be7243ca23p-5",
+"-0x1.3cfbf63239a55p-10",
+"-0x1.30312c3378314p-6",
+"-0x1.5bbf5bdba46f3p-7"
+],
+"shape": [
+4
+]
+},
+"structured_constraint_cond": null,
+"structured_constraints": {
+"__seq__": [
+"Ip (soft)",
+"l_i (li_1, soft)"
+],
+"tuple": false
+},
+"structured_corrector_targets": {
+"__seq__": [
+"l_i"
+],
+"tuple": false
+},
+"structured_deficit": {
+"__f__": "0x1.ebc234c0efca0p+13"
+},
+"structured_gn_iterations": {
+"__int__": 4
+},
+"structured_ip_measured_residual_pct": {
+"__f__": "-0x1.480509bc9ca16p-4"
+},
+"structured_ip_posterior": {
+"__f__": "0x1.8f3be1044cb81p+18"
+},
+"structured_ip_residual": {
+"__f__": "-0x1.47a761d86e800p+8"
+},
+"structured_ip_residual_pct": {
+"__f__": "-0x1.480509bc9ca16p-4"
+},
+"structured_ip_sigma": {
+"__f__": "0x1.ff6dd076bbf04p+10"
+},
+"structured_ip_sigma_frac": {
+"__f__": "0x1.47ae147ae147bp-8"
+},
+"structured_kkt_cond": null,
+"structured_li_achieved_corrected": {
+"__f__": "0x1.3e9d866121919p+3"
+},
+"structured_li_achieved_predictor": {
+"__f__": "0x1.534d67970482ep+3"
+},
+"structured_li_anchor": {
+"__f__": "0x1.3b780d0047e86p+3"
+},
+"structured_li_anchor_at_target_Ip": null,
+"structured_li_corrector_achieved": {
+"__arr__": [
+"0x1.534d67970482ep+3",
+"0x1.4087fcc7a75f1p+3",
+"0x1.3e9d866121919p+3"
+],
+"shape": [
+3
+]
+},
+"structured_li_corrector_ratio": {
+"__f__": "0x1.e0cbd6eae34b4p-1"
+},
+"structured_li_corrector_row": {
+"__f__": "0x1.33becca755eebp+3"
+},
+"structured_li_corrector_row_factor": {
+"__f__": "0x1.ee84fd49b824ap-1"
+},
+"structured_li_corrector_rows": {
+"__arr__": [
+"0x1.3e9fa6bb29e82p+3",
+"0x1.34c3047fc1605p+3",
+"0x1.33becca755eebp+3"
+],
+"shape": [
+3
+]
+},
+"structured_li_estimator": "utils.li_achieved: TokaMaker get_globals (Bp_vol, vol, Ip) in the target's normalisation, perimeter=3.7699111843077517 m from the anchor's traced LCFS contour (NOT get_stats' dl)",
+"structured_li_gain_exponents": {
+"__arr__": [
+"0x1.0000000000000p+1",
+"0x1.cf65e223f483dp+0"
+],
+"shape": [
+2
+]
+},
+"structured_li_gain_law": "row' = row * (target/achieved)**(1/p), p = 2 (parameter-free: Delta_psi ~ sqrt(l_i), so achieved ~ row**2); step 2 (when enabled) uses this slice's own log-secant p",
+"structured_li_geometry": {
+"__dict__": {
+"R_axis": {
+"__f__": "0x1.b333333333333p+0"
+},
+"dpsi_dpsiN": {
+"__f__": "0x1.ccccccccccccdp-1"
+},
+"perimeter": {
+"__f__": "0x1.e28c731eb6950p+1"
+},
+"perimeter_get_stats_dl": {
+"__f__": "0x1.e75fc630f0ba5p+1"
+},
+"perimeter_ratio_dl_over_L": {
+"__f__": "0x1.028f5c28f5c29p+0"
+},
+"perimeter_source": "synthetic circle",
+"psi_pad": {
+"__f__": "0x1.0624dd2f1a9fcp-10"
+},
+"vol": {
+"__f__": "0x1.54f503e53e9b5p+3"
+}
+}
+},
+"structured_li_kind": "li_1",
+"structured_li_max_corrector_steps": {
+"__int__": 2
+},
+"structured_li_predicted": {
+"__f__": "0x1.339db48995b2bp+3"
+},
+"structured_li_predictor_residual": {
+"__f__": "-0x1.6e774fb082000p-7"
+},
+"structured_li_residual": {
+"__f__": "-0x1.102d042b48000p-12"
+},
+"structured_li_residual_corrected": {
+"__f__": "-0x1.102d042b48000p-12"
+},
+"structured_li_residual_predictor": {
+"__f__": "0x1.4adc0dbda9ac0p-1"
+},
+"structured_li_sigma": {
+"__f__": "0x1.47ae147ae147bp-5"
+},
+"structured_li_solved": {
+"__f__": "0x1.3e9d866121919p+3"
+},
+"structured_li_solved_get_stats": {
+"__f__": "0x1.56044bbf23447p+3"
+},
+"structured_li_solved_predictor": {
+"__f__": "0x1.534d67970482ep+3"
+},
+"structured_li_solved_residual": {
+"__f__": "-0x1.102d042b48000p-12"
+},
+"structured_li_target": {
+"__f__": "0x1.3e9fa6bb29e82p+3"
+},
+"structured_li_target_source": "GenerationConfig.structured_li_target -- a plain caller input; bouquet applies no cross-code definition offset to it",
+"structured_li_tol": {
+"__f__": "0x1.47ae147ae147bp-8"
+},
+"structured_n_sign_iter": {
+"__int__": 2
+},
+"structured_objective": {
+"__f__": "0x1.efabe15fde7f3p+1"
+},
+"structured_ohm_scale_eff_basis": "Ip-weighted mean lin(s*j)/lin(j)",
+"structured_one_sided_ind": true,
+"structured_preset": "li_soft_onesided",
+"structured_preset_filled": "structured_ip_sigma_frac, structured_li_sigma, structured_sigma_ind_up, structured_soft, structured_weights",
+"structured_preset_source": "default",
+"structured_prior_chi2": {
+"__f__": "0x1.cdd5fee232806p+1"
+},
+"structured_residual_sigma_Ip": {
+"__f__": "-0x1.480509bc9ca15p-3"
+},
+"structured_residual_sigma_Ip_model": {
+"__f__": "-0x1.480509bc9ca15p-3"
+},
+"structured_residual_sigma_axis": null,
+"structured_residual_sigma_li": {
+"__f__": "-0x1.a9465683a0800p-8"
+},
+"structured_residual_sigma_li_model": {
+"__f__": "-0x1.1e4d3641e5900p-2"
+},
+"structured_roundtrip_post_corrector_err_pct": {
+"__f__": "0x0.0p+0"
+},
+"structured_roundtrip_post_corrector_reference": "the closure's own posterior Ip",
+"structured_s_bs_at": {
+"__dict__": {
+"0.00": {
+"__f__": "0x1.092be0e0fd1c6p+0"
+},
+"0.20": {
+"__f__": "0x1.0b24f77fb3047p+0"
+},
+"0.40": {
+"__f__": "0x1.03fe750df07b4p+0"
+},
+"0.60": {
+"__f__": "0x1.f90dc6ecbcd9dp-1"
+},
+"0.80": {
+"__f__": "0x1.f2abdb9161157p-1"
+},
+"0.95": {
+"__f__": "0x1.f4c81be4a7251p-1"
+},
+"1.00": {
+"__f__": "0x1.f608c6061e7ccp-1"
+}
+}
+},
+"structured_s_bs_max": {
+"__f__": "0x1.0b9bb4cab26f8p+0"
+},
+"structured_s_bs_min": {
+"__f__": "0x1.f2a20a253652fp-1"
+},
+"structured_s_bs_profile": {
+"__sum__": {
+"n": 201,
+"shape": [
+201
+],
+"stats": [
+"0x1.944753d14849ap+7",
+"-0x1.c0fb20bc69c3cp+4",
+"0x1.092be0e0fd1c6p+0",
+"0x1.f608c6061e7ccp-1",
+"0x1.f2a20a253652fp-1",
+"0x1.0b9bb4cab26f8p+0",
+"0x1.c86c067590c96p+3"
+]
+}
+},
+"structured_s_ind_at": {
+"__dict__": {
+"0.00": {
+"__f__": "0x1.0e40a387e496ap+0"
+},
+"0.20": {
+"__f__": "0x1.13f2f18e6ec72p+0"
+},
+"0.40": {
+"__f__": "0x1.0cca7d5d5f678p+0"
+},
+"0.60": {
+"__f__": "0x1.fb41fdbab52f3p-1"
+},
+"0.80": {
+"__f__": "0x1.dfa14b81eee2ep-1"
+},
+"0.95": {
+"__f__": "0x1.dcf42163d114cp-1"
+},
+"1.00": {
+"__f__": "0x1.df3b9b4950be2p-1"
+}
+}
+},
+"structured_s_ind_max": {
+"__f__": "0x1.13f712019972ep+0"
+},
+"structured_s_ind_min": {
+"__f__": "0x1.dbba4f30f5628p-1"
+},
+"structured_s_ind_profile": {
+"__sum__": {
+"n": 201,
+"shape": [
+201
+],
+"stats": [
+"0x1.964741d8adf2cp+7",
+"-0x1.c6c782f1af3a8p+4",
+"0x1.0e40a387e496ap+0",
+"0x1.df3b9b4950be2p-1",
+"0x1.dbba4f30f5628p-1",
+"0x1.13f712019972ep+0",
+"0x1.cb3bcf109399ap+3"
+]
+}
+},
+"structured_sigma_ind_up": {
+"__arr__": [
+"0x1.999999999999ap-4",
+"0x1.999999999999ap-4",
+"0x1.999999999999ap-4",
+"0x1.999999999999ap-2"
+],
+"shape": [
+4
+]
+},
+"structured_sign_pattern": "++--",
+"structured_soft": true,
+"structured_solver": "soft-GaussNewton",
+"structured_structure_bs": {
+"__f__": "0x1.6c8a0cfadf985p-6"
+},
+"structured_structure_ind": {
+"__f__": "0x1.31b95ffccb3cep-5"
+},
+"structured_weights_bs": {
+"__arr__": [
+"0x1.0000000000000p+2",
+"0x1.638e38e38e38ep+3",
+"0x1.638e38e38e38ep+5",
+"0x1.8ffffffffffffp+6"
+],
+"shape": [
+4
+]
+},
+"structured_weights_ind": {
+"__arr__": [
+"0x1.8ffffffffffffp+6",
+"0x1.8ffffffffffffp+2",
+"0x1.8ffffffffffffp+2",
+"0x1.8ffffffffffffp+2"
+],
+"shape": [
+4
+]
+},
+"structured_weights_name": "sigma ladder (soft)"
+}
+},
+"state": {
+"__seq__": [
+"Ip_signed",
+"axis",
+"basis",
+"c_signed",
+"gated",
+"ip_bs",
+"ip_fix",
+"ip_ind",
+"ip_sigma",
+"j_BS_swb",
+"j_fixed",
+"j_ind",
+"li_geom",
+"li_kind",
+"li_max_corrector_steps",
+"li_sigma",
+"li_target",
+"li_tol",
+"psi_geom",
+"psi_pad",
+"psi_q",
+"q0_target",
+"q0_tol",
+"sigma_bs",
+"sigma_ind",
+"sigma_ind_up",
+"soft",
+"w_lin",
+"weights"
+],
+"tuple": false
+}
+}
+},
+"p_li_none": {
+"__dict__": {
+"bs_scale": {
+"__f__": "0x1.f3bd4f97e039ep-1"
+},
+"j_BS": {
+"__sum__": {
+"n": 201,
+"shape": [
+201
+],
+"stats": [
+"0x1.f65830b021d7cp+22",
+"-0x1.5f03da5f55cefp+18",
+"0x1.491993b305f1bp+14",
+"0x1.e31dd8ed86a30p+14",
+"0x1.4313446616881p+12",
+"0x1.1aa6ed7e585c2p+18",
+"0x1.18d22d6620a54p+20"
+]
+}
+},
+"j_inductive": {
+"__sum__": {
+"n": 201,
+"shape": [
+201
+],
+"stats": [
+"0x1.0134116cb7f68p+26",
+"-0x1.887a43709d984p+23",
+"0x1.8dd22ca2d3f58p+19",
+"0x1.37bfdbb0ee183p+9",
+"0x1.37bfdbb0ee183p+9",
+"0x1.8dd22ca2d3f58p+19",
+"0x1.6d9b5d0fe2418p+22"
+]
+}
+},
+"j_phi": {
+"__sum__": {
+"n": 201,
+"shape": [
+201
+],
+"stats": [
+"0x1.337b353aed473p+26",
+"-0x1.b5c043686d22cp+23",
+"0x1.c77bb60d38f1ep+19",
+"0x1.ecdc3e31747a2p+14",
+"0x1.ecdc3e31747a2p+14",
+"0x1.c77bb60d38f1ep+19",
+"0x1.9df3dace1cc04p+22"
+]
+}
+},
+"n_solves": {
+"__int__": 2
+},
+"ohm_scale": {
+"__f__": "0x1.0d42f26f9fdddp+0"
+},
+"record": {
+"__dict__": {
+"Ip_hybrid": {
+"__f__": "0x1.8f8dcadcc2d3bp+18"
+},
+"bs_scale": {
+"__f__": "0x1.f3bd4f97e039ep-1"
+},
+"closure_limited": true,
+"closure_limited_reasons": {
+"__seq__": [
+"l_i misses its hard row by +0.0336 (> tol 0.005) after 1 corrector solve(s)"
+],
+"tuple": true
+},
+"closure_limited_thresholds": {
+"__dict__": {
+"bs_scale_min": {
+"__f__": "0x1.0000000000000p-1"
+},
+"mismatch_max_pct": {
+"__f__": "0x1.4000000000000p+3"
+}
+}
+},
+"f_BS_closed": {
+"__f__": "0x1.af95712c3e46ap-4"
+},
+"f_BS_unscaled": {
+"__f__": "0x1.ba2c119d45a0cp-4"
+},
+"j_bs0": {
+"__f__": "0x1.3560000000000p+14"
+},
+"j_fix0": {
+"__f__": "0x1.7b05e66666667p+16"
+},
+"j_ind0": {
+"__f__": "0x1.80c7c19b24cb3p+19"
+},
+"j_ref0_achieved": {
+"__f__": "0x1.b9d37e67f1980p+19"
+},
+"j_ref0_requested": {
+"__f__": "0x1.b9d37e67f1980p+19"
+},
+"j_ref0_used": {
+"__f__": "0x1.b9d37e67f1980p+19"
+},
+"j_renorm_ratio": {
+"__f__": "0x1.0000000000000p+0"
+},
+"n_extra_solves": {
+"__int__": 1
+},
+"ohm_scale": {
+"__f__": "0x1.0d42f26f9fdddp+0"
+},
+"ohm_scale_is_effective_mean": true,
+"q0_anchor": {
+"__f__": "0x1.3333333333333p+0"
+},
+"q0_dd": null,
+"q0_gate": {
+"__f__": "0x1.199999999999ap+0"
+},
+"q0_gate_basis": "|q0_target| (source carries no axis q)",
+"q0_target": {
+"__f__": "0x1.3333333333333p+0"
+},
+"q0_target_psi_N": {
+"__f__": "0x1.47ae147ae147bp-7"
+},
+"q0_target_source": "same reference as sawtooth_bootstrap: q0_anchor * (j_achieved0/j_requested0), un-renormalised onto the source's own current; get_q at the psi_pad-clipped axis",
+"raw_components_ip_mismatch_pct": {
+"__f__": "-0x1.ec4ec4ec4ec57p+1"
+},
+"sawtooth_active": false,
+"sawtooth_j_par_max_abs": {
+"__f__": "0x0.0p+0"
+},
+"sawtooth_present": false,
+"sawtooth_verdict": "structured predictor + 1 corrector solve (l_i)",
+"structured_axis_residual": null,
+"structured_basis": {
+"__dict__": {
+"centres": {
+"__arr__": [
+"0x1.3333333333333p-3",
+"0x1.ccccccccccccdp-2",
+"0x1.8000000000000p-1",
+"0x1.e666666666666p-1"
+],
+"shape": [
+4
+]
+},
+"kind": "gaussian",
+"widths": {
+"__arr__": [
+"0x1.999999999999ap-3",
+"0x1.999999999999ap-3",
+"0x1.999999999999ap-3",
+"0x1.999999999999ap-3"
+],
+"shape": [
+4
+]
+}
+}
+},
+"structured_bs_scale_eff_basis": "Ip-weighted mean lin(s*j)/lin(j)",
+"structured_coeffs_a": {
+"__arr__": [
+"0x1.f5c7d3bc76c7ap-6",
+"0x1.cc91a82e0ca12p-4",
+"-0x1.22e66a5fe6265p-4",
+"-0x1.8ae37e6ef81b7p-3"
+],
+"shape": [
+4
+]
+},
+"structured_coeffs_b": {
+"__arr__": [
+"0x1.511da044e6753p-4",
+"-0x1.c3dd11a361f14p-8",
+"-0x1.78a0a90a3c43cp-5",
+"-0x1.804717314fc93p-8"
+],
+"shape": [
+4
+]
+},
+"structured_constraint_cond": {
+"__f__": "0x1.3882b8d318cabp+3"
+},
+"structured_constraints": {
+"__seq__": [
+"Ip",
+"l_i (li_1, on the Ip-closed manifold)"
+],
+"tuple": false
+},
+"structured_corrector_targets": {
+"__seq__": [
+"l_i"
+],
+"tuple": false
+},
+"structured_deficit": {
+"__f__": "0x1.ebc234c0efca0p+13"
+},
+"structured_gn_iterations": null,
+"structured_ip_posterior": {
+"__f__": "0x1.8f8dcadcc2d3bp+18"
+},
+"structured_ip_residual": {
+"__f__": "0x0.0p+0"
+},
+"structured_ip_residual_pct": {
+"__f__": "0x0.0p+0"
+},
+"structured_ip_sigma": null,
+"structured_ip_sigma_frac": null,
+"structured_kkt_cond": {
+"__f__": "0x1.f8064789ffb10p+2"
+},
+"structured_li_achieved_corrected": {
+"__f__": "0x1.3fb2b3ad56e88p+3"
+},
+"structured_li_achieved_predictor": {
+"__f__": "0x1.54e5c966e2ce5p+3"
+},
+"structured_li_anchor": {
+"__f__": "0x1.3b780d0047e86p+3"
+},
+"structured_li_anchor_at_target_Ip": {
+"__f__": "0x1.23ab34eb6e693p+3"
+},
+"structured_li_corrector_achieved": {
+"__arr__": [
+"0x1.54e5c966e2ce5p+3",
+"0x1.3fb2b3ad56e88p+3"
+],
+"shape": [
+2
+]
+},
+"structured_li_corrector_ratio": {
+"__f__": "0x1.de8bdd4334e89p-1"
+},
+"structured_li_corrector_row": {
+"__f__": "0x1.3409dbbfdd411p+3"
+},
+"structured_li_corrector_row_factor": {
+"__f__": "0x1.eefd9a3f445c3p-1"
+},
+"structured_li_corrector_rows": {
+"__arr__": [
+"0x1.3e9fa6bb29e82p+3",
+"0x1.3409dbbfdd411p+3"
+],
+"shape": [
+2
+]
+},
+"structured_li_estimator": "utils.li_achieved: TokaMaker get_globals (Bp_vol, vol, Ip) in the target's normalisation, perimeter=3.7699111843077517 m from the anchor's traced LCFS contour (NOT get_stats' dl)",
+"structured_li_gain_exponents": {
+"__arr__": [
+"0x1.0000000000000p+1"
+],
+"shape": [
+1
+]
+},
+"structured_li_gain_law": "row' = row * (target/achieved)**(1/p), p = 2 (parameter-free: Delta_psi ~ sqrt(l_i), so achieved ~ row**2); step 2 (when enabled) uses this slice's own log-secant p",
+"structured_li_geometry": {
+"__dict__": {
+"R_axis": {
+"__f__": "0x1.b333333333333p+0"
+},
+"dpsi_dpsiN": {
+"__f__": "0x1.ccccccccccccdp-1"
+},
+"perimeter": {
+"__f__": "0x1.e28c731eb6950p+1"
+},
+"perimeter_get_stats_dl": {
+"__f__": "0x1.e75fc630f0ba5p+1"
+},
+"perimeter_ratio_dl_over_L": {
+"__f__": "0x1.028f5c28f5c29p+0"
+},
+"perimeter_source": "synthetic circle",
+"psi_pad": {
+"__f__": "0x1.0624dd2f1a9fcp-10"
+},
+"vol": {
+"__f__": "0x1.54f503e53e9b5p+3"
+}
+}
+},
+"structured_li_kind": "li_1",
+"structured_li_max_corrector_steps": {
+"__int__": 1
+},
+"structured_li_predicted": {
+"__f__": "0x1.3409dbbfdd413p+3"
+},
+"structured_li_predictor_residual": {
+"__f__": "0x1.0000000000000p-48"
+},
+"structured_li_residual": {
+"__f__": "0x1.130cf22d00600p-5"
+},
+"structured_li_residual_corrected": {
+"__f__": "0x1.130cf22d00600p-5"
+},
+"structured_li_residual_predictor": {
+"__f__": "0x1.64622abb8e630p-1"
+},
+"structured_li_sigma": null,
+"structured_li_solved": {
+"__f__": "0x1.3fb2b3ad56e88p+3"
+},
+"structured_li_solved_get_stats": {
+"__f__": "0x1.579ff1ecd43c8p+3"
+},
+"structured_li_solved_predictor": {
+"__f__": "0x1.54e5c966e2ce5p+3"
+},
+"structured_li_solved_residual": {
+"__f__": "0x1.130cf22d00600p-5"
+},
+"structured_li_target": {
+"__f__": "0x1.3e9fa6bb29e82p+3"
+},
+"structured_li_target_source": "GenerationConfig.structured_li_target -- a plain caller input; bouquet applies no cross-code definition offset to it",
+"structured_li_tol": {
+"__f__": "0x1.47ae147ae147bp-8"
+},
+"structured_n_sign_iter": {
+"__int__": 0
+},
+"structured_objective": null,
+"structured_ohm_scale_eff_basis": "Ip-weighted mean lin(s*j)/lin(j)",
+"structured_one_sided_ind": false,
+"structured_preset": "none",
+"structured_preset_filled": "none",
+"structured_preset_source": "opt-out",
+"structured_prior_chi2": null,
+"structured_residual_sigma_Ip": null,
+"structured_residual_sigma_Ip_model": null,
+"structured_residual_sigma_axis": null,
+"structured_residual_sigma_li": null,
+"structured_residual_sigma_li_model": null,
+"structured_roundtrip_post_corrector_err_pct": {
+"__f__": "0x0.0p+0"
+},
+"structured_roundtrip_post_corrector_reference": "Ip_target",
+"structured_s_bs_at": {
+"__dict__": {
+"0.00": {
+"__f__": "0x1.105265bcc971ap+0"
+},
+"0.20": {
+"__f__": "0x1.1357b763b5db2p+0"
+},
+"0.40": {
+"__f__": "0x1.055b2e84e741dp+0"
+},
+"0.60": {
+"__f__": "0x1.ee45954c2dae3p-1"
+},
+"0.80": {
+"__f__": "0x1.e65ef39061e10p-1"
+},
+"0.95": {
+"__f__": "0x1.ee94678daf271p-1"
+},
+"1.00": {
+"__f__": "0x1.f183760938983p-1"
+}
+}
+},
+"structured_s_bs_max": {
+"__f__": "0x1.146633294d8c8p+0"
+},
+"structured_s_bs_min": {
+"__f__": "0x1.e5eb4ce601ae6p-1"
+},
+"structured_s_bs_profile": {
+"__sum__": {
+"n": 201,
+"shape": [
+201
+],
+"stats": [
+"0x1.9465640c89d4ap+7",
+"-0x1.c3d3d6861da03p+4",
+"0x1.105265bcc971ap+0",
+"0x1.f183760938983p-1",
+"0x1.e5eb4ce601ae6p-1",
+"0x1.146633294d8c8p+0",
+"0x1.c8f2f1396b72ap+3"
+]
+}
+},
+"structured_s_ind_at": {
+"__dict__": {
+"0.00": {
+"__f__": "0x1.08ad19462faa9p+0"
+},
+"0.20": {
+"__f__": "0x1.1451e40a5a09ep+0"
+},
+"0.40": {
+"__f__": "0x1.1a6df36c47e3cp+0"
+},
+"0.60": {
+"__f__": "0x1.fbe73599a206cp-1"
+},
+"0.80": {
+"__f__": "0x1.9ec5a65321c32p-1"
+},
+"0.95": {
+"__f__": "0x1.89c3218e779b9p-1"
+},
+"1.00": {
+"__f__": "0x1.8f0a0ef6f351ap-1"
+}
+}
+},
+"structured_s_ind_max": {
+"__f__": "0x1.1b2e00f47280dp+0"
+},
+"structured_s_ind_min": {
+"__f__": "0x1.88af36a31c4a3p-1"
+},
+"structured_s_ind_profile": {
+"__sum__": {
+"n": 201,
+"shape": [
+201
+],
+"stats": [
+"0x1.8975a74130702p+7",
+"-0x1.bdf5abae56990p+4",
+"0x1.08ad19462faa9p+0",
+"0x1.8f0a0ef6f351ap-1",
+"0x1.88af36a31c4a3p-1",
+"0x1.1b2e00f47280dp+0",
+"0x1.bf9fc1e80d3c8p+3"
+]
+}
+},
+"structured_sigma_ind_up": null,
+"structured_sign_pattern": null,
+"structured_soft": false,
+"structured_solver": "hard-KKT",
+"structured_structure_bs": {
+"__f__": "0x1.3925260f26b4bp-5"
+},
+"structured_structure_ind": {
+"__f__": "0x1.0b1c0e2244a21p-4"
+},
+"structured_weights_bs": {
+"__arr__": [
+"0x1.0000000000000p+0",
+"0x1.8000000000000p+1",
+"0x1.4000000000000p+3",
+"0x1.9000000000000p+6"
+],
+"shape": [
+4
+]
+},
+"structured_weights_ind": {
+"__arr__": [
+"0x1.9000000000000p+6",
+"0x1.4000000000000p+3",
+"0x1.8000000000000p+1",
+"0x1.0000000000000p+0"
+],
+"shape": [
+4
+]
+},
+"structured_weights_name": "physics-prior"
+}
+},
+"state": {
+"__seq__": [
+"Ip_signed",
+"axis",
+"basis",
+"c_signed",
+"gated",
+"ip_bs",
+"ip_fix",
+"ip_ind",
+"ip_sigma",
+"j_BS_swb",
+"j_fixed",
+"j_ind",
+"li_geom",
+"li_kind",
+"li_max_corrector_steps",
+"li_sigma",
+"li_target",
+"li_tol",
+"psi_geom",
+"psi_pad",
+"psi_q",
+"q0_target",
+"q0_tol",
+"sigma_bs",
+"sigma_ind",
+"sigma_ind_up",
+"soft",
+"w_lin",
+"weights"
+],
+"tuple": false
+}
+}
+},
+"p_none": {
+"__dict__": {
+"bs_scale": {
+"__f__": "0x1.0277cc00b5adbp+0"
+},
+"j_BS": {
+"__sum__": {
+"n": 201,
+"shape": [
+201
+],
+"stats": [
+"0x1.03a24ba0d135bp+23",
+"-0x1.5c4244f2dc81fp+18",
+"0x1.39b108efd4e50p+14",
+"0x1.f3a72a41dcec2p+14",
+"0x1.58336b231a404p+12",
+"0x1.28d23464e98d8p+18",
+"0x1.2673c4406a494p+20"
+]
+}
+},
+"j_inductive": {
+"__sum__": {
+"n": 201,
+"shape": [
+201
+],
+"stats": [
+"0x1.ffa2f26c27584p+25",
+"-0x1.871b3ae8e8050p+23",
+"0x1.84412d8b79689p+19",
+"0x1.b5f6adbe63646p+9",
+"0x1.b5f6adbe63646p+9",
+"0x1.84412d8b79689p+19",
+"0x1.63251901396b6p+22"
+]
+}
+},
+"j_phi": {
+"__sum__": {
+"n": 201,
+"shape": [
+201
+],
+"stats": [
+"0x1.3327636d61060p+26",
+"-0x1.b44b2e3553c50p+23",
+"0x1.bd6f729fc4dc9p+19",
+"0x1.00aba30b1b36dp+15",
+"0x1.00aba30b1b36dp+15",
+"0x1.bd6f729fc4dc9p+19",
+"0x1.9472681ecbfb9p+22"
+]
+}
+},
+"n_solves": {
+"__int__": 1
+},
+"ohm_scale": {
+"__f__": "0x1.0c170fc5c6909p+0"
+},
+"record": {
+"__dict__": {
+"closure_limited": false,
+"closure_limited_reasons": {
+"__arr__": [],
+"shape": [
+0
+]
+},
+"j_bs0": {
+"__f__": "0x1.3560000000000p+14"
+},
+"j_fix0": {
+"__f__": "0x1.7b05e66666667p+16"
+},
+"j_ind0": {
+"__f__": "0x1.80c7c19b24cb3p+19"
+},
+"j_ref0_achieved": {
+"__f__": "0x1.b9d37e67f1980p+19"
+},
+"j_ref0_requested": {
+"__f__": "0x1.b9d37e67f1980p+19"
+},
+"j_ref0_used": {
+"__f__": "0x1.b9d37e67f1980p+19"
+},
+"j_renorm_ratio": {
+"__f__": "0x1.0000000000000p+0"
+},
+"n_extra_solves": {
+"__int__": 0
+},
+"ohm_scale_is_effective_mean": true,
+"q0_anchor": {
+"__f__": "0x1.3333333333333p+0"
+},
+"q0_dd": null,
+"q0_gate": {
+"__f__": "0x1.199999999999ap+0"
+},
+"q0_gate_basis": "|q0_target| (source carries no axis q)",
+"q0_target": {
+"__f__": "0x1.3333333333333p+0"
+},
+"q0_target_psi_N": {
+"__f__": "0x1.47ae147ae147bp-7"
+},
+"q0_target_source": "same reference as sawtooth_bootstrap: q0_anchor * (j_achieved0/j_requested0), un-renormalised onto the source's own current; get_q at the psi_pad-clipped axis",
+"sawtooth_active": false,
+"sawtooth_j_par_max_abs": {
+"__f__": "0x0.0p+0"
+},
+"sawtooth_present": false,
+"sawtooth_verdict": "gate rejected -> Ip row only (minimal-norm radial closure; NOT a bootstrap fallback)",
+"structured_axis_residual": null,
+"structured_basis": {
+"__dict__": {
+"centres": {
+"__arr__": [
+"0x1.3333333333333p-3",
+"0x1.ccccccccccccdp-2",
+"0x1.8000000000000p-1",
+"0x1.e666666666666p-1"
+],
+"shape": [
+4
+]
+},
+"kind": "gaussian",
+"widths": {
+"__arr__": [
+"0x1.999999999999ap-3",
+"0x1.999999999999ap-3",
+"0x1.999999999999ap-3",
+"0x1.999999999999ap-3"
+],
+"shape": [
+4
+]
+}
+}
+},
+"structured_bs_scale_eff_basis": "Ip-weighted mean lin(s*j)/lin(j)",
+"structured_coeffs_a": {
+"__arr__": [
+"0x1.86eace989f3a1p-8",
+"0x1.8b83321f59047p-5",
+"0x1.fe75d156a16c9p-5",
+"0x1.089547fb1c99fp-4"
+],
+"shape": [
+4
+]
+},
+"structured_coeffs_b": {
+"__arr__": [
+"0x1.15036bcca265bp-6",
+"0x1.05cb13da118d6p-7",
+"0x1.02af74e5d9071p-7",
+"0x1.e8043a4427199p-11"
+],
+"shape": [
+4
+]
+},
+"structured_constraint_cond": {
+"__f__": "0x1.0000000000000p+0"
+},
+"structured_constraints": {
+"__seq__": [
+"Ip"
+],
+"tuple": false
+},
+"structured_deficit": {
+"__f__": "0x1.ebc234c0efca0p+13"
+},
+"structured_gn_iterations": null,
+"structured_ip_posterior": {
+"__f__": "0x1.8f8dcadcc2d3bp+18"
+},
+"structured_ip_residual": {
+"__f__": "0x0.0p+0"
+},
+"structured_ip_residual_pct": {
+"__f__": "0x0.0p+0"
+},
+"structured_ip_sigma": null,
+"structured_ip_sigma_frac": null,
+"structured_kkt_cond": {
+"__f__": "0x1.0000000000000p+0"
+},
+"structured_li_anchor": null,
+"structured_li_anchor_at_target_Ip": null,
+"structured_li_geometry": null,
+"structured_li_kind": null,
+"structured_li_predicted": null,
+"structured_li_predictor_residual": null,
+"structured_li_sigma": null,
+"structured_li_target": null,
+"structured_li_target_source": null,
+"structured_li_tol": {
+"__f__": "0x1.47ae147ae147bp-8"
+},
+"structured_n_sign_iter": {
+"__int__": 0
+},
+"structured_objective": null,
+"structured_ohm_scale_eff_basis": "Ip-weighted mean lin(s*j)/lin(j)",
+"structured_one_sided_ind": false,
+"structured_preset": "none",
+"structured_preset_filled": "none",
+"structured_preset_source": "opt-out",
+"structured_prior_chi2": null,
+"structured_residual_sigma_Ip": null,
+"structured_residual_sigma_Ip_model": null,
+"structured_residual_sigma_axis": null,
+"structured_residual_sigma_li": null,
+"structured_residual_sigma_li_model": null,
+"structured_s_bs_at": {
+"__dict__": {
+"0.00": {
+"__f__": "0x1.039263739a8c1p+0"
+},
+"0.20": {
+"__f__": "0x1.052d7ba49bf09p+0"
+},
+"0.40": {
+"__f__": "0x1.0468108a15a6ap+0"
+},
+"0.60": {
+"__f__": "0x1.03771b89edfb2p+0"
+},
+"0.80": {
+"__f__": "0x1.029a5bb9ff560p+0"
+},
+"0.95": {
+"__f__": "0x1.018e2eafe1be8p+0"
+},
+"1.00": {
+"__f__": "0x1.0145774f78461p+0"
+}
+}
+},
+"structured_s_bs_max": {
+"__f__": "0x1.053021a12fc2cp+0"
+},
+"structured_s_bs_min": {
+"__f__": "0x1.0145774f78461p+0"
+},
+"structured_s_bs_profile": {
+"__sum__": {
+"n": 201,
+"shape": [
+201
+],
+"stats": [
+"0x1.97c993f044c0bp+7",
+"-0x1.c16b490e42e42p+4",
+"0x1.039263739a8c1p+0",
+"0x1.0145774f78461p+0",
+"0x1.0145774f78461p+0",
+"0x1.053021a12fc2cp+0",
+"0x1.cc36c75ac9ebfp+3"
+]
+}
+},
+"structured_s_ind_at": {
+"__dict__": {
+"0.00": {
+"__f__": "0x1.024fbeccfe88fp+0"
+},
+"0.20": {
+"__f__": "0x1.078467a55105dp+0"
+},
+"0.40": {
+"__f__": "0x1.10815b23523e8p+0"
+},
+"0.60": {
+"__f__": "0x1.1911820e358ecp+0"
+},
+"0.80": {
+"__f__": "0x1.1e9f9af0005e0p+0"
+},
+"0.95": {
+"__f__": "0x1.1ac13742dae1dp+0"
+},
+"1.00": {
+"__f__": "0x1.184bf450e3731p+0"
+}
+}
+},
+"structured_s_ind_max": {
+"__f__": "0x1.1ea51d1c6bff4p+0"
+},
+"structured_s_ind_min": {
+"__f__": "0x1.024fbeccfe88fp+0"
+},
+"structured_s_ind_profile": {
+"__sum__": {
+"n": 201,
+"shape": [
+201
+],
+"stats": [
+"0x1.afacc57e7f88ep+7",
+"-0x1.d4bc944340106p+4",
+"0x1.024fbeccfe88fp+0",
+"0x1.184bf450e3731p+0",
+"0x1.024fbeccfe88fp+0",
+"0x1.1ea51d1c6bff4p+0",
+"0x1.e777293563a38p+3"
+]
+}
+},
+"structured_sigma_ind_up": null,
+"structured_sign_pattern": null,
+"structured_soft": false,
+"structured_solver": "hard-KKT",
+"structured_structure_bs": {
+"__f__": "0x1.15394fa14c095p-8"
+},
+"structured_structure_ind": {
+"__f__": "0x1.0aab1edb05c5dp-5"
+},
+"structured_weights_bs": {
+"__arr__": [
+"0x1.0000000000000p+0",
+"0x1.8000000000000p+1",
+"0x1.4000000000000p+3",
+"0x1.9000000000000p+6"
+],
+"shape": [
+4
+]
+},
+"structured_weights_ind": {
+"__arr__": [
+"0x1.9000000000000p+6",
+"0x1.4000000000000p+3",
+"0x1.8000000000000p+1",
+"0x1.0000000000000p+0"
+],
+"shape": [
+4
+]
+},
+"structured_weights_name": "physics-prior"
+}
+},
+"state": null
+}
+},
+"soft": {
+"__dict__": {
+"A_row": {
+"__arr__": [
+"0x1.a1d6bf620403ep+17",
+"0x1.5233524885d6bp+17",
+"0x1.05e51d7378d14p+16",
+"0x1.69fd596ee02cap+14"
+],
+"shape": [
+4
+]
+},
+"B_row": {
+"__arr__": [
+"0x1.7afeff368a8c7p+12",
+"0x1.0ca12883b1ca2p+13",
+"0x1.ba669a1840ca8p+14",
+"0x1.04d005eab6436p+15"
+],
+"shape": [
+4
+]
+},
+"Ip_hybrid": {
+"__f__": "0x1.8f8b18fb31258p+18"
+},
+"Ip_lin_bs": {
+"__f__": "0x1.590fcc0ef3b69p+15"
+},
+"Ip_lin_fix": {
+"__f__": "0x1.8389851dea7bep+14"
+},
+"Ip_lin_ind": {
+"__f__": "0x1.3c9773aa656e0p+18"
+},
+"a": {
+"__arr__": [
+"0x1.6921077322cafp-8",
+"0x1.244c9ef3fc3e3p-4",
+"0x1.c4b343950dc05p-6",
+"0x1.38dc196eb8463p-7"
+],
+"shape": [
+4
+]
+},
+"axis_residual": null,
+"b": {
+"__arr__": [
+"0x1.ffcf38d4fa40ep-9",
+"0x1.05312546461a6p-9",
+"0x1.ae26eb90385e8p-10",
+"0x1.c2d44b825b7a7p-11"
+],
+"shape": [
+4
+]
+},
+"basis": {
+"__dict__": {
+"centres": {
+"__arr__": [
+"0x1.3333333333333p-3",
+"0x1.ccccccccccccdp-2",
+"0x1.8000000000000p-1",
+"0x1.e666666666666p-1"
+],
+"shape": [
+4
+]
+},
+"kind": "gaussian",
+"widths": {
+"__arr__": [
+"0x1.999999999999ap-3",
+"0x1.999999999999ap-3",
+"0x1.999999999999ap-3",
+"0x1.999999999999ap-3"
+],
+"shape": [
+4
+]
+}
+}
+},
+"basis_K": {
+"__int__": 4
+},
+"basis_phi0": null,
+"bs_scale_eff": {
+"__f__": "0x1.00ac1516c9393p+0"
+},
+"bs_scale_eff_basis": "Ip-weighted mean lin(s*j)/lin(j)",
+"constraint_cond": null,
+"constraint_singular_values": null,
+"constraints": {
+"__seq__": [
+"Ip (soft)"
+],
+"tuple": true
+},
+"deficit": {
+"__f__": "0x1.ebc234c0efca0p+13"
+},
+"ip_residual": {
+"__f__": "-0x1.58f0c8d718000p+3"
+},
+"ip_residual_pct": {
+"__f__": "-0x1.595361adaeb5ap-9"
+},
+"kkt_cond": null,
+"kkt_singular_values": null,
+"li_anchor": null,
+"li_anchor_at_target_Ip": null,
+"li_gradient": null,
+"li_kind": null,
+"li_predicted": null,
+"li_predictor_residual": null,
+"li_target": null,
+"lm_lambda": {
+"__f__": "0x0.0p+0"
+},
+"n_iter": {
+"__int__": 2
+},
+"n_sign_iter": {
+"__int__": 0
+},
+"objective": {
+"__f__": "0x1.4c0b40621aa24p-5"
+},
+"ohm_scale_eff": {
+"__f__": "0x1.0c5383b140fbap+0"
+},
+"ohm_scale_eff_basis": "Ip-weighted mean lin(s*j)/lin(j)",
+"one_sided_ind": false,
+"prior_chi2": {
+"__f__": "0x1.4bd106270ccbep-5"
+},
+"residual_sigma_Ip": {
+"__f__": "-0x1.595361adaeb5ap-8"
+},
+"residual_sigma_axis": null,
+"residual_sigma_li": null,
+"s_bs": {
+"__sum__": {
+"n": 201,
+"shape": [
+201
+],
+"stats": [
+"0x1.936907a6cd304p+7",
+"-0x1.bbeb4f9965c7fp+4",
+"0x1.00d406a8215afp+0",
+"0x1.006f08040334ep+0",
+"0x1.006f08040334ep+0",
+"0x1.0137679552dccp+0",
+"0x1.c745214845e04p+3"
+]
+}
+},
+"s_ind": {
+"__sum__": {
+"n": 201,
+"shape": [
+201
+],
+"stats": [
+"0x1.a75f77725855bp+7",
+"-0x1.cf1b84f1a60e0p+4",
+"0x1.02bc7688617adp+0",
+"0x1.0650f56675036p+0",
+"0x1.02bc7688617adp+0",
+"0x1.1573c5f524059p+0",
+"0x1.dde804349c1a0p+3"
+]
+}
+},
+"sigma_Ip": {
+"__f__": "0x1.ff6dd076bbf04p+10"
+},
+"sigma_axis": null,
+"sigma_bs": {
+"__arr__": [
+"0x1.0000000000000p-1",
+"0x1.3333333333333p-2",
+"0x1.3333333333333p-3",
+"0x1.999999999999ap-4"
+],
+"shape": [
+4
+]
+},
+"sigma_ind": {
+"__arr__": [
+"0x1.999999999999ap-4",
+"0x1.999999999999ap-2",
+"0x1.999999999999ap-2",
+"0x1.999999999999ap-2"
+],
+"shape": [
+4
+]
+},
+"sigma_ind_up": null,
+"sigma_li": null,
+"sign_pattern": null,
+"solver": "soft-GaussNewton",
+"structure_bs": {
+"__f__": "0x1.a9547c6f62834p-11"
+},
+"structure_ind": {
+"__f__": "0x1.983db11cf4653p-6"
+},
+"weights_bs": {
+"__arr__": [
+"0x1.0000000000000p+2",
+"0x1.638e38e38e38ep+3",
+"0x1.638e38e38e38ep+5",
+"0x1.8ffffffffffffp+6"
+],
+"shape": [
+4
+]
+},
+"weights_ind": {
+"__arr__": [
+"0x1.8ffffffffffffp+6",
+"0x1.8ffffffffffffp+2",
+"0x1.8ffffffffffffp+2",
+"0x1.8ffffffffffffp+2"
+],
+"shape": [
+4
+]
+},
+"weights_ind_up": null,
+"weights_name": "sigma ladder (soft)"
+}
+},
+"soft_up": {
+"__dict__": {
+"A_row": {
+"__arr__": [
+"0x1.a1d6bf620403ep+17",
+"0x1.5233524885d6bp+17",
+"0x1.05e51d7378d14p+16",
+"0x1.69fd596ee02cap+14"
+],
+"shape": [
+4
+]
+},
+"B_row": {
+"__arr__": [
+"0x1.7afeff368a8c7p+12",
+"0x1.0ca12883b1ca2p+13",
+"0x1.ba669a1840ca8p+14",
+"0x1.04d005eab6436p+15"
+],
+"shape": [
+4
+]
+},
+"Ip_hybrid": {
+"__f__": "0x1.8f7c3b5e8572bp+18"
+},
+"Ip_lin_bs": {
+"__f__": "0x1.590fcc0ef3b69p+15"
+},
+"Ip_lin_fix": {
+"__f__": "0x1.8389851dea7bep+14"
+},
+"Ip_lin_ind": {
+"__f__": "0x1.3c9773aa656e0p+18"
+},
+"a": {
+"__arr__": [
+"0x1.26278c53e6ed4p-5",
+"0x1.dc2dff5d88fc2p-6",
+"0x1.70be373006273p-7",
+"0x1.fdaca35fa2a42p-5"
+],
+"shape": [
+4
+]
+},
+"axis_residual": null,
+"b": {
+"__arr__": [
+"0x1.a0e3d1d3b5604p-6",
+"0x1.a980d6d4d7c55p-7",
+"0x1.5e606744f6732p-7",
+"0x1.6f3813566e95ep-8"
+],
+"shape": [
+4
+]
+},
+"basis": {
+"__dict__": {
+"centres": {
+"__arr__": [
+"0x1.3333333333333p-3",
+"0x1.ccccccccccccdp-2",
+"0x1.8000000000000p-1",
+"0x1.e666666666666p-1"
+],
+"shape": [
+4
+]
+},
+"kind": "gaussian",
+"widths": {
+"__arr__": [
+"0x1.999999999999ap-3",
+"0x1.999999999999ap-3",
+"0x1.999999999999ap-3",
+"0x1.999999999999ap-3"
+],
+"shape": [
+4
+]
+}
+}
+},
+"basis_K": {
+"__int__": 4
+},
+"basis_phi0": null,
+"bs_scale_eff": {
+"__f__": "0x1.046158779633ap+0"
+},
+"bs_scale_eff_basis": "Ip-weighted mean lin(s*j)/lin(j)",
+"constraint_cond": null,
+"constraint_singular_values": null,
+"constraints": {
+"__seq__": [
+"Ip (soft)"
+],
+"tuple": true
+},
+"deficit": {
+"__f__": "0x1.ebc234c0efca0p+13"
+},
+"ip_residual": {
+"__f__": "-0x1.18f7e3d610000p+6"
+},
+"ip_residual_pct": {
+"__f__": "-0x1.1948338a4c610p-6"
+},
+"kkt_cond": null,
+"kkt_singular_values": null,
+"li_anchor": null,
+"li_anchor_at_target_Ip": null,
+"li_gradient": null,
+"li_kind": null,
+"li_predicted": null,
+"li_predictor_residual": null,
+"li_target": null,
+"lm_lambda": {
+"__f__": "0x0.0p+0"
+},
+"n_iter": {
+"__int__": 2
+},
+"n_sign_iter": {
+"__int__": 2
+},
+"objective": {
+"__f__": "0x1.0e76a7b63670dp-2"
+},
+"ohm_scale_eff": {
+"__f__": "0x1.0bc62a58c18fdp+0"
+},
+"ohm_scale_eff_basis": "Ip-weighted mean lin(s*j)/lin(j)",
+"one_sided_ind": true,
+"prior_chi2": {
+"__f__": "0x1.0d419820b3cd0p-2"
+},
+"residual_sigma_Ip": {
+"__f__": "-0x1.1948338a4c610p-5"
+},
+"residual_sigma_axis": null,
+"residual_sigma_li": null,
+"s_bs": {
+"__sum__": {
+"n": 201,
+"shape": [
+201
+],
+"stats": [
+"0x1.9b3097045163cp+7",
+"-0x1.c5458e5ff1c55p+4",
+"0x1.0565a1a434124p+0",
+"0x1.02d3844461a6cp+0",
+"0x1.02d3844461a6cp+0",
+"0x1.07ed371d7ccefp+0",
+"0x1.d00e7e1ee5815p+3"
+]
+}
+},
+"s_ind": {
+"__sum__": {
+"n": 201,
+"shape": [
+201
+],
+"stats": [
+"0x1.a6ec482d72b6cp+7",
+"-0x1.ce80f858fe72ap+4",
+"0x1.07dc1c033ddddp+0",
+"0x1.1135bb536ba1fp+0",
+"0x1.07dc1c033ddddp+0",
+"0x1.123d77418162ep+0",
+"0x1.dd502a8a3005ap+3"
+]
+}
+},
+"sigma_Ip": {
+"__f__": "0x1.ff6dd076bbf04p+10"
+},
+"sigma_axis": null,
+"sigma_bs": {
+"__arr__": [
+"0x1.0000000000000p-1",
+"0x1.3333333333333p-2",
+"0x1.3333333333333p-3",
+"0x1.999999999999ap-4"
+],
+"shape": [
+4
+]
+},
+"sigma_ind": {
+"__arr__": [
+"0x1.999999999999ap-4",
+"0x1.999999999999ap-2",
+"0x1.999999999999ap-2",
+"0x1.999999999999ap-2"
+],
+"shape": [
+4
+]
+},
+"sigma_ind_up": {
+"__arr__": [
+"0x1.999999999999ap-4",
+"0x1.999999999999ap-4",
+"0x1.999999999999ap-4",
+"0x1.999999999999ap-2"
+],
+"shape": [
+4
+]
+},
+"sigma_li": null,
+"sign_pattern": {
+"__seq__": [
+true,
+true,
+true,
+true
+],
+"tuple": true
+},
+"solver": "soft-GaussNewton",
+"structure_bs": {
+"__f__": "0x1.5a72e7e90abc6p-8"
+},
+"structure_ind": {
+"__f__": "0x1.b271e221cbe7bp-8"
+},
+"weights_bs": {
+"__arr__": [
+"0x1.0000000000000p+2",
+"0x1.638e38e38e38ep+3",
+"0x1.638e38e38e38ep+5",
+"0x1.8ffffffffffffp+6"
+],
+"shape": [
+4
+]
+},
+"weights_ind": {
+"__arr__": [
+"0x1.8ffffffffffffp+6",
+"0x1.8ffffffffffffp+2",
+"0x1.8ffffffffffffp+2",
+"0x1.8ffffffffffffp+2"
+],
+"shape": [
+4
+]
+},
+"weights_ind_up": {
+"__arr__": [
+"0x1.8ffffffffffffp+6",
+"0x1.8ffffffffffffp+6",
+"0x1.8ffffffffffffp+6",
+"0x1.8ffffffffffffp+2"
+],
+"shape": [
+4
+]
+},
+"weights_name": "sigma ladder (soft)"
+}
+}
+}
+}
+}

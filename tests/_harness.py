@@ -112,3 +112,75 @@ def ensure_repo_on_syspath():
     if REPO_ROOT not in sys.path:
         sys.path.insert(0, REPO_ROOT)
     return REPO_ROOT
+
+
+def golden_provenance(h5path):
+    """The ``prov_*`` attrs ``tests/golden/make_golden_fixture.py`` stamps on.
+
+    Returns ``{}`` for a fixture built before provenance was stamped (which is
+    itself the useful answer: an undated fixture cannot be told apart from a
+    current one, and that is how a stale one survives).
+    """
+    import h5py
+    try:
+        with h5py.File(h5path, "r") as hf:
+            out = {}
+            for k, v in hf.attrs.items():
+                if not str(k).startswith("prov"):
+                    continue
+                out[str(k)] = (v.decode() if isinstance(v, bytes)
+                               else (v.item() if hasattr(v, "item") else v))
+            for k in ("bouquet_version", "created", "updated"):
+                if k in hf.attrs:
+                    v = hf.attrs[k]
+                    out[k] = (v.decode() if isinstance(v, bytes)
+                              else (v.item() if hasattr(v, "item") else v))
+            return out
+    except Exception as exc:                        # pragma: no cover
+        return {"prov_read_error": str(exc)}
+
+
+def golden_provenance_banner(h5path):
+    """A block naming what built the fixture, for a failure message.
+
+    A golden value can go stale because the code moved OR because the SOLVER
+    underneath it moved, and the two look identical from the assertion.  The
+    second is only diagnosable if the fixture says which solver build it was
+    made against, so every test that compares against the fixture prints this
+    when it fails.
+    """
+    prov = golden_provenance(h5path)
+    head = f"golden fixture provenance ({os.path.basename(h5path)}):"
+    if not prov:
+        return (f"{head}\n  NONE STAMPED -- this fixture predates provenance "
+                "stamping, so neither its bouquet revision nor its OFT build "
+                "can be read off it.  Regenerate with "
+                "tests/golden/make_golden_fixture.py to make the next "
+                "staleness diagnosable.")
+    body = "\n".join(f"  {k} = {prov[k]}" for k in sorted(prov))
+    return f"{head}\n{body}"
+
+
+def legacy_golden_provenance_banner(json_path):
+    """:func:`golden_provenance_banner` for the slim LEGACY golden JSON
+    (``tests/golden/make_golden_fixture.py --legacy-json``), which carries
+    the same provenance block as the h5 fixture's manifest."""
+    import json
+    head = f"legacy golden provenance ({os.path.basename(json_path)}):"
+    try:
+        with open(json_path) as fh:
+            prov = json.load(fh).get("provenance") or {}
+    except Exception as exc:                        # pragma: no cover
+        return f"{head}\n  unreadable: {exc}"
+    flat = {}
+
+    def _walk(node, path):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                _walk(v, f"{path}_{k}" if path else str(k))
+        elif node is not None:
+            flat[path] = node
+    _walk(prov, "")
+    if not flat:
+        return f"{head}\n  NONE STAMPED"
+    return head + "\n" + "\n".join(f"  {k} = {flat[k]}" for k in sorted(flat))

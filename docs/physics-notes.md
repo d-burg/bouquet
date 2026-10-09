@@ -11,6 +11,9 @@ covers the guarantees a user should know about and the knobs that change them.
 - [The σ=0 consistency guard](#the-0-consistency-guard)
 - [Bootstrap current treatment](#bootstrap-current-treatment)
 - [Differential bootstrap (`jbs_delta_mode`)](#differential-bootstrap-jbs_delta_mode)
+- [Self-consistent bootstrap (`jbs_self_consistent`)](#self-consistent-bootstrap-jbs_self_consistent)
+- [The unified reconstruction engine (`reconstruction_engine`, default off)](#the-unified-reconstruction-engine-reconstruction_engine-default-off)
+- [The pressure handed to the solver: separatrix pressure and the edge P′ pin](#the-pressure-handed-to-the-solver-separatrix-pressure-and-the-edge-p-pin)
 - [Kinetics regridding](#kinetics-regridding)
 - [Edge-profile classification](#edge-profile-classification)
 - [Hybrid kinetics on the IMAS path](#hybrid-kinetics-on-the-imas-path)
@@ -73,7 +76,14 @@ b.generate()
 ```
 
 It returns `spike0`, `max_dev`, `rms_dev`, `max_dev_frac`, `psi_worst`, and
-`passed`, and costs one bootstrap solve (~1 min). Call it after
+`passed`, and costs one bootstrap solve (~1 min). That is the **legacy**
+(`jbs_self_consistent=False`) check; by default (the self-consistent loop)
+`passed` means that an unperturbed draw, on every route the configuration
+can use, reproduces the one reconstruction state at the loop's tolerances
+(the `draw_route` block, with q0, q95 and the total-current profile reported
+beside them), and the loop "solved the baseline's way" is reported as
+`passed_baseline_way` -- see
+[the self-consistent bootstrap](#one-reconstruction-state-and-what-an-unperturbed-draw-reproduces). Call it after
 `reconstruct()` / `prepare_baseline()` and before `generate()`; it leaves the
 solver re-anchored on the baseline equilibrium.
 
@@ -90,8 +100,9 @@ is what keeps it from silently regressing.
 ## Bootstrap current treatment
 
 The per-draw bootstrap comes from TokaMaker's Sauter/Redl
-`solve_with_bootstrap`, whose parallel output is converted to toroidal with the
-flux-surface geometry factor `c = 1/(⟨R⟩⟨1/R⟩)` (`bouquet.physics.parallel_to_toroidal`).
+`solve_with_bootstrap`, whose output is already TokaMaker `jphi` (field-aligned
+part plus the pressure term p′G; see [current-conventions.md](current-conventions.md))
+and is used as is.
 
 Two composition modes:
 
@@ -129,6 +140,624 @@ computed in the same pre-draw anchor context. Under this mode the σ=0 draw
 reproduces the baseline split exactly *by construction*, so
 `verify_sigma0_consistency` becomes a pure bootstrap-context-reproducibility
 probe rather than an independent check.
+
+## Self-consistent bootstrap (`jbs_self_consistent`)
+
+**On by default** (`GenerationConfig.jbs_self_consistent=True`): the bootstrap
+is re-evaluated on the delivered equilibrium inside a relaxed outer loop
+(closure ↔ GS solve ↔ Redl) that runs to a convergence test, in every path
+that builds a j_phi containing a bootstrap. `jbs_self_consistent=False` is the
+**legacy frozen bootstrap** (with `reconstruction_engine="legacy"`; the
+unified engine is the loop and refuses it), kept for A/B comparisons and for
+reproducing archives made before the loop existed. It is NOT by itself the
+pre-release code path bit for bit: reproduction also needs
+`reconstruction_engine="legacy"` and `separatrix_pressure="legacy"`, and two
+moves are not switchable -- the canonical coil-solve mode (<= 5e-4 relative on
+draws) and the one current conversion (the frozen bootstrap is ~6.4-6.8 %
+lower at the pedestal on the synthetic example). The structured soft
+closure's noise-floor acceptance, below, is passed only by the loop's closure
+calls (`utils.close_ip_structured_soft(..., accept_noise_floor=True)`); every
+frozen-path call keeps the historical strict solver. Since the loop is the
+default, that acceptance is on the DEFAULT path (a rounding-level effect).
+Two consequences of the default:
+
+- `single_profile_jphi=True` and `recalculate_j_BS=False` have no bootstrap to
+  iterate; they are refused unless `jbs_self_consistent=False` is set (never
+  silently downgraded -- the error says so).
+- A stored config that predates the field (an old archive's `config_json`,
+  or any dict/JSON without it) loads with `jbs_self_consistent=False` and a
+  warning, i.e. it replays the bootstrap model it was produced with; the
+  warning says how to opt in (`"jbs_self_consistent": true` in the
+  `generation` section). A current config always carries the field. An
+  unknown (e.g. misspelt) `generation` key is refused, naming the nearest
+  valid key, so a typo can no longer land on this legacy default.
+- `bootstrap_kwargs` configures `solve_with_bootstrap`; under the loop SWB
+  runs only for `jbs_init="swb"` and the jBS-delta / `DIFF_BS` caches, so a
+  non-empty dict raises a `DeprecationWarning` saying where it acts.  (It
+  replaced `swb_iterations`; a stored value loads as `{"iterations": n}`.)
+
+The archive says which model a group carries: the schema-v3 `jbs_loop` block
+(below) is present exactly where the loop ran; plots label the bootstrap
+"self-consistent Redl bootstrap" or "frozen SWB bootstrap (legacy)"
+accordingly.
+
+### What the legacy path does, and why it is not enough
+
+With the legacy flag, the bootstrap is computed **once** per baseline and per draw
+by OFT's `solve_with_bootstrap` (SWB) and then frozen: the closures, the
+correctors, the MSE stage and the draws only *rescale* it. Two properties of
+that single call matter:
+
+- **It runs on SWB's own auxiliary equilibrium** -- a generic power-law
+  inductive seed, thermal main-ion pressure only (no impurity, no fast ions),
+  a fixed number of Picard passes with no convergence test. The equilibrium
+  bouquet finally delivers (the source's inductive current, the full pressure,
+  the closure's multipliers, the post-homotopy coils) is never the one the
+  bootstrap was evaluated on. Since `j_BS ∝ (dp/dψ_N)/Δψ` and `Δψ` scales with
+  `√l_i`, a different l_i alone moves the bootstrap amplitude by several
+  percent; the inductive seed alone moves it by more.
+- **It assumes evenly sampled `ψ_N`** unless the OFT build accepts `psi_N=`
+  (and bouquet never passed it). A source grid uniform in ρ_tor -- the usual
+  IMAS/integrated-modelling grid -- is then read as ψ_N-uniform: the profiles'
+  gradients are mis-scaled by `dψ_N/du` (for `ψ_N ≈ ρ²` that factor is
+  `≈ 2ρ`: far below 1 near the axis, above 1 beyond mid-radius) and the
+  geometry is sampled at the wrong surfaces.
+  The geqdsk path is unaffected (its grid is uniform).
+
+### The evaluator: `physics.evaluate_jBS`
+
+`evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff)` is a faithful port of SWB's
+inner Redl evaluation (NRL electron / `Zavg` ion Coulomb logarithms, Koh ion
+collisionality, `redl_bootstrap(formula_form='jboot1', use_sign_q=True)`) run
+**once on the equilibrium it is handed -- no solve inside** -- with three
+differences, each the point of the helper:
+
+1. geometry (`F`, `f_T = 1 − f_c`, `ε = ⟨a⟩/⟨R⟩`, `q`, `⟨R⟩`) is sampled on the
+   **caller's** surfaces, `clip(ψ_N, psi_pad, 1 − psi_pad)`;
+2. gradients are taken on the **true** grid, `numpy.gradient(y, ψ_N,
+   edge_order=2)`, divided by the **current** flux range;
+3. Redl's `⟨j·B⟩` is converted to TokaMaker `jphi = ⟨j_φ⟩` exactly, by (A7) of
+   [current-conventions](current-conventions.md): the field-aligned
+   `F⟨1/R⟩⟨j·B⟩/⟨B²⟩` plus the pressure-driven `p′(⟨R⟩ − F²⟨1/R⟩/⟨B²⟩)`, all of
+   the same surfaces. The bootstrap component carries `p′G`, as IMAS
+   `j_bootstrap` and OFT's own SWB output do, and the IDS export inverts the
+   same relations.
+
+   **Declared default physics change (2026-10-06, owner-approved).** Until then
+   the legacy sites converted with `⟨j·B⟩/(F⟨1/R⟩)` (`⟨1/R²⟩` not passed) and
+   the IDS export with `⟨j·B⟩F⟨1/R²⟩/(⟨B²⟩⟨1/R⟩)`. The legacy factor exceeds κ
+   by `⟨B²⟩/(F²⟨1/R⟩²)` = the bracket `⟨B²⟩/⟨B_φ²⟩` (the poloidal-field
+   content: ≈ 1.5 % at ψ_N ≈ 0.97 on the synthetic D3D-like example) × the
+   Jensen ratio `⟨1/R²⟩/⟨1/R⟩²` (≈ 5 % there) -- **+6.8 %** at the pedestal
+   (+1.0 % at ψ_N 0.1, +4.3 % at 0.5, +6.4 % at 0.9). The legacy bootstrap
+   drops by that fraction (before `p′G` is added); the unified engine,
+   which already used κ, is unchanged (`tests/test_one_conversion.py`). (The bracket alone, ~1.4 % at
+   the peak, is what this page used to quote; the Jensen term was missed.)
+
+**Refusals, never a silent zero.** The historical evaluation mapped every NaN
+of the Redl expressions to `j_BS = 0` at that node. `evaluate_jBS` now raises
+`physics.JBSEvaluationError` (a `ValueError`), naming the quantity, the first
+ψ_N and the grid index, for non-physical input (`n_e`, `n_i`, `T_e`, `T_i`
+not strictly positive, or `Z_eff < 1`, at any node), for a surface the tracer
+failed on (the all-zero row: a non-positive `⟨R⟩`, `⟨1/R⟩`, `⟨a⟩`, `⟨B²⟩` or
+`dV/dψ`, `F = 0`, `q = 0`, `f_T ≥ 1`; also `f_T ≤ 0` away from the axis), and
+for a non-finite Redl value anywhere but the END nodes. The END nodes -- those
+whose geometry is the clipped axis or separatrix surface, `ψ_N ≤ psi_pad` or
+`ψ_N ≥ 1 − psi_pad`, identified by coordinate -- keep the historical
+treatment exactly (a non-finite value there is zeroed and counted in
+`diag["n_nonfinite_zeroed_at_ends"]`). For every accepted input the output is
+bit-identical to the evaluator before the refusals (a fast test compares it
+against a verbatim copy). The production callers clip `Z_eff` at 1 before
+calling, as they always did.
+
+On a uniform grid it reproduces SWB's first-pass `⟨j·B⟩` **bit for bit** (on a
+build whose SWB accepts `psi_N=`). Grids whose first intervals are finer than
+`psi_pad` (a ρ-uniform grid near the axis) are handled without changing
+`psi_pad` and without merging surfaces: every point keeps its own profile value
+and gradient; only the geometry of the points inside the pad is looked up at
+`psi_pad`, once. It uses only primitives present on every supported OFT build
+(`get_profiles`, `sauter_fc`, `get_q`, `psi_bounds`, `redl_bootstrap`,
+`calculate_ln_lambda`), in either of their return layouts.
+
+### The loop
+
+```
+E_0   = anchor equilibrium (the source's total current, full pressure)
+jBS_0 = evaluate_jBS(E_0)                      # jbs_init="anchor" (default)
+for k:
+    E_k+1   = solve( closure on E_k's geometry, assembled with jBS_k )
+    J       = evaluate_jBS(E_k+1)
+    residuals(J, jBS_k, E_k+1, E_k)
+    jBS_k+1 = (1 − ω) jBS_k + ω J
+```
+
+Residuals, **all logged every pass**:
+
+| residual | definition | tolerance |
+|---|---|---|
+| `r_j` | `‖J − jBS_k‖_w / ‖J‖_w`, `‖f‖_w² = ∫ |w| f² dψ_N` with the pass's own Ip weights `w` | `jbs_rtol_j = 1e-3` |
+| `r_I` | `|∫ w (J − jBS_k) dψ_N| / I_p` (linear part of the closure's measure) | `jbs_rtol_Ip = 1e-4` |
+| `Δl_i` | `|l_i(E_k+1) − l_i(E_k)|` | `jbs_tol_li = 1e-3` |
+| `Δq0` | `|q0(E_k+1) − q0(E_k)|`, only where an axis row is active | `jbs_tol_q0 = 2e-3` |
+| `q0 − q0_target` | the true q0 residual on the pass's solved equilibrium; a criterion only with `jbs_loop_q0_corrector=True` on an axis-row channel (below) | `q0_tol = 0.01` (unchanged) |
+
+`r_j` and `r_I` are the **unrelaxed** fixed-point residual -- the distance
+between the bootstrap an equilibrium was solved with and the Redl bootstrap of
+that equilibrium. That is `1/ω` times the relaxed step `‖jBS_k+1 − jBS_k‖`, so
+the criterion is never looser than a step-size test. Converged means **every
+active criterion on two consecutive passes**. Ceilings (limits, not
+tolerances): `jbs_max_passes = 12` (baseline / reconstruction; 8 before 2026-10-07),
+`jbs_max_passes_draw = 12` for each loop of a draw (its anchor loop, each
+l_i-match candidate's coupling, each Fix C resample), and
+`jbs_max_passes_post_homotopy = 6` passes after a draw's coil homotopy when
+Redl on the delivered equilibrium misses (with the two-consecutive rule a
+stage whose first pass misses needs at least 3). The draw ceilings were
+raised from 6 / 2 once the golden case showed the standard draw's l_i-match
+coupling contracting at ≈0.38/pass from r_j ≈ 2e-2…1.2e-1 (7–8 passes) --
+a limit change; no tolerance moved. The post-homotopy ceiling was then
+raised from 4 to 6, an owner-approved change of a pass ceiling: in the
+passes-to-convergence study no draw needed more than 5 post-homotopy
+passes, and every draw a ceiling of 4 had rejected converged on its next
+pass; 6 is that measured need plus one pass. Again a limit change; no
+tolerance and no criterion moved.
+
+**Where a draw's loop starts.** Every draw's first loop starts from
+`evaluate_jBS` on the draw's **state anchor** (the archived total current at
+the draw's full pressure) with the draw's **own perturbed kinetics**
+(n_e, T_e, n_i, T_i, Z_eff; in delta mode composed as baseline + (that Redl −
+the σ=0 Redl reference); `jBS_diff` added in diff mode) -- never from the
+unperturbed baseline bootstrap. Later loops of the same draw (the next
+l_i-match candidate, a Fix C resample) start warm from the draw's previous
+converged bootstrap; the post-homotopy stage starts from the relaxed blend of
+the bootstrap the draw carries and Redl on the delivered equilibrium. Each loop
+record says which (`init_source`), and the per-draw block repeats the first
+one. The start changes the path only (a test runs the same draw loop from the
+baseline bootstrap and from the anchor Redl and gets the same fixed point).
+The large first residual of an l_i-match candidate's loop is geometric: the
+candidate's new inductive shape moves q and the flux range, and Redl with the
+**same** kinetics on that geometry differs by a few to ~10 % in I_BS.
+Relaxation, on two quantities, both of the **path** only (at the fixed point
+both blends are the identity):
+
+* **the bootstrap**, `jBS_k+1 = (1 − ω) jBS_k + ω J` with `ω = jbs_relax = 0.7`,
+  held fixed and halved (floor 0.25) only on **sustained** growth of `r_j` —
+  growth on `jbs_relax_halve_on = 3` consecutive passes (`1` restores the
+  earlier halve-on-every-growth schedule). Three growing passes at the floor
+  abort early.
+* **the solved current**, `js_k = (1 − β) js_k−1 + β jc_k` (from the second pass
+  on) with `β = jbs_relax_current = 0.7`: each pass closes on the *previous*
+  equilibrium's geometry, so the closure's current `jc` and the geometry it
+  produces form an oscillating two-state mode (l_i swings back by a fraction
+  g ≈ −0.5 per pass) that ω does not act on; `β ≈ 1/(1 − g)` damps it. The
+  record carries β, the per-pass gap `‖js − jc‖_w / ‖jc‖_w` and, next to it,
+  the **unrelaxed** closure-half residual `‖jc_k − js_k−1‖_w / ‖jc_k‖_w`
+  (`current_residual_unrelaxed`; it equals gap/(1 − β) on a blended pass, so
+  the gap understates it by the factor 1 − β, and it is also defined at
+  β = 1). Both are recorded only, **not gated**: the convergence gate is the
+  four criteria above. Whether to gate the unrelaxed residual (a stricter
+  "converged") is a pending decision, and the record exists so it can be
+  made with numbers. Applied where a pass solves one assembled j_phi (the IMAS baseline
+  loop in every mode and channel, the σ=0 check, the draws' anchor loops); not
+  in the standard draw's l_i-match coupling, the geqdsk reconstruction or the
+  MSE chord steps (whose linearisation is centred on the closure's own
+  current) — their records say so.
+
+A single growth of `r_j` is the forced response of that mode, not divergence,
+which is why ω is no longer halved on it. **None of the existing solver or closure tolerances
+(`nl_tol`, `maxits`, `structured_li_tol`, `q0_tol`, the soft solver's
+`rtol`/`max_iter`, `SIGN_ITER_MAX`) is touched**; these numbers define what
+"j_BS converged" means and are initial values, to be revisited with data.
+
+Failure is never silent. `jbs_loop_on_fail="raise"` (default) raises
+`jbs_loop.JBSNotConverged` carrying the whole residual history;
+`"flag"` delivers the last iterate with `jbs_converged=False` and a
+`"j_BS loop: …"` reason in `closure_limited_reasons`. A draw whose loop does
+not converge is a **failed draw** in either mode. A pass that can never count
+-- a gated l_i or q0 the step did not return (or returned non-finite), or an
+identically zero Redl bootstrap against a non-zero iterate -- ends the loop at
+that pass (then raise or flag as above) instead of running to the ceiling. A
+non-finite initial guess or evaluated bootstrap raises `jbs_loop.JBSNonFinite`
+(a `JBSNotConverged`) at once, with the pass number and the ψ_N location,
+whatever the policy: it is never blended into the next iterate or handed to a
+GS solve.
+
+### The q0 pin under the loop (`jbs_loop_q0_corrector`)
+
+This applies to the channels that pin the on-axis safety factor: IMAS
+baseline, `jBS_baseline_mode="ohmic"`, with `closure_channel=
+"sawtooth_bootstrap"`, or `"structured"` when the sawtooth gate admits the
+axis row.
+
+- **Default (`False`): record-only.** Every pass closes with the axis row
+  held at the anchor's requested axis current. The delivered equilibrium's
+  `q0 − q0_target` is recorded and flagged against `q0_tol`.
+- **`True`: the pin acts.** After pass k is solved, the q0 measured on its
+  equilibrium moves the row for pass k+1:
+
+  ```
+  j_ref0(k+1) = j0_solved(k) · q0(E_k+1) / q0_target
+  ```
+
+  This is the structured corrector's `j_ref0' = j_ref0 · q0_solved/q0_target`,
+  applied once per pass; the scalar corrector's Newton step is its
+  first-order expansion. `j0_solved` is the axis value of the current the pass
+  actually solved: under `jbs_relax_current = β` the equilibrium sees
+  `(1 − β) js_k−1(0) + β j_ref0(k)`, not the row. With β = 1 the two are the
+  same.
+
+  In the `q0 ~ 1/j0` model the update lands the row in one step, and the
+  solved axis current then follows it at the β rate. At the joint fixed point
+  the row stops moving exactly when `q0 = q0_target`, so, like ω and β, the
+  update changes the path and not the answer. The pin's criterion
+  `|q0 − q0_target| ≤ q0_tol` is **added** to the pass criteria next to
+  `Δq0 ≤ jbs_tol_q0`. So the loop converges on the bootstrap, I_p, l_i and q0
+  together, and the delivered equilibrium (the last one solved, whose
+  bootstrap was the last evaluated) meets all of them.
+- **MSE chord stage.** The chord steps are passes of the loop, so the stage's
+  refresh moves the row from each step's q0. Every chord step, the final
+  step and the refusal re-solve carry the same added criterion.
+- **Unchanged.** `q0_tol`, every loop tolerance and the pass ceilings do not
+  move. A joint iteration that does not converge within the ceiling raises
+  `JBSNotConverged`, or flags the slice under `jbs_loop_on_fail="flag"`. The
+  q0 residual history is in the message and in `jbs_loop["q0_pin"]`, and the
+  reason is in `closure_limited_reasons`. The delivered equilibrium is
+  checked against `q0_tol` once more after the correctors' readback, so no
+  path delivers a q0 outside `q0_tol` as converged.
+- **Records.** Per pass, in `jbs_loop["q0_pin"]`: the axis row, the solved
+  axis current, q0, the residual, the residual / `q0_tol` and the next row.
+  In `ip_closure`: `q0_pin_acted`, `q0_pin_n_row_updates`,
+  `q0_pin_axis_row_initial` / `_final`, `q0_residual_over_tol` and
+  `q0_pin_delivered_within_tol`. The run-time NOTICE names the mode.
+- **Not covered: the l_i row.** It stays held at its target either way; its
+  log-gain row update is a separate design, not part of this flag.
+
+### Where it runs
+
+- **IMAS baseline, `jBS_baseline_mode="ohmic"`** (every `closure_channel`):
+  each pass re-builds the closure geometry (FSA geometry, ⟨1/R²⟩, `w_lin`, the
+  affine `c`, the probe profile, `li_geom`) on the current iterate and re-solves
+  the channel's closure there. Held fixed: I_p and σ_Ip, the l_i target and
+  σ_li, the MSE chords, the prior ladders, and `q0_target` / the axis-current
+  row -- computed once from the source's total on the ORIGINAL anchor, because
+  they are data-derived targets, not forward-model quantities. The l_i model is
+  exact given its geometry, so with `li_geom` refreshed every pass its
+  frozen-geometry error vanishes at the fixed point, and the l_i corrector
+  *step* is not needed (no row rescaling). **The q0 residual is different.**
+  `q0_target = q0_anchor · j_ach0 / j_req0` is a first-order `q0 ~ 1/j_φ(0)`
+  mapping at the anchor, and at the loop's fixed point the held row enforces
+  `j_φ(0) = j_req0`, not `q0 = q0_target`. Refreshing the geometry therefore
+  does not remove the residual that the legacy Newton step removes. By default
+  (`jbs_loop_q0_corrector=False`) that residual is only recorded and flagged
+  against `q0_tol`; see "The q0 pin under the loop" below. The correctors
+  still run, in record-only mode on the delivered equilibrium, so every
+  bookkeeping field and every acceptance flag (`structured_li_tol`, `q0_tol`,
+  the round-trip gate) is written as before -- "predictor" = the first pass,
+  "corrected" = the delivered equilibrium.
+- **`"rescale"`**: the l_i-proxy root is re-solved on every iterate.
+- **`"diff"`**: the baseline total stays pinned to the source, so the baseline
+  itself needs no loop; `jBS_diff` is redefined as
+  `source j_BS − evaluate_jBS(delivered baseline, source kinetics)` -- a pure
+  model offset on the baseline geometry, frozen in ψ_N labels. A σ=0 draw
+  whose equilibrium returns to the baseline therefore reproduces the source
+  bootstrap exactly. Only the draws iterate. The stored split is then
+  normalised to the one reconstruction state (see "One reconstruction
+  state" below); the bootstrap and `jBS_diff` are untouched by that.
+- **MSE** (`closure_channel="structured"` with `mse_data`): converge the loop
+  WITHOUT the MSE term; the forward-difference Jacobian of tanγ once at that
+  state (j_BS held fixed during the differences -- an approximation of the loop
+  map's Jacobian, recorded as such); chord steps -- closure with the linearised
+  MSE term on the current geometry and bootstrap → solve → `evaluate_jBS`
+  (+ relaxation) → refreshed offset and closure state -- until the j_BS
+  residuals hold on two consecutive steps **and** tanγ moved by less than
+  `jbs_loop.MSE_CHORD_OFFSET_TOL_SIGMA = 0.1` σ on every chord between steps
+  (at most `jbs_max_passes` steps -- each chord step is also a pass of the
+  bootstrap loop); then the Jacobian is recomputed ONCE at
+  the converged state and one final step taken (a stale Jacobian biases the
+  stationary point of a chord iteration, not only its rate). The Jacobian
+  change and the objective change of that step are recorded.
+- **Draws** (`perturb_kinetic_equilibrium`): the per-draw composition is
+  unchanged (scale, smoothing or delta mode, floor, `jBS_diff`) with
+  `evaluate_jBS` on the draw's own equilibrium in place of SWB. Fix C: per GPR
+  candidate, {Redl → Ip renormalisation of the inductive with the R2 measure
+  rebuilt on the current iterate → solve}; every band-conditioning resample
+  converges its own loop. Standard l_i loop: the anchor bootstrap is converged
+  first; each candidate is then re-solved (root, `find_optimal_scale`,
+  corrective) while its bootstrap still moves beyond tolerance (Gauss–Seidel)
+  before the l_i band judges it. After the post-perturb coil homotopy, Redl on
+  the delivered equilibrium is checked against the bootstrap it carries;
+  outside tolerance, up to two passes at the tight coil stage, else the draw is
+  rejected. With `jbs_delta_mode` the σ=0 reference is `evaluate_jBS` on the
+  cache anchor, so delta mode and the shared mode coincide to loop tolerance
+  (the flag is kept for back-compatibility). The `PIN_JPHI` / `DIFF_BS`
+  diagnostics are unchanged.
+- **geqdsk reconstruction**: `E_0` is the g-file's own current at the full
+  pressure; the loop wraps the inductive fit + l_i secant; the corrective
+  iteration runs once afterwards and is followed by the **l_i re-match** of
+  its landed request (below), then a post-corrective check (up to
+  `jbs_max_passes` further passes of fit + l_i match + corrective +
+  re-match). Every pass ends on the re-matched state.
+- **`verify_sigma0_consistency`**: `passed` requires the draw's OWN route(s)
+  -- every route the configuration can use -- to reproduce the one
+  reconstruction state at zero perturbation, at the loop's unchanged
+  tolerances (below). The loop "solved the baseline's way" (the baseline
+  inductive held, one jphi-linterp solve per pass, which is how the
+  reconstruction's final state is solved) is kept beside it as
+  `passed_baseline_way`. Route R2's inductive Ip renormalisation keeps its
+  own, separately budgeted σ=0 invariant as well.
+
+### One reconstruction state, and what an unperturbed draw reproduces
+
+There are three levels: the INPUT (a g-file, or a modelling-source IDS); the
+bouquet RECONSTRUCTION, as close to the input as it can be while physically
+valid and carrying a neoclassical bootstrap current -- it is allowed to
+differ from the input (the input usually carries no Redl/Sauter bootstrap);
+and the DRAWS, perturbations of the reconstruction. With the loop on:
+
+- **The reconstruction is one equilibrium F.** The saved baseline g-file,
+  `l_i_target` and every recorded l_i / q0 / q95 (`Baseline.delivered_state`,
+  `reconstruction_metrics`), the archived baseline profiles, the centre of the
+  draws' l_i band and the reference of the zero-perturbation check are all F.
+  Its bootstrap is Redl evaluated on F (loop-converged).
+- **On the g-file path F keeps the l_i match to the input.** The corrective
+  iteration shapes the current toward the fitted target but moved l_i(3)
+  +0.40 % off the step-6 match on the synthetic example, and before this
+  change the baseline carried three states: the l_i-matched target
+  (0.653864), the post-corrective state (0.656455) and the saved g-file, a
+  single re-solve of the stored achieved current (0.653866). F is now the
+  corrective iteration's landed *request* re-matched in l_i by the same
+  secant step 5 uses, on the inductive amplitude of that request (the shape
+  the corrective iteration gave the inductive is kept; only its amplitude
+  relative to the bootstrap moves). F is a single jphi-linterp solve of a
+  known request -- the route every draw pass takes. (Alternative, not
+  taken: F = the post-corrective state, `l_i_target` = its l_i. That gives
+  up the l_i match -- the band centre would move +2.59e-3 in l_i, and q95 of
+  the reference by ≈0.024, about one ensemble σ -- and a single-solve route
+  cannot reach it.)
+- **The stored split is F in the form the draws consume it.** `j_phi`
+  (+ `jphi_diff`) is F's jphi-linterp request, normalised to I_p in the
+  'exact' FSA current measure ON F (the measure route R2 roots in; a uniform
+  factor, so F is unchanged); `j_BS` (+ `jBS_diff`) is the draws' own σ=0
+  bootstrap composition on F (Redl, scale, floor, `jBS_diff`); the fixed
+  parts are as read; `j_inductive` is the residual, so it carries the whole
+  normalisation. On the modelling-source example the source total read
+  0.965 I_p in that measure and the solver made it up uniformly; the stored
+  split no longer hands the draws a total 3.5 % short. In diff mode
+  `j_BS + jBS_diff` is still the source bootstrap exactly. On the g-file path
+  the inductive is floored at zero by the usual convention; a floored point
+  is one where a zero-perturbation draw cannot reproduce F, and is counted
+  (`delivered_state["n_floored_inductive"]`).
+- **Every draw stage is the identity at zero perturbation.** The state anchor
+  is one solve of the stored request (`jphi_diff` included) -- F. Route R2's
+  scale is 1 to rounding (same measure, normalised split). The standard
+  route's l_i stage targets ACHIEVED currents: it perturbs
+  `j_inductive - jphi_request_offset` (F's achieved current minus the σ=0
+  bootstrap and fixed parts), roots its inductive amplitude in the same
+  exact measure on the live geometry (was: the limiter-area flux integral,
+  which read the total 10–44 % high), so the root is 1; `find_optimal_scale`
+  then accepts its first trial (scale 1); and the corrective iteration starts
+  from `target + jphi_request_offset`, which at zero perturbation is F's own
+  request, so its first iterate IS F. The only residual departure there is
+  the corrective target's exact-measure I_p normalisation against the
+  solver's own (the measure's self-check, 1e-5–4e-4 of I_p), second order in
+  the state. The loop passes and the post-homotopy passes then find F's
+  bootstrap already self-consistent. Every sampled perturbation (kinetics,
+  inductive GPR, bootstrap scale, l_i target) enters as a departure from the
+  reconstruction's value.
+- **What is left non-identity by construction:** for an asymmetric
+  `jBS_scale_range` the draws' centre scale is not the reconstruction's;
+  `jBS_baseline_mode="ohmic"` (baseline-only; the draws refuse it) keeps its
+  split as before. (The electron-charge mismatch that used to sit here -- the
+  modelling-source forward solve at 1.602176634e-19 against the draws'
+  1.6022e-19, a σ=0 draw pressure 1.28e-5 relative high -- is gone under the
+  loop: every pressure there uses `physics.ELEMENTARY_CHARGE`; only the
+  frozen legacy path keeps `ELEMENTARY_CHARGE_LEGACY` for its thermal terms.)
+
+`jbs_init="swb"` starts from the legacy SWB result instead (A/B only; `psi_N=`
+is passed when the OFT build accepts it and the grid allows it, and the record
+says whether it was). The fixed point does not depend on the initial guess.
+
+The loop is refused with `single_profile_jphi=True` (no bootstrap component)
+and with `recalculate_j_BS=False`; set `jbs_self_consistent=False` for either.
+
+**Closure stop test inside the loop.** Each pass re-solves the closure on
+the new geometry, so the structured soft closure is called several times per
+slice. **Its acceptance criterion is changed for the loop only**: old
+criterion -- when no damped step descends, accept iff the scaled gradient is
+below `rtol·max|J|·max(√F, 1)`, else refuse; new criterion (with the loop on)
+-- the same, plus accept an iterate stationary to within the objective's
+rounding noise (`stop_reason="noise_floor"`). It therefore accepts points the
+old test refused (and only those: every result the old test returned is
+unchanged). It is opt-in (`accept_noise_floor=True`, passed by the loop's
+closure calls only); every acceptance is recorded (gradient, predicted
+decrease, noise estimate, `n_noise_floor_accepts`) and printed, and a noise
+estimate that is not finite and positive accepts nothing. A refusal inside
+the loop is retried once from the previous pass's coefficients
+(`closure_retry=1`, logged) -- see the soft closure under
+[the structured closure](#the-structured-closure-and-its-l_i-constraint).
+
+### What is recorded
+
+`li_metrics["jbs_loop"]` (and `ip_closure["jbs_loop"]` in ohmic mode;
+`reconstruction_metrics["jbs_loop"]` on the geqdsk path; in the archive, the
+schema-v3 `jbs_loop` block -- attrs `jbs_converged`, `jbs_n_passes`,
+`jbs_loop_json` -- on every loop draw and on `_baseline`, read with
+`bouquet.utils.load_jbs_loop`, `DrawView.jbs_loop` or
+`ScanView.baseline_jbs_loop`; see
+[archive-schema.md](archive-schema.md#v2--v3-the-self-consistent-bootstrap-record)): `enabled, init, grid, n_passes, converged,
+stop_reason, tolerances, omega[], r_j[], r_I[], dl_i[], dq0[], I_BS[],
+jBS_peak_psiN[], jBS_peak[], wall_s, evaluate_jBS_version, oft_build`
+(`version`, 12-character `git_hash`, `library_sha256` of the loaded
+`liboftpy`, `sources_sha256` of the package's Python sources, `build_id`; no
+filesystem path -- records
+written by earlier builds of this branch carried the OFT package path there),
+`current_gap[]` and, next to it, `current_residual_unrelaxed[]` (record only,
+see above), plus `jBS_diff_definition` in diff mode, the per-pass closure log
+in ohmic mode, the MSE chord-stage block, and the post-move check on draws and
+reconstructions.
+
+### What it does not change
+
+The kinetic profiles stay pinned to their ψ_N labels: the loop makes the
+geometry Redl sees the delivered equilibrium's and the gradients true-grid, but
+it does not move a measurement to a different flux surface when the current
+redistributes. The Redl drive is main-ion + electron (the model definition);
+impurity and fast-ion pressure enter the GS pressure, not the bootstrap drive.
+
+**Cost.** SWB's generic-seed cold solves are replaced by warm-started passes;
+on the synthetic D3D-like IMAS example the loop converged in 2 passes
+(`rescale`), 5 (`bootstrap`), 6 (`sawtooth_bootstrap`) and 8 (`structured`, soft
+preset with the axis row -- its one-sided prior makes the closure map
+non-smooth, which costs relaxation), and a Fix-C draw at 5 % kinetic / j_φ σ
+needed 7 passes -- one more than the draw default.
+
+## The unified reconstruction engine (`reconstruction_engine`, default off)
+
+`GenerationConfig.reconstruction_engine="unified"` (default `"legacy"`; with
+the factories, `Bouquet.from_geqdsk/from_imas(..., reconstruction_engine=
+"unified")`, which leave the legacy-path workflow settings at their defaults)
+replaces the g-file reconstruction and the IMAS baseline with ONE loop for
+both inputs ([engine.md](engine.md)). Every current component is stored as a
+parallel current `<j.B>`: the g-file's from identity (I0) on its own surfaces
+(minus Redl on the anchor, smoothed with the existing inductive basis, no
+amplitude search), the IDS's as `|B0|` times its `<j.B>/B0` fields. Each pass
+composes the solver's `<j_phi>` on the latest SOLVED geometry with the
+field-aligned conversion `<j.B> F<1/R>/<B^2>` plus the pressure-driven term
+`p'(<R> - F^2<1/R>/<B^2>)` recomputed from that pass's own `p'` (identity
+I2) -- so the Redl bootstrap enters in the solver-consistent convention, not
+the legacy `<j.B>/(F<1/R>)` (about 6 % high at the peak), and a pressure change
+is never booked as inductive current. The structured closure then meets the
+rows (Ip; l_i hard at 1e-3 for a g-file, soft σ 0.04 for an IDS; optional q0
+at like radii; optional E_r-corrected MSE chords), each carrying the
+discrepancy measured on the previous solved equilibrium, and ONE GS solve is
+taken per pass. Convergence uses only the existing tolerances (plus the
+closure-half current gate as a standing criterion); the delivery solve is
+checked on every row and is the reconstruction. Stage 2 builds the baseline
+only: the draws refuse an engine baseline until they run on the engine.
+
+## The pressure handed to the solver: separatrix pressure and the edge P′ pin
+
+Every Grad-Shafranov solve in the package hands the solver two things about
+the pressure: a `P'` profile on `psi_N` and an axis-pressure target. One
+module builds both (`bouquet/edge_pressure.py`), for every path -- the legacy
+reconstruction and draws, the modelling-source forward solve, the
+zero-perturbation checks, the unified engine and its draws.
+
+**The convention of the solver.** The solver builds the pressure by
+integrating `P'` inward from the plasma boundary starting at ZERO, then
+rescales `P'` so that the axis value equals the target. Its `P'` is a
+piecewise-linear function of `psi_N` that is zero outside the plasma and may
+take any value at `psi_N = 1` (`P'` then jumps to zero across the boundary).
+So a non-zero `P'` at the boundary is representable; a non-zero pressure
+there is not, and need not be: only `P'` enters the Grad-Shafranov equation.
+
+Two settings follow, both on `GenerationConfig`. At the PRE-CHANGE settings
+(`edge_pprime_pin=True`, `separatrix_pressure="legacy"`) every path hands
+the solver what it did before the settings existed, bit for bit (proven by
+frozen-copy tests). Since 2026-10-02 the default of `separatrix_pressure` is
+`"offset"`, so the defaults are no longer the pre-change settings:
+
+| setting | default | other value |
+|---|---|---|
+| `edge_pprime_pin` | `True` (pre-change): the last node of `P'` (`psi_N = 1`) is set to zero, so `P'` ramps linearly to zero across the final grid interval | `False`: the last node keeps the profile's own derivative |
+| `separatrix_pressure` | `"offset"`: the axis target is `p_axis - p_sep`, and `p_sep` is added back wherever pressure, beta or stored energy is reported or delivered | `"legacy"` (pre-change): the axis target is the full axis pressure `p_axis` |
+
+`p_sep` is the pressure handed to the solver at its last node -- the TOTAL
+solve pressure (thermal + impurity + fast, and the pressure anchor where a
+path uses one), defined once in `edge_pressure.separatrix_pressure_of`. Each
+draw uses its own, from its own perturbed pressure.
+
+**What `"legacy"` does when `p_sep` is not zero.** The solver's pressure is
+zero at the boundary, so it reaches the full axis target only by inflating
+`P'` everywhere by `p_axis / (p_axis - p_sep)`. The equilibrium is then that
+of the pressure `p_axis (p - p_sep) / (p_axis - p_sep)`: too steep by that
+factor, and its `beta` and `W_MHD` are neither the input's full-pressure
+values nor its `p - p_sep` values. `"offset"` hands the solver the axis
+target `p_axis - p_sep` that the input's own `P'` integrates to, so the
+solver's rescaling of `P'` to meet its target is reduced to the
+discretisation of that integral (not exactly 1: estimated 1.017 at 129
+nodes and 1.005 at 257 on a smooth synthetic profile) instead of
+`p_axis / (p_axis - p_sep)`. That is a PHYSICS change relative to
+`"legacy"`: `P'`, the pressure-driven current and the Shafranov shift move
+by about the factor `(p_axis - p_sep) / p_axis`.
+
+**Why `"offset"` is the default (owner-approved change, 2026-10-02).** On
+real g-file and IDS cases (pin on), `"offset"` brought the full-frame
+`beta_N` and `W_MHD` closer to the input on every comparable g-file case, by
+1.4-8 points (median 3.5), and by about 0.5 points on IDS slices. Every
+case converged under it, with the same passes, solves and wall time, and
+`l_i`, `q` and the current distances did not move. The solver-frame gaps
+grew (median 1.4 points on g-files): under `"legacy"` the inflated `P'` had
+been compensating a deficit in that frame. For an existing run with
+`p_sep != 0` the change means: `P'` in the solve is scaled by
+`(p_axis - p_sep) / p_axis`, and the reported pressure, `beta`, `W_MHD` and
+the delivered `PRES` move toward the input's full-pressure values. With
+`p_sep = 0` nothing changes. `separatrix_pressure="legacy"` reproduces the
+pre-change numbers; a stored config that predates the setting reloads with
+`"legacy"`.
+
+**What the edge pin does.** With the pin on, the pressure gradient is
+truncated in the last grid interval, and the pressure-driven part of the
+current, `P' (<R> - F^2 <1/R> / <B^2>)`, is forced to zero at the boundary.
+With it off the profile keeps its pedestal gradient to the separatrix. For
+the same requested `<j_phi>` this changes how the edge current is split
+between the `P'` and `FF'` terms in the last interval (`FF'` carries less,
+and can change sign there), the pressure-driven current at the boundary, and
+with them the edge current and `q95`. It is a PHYSICS change when turned off.
+
+**Reporting under `"offset"`: two frames, compared like for like.**
+
+- *solver frame* -- the solver's own statistics, built from `p - p_sep`: what
+  the equilibrium responds to. Compare with an input's `p - p_edge`
+  quantities (a magnetics-only input usually has zero edge pressure already).
+- *full frame* -- with `p_sep` added back: what a kinetic input reports.
+  With `V` the plasma volume and `int p dV` of the solved equilibrium (both
+  the solver's own numbers: `vol` and `W_MHD / 1.5`),
+
+  ```
+  W_MHD(full)  = W_MHD(solver) + 1.5 p_sep V
+  beta_X(full) = beta_X(solver) * (int p dV + p_sep V) / int p dV      X = p, t, N
+  P_ax(full)   = P_ax(solver) + p_sep
+  ```
+
+  (every beta of the solver is `2 mu0 <p> / B_ref^2` with the same reference
+  field, so the constant adds `2 mu0 p_sep / B_ref^2`). With nothing added
+  back the two frames ARE the solver's numbers.
+
+`Baseline.edge_pressure`, the engine record (`edge_pressure`), the
+reconstruction summary (`pressure_like_for_like`: each frame against the
+input's same-definition quantity, a g-file's edge pressure read from its own
+`PRES`) and every draw record carry `p_sep` and both frames; the archive
+stores the record on `_baseline` and on every draw (`edge_pressure_json`).
+The headline `beta_N` / `beta_p` / `W_MHD` of a summary are the full-frame
+values under `"offset"` and the solver's own under `"legacy"`.
+
+**Delivery under `"offset"`.** Every g-file bouquet writes carries the FULL
+pressure -- the archive's `_baseline` and each draw (`generate()`), and the
+reconstruction's own (`Bouquet.save_baseline_eqdsk`): `PRES` is the solver's
+pressure plus that equilibrium's own `p_sep`, `PPRIME` is unchanged, so
+`PRES` still differentiates to `PPRIME` and equals the input pressure at the
+edge. The IMAS export is built from the delivered g-file and so carries the
+same pressure; nothing downstream adds `p_sep` to a written `PRES` again. A
+bare `mygs.save_eqdsk` bypasses this and writes the solver frame (`PRES`
+zero at the boundary).
+
+**Where the model stops.** A pressure that is `p_sep` just inside the
+boundary and zero just outside is not physical: the real separatrix pressure
+continues into the scrape-off layer, which a vacuum-outside free-boundary
+equilibrium cannot represent. The constant `p_sep` exerts no force in the
+model -- the equilibrium inside the boundary is the one the input's `P'` asks
+for -- and is bookkeeping for readers of the pressure. The same holds for the
+`P'` jump at the boundary with the pin off: it is the truncation of a
+gradient that in reality continues outward.
+
+**Not covered.** The solver's own bootstrap helper (`solve_with_bootstrap`,
+used by the legacy non-loop routes for their intermediate bootstrap
+evaluation) builds its own `P'` and axis target inside the solver package
+and is not reached by either setting (it keeps the pre-change ones; a
+printed note says so whenever the settings are not the pre-change ones --
+the default included); the states a run delivers are solved by bouquet's
+own calls, which are. The g-file READER's edge extrapolation of
+`PPRIME` / `FFPRIM` is a separate, unchanged option.
 
 ## Kinetics regridding
 
@@ -359,6 +988,15 @@ the input g-file, which is an l_i-versus-peakedness tradeoff intrinsic to
 matching both. Pinning the core has been tried and is unstable. See
 [architecture.md §16](../architecture.md#16-known-limitations-and-future-work).
 
+**Known error, kept for legacy bit-identity: index-for-index ψ_N readbacks.** On a uniform ψ_N grid (every g-file run), the legacy path samples the solver at its own padded points, `linspace(psi_pad, 1 - psi_pad, n)`, and pairs those samples index for index with profiles on the nodes, `linspace(0, 1, n)`. Each pairing is misplaced by up to `psi_pad`, most of all at the edge.
+
+Sites:
+- the corrective iteration's measurement (`_corrective_output_jphi`, `coords.readback_kw`'s uniform branch);
+- the cylindrical l_i proxy (`calc_cylindrical_li_proxy`);
+- the self-consistent loop's delivered state (`_deliver_request_split`).
+
+This is wrong, and it is kept only so that legacy ψ_N results and their goldens stay bit-identical with main. On the D3D-like g-file it costs q95 −0.48% against the g-file's own q; with the readbacks moved to the nodes, the same run is −0.036% off, and l_i(3) moves from 0.65594 to 0.65397. The unified engine, swb, Φ_N runs and the archived achieved current all sample at, or interpolate onto, the nodes, and are not affected.
+
 A separate known issue — the small constant boundary offset from `jphi-linterp`
 edge/separatrix handling that sets the ~0.5 mm σ=0 floor — is written up in
 [ISSUE_jphi_edge_reconstruction.md](ISSUE_jphi_edge_reconstruction.md).
@@ -488,7 +1126,23 @@ Two statements about the data, one prior:
   ```
 
   over the same eight unknowns — Gauss–Newton with Levenberg damping, no GS
-  solves, converged to 1e-10 relative. The prior is the *same* one: σ = W^(−1/2)
+  solves, converged to 1e-10 relative. When no damped step can be verified
+  downhill, the iterate is accepted only if the scaled gradient is below
+  `rtol·max|J|·max(√F, 1)` (`stop_reason="gradient_floor"`), or if it is
+  stationary to within the objective's **rounding noise**
+  (`stop_reason="noise_floor"`): the gradient below the floor that noise implies
+  and every Levenberg trial's predicted decrease below
+  `noise_F = 2 ε Σ_i (2|r_i| m_i + r_i²)` (`m_i` = the magnitude of the terms
+  row i is computed from, in σ units — an MA-scale I_p difference over a
+  kA-scale σ_Ip is what makes it exceed the `F·1e-14` acceptance slack).
+  The noise-floor acceptance applies **only with
+  `accept_noise_floor=True`**, which the self-consistent bootstrap loop's
+  closure calls pass; the default (`False`, every frozen-path call) is the
+  historical strict solver. An acceptance is printed as well as recorded, and
+  a non-finite or non-positive noise estimate accepts nothing.
+  Otherwise it refuses, as before. Inside the self-consistent loop a refused
+  soft closure is retried ONCE from the previous pass's coefficients
+  (`closure_retry=1`, logged); a second refusal is a real one. The prior is the *same* one: σ = W^(−1/2)
   of `structured_weights`, so a hard/soft pair differs only in what is claimed
   about the data. The on-axis-current row stays hard in both (a q0 pin is a
   topological statement, not a measurement with a σ). `structured_ip_sigma=None`
@@ -663,7 +1317,7 @@ unvalidated.
 | reason | what it means |
 |---|---|
 | `raw components miss Ip by …% (> …%)` | the *unscaled* components are far from I_p, so the closure is being asked for a large reconciliation however it distributes it |
-| `bs_scale … < …` | the closure paid for I_p by scaling the bootstrap down past `bs_scale_min` |
+| `bootstrap_scale_out_of_prior: bs_scale … outside 1 +/- 0.5 …` | the closure's bootstrap scale left the ±50 % bootstrap prior (`utils.BS_SCALE_PRIOR_HALFWIDTH`), either way: a **closure failure, not a finding**. Printed and warned loudly, never clamped. Evaluated on every path since 2026-10-06 -- the legacy IMAS channels, both engine paths (the effective scale `bs_scale_eff`, the `s_bs(ψ)` range recorded beside it; the g-file engine path records it in `reconstruction_metrics["closure_health"]`, the IDS path in `ip_closure` and `li_metrics["bootstrap_prior"]`) and the legacy g-file path (the inductive fit's scale, 1.0 unless `rescale_j_BS`). Until then only `bs_scale < 0.5` was flagged, and only on the IMAS paths |
 | `soft Ip beyond 1 sigma_Ip (z_Ip = …)` | soft channel only: the **delivered** hybrid's I_p sits more than 1 σ_Ip from the measurement. A small offset is the channel working; past 1 σ it is worth seeing. The corrector *replaces* this flag rather than stacking a stale one |
 | `l_i misses its hard row by … (> tol …) after … corrector solve(s)` | hard channel only: the corrected l_i is still outside `structured_li_tol`. Before this existed, `closure_health` did not look at l_i at all |
 
@@ -740,7 +1394,10 @@ trusting the answer —
 
 `STRUCTURED_WEIGHTS_UNIFORM` is the no-prior sensitivity: the difference between
 the two answers is the part of the result the prior, not the data, is holding
-up, and off the original device it is the first thing to run.
+up, and off the original device it is the first thing to run. "No prior" holds
+only without MSE data: with `mse_data` the objective gains the chords' χ², the
+weights become an absolute σ⁻² that trades against it, and the uniform ladder
+is a σ = 1 prior on every coefficient.
 
 Two guards keep the default from being worse than no default:
 

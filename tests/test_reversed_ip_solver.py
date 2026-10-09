@@ -152,7 +152,8 @@ def _probe(dd_path, outdir):
     os.makedirs(outdir, exist_ok=True)
     b = bq.Bouquet.from_imas(dd_path, mesh=mdd.EXAMPLE_MESH,
                              time=mdd.EXAMPLE_TIME, nthreads=1,
-                             header=os.path.join(outdir, "rev"), n_draws=1)
+                             header=os.path.join(outdir, "rev"), n_draws=1,
+                             reconstruction_engine="legacy")
     gen0 = copy.deepcopy(b.config.generation)
     b.setup_solver()
     for name, overrides in _configs():

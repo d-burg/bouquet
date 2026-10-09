@@ -10,6 +10,8 @@ template's negative beam current: j_inductive off by 2|j_NBI|).
 Checked on the synthetic D3D-like example and its four orientation mirrors
 (tests/_mirror_dd.py): the export of a mirrored source IS the mirror of the
 normal export, field for field, and re-reads to a bit-identical Baseline.
+The export holds only its slice (``write_imas_draw``), read here as ``[-1]``:
+the example's last slice is the one exported.
 """
 import json
 import os
@@ -103,15 +105,15 @@ class TestExportIsInTheSourceFrame:
         # one frame inside the file: ip, the written currents and the kept
         # template beam current all carry the source's Ip sign
         s = orient[0]
-        ts = got["equilibrium"]["time_slice"][2]
+        ts = got["equilibrium"]["time_slice"][-1]
         assert np.sign(ts["global_quantities"]["ip"]) == s
-        cp = got["core_profiles"]["profiles_1d"][2]
+        cp = got["core_profiles"]["profiles_1d"][-1]
         assert np.sign(np.sum(cp["j_tor"])) == s
         assert np.sign(np.sum(cp["j_total"])) == s
-        nbi = got["core_sources"]["source"][0]["profiles_1d"][2]["j_parallel"]
+        nbi = got["core_sources"]["source"][0]["profiles_1d"][-1]["j_parallel"]
         assert np.sign(np.sum(nbi)) == s
         # and F agrees with the kept b0
-        b0 = got["equilibrium"]["vacuum_toroidal_field"]["b0"][2]
+        b0 = got["equilibrium"]["vacuum_toroidal_field"]["b0"][-1]
         assert np.all(np.sign(ts["profiles_1d"]["f"]) == np.sign(b0))
 
     def test_positive_ip_values_are_the_archive_values(self, tmp_path, base):
@@ -123,12 +125,12 @@ class TestExportIsInTheSourceFrame:
         dd, bl = base
         _, out = _export(tmp_path, "n", dd, bl, _stamp(1.0, 1.0))
         g = read_geqdsk(_GEQ)
-        p1 = out["equilibrium"]["time_slice"][2]["profiles_1d"]
+        p1 = out["equilibrium"]["time_slice"][-1]["profiles_1d"]
         assert p1["dpressure_dpsi"] == np.asarray(g.pprime, float).tolist()
         assert p1["f_df_dpsi"] == np.asarray(g.ffprim, float).tolist()
         assert p1["q"] == np.asarray(g.qpsi, float).tolist()
         assert p1["f"] == (-np.asarray(g.fpol, float)).tolist()     # b0 < 0
-        gq = out["equilibrium"]["time_slice"][2]["global_quantities"]
+        gq = out["equilibrium"]["time_slice"][-1]["global_quantities"]
         assert gq["ip"] == float(g.Ip) > 0.0
 
     def test_unstamped_archive_restores_the_template_orientation_and_warns(
@@ -161,6 +163,6 @@ class TestExportIsInTheSourceFrame:
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             _, got = _export(tmp_path, "o", m, bl, st)
-        cp = got["core_profiles"]["profiles_1d"][2]
+        cp = got["core_profiles"]["profiles_1d"][-1]
         assert np.sign(np.sum(cp["j_tor"])) == 1.0
-        assert got["equilibrium"]["time_slice"][2]["global_quantities"]["ip"] > 0
+        assert got["equilibrium"]["time_slice"][-1]["global_quantities"]["ip"] > 0

@@ -30,6 +30,8 @@ from .utils import (
     count_equilibria,
     list_equilibrium_indices,
     discover_scan_keys,
+    group_coord,
+    profile_coord,
     select_closed_lcfs,
 )
 from .io import read_geqdsk
@@ -157,7 +159,11 @@ def _lcfs_from_psi(mygs, psi_arr, isoflux_fallback, psi_lcfs_val=None):
         plt.close(_fig_tmp)
     # Longest CLOSED segment: on a diverted equilibrium the open separatrix
     # branch to the divertor can be longer than the LCFS itself (issue #33).
-    _lcfs = select_closed_lcfs(_segs, context="_lcfs_from_psi")
+    # ... and the one that goes around the magnetic axis, when the solver
+    # reports one (another closed loop of the level set is not the boundary)
+    from .utils import magnetic_axis_of
+    _lcfs = select_closed_lcfs(_segs, context="_lcfs_from_psi",
+                               axis=magnetic_axis_of(mygs))
     if _lcfs is not None:
         return _lcfs
     return isoflux_fallback
@@ -237,6 +243,50 @@ def _isoflux_deviation_plot(ax, fig, iso_pts, lcfs_pts, R_bnd, Z_bnd,
     return devs, max_mm, rms_mm
 
 
+def _result_is_phi(r):
+    """True when a recon result's ``psi_N_grid`` is Φ_N (it differs from the
+    g-file's ψ_N)."""
+    x, e = np.asarray(r['psi_N_grid'], float), np.asarray(r['eqdsk_psi_N'], float)
+    return x.shape != e.shape or not np.allclose(x, e)
+
+
+def _relabel_comparison(fig):
+    """Φ_N axes on a comparison figure; profiles stay at the g-file nodes and
+    P', FF' are d/dψ there."""
+    for a in fig.axes:
+        if a.get_xlabel() == r'$\psi_N$':
+            a.set_xlabel(r'$\Phi_N$')
+        t = a.get_title()
+        for old, new in ((r"$P'(\psi_N)$", r"$P' = dp/d\psi$"),
+                         (r"$FF'(\psi_N)$", r"$FF'$")):
+            t = t.replace(old, new)
+        a.set_title(t)
+
+
+
+def _bootstrap_model_suffix(record_or_flag):
+    """``" (self-consistent Redl bootstrap)"`` / ``" (frozen SWB bootstrap
+    (legacy))"`` for a legend label.  ``record_or_flag``: a
+    ``jbs_self_consistent`` bool, a loop record (dict -> self-consistent) or
+    ``None`` (no record -> the frozen bootstrap)."""
+    from .schema import bootstrap_label
+    sc = (record_or_flag if isinstance(record_or_flag, (bool, np.bool_))
+          else record_or_flag is not None)
+    return f" ({bootstrap_label(sc)})"
+
+
+def _archive_bootstrap_self_consistent(scan_group) -> bool:
+    """Whether an archive scan group's bootstrap came from the
+    self-consistent loop: the schema-v3 ``jbs_loop`` block on ``_baseline`` or
+    on any draw.  v2 archives and ``jbs_self_consistent=False`` runs carry
+    none -> ``False`` (the frozen SWB bootstrap)."""
+    from .schema import JBS_LOOP_JSON_ATTR
+    if "_baseline" in scan_group and \
+            JBS_LOOP_JSON_ATTR in scan_group["_baseline"].attrs:
+        return True
+    return any(k.isdigit() and JBS_LOOP_JSON_ATTR in scan_group[k].attrs
+               for k in scan_group)
+
 def plot_tokamaker_comparison(mygs, all_results, plot_idx=None):
     """Compare TokaMaker reconstructions against source geqdsk files.
 
@@ -298,7 +348,8 @@ def plot_tokamaker_comparison(mygs, all_results, plot_idx=None):
             axes[0, 1].plot(psi_N, r['j_inductive_fit'] / 1e6, color=color, lw=_LW, ls='--',
                             label=f'{lbl} $j_{{\\rm ind}}$')
             axes[0, 1].plot(psi_N, r['j_BS_used'] / 1e6, color=color, lw=_LW, ls='-.',
-                            label=f'{lbl} $j_{{BS}}$')
+                            label=f'{lbl} $j_{{BS}}$'
+                            + _bootstrap_model_suffix(r.get('jbs_loop')))
 
             # (0,2) residuals
             res = (r['j_phi_fit'] - r['eqdsk_jtor']) / 1e6
@@ -417,6 +468,8 @@ def plot_tokamaker_comparison(mygs, all_results, plot_idx=None):
         axes[2, 2].legend(fontsize=8)
         axes[2, 2].grid(axis='y', ls=':')
 
+        if any(_result_is_phi(all_results[k]) for k in keys):
+            _relabel_comparison(fig)
         plt.tight_layout()
         plt.subplots_adjust(top=0.94)
         plt.show()
@@ -451,7 +504,8 @@ def plot_tokamaker_comparison(mygs, all_results, plot_idx=None):
         ax.plot(psi_N, r['j_inductive_fit'] / 1e6, color=_C1, lw=_LW,
                 label=r'$j_\mathrm{inductive}$ (fit)')
         ax.plot(psi_N, r['j_BS_used'] / 1e6, color=_C3, lw=_LW, ls='-.',
-                label=f'$j_{{BS}}$ (\u00d7{r["bs_factor_final"]:.3f})')
+                label=f'$j_{{BS}}$ (\u00d7{r["bs_factor_final"]:.3f})'
+                + _bootstrap_model_suffix(r.get('jbs_loop')))
         ax.plot(psi_N, r['j_phi_fit'] / 1e6, color=_C2, ls='--', lw=_LW,
                 label=r'$j_\mathrm{ind} + j_{BS}$')
         ax.plot(psi_N, r['eqdsk_jtor'] / 1e6, 'k-', lw=_LW,
@@ -546,6 +600,8 @@ def plot_tokamaker_comparison(mygs, all_results, plot_idx=None):
             ax.text(bar_.get_x() + bar_.get_width() / 2, _ytxt,
                     f'{val_:+.3f}%', ha='center', va=_va, fontsize=9, fontweight='bold')
 
+        if _result_is_phi(r):
+            _relabel_comparison(fig)
         plt.tight_layout()
         plt.subplots_adjust(top=0.94)
         plt.show()
@@ -710,16 +766,9 @@ def _pressure_components(bl, psi_eq=None):
     regridded onto the total's grid before differencing. Single-grid archives
     (OMAS) skip this since the shapes already match.
 
-    KNOWN LIMITATION with fast ions.  The solve path derives ``Z_imp`` and
-    ``p_imp`` on the THERMAL electron density ``ne - z_fast``; this display
-    path cannot, because ``z_fast`` is not written to the archive (only
-    ``p_fast`` rides in the total).  So on a fast-ion source the impurity
-    term recomputed here is the uncorrected, inflated one, and the
-    impurity/fast split shown is NOT the split the GS solve used -- the
-    plotted impurity is too large and the fast remainder correspondingly too
-    small.  Thermal and total are unaffected, as is every solve-path
-    consumer.  Archiving ``z_fast`` is what would close this; until then the
-    decomposition is diagnostic only.
+    Fast ions: an archived ``z_fast`` marks a thermal ``n_i``, so it is
+    subtracted from ``n_e`` and the archived ``Z_imp`` is used; an archive
+    without them carries a total ``n_i``, paired with the full ``n_e``.
     """
     if "pressure" not in bl or "pressure_thermal" not in bl:
         return None
@@ -732,7 +781,14 @@ def _pressure_components(bl, psi_eq=None):
         ti = np.asarray(bl["T_i"], float)
         zeff = np.asarray(bl["aux_zeff"] if "aux_zeff" in bl else bl["Zeff"], float)
         from .physics import effective_impurity_charge, impurity_pressure
-        imp = impurity_pressure(ne, ni, ti, effective_impurity_charge(ne, ni, zeff))
+        if "z_fast" in bl:
+            zf = np.asarray(bl["z_fast"], float)   # same grid as n_e / n_i
+            if zf.shape == ne.shape:
+                ne = np.maximum(ne - zf, 0.0)
+        Z_imp = bl.get("Z_imp")
+        if not Z_imp:
+            Z_imp = effective_impurity_charge(ne, ni, zeff)
+        imp = impurity_pressure(ne, ni, ti, Z_imp)
     except Exception:
         imp = np.zeros_like(total)
     # Align kinetics-derived terms (imp; thermal defensively) onto the total's
@@ -1105,6 +1161,19 @@ def _source_kind(h5path, scan_key=None):
         return None
 
 
+_PSI_XLABELS = (r"$\psi_N$", r"$\hat{\psi}$")
+
+
+def _relabel_x(figs, h5path, scan_key=None):
+    """Relabel ψ_N x axes as Φ_N when the archive's profiles are on Φ_N."""
+    if profile_coord(h5path, scan_key) != "phi_n":
+        return
+    for f in (figs if isinstance(figs, (list, tuple)) else [figs]):
+        for a in getattr(f, "axes", []):
+            if a.get_xlabel() in _PSI_XLABELS:
+                a.set_xlabel(r"$\Phi_N$")
+
+
 def _lcfs_from_psigrid(eq):
     r"""Contour the LCFS from an eqdsk's 2-D :math:`\psi` grid (``psi_RZ``).
 
@@ -1201,17 +1270,20 @@ def _load_flux_functions(h5path, scan_key=None, indices=None):
     ``.ffprim``) on the geqdsk's own uniform :math:`\hat\psi` grid (0..1,
     length ``nw``), which is independent of the kinetic ``psi_N``. Returns
     ``(baseline, draws)`` where each entry is a dict
-    ``{"psi_N", "q", "ffprime"}`` (``baseline`` is ``None`` when the
+    ``{"x", "q", "ffprime"}`` (``baseline`` is ``None`` when the
     baseline group carries no eqdsk; draws without eqdsk are skipped).
+    ``x`` is the geqdsk's ψ_N, or its Φ_N = ``rhovn**2`` in a Φ_N archive.
     """
     from .io import GEQDSKEquilibrium
     from .utils import _scan_key, _group_path
+    phi = profile_coord(h5path, scan_key) == "phi_n"
 
     def _ff(raw):
         eq = GEQDSKEquilibrium.from_bytes(raw)
         q = np.asarray(eq.qpsi, dtype=float)
-        return {"psi_N": np.linspace(0.0, 1.0, len(q)),
-                "q": q, "ffprime": np.asarray(eq.ffprim, dtype=float)}
+        x = (np.asarray(eq.rhovn, dtype=float) ** 2 if phi
+             else np.linspace(0.0, 1.0, len(q)))
+        return {"x": x, "q": q, "ffprime": np.asarray(eq.ffprim, dtype=float)}
 
     def _eqdsk_in(grp):
         name = find_bytes_dataset(grp)
@@ -1248,8 +1320,8 @@ def draw_flux_function(ax, key, ylabel, baseline_ff, perturbed_ff,
     r"""Draw a flux-function profile (``key`` = ``"q"`` or ``"ffprime"``).
 
     Baseline in black, perturbed draws as thin gold curves -- mirroring
-    :func:`draw_jphi_total`. Each draw carries its own ``psi_N`` (the
-    geqdsk grid). ``q_marker`` adds the q=1 sawtooth reference line.
+    :func:`draw_jphi_total`. Each draw carries its own ``x`` (the
+    geqdsk grid, see :func:`_load_flux_functions`). ``q_marker`` adds the q=1 sawtooth reference line.
     """
     ax.cla()
     ax.set_ylabel(ylabel)
@@ -1260,10 +1332,10 @@ def draw_flux_function(ax, key, ylabel, baseline_ff, perturbed_ff,
         for i, d in enumerate(perturbed_ff):
             if d is None:
                 continue
-            ax.plot(d["psi_N"], d[key], c=_GOLD, lw=1.0, alpha=0.55,
+            ax.plot(d["x"], d[key], c=_GOLD, lw=1.0, alpha=0.55,
                     label=f"perturbed ({n})" if i == 0 else None, zorder=3)
     if baseline_ff is not None:
-        ax.plot(baseline_ff["psi_N"], baseline_ff[key], c="k", lw=2,
+        ax.plot(baseline_ff["x"], baseline_ff[key], c="k", lw=2,
                 label="baseline", zorder=1)
     if q_marker:
         ax.axhline(1.0, color="0.6", ls="--", lw=0.8, zorder=0)
@@ -1385,6 +1457,7 @@ def plot_bouquet(h5path_or_header, scan_key=None, mode="kinetic",
             except Exception:
                 pass
 
+        _relabel_x(figs, h5path, scan_key)
         return figs, [f.axes for f in figs]
 
     figs = []
@@ -1469,6 +1542,7 @@ def plot_bouquet(h5path_or_header, scan_key=None, mode="kinetic",
         except Exception:
             pass
 
+    _relabel_x(figs, h5path, scan_key)
     # Optional side-by-side layout: render the separate figures in a wrapping
     # flex row (less vertical scroll) while keeping each an individual image.
     if layout == "row" and len(figs) > 1:
@@ -1622,6 +1696,30 @@ def _imas_input_profiles(source):
     return psiN, np.asarray(p1["pressure"], float), q, jt
 
 
+def _recon_fixed_channels(bl):
+    """The fixed currents in ``bl.j_phi``: j_NBI, j_RF, j_other; with the swb saw
+    on (``bl.j_saw``) j_other's sawteeth share is replaced by j_saw."""
+    j_other = getattr(bl, "j_other", None)
+    j_saw = getattr(bl, "j_saw", None)
+    if j_saw is not None:
+        j_st = getattr(bl, "j_sawteeth", None)
+        j_other = (np.asarray(0.0 if j_other is None else j_other, float)
+                   - np.asarray(0.0 if j_st is None else j_st, float)
+                   + np.asarray(j_saw, float))
+    return (getattr(bl, "j_NBI", None), getattr(bl, "j_RF", None), j_other)
+
+
+def _reported_pressure(bl, p_solver):
+    """The solver-frame pressure of a baseline's live solve (zero at
+    psi_N = 1) in the REPORTED frame: ``p_sep`` added back when the
+    reconstruction applied it (``Baseline.edge_pressure["p_sep_applied"]``,
+    ``separatrix_pressure="offset"``); unchanged otherwise (``"legacy"`` or a
+    baseline that predates the record)."""
+    psep = float(((getattr(bl, "edge_pressure", None) or {})
+                  .get("p_sep_applied")) or 0.0)
+    return np.asarray(p_solver, dtype=float) + psep
+
+
 def plot_input_vs_recon(run, npsi=80, max_dev_mm=10.0):
     r"""Compare the reconstructed / forward-solved baseline against the RAW
     INPUT -- pressure, :math:`j_\phi`, q, and the separatrix (with the green→red
@@ -1652,9 +1750,18 @@ def plot_input_vs_recon(run, npsi=80, max_dev_mm=10.0):
     psi_pad = float(getattr(run.config.source, "psi_pad", 1e-3))
     is_imas = (str(getattr(bl, "provenance", "")) == "imas"
                or type(run.config.source).__name__ == "ImasSource")
+    # Baseline arrays sit on the run grid; place them at the solver's ψ_N.
+    from .coords import psi_at
+    _coord = getattr(bl, "coord", "psi_n")
+    _to_psi = lambda x: np.asarray(psi_at(mygs, np.asarray(x, float), _coord), float)
 
     # ---- reconstructed / solved side (live TokaMaker solve) ----------------
     psiN_p, _f, _fp, p_sol, _pp = mygs.get_profiles(npsi=npsi, psi_pad=psi_pad)
+    # the solver's pressure is zero at psi_N = 1; under
+    # separatrix_pressure="offset" the reported pressure adds p_sep back
+    # (bouquet.edge_pressure) -- so the input's full pressure is compared
+    # with the reconstruction's full pressure, not with the solver frame
+    p_sol = _reported_pressure(bl, p_sol)
     psiN_q, q_sol = mygs.get_q(npsi=npsi, psi_pad=psi_pad)[:2]
     psiN_q = np.asarray(psiN_q, float)
     if psiN_q.size and psiN_q.max() > 1.5:          # in case get_q returns psi, not psi_N
@@ -1680,7 +1787,7 @@ def plot_input_vs_recon(run, npsi=80, max_dev_mm=10.0):
     # panel now shows that honestly (consistent with the q panel, which is also
     # computed from the converged state). Falls back to the baseline arrays if
     # the live extraction fails.
-    j_sol_x = np.asarray(bl.psi_N, float)
+    j_sol_x = _to_psi(bl.psi_N)
     try:
         from OpenFUSIONToolkit.TokaMaker.util import get_jphi_from_GS
         _psj, _f, _fp, _, _pp = mygs.get_profiles(npsi=len(j_sol_x), psi_pad=psi_pad)
@@ -1702,10 +1809,12 @@ def plot_input_vs_recon(run, npsi=80, max_dev_mm=10.0):
 
     # Anchors (IMAS diff workflow): jphi_diff / jBS_diff are FIXED offsets on
     # the kinetic grid (bl.j_BS + jBS_diff is the effective/FUSE bootstrap in
-    # the solve; bl.j_BS itself is the raw SWB Sauter). Used below so the
+    # the solve; bl.j_BS itself is the model bootstrap -- the self-consistent
+    # Redl bootstrap by default, the frozen SWB one with
+    # jbs_self_consistent=False). Used below so the
     # component overlay reflects the bootstrap actually in the solve. Both are
     # None on the geqdsk path.
-    _kin_x = np.asarray(getattr(bl, "psi_N_kinetic", bl.psi_N), float)
+    _kin_x = _to_psi(getattr(bl, "psi_N_kinetic", bl.psi_N))
 
     # ---- raw input side ----------------------------------------------------
     if not is_imas:
@@ -1768,7 +1877,7 @@ def plot_input_vs_recon(run, npsi=80, max_dev_mm=10.0):
     # All baseline arrays are interpolated from their native grids onto the
     # solver's uniform psi_N grid (same length does NOT imply same grid).
     if getattr(bl, "j_BS", None) is not None:
-        _blx = np.asarray(bl.psi_N, float)
+        _blx = _to_psi(bl.psi_N)
 
         def _to_jx(a, native_x):
             a = np.asarray(a, float)
@@ -1779,7 +1888,7 @@ def plot_input_vs_recon(run, npsi=80, max_dev_mm=10.0):
             _d = np.asarray(bl.jBS_diff, float)
             _jBS_eff = _jBS_eff + _to_jx(_d, _kin_x if _d.shape == _kin_x.shape else _blx)
         _j_ind_eff = j_sol - _jBS_eff
-        for _fx in (getattr(bl, "j_NBI", None), getattr(bl, "j_RF", None)):
+        for _fx in _recon_fixed_channels(bl):
             if _fx is not None:
                 _fx = np.asarray(_fx, float)
                 _j_ind_eff = _j_ind_eff - _to_jx(
@@ -1787,7 +1896,10 @@ def plot_input_vs_recon(run, npsi=80, max_dev_mm=10.0):
         ax[0, 1].plot(j_sol_x, _j_ind_eff / 1e6, ls="--", c=C_SOL, lw=1.5,
                       alpha=0.45, label=r"recon $j_{ind}$", zorder=2)
         ax[0, 1].plot(j_sol_x, _jBS_eff / 1e6, ls="-.", c=C_SOL, lw=1.5,
-                      alpha=0.45, label=r"recon $j_{BS}$", zorder=2)
+                      alpha=0.45, label=r"recon $j_{BS}$"
+                      + _bootstrap_model_suffix(bool(getattr(
+                          run.config.generation, "jbs_self_consistent",
+                          False))), zorder=2)
         ax[0, 1].legend(fontsize=8, loc="best")
 
     # q panel: tame the edge divergence. q climbs steeply toward a diverted
@@ -2750,6 +2862,7 @@ def plot_aux_profiles(h5path_or_header, scan_key=None, names=None,
         handles = [handles[-1]]
     _framed_legend(flat[0], handles=handles, fontsize=7, loc="best")
     fig.tight_layout()
+    _relabel_x(fig, h5path, svs[0])
     return fig, axes
 
 
@@ -2843,6 +2956,7 @@ def plot_bouquet_timeseries(entries, scan_key=None, draws=True, envelopes=True,
     ]
     fig, axes = plt.subplots(2, 3, figsize=(11, 6), sharex=True)
     flat = axes.ravel()
+    coords_seen = set()
 
     for (orig_key, path) in items:
         h5 = path if str(path).endswith(".h5") else os.path.abspath(f"{path}.h5")
@@ -2861,6 +2975,7 @@ def plot_bouquet_timeseries(entries, scan_key=None, draws=True, envelopes=True,
             if bl_path not in hf:
                 continue
             bl = hf[bl_path]
+            coords_seen.add(group_coord(bl))
             grids = {g: np.asarray(bl[g][()]) for g in ("psi_N", "psi_N_kinetic") if g in bl}
             draw_keys = sorted(int(k) for k in hf[f"scan/{bkey}" if bkey is not None else "."].keys()
                                if k.isdigit()) if True else []
@@ -2893,8 +3008,14 @@ def plot_bouquet_timeseries(entries, scan_key=None, draws=True, envelopes=True,
                 ax.plot(x, y0, "-", color=col, lw=1.1, alpha=0.9, zorder=3)
                 ax.set_title(title, fontsize=10); ax.grid(ls=":")
 
+    if len(coords_seen) > 1:
+        warnings.warn("plot_bouquet_timeseries: archives differ in profile_coord "
+                      f"{sorted(coords_seen)}; x axes mix psi_N and Phi_N")
+        xl = r"$\psi_N$ / $\Phi_N$ (mixed)"
+    else:
+        xl = r"$\Phi_N$" if coords_seen == {"phi_n"} else r"$\psi_N$"
     for j in (3, 4, 5):
-        flat[j].set_xlabel(r"$\psi_N$")
+        flat[j].set_xlabel(xl)
     sm = _cm.ScalarMappable(norm=norm, cmap=cm_obj); sm.set_array([])
     cb = fig.colorbar(sm, ax=axes.ravel().tolist(), pad=0.02, label=time_label)
     fig.suptitle("Bouquet time evolution  (lines = baseline + draws, "
@@ -3622,8 +3743,11 @@ def plot_boundary_point_traces(h5path_or_header, scan_key="all",
 def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
               selection="all", save=None):
     r"""Three-panel current decomposition: total / inductive / bootstrap,
-    overlaying the raw input (FUSE OMAS or geqdsk), the SWB-reconstructed
-    baseline, and the perturbed draws.
+    overlaying the raw input (FUSE OMAS or geqdsk), the reconstructed
+    baseline, and the perturbed draws.  The bootstrap is labelled with the
+    model the archive records: "self-consistent Redl bootstrap" (a schema-v3
+    ``jbs_loop`` block on the baseline or a draw -- the default) or "frozen
+    SWB bootstrap (legacy)" (v2 archives, ``jbs_self_consistent=False``).
 
     Uses the FAITHFUL components actually summed into TokaMaker --
     ``j_inductive = j_phi - j_BS,edge - j_fixed`` (which closes to the total
@@ -3637,10 +3761,10 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
     scan_key : int/str or None
         Scan group; defaults to the first scan in the file.
     source : str or None
-        Raw input to overlay. IMAS ``dd_sim.json`` -> raw FUSE j_tor /
-        j_bootstrap / j_ohmic (toroidal), multiplied by the orientation
-        factor the archive's read applied (its stamped
-        ``source_current_sign``, else the archived
+        Raw input to overlay. IMAS ``dd_sim.json`` -> FUSE j_tor /
+        j_bootstrap / j_ohmic as TokaMaker jphi (converted in the dd's own
+        frame), multiplied by the orientation factor the archive's read
+        applied (its stamped ``source_current_sign``, else the archived
         ``ImasSource.current_orientation``, else ``sign(equilibrium ip)``).
         g-file -> its direct j_phi used as the input reference in all three
         panels (no FUSE component split).
@@ -3658,7 +3782,7 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
     with h5py.File(h5, "r") as hf:
         sk = str(scan_key) if scan_key is not None else list(hf["scan"].keys())[0]
         g = hf[f"scan/{sk}"]
-        psi = np.asarray(g["_baseline/psi_N"][:], float)
+        psi = np.asarray(g["_baseline/psi_N"][:], float)   # run grid (ψ_N or Φ_N)
         base_total = np.asarray(g["_baseline/j_phi"][:], float)
         base_jBS = (np.asarray(g["_baseline/j_BS"][:], float)
                     if "j_BS" in g["_baseline"] else None)
@@ -3689,6 +3813,8 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
                      spike=(np.asarray(g[f"{d}/{_bs_key}"][:], float)
                             if _bs_key in g[d] else np.zeros_like(psi)))
              for d in ids}
+        _bs_sc = _archive_bootstrap_self_consistent(g)
+    _bs_model = _bootstrap_model_suffix(_bs_sc)
 
     sel = None
     if selection == "selected":
@@ -3699,6 +3825,7 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
         except Exception:
             sel = None
 
+    phi = profile_coord(h5, sk) == "phi_n"
     fixed = np.zeros_like(psi)
     F = None; Flabel = "input"
     if source is not None:
@@ -3707,8 +3834,11 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
             kind = "imas" if (str(source).endswith(".json") or "dd_sim" in str(source)) else "geqdsk"
         try:
             if kind == "imas":
-                from .physics import parallel_to_toroidal
-                from .io.imas import parse_current_orientation
+                from .physics import (jpar_to_jphi_tokamaker,
+                                      jphi_tokamaker_pressure_term,
+                                      jtor_imas_to_jphi_tokamaker)
+                from .io.imas import (current_frame, orientation_ip,
+                                      parse_current_orientation)
                 _dd = json.load(open(source))
                 cp = _dd["core_profiles"]
                 ic = int(np.argmin(np.abs(np.asarray(cp["time"], float) - float(int(sk)) / 1000.0)))
@@ -3732,13 +3862,24 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
                     except ValueError:
                         _o = "auto"
                     _cs = _imas_current_sign(_dd, float(int(sk)) / 1000.0, _o)
+                if phi:
+                    r = np.asarray(c["grid"]["rho_tor_norm"], float); pN = (r / r[-1]) ** 2
+                else:
+                    p = np.asarray(c["grid"]["psi"], float); pN = (p - p[0]) / (p[-1] - p[0])
+                # TokaMaker jphi, exactly as read_imas_baseline converts them
+                # (in the frame of the dd's geometry, then into the positive
+                # frame: io.imas.current_frame)
+                _ip = orientation_ip(_dd, float(int(sk)) / 1000.0)
+                _m, _s, geo, _ = current_frame(
+                    _dd["equilibrium"], c, float(cp["time"][ic]), _cs,
+                    1.0 if _ip is None else _ip)
                 del _dd
-                p = np.asarray(c["grid"]["psi"], float); pN = (p - p[0]) / (p[-1] - p[0])
-                jtot = _cs * np.asarray(c["j_total"], float); jtor = _cs * np.asarray(c["j_tor"], float)
-                tt = lambda jp: parallel_to_toroidal(jp, j_parallel_total=jtot, j_tor_total=jtor)
-                F = dict(total=np.interp(psi, pN, jtor),
-                         jBS=np.interp(psi, pN, tt(_cs * np.asarray(c["j_bootstrap"], float))),
-                         jind=np.interp(psi, pN, tt(_cs * np.asarray(c["j_ohmic"], float))))
+                jtor = _m * np.asarray(c["j_tor"], float)
+                tt = lambda jp: _s * jpar_to_jphi_tokamaker(_m * jp, geo)
+                F = dict(total=np.interp(psi, pN, _s * jtor_imas_to_jphi_tokamaker(jtor, geo)),
+                         jBS=np.interp(psi, pN, tt(np.asarray(c["j_bootstrap"], float))
+                                       + _s * jphi_tokamaker_pressure_term(geo)),
+                         jind=np.interp(psi, pN, tt(np.asarray(c["j_ohmic"], float))))
                 fixed = F["total"] - F["jBS"] - F["jind"]; Flabel = "FUSE"
             else:
                 from .io.geqdsk import read_geqdsk
@@ -3749,7 +3890,9 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
                 # positive-Ip frame, like the archived baseline and draws
                 # (identity for a g-file with CURRENT >= 0)
                 jg = _gfile_current_sign(eq) * np.asarray(jg, float).ravel()
-                F = dict(total=np.interp(psi, np.asarray(eq.psi_N, float).ravel(), jg),
+                xg = (np.asarray(eq.rhovn, float) ** 2 if phi
+                      else np.asarray(eq.psi_N, float)).ravel()
+                F = dict(total=np.interp(psi, xg, jg),
                          jBS=None, jind=None); Flabel = "geqdsk"
         except Exception as e:
             print(f"plot_jphi: source not read ({e!r}); baseline + draws only")
@@ -3757,16 +3900,16 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
 
     if base_jBS is None and D:
         base_jBS = np.mean([D[d]["spike"] for d in D], axis=0)
-        base_jBS_label = r"SWB baseline $j_{BS}$ (ens.-mean)"
+        base_jBS_label = r"baseline $j_{BS}$ (ens.-mean)" + _bs_model
     else:
-        base_jBS_label = r"SWB baseline $j_{BS}$"
+        base_jBS_label = r"baseline $j_{BS}$" + _bs_model
 
     OR, FU = _GOLD, "tab:blue"   # gold draws (matches the other plots)
     keep = [d for d in ids if (sel is None or d in sel)]
     fig, ax = plt.subplots(1, 3, figsize=(13.0, 3.8))
     if F is not None:
         ax[0].plot(psi, F["total"] / 1e6, "--", color=FU, lw=1.6, label=rf"{Flabel} $j_\phi$")
-    ax[0].plot(psi, base_total / 1e6, "k-", lw=2.0, zorder=5, label=r"SWB baseline $j_\phi$")
+    ax[0].plot(psi, base_total / 1e6, "k-", lw=2.0, zorder=5, label=r"baseline $j_\phi$")
     for i, d in enumerate(keep):
         ax[0].plot(psi, D[d]["total"] / 1e6, "-", color=OR, lw=1.0, alpha=0.55,
                    label="perturbed" if i == 0 else None)
@@ -3795,12 +3938,14 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
     for i, d in enumerate(keep):
         ax[2].plot(psi, D[d]["spike"] / 1e6, "-", color=OR, lw=1.0, alpha=0.55,
                    label=r"perturbed $j_{BS}$" if i == 0 else None)
-    ax[2].set_title(r"$j_{BS}$  (%s)"
-                    % ("isolate-edge spike" if has_spike else "full bootstrap"))
+    ax[2].set_title(r"$j_{BS}$  (%s; %s)"
+                    % ("isolate-edge spike" if has_spike else "full bootstrap",
+                       _bs_model.strip()[1:-1]))
 
     for a in ax:
         a.axhline(0, color="gray", lw=0.5); a.set_xlim(0, 1); a.grid(alpha=0.3)
         a.set_xlabel(r"$\psi_N$"); a.set_ylabel(r"$j$ [MA/m$^2$]"); a.legend(fontsize=8)
+    _relabel_x(fig, h5, sk)
     fig.tight_layout()
     if save:
         fig.savefig(save)

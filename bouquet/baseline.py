@@ -315,6 +315,12 @@ class Baseline:
     # REGISTRY keys, Bouquet.prepare_baseline); [] when none.  Archived as
     # the _baseline attr experimental_features_json on every solve method.
     experimental_features: Optional[list] = None
+    # The Redl epsilon every bootstrap evaluation of the run uses
+    # (GenerationConfig.eps_definition; bouquet.engine.eps_record):
+    # {"eps_definition", "eps_formula", "nu_star_R", "evaluate_jBS_version"}.
+    # Set by Bouquet.prepare_baseline on every path; archived as the
+    # _baseline attr bootstrap_eps_json (and in the engine record).
+    bootstrap_eps: Optional[dict] = None
 
     def __repr__(self):
         # concise summary -- the default dataclass repr dumps every numpy array,
@@ -1541,7 +1547,9 @@ def _deliver_reconstruction_state(mygs, config, source, result, psi_N, ne_eq,
     comp = _draw_jbs_composer(psi_N, ne_eq, te_eq, ni_eq, ti_eq, Zeff_eq,
                               psi_pad, bool(gc.isolate_edge_jBS), 1.0,
                               bool(gc.floor_j_BS), None, None, None,
-                              coord=coord)
+                              coord=coord,
+                              eps_definition=getattr(gc, "eps_definition",
+                                                     None))
     j_bs0 = np.asarray(comp(mygs.copy_eq())[0], dtype=float)
     fixed = np.asarray(j_NBI, dtype=float) + np.asarray(j_RF, dtype=float)
     dv = _deliver_request_split(mygs, psi_N, psi_pad, Ip_target,

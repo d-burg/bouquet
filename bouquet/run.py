@@ -909,6 +909,7 @@ class Bouquet(SwbBaseline):
             self._record_engine_resolved_defaults(_bl)
             self._record_experimental_features(_bl)
             self._record_coil_solve_mode(_bl)
+            self._record_bootstrap_eps(_bl)
             self._report_sigma_exceeds_profile(_bl)
             self._remember_baseline_state()
             return _bl
@@ -1007,6 +1008,7 @@ class Bouquet(SwbBaseline):
         self._record_engine_resolved_defaults(self.baseline)
         self._record_experimental_features(self.baseline)
         self._record_coil_solve_mode(self.baseline)
+        self._record_bootstrap_eps(self.baseline)
         self._report_sigma_exceeds_profile(self.baseline)
         self._remember_baseline_state()
         return self.baseline
@@ -1082,6 +1084,20 @@ class Bouquet(SwbBaseline):
         bl.experimental_features = list(on)
         if isinstance(getattr(bl, "engine", None), dict):
             bl.engine["experimental_features"] = list(on)
+
+    def _record_bootstrap_eps(self, bl) -> None:
+        """Record the Redl epsilon (``GenerationConfig.eps_definition``:
+        name, formula, the R in ``nu*``, the ``evaluate_jBS`` version) on
+        *bl* (``Baseline.bootstrap_eps``, archived as the ``_baseline`` attr
+        ``bootstrap_eps_json``) and, under the unified engine, in its
+        record -- both paths, every solve method."""
+        from .engine import eps_record
+        if bl is None or not hasattr(bl, "bootstrap_eps"):
+            return
+        bl.bootstrap_eps = eps_record(getattr(self.config.generation,
+                                              "eps_definition", None))
+        if isinstance(getattr(bl, "engine", None), dict):
+            bl.engine["bootstrap_eps"] = dict(bl.bootstrap_eps)
 
     def _record_coil_solve_mode(self, bl) -> None:
         """Record the coil-solve mode the solver ran the reconstruction in --
@@ -5266,7 +5282,12 @@ class Bouquet(SwbBaseline):
                                        residual_weights, run_jbs_loop,
                                        oft_build_info)
                 from .utils import li_achieved, ip_roundtrip_gate as _gate_fn
-                from .physics import EVALUATE_JBS_VERSION
+                from .physics import (EPS_DEFINITION_DEFAULT,
+                                      evaluate_jbs_version)
+                # the Redl eps / nu* R (GenerationConfig.eps_definition)
+                _eps_def = getattr(gc, "eps_definition",
+                                   EPS_DEFINITION_DEFAULT)
+                EVALUATE_JBS_VERSION = evaluate_jbs_version(_eps_def)
 
                 Ip_abs = abs(float(bl.Ip_target))
                 _init = str(_jbs["init"])
@@ -5275,7 +5296,8 @@ class Bouquet(SwbBaseline):
                 def _redl(eq):
                     j, d = evaluate_jBS(eq, psi_N, ne, te, ni, ti, Zeff,
                                         psi_pad=psi_pad, isolate_edge=iso,
-                                        smooth_axis=True, coord=coord)
+                                        smooth_axis=True, coord=coord,
+                                        eps_definition=_eps_def)
                     if gc.floor_j_BS:
                         j = np.clip(j, 0.0, None)
                     return j, d
@@ -6239,7 +6261,8 @@ class Bouquet(SwbBaseline):
             comp = _draw_jbs_composer(
                 psi_N, ne, te, ni, ti, Zeff, psi_pad,
                 bool(gc.isolate_edge_jBS), float(getattr(bl, "bs_scale", 1.0)),
-                bool(gc.floor_j_BS), jdiff, None, None, coord=coord)
+                bool(gc.floor_j_BS), jdiff, None, None, coord=coord,
+                eps_definition=getattr(gc, "eps_definition", None))
             j_bs0 = np.asarray(comp(mygs.copy_eq())[0], dtype=float)
             bl.j_BS = j_bs0 - (0.0 if jdiff is None else jdiff)
         # every channel the draws hold fixed, once each (the draws' _jfix =
@@ -7095,7 +7118,8 @@ class Bouquet(SwbBaseline):
         compose = _draw_jbs_composer(
             psi_N, ne_eq, te_eq, ni_eq, ti_eq, Zeff_eq, psi_pad,
             bool(gc.isolate_edge_jBS), float(getattr(bl, "bs_scale", 1.0)),
-            bool(gc.floor_j_BS), jdiff, None, None, coord=coord)
+            bool(gc.floor_j_BS), jdiff, None, None, coord=coord,
+            eps_definition=getattr(gc, "eps_definition", None))
         j_ind = np.asarray(bl.j_inductive, dtype=float)
         # the fixed current the draws hold (j_NBI + j_RF + j_other), not the
         # stored split's residual: a residual is self-consistent with a
@@ -7388,7 +7412,9 @@ class Bouquet(SwbBaseline):
             _sel, _d = evaluate_jBS(mygs, psi_N, ne_eq, te_eq, ni_eq, ti_eq,
                                     Zeff_eq, psi_pad=psi_pad,
                                     isolate_edge=bool(gc.isolate_edge_jBS),
-                                    smooth_axis=False, coord=coord)
+                                    smooth_axis=False, coord=coord,
+                                    eps_definition=getattr(
+                                        gc, "eps_definition", None))
             dref = scale0 * np.asarray(_sel, dtype=float)
             dbase = np.asarray(ref, dtype=float)
             blk["delta_mode"] = True
@@ -8154,6 +8180,15 @@ class Bouquet(SwbBaseline):
         # another mode or before the record)
         stamp_coil_solve_mode(header, scan_key=gc.scan_key,
                               mode=getattr(bl, "coil_solve_mode", None))
+        # the Redl epsilon / nu* R every bootstrap evaluation used (both
+        # paths): the baseline's record, else the config's
+        from .engine import eps_record
+        from .utils import stamp_bootstrap_eps
+        _be = getattr(bl, "bootstrap_eps", None)
+        stamp_bootstrap_eps(header, scan_key=gc.scan_key,
+                            record=(eps_record(getattr(
+                                gc, "eps_definition", None))
+                                    if _be is None else _be))
         # how the engine-dependent settings were resolved (both paths)
         from .utils import (stamp_engine_resolved_defaults,
                             stamp_experimental_features)

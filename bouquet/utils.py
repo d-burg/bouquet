@@ -4363,6 +4363,40 @@ def stamp_coil_solve_mode(h5path_or_header, scan_key=None, mode=None):
             hf[gp].attrs["coil_solve_mode"] = str(mode)
 
 
+def stamp_bootstrap_eps(h5path_or_header, scan_key=None, record=None):
+    """Record the Redl epsilon of the run (``Baseline.bootstrap_eps``,
+    :func:`bouquet.engine.eps_record`: ``eps_definition``, ``eps_formula``,
+    ``nu_star_R``, ``evaluate_jBS_version``) as the JSON attr
+    ``bootstrap_eps_json`` of the ``_baseline`` group.  No-op without a
+    record or a ``_baseline`` group."""
+    if not record:
+        return
+    import json
+    path = _resolve_h5(h5path_or_header)
+    gp = _baseline_group_path(scan_key)
+    with h5py.File(path, "a") as hf:
+        if gp in hf:
+            hf[gp].attrs["bootstrap_eps_json"] = json.dumps(
+                dict(record), sort_keys=True)
+
+
+def load_bootstrap_eps(h5path_or_header, scan_key=None):
+    """The record :func:`stamp_bootstrap_eps` wrote, or ``None`` for an
+    archive that predates it (before 2026-10-09: such a run evaluated with
+    ``<a>/<R>`` or ``(R_max - R_min)/(2<R>)``, ``<R>`` in ``nu*``; its loop
+    records' ``evaluate_jBS_version`` says which)."""
+    import json
+    path = _resolve_h5(h5path_or_header)
+    gp = _baseline_group_path(scan_key)
+    with h5py.File(path, "r") as hf:
+        if gp not in hf:
+            return None
+        v = hf[gp].attrs.get("bootstrap_eps_json")
+    if v is None:
+        return None
+    return json.loads(v.decode() if isinstance(v, bytes) else str(v))
+
+
 def stamp_engine_resolved_defaults(h5path_or_header, scan_key=None,
                                    record=None):
     """Record how the engine-dependent settings were resolved

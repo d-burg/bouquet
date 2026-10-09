@@ -415,3 +415,133 @@ def test_the_three_definitions_are_ordered_at_the_edge(gfile):
     c = _eps_all(gfile, core)
     np.testing.assert_allclose(c[_HW][0], c["r_over_R_geo"][0], rtol=1e-3)
     assert np.all(c["a_over_R"][0] > 1.1 * c["r_over_R_geo"][0])
+
+
+# ---------------------------------------------------------------------------
+#  GenerationConfig.eps_definition reaches every evaluation, and is stamped
+# ---------------------------------------------------------------------------
+def test_the_config_field_defaults_to_r_over_R_geo_and_is_validated():
+    from bouquet.config import GenerationConfig
+    assert GenerationConfig().eps_definition == "r_over_R_geo"
+    for name in EPS_DEFINITIONS:
+        assert GenerationConfig(eps_definition=name).eps_definition == name
+    with pytest.raises(ValueError, match="eps_definition"):
+        GenerationConfig(eps_definition="inverse_aspect")
+    with pytest.raises(ValueError, match="half_width_over_fsa_R"):
+        GenerationConfig(eps_definition="geometric")
+
+
+def test_it_is_engine_independent_not_an_engine_unread_field():
+    """It configures physics.evaluate_jBS on every path: not an engine-only
+    field (refused under legacy) nor an engine-unread legacy field (refused
+    under unified)."""
+    from bouquet.config import GenerationConfig
+    from bouquet.engine import (ENGINE_FIELD_DEFAULTS,
+                                ENGINE_UNREAD_LEGACY_FIELDS,
+                                validate_engine_settings)
+    assert "eps_definition" not in ENGINE_FIELD_DEFAULTS
+    assert "eps_definition" not in ENGINE_UNREAD_LEGACY_FIELDS
+    for eng in ("legacy", "unified"):
+        validate_engine_settings(GenerationConfig(
+            reconstruction_engine=eng, eps_definition="a_over_R"))
+
+
+def test_the_engine_settings_and_record_carry_it():
+    from bouquet.config import GenerationConfig
+    from bouquet.engine import engine_settings, eps_record
+    for name in EPS_DEFINITIONS:
+        s = engine_settings(GenerationConfig(reconstruction_engine="unified",
+                                             eps_definition=name))
+        assert s["eps_definition"] == name
+        rec = eps_record(name)
+        assert rec == dict(eps_definition=name,
+                           eps_formula=EPS_DEFINITIONS[name],
+                           nu_star_R=NU_STAR_R[name],
+                           evaluate_jBS_version=evaluate_jbs_version(name))
+    assert eps_record(None)["eps_definition"] == "r_over_R_geo"
+
+
+def _spy_evaluate(monkeypatch, j):
+    import bouquet.physics as physics
+    seen = []
+
+    def _spy(*a, **k):
+        seen.append(k.get("eps_definition"))
+        return j.copy(), dict(j_dot_B=j.copy(), j_tor_full_raw=j.copy(),
+                              I_BS=1.0)
+
+    monkeypatch.setattr(physics, "evaluate_jBS", _spy)
+    return seen
+
+
+@pytest.mark.parametrize("name", sorted(EPS_DEFINITIONS))
+def test_the_engine_backend_and_its_draws_evaluate_with_it(monkeypatch, name):
+    """The reconstruction backend, and the draws' backend built from the
+    reconstruction's settings (``GenerateEngineDraws.backend``), pass the
+    definition to every Redl evaluation."""
+    from types import SimpleNamespace
+    import _engine_toy as T
+    from bouquet.engine import TokaMakerBackend
+    from bouquet.engine_draws import GenerateEngineDraws
+    c = T.ToyAdapter().read()
+    seen = _spy_evaluate(monkeypatch, np.ones(len(c.psi_N)))
+
+    class _GS:
+        def copy_eq(self):
+            return object()
+
+    TokaMakerBackend(_GS(), c, eps_definition=name).redl()
+    assert seen == [name]
+    gd = object.__new__(GenerateEngineDraws)
+    gd.ctx = SimpleNamespace(c=c, edge=None, coord="psi_n",
+                             eng=SimpleNamespace(s={"eps_definition": name,
+                                                    "edge_taper": None}))
+    gd.psi_pad, gd.q_psi, gd.maxits = 1e-3, None, None
+    be = gd.backend(_GS())
+    assert be.eps_definition == name
+    be.redl()
+    assert seen == [name, name]
+
+
+@pytest.mark.parametrize("name", sorted(EPS_DEFINITIONS))
+def test_the_legacy_draw_composer_evaluates_with_it(monkeypatch, name):
+    from bouquet.TokaMaker_interface import _draw_jbs_composer
+    x = np.linspace(0.0, 1.0, 21)
+    seen = _spy_evaluate(monkeypatch, np.ones_like(x))
+    k = _kin(x)
+    _draw_jbs_composer(x, *k, 1e-3, False, 1.0, False, None, None, None,
+                       eps_definition=name)(object())
+    assert seen == [name]
+
+
+def test_the_loop_settings_carry_a_non_default_and_the_record_names_it():
+    """``jbs_settings`` (the legacy loops' and the engine's loop settings)
+    carries a non-default definition -- the default dict keeps its keys --
+    and every loop record's ``evaluate_jBS_version`` is that definition's."""
+    from bouquet.jbs_loop import jbs_settings, run_jbs_loop
+    from test_jbs_loop import _GC, _IP, _affine_problem
+    assert "eps_definition" not in jbs_settings(_GC())
+    for name in EPS_DEFINITIONS:
+        g = _GC()
+        g.eps_definition = name
+        s = jbs_settings(g)
+        assert s.get("eps_definition", EPS_DEFINITION_DEFAULT) == name
+        assert ("eps_definition" in s) == (name != EPS_DEFINITION_DEFAULT)
+        Jstar, step, ev = _affine_problem(-0.1)
+        rec = run_jbs_loop(0.5 * Jstar, step, ev, s, Ip=_IP,
+                           meas0=dict(li=0.0))["record"]
+        assert rec["evaluate_jBS_version"] == evaluate_jbs_version(name)
+
+
+def test_the_archive_stamp_round_trips(tmp_path):
+    h5py = pytest.importorskip("h5py")
+    from bouquet.engine import eps_record
+    from bouquet.utils import (_baseline_group_path, load_bootstrap_eps,
+                               stamp_bootstrap_eps)
+    p = str(tmp_path / "a.h5")
+    with h5py.File(p, "w") as hf:
+        hf.create_group(_baseline_group_path(None))
+    assert load_bootstrap_eps(p) is None             # predates the record
+    rec = eps_record("half_width_over_fsa_R")
+    stamp_bootstrap_eps(p, record=rec)
+    assert load_bootstrap_eps(p) == rec

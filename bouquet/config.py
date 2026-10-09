@@ -1190,6 +1190,23 @@ class GenerationConfig:
     # and refuses those keys).  EXPERIMENTAL -- see
     # bouquet.experimental.REGISTRY["bootstrap_convergence_override"].
     bootstrap_convergence_override: bool = False
+    # The inverse aspect ratio of the Redl collisionalities, and the major
+    # radius R that goes with it in nu_e* / nu_i* (Sauter 1999 Eqs. 18b/18c),
+    # at EVERY bouquet Redl evaluation (physics.evaluate_jBS: the unified
+    # engine's reconstruction and draws, the legacy self-consistent loop, the
+    # IMAS baseline loop, the delta-cache references); engine-independent.
+    # "r_over_R_geo" (default, owner decision E7 2026-10-09): eps = (R_max -
+    # R_min)/(R_max + R_min) with R_geo = (R_max + R_min)/2 in nu* -- the
+    # surface's r/R0 (Sauter 1999 / Redl 2021; OMFIT, FUSE).
+    # "half_width_over_fsa_R": (R_max - R_min)/(2<R>) with <R> in nu*;
+    # "a_over_R": <a>/<R> with <R> in nu* (the pre-2026-10-09 evaluator, bit
+    # for bit).  See physics.EPS_DEFINITIONS / NU_STAR_R and
+    # docs/physics-notes.md "Inverse aspect ratio".  A stored config without
+    # the field replays with this default (warned); one that names a
+    # definition keeps it.  Toolkit-internal solve_with_bootstrap calls (the
+    # legacy frozen bootstrap, the swb method) form their own nu* and do not
+    # read it.
+    eps_definition: str = "r_over_R_geo"
     # GS iteration cap for the DRAW solves of generate()'s legacy / swb draw
     # loop (TokaMaker_interface.DrawSolveGuard): applied from the first draw
     # on, never to the cold baseline re-solve or the sigma=0 reference solve
@@ -1690,6 +1707,8 @@ class GenerationConfig:
         _t = self.swb_ip_tol
         if isinstance(_t, bool) or not (float(_t) > 0.0 and float(_t) < 1.0):
             raise ValueError(f"swb_ip_tol={_t!r} must be in (0, 1)")
+        from .physics import check_eps_definition
+        check_eps_definition(self.eps_definition)
         solve_method_of(self)      # refuses a contradiction; writes nothing
         self._validate_bootstrap_kwargs(self.bootstrap_kwargs)
         object.__setattr__(self, "_bootstrap_kwargs_armed", True)
@@ -2649,6 +2668,20 @@ class BouquetConfig:
                 "default is 'auto'", UserWarning, stacklevel=2)
             gend["imas_li3_radius"] = "axis"
         _stored_bootstrap_kwargs_compat(gend)
+        if "eps_definition" not in gend:
+            # A config stored before the field existed replays with the NEW
+            # default (owner decision E7: the goldens are regenerated under
+            # it); the run that wrote it used <a>/<R> or (R_max -
+            # R_min)/(2<R>) with <R> in nu*, so its bootstrap is not
+            # reproduced bit for bit -- said once, never silently.
+            import warnings
+            warnings.warn(
+                "stored config predates generation.eps_definition; it "
+                "replays with the default 'r_over_R_geo' (eps = (R_max - "
+                "R_min)/(R_max + R_min), R_geo in nu*).  Set "
+                "generation.eps_definition='a_over_R' (or "
+                "'half_width_over_fsa_R') to evaluate the bootstrap as that "
+                "run did.", UserWarning, stacklevel=2)
         _tok = _LOADING_STORED_CONFIG.set(True)
         try:
             return cls(

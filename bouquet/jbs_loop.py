@@ -361,6 +361,14 @@ def jbs_settings(gc, *, draw: bool = False) -> dict:
         # only present when ON, so the default settings dict (and every
         # record built from it) is exactly what it was before the flag
         out["gate_current_residual"] = True
+    from .physics import EPS_DEFINITION_DEFAULT, check_eps_definition
+    eps_def = check_eps_definition(getattr(gc, "eps_definition",
+                                           EPS_DEFINITION_DEFAULT))
+    if eps_def != EPS_DEFINITION_DEFAULT:
+        # the Redl eps / nu* R opt-in (GenerationConfig.eps_definition):
+        # carried to every loop evaluation and record; only present when
+        # not the default, so the default settings dict keeps its keys
+        out["eps_definition"] = eps_def
     return out
 
 
@@ -1139,8 +1147,11 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
             requested=True, applied=False, after_pass=1,
             definition=START_REFRESH_DEFINITION)
     try:
-        from .physics import EVALUATE_JBS_VERSION
-        rec["evaluate_jBS_version"] = EVALUATE_JBS_VERSION
+        from .physics import evaluate_jbs_version, EPS_DEFINITION_DEFAULT
+        # the version of the definition the loop evaluates with (the
+        # settings carry a non-default GenerationConfig.eps_definition)
+        rec["evaluate_jBS_version"] = evaluate_jbs_version(
+            settings.get("eps_definition", EPS_DEFINITION_DEFAULT))
     except Exception:
         rec["evaluate_jBS_version"] = None
     rec["oft_build"] = oft_build_info()

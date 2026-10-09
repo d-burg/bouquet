@@ -2704,9 +2704,12 @@ class _DrawJBSComposer:
 
     def __init__(self, psi_N, ne, te, ni, ti, zeff, psi_pad, isolate_edge,
                  scale, floor, jBS_diff, delta_ref, delta_baseline,
-                 coord="psi_n"):
+                 coord="psi_n", eps_definition=None):
         self.psi_N = np.asarray(psi_N, dtype=float)
         self.coord = coord
+        #: the Redl eps / nu* R (GenerationConfig.eps_definition; None:
+        #: evaluate_jBS's default)
+        self.eps_definition = eps_definition
         self.kin = (ne, te, ni, ti, zeff)
         self.psi_pad = float(psi_pad)
         self.isolate_edge = bool(isolate_edge)
@@ -2727,7 +2730,8 @@ class _DrawJBSComposer:
                               psi_pad=self.psi_pad,
                               isolate_edge=self.isolate_edge,
                               smooth_axis=not self.use_delta,
-                              coord=self.coord)
+                              coord=self.coord,
+                              eps_definition=self.eps_definition)
         if self.use_delta:
             spike = self.delta_baseline + (self.scale * sel - self.delta_ref)
             full = self.delta_baseline + (
@@ -2746,11 +2750,19 @@ class _DrawJBSComposer:
 
 def _draw_jbs_composer(psi_N, ne, te, ni, ti, zeff, psi_pad, isolate_edge,
                        scale, floor, jBS_diff, delta_ref, delta_baseline,
-                       coord="psi_n"):
+                       coord="psi_n", eps_definition=None):
     """Factory for :class:`_DrawJBSComposer` (keeps the call site short)."""
     return _DrawJBSComposer(psi_N, ne, te, ni, ti, zeff, psi_pad,
                             isolate_edge, scale, floor, jBS_diff, delta_ref,
-                            delta_baseline, coord=coord)
+                            delta_baseline, coord=coord,
+                            eps_definition=eps_definition)
+
+
+def _loop_eps_definition(jbs_loop):
+    """The Redl eps / nu* R a legacy loop evaluates with: the loop
+    settings' ``eps_definition`` (present only when not the default,
+    :func:`bouquet.jbs_loop.jbs_settings`), else ``None`` (the default)."""
+    return (jbs_loop or {}).get("eps_definition")
 
 
 # What a draw's loop starts from (recorded per loop as ``init_source``).
@@ -3814,7 +3826,8 @@ def perturb_kinetic_equilibrium(
         _compose = _draw_jbs_composer(
             psi_N, ne_eq, te_eq, ni_eq, ti_eq, Zeff, psi_pad,
             isolate_edge_jBS, scale_jBS, floor_j_BS, jBS_diff,
-            spike_delta_ref, spike_delta_baseline, coord=coord)
+            spike_delta_ref, spike_delta_baseline, coord=coord,
+            eps_definition=_loop_eps_definition(jbs_loop))
         _use_spike_delta = _compose.use_delta
         spike_profile, full_j_BS, _d_anchor = _compose(mygs)
         results = {"scale_j0": 1.0, "scale_Ip": 1.0}
@@ -6954,7 +6967,8 @@ def generate_bouquet(
                     _ref_sel, _ref_d = _evaluate_jBS(
                         mygs, psi_N, ne_cache, te_cache, ni_cache, ti_cache,
                         Zeff, psi_pad=psi_pad, isolate_edge=isolate_edge_jBS,
-                        smooth_axis=False, coord=coord)
+                        smooth_axis=False, coord=coord,
+                        eps_definition=_loop_eps_definition(jbs_loop))
                     _delta_spike0_raw = _scale_ref * np.asarray(_ref_sel,
                                                                 dtype=float)
                     _diff_spike_recon = smooth_jbs_transition(
@@ -8955,7 +8969,8 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         mygs.solve()
         j_BS_isolated, _d0 = _evaluate_jBS(
             mygs, _x, ne, te, ni, ti, Zeff, psi_pad=psi_pad,
-            isolate_edge=isolate_edge_jBS, smooth_axis=True, coord=coord)
+            isolate_edge=isolate_edge_jBS, smooth_axis=True, coord=coord,
+            eps_definition=_loop_eps_definition(jbs_loop))
         # classification / shelf locator read the RAW profile, as they always
         # have (see 2b)
         j_BS_isolated_raw = np.asarray(_d0["j_tor_raw"], dtype=float)
@@ -9419,7 +9434,9 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
             return _evaluate_jBS(meas["snap"], _x, ne, te, ni, ti,
                                  Zeff, psi_pad=psi_pad,
                                  isolate_edge=isolate_edge_jBS,
-                                 smooth_axis=True, coord=coord)[0]
+                                 smooth_axis=True, coord=coord,
+                                 eps_definition=_loop_eps_definition(
+                                     jbs_loop))[0]
 
         _li0 = float(mygs.get_stats(li_normalization='iter',
                                     lcfs_pad=psi_pad)['l_i'])

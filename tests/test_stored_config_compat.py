@@ -90,7 +90,43 @@ def test_every_stored_unified_config_loads_with_what_it_ran_with(sha):
         assert g.draw_solve_maxits is None
         assert any("engine_draw_solve_maxits" in m for m in msgs)
     if sha == "d874822":
-        assert msgs == []                     # a current config: silent
+        # the newest stored config: silent but for the one field added
+        # after it was written (generation.eps_definition, owner decision
+        # E7): it replays with the new default, said exactly once
+        assert [m for m in msgs if "eps_definition" not in m] == []
+        assert len([m for m in msgs if "eps_definition" in m]) == 1
+        assert g.eps_definition == "r_over_R_geo"
+
+
+@pytest.mark.parametrize("path", ["legacy", "unified"])
+def test_a_stored_config_without_eps_definition_replays_with_the_new_default(
+        path):
+    d = _stored(SHAS[-1], path)
+    assert "eps_definition" not in d["generation"]
+    g, msgs = _load(d)
+    assert g.eps_definition == "r_over_R_geo"
+    assert any("predates generation.eps_definition" in m
+               and "'a_over_R'" in m for m in msgs)
+
+
+@pytest.mark.parametrize("name", ["r_over_R_geo", "half_width_over_fsa_R",
+                                  "a_over_R"])
+def test_a_stored_config_that_names_an_eps_definition_keeps_it(name):
+    d = _stored(SHAS[-1], "unified")
+    d["generation"]["eps_definition"] = name
+    g, msgs = _load(d)
+    assert g.eps_definition == name
+    assert not [m for m in msgs if "eps_definition" in m]
+    # and it round-trips through to_dict / from_dict
+    g2, _m = _load(BouquetConfig.from_dict(d).to_dict())
+    assert g2.eps_definition == name
+
+
+def test_a_stored_config_with_an_unknown_eps_definition_is_refused():
+    d = _stored(SHAS[-1], "unified")
+    d["generation"]["eps_definition"] = "geometric"
+    with pytest.raises(ValueError, match="half_width_over_fsa_R"):
+        _load(d)
 
 
 def test_a_unified_config_drops_a_non_default_swb_iterations():

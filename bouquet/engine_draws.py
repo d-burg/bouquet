@@ -1135,16 +1135,19 @@ def engine_rejection_reason(exc, stage):
 #  generate(): the hook generate_bouquet calls
 # ---------------------------------------------------------------------------
 def tokamaker_backend(mygs, contract, *, psi_pad, q_psi, maxits,
-                      edge_pressure=None, edge_taper=None, coord="psi_n"):
+                      edge_pressure=None, edge_taper=None, coord="psi_n",
+                      eps_definition=None):
     """The draw's backend on a live solver (monkeypatched by the fast
-    tests).  ``edge_pressure`` / ``edge_taper``: the reconstruction's
-    settings (:mod:`bouquet.edge_pressure`, :func:`bouquet.engine.
-    engine_edge_taper`)."""
+    tests).  ``edge_pressure`` / ``edge_taper`` / ``eps_definition``: the
+    reconstruction's settings (:mod:`bouquet.edge_pressure`,
+    :func:`bouquet.engine.engine_edge_taper`, ``GenerationConfig.
+    eps_definition``)."""
     from .engine import TokaMakerBackend
     return TokaMakerBackend(mygs, contract, psi_pad=psi_pad, li_kind="li_3",
                             q_psi=q_psi, maxits=maxits,
                             edge_pressure=edge_pressure,
-                            edge_taper=edge_taper, coord=coord)
+                            edge_taper=edge_taper, coord=coord,
+                            eps_definition=eps_definition)
 
 
 class GenerateEngineDraws(DrawMethod):
@@ -1212,7 +1215,10 @@ class GenerateEngineDraws(DrawMethod):
                                  q_psi=self.q_psi, maxits=self.maxits,
                                  edge_pressure=self.ctx.edge,
                                  edge_taper=self.ctx.eng.s.get("edge_taper"),
-                                 coord=self.ctx.coord)
+                                 coord=self.ctx.coord,
+                                 # the reconstruction's Redl eps / nu* R
+                                 eps_definition=self.ctx.eng.s.get(
+                                     "eps_definition"))
 
     def lcfs_pressure(self, p_lcfs=None):
         """The separatrix pressure a written g-file of the CURRENT draw

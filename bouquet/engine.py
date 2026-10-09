@@ -126,11 +126,13 @@ def mse_scheme_text(scheme) -> str:
 ENGINE_EDGE_TAPER_DEFAULT = {"taper_edge_jBS": False, "taper_edge_psi0": 0.999,
                              "taper_edge_shape": 2}
 #: The ``bootstrap_kwargs`` keys the engine honours (the edge taper; and
-#: ``use_sauter_eps`` at True: the geometric ``eps = (R_max - R_min)/(2<R>)``
-#: is evaluate_jBS's default since ``evaluate_jBS/4`` (owner decision E4),
-#: so True asks for what the engine already does; ``False`` -- SWB's
-#: ``<a>/<R>`` -- is refused, see :func:`validate_engine_settings`).  Any other
-#: key configures solve_with_bootstrap, which the engine never runs: refused.
+#: ``use_sauter_eps`` at True, accepted as a no-op for configs written for
+#: the toolkit's SWB: the engine's Redl epsilon is
+#: ``GenerationConfig.eps_definition`` (default ``r_over_R_geo``, owner
+#: decision E7); ``False`` -- SWB's ``<a>/<R>`` -- is refused, pointing at
+#: ``eps_definition="a_over_R"``, see :func:`validate_engine_settings`).  Any
+#: other key configures solve_with_bootstrap, which the engine never runs:
+#: refused.
 ENGINE_BOOTSTRAP_KWARGS = frozenset(ENGINE_EDGE_TAPER_DEFAULT) | {
     "use_sauter_eps"}
 
@@ -356,11 +358,10 @@ def validate_engine_settings(gc) -> None:
     if not bool(bk.get("use_sauter_eps", True)):
         raise ValueError(
             "generation.bootstrap_kwargs['use_sauter_eps']=False: the "
-            "engine's Redl evaluation (physics.evaluate_jBS) uses the "
-            "geometric eps = (R_max - R_min)/(2<R>) (evaluate_jBS/4, owner "
-            "decision E4); the <a>/<R> of use_sauter_eps=False is "
-            "physics.evaluate_jBS(..., eps_definition='a_over_R'), which no "
-            "engine setting selects")
+            "engine's Redl epsilon is set by generation.eps_definition "
+            "(default 'r_over_R_geo', owner decision E7), not by this "
+            "toolkit key; for the <a>/<R> of use_sauter_eps=False set "
+            "generation.eps_definition='a_over_R'")
     if engine_edge_taper(gc)["on"] and not resolve_edge_pressure(
             gc).edge_pprime_pin:
         raise ValueError(
@@ -747,6 +748,8 @@ def engine_settings(gc) -> dict:
         draw_solve_maxits=engine_draw_maxits(gc),
         edge_pressure=resolve_edge_pressure(gc).record(),
         edge_taper=engine_edge_taper(gc),
+        # the Redl eps and the R of nu* (GenerationConfig.eps_definition)
+        eps_definition=_eps_definition_of(gc),
         loop=loop,
         q0_tol=float(gc.q0_tol),
         structured_li_tol=float(gc.structured_li_tol),
@@ -755,6 +758,26 @@ def engine_settings(gc) -> dict:
         mse_chi2n_flag=float(getattr(gc, "mse_chi2n_flag",
                                      ENGINE_FIELD_DEFAULTS["mse_chi2n_flag"])),
     )
+
+
+def _eps_definition_of(gc) -> str:
+    """``GenerationConfig.eps_definition`` (the default for an object
+    without the field), validated."""
+    from .physics import EPS_DEFINITION_DEFAULT, check_eps_definition
+    return check_eps_definition(getattr(gc, "eps_definition",
+                                        EPS_DEFINITION_DEFAULT))
+
+
+def eps_record(eps_definition) -> dict:
+    """The record of the Redl epsilon a run evaluates with: name, formula,
+    the R in ``nu*`` and the ``evaluate_jBS`` version tag."""
+    from .physics import (EPS_DEFINITION_DEFAULT, EPS_DEFINITIONS, NU_STAR_R,
+                          check_eps_definition, evaluate_jbs_version)
+    d = check_eps_definition(EPS_DEFINITION_DEFAULT if eps_definition is None
+                             else eps_definition)
+    return dict(eps_definition=d, eps_formula=EPS_DEFINITIONS[d],
+                nu_star_R=NU_STAR_R[d],
+                evaluate_jBS_version=evaluate_jbs_version(d))
 
 
 def convergence_table(settings: dict, contract=None) -> list:
@@ -2184,9 +2207,12 @@ class TokaMakerBackend:
 
     def __init__(self, mygs, contract, *, psi_pad=1e-3, li_kind="li_3",
                  q_psi=None, chords=None, maxits=None, edge_pressure=None,
-                 edge_taper=None, coord="psi_n"):
+                 edge_taper=None, coord="psi_n", eps_definition=None):
         self.mygs = mygs
         self.c = contract
+        #: the Redl eps / nu* R of every evaluation of this backend
+        #: (GenerationConfig.eps_definition; None: evaluate_jBS's default)
+        self.eps_definition = eps_definition
         #: the run grid (psi_N, or Phi_N with coord="phi_n"); every solve
         #: tags its profiles with coord and every measurement samples the
         #: geometry at the nodes' psi_N on that solve's own map
@@ -2250,7 +2276,8 @@ class TokaMakerBackend:
         _j, d = evaluate_jBS(self.mygs.copy_eq(), self.psi, kin["ne"],
                              kin["te"], kin["ni"], kin["ti"], kin["zeff"],
                              psi_pad=self.psi_pad, isolate_edge=False,
-                             smooth_axis=False, coord=self.coord)
+                             smooth_axis=False, coord=self.coord,
+                             eps_definition=self.eps_definition)
         return smooth_jbs_transition(np.asarray(d["j_dot_B"], dtype=float))
 
     def p_sep(self) -> float:
@@ -2325,7 +2352,8 @@ class TokaMakerBackend:
         _j, d = evaluate_jBS(eq, self.psi, kin["ne"], kin["te"], kin["ni"],
                              kin["ti"], kin["zeff"], psi_pad=pad,
                              isolate_edge=False, smooth_axis=False,
-                             coord=self.coord)
+                             coord=self.coord,
+                             eps_definition=self.eps_definition)
         redl = smooth_jbs_transition(np.asarray(d["j_dot_B"], dtype=float))
         geom["F"] = np.asarray(d["F"], dtype=float)
         geom["B2"] = np.asarray(d["avg_B2"], dtype=float)
@@ -2503,6 +2531,7 @@ def engine_record(eng, res, wall_s=None) -> dict:
                       ids_inductive=eng.s.get("ids_inductive", "auto"),
                       edge_pressure=eng.s.get("edge_pressure"),
                       edge_taper=eng.s.get("edge_taper"),
+                      bootstrap_eps=eps_record(eng.s.get("eps_definition")),
                       loop=eng.s["loop"]),
         convergence=convergence_table(eng.s),
         composition=("J = F<1/R>/<B^2> [s_ind <j.B>_ind + s_bs <j.B>_BS + "
@@ -3012,6 +3041,7 @@ def prepare_engine_baseline(bq):
                 edge_pressure=s["edge_pressure"],
                 edge_taper=s["edge_taper"],
                 coord=getattr(ad, "coord", "psi_n"),
+                eps_definition=s.get("eps_definition"),
                 # the reconstruction runs under the solver's own cap
                 # (engine_draw_solve_maxits caps the DRAWS only)
                 maxits=None)

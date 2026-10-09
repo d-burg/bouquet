@@ -155,6 +155,14 @@ def _probe(work, method):
 
 @pytest.fixture(scope="module", params=["legacy", "swb"])
 def run(request, tmp_path_factory):
+    if request.param == "swb":
+        # the swb arm needs an OpenFUSIONToolkit whose solve_with_bootstrap
+        # takes x / jphi_fixed / p_fixed (the same capability the config
+        # refuses on); on any other build the arm is a skip, not an error
+        from bouquet.coords import _swb_grid_arg, _swb_params
+        if not _swb_grid_arg() or not {"jphi_fixed", "p_fixed"} <= _swb_params():
+            pytest.skip("swb arm: this OpenFUSIONToolkit's solve_with_bootstrap "
+                        "lacks x/jphi_fixed/p_fixed")
     work = str(tmp_path_factory.mktemp(f"ida_hybrid_{request.param}"))
     proc = subprocess.run(
         [sys.executable, os.path.abspath(__file__), work, request.param],

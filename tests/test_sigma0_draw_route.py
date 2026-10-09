@@ -70,7 +70,7 @@ def _bouquet(monkeypatch, li_draw, perturb_jind_in_anchor=False,
         aux_baselines={"zeff": 2.0 * np.ones(_XK.size)},
         aux_length_scales={"zeff": 0.4}))
     monkeypatch.setattr(L, "residual_weights",
-                        lambda eq, psi_N, psi_pad=1e-3: (np.ones_like(_X), _X,
+                        lambda eq, psi_N, psi_pad=1e-3, coord="psi_n": (np.ones_like(_X), _X,
                                                          "test"))
 
     def _perturb(*a, **k):

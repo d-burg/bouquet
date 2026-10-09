@@ -170,13 +170,13 @@ def _load_golden():
 
 #: What mode 3 takes from ``Bouquet.generate()``'s own ``generate_bouquet``
 #: call rather than from the function defaults: the bootstrap model
-#: (baseline split, edge isolation, floor, diff offset, delta mode, SWB
-#: iterations, the anchor routes) and the fixed additive components
+#: (baseline split, edge isolation, floor, diff offset, delta mode, the
+#: anchor routes) and the fixed additive components
 #: (impurity / fast pressure, diff anchors, NBI / RF current).  Per-draw
 #: quantities (Z_eff, the bootstrap scale) are the draw's own, below.
 _GENERATOR_MODEL_KWARGS = (
     "baseline_j_BS", "isolate_edge_jBS", "floor_j_BS",
-    "jBS_diff", "jbs_delta_mode", "swb_iterations", "accept_anchor_inband",
+    "jBS_diff", "jbs_delta_mode", "accept_anchor_inband",
     "perturb_jind_in_anchor", "p_fast", "z_fast", "Z_imp", "p_diff",
     "jphi_diff", "j_NBI", "j_RF",
 )
@@ -354,6 +354,13 @@ def replay(tmp_path_factory):
     base["l_i_target"] = float(
         mygs.get_stats(lcfs_pad=pad, li_normalization="iter")["l_i"])
 
+    # The golden predates p'G going with the bootstrap: its draws' j_inductive
+    # carries it.  Move it over (the baseline's p'G: this reconstruction's
+    # j_BS minus the golden's).
+    _pr = _legacy_golden()["baseline"]["profiles"]
+    p_g = np.asarray(gen_model["baseline_j_BS"], dtype=float) - np.interp(
+        psi_N, np.asarray(_pr["psi_N"], float), np.asarray(_pr["j_BS"], float))
+
     z = np.zeros_like(psi_pf)
     zj = np.zeros_like(psi_N)
     with open(_GEQ, 'rb') as fh:
@@ -424,7 +431,7 @@ def replay(tmp_path_factory):
                  else "generate()'s baseline"))
         results["mode3"][i] = _run(
             work + f"/m3_{i}", d["ne"], d["te"], d["ni"], d["ti"],
-            d["jphi"], d["jind"], d["li3"], pin_jphi=False,
+            d["jphi"], d["jind"] - p_g, d["li3"], pin_jphi=False,
             Zeff_run=(_zeff_eq(d["zeff"]) if d["zeff"] is not None
                       else np.asarray(_gen_kw["Zeff"], dtype=float)),
             jBS_scale_range=(_s, _s), **gen_model)

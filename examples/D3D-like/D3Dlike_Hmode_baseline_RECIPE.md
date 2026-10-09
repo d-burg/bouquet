@@ -52,3 +52,15 @@ generic round-number targets.  (The old derived version has been removed.)
 Generator env: `N_ISO=16 ISO_W=200 USE_SADDLE=1 SAD_W=200 IP_TARGET=1200000
 BT_ABS=2.0 FLIP_BT=1 SR=0.99 SZ=0.97 DZ=0.02`.
 Audit tool: /tmp/audit_recon.py (AUDIT_GEQ=<file> AUDIT_PNG=<png>).
+
+## D3Dlike_baseline_omas.json: equilibrium geometry
+`add_equilibrium_geometry.py` (idempotent) gives the dd the fields FUSE writes
+and the reader's exact current conversion needs (docs/current-conventions.md):
+- every equilibrium slice takes this g-file's flux-surface averages at its psi_N:
+  gm1 = <1/R^2>, gm8 = <R>, gm9 = <1/R>, gm5 = F^2 gm1 + <Bp^2>, with F scaled
+  so its edge value is r0*b0 of the dd; rho_tor_norm from core_profiles;
+- psi in Wb, COCOS 11 (2*pi times this g-file's COCOS-1 psi), in equilibrium
+  and core_profiles; dpressure_dpsi from the slice pressure;
+- core_profiles.j_total rebuilt from j_tor (A5, A7), so A6 reproduces j_tor to
+  machine precision; j_tor (Ip), j_bootstrap and j_non_inductive unchanged,
+  j_ohmic = j_total - j_non_inductive (j_total moved by <= 1.5 %).

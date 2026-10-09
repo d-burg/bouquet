@@ -1,9 +1,8 @@
 """Config validation of the self-consistent bootstrap loop's settings.
 
-* ``swb_iterations`` is ignored under the loop: a non-default value with
-  ``jbs_self_consistent=True`` raises a DeprecationWarning that says so and
-  says where it is honoured (the legacy path); with the loop off it is
-  honoured and nothing is emitted.
+* ``bootstrap_kwargs`` reaches SWB only: under the loop a non-empty dict
+  raises a DeprecationWarning that says where it acts; a stored
+  ``swb_iterations`` (retired) loads as ``bootstrap_kwargs["iterations"]``.
 * ``True``/``False`` is not a tolerance or a relaxation factor; ceilings are
   integers; relaxation factors lie in (0, 1].
 * ``from_dict``/``from_json`` refuse an unknown (misspelt) ``generation``
@@ -37,36 +36,41 @@ def _cfg(**gen):
 
 
 # ---------------------------------------------------------------------------
-#  swb_iterations under the loop
+#  bootstrap_kwargs under the loop; the retired swb_iterations
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize("n", [1, 2, 5])
-def test_swb_iterations_under_the_loop_warns_that_it_is_ignored(n):
+def test_bootstrap_kwargs_under_the_loop_warns_where_it_acts():
     with pytest.warns(DeprecationWarning) as rec:
-        _cfg(swb_iterations=n)
+        _cfg(bootstrap_kwargs={"iterations": 2})
     msg = " ".join(str(w.message) for w in rec
                    if issubclass(w.category, DeprecationWarning))
-    assert f"swb_iterations={n}" in msg
-    assert "IGNORED under the self-consistent bootstrap loop" in msg
-    assert "honoured only with jbs_self_consistent=False" in msg
+    assert "bootstrap_kwargs" in msg and "jbs_init='swb'" in msg
 
 
-@pytest.mark.parametrize("gen", [dict(), dict(swb_iterations=3),
+@pytest.mark.parametrize("gen", [dict(), dict(bootstrap_kwargs={}),
                                  dict(jbs_self_consistent=False,
-                                      swb_iterations=2)])
-def test_swb_iterations_is_silent_where_it_is_honoured_or_default(gen):
+                                      bootstrap_kwargs={"iterations": 2})])
+def test_bootstrap_kwargs_is_silent_where_it_is_honoured_or_empty(gen):
     with warnings.catch_warnings():
         warnings.simplefilter("error", DeprecationWarning)
         _cfg(**gen)
 
 
-def test_an_old_config_with_swb_iterations_keeps_it_without_a_deprecation():
-    d = _cfg(jbs_self_consistent=False, swb_iterations=2).to_dict()
-    del d["generation"]["jbs_self_consistent"]
-    with warnings.catch_warnings(record=True) as rec:
-        warnings.simplefilter("always")
+def test_a_stored_swb_iterations_loads_as_bootstrap_kwargs():
+    d = _cfg(jbs_self_consistent=False).to_dict()
+    d["generation"]["swb_iterations"] = 2
+    with pytest.warns(UserWarning, match="iterations"):
         g = BouquetConfig.from_dict(d).generation
-    assert g.jbs_self_consistent is False and g.swb_iterations == 2
-    assert not [w for w in rec if issubclass(w.category, DeprecationWarning)]
+    assert g.bootstrap_kwargs == {"iterations": 2}
+    assert not hasattr(g, "swb_iterations")
+
+
+def test_a_stored_default_swb_iterations_is_dropped_silently():
+    d = _cfg().to_dict()
+    d["generation"]["swb_iterations"] = 3
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        g = BouquetConfig.from_dict(d).generation
+    assert g.bootstrap_kwargs == {}
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +107,7 @@ def test_valid_values_still_pass(field, good):
     ("jbs_self_consistant", "jbs_self_consistent"),
     ("jbs_max_pases", "jbs_max_passes"),
     ("jbs_rtol_ip", "jbs_rtol_Ip"),
-    ("swb_iteration", "swb_iterations"),
+    ("bootstrap_kwarg", "bootstrap_kwargs"),
 ])
 def test_a_misspelt_generation_key_is_refused_with_the_nearest_key(typo,
                                                                    nearest):

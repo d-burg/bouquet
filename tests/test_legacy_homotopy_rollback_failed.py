@@ -20,7 +20,6 @@ import os
 
 import h5py
 import numpy as np
-import pytest
 
 _N = 21
 _X = np.linspace(0.0, 1.0, _N)
@@ -220,8 +219,11 @@ def test_a_good_rollback_still_archives_the_legacy_draw(tmp_path,
     re-solve converges is the pre-existing behaviour (rolled back to pass 1
     and archived)."""
     gs = _HomotopyGS(fail={2})
-    with pytest.raises(_Archiving):          # it goes on to the g-file write
-        _run(tmp_path, monkeypatch, gs)
+    # it goes on to the g-file write, where the mock's save raises (a failed
+    # save is rejected as eqdsk_save_failed)
+    _out, rej, _h, _p = _run(tmp_path, monkeypatch, gs)
+    assert [(r["reason"], r["error_type"]) for r in rej] == [
+        ("eqdsk_save_failed", "_Archiving")]
     txt = capsys.readouterr().out
     assert gs.homotopy_solves == [1, 2, 3]
     assert "rolled back to pass 1" in txt

@@ -82,6 +82,7 @@ from .plotting import (
     draw_jphi_total,
     draw_jphi_components,
     _load_all_perturbations,
+    _relabel_x,
 )
 
 
@@ -231,12 +232,13 @@ class EquilibriumBrowser:
         bl = load_baseline_profiles(self.h5path, scan_key=sv)
         perturbed = _load_all_perturbations(self.h5path, scan_key=sv)
         psi_N = bl["psi_N"]
+        psi_N_kin = bl.get("psi_N_kinetic", psi_N)
 
         tab = self._current_tab
 
         if tab == self.TABS[0]:  # Kinetic
             draw_kinetic_profiles(
-                self.kinetic_axes, psi_N,
+                self.kinetic_axes, psi_N_kin,
                 bl["n_e"],  bl["n_i"],
                 bl["T_e"],    bl["T_i"],
                 bl["sigma_ne"], bl["sigma_ni"],
@@ -263,6 +265,7 @@ class EquilibriumBrowser:
                 self.jphi_comp_axes, psi_N,
                 perturbed_data_list=perturbed,
             )
+        _relabel_x(self.fig, self.h5path, sv)
 
     # ------------------------------------------------------------------
     #  Show

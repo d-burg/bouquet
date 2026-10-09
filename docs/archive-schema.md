@@ -48,7 +48,7 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │                                  [refused_reason_superseded]
     ├── _baseline/                     written once per scan point
     │   ├── eqdsk, [pfile]             raw byte-perfect g-file / p-file
-    │   ├── psi_N, psi_N_kinetic
+    │   ├── psi_N, psi_N_kinetic         run grids, in the `profile_coord` coordinate
     │   ├── n_e, T_e, n_i, T_i         kinetic profiles
     │   ├── pressure[, pressure_thermal]
     │   ├── j_phi[, j_BS, j_inductive] separated toroidal currents
@@ -63,7 +63,8 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │   │                              unified engine: engine_mse_*)
     │   ├── [engine_json]              the engine record as a string DATASET
     │   │                              when too large for an attribute
-    │   └── attrs: Ip_target, l_i_target, l_i_scale, source_kind, [diverted],
+    │   └── attrs: Ip_target, l_i_target, l_i_scale, source_kind, profile_coord,
+    │              [diverted],
     │              [source_current_sign, source_b0_sign,
     │               source_current_sign_origin, current_frame],
     │              [coil_solve_mode]   the run's coil-solve mode ("bounded"
@@ -95,7 +96,7 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     └── <count>/                       one group per accepted draw
         │                              (integer; gaps = rejected draws)
         ├── eqdsk, [pfile]             raw bytes, fixed names
-        ├── psi_N[, psi_N_kinetic]
+        ├── psi_N[, psi_N_kinetic]       run grids, in `profile_coord`
         ├── j_phi, j_BS, j_inductive[, j_BS,edge]
         ├── n_e, T_e, n_i, T_i, w_ExB[, Zeff]
         ├── [pressure, pressure_thermal]
@@ -103,7 +104,7 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
         ├── [coil_currents, coil_names]
         ├── [perturbed_lcfs_ref], [x_points]
         ├── [eq_fsa/]                  live-equilibrium flux-surface averages
-        │   ├── psi_N                  (subgroup; see below)
+        │   ├── psi_N                  always ψ_N (subgroup; see below)
         │   ├── F, avg_inv_R, avg_inv_R2, avg_B2
         │   └── q, dV_dpsi, f_trap, B_avg
         ├── [jB_parallel/]             engine draws (added 2026-10-06): the
@@ -113,8 +114,8 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
         │   └── kappa, j_pressure
         ├── [engine_json]              engine draw record as a string DATASET
         │                              when too large for an attribute
-        └── attrs: l_i(1), l_i(3), count, homotopy_*, max_F_drift_pct,
-                   max_VSC_drift_pct, in_spec, inspec_*, l_i_target_used,
+        └── attrs: l_i(1), l_i(3), count, profile_coord, homotopy_*, max_F_drift_pct,
+                   max_VSC_drift_pct, in_spec, inspec_*, l_i_target_used, [jbs_delta_active],
                    [diverted], [passes_coil_filter, passes_boundary_filter,
                    selected]           ← filter flags, written post-hoc
                    [jbs_converged, jbs_n_passes, jbs_loop_json]
@@ -161,6 +162,11 @@ pressure + that equilibrium's `p_sep`).
 - **Always `scan/<key>/`.** The scan key is a user-chosen label
   (`GenerationConfig.scan_key`, default `0`) — a time in ms, a beta value, …
   Several bouquets can share one file under different keys.
+- **Profile coordinate.** `profile_coord` (`"psi_n"` or `"phi_n"`, on
+  `_baseline` and each draw; absent = `"psi_n"`) names the coordinate of the
+  `psi_N` / `psi_N_kinetic` grids despite their names. `eq_fsa/psi_N` is
+  always ψ_N. Read it with `bouquet.utils.profile_coord`; `merge_archives`
+  refuses shards that differ.
 - **Gap-tolerant indices.** Rejected draws leave gaps; iterate with
   `list_equilibrium_indices` / `BouquetArchive`, never `range(n)`.
 - **Filtering is non-destructive.** Filters write boolean attrs
@@ -192,14 +198,16 @@ pressure + that equilibrium's `p_sep`).
   a dict under `"structured_mse"`.
 - **Live-equilibrium FSA (`eq_fsa/`).** Optional per-draw subgroup of
   flux-surface averages captured directly from the live TokaMaker object at
-  generate time (`GenerationConfig.capture_live_eq`, on by default), on the
-  `psi_N` grid of `capture_npsi` points. Keys and units are `EQ_FSA_GROUP` /
-  `EQ_FSA_UNITS` in `schema.py`: `F` (T m), `avg_inv_R` (⟨1/R⟩, m⁻¹),
-  `avg_inv_R2` (⟨1/R²⟩, m⁻²), `avg_B2` (⟨B²⟩, T²), `q`, `dV_dpsi`
-  (m³ Wb⁻¹), `f_trap`, `B_avg` (⟨B⟩, T). `⟨1/R²⟩` is computed by exact
-  FSA quadrature (`capture_exact_inv_R2`, default) with a fast path for
-  `sauter_fc`'s native value when present. This is what enables the exact
-  parallel↔toroidal current split in the IMAS/OMAS exporter
+  generate time (`GenerationConfig.capture_live_eq`, on by default), on a
+  ψ_N grid of `capture_npsi` points (ψ_N whatever the `profile_coord`). Keys and units are `EQ_FSA_GROUP` /
+  `EQ_FSA_UNITS` in `schema.py`: `F` (T m), `avg_R` (⟨R⟩, m), `avg_inv_R`
+  (⟨1/R⟩, m⁻¹), `avg_inv_R2` (⟨1/R²⟩, m⁻²), `avg_B2` (⟨B²⟩, T²), `pprime`
+  (p′, Pa Wb⁻¹, signed so `jphi_eq` > 0), `jphi_eq` (the equilibrium's own
+  TokaMaker jphi, A m⁻²), `q`, `dV_dpsi` (m³ Wb⁻¹), `f_trap`, `B_avg`
+  (⟨B⟩, T); `avg_R`/`pprime`/`jphi_eq` are absent from older archives.
+  `⟨1/R²⟩` comes from `get_q` when the toolkit exposes it, else exact FSA
+  quadrature (`capture_exact_inv_R2`, default). This is what enables the exact
+  TokaMaker-jphi → IMAS current conversion in the IMAS/OMAS exporter
   (`write_imas_draw(..., fidelity="exact")`); read it back with
   `bq.load_eq_fsa`.
 
@@ -331,11 +339,11 @@ pressure + that equilibrium's `p_sep`).
     positive frame on the subgroup's `psi_N` (the draw's grid) --
     `jB_BS` (the bootstrap model on the archived state), `jB_NBI`,
     `jB_RF` (rf + other driven), and `jB_inductive` the FIELD-ALIGNED
-    inductive only, `(j_inductive - j_pressure) / kappa`; with `kappa =
+    inductive only; with `kappa =
     F<1/R>/<B^2>` and `j_pressure = p'(<R> - F^2<1/R>/<B^2>)` [A m⁻²] of
     the archived state, `j_phi = kappa (jB_inductive + jB_BS + jB_NBI +
-    jB_RF) + j_pressure` to round-off. The toroidal `j_inductive` (the
-    residual) CARRIES `j_pressure`; the parallel one does not. The IDS
+    jB_RF) + j_pressure` to round-off. The toroidal `j_BS` CARRIES
+    `j_pressure`; no parallel part does. The IDS
     exporter (`write_imas_draw`) writes these parts as they are, so no
     exported parallel current (`j_ohmic`, `j_bootstrap`, `j_total`)
     carries the pressure-driven term and export -> `IdsAdapter.read`
@@ -343,8 +351,7 @@ pressure + that equilibrium's `p_sep`).
     the subgroup (every legacy draw; engine draws archived before
     2026-10-06) the exporter subtracts `j_pressure` computed from the
     archived eqdsk's own flux surfaces (`io.imas.archived_pressure_term`,
-    COCOS 7) from `j_inductive` before converting with the `eq_fsa`
-    geometry.
+    COCOS 7) from `j_BS` before converting with the `eq_fsa` geometry.
   - `passes_draw_band` (bool attr, engine draws only): the post-hoc band
     verdict. It is one of the filter flags ANDed into `selected`
     (`filtering._FILTER_FLAGS`), so `.filter()` selects what the until-N

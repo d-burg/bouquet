@@ -170,7 +170,7 @@ def test_the_inductive_basis_is_the_legacy_basis_without_the_amplitude(
     resid = jB - 0.3 * jB * np.exp(-0.5 * ((psi - 0.95) / 0.03) ** 2)
     # the amplitude search's proxy, replaced by a linear stand-in
     monkeypatch.setattr(ti, "calc_cylindrical_li_proxy",
-                        lambda mygs, j, pad: float(np.sum(j)) * 1e-9)
+                        lambda mygs, j, pad, *a: float(np.sum(j)) * 1e-9)
     fit = ti.fit_inductive_profile(None, resid, np.zeros_like(psi), psi,
                                    1e-3, float(np.sum(resid)) * 0.9e-9,
                                    k=5, psi_bridge=0.99)

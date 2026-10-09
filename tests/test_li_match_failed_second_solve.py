@@ -49,9 +49,12 @@ def _block(src):
     code = ("def _secant(mygs, eqdsk, j_inductive_fit, j_BS_isolated, "
             "pp_prof, psi_pad, li_target, li_tol, max_li_iters, "
             "max_step_frac):\n"
+            # a psi_n run: the run grid is the g-file's psi_N
+            "    _x, coord = eqdsk.psi_N, 'psi_n'\n"
             + textwrap.indent(body, "    ")
             + "\n    return ind_1, li_1_sec\n")
-    ns = {"np": np}
+    from bouquet import coords
+    ns = {"np": np, "coords": coords}
     exec(compile(code, "<li-secant>", "exec"), ns)
     return ns["_secant"]
 

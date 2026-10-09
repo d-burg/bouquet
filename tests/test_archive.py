@@ -42,6 +42,24 @@ class TestArchiveGolden:
         assert isinstance(d.attrs, dict) and "l_i(1)" in d.attrs
         assert d.eqdsk_bytes is not None                  # suffix scan finds it
 
+    def test_profile_attr_on_draw_group(self, tmp_path):
+        # swb_saw_q stamps the draw's j_saw profile as a group attr: attrs keep it as an
+        # array and the scalar readers (spread) still work
+        import shutil
+        p = str(tmp_path / "saw.h5")
+        shutil.copy(_GOLDEN, p)
+        c = bq.BouquetArchive(p)["0"].indices[0]
+        with h5py.File(p, "a") as hf:
+            hf[f"scan/0/{c}"].attrs["swb_j_saw"] = np.linspace(0.0, 1.0, 257)
+        sc = bq.BouquetArchive(p)["0"]
+        d = sc[c]
+        assert d.attrs["swb_j_saw"].shape == (257,) and isinstance(d.li1, float)
+        assert sc.spread(selection="all")["l_i(1)"]["n"] == len(sc.all)
+        import json
+        doc = json.loads(json.dumps(d.profiles_doc()))          # profiles JSON export
+        assert len(doc["profiles"]["swb_j_saw"]) == 257 and "swb_j_saw" not in doc["scalars"]
+        assert "profiles" in d.extract(str(tmp_path / "x"), formats=("profiles",))
+
     def test_equilibrium_parse(self):
         sc = bq.BouquetArchive(_GOLDEN)["0"]
         eq = sc[sc.indices[0]].equilibrium()

@@ -25,6 +25,7 @@ from bouquet.config import FixedComponentsConfig, ImasSource
 from bouquet.io.imas import (detect_p_fast_convention, read_imas_baseline,
                              resolve_p_fast_reduction,
                              P_FAST_UNDETERMINED_FALLBACK)
+from _imas_geometry import eq_geometry, jtor_from_jtotal
 
 
 # ---------------------------------------------------------------------------
@@ -43,10 +44,9 @@ def _minimal_dd(n=9, p_fast_perp=None, p_fast_par=None, with_parallel=True):
     ti = te.copy()
     nC = 0.02 * ne
     ni = ne - 6.0 * nC
-    j_tor = 6.0e5 * (1.0 - psi_N ** 2)
-    j_total = j_tor.copy()
-    j_boot = 0.1 * j_tor
-    j_ohmic = j_tor - j_boot
+    j_total = 6.0e5 * (1.0 - psi_N ** 2)
+    j_boot = 0.1 * j_total
+    j_ohmic = j_total - j_boot
 
     if p_fast_perp is None:
         p_fast_perp = 3.0e3 * (1.0 - psi_N ** 2)
@@ -57,6 +57,8 @@ def _minimal_dd(n=9, p_fast_perp=None, p_fast_par=None, with_parallel=True):
     EC = 1.602176634e-19
     # thermal + impurity + the "trace" reading of the fast fields
     p_eq = EC * (ne * te + ni * ti + nC * ti) + p_fast_perp
+    geo = eq_geometry(psi, p_eq)
+    j_tor = jtor_from_jtotal(j_total, geo, -2.0)
 
     def _sp(dens, temp, perp=None, par=None, label=None, z=None):
         d = {"density_thermal": dens.tolist(), "temperature": temp.tolist()}
@@ -80,13 +82,14 @@ def _minimal_dd(n=9, p_fast_perp=None, p_fast_par=None, with_parallel=True):
                 "boundary": {"outline": {"r": [1.2, 2.2, 1.7],
                                          "z": [0.0, 0.0, 0.8]}},
                 "profiles_1d": {"psi": psi.tolist(), "pressure": p_eq.tolist(),
-                                "j_tor": j_tor.tolist()},
+                                "j_tor": j_tor.tolist(), **geo},
             }],
         },
         "core_profiles": {
             "time": [1.0],
             "profiles_1d": [{
-                "grid": {"psi": psi.tolist()},
+                "grid": {"psi": psi.tolist(),
+                         "rho_tor_norm": geo["rho_tor_norm"]},
                 "j_tor": j_tor.tolist(), "j_total": j_total.tolist(),
                 "j_ohmic": j_ohmic.tolist(), "j_bootstrap": j_boot.tolist(),
                 "electrons": _sp(ne, te),

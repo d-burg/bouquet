@@ -3016,8 +3016,18 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
     (``profiles_1d`` / ``profiles_2d`` / ``global_quantities`` / ``boundary`` --
     lossless to the eqdsk grid, machine-precision GS) and the draw's ``.h5``
     kinetics/currents to ``core_profiles``.  The written IDS holds only that
-    time slice: every time series in the template is cut to its sample
-    nearest ``time`` (:func:`_slice_in_time`), keeping the template's structure.
+    time slice (:func:`_slice_in_time`, review PR71): every IDS is cut at the
+    ``core_profiles`` slice nearest ``time`` -- the slice the reader reads --
+    keyed on the IMAS structure (the IDS ``time``, time-tagged arrays of
+    structures, signals on their own or the homogeneous time base,
+    ``vacuum_toroidal_field.b0``, ``code.output_flag``,
+    ``global_quantities``), never on list length, keeping the template's
+    structure; ``core_sources`` is cut by the reader's own source-time rule
+    (each entry keeps its slices bracketing the time plus its first and last
+    own slice), with the windows of that read recorded under
+    :data:`IMAS_EXPORT_TIME_WINDOW_KEY` so a re-read matches the same entries
+    exactly.  The template is this function's own fresh ``json.load``, never
+    the shared parsed dd of :func:`_load_dd` (#72: the cut mutates it).
 
     bouquet's arrays are TokaMaker ``jphi``; they are written as IMAS
     ``j_tor`` (A5) and the parallel split ``j_total`` / ``j_ohmic`` /
@@ -3079,6 +3089,8 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
         raise ValueError(
             f"fidelity must be 'auto'|'exact'|'reconstruct', got {fidelity!r}")
 
+    # a FRESH parse: _slice_in_time cuts this object in place, so it must
+    # never be the shared cached dd of _load_dd (#72 B5)
     with open(template_ids_path) as fh:
         out = json.load(fh)
 
@@ -3086,7 +3098,10 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
     ie = _nearest_index(eq_ids["time"], time, "equilibrium")
     cp_ids = out["core_profiles"]
     ic = _nearest_index(cp_ids["time"], time, "core_profiles")
-    # Only the exported slice is written: every time series is cut to it.
+    # Only the exported slice is written: every IDS is cut at the
+    # core_profiles slice nearest the time, core_sources by the reader's rule
+    # with its windows recorded (#71).  This MUST stay before ie = ic = 0:
+    # every index below addresses the one kept slice.
     _slice_in_time(out, eq_ids["time"][ie] if time is None else time)
     ie = ic = 0
 

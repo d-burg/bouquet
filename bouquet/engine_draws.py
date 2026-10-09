@@ -548,6 +548,10 @@ def sample_kinetics(ctx, rng, unc, flux_integral, *, p_thresh=0.05,
                      pressure_match_err_pct=kd.p_err_pct,
                      p_thresh=float(p_thresh),
                      zeff_primary=kd.zeff_primary,
+                     # the sampler version (kinetic_sampler/2) and its
+                     # per-draw clip counters (PR #56 B3/B4/B7), archived in
+                     # the draw record's "inputs"
+                     kinetic_sampler=kd.record(),
                      rng_stream=RNG_STREAM))
 
 

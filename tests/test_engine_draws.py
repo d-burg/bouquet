@@ -330,6 +330,13 @@ def test_the_sampler_draws_the_legacy_kinetic_stream(recon, zeff_primary,
     assert np.max(np.abs(leg - mine)) <= 1e-12 * np.max(np.abs(leg))
     assert set(inp.aux) == set(unc["aux_sigmas"])
     assert inp.sampler["zeff_primary"] is zeff_primary
+    # the sampler version and its clip counters ride with every engine draw
+    # (PR #56 B3/B4/B7)
+    from bouquet.kinetic_sampler import CLIP_COUNTERS, KINETIC_SAMPLER_VERSION
+    ks = inp.sampler["kinetic_sampler"]
+    assert ks["version"] == KINETIC_SAMPLER_VERSION
+    assert ks["zeff_primary"] is zeff_primary
+    assert set(ks["clips"]) == set(CLIP_COUNTERS)
 
 
 @pytest.mark.parametrize("j_ls, bar", [(0.05, 1e-8), (0.25, 1e-3)])
@@ -605,6 +612,9 @@ def test_generate_bouquet_runs_engine_draws_end_to_end(tmp_path,
         assert c["total"]["wall_s"] > 0.0
         back = ED.read_draw_engine(h, i)
         assert back["deltas"] == e["deltas"]
+        # the kinetic sampler's version + clip counters are archived
+        assert back["inputs"]["kinetic_sampler"]["version"].startswith(
+            "kinetic_sampler/")
         assert "cost" in back
     with h5py.File(h + ".h5", "r") as hf:
         g0 = hf["scan/0/0"] if "scan" in hf else hf["0"]

@@ -232,3 +232,47 @@ def test_the_archive_records_the_enabled_features(tmp_path, toy_bouquet_solver,
         w.category, X.ExperimentalFeatureWarning)]) == len(want)
     _quiet(b.generate)
     assert load_experimental_features(b.config.output_header, 0) == want
+
+
+# ---------------------------------------------------------------------------
+#  the readers surface the list (stats.draw_band, archive views)
+# ---------------------------------------------------------------------------
+from test_stats_draw_band import _by_attr, _simple  # noqa: E402
+
+
+@pytest.mark.parametrize("stamp, want", [
+    (None, "unrecorded"), ([], []), (["swb_solve_method"], ["swb_solve_method"])])
+def test_draw_band_carries_the_features(tmp_path, stamp, want):
+    import json
+    import bouquet as bq
+    attrs = ({} if stamp is None else
+             {"experimental_features_json": json.dumps(stamp)})
+    p = _simple(tmp_path / "a.h5", 6, baseline_attrs=attrs)
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter("always")
+        r = bq.draw_band(p, "1", _by_attr)["x"]
+    assert r.provenance["experimental_features"] == want
+    xw = [w for w in rec if issubclass(w.category, X.ExperimentalFeatureWarning)]
+    lim = [m for m in r.provenance["limitations"] if "EXPERIMENTAL" in m]
+    if want and want != "unrecorded":
+        assert len(xw) == 1 and "swb_solve_method" in str(xw[0].message)
+        assert len(lim) == 1 and "swb_solve_method" in lim[0]
+        assert "EXPERIMENTAL[swb_solve_method]" in repr(r)
+    else:
+        assert not xw and not lim and "EXPERIMENTAL" not in repr(r)
+
+
+def test_archive_views_show_the_features(tmp_path, capsys):
+    import json
+    from bouquet.archive import BouquetArchive
+    p = _simple(tmp_path / "a.h5", 3, baseline_attrs={
+        "experimental_features_json": json.dumps(["ida_ion_route"])})
+    ar = BouquetArchive(p)
+    sv = ar.scan("1")
+    assert sv.experimental_features == ["ida_ion_route"]
+    assert "EXPERIMENTAL=['ida_ion_route']" in repr(sv)
+    assert "ida_ion_route" in repr(ar)
+    p0 = _simple(tmp_path / "b.h5", 3)
+    sv0 = BouquetArchive(p0).scan("1")
+    assert sv0.experimental_features is None
+    assert "EXPERIMENTAL" not in repr(sv0)

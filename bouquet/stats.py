@@ -204,6 +204,9 @@ class BandRecord:
         flags = [n for n in ("below_floor", "no_band", "gated") if getattr(self, n)]
         if not self.show:
             flags.append("hidden")
+        _xf = (self.provenance or {}).get("experimental_features")
+        if isinstance(_xf, list) and _xf:
+            flags.append("EXPERIMENTAL[" + ",".join(_xf) + "]")
         band = ("" if self.no_band else
                 f" [{self.p16:.4g}, {self.p84:.4g}]")
         return (f"{head} median={self.median:.4g}{band} "
@@ -468,6 +471,15 @@ def _scan_context(ar, key) -> dict:
     ctx["closure_channel"] = str(_decode(ch)) if ch is not None else None
     scale = bl.get("l_i_scale")
     ctx["l_i_scale"] = str(_decode(scale)) if scale is not None else None
+    # the EXPERIMENTAL features the run enabled (bouquet.experimental;
+    # _baseline attr experimental_features_json): a list ([] none), or
+    # UNRECORDED on an archive that predates the record
+    from .utils import load_experimental_features
+    try:
+        xf = load_experimental_features(ar.path, scan_key=key)
+    except (KeyError, OSError, ValueError):
+        xf = None
+    ctx["experimental_features"] = UNRECORDED if xf is None else list(xf)
     return ctx
 
 
@@ -714,6 +726,16 @@ def draw_band(archive, scan_key, evaluate, *, quantities=None,
             common_dropped.append((d, f"rescued:{resc[d]}"))
         else:
             to_eval.append(d)
+    _xf = ctx.get("experimental_features")
+    if isinstance(_xf, list) and _xf:
+        import warnings
+        from .experimental import ExperimentalFeatureWarning
+        warnings.warn(
+            f"draw_band: scan {skey!r} was generated with EXPERIMENTAL "
+            f"feature(s) {_xf} (not validated on real data; see "
+            "bouquet.experimental.REGISTRY); every record carries them in "
+            "its provenance and limitations",
+            ExperimentalFeatureWarning, stacklevel=2)
     _resc_in = sorted(d for d in to_eval if d in resc)
     if _resc_in:
         import warnings
@@ -777,6 +799,7 @@ def draw_band(archive, scan_key, evaluate, *, quantities=None,
         "exclude": {int(k): v for k, v in excl.items()},
         "bouquet_version": ctx["bouquet_version"],
         "evaluator_meta": meta,
+        "experimental_features": ctx["experimental_features"],
     }
     if resc or rescued != "include":
         # only where it says something: an archive without rescued draws
@@ -961,6 +984,7 @@ def _status_record(skey, quantity, status, archive, *, refused_reason=None,
         "exclude": {},
         "bouquet_version": {"scan": UNRECORDED, "file": UNRECORDED,
                             "reader": __version__},
+        "experimental_features": UNRECORDED,
         "evaluator_meta": dict(settings["evaluator_meta"] or {}),
         "limitations": [LIMITATION_SAMPLED, why],
     }
@@ -973,6 +997,11 @@ def _limitations(rec, ctx, meta, selection, require_filter, percentiles):
     lim = [LIMITATION_SAMPLED]
     for extra in meta.get("limitations", ()) or ():
         lim.append(str(extra))
+    _xf = ctx.get("experimental_features")
+    if isinstance(_xf, list) and _xf:
+        lim.append(f"EXPERIMENTAL features were enabled for this run: {_xf} "
+                   "-- not validated on real data (bouquet.experimental."
+                   "REGISTRY lists each one's open validation items).")
     if ctx["n_attempted"] is None:
         lim.append("n_attempted is not recorded on this archive: draws that "
                    "failed before archiving are invisible, so n_stored is not "

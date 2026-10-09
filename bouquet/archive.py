@@ -377,7 +377,21 @@ class ScanView:
         self.scan_key = scan_key
 
     def __repr__(self):
-        return f"<ScanView scan={self.scan_key!r} ({len(self.indices)} draws)>"
+        xf = self.experimental_features
+        return (f"<ScanView scan={self.scan_key!r} ({len(self.indices)} draws)"
+                + (f" EXPERIMENTAL={xf}" if xf else "") + ">")
+
+    @property
+    def experimental_features(self):
+        """The EXPERIMENTAL features the run enabled
+        (:data:`bouquet.experimental.REGISTRY` keys; ``[]``: none), or
+        ``None`` for an archive that predates the record."""
+        from .utils import load_experimental_features
+        try:
+            return load_experimental_features(self._ar.path,
+                                              scan_key=self.scan_key)
+        except (KeyError, OSError):
+            return None
 
     @property
     def indices(self) -> list:
@@ -521,6 +535,14 @@ class ScanView:
         if print_table:
             print(f"Bouquet output spread -- scan {self.scan_key!r}, "
                   f"selection={selection!r} ({len(draws)} draws)")
+            xf = self.experimental_features
+            if xf:
+                print(f"  EXPERIMENTAL features enabled for this run: {xf} "
+                      "(not validated on real data; see "
+                      "bouquet.experimental.REGISTRY)")
+            elif xf is None:
+                print("  experimental features: not recorded (archive "
+                      "predates the record)")
             print(f"  {'quantity':<11}{'mean':>10}{'1sigma':>10}{'σ/mean':>8}   range")
             for name, st in out.items():
                 if st is None:
@@ -570,7 +592,16 @@ class BouquetArchive:
                     "with the current bouquet for full v2 support.")
 
     def __repr__(self):
-        return f"<BouquetArchive {self.path!r} scans={self.scan_keys}>"
+        xf = {}
+        for k in self.scan_keys:
+            try:
+                v = ScanView(self, k).experimental_features
+            except Exception:           # a repr never raises
+                v = None
+            if v:
+                xf[k] = v
+        return (f"<BouquetArchive {self.path!r} scans={self.scan_keys}"
+                + (f" EXPERIMENTAL={xf}" if xf else "") + ">")
 
     @property
     def scan_keys(self) -> list:

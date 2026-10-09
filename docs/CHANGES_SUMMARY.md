@@ -41,6 +41,14 @@ thread per process, `bouquet.threads`, `threadpoolctl` is a dependency).
 run many bouquets, one standing single-threaded solver per worker; see
 docs/workflows.md, "Many bouquets on one node".
 
+**Failed cases are in the merged archive.** `merge_cases` (and so
+`parallel_cases`) writes each failed case into its group's archive as a refused
+scan (`refused_reason` = the case and its exception) and marks the archive as
+a PARTIAL merge (root attrs `merge_partial`, `merge_expected_cases`,
+`merge_failed_cases_json`, `merge_partial_json`), following `merge_archives`.
+A complete merge carries `merge_partial=False`. `merge_cases` no longer
+replaces an existing merged archive unless `overwrite=True`.
+
 ## Unreleased — the PR #56 kinetic combination is EXPERIMENTAL and opt-in (owner decision 2026-10-09)
 
 **What and why.** PR #56's IDA/FUSE ion coupling is not the default for 1.4.0.

@@ -556,9 +556,57 @@ class TestMergeCases:
         results = [_case_archive(tmp_path, 0, "A", 2000),
                    _case_archive(tmp_path, 1, "A", 2500)]
         merge_cases(results, str(tmp_path / "sweep"))
-        merged = merge_cases(results[:1], str(tmp_path / "sweep"))
+        merged = merge_cases(results[:1], str(tmp_path / "sweep"), overwrite=True)
         with h5py.File(merged["A"], "r") as f:      # stale 2500 must be gone
             assert list(f["scan"].keys()) == ["2000"]
+
+    def test_an_existing_merge_is_not_replaced_unless_asked(self, tmp_path):
+        # a re-run that lost cases must not silently replace a complete merge
+        results = [_case_archive(tmp_path, 0, "A", 2000),
+                   _case_archive(tmp_path, 1, "A", 2500)]
+        merged = merge_cases(results, str(tmp_path / "sweep"))
+        with pytest.raises(FileExistsError, match="overwrite=True"):
+            merge_cases(results[:1], str(tmp_path / "sweep"))
+        with h5py.File(merged["A"], "r") as f:      # untouched
+            assert sorted(f["scan"].keys(), key=int) == ["2000", "2500"]
+            assert f.attrs["merge_partial"] == False  # noqa: E712
+            assert f.attrs["merge_expected_cases"] == 2
+
+    def test_a_failed_case_is_recorded_and_marks_a_partial_merge(self, tmp_path):
+        import json
+        results = [_case_archive(tmp_path, 0, "A", 2000),
+                   _case_archive(tmp_path, 2, "B", 4000)]
+        failed = [dict(idx=1, group="A", scan_key=2500,
+                       error="Traceback (most recent call last):\n  ...\nRuntimeError: synthetic failure"),
+                  dict(idx=3, group="C", scan_key=6000, error="ValueError: also synthetic")]
+        with pytest.warns(RuntimeWarning, match="PARTIAL merge"):
+            merged = merge_cases(results, str(tmp_path / "sweep"), failed=failed)
+        # a group whose only case failed still gets its archive: never only in errors.pkl
+        assert set(merged) == {"A", "B", "C"}
+        with h5py.File(merged["A"], "r") as f:
+            assert sorted(f["scan"].keys(), key=int) == ["2000", "2500"]
+            assert f["scan/2500"].attrs["refused_reason"] == \
+                "parallel case 1 failed: RuntimeError: synthetic failure"
+            assert not any(k.isdigit() for k in f["scan/2500"])
+            assert f.attrs["merge_partial"] == True  # noqa: E712
+            assert f.attrs["merge_expected_cases"] == 2
+            part = json.loads(f.attrs["merge_partial_json"])
+            assert part == dict(expected_cases=2, merged_cases=[0], failed_cases=[1])
+            assert json.loads(f.attrs["merge_failed_cases_json"])[0]["scan_key"] == 2500
+        with h5py.File(merged["B"], "r") as f:      # complete groups are not marked
+            assert f.attrs["merge_partial"] == False  # noqa: E712
+            assert "merge_partial_json" not in f.attrs
+        with h5py.File(merged["C"], "r") as f:
+            assert f.attrs["merge_partial"] == True and list(f["scan"].keys()) == ["6000"]  # noqa: E712
+        # a series reader reports the failed case, not a gap
+        ev = {"_baseline": {"q": {"value": 1.0, "status": "ok", "regular": True}}}
+        assert bq.draw_band(merged["A"], "2500", ev)[None].status == "refused"
+
+    def test_a_failed_case_cannot_hide_a_duplicate_scan_key(self, tmp_path):
+        results = [_case_archive(tmp_path, 0, "A", 2000)]
+        with pytest.raises(ValueError, match="duplicate scan_key"):
+            merge_cases(results, str(tmp_path / "sweep"),
+                        failed=[dict(idx=1, group="A", scan_key=2000, error="x")])
 
 
 # ---------------------------------------------------------------------------

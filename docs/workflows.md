@@ -881,7 +881,11 @@ bit-identical with — a serial run of the same seed.
 One complete bouquet per case (g-file/p-file pair, IDA time slice, IMAS time).  Each worker stands up its
 solver once, in its own directory (TokaMaker's scratch files) with its own copy of the mesh, and swaps
 case after case onto it (`Bouquet.set_case`).  A failed case returns its traceback (`errors`,
-`errors.pkl`) and the sweep goes on.  Each case runs at its own seed (`bouquet.parallel.case_seed`, from
+`errors.pkl`) and the sweep goes on; the merge records it in its group's archive as a refused scan
+(`refused_reason` names the case and its exception, so `draw_bands` reports `status="refused"`) and marks
+the archive as a PARTIAL merge (root attrs `merge_partial`, `merge_expected_cases`,
+`merge_failed_cases_json`, `merge_partial_json`).  An existing merged archive is not replaced unless
+`overwrite=True`.  Each case runs at its own seed (`bouquet.parallel.case_seed`, from
 the run seed and the case's group and scan_key), the one `units.units_from_cases` gives it too.  Input
 paths may be relative to the launch directory.  A sweep is one run-level config plus the cases:
 
@@ -907,7 +911,7 @@ work_dir/
   cases/sweep_<stem>_idx0.h5 ...   one archive per case
   sweep_<group>.h5         merged
   map_object.pkl           idx -> CaseSpec
-  errors.pkl               {idx: traceback}
+  errors.pkl               {idx: traceback} (also recorded in the merged archives)
 ```
 
 `group_by=None` merges into one archive, `merge=False` keeps only the per-case files, `cleanup=True`

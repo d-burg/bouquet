@@ -1184,7 +1184,7 @@ def _picklable_hooks(**hooks) -> dict:
 
 def parallel_cases(source, config, master_working_dir, *, use_logical_cpus=True, n_cpus_override=None,
                    verbose=False, merge=True, group_by="group", cleanup=False, before_baseline=None,
-                   after_baseline=None):
+                   after_baseline=None, overwrite=False):
     """Run many independent bouquets in parallel on one node, one single-threaded solver per worker.
 
     Call it under ``if __name__ == "__main__":`` in a script: workers are spawned (OFT's Fortran is not
@@ -1208,8 +1208,9 @@ def parallel_cases(source, config, master_working_dir, *, use_logical_cpus=True,
         The worker count, bypassing detection.
     verbose : bool
         Stream worker output to the terminal instead of ``worker_N.log``.
-    merge, group_by, cleanup
-        :func:`merge_cases` on the successful cases.
+    merge, group_by, cleanup, overwrite
+        :func:`merge_cases` on the cases: the successful ones are merged, the failed ones recorded as
+        refused scans with a partial-merge mark; an existing merged archive raises unless ``overwrite``.
     before_baseline, after_baseline : callable, optional
         ``f(bouquet, case)`` either side of ``prepare_baseline()`` on the worker: per-case setup a
         ``CaseSpec`` cannot express (solver targets before; anything on the baseline's grid after, e.g.
@@ -1291,31 +1292,59 @@ def parallel_cases(source, config, master_working_dir, *, use_logical_cpus=True,
         with open(os.path.join(master_working_dir, "errors.pkl"), "wb") as fh:
             pickle.dump(errors, fh)
     merged = {}
-    if merge and results:
+    if merge and (results or errors):
+        failed = [dict(idx=i, group=cases[i].group, scan_key=cases[i].scan_key, error=errors[i])
+                  for i in sorted(errors)]
         merged = merge_cases([results[i] for i in sorted(results)],
                              os.path.join(master_working_dir, os.path.basename(config.output_header)),
-                             group_by=group_by, cleanup=cleanup)
+                             group_by=group_by, cleanup=cleanup, failed=failed, overwrite=overwrite)
     print(f"[parallel_cases] {n_runs - len(errors)}/{n_runs} case(s) succeeded", flush=True)
     return dict(n_runs=n_runs, n_success=n_runs - len(errors), cases=cases, results=results, errors=errors,
                 merged=merged, map_object_path=map_object_path)
 
 
-def merge_cases(results, out_header, *, group_by="group", cleanup=False):
+def _failure_reason(tb) -> str:
+    """The last line of a traceback (the exception), for a refused scan's reason."""
+    lines = [ln for ln in str(tb or "").strip().splitlines() if ln.strip()]
+    return lines[-1].strip() if lines else "unknown error"
+
+
+def merge_cases(results, out_header, *, group_by="group", cleanup=False, failed=None, overwrite=False):
     """Merge per-case archives into ``{out_header}_{group}.h5`` per case group (``group_by=None``: one
     ``{out_header}.h5``).  Each case's ``scan/<scan_key>`` group is copied whole, with its own
     ``config_json`` and ``_baseline``.  A duplicate scan_key in a group, a missing archive or a missing
-    scan group raises: a partial merge would silently shrink the sweep.  Returns ``{group: path}``."""
-    import h5py
-    from .utils import _scan_key, initialize_equilibrium_database, write_provenance
+    scan group raises: a partial merge would silently shrink the sweep.  Returns ``{group: path}``.
 
-    buckets = {}
+    ``failed``: records ``{"idx", "group", "scan_key", "error"}`` of the cases that did not complete.  Each
+    is written into its group's archive as a REFUSED scan (:func:`~bouquet.utils.write_refused_scan`:
+    ``refused_reason`` names the case and its exception), so a series reader reports it as
+    ``status="refused"`` instead of a gap, and the archive is marked as a PARTIAL merge (the convention of
+    :func:`merge_archives`): root attrs ``merge_partial=True``, ``merge_expected_cases``,
+    ``merge_failed_cases_json`` and ``merge_partial_json`` (expected / merged / failed case indices).  A
+    complete merge carries ``merge_partial=False`` and ``merge_expected_cases``.
+
+    An existing merged archive is never replaced silently: it raises ``FileExistsError`` unless
+    ``overwrite=True`` (a re-run that lost cases would otherwise replace a complete merge by a partial one).
+    """
+    import json
+
+    import h5py
+    from .utils import _scan_key, initialize_equilibrium_database, write_provenance, write_refused_scan
+
+    def _bucket(r):
+        return r.get("group") if group_by == "group" else None
+
+    buckets, fails = {}, {}
     for r in results:
         if r and r.get("path"):
-            buckets.setdefault(r.get("group") if group_by == "group" else None, []).append(r)
-    merged = {}
+            buckets.setdefault(_bucket(r), []).append(r)
+    for f in failed or ():
+        fails.setdefault(_bucket(f), []).append(f)
+        buckets.setdefault(_bucket(f), [])
+    plan = {}
     for gname, rows in buckets.items():
         seen = {}
-        for r in rows:
+        for r in list(rows) + fails.get(gname, []):
             k = _scan_key(r["scan_key"])
             if k in seen:
                 raise ValueError(f"duplicate scan_key {r['scan_key']!r} in group {gname!r}: cases {seen[k]} "
@@ -1323,6 +1352,13 @@ def merge_cases(results, out_header, *, group_by="group", cleanup=False):
             seen[k] = r["idx"]
         stem = out_header if gname is None else f"{out_header}_{gname}"
         out_path = os.path.abspath(f"{stem}.h5")
+        if os.path.exists(out_path) and not overwrite:
+            raise FileExistsError(f"merged archive {out_path} exists; pass overwrite=True to replace it "
+                                  "(nothing was merged)")
+        plan[gname] = (stem, out_path)
+    merged = {}
+    for gname, rows in buckets.items():
+        stem, out_path = plan[gname]
         if os.path.exists(out_path):
             os.remove(out_path)
         initialize_equilibrium_database(stem)
@@ -1337,7 +1373,28 @@ def merge_cases(results, out_header, *, group_by="group", cleanup=False):
                         raise KeyError(f"{r['path']} has no '{grp}' group: the case ran with a different "
                                        f"scan_key than its CaseSpec ({r['scan_key']!r})")
                     dst.copy(src[grp], grp)
+        gfails = sorted(fails.get(gname, []), key=lambda x: x["idx"])
+        for f in gfails:
+            write_refused_scan(out_path, f["scan_key"],
+                               f"parallel case {f['idx']} failed: {_failure_reason(f.get('error'))}")
         write_provenance(stem)
+        n_expected = len(rows) + len(gfails)
+        with h5py.File(out_path, "a") as dst:
+            dst.attrs["merge_partial"] = bool(gfails)
+            dst.attrs["merge_expected_cases"] = int(n_expected)
+            if gfails:
+                frec = [dict(idx=int(f["idx"]), group=f.get("group"), scan_key=f["scan_key"],
+                             error=_failure_reason(f.get("error"))) for f in gfails]
+                dst.attrs["merge_failed_cases_json"] = json.dumps(frec, default=str)
+                dst.attrs["merge_partial_json"] = json.dumps(dict(
+                    expected_cases=int(n_expected),
+                    merged_cases=sorted(int(r["idx"]) for r in rows),
+                    failed_cases=[f["idx"] for f in frec]))
+        if gfails:
+            import warnings
+            warnings.warn(f"merge_cases: PARTIAL merge of {stem}.h5 -- {len(gfails)} of {n_expected} case(s) "
+                          f"failed ({[f['idx'] for f in gfails]}); recorded as refused scans and "
+                          "merge_partial_json", RuntimeWarning, stacklevel=2)
         merged[gname] = out_path
         if cleanup:
             for r in rows:

@@ -117,8 +117,10 @@ class TestExportIsInTheSourceFrame:
         assert np.all(np.sign(ts["profiles_1d"]["f"]) == np.sign(b0))
 
     def test_positive_ip_values_are_the_archive_values(self, tmp_path, base):
-        """ip > 0: currents, psi, P', FF', ip are the archive's (positive-frame)
-        values unchanged; q keeps the template's own (positive) q sign; only f
+        """ip > 0: currents, ip are the archive's (positive-frame) values
+        unchanged, psi, P', FF' its values in COCOS 11 (psi_11 = -2 pi psi_7,
+        so d/dpsi_11 = d/dpsi_7 / (-2 pi): the archived eqdsk is COCOS 7;
+        review PR64 B4); q keeps the template's own (positive) q sign; only f
         takes the template b0's sign."""
         from bouquet.io.geqdsk import read_geqdsk
 
@@ -126,8 +128,12 @@ class TestExportIsInTheSourceFrame:
         _, out = _export(tmp_path, "n", dd, bl, _stamp(1.0, 1.0))
         g = read_geqdsk(_GEQ)
         p1 = out["equilibrium"]["time_slice"][-1]["profiles_1d"]
-        assert p1["dpressure_dpsi"] == np.asarray(g.pprime, float).tolist()
-        assert p1["f_df_dpsi"] == np.asarray(g.ffprim, float).tolist()
+        c11 = -2.0 * np.pi
+        assert p1["dpressure_dpsi"] == (np.asarray(g.pprime, float) / c11).tolist()
+        assert p1["f_df_dpsi"] == (np.asarray(g.ffprim, float) / c11).tolist()
+        psi7 = g.psi_axis + np.asarray(g.psi_N) * (g.psi_boundary - g.psi_axis)
+        assert p1["psi"] == (c11 * psi7).tolist()
+        assert p1["psi"][-1] > p1["psi"][0]          # COCOS 11, Ip > 0: rising
         assert p1["q"] == np.asarray(g.qpsi, float).tolist()
         assert p1["f"] == (-np.asarray(g.fpol, float)).tolist()     # b0 < 0
         gq = out["equilibrium"]["time_slice"][-1]["global_quantities"]

@@ -58,4 +58,4 @@ The swb draw differs more. It has no anchor route, no bouquet Ip closure, no str
 ## Adding a method
 1. Subclass `DrawMethod` and override only the hooks that differ.
 2. Build it in `Bouquet._draw_method`, and `draw_methods.method_hooks` for the class-level hooks.
-3. A hook that needs a new kind of legacy behaviour goes into `HOOKS` / `FLAGS`, so the legacy-path test can write it back.
+3. A hook needs a legacy default on `DrawMethod` that is exactly the legacy behaviour (most take a `legacy=` callable and return it), so the legacy path is unchanged; pin that with a behavioural test through `generate_bouquet` (as `tests/test_solve_method.py` does for the swb and engine methods), and add the class to `method_hooks` if a class-level hook needs it.

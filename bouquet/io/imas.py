@@ -2748,11 +2748,9 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
         cp["grid"]["psi"] = (s_I * c11 * (geq.psi_axis + psiN_fsa * (
             geq.psi_boundary - geq.psi_axis))).tolist()
     else:
-        # the draw's own psi (COCOS 11, source frame) and rho_tor_norm at the
-        # template's psi_N nodes, so the nodes and the equilibrium geometry a
-        # reader pairs them with agree
-        cp["grid"]["psi"] = (s_I * c11 * (geq.psi_axis + psiN_t * (
-            geq.psi_boundary - geq.psi_axis))).tolist()
+        # the draw's own rho_tor_norm at the template's psi_N nodes (kept),
+        # so the nodes and the equilibrium geometry a reader pairs them with
+        # agree
         cp["grid"]["rho_tor_norm"] = np.interp(
             psiN_t, np.asarray(geq.psi_N, dtype=float),
             np.asarray(geq.rhovn, dtype=float)).tolist()

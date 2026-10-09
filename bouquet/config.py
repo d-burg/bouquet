@@ -1724,11 +1724,22 @@ def resolve_solve_method(gc) -> str:
     Idempotent."""
     sm = solve_method_of(gc)
     user = _user_solve_fields(gc)
-    ib = "swb" if sm == "swb" else ("closure" if user[0] == "swb" else user[0])
-    eng = "unified" if sm == "engine" else "legacy"
+    ib, eng = _effective_solve_fields(gc, sm, user)
     gc.imas_baseline, gc.reconstruction_engine = ib, eng
     gc._solve_method_written = {"wrote": (ib, eng), "user": user}
     return sm
+
+
+def _effective_solve_fields(gc, sm, user):
+    """``(imas_baseline, reconstruction_engine)`` the method runs with: the
+    user's own when ``solve_method`` is None and ``imas_baseline`` is not
+    ``"swb"`` (they ARE the selection, unchanged -- also a malformed engine
+    name, which validate_engine_settings then refuses by name), else the
+    method's."""
+    if getattr(gc, "solve_method", None) is None and user[0] != "swb":
+        return user
+    ib = "swb" if sm == "swb" else ("closure" if user[0] == "swb" else user[0])
+    return ib, ("unified" if sm == "engine" else "legacy")
 
 
 class _EffectiveSolveFields:
@@ -1740,12 +1751,10 @@ class _EffectiveSolveFields:
 
     def __init__(self, gc):
         object.__setattr__(self, "_gc", gc)
-        sm = solve_method_of(gc)
-        user = _user_solve_fields(gc)
-        object.__setattr__(self, "imas_baseline", "swb" if sm == "swb" else (
-            "closure" if user[0] == "swb" else user[0]))
-        object.__setattr__(self, "reconstruction_engine",
-                           "unified" if sm == "engine" else "legacy")
+        ib, eng = _effective_solve_fields(gc, solve_method_of(gc),
+                                          _user_solve_fields(gc))
+        object.__setattr__(self, "imas_baseline", ib)
+        object.__setattr__(self, "reconstruction_engine", eng)
 
     def __getattr__(self, name):
         return getattr(object.__getattribute__(self, "_gc"), name)

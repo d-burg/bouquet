@@ -211,9 +211,12 @@ class TestWriteDrawPhi:
         psiN_d = np.interp(x, _norm(np.asarray(geq.rhovn) ** 2), geq.psi_N)
         assert np.max(np.abs(psiN_d - psiN_t)) > 1e-3   # the maps differ
         self._check_currents(cp, x, self._geom(psiN_d), psiN_d)
+        # the draw's psi at the nodes, in COCOS 11 (psi_11 = -2 pi psi_7 of the
+        # archived eqdsk; review PR64 B4)
         np.testing.assert_allclose(
-            cp["grid"]["psi"],
-            geq.psi_axis + psiN_d * (geq.psi_boundary - geq.psi_axis), rtol=1e-12)
+            cp["grid"]["psi"], -2.0 * np.pi * (
+                geq.psi_axis + psiN_d * (geq.psi_boundary - geq.psi_axis)),
+            rtol=1e-12)
         np.testing.assert_allclose(cp["grid"]["rho_tor_norm"], rho, rtol=0, atol=0)
 
     def test_a_psi_archive_is_unchanged(self, tmp_path):

@@ -3049,7 +3049,7 @@ def perturb_kinetic_equilibrium(
     jbs_loop=None,
     coil_saturation_guard=None,
     jphi_request_offset=None,
-    **kwargs,  # solve_with_bootstrap options (bootstrap_kwargs)
+    bootstrap_kwargs=None,
 ):
     r"""Perturb kinetic and current-density profiles and iterate to
     match :math:`I_p` and :math:`l_i` targets.
@@ -3202,9 +3202,11 @@ def perturb_kinetic_equilibrium(
         was normalised in and route R2 roots in; ``BOUQUET_R2_IP_MODE``
         selects it for both routes) instead of the limiter-area flux
         integral, so it reads 1 at zero perturbation.
-    **kwargs
-        Additional keyword options passed through to
-        :func:`solve_with_bootstrap` in OpenFUSIONToolkit.
+    bootstrap_kwargs : dict, optional
+        Keyword options passed through to :func:`solve_with_bootstrap` in
+        OpenFUSIONToolkit (``GenerationConfig.bootstrap_kwargs``, validated
+        there).  An explicit parameter, not ``**kwargs``: a mistyped keyword
+        of this function raises ``TypeError`` at the call (review PR60 B5).
 
     Returns
     -------
@@ -3215,6 +3217,9 @@ def perturb_kinetic_equilibrium(
         When ``psi_N_kinetic`` is provided, the kinetic profiles
         (``ne_perturb`` etc.) are on the ``psi_N_kinetic`` grid.
     """
+    # solve_with_bootstrap options: an explicit parameter (review PR60 B5);
+    # a private copy, so the caller's dict is never mutated
+    kwargs = dict(bootstrap_kwargs or {})
 
     _edge = resolve_edge_pressure(edge_pressure)
     # ----------------------------------------------------------------
@@ -5371,7 +5376,7 @@ def generate_bouquet(
     # Appended after baseline_meta for the same positional-compatibility reason.
     on_inspec=None,
     stop_check=None,
-    **kwargs,  # solve_with_bootstrap options (bootstrap_kwargs)
+    bootstrap_kwargs=None,
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
 
@@ -5541,9 +5546,11 @@ def generate_bouquet(
     draw_method : bouquet.draw_methods.DrawMethod, optional
         How each draw is made where the solve methods differ
         (docs/draw-methods.md); None: the legacy draws.
-    **kwargs
-        Additional keyword options passed through to
-        :func:`solve_with_bootstrap` in OpenFUSIONToolkit.
+    bootstrap_kwargs : dict, optional
+        Keyword options passed through to :func:`solve_with_bootstrap` in
+        OpenFUSIONToolkit (``GenerationConfig.bootstrap_kwargs``, validated
+        there).  An explicit parameter, not ``**kwargs``: a mistyped keyword
+        of this function raises ``TypeError`` at the call (review PR60 B5).
 
     rejection_log : list or None
         Filled with one dict per rejected draw attempt: ``draw`` (attempt
@@ -5558,6 +5565,9 @@ def generate_bouquet(
     list[dict]
         Diagnostics from each equilibrium.
     """
+    # solve_with_bootstrap options: an explicit parameter (review PR60 B5);
+    # a private copy, so the caller's dict is never mutated
+    kwargs = dict(bootstrap_kwargs or {})
     # ---- the draw method (bouquet.draw_methods; None: the legacy draws) ---
     from .draw_methods import DrawMethod
     _m = draw_method if draw_method is not None else DrawMethod()
@@ -7285,7 +7295,7 @@ def generate_bouquet(
                     swb_seed_ref=_swb_seed_cache,
                     swb_seed_profile=source_seed_profile,
                     coord=coord,
-                    **kwargs,
+                    bootstrap_kwargs=kwargs,
                 ))
         except Exception as e:
             # Catch ANY exception during a perturbed solve -- ValueError
@@ -8562,7 +8572,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
                             p_fast=None, Z_imp=None,
                             l_i_tolerance=0.01, jbs_loop=None,
                             edge_pressure=None, coord="psi_n", x=None,
-                            **kwargs):
+                            bootstrap_kwargs=None):
     r"""Reconstruct a single Grad-Shafranov equilibrium from a geqdsk
     reference and kinetic profiles, matching the EFIT :math:`l_i(1)`.
 
@@ -8659,9 +8669,11 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         (``li_corrective_state`` / ``li_step6_matched`` keep the two earlier
         stages).  The record is returned as ``result['jbs_loop']``.  ``None``
         (default) is the legacy path, bit for bit.
-    **kwargs
-        Additional keyword options passed through to
-        :func:`solve_with_bootstrap` in OpenFUSIONToolkit.
+    bootstrap_kwargs : dict, optional
+        Keyword options passed through to :func:`solve_with_bootstrap` in
+        OpenFUSIONToolkit (``GenerationConfig.bootstrap_kwargs``, validated
+        there).  An explicit parameter, not ``**kwargs``: a mistyped keyword
+        of this function raises ``TypeError`` at the call (review PR60 B5).
 
     Returns
     -------
@@ -8669,6 +8681,9 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         Result dictionary containing reconstructed profiles, fields,
         and comparison data keyed as documented inline.
     """
+    # solve_with_bootstrap options: an explicit parameter (review PR60 B5);
+    # a private copy, so the caller's dict is never mutated
+    kwargs = dict(bootstrap_kwargs or {})
     # ---- 0. Validate the equilibrium-grid inputs (fail before the solve) ----
     # Checked ahead of the OpenFUSIONToolkit imports below so a caller-side
     # shape error surfaces immediately, without needing OFT present.

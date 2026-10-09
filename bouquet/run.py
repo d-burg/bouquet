@@ -7328,7 +7328,7 @@ class Bouquet(SwbBaseline):
                     accept_anchor_inband=gc.accept_anchor_inband,
                     perturb_jind_in_anchor=(route == "ip_renorm"),
                     scale_jBS=scale0, jBS_scale_profile=_prof,
-                    **gc.bootstrap_kwargs,
+                    bootstrap_kwargs=gc.bootstrap_kwargs,
                     edge_pressure=_edge,
                     diagnostic_plots=False, psi_N_kinetic=psi_kin,
                     p_fast=bl.p_fast, z_fast=getattr(bl, "z_fast", None),
@@ -7947,7 +7947,7 @@ class Bouquet(SwbBaseline):
                 coord=getattr(bl, "coord", coords.PSI),
                 source_seed_profile=getattr(bl, "swb_seed_profile", None),
                 source_jphi_fixed=getattr(bl, "swb_jphi_fixed", None),
-                **gc.bootstrap_kwargs,
+                bootstrap_kwargs=gc.bootstrap_kwargs,
             )
         self.generation_log = _cap["text"] or None
         self.draw_rejections = list(_rejections)

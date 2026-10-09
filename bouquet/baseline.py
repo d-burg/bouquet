@@ -1225,7 +1225,7 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
             **_recon_coord,
             edge_pressure=_edge,
             **_jbs_kw,
-            **config.generation.bootstrap_kwargs,
+            bootstrap_kwargs=config.generation.bootstrap_kwargs,
         )
         # get_stats traces the q-profile and can emit gs_get_qprof warnings, so
         # keep these inside the capture too.

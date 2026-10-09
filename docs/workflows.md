@@ -306,6 +306,23 @@ as an enormous sigma.
 | `capture_exact_inv_R2` | `True` | Record ⟨1/R²⟩ in the draw's `eq_fsa` block (read from `get_q`, else by flux-surface quadrature). Archived geometry only: since 2026-10-06 the current conversion is the one field-aligned factor `F⟨1/R⟩/⟨B²⟩`, which does not read it |
 | `diagnostic_plots` | `False` | Per-draw diagnostic figures |
 
+**Timing the IDA slice (`ImasSource.ida_time`, ida_hybrid only).** By default
+the IDA slice is read at the dd slice `time`; `ida_time` reads it at another
+time while `time` still picks the dd slices (equilibrium, core_profiles,
+core_sources) — for example the IDA slice FUSE paired with a macro step when it
+computed the dd's bootstrap. The IDA slice is the file's own slice nearest the
+requested time, never interpolated, accepted within half the IDA file's local
+time-step (a single-slice IDA file: half the dd step when paired with `time`,
+the 10 µs floor for an explicit `ida_time`); paired with `time` it must also
+sit within half the dd step of the core_profiles slice. Anything else is
+refused. The match — requested and used IDA time, `dt`, the window and its
+basis, the dd slice times, and the verdict of FUSE's `ida_provenance.json`
+replay pairing when that table names this run's IDA file and holds the dd
+slice — is archived in the baseline's `li_metrics["ida_time_match"]`.
+`ida_time` outside ida_hybrid is refused. `set_slice(time=t)` keeps a
+configured `ida_time` (with a warning), `set_slice(ida_time=x)` applies it
+alone, and a series takes one per slice: `run_slices(times, ida_times=[…])`.
+
 ### `FilterConfig` (`b.filtering`)
 
 | Knob | Default | Meaning |

@@ -222,10 +222,14 @@ class ImasSource:
 
     ids_path: str                      # IMAS/OMAS file (FUSE output)
     time: Optional[float] = None       # time slice [s]; None -> single/first slice
-    # IDA-lite slice [s] for ida_hybrid; None -> `time`. `time` then picks only the dd slices
-    # (equilibrium, core_profiles, core_sources). FUSE (replay_first) computed dd j_bootstrap(t)
-    # on ONE IDA slice, recorded in ida_provenance.json "replay_pairing"; pass that slice here
-    # and the macro step t as `time` to keep IDA kinetics and FUSE currents consistent.
+    # IDA-lite slice [s] for ida_hybrid ONLY (refused otherwise); None -> `time`. `time`
+    # then picks only the dd slices (equilibrium, core_profiles, core_sources).  The IDA
+    # slice is the file's own nearest slice within half its local step, never
+    # interpolated, else refused (io.imas.IDA_TIME_RULE); the match is archived in
+    # li_metrics["ida_time_match"].  When the FUSE run computed dd j_bootstrap(t) on one
+    # IDA slice (its ida_provenance.json "replay_pairing"), pass that slice here and the
+    # macro step t as `time` to keep IDA kinetics and FUSE currents consistent; for a
+    # series, Bouquet.run_slices(ida_times=[...]).
     ida_time: Optional[float] = None
     # --- IDA-hybrid kinetics (GenerationConfig.kinetic_source = "ida_hybrid") ---
     # When set, the baseline ne/Te/Ti/ni/Z_eff/omega_tor come from this IDA

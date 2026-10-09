@@ -21,7 +21,7 @@ and a documented home for every knob -- a typo fails immediately in
 
 from __future__ import annotations
 
-import functools
+import contextvars
 from dataclasses import dataclass, field
 from typing import Any, Optional, Union, TYPE_CHECKING
 
@@ -1104,10 +1104,25 @@ class GenerationConfig:
     # already ~clean, so flooring is redundant -- and it REGRESSED a stiff
     # high-l_i case (clipping its isolate-edge spike drove yield to 0).
     floor_j_BS: bool = False
-    # Keyword options forwarded to every solve_with_bootstrap call (keys
-    # validated in __post_init__).  The unified engine reads only the
-    # edge-taper keys (taper off by default).  Replaces swb_iterations.
+    # Keyword options forwarded to every solve_with_bootstrap call
+    # (validate_bootstrap_kwargs: an explicit allow-list,
+    # BOOTSTRAP_KWARGS_ALLOWED, so a typo is refused with or without
+    # OpenFUSIONToolkit; a key the call sites set is refused; on the legacy
+    # path a key the INSTALLED toolkit lacks is refused for a new config and
+    # warned about when a stored config is loaded).  Checked at construction
+    # AND whenever the attribute is reassigned.  The unified engine reads only
+    # its own edge-taper keys (taper off by default) and use_sauter_eps=True;
+    # it implements them itself, so they need no toolkit capability there.
+    # Replaces swb_iterations.
     bootstrap_kwargs: dict = field(default_factory=dict)
+    # Opt-in for the bootstrap keys that change a CONVERGENCE criterion of the
+    # toolkit's internal bootstrap solve (BOOTSTRAP_CONVERGENCE_KWARGS:
+    # djBS_tol, the j_BS freeze threshold; saw_relax).  False: such a key in
+    # bootstrap_kwargs is refused.  True: accepted with a warning, and the
+    # config_json of every archive carries both this flag and the values.
+    # Legacy paths only (the unified engine never runs solve_with_bootstrap
+    # and refuses those keys).
+    bootstrap_convergence_override: bool = False
     # GS iteration cap for generate()'s draw loop (TokaMaker_interface.
     # DrawSolveGuard).  Draw solves converge in <= ~25 iterations; a failing
     # one sits in a limit cycle and burns the whole cap.  None keeps the
@@ -1490,6 +1505,27 @@ class GenerationConfig:
     _SAW_RESERVED = frozenset(
         "jphi_saw saw_q_s saw_dq saw_tol saw_ramp saw_rule".split())
 
+    def _validate_bootstrap_kwargs(self, value):
+        """:func:`validate_bootstrap_kwargs` with this config's reserved
+        names, engine and convergence opt-in."""
+        validate_bootstrap_kwargs(
+            value,
+            _BOOTSTRAP_RESERVED | self._SAW_RESERVED
+            | ({"jphi_fixed"} if self.swb_seed == "source" else set())
+            | ({"p_fixed"} if self.imas_baseline == "swb" else set()),
+            engine=str(getattr(self, "reconstruction_engine", "unified")),
+            convergence_override=bool(getattr(
+                self, "bootstrap_convergence_override", False)))
+
+    def __setattr__(self, name, value):
+        # The notebook idiom sets ``bootstrap_kwargs`` AFTER construction;
+        # validate it there too (before assigning, so a refused value is
+        # never left in place).
+        if (name == "bootstrap_kwargs"
+                and self.__dict__.get("_bootstrap_kwargs_armed")):
+            self._validate_bootstrap_kwargs(value)
+        object.__setattr__(self, name, value)
+
     def __post_init__(self):
         """Validate ``bootstrap_kwargs``, then resolve ``structured_preset``
         into the individual structured fields.
@@ -1535,11 +1571,8 @@ class GenerationConfig:
         if self.swb_saw_rule not in SWB_SAW_RULES:
             raise ValueError(f"swb_saw_rule={self.swb_saw_rule!r} not in {tuple(SWB_SAW_RULES)}")
         resolve_solve_method(self)
-        validate_bootstrap_kwargs(
-            self.bootstrap_kwargs,
-            _BOOTSTRAP_RESERVED | self._SAW_RESERVED
-            | ({"jphi_fixed"} if self.swb_seed == "source" else set())
-            | ({"p_fixed"} if self.imas_baseline == "swb" else set()))
+        self._validate_bootstrap_kwargs(self.bootstrap_kwargs)
+        object.__setattr__(self, "_bootstrap_kwargs_armed", True)
         resolve_structured_preset(self, stacklevel=4)
         validate_structured_mse_settings(self)
         from .edge_pressure import validate_edge_pressure_settings
@@ -1627,19 +1660,67 @@ def validate_structured_mse_settings(gc) -> None:
 
 #: Arguments the call sites set themselves; ``bootstrap_kwargs`` may not
 #: shadow them (duplicate keyword, or a silent override of a per-draw value).
+#: ``*_prof`` / ``jphi_fixed_prof`` / ``p_fixed_prof`` / ``jphi_saw_prof``:
+#: the toolkit's ``solve_with_bootstrap`` passes them to ``solve_bootstrap``
+#: itself, so a user value would be a duplicate keyword in every call.
 _BOOTSTRAP_RESERVED = frozenset(
     "mygs ne Te ni Ti Zeff Ip_target inductive_jphi scale_jBS "
     "isolate_edge_jBS verbose diagnostic_plots psi_pad psi_N x coord "
-    "ffp_prof ne_prof te_prof ni_prof ti_prof".split()
+    "ffp_prof ne_prof te_prof ni_prof ti_prof "
+    "jphi_fixed_prof p_fixed_prof jphi_saw_prof pres_prof F0".split()
 )
 
+#: The explicit allow-list of OpenFUSIONToolkit bootstrap options
+#: ``bootstrap_kwargs`` may carry, with where each lives.  A key outside it is
+#: refused whether or not the toolkit is importable (a typo never survives to
+#: the draw loop).  Whether the INSTALLED toolkit has the option is checked
+#: separately (:func:`_bootstrap_kwarg_names`).
+BOOTSTRAP_KWARGS_ALLOWED = {
+    # solve_with_bootstrap, OpenFUSIONToolkit main and later
+    "Zis": "solve_with_bootstrap",
+    "iterations": "solve_with_bootstrap (Python solve passes)",
+    "parameterize_jBS": "solve_with_bootstrap",
+    "use_OMFIT_sauter": "solve_with_bootstrap",
+    # builds with the internal Fortran bootstrap solve (OpenFUSIONToolkit
+    # PR #271 / the bouquet_dev fork) only
+    "use_sauter_eps": "solve_with_bootstrap (internal-solve builds)",
+    "use_python_solve": "solve_with_bootstrap (internal-solve builds)",
+    "diagnose_bs": "set_boot_ops (internal-solve builds)",
+    "djBS_tol": "set_boot_ops (internal-solve builds; CONVERGENCE)",
+    "saw_relax": "set_boot_ops (internal-solve builds; CONVERGENCE)",
+    "taper_edge_jBS": "set_boot_ops (internal-solve builds); the unified "
+                      "engine implements it itself",
+    "taper_edge_psi0": "set_boot_ops (internal-solve builds); the unified "
+                       "engine implements it itself",
+    "taper_edge_shape": "set_boot_ops (internal-solve builds); the unified "
+                        "engine implements it itself",
+}
 
-@functools.lru_cache(maxsize=None)
+#: Allow-listed keys that change a convergence criterion of the toolkit's
+#: internal bootstrap solve: refused unless
+#: ``GenerationConfig.bootstrap_convergence_override`` (``saw_tol`` is set from
+#: ``swb_saw_tol`` and reserved).
+BOOTSTRAP_CONVERGENCE_KWARGS = frozenset({"djBS_tol", "saw_relax"})
+
+#: True while :meth:`BouquetConfig.from_dict` rebuilds a STORED config: a
+#: bootstrap option the installed toolkit lacks is then warned about, not
+#: refused, so an archive written on another toolkit build stays loadable.
+_LOADING_STORED_CONFIG = contextvars.ContextVar(
+    "bouquet_loading_stored_config", default=False)
+
+_BOOTSTRAP_NAMES_CACHE: dict = {}
+
+
 def _bootstrap_kwarg_names():
-    """Every keyword ``bootstrap_kwargs`` can reach, introspected from the
-    toolkit's bootstrap entry points.  ``None`` when OpenFUSIONToolkit is not
-    importable, which skips the unknown-key check.  Cached per process.
+    """Every keyword the INSTALLED toolkit's bootstrap entry points accept
+    (introspected).  ``None`` when OpenFUSIONToolkit is not importable, which
+    skips the capability check (the allow-list still applies).  A successful
+    introspection is cached per process; a failed one is not, so a config
+    built before ``add_oft_to_path()`` does not switch the check off for the
+    whole process.
     """
+    if "names" in _BOOTSTRAP_NAMES_CACHE:
+        return _BOOTSTRAP_NAMES_CACHE["names"]
     try:
         import inspect
 
@@ -1657,7 +1738,8 @@ def _bootstrap_kwarg_names():
                 continue
             names |= {prm.name for prm in inspect.signature(fn).parameters.values()
                       if prm.kind in (prm.POSITIONAL_OR_KEYWORD, prm.KEYWORD_ONLY)}
-        return frozenset(names) - {"self"}
+        _BOOTSTRAP_NAMES_CACHE["names"] = frozenset(names) - {"self"}
+        return _BOOTSTRAP_NAMES_CACHE["names"]
     except Exception:
         # No OFT (unit tests, a docs build): cannot introspect, so do not
         # guess; a wrong key then surfaces at the call.
@@ -1764,24 +1846,57 @@ def swb_bootstrap_kwargs(gc):
 
 
 def validate_bootstrap_kwargs(bootstrap_kwargs, reserved=_BOOTSTRAP_RESERVED,
-                              known=None):
+                              known=None, *, engine="legacy",
+                              convergence_override=None):
     """Refuse a ``bootstrap_kwargs`` key that would not survive the call chain.
 
-    Validated at config time: the call sites end in ``**kwargs``, so a wrong
-    key would otherwise fail every draw inside the draw loop's ``except``.
+    Validated at config time (construction, and reassignment of
+    ``GenerationConfig.bootstrap_kwargs``): the call sites end in
+    ``**kwargs``, so a wrong key would otherwise fail every draw inside the
+    draw loop's ``except``.  In order:
+
+    1. a dict with string keys (``None`` is refused by name);
+    2. no key the call sites set themselves (*reserved*);
+    3. ``swb_iterations`` names its replacement, ``iterations``;
+    4. every key on the explicit allow-list :data:`BOOTSTRAP_KWARGS_ALLOWED`
+       -- whether or not OpenFUSIONToolkit is importable;
+    5. a convergence key (:data:`BOOTSTRAP_CONVERGENCE_KWARGS`) only with
+       ``convergence_override`` True (warned); ``None`` skips this step
+       (direct callers that are not a config);
+    6. the INSTALLED toolkit's capability, for the keys that will reach it:
+       every key on ``engine="legacy"``; on ``engine="unified"`` the engine's
+       own keys (``bouquet.engine.ENGINE_BOOTSTRAP_KWARGS``: the edge taper,
+       ``use_sauter_eps``) are implemented by bouquet and need no capability,
+       and every other key is refused by the engine's own unread-settings
+       check (``bouquet.engine.validate_engine_settings``).  A missing
+       capability is refused for a new config and WARNED about while a stored
+       config is being loaded (:data:`_LOADING_STORED_CONFIG`), so an archive
+       written on another toolkit build stays loadable.
 
     Parameters
     ----------
     bootstrap_kwargs : dict
-        The keys to check.
+        The options to check.
     reserved : set of str
         Names the call sites pass themselves.
     known : set of str, optional
-        The accepted keyword names; defaults to :func:`_bootstrap_kwarg_names`
-        (``None`` from it skips the unknown-key check).  Passed explicitly by
-        the tests, which run without OpenFUSIONToolkit.
+        The keyword names the installed toolkit accepts; defaults to
+        :func:`_bootstrap_kwarg_names` (``None`` from it skips step 6 only).
+        Passed explicitly by the tests, which run without OpenFUSIONToolkit.
+    engine : {"legacy", "unified"}
+        The ``reconstruction_engine`` the options will run under.
+    convergence_override : bool or None
+        ``GenerationConfig.bootstrap_convergence_override``.
     """
+    import warnings
+    if not isinstance(bootstrap_kwargs, dict):
+        raise ValueError(
+            f"bootstrap_kwargs must be a dict of solve_with_bootstrap "
+            f"options (use {{}} for none), got "
+            f"{type(bootstrap_kwargs).__name__}")
     keys = set(bootstrap_kwargs)
+    if any(not isinstance(k, str) for k in keys):
+        raise ValueError("bootstrap_kwargs keys must be option names (str)")
 
     bad = sorted(reserved & keys)
     if bad:
@@ -1792,15 +1907,58 @@ def validate_bootstrap_kwargs(bootstrap_kwargs, reserved=_BOOTSTRAP_RESERVED,
         raise ValueError(
             "bootstrap_kwargs: 'swb_iterations' is now 'iterations'.")
 
+    allowed = set(BOOTSTRAP_KWARGS_ALLOWED) - set(reserved)
+    unknown = sorted(keys - allowed)
+    if unknown:
+        raise ValueError(
+            f"bootstrap_kwargs has no such solve_with_bootstrap option(s): "
+            f"{unknown}. Accepted: {sorted(allowed)} "
+            "(bouquet.config.BOOTSTRAP_KWARGS_ALLOWED).")
+
+    conv = sorted(keys & BOOTSTRAP_CONVERGENCE_KWARGS)
+    if conv and convergence_override is not None:
+        if not convergence_override:
+            raise ValueError(
+                f"bootstrap_kwargs {conv} change a convergence criterion of "
+                "the toolkit's bootstrap solve (djBS_tol: the j_BS freeze "
+                "threshold; saw_relax: the sawtooth reset relaxation).  "
+                "Refused unless generation.bootstrap_convergence_override="
+                "True, which is recorded in the archive's config_json with "
+                "the values.")
+        warnings.warn(
+            f"bootstrap_kwargs {conv} = "
+            f"{ {k: bootstrap_kwargs[k] for k in conv} } override a "
+            "CONVERGENCE criterion of the toolkit's bootstrap solve "
+            "(generation.bootstrap_convergence_override=True); every "
+            "solve_with_bootstrap call uses them and the archive's "
+            "config_json records them.", UserWarning, stacklevel=4)
+
+    # unified: the engine's own keys are implemented by bouquet (no toolkit
+    # capability needed) and every other key is refused by
+    # engine.validate_engine_settings, which names the reason (the engine
+    # never runs solve_with_bootstrap) -- nothing reaches the toolkit
+    to_check = set() if str(engine) == "unified" else keys
+    if not to_check:
+        return
     if known is None:
         known = _bootstrap_kwarg_names()
     if known is None:
         return
-    unknown = sorted(keys - set(known))
-    if unknown:
-        raise ValueError(
-            f"bootstrap_kwargs has no such solve_with_bootstrap option(s): "
-            f"{unknown}. Accepted: {sorted(set(known) - set(reserved))}.")
+    missing = sorted(to_check - set(known))
+    if missing:
+        msg = (f"bootstrap_kwargs {missing}: the installed OpenFUSIONToolkit's "
+               "solve_with_bootstrap / set_boot_ops do not take "
+               f"{'this option' if len(missing) == 1 else 'these options'} "
+               f"({', '.join(BOOTSTRAP_KWARGS_ALLOWED[k] for k in missing)}). "
+               "Install a toolkit with the internal bootstrap solve, or drop "
+               "the key")
+        if _LOADING_STORED_CONFIG.get():
+            warnings.warn(
+                msg + ".  Loaded anyway (a stored config): a legacy run of it "
+                "on this toolkit fails at the first solve_with_bootstrap "
+                "call.", UserWarning, stacklevel=4)
+            return
+        raise ValueError(msg + ".")
 
 
 def resolve_structured_preset(gc, warn: bool = True, stacklevel: int = 3):
@@ -2246,16 +2404,22 @@ class BouquetConfig:
                 "unrescaled -- so it reproduces what it recorded; today's "
                 "default is 'auto'", UserWarning, stacklevel=2)
             gend["imas_li3_radius"] = "axis"
-        return cls(
-            source=_build(SrcCls, srcd),
-            solver=_build(SolverConfig, d["solver"]),
-            output_header=d["output_header"],
-            uncertainty=_build(UncertaintyConfig, d.get("uncertainty", {})),
-            generation=_build(GenerationConfig, gend),
-            filtering=_build(FilterConfig, d.get("filtering", {})),
-            fixed_components=_build(FixedComponentsConfig, d.get("fixed_components", {})),
-            verbose=bool(d.get("verbose", False)),
-        )
+        _stored_bootstrap_kwargs_compat(gend)
+        _tok = _LOADING_STORED_CONFIG.set(True)
+        try:
+            return cls(
+                source=_build(SrcCls, srcd),
+                solver=_build(SolverConfig, d["solver"]),
+                output_header=d["output_header"],
+                uncertainty=_build(UncertaintyConfig, d.get("uncertainty", {})),
+                generation=_build(GenerationConfig, gend),
+                filtering=_build(FilterConfig, d.get("filtering", {})),
+                fixed_components=_build(FixedComponentsConfig,
+                                        d.get("fixed_components", {})),
+                verbose=bool(d.get("verbose", False)),
+            )
+        finally:
+            _LOADING_STORED_CONFIG.reset(_tok)
 
     def to_json(self, indent: Optional[int] = 2) -> str:
         """The config as a JSON string (see :meth:`to_dict`)."""
@@ -2398,6 +2562,51 @@ def _stored_unified_unread_fields():
     :func:`_stored_config_compat`)."""
     from .engine import ENGINE_UNREAD_LEGACY_FIELDS
     return tuple(ENGINE_UNREAD_LEGACY_FIELDS)
+
+
+def _stored_bootstrap_kwargs_compat(gend: dict) -> None:
+    """Load a stored ``bootstrap_kwargs`` as it ran (in place).
+
+    * A stored ``"unified"`` config carrying keys the engine never reads
+      (anything outside ``bouquet.engine.ENGINE_BOOTSTRAP_KWARGS``, e.g. the
+      ``{"iterations": 3}`` the D3D-like example notebooks set after
+      construction before 2026-10-09, which ``generate()`` ignored): the keys
+      are dropped with a warning -- the engine ignored them, so dropping them
+      reproduces what the stored run did, and the config loads instead of
+      being refused.
+    * A stored config carrying a convergence key
+      (:data:`BOOTSTRAP_CONVERGENCE_KWARGS`) without
+      ``bootstrap_convergence_override`` (it predates the flag): the stored
+      run used the value, so it is loaded with the flag set, warned.
+    """
+    import warnings
+    bk = gend.get("bootstrap_kwargs")
+    if not isinstance(bk, dict) or not bk:
+        return
+    eng = gend.get("reconstruction_engine", "legacy")
+    if gend.get("solve_method") == "engine":
+        eng = "unified"
+    if eng == "unified":
+        from .engine import ENGINE_BOOTSTRAP_KWARGS
+        unread = sorted(set(bk) - set(ENGINE_BOOTSTRAP_KWARGS))
+        if unread:
+            warnings.warn(
+                f"stored unified config: generation.bootstrap_kwargs keys "
+                f"{unread} configure solve_with_bootstrap, which the unified "
+                "engine never ran; they are dropped -- the stored run is "
+                "unchanged", UserWarning, stacklevel=3)
+            gend["bootstrap_kwargs"] = {k: v for k, v in bk.items()
+                                        if k not in unread}
+        return
+    conv = sorted(set(bk) & BOOTSTRAP_CONVERGENCE_KWARGS)
+    if conv and not gend.get("bootstrap_convergence_override", False):
+        warnings.warn(
+            f"stored config: generation.bootstrap_kwargs {conv} change a "
+            "convergence criterion of the bootstrap solve and the config "
+            "predates generation.bootstrap_convergence_override; loading it "
+            "with the override ON, as the stored run used the values",
+            UserWarning, stacklevel=3)
+        gend["bootstrap_convergence_override"] = True
 
 
 def _stored_config_compat(gend: dict) -> None:
@@ -2617,7 +2826,16 @@ def _checked_generation_keys(gend: dict) -> dict:
             gend["bootstrap_kwargs"] = bk
             warnings.warn(
                 f"config generation.swb_iterations={v!r} (retired) loaded as "
-                f"bootstrap_kwargs={{'iterations': {bk['iterations']}}}.",
+                f"bootstrap_kwargs={{'iterations': {bk['iterations']}}}.  "
+                "This does NOT replay the stored run exactly: swb_iterations "
+                "reached only the per-draw solve_with_bootstrap, while "
+                "bootstrap_kwargs reaches EVERY call -- the g-file "
+                "reconstruction and IMAS frozen-baseline SWB, the DIFF_BS / "
+                "jBS-delta caches, jbs_init='swb' and the sigma=0 check -- "
+                "which ran the toolkit's default iterations=3 before.  The "
+                "replay's BASELINE j_BS can therefore differ from the stored "
+                "run's (on toolkits with the internal Fortran bootstrap "
+                "solve, 'iterations' only acts with use_python_solve=True).",
                 UserWarning, stacklevel=3)
     retired = [k for k in gend if k in _RETIRED_GENERATION_KEYS]
     unknown = sorted(k for k in gend

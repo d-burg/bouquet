@@ -24,6 +24,34 @@
   goldens that pin `evaluate_jBS` output need regeneration.
   [physics-notes.md](physics-notes.md#the-evaluator-physicsevaluate_jbs).
 
+### `bootstrap_kwargs` (PR #60), hardened
+
+- **Validated against an explicit allow-list** (`config.BOOTSTRAP_KWARGS_ALLOWED`)
+  at construction and on every reassignment of the attribute (the notebook
+  idiom), so a mistyped option is refused with or without the toolkit.
+  `None` / non-dict values are refused by name; `jphi_fixed_prof`,
+  `p_fixed_prof`, `jphi_saw_prof`, `pres_prof`, `F0` are reserved.
+- **Toolkit capability** is checked only where the option reaches the
+  toolkit: on the legacy paths a key the installed OFT lacks is refused for a
+  new config and warned about while a stored config loads (archives stay
+  reloadable across OFT builds). Under the unified engine its own edge-taper
+  keys need no capability (bouquet implements the taper); the three tests that
+  failed on OFT main for this reason pass. A failed introspection is no longer
+  cached for the process.
+- **Convergence keys** (`djBS_tol`, `saw_relax`) need
+  `generation.bootstrap_convergence_override=True` (new field, recorded in
+  `config_json`); refused otherwise.
+- **Stored configs:** a unified config carrying solve_with_bootstrap keys (the
+  D3D-like notebooks' `{"iterations": 3}`, 2026-10-04..09) loads with them
+  dropped and a warning; a stored `swb_iterations=n` loads as
+  `{"iterations": n}` with a warning that it now reaches the baseline SWB too
+  (it does not replay the stored baseline exactly). The two D3D-like notebooks
+  now set `bootstrap_kwargs = {}` (the key had no effect under the engine).
+- `tools/install_oft.py` builds upstream OpenFUSIONToolkit `main` by default,
+  a fork only by explicit `--repo`/`--ref`, refuses (instead of repointing) an
+  existing clone of another repository, and checks the build has a route to
+  the geometric ε.
+
 ### Kinetic draws: `kinetic_sampler/2` (PR #56)
 
 - **One sampler for every path** (`bouquet.kinetic_sampler`, version

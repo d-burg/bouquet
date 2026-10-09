@@ -55,7 +55,13 @@ def test_rho_tor_is_accepted():
     assert ImasSource(ids_path="d", coord="rho_tor").coord == "rho_tor"
 
 
-def test_phi_run_refuses_the_python_solve_at_construction():
+def test_phi_run_refuses_the_python_solve_at_construction(monkeypatch):
+    # a toolkit WITH the Python solve option (the internal-solve build): the
+    # refusal under test is the Phi_N one, not the toolkit-capability one
+    from _swb import FORK_BOOTSTRAP_NAMES
+    import bouquet.config as _config
+    monkeypatch.setattr(_config, "_bootstrap_kwarg_names",
+                        lambda: FORK_BOOTSTRAP_NAMES)
     with pytest.raises(ValueError, match="use_python_solve"):
         _cfg(generation=_legacy(bootstrap_kwargs={"use_python_solve": True}))
     _cfg(source=ImasSource(ids_path="d"), generation=_legacy(
@@ -78,6 +84,11 @@ def test_json_round_trip_keeps_the_coords():
 # check_backend / check_run against a fake toolkit
 # ---------------------------------------------------------------------------
 def _fake_oft(monkeypatch, sb_coord=True, torflux=True, swb=("x", "coord")):
+    # its bootstrap options are the internal-solve toolkit's
+    from _swb import FORK_BOOTSTRAP_NAMES
+    import bouquet.config as _config
+    monkeypatch.setattr(_config, "_bootstrap_kwarg_names",
+                        lambda: FORK_BOOTSTRAP_NAMES)
     ns = {}
     exec("def solve_bootstrap(self, %s): pass" % ("coord=None" if sb_coord else "x=None"), ns)
     TM = type("TokaMaker", (), {"solve_bootstrap": ns["solve_bootstrap"]})

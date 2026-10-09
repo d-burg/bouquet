@@ -180,10 +180,19 @@ class ReconstructionSource:
     stripped), beryllium 4, neon 10. For a p-file this is informational: the
     Osborne ``N Z A`` footer carries the species directly and is authoritative.
 
-    ``ni_source`` picks the IDA main-ion density route: ``"Zeff"``
-    (single-impurity quasineutrality), ``"CER"`` (``ni = max(ne - Z_imp n_C, 0)``
-    from the measured ``n_12C6``), or ``"all"`` (default, the mean of the two).
-    The two routes are independent measurements and may disagree. Ignored for p-files.
+    ``ni_source`` picks the IDA Z_eff / main-ion density route: ``"Zeff"``
+    (the visible-bremsstrahlung Z_eff, single-impurity quasineutrality),
+    ``"CER"`` (``Z_eff = 1 + Z(Z-1) n_C/n_e`` from the measured ``n_12C6``,
+    i.e. ``ni = ne - Z_imp n_C``; needs ``impurity_Z=6``), or ``"all"``
+    (default since PR #56): the equal-weight mean of the two, each clamped to
+    ``[1, Z_imp]`` first, with their disagreement beyond the combined sigma
+    added to ``sigma_ni`` / ``sigma_Zeff``.  With ``"all"`` a file lacking one
+    route's envelope (``Zeff_err``, or ``n_12C6_err``) falls to the other
+    route ALONE -- an older vintage without ``Zeff_err`` gets the CER value.
+    The baseline Z_eff fed to the bootstrap is this resolved value
+    (``IDAProfiles.zeff_provenance`` records the rung, weights and clamp
+    counts; docs/physics-notes.md "Kinetic assumptions").  Before PR #56 the
+    baseline Z_eff was the raw VB value.  Ignored for p-files.
     """
 
     geqdsk_path: str
@@ -236,8 +245,15 @@ class ImasSource:
     # from the same file (resolve_uncertainty).
     ida_path: Optional[str] = None
     impurity_Z: float = 6.0            # machine impurity charge (carbon); ni dilution
-    ni_source: str = "all"             # IDA ni route for ida_hybrid: "Zeff" | "CER" | "all"
-    zeff_from_fuse: bool = False       # ida_hybrid: keep FUSE Z_eff instead of IDA's
+    # IDA Z_eff / ni route for ida_hybrid: "Zeff" | "CER" | "all" (mean; see
+    # ReconstructionSource.ni_source).  The IDA ni is a measured TOTAL: the
+    # FUSE fast-ion density equivalent is subtracted to give the thermal ni.
+    ni_source: str = "all"
+    # ida_hybrid only: True keeps FUSE's Z_eff (consistent with FUSE's own
+    # j_ohmic / j_bootstrap) while ne/Te/Ti/ni come from IDA; False (default)
+    # takes IDA's resolved Z_eff, which counts the fast ions in its numerator
+    # (a measured Z_eff), so Baseline.zeff_includes_fast is True.
+    zeff_from_fuse: bool = False
     # OPTIONAL. A gEQDSK whose LCFS replaces the dd boundary outline as the
     # isoflux separatrix target. Leave None to use the source's own boundary.
     # Supply one when you have a more accurate separatrix for the slice than the
@@ -435,7 +451,8 @@ class UncertaintyConfig:
     # by default for every source (the physically-consistent density scheme --
     # see the aux block below). Each draw perturbs Z_eff within this band and
     # DERIVES the main-ion density ni from (ne, Z_eff) via quasineutrality, so
-    # ni/nz/Z_eff stay mutually consistent and ni_scalar_sigma is unused.
+    # ni/nz/Z_eff stay mutually consistent; ni_scalar_sigma is then unused
+    # (it IS used whenever ni_from_zeff resolves False -- see below).
     # Real Z_eff (visible bremsstrahlung / CER) is ~10-20% uncertain; the 0.05
     # default is deliberately conservative -- widen it for a realistic envelope.
     # Set 0.0 to disable (Z_eff held at baseline, ni drawn independently).
@@ -443,24 +460,21 @@ class UncertaintyConfig:
     zeff_scalar_sigma: float = 0.05
     # Where the Z_eff envelope's MAGNITUDE comes from (the channel is enabled
     # by zeff_scalar_sigma > 0 either way):
-    #   "auto"     -- highest-fidelity tier the file supports:
-    #                 carbon-propagated dilution sigma (n_12C6_err / the
-    #                 dilution posterior; 1.9-5.8 % of Zeff in-core on the
-    #                 demo shots, sane in the SOL) > the file's VB-measured
-    #                 sigma_Zeff (Zeff_err / sample spread; 8-9 % core but
-    #                 44-130 % SOL, grand means to ~90 % on some shots) >
-    #                 the scalar.  The Zeff-primary scheme perturbs Zeff to
-    #                 move the dilution ni = ne - Z nC, and CER carbon IS
-    #                 that dilution's direct measurement, hence the order.
-    #   "carbon"   -- require the carbon-propagated tier; loud fallback.
-    #   "measured" -- require the VB-measured envelope; loud fallback.
+    #   "auto"     -- the IDA-resolved envelope (bouquet.io.ida.read_ida
+    #                 walks VB+CER > CER > VB over what the file supports,
+    #                 the route disagreement folded in; the same resolution
+    #                 the baseline Z_eff and ni came from) > the scalar.
+    #   "carbon"   -- single-route override: the bare carbon-propagated
+    #                 envelope (n_12C6_err / the dilution posterior), for an
+    #                 A/B against the combined one; loud fallback.
+    #   "measured" -- require the IDA-resolved envelope; loud fallback.
     #   "scalar"   -- always the flat zeff_scalar_sigma fraction (the only
     #                 behaviour before 1.4.0).
-    # Only the reconstruction/IDA path is eligible for the measured tiers,
-    # and only when the sigma .cdf IS the source's own profiles file: on the
-    # IMAS/ida_hybrid path the Z_eff baseline is FUSE's, and pairing a FUSE
-    # baseline (or a p-file one, or a different .cdf vintage named via
-    # ida_path) with an IDA-measured envelope would mix channels.  That file
+    # The measured tiers are eligible only when the Z_eff baseline came from
+    # the sigma .cdf itself: the reconstruction source's own profiles file,
+    # or ImasSource.ida_path (ida_hybrid; also with zeff_from_fuse=True, the
+    # envelope then carried absolute).  A p-file baseline, or a different
+    # .cdf vintage named via ida_path, is refused: it would mix channels.  That file
     # test compares RESOLVED paths (expanduser + realpath, samefile when both
     # exist), so a relative-vs-absolute, '~'-prefixed, trailing-slash or
     # symlinked spelling of the same file stays eligible.
@@ -471,10 +485,18 @@ class UncertaintyConfig:
     zeff_sigma_source: str = "auto"
 
     # With the zeff channel active: True derives ni per draw from the drawn
-    # (ne, Zeff) (sigma_ni unused); False draws ni from its own sigma_ni.
-    # None = auto: True for the flat ni_scalar_sigma fallback or one IDA
-    # resolution (sigma_ni kept via IDAProfiles.zeff_dne), False for any other
-    # real ni envelope.
+    # (ne, Zeff) as an increment on the baseline ni (kinetic_sampler/2;
+    # sigma_ni unused); False draws ni from its own sigma_ni and Z_eff
+    # passively AFTER Ti (a different RNG order).
+    # None = auto (PR #56): True when ni's sigma is the flat ni_scalar_sigma
+    # fallback, or when ni AND the Z_eff envelope are the same IDA resolution
+    # (Z_eff tier "IDA-resolved"; sigma_ni kept via IDAProfiles.zeff_dne);
+    # False for any other real ni envelope -- an explicit
+    # sigma_profiles["ni"], an IDA ni with zeff_sigma_source="scalar" or
+    # "carbon", an IDA sigma file paired with a p-file baseline.  NOTE: auto
+    # therefore changes with the Z_eff tier; pin it explicitly for an A/B of
+    # Z_eff envelopes.  Before PR #56 ni was always derived when the channel
+    # had dilution.
     ni_from_zeff: Optional[bool] = None
 
     # GPR correlation length scales (psi_N units) -- define the perturbation

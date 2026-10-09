@@ -115,6 +115,20 @@ is a navigational summary of the defaults.
 | `coil_vsc` | `{"F9A": 1.0, "F9B": -1.0}` | Antisymmetric vertical-stability channel definition |
 | `region_overrides` | `None` | Special-case mesh cond/coil dict edits |
 
+### Ion and Z_eff fields of the sources (`b.source`, PR #56)
+
+| Knob | Default | Meaning |
+|---|---|---|
+| `ReconstructionSource.ni_source` | `"all"` | IDA `.cdf` profiles: where Z_eff and n_i come from. `"Zeff"` = the visible-bremsstrahlung Z_eff; `"CER"` = `Z_eff = 1 + Z(Z−1)·n_C/n_e` from the measured `n_12C6` (needs `impurity_Z=6`); `"all"` = the equal-weight mean of the two, each clamped to `[1, Z]` first, their disagreement beyond σ added to σ_ni / σ_Zeff. With `"all"`, a file lacking one route's envelope uses the other **alone** (an older vintage without `Zeff_err` gets the CER value). Before PR #56 the baseline Z_eff was the raw VB value. Recorded as `IDAProfiles.zeff_provenance`. Ignored for p-files |
+| `ImasSource.ni_source` | `"all"` | The same choice for `ida_hybrid`; IDA's n_i is a measured total, so the FUSE fast-ion density equivalent is subtracted to give the thermal n_i |
+| `ImasSource.zeff_from_fuse` | `False` | `ida_hybrid`: `True` keeps FUSE's Z_eff (consistent with FUSE's own j_ohmic / j_bootstrap) while n_e/T_e/T_i/n_i come from IDA |
+| `Baseline.z2_fast` | — (read) | Σ_s Z_s² n_s^fast on the kinetic grid, from the dd's fast-ion species (IMAS path); `None` without a fast population. Archived per draw with `z_fast` |
+| `Baseline.zeff_includes_fast` | — (read) | Whether the baseline Z_eff's numerator counts the fast ions: classified from the dd's stored `zeff` against both numerators (`io.imas._dd_zeff`; with no stored Z_eff and a beam, `True`), `True` for a measured (IDA) Z_eff. When `True`, the bootstrap sees `Z_eff,th + z2_fast/n_e` (since PR #56; see [physics-notes.md](physics-notes.md#kinetic-assumptions-z_eff-n_i-and-the-clips-pr-56)) and the draw window is `physics.zeff_bounds`' includes-fast one |
+
+`read_ida(sigma_ni_from_ne=...)` is accepted as a deprecated no-op (it warns);
+`UncertaintyConfig.sigma_ni_from_ne` was removed (it was already a no-op), and a
+stored config carrying it still loads.
+
 ### `UncertaintyConfig` (`b.uncertainty`)
 
 | Knob | Default | Meaning |
@@ -129,6 +143,7 @@ is a navigational summary of the defaults.
 | `jphi_scalar_sigma` | `0.10` | Inductive-current envelope. **Must be > 0** — setting it to 0 freezes `j_inductive` and trips the workflow guard |
 | `zeff_scalar_sigma` | `0.05` | One Z_eff perturbation per draw; n_i / n_z follow from quasi-neutrality. Also the width of the bottom tier below |
 | `zeff_sigma_source` | `"auto"` | Which tier supplies the Z_eff envelope's **magnitude**: `"auto"` / `"carbon"` / `"measured"` / `"scalar"` — see the ladder below |
+| `ni_from_zeff` | `None` (auto) | With the Z_eff channel on: `True` derives n_i per draw from the drawn (n_e, Z_eff) as an increment on the baseline n_i; `False` draws n_i from its own σ and Z_eff passively after T_i (different RNG order). Auto: `True` when n_i's σ is the scalar fallback, or n_i and the Z_eff envelope are the same IDA resolution (tier `"IDA-resolved"`); `False` for any other real n_i envelope (explicit `sigma_profiles["ni"]`, an IDA n_i with `zeff_sigma_source="scalar"`/`"carbon"`, an IDA σ file paired with a p-file). Auto follows the Z_eff tier: pin it for an A/B of Z_eff envelopes. Before PR #56 n_i was always derived |
 | `sigma_profiles` | `{}` | Explicit `{name: sigma(psi_N)}` envelopes on the kinetic run grid (`psi_N_kinetic`; Φ_N in a `"phi_n"` run), highest precedence |
 | `n_ls` / `t_ls` / `j_ls` | `0.5` / `0.4` / `0.25` | GPR correlation lengths for density / temperature / current, in units of the run coordinate (Φ_N lengths in a `"phi_n"` run; the defaults are not converted) |
 | `aux_sigmas`, `aux_baselines`, `aux_length_scales` | `{}` | The passive switchboard: any extra channel gets perturbed and archived alongside the physics. Arrays on the kinetic run grid; length scales in the run coordinate |
@@ -208,17 +223,18 @@ width of its envelope sets the width of every dilution band in the ensemble.
 
 | Tier | Where the magnitude comes from | Forced by |
 |---|---|---|
-| carbon-propagated | `n_12C6_err` + `n_e_err` (direct layout) or the dilution posterior (ensemble), propagated through `Z_eff = 1 + Z(Z−1)·n_C/n_e` | `"carbon"` |
-| VB-measured | the file's own `Zeff_err` (direct) or `Zeff` sample spread (ensemble) | `"measured"` |
+| IDA-resolved | `read_ida`'s own resolution, walking **VB+CER > CER > VB** over what the file supports: the VB `Zeff_err` (or sample spread) and the carbon-propagated σ (`n_12C6_err` + `n_e_err`, or the dilution posterior, through `Z_eff = 1 + Z(Z−1)·n_C/n_e`), equal-weight combined, with the routes' disagreement beyond their combined σ added one-sidedly. It is the same resolution the baseline Z_eff and n_i came from | `"measured"` |
+| carbon-propagated (override) | the bare carbon σ alone, for an A/B against the combined envelope (n_i in play was not necessarily derived from it) | `"carbon"` |
 | scalar | `zeff_scalar_sigma` × abs(Z_eff) — an **assumed** width, not a measured one | `"scalar"` |
 
-CER carbon is the direct measurement of the dilution the draw actually moves,
-which is why it outranks the visible-bremsstrahlung sigma. Both measured tiers
-require the Z_eff baseline to be the IDA one — the reconstruction path, and the
-**same** file that supplies the sigmas (compared as resolved paths, so a
-relative, `~`-prefixed or symlinked spelling is still the same file). An
-IMAS/`ida_hybrid` or p-file baseline therefore always gets the scalar: pairing a
-FUSE Z_eff with an IDA envelope would mix channels.
+The measured tiers require the Z_eff baseline to come from the **same** IDA
+file that supplies the sigmas (compared as resolved paths, so a relative,
+`~`-prefixed or symlinked spelling is still the same file): the reconstruction
+source's own `.cdf`, or `ImasSource.ida_path` on `ida_hybrid` (also with
+`zeff_from_fuse=True`, the envelope then carried absolute). A p-file baseline,
+or a different `.cdf` vintage, gets the scalar: it would mix channels. The
+assumptions behind the VB/CER combination are stated and cited in
+[physics-notes.md](physics-notes.md#kinetic-assumptions-z_eff-n_i-and-the-clips-pr-56).
 
 **No step down this ladder is silent.** Each one emits a single warning naming
 the tier chosen, each tier skipped and its reason class (*source ineligible* /
@@ -264,7 +280,7 @@ as an enormous sigma.
 | `structured_mse_sigma_sys` / `structured_mse_min_chords` | `0.0` / `4` | `"structured"` + `mse_data`: an optional caller-stated systematic added in quadrature to every chord's `sigma_eff` (default 0: nothing inflated), and the fewest usable chords a block may carry. Every `structured_mse_*` knob is validated when the config is built (steps an integer ≥ 1, `fd_step` finite > 0, `sigma_sys` finite ≥ 0, `min_chords` an integer ≥ 1), and an unknown key in `mse_data` is refused; a dropped chord (weight ≤ 0, a non-finite value, a NaN E<sub>r</sub> inside a supplied E<sub>r</sub> profile, off the solver mesh) is recorded with its reason |
 | `q0_gate` | `1.1` | `closure_channel="sawtooth_bootstrap"` (and the engine's `"q0"` row): the axis row is admitted only where the source's sawtooth model is active at the slice OR its own axis `|q0_dd|` is at/below this value; otherwise the slice falls back to `"bootstrap"` with a printed note (`q0_gate_basis` recorded) |
 | `accept_anchor_inband` | `False` | Legacy draws (Fix B): when the reconstruction anchor's l_i is already in the band, accept the anchor and skip the scale search and the corrective iteration. Refused non-default under the unified engine |
-| `kinetic_source` | `"fuse"` | IMAS path: `"ida_hybrid"` takes ne/Te/Ti/ω_tor from an IDA `.cdf` while keeping FUSE Z_eff / currents / equilibrium. `from_imas(ida_path=…)` selects it automatically |
+| `kinetic_source` | `"fuse"` | IMAS path: `"ida_hybrid"` takes ne/Te/Ti/n_i/Z_eff/ω_tor from an IDA `.cdf` (n_i and Z_eff by `ImasSource.ni_source`; the FUSE fast-ion density is subtracted from IDA's measured n_i) while keeping FUSE currents / equilibrium / p_fast; `ImasSource.zeff_from_fuse=True` keeps FUSE's Z_eff. `from_imas(ida_path=…)` selects it automatically |
 | `anchor_jtor_to_equilibrium` | `True` | IMAS path: anchor total j_phi to `equilibrium.profiles_1d.j_tor` rather than `core_profiles.j_tor` |
 | `anchor_pressure_to_equilibrium` | `False` | IMAS path: add the fixed `p_diff = equilibrium.pressure − p_reconstructed` offset |
 | `imas_corrective_jphi` | `False` | Opt-in corrective j_phi iteration on the IMAS baseline solve (still being validated) |

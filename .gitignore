@@ -27,7 +27,8 @@ env/
 # NetCDF / proprietary IDA data (IDA_*.cdf) — never commit
 *.nc
 *.cdf
-# ...but DO track the anonymised one-slice IDA test fixture
+# ...but track the one-slice IDA test fixture -- QUARANTINED (owner-flagged as
+# possibly real-data-derived; replace before merge: tests/data/README.md)
 !tests/data/diiid_profs_synthetic.cdf
 *.dat
 *.npz

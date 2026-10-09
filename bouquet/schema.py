@@ -118,6 +118,7 @@ PROFILE_UNITS = {
     "sigma_ni": "m^-3",
     "sigma_ti": "eV",
     "sigma_jphi": "A m^-2",
+    "j_pressure": "A m^-2",
     "swb_j_saw": "A m^-2",
     "coil_currents": "A",
 }
@@ -203,6 +204,74 @@ def read_jB_parallel(grp):
         return None
     sub = grp[JB_PARALLEL_GROUP]
     return {k: np.asarray(sub[k][()], dtype=float) for k in sub}
+
+
+# ---- where the pressure-driven current sits in the archived split ----------
+#: Group attr (draw and ``_baseline``) naming where the pressure-driven
+#: ``p'G = p'(<R> - F^2<1/R>/<B^2>)`` (A7 of docs/current-conventions.md) sits
+#: in the archived toroidal split ``j_phi = j_inductive + j_BS + fixed (+
+#: j_pressure)``.  Its <j.B> is zero, so the IDS exporter must take it off
+#: whichever bucket carries it before converting to parallel currents.
+CURRENT_SPLIT_CONVENTION_ATTR = "current_split_convention"
+#: Owner decision D2 (2026-10-09): ``p'G`` is its own ``j_pressure`` dataset;
+#: neither ``j_BS`` nor ``j_inductive`` carries it.
+SPLIT_PRESSURE_SEPARATE = "pressure_separate"
+#: Every archive before PR #64 (absent attr): the residual ``j_inductive``
+#: carries ``p'G``.
+SPLIT_PRESSURE_IN_INDUCTIVE = "pressure_in_inductive"
+#: PR #64's convention (evaluate_jBS/3; never on main): ``j_BS`` carries it.
+SPLIT_PRESSURE_IN_BOOTSTRAP = "pressure_in_bootstrap"
+CURRENT_SPLIT_CONVENTIONS = (SPLIT_PRESSURE_SEPARATE,
+                             SPLIT_PRESSURE_IN_INDUCTIVE,
+                             SPLIT_PRESSURE_IN_BOOTSTRAP)
+JPRESSURE_DS = "j_pressure"
+
+
+def write_current_split(grp, j_pressure, convention=SPLIT_PRESSURE_SEPARATE):
+    """Stamp *grp* (a draw group or ``_baseline``) with its split convention
+    and, for :data:`SPLIT_PRESSURE_SEPARATE`, write the ``j_pressure``
+    dataset (replacing an earlier one).  ``j_pressure`` may be None only for
+    the two carried conventions."""
+    import numpy as np
+    if convention not in CURRENT_SPLIT_CONVENTIONS:
+        raise ValueError(f"convention must be one of {CURRENT_SPLIT_CONVENTIONS},"
+                         f" got {convention!r}")
+    if convention == SPLIT_PRESSURE_SEPARATE:
+        if j_pressure is None:
+            raise ValueError("write_current_split: the separate convention "
+                             "needs the j_pressure profile")
+        if JPRESSURE_DS in grp:
+            del grp[JPRESSURE_DS]
+        write_profile(grp, JPRESSURE_DS, np.asarray(j_pressure, dtype=float))
+    grp.attrs[CURRENT_SPLIT_CONVENTION_ATTR] = convention
+
+
+def read_current_split_convention(grp, baseline_attrs=None) -> str:
+    """Where *grp*'s archived split keeps ``p'G`` (one of
+    :data:`CURRENT_SPLIT_CONVENTIONS`).
+
+    The group's own attr, else the ``_baseline`` attrs' (*baseline_attrs*);
+    without either: a ``j_pressure`` dataset means separate; a loop record
+    written by ``evaluate_jBS/3`` (PR #64's evaluator) means in the
+    bootstrap; anything else is an archive from before PR #64 -- in the
+    inductive."""
+    def _s(v):
+        return v.decode() if isinstance(v, bytes) else (None if v is None
+                                                         else str(v))
+    v = _s(grp.attrs.get(CURRENT_SPLIT_CONVENTION_ATTR))
+    if v is None and baseline_attrs is not None:
+        v = _s(dict(baseline_attrs).get(CURRENT_SPLIT_CONVENTION_ATTR))
+    if v is not None:
+        if v not in CURRENT_SPLIT_CONVENTIONS:
+            raise ValueError(f"unknown {CURRENT_SPLIT_CONVENTION_ATTR} {v!r}")
+        return v
+    if JPRESSURE_DS in grp:
+        return SPLIT_PRESSURE_SEPARATE
+    rec = read_jbs_loop(grp)
+    if rec is not None and str(rec.get("evaluate_jBS_version", "")).startswith(
+            "evaluate_jBS/3"):
+        return SPLIT_PRESSURE_IN_BOOTSTRAP
+    return SPLIT_PRESSURE_IN_INDUCTIVE
 
 
 def is_binary_profile_source(data: bytes) -> bool:

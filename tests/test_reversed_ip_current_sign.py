@@ -356,8 +356,9 @@ class TestSignIsRecorded:
         geom, _ = _paired_current_geometry(eq, cp, float(cps["time"][ic]),
                                            jtot, jtor)
         j_phi = jtor_imas_to_jphi_tokamaker(jtor, geom)
-        j_bs = (jpar_to_jphi_tokamaker(np.asarray(cp["j_bootstrap"], float), geom)
-                + jphi_tokamaker_pressure_term(geom))
+        # the bootstrap is field-aligned only; p'G is the third bucket (D2)
+        j_bs = jpar_to_jphi_tokamaker(np.asarray(cp["j_bootstrap"], float), geom)
+        assert np.array_equal(bl.j_pressure, jphi_tokamaker_pressure_term(geom))
         jnbi_par = np.zeros_like(jtor)
         for s in dd["core_sources"]["source"]:
             if s["identifier"]["index"] == 2:

@@ -98,7 +98,10 @@ def test_reader_converts_exactly_on_the_paired_slice(tmp_path, capsys):
     g = current_geom(dd["equilibrium"]["time_slice"][0]["profiles_1d"], _B0[0])
     pt = jphi_tokamaker_pressure_term(g)
     assert np.allclose(bl.j_phi, jtor_imas_to_jphi_tokamaker(raw["j_tor"], g), rtol=1e-12)
-    assert np.allclose(bl.j_BS, jpar_to_jphi_tokamaker(raw["j_bs"], g) + pt, rtol=1e-12)
+    # the bootstrap is field-aligned only; p'G is the third bucket (D2)
+    assert np.allclose(bl.j_BS, jpar_to_jphi_tokamaker(raw["j_bs"], g), rtol=1e-12)
+    assert np.allclose(bl.j_pressure, pt, rtol=1e-12)
+    assert np.max(np.abs(pt)) > 1e-2 * np.max(np.abs(bl.j_BS))
     assert np.allclose(bl.j_NBI, jpar_to_jphi_tokamaker(raw["j_nbi"], g), rtol=1e-12)
     # the total's own parallel current closes on j_phi (j_tor came from it)
     assert np.allclose(jpar_to_jphi_tokamaker(raw["j_total"], g) + pt, bl.j_phi,
@@ -112,10 +115,15 @@ def test_reader_components_sum_to_j_phi(tmp_path):
     bl = _read(tmp_path, dd)
     total = bl.j_inductive + bl.j_BS + bl.j_NBI + bl.j_RF
     assert np.allclose(total, bl.j_phi, rtol=0, atol=1e-9 * np.max(np.abs(bl.j_phi)))
-    # the inductive residual is the ohmic <J.B>'s field-aligned image
+    # the solve split's inductive residual is the ohmic <J.B>'s field-aligned
+    # image plus the pressure-driven p'G it carries for the solve; minus
+    # j_pressure it is the ohmic alone (the archived third-bucket split)
     g = current_geom(dd["equilibrium"]["time_slice"][0]["profiles_1d"], _B0[0])
     j_ohm = np.asarray(dd["core_profiles"]["profiles_1d"][0]["j_ohmic"])
-    assert np.allclose(bl.j_inductive, jpar_to_jphi_tokamaker(j_ohm, g), rtol=1e-10)
+    assert np.allclose(bl.j_inductive - bl.j_pressure,
+                       jpar_to_jphi_tokamaker(j_ohm, g), rtol=1e-10)
+    assert (bl.li_metrics["imas_current_conversion"]["current_split_convention"]
+            == "pressure_in_inductive")
 
 
 def test_jphi_diff_uses_the_anchor_slice_own_geometry(tmp_path):
@@ -126,10 +134,24 @@ def test_jphi_diff_uses_the_anchor_slice_own_geometry(tmp_path):
     assert np.allclose(bl.jphi_diff, eq_jphi - bl.j_phi, rtol=1e-12, atol=1e-6)
 
 
-def test_dd_without_geometry_or_profiles_2d_raises(tmp_path):
-    dd, _ = _dd(with_geometry=False)
-    with pytest.raises(ValueError, match="profiles_2d"):
-        _read(tmp_path, dd)
+def test_dd_without_geometry_or_profiles_2d_falls_back_to_the_ratio(tmp_path):
+    """A dd without the averages (and no profiles_2d to trace them) is read
+    with the pre-PR #64 per-surface ratio c = j_tor/j_total, with a warning
+    and a stamp -- not refused (review PR64 B7)."""
+    dd, raw = _dd(with_geometry=False)
+    with pytest.warns(UserWarning, match="FALLING BACK"):
+        bl = _read(tmp_path, dd)
+    conv = bl.li_metrics["imas_current_conversion"]
+    assert conv["method"].startswith("ratio")
+    assert "profiles_2d" in conv["reason"]
+    c = raw["j_tor"] / raw["j_total"]
+    np.testing.assert_allclose(bl.j_phi, raw["j_tor"], rtol=1e-15)
+    np.testing.assert_allclose(bl.j_BS, c * raw["j_bs"], rtol=1e-14)
+    np.testing.assert_allclose(bl.j_NBI, c * raw["j_nbi"], rtol=1e-14)
+    assert bl.j_pressure is None
+    total = bl.j_inductive + bl.j_BS + bl.j_NBI + bl.j_RF
+    np.testing.assert_allclose(total, bl.j_phi, rtol=0,
+                               atol=1e-9 * np.max(np.abs(bl.j_phi)))
 
 
 # Concentric circular surfaces, psi ~ r^2: weight dl/Bp ~ R dtheta, so

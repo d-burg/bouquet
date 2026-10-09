@@ -13,10 +13,14 @@
   never raises for that now. `ε = ⟨a⟩/⟨R⟩` (versions `/1`-`/3`) is the opt-in
   `eps_definition="a_over_R"`.
 - **Version.** `EVALUATE_JBS_VERSION` is `evaluate_jBS/4 (..., geometric eps =
-  (R_max-R_min)/(2<R>), ...)`; `/3` keeps its meaning (p′G with the bootstrap,
-  PR #64), and an opt-in run records `evaluate_jbs_version("a_over_R")`, which
-  names `OPT-IN eps = <a>/<R>`. `diag["eps_definition"]`/`["eps_route"]` per
-  evaluation.
+  (R_max-R_min)/(2<R>), ...; p'G separate as j_pressure)`. `/4` is ONE new
+  convention carrying two owner decisions: this ε (E4) and p′G returned
+  beside the bootstrap as `diag["j_pressure"]`, never inside `j_BS` (D2,
+  PR #64; see `docs/current-conventions.md`). `/3` keeps its meaning (p′G
+  with the bootstrap, PR #64, never on main), and an opt-in run records
+  `evaluate_jbs_version("a_over_R")`, which names `OPT-IN eps = <a>/<R>` and
+  is otherwise the same `/4` convention (p′G separate).
+  `diag["eps_definition"]`/`["eps_route"]` per evaluation.
 - **What moves** (synthetic D3D-like, same equilibrium and kinetics): ν* ×1.27
   at ψ_N 0.1 rising to ×1.72 at 0.98 (`ν* ∝ ε^-3/2`); j_BS +0.2 % core, +2.1 %
   at 0.9, −1.0 % at 0.95, −8.2 % at 0.98; peak −2.0 %; I_BS −0.46 %. Every

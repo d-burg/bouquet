@@ -15,8 +15,12 @@ Checked here, on the synthetic example's own flux-surface averages (the
 golden fixture's captured ``eq_fsa`` block):
 
 * ``physics.parallel_to_toroidal`` / ``toroidal_to_parallel``,
-  ``physics.evaluate_jBS`` (its toroidal output) and
+  ``physics.evaluate_jBS`` (its toroidal output), ``physics.
+  _swb_jbs_to_toroidal`` (SWB's ``R_avg/F`` output) and
   ``engine.conversion_factor`` agree with kappa bit for bit;
+* the installed toolkit's SWB output convention is identified, never
+  guessed (``physics.swb_jbs_convention``), and a toolkit that returns the
+  bootstrap as TokaMaker jphi has ``p'G`` taken off it;
 * the old legacy factor exceeded kappa by exactly the bracket
   ``<B^2>/<B_phi^2>`` times the Jensen ratio ``<1/R^2>/<1/R>^2``;
 * the engine's composition is unchanged: its request is rebuilt bit for bit
@@ -124,11 +128,12 @@ def test_the_old_legacy_factor_was_bracket_times_jensen_high(fsa):
 
 
 # ---------------------------------------------------------------------------
-#  evaluate_jBS, on a mock of the example
+#  evaluate_jBS and _swb_jbs_to_toroidal, on a mock of the example
 # ---------------------------------------------------------------------------
 class _ExampleEq:
     """A mygs stand-in serving the example's captured averages: the
-    primitives ``evaluate_jBS`` reads.  ``<R>`` and ``<a>`` are not captured;
+    primitives ``evaluate_jBS`` (``psi=``) and ``_swb_jbs_to_toroidal``
+    (``npsi=``, ``psi_pad=`` or ``psi=``) read.  ``<R>`` and ``<a>`` are not captured;
     plausible synthetic values stand in (neither enters the conversion)."""
 
     def __init__(self, fsa):
@@ -216,6 +221,125 @@ def test_evaluate_jBS_toroidal_output_is_kappa(fsa, fake_redl):
     np.testing.assert_array_equal(d["j_tor_full_raw"], d["j_dot_B"] * kap)
     np.testing.assert_array_equal(_j, d["j_dot_B"] * kap)
     assert "kappa" in d["version"]
+
+
+def test_swb_jbs_to_toroidal_is_kappa(fsa):
+    """SWB's ``<j.B> R_avg/F`` output, converted, IS ``kappa <j.B>`` with
+    kappa the physics module's one factor (restored 2026-10-09: PR #64
+    deleted the conversion and this pin)."""
+    eq = _ExampleEq(fsa)
+    p = fsa["psi_N"]
+    jB = _jdotB(p)
+    R_avg = eq._R(p)
+    swb = jB * R_avg / fsa["F"]            # SWB's own R_avg/F projection
+    out = physics._swb_jbs_to_toroidal(eq, swb, 1e-3,
+                                       convention=physics.SWB_JBS_RAVG_OVER_F)
+    kap = physics.field_aligned_conversion(fsa["F"], fsa["avg_inv_R"],
+                                           fsa["avg_B2"])
+    np.testing.assert_allclose(out, jB * kap, rtol=1e-14, atol=0.0)
+    np.testing.assert_allclose(
+        out, jB * _kappa_literal(fsa["F"], fsa["avg_inv_R"], fsa["avg_B2"]),
+        rtol=1e-14, atol=0.0)
+    # SWB's raw output is NOT that: R_avg/F over kappa = <R><B^2>/(F^2<1/R>)
+    assert np.max(np.abs(swb / out - 1.0)) > 1e-2
+
+
+def test_swb_jbs_to_toroidal_on_the_grid_swb_was_given(fsa):
+    """With the grid SWB was called on (``x`` / ``psi_N``), the geometry is
+    read on SWB's own clipped surfaces; on a grid equal to OFT's uniform one
+    the result is the uniform call's."""
+    eq = _ExampleEq(fsa)
+    p = fsa["psi_N"]
+    swb = _jdotB(p) * eq._R(p) / fsa["F"]
+    a = physics._swb_jbs_to_toroidal(eq, swb, 1e-3,
+                                     convention=physics.SWB_JBS_RAVG_OVER_F)
+    b = physics._swb_jbs_to_toroidal(eq, swb, 1e-3, psi=p,
+                                     convention=physics.SWB_JBS_RAVG_OVER_F)
+    np.testing.assert_array_equal(a, b)
+    with pytest.raises(ValueError, match="shape"):
+        physics._swb_jbs_to_toroidal(eq, swb, 1e-3, psi=p[:-1],
+                                     convention=physics.SWB_JBS_RAVG_OVER_F)
+
+
+class _PressureEq(_ExampleEq):
+    """The example's averages with a non-zero p' and FF' (positive jphi)."""
+
+    def get_profiles(self, psi=None, npsi=None, psi_pad=None):
+        p = self._grid(psi, npsi, psi_pad)
+        F = self._at("F", p)
+        pp = -4.0e5 * (1.0 - p) - 2.0e6 * np.exp(-0.5 * ((p - 0.95) / 0.02) ** 2)
+        Fp = -0.02 * (1.0 - p) / F
+        return p, F, Fp, np.zeros_like(p), pp
+
+
+def test_a_toroidal_swb_output_has_the_pressure_term_taken_off(fsa):
+    """A toolkit whose SWB returns TokaMaker jphi (``kappa <j.B> + p'G``,
+    A7): the conversion takes ``p'G`` off -- the field-aligned bootstrap is
+    left, and ``p'G`` is the third bucket (D2) -- with p' signed so the
+    equilibrium's own jphi is positive."""
+    eq = _PressureEq(fsa)
+    p = fsa["psi_N"]
+    F, iR, B2 = fsa["F"], fsa["avg_inv_R"], fsa["avg_B2"]
+    R = eq._R(p)
+    _, _, Fp, _, pp = eq.get_profiles(psi=p)
+    sign = 1.0 if np.sum(R * pp + iR * F * Fp / (4e-7 * np.pi)) >= 0 else -1.0
+    assert sign == -1.0                    # the mock is in the reversed frame
+    P = sign * pp * (R - F ** 2 * iR / B2)
+    assert np.max(np.abs(P)) > 1e3
+    kjB = _jdotB(p) * _kappa_literal(F, iR, B2)
+    out = physics._swb_jbs_to_toroidal(eq, kjB + P, 1e-3, psi=p,
+                                       convention=physics.SWB_JBS_TOROIDAL)
+    np.testing.assert_allclose(out, kjB, rtol=1e-12, atol=1e-9 * kjB.max())
+    np.testing.assert_allclose(physics.swb_pressure_term(eq, p.size, 1e-3,
+                                                         psi=p), P,
+                               rtol=1e-14, atol=0.0)
+
+
+def test_the_swb_output_convention_is_identified_not_guessed():
+    """The capability check: the upstream projection line -> R_avg/F; a
+    toolkit whose ``solve_with_bootstrap`` takes the grid ``x`` -> toroidal;
+    anything else (a Fortran-routed call, another projection) is refused."""
+    def upstream(mygs, ne, Te, ni, Ti, Zeff, Ip_target, psi_N=None):
+        j_BS_neo = R_avg = f = 1.0
+        j_BS_final = j_BS_neo * (R_avg / f)
+        return j_BS_final
+
+    def fork(mygs, ne, Te, ni, Ti, Zeff, Ip_target, x=None, coord="psi_n",
+             jphi_fixed=None):
+        return None
+
+    def routed(mygs, ne, Te, ni, Ti, Zeff, Ip_target, use_python_solve=False):
+        j_BS_neo = R_avg = f = 1.0
+        return j_BS_neo * (R_avg / f)   # the python path is not the default
+
+    def other(mygs, ne, Te, ni, Ti, Zeff, Ip_target):
+        j_BS_neo = b = 1.0
+        return j_BS_neo / b
+
+    assert physics.swb_jbs_convention(upstream) == physics.SWB_JBS_RAVG_OVER_F
+    assert physics.swb_jbs_convention(fork) == physics.SWB_JBS_TOROIDAL
+    for fn in (routed, other):
+        with pytest.raises(physics.SwbConventionUnknown):
+            physics.swb_jbs_convention(fn)
+    # the toolkit probe bouquet uses everywhere (coords._swb_params)
+    assert physics.swb_jbs_convention(params=frozenset({"x"})) == \
+        physics.SWB_JBS_TOROIDAL
+    assert physics.swb_jbs_convention(upstream, params=frozenset(
+        {"psi_N"})) == physics.SWB_JBS_RAVG_OVER_F
+    rec = physics.swb_conversion_record(physics.SWB_JBS_RAVG_OVER_F)
+    assert rec["swb_jbs_convention"] == physics.SWB_JBS_RAVG_OVER_F
+    assert "kappa" in rec["swb_jbs_conversion"]
+    with pytest.raises(ValueError, match="convention"):
+        physics._swb_jbs_to_toroidal(None, np.ones(3), 1e-3,
+                                     convention="R/F?")
+
+
+def test_the_installed_toolkit_has_a_known_swb_convention():
+    """On the toolkit this suite runs against, the convention is one of the
+    two known ones (upstream OFT: R_avg/F)."""
+    bs = pytest.importorskip("OpenFUSIONToolkit.TokaMaker.bootstrap")
+    conv = physics.swb_jbs_convention(bs.solve_with_bootstrap)
+    assert conv in physics.SWB_JBS_CONVENTIONS
 
 
 # ---------------------------------------------------------------------------

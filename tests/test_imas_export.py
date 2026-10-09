@@ -51,16 +51,27 @@ def _fsa_geom_on(x):
     return g
 
 
-def _make_archive(path, with_fsa=True, legacy_fsa=False):
+def _make_archive(path, with_fsa=True, legacy_fsa=False,
+                  convention="pressure_in_bootstrap", j_ind=None, j_bs=None,
+                  j_pressure=None):
+    """``convention``: the draw's ``current_split_convention`` attr (None:
+    no attr, an archive from before PR #64).  The default archive is the
+    PR #64 one (p'G inside j_BS) these checks were written for."""
+    j_ind = _J_IND if j_ind is None else j_ind
+    j_bs = _J_BS if j_bs is None else j_bs
     with h5py.File(path, "w") as hf:
         g = hf.require_group("scan/0/0")
+        if convention is not None:
+            g.attrs["current_split_convention"] = convention
+        if j_pressure is not None:
+            g.create_dataset("j_pressure", data=j_pressure)
         g.create_dataset("psi_N", data=_PEQ)
         g.create_dataset("psi_N_kinetic", data=np.linspace(0, 1, 20))
         for k in ("n_e", "T_e", "n_i", "T_i"):
             g.create_dataset(k, data=np.linspace(1.0, 0.1, 20))
         g.create_dataset("j_phi", data=_J_PHI)
-        g.create_dataset("j_inductive", data=_J_IND)
-        g.create_dataset("j_BS", data=_J_BS)
+        g.create_dataset("j_inductive", data=j_ind)
+        g.create_dataset("j_BS", data=j_bs)
         with open(_GEQ, "rb") as fh:
             g.create_dataset("eqdsk", data=np.void(fh.read()))
         if with_fsa:
@@ -265,6 +276,56 @@ class TestExactImasExport:
         geom = _fuse_current_geometry(template["equilibrium"], 0, rho)
         assert np.allclose(cp["j_tor"], jphi_tokamaker_to_jtor_imas(
             np.interp(rho ** 2, _PEQ, _J_PHI), geom), rtol=1e-10)
+
+
+@pytest.mark.skipif(not os.path.isfile(_GEQ), reason="d3dlike.geqdsk absent")
+class TestSplitConventions:
+    """The same physical currents, archived with p'G in each bucket (schema
+    current_split_convention), export to the same IMAS currents: p'G has
+    zero <j.B> and comes off whichever bucket carries it (review PR64 B3)."""
+
+    def _export(self, tmp_path, name, **kw):
+        arc = str(tmp_path / f"{name}.h5")
+        _make_archive(arc, **kw)
+        tmpl = str(tmp_path / "tmpl.json")
+        psi, _ = _make_template(tmpl)
+        out = str(tmp_path / f"{name}.json")
+        write_imas_draw(arc, 0, tmpl, out, scan_key=0, fidelity="exact")
+        cp = json.load(open(out))["core_profiles"]["profiles_1d"][0]
+        return cp, (psi - psi[0]) / (psi[-1] - psi[0])
+
+    def test_every_convention_exports_the_same_currents(self, tmp_path):
+        P_eq = _P(_PEQ)                       # p'G on the archive grid
+        bs_fa = _J_BS - P_eq                  # the field-aligned bootstrap
+        ref, x = self._export(tmp_path, "bs", convention="pressure_in_bootstrap",
+                              j_bs=_J_BS)
+        pre, _ = self._export(tmp_path, "pre64", convention=None,
+                              j_ind=_J_IND + P_eq, j_bs=bs_fa)
+        ind, _ = self._export(tmp_path, "ind", convention="pressure_in_inductive",
+                              j_ind=_J_IND + P_eq, j_bs=bs_fa)
+        sep, _ = self._export(tmp_path, "sep", convention="pressure_separate",
+                              j_bs=bs_fa, j_pressure=P_eq)
+        geom = _fsa_geom_on(x)
+        Px = _P(x)
+        for cp in (pre, ind, sep):
+            np.testing.assert_allclose(cp["j_tor"], ref["j_tor"], rtol=1e-12)
+        for cp in (pre, ind):        # sep subtracts the archived (coarser) P
+            np.testing.assert_allclose(cp["j_total"], ref["j_total"], rtol=1e-12)
+        # the eqdsk's own p'G (pre64 / inductive / bootstrap) on the export grid
+        for cp in (pre, ind):        # the eqdsk's p'G comes off j_inductive
+            np.testing.assert_allclose(cp["j_ohmic"], jphi_tokamaker_to_jpar(
+                np.interp(x, _PEQ, _J_IND + P_eq) - Px, geom), rtol=1e-12)
+            np.testing.assert_allclose(cp["j_bootstrap"], jphi_tokamaker_to_jpar(
+                np.interp(x, _PEQ, bs_fa), geom), rtol=1e-12, atol=1e-9)
+        # separate: the archived j_pressure, not the eqdsk's, comes off
+        np.testing.assert_allclose(sep["j_ohmic"], jphi_tokamaker_to_jpar(
+            np.interp(x, _PEQ, _J_IND), geom), rtol=1e-12)
+        np.testing.assert_allclose(sep["j_bootstrap"], jphi_tokamaker_to_jpar(
+            np.interp(x, _PEQ, bs_fa), geom), rtol=1e-12, atol=1e-9)
+        jphi = np.interp(x, _PEQ, _J_PHI)
+        np.testing.assert_allclose(sep["j_total"], jphi_tokamaker_to_jpar(
+            jphi - np.interp(x, _PEQ, P_eq), geom), rtol=1e-12)
+        assert np.max(np.abs(Px)) > 1e3
 
 
 @pytest.mark.skipif(not os.path.isfile(_GEQ), reason="d3dlike.geqdsk absent")

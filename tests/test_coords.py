@@ -27,6 +27,13 @@ def _pp(eq, x, p, coord=coords.PSI):
                              {"edge_pprime_pin": False}, coord)
 
 
+@pytest.fixture
+def swb_params(monkeypatch):
+    def _set(names):
+        monkeypatch.setattr(coords, "_SWB_PARAMS", frozenset(names), raising=False)
+    return _set
+
+
 X = np.array([0.0, 0.05, 0.2, 0.5, 0.9, 1.0])
 
 
@@ -87,6 +94,43 @@ def test_rho_tor_runs_as_phi_n():
     assert coords.run_coord("psi_n") == coords.PSI
     with pytest.raises(ValueError):
         coords.run_coord("psi")
+
+
+# ---- the OFT-capability detection of solve_with_bootstrap's grid argument
+# (restored from the pre-cleanup PR #64 branch, review PR64 B13: on a
+# toolkit without x it decides the default-path SWB call) ----
+@pytest.mark.parametrize("arg", ["x", "psi_N"])
+def test_swb_grid_on_a_toolkit_with_a_grid_argument(swb_params, arg):
+    swb_params({"mygs", "ne", arg})
+    xi = np.array([0.0, 0.1, 0.4, 1.0])
+    np.testing.assert_array_equal(coords.swb_grid(xi), xi)
+    assert list(coords.swb_grid_kwargs(xi)) == [arg]
+    assert coords.swb_grid_kwargs(xi, coords.PHI)["coord"] == coords.PHI
+    np.testing.assert_array_equal(coords.swb_seed(xi), (1 - xi ** 1.5) ** 1.5)
+
+
+def test_swb_grid_prefers_x(swb_params):
+    swb_params({"x", "psi_N"})
+    assert list(coords.swb_grid_kwargs(X)) == ["x"]
+
+
+def test_swb_grid_on_a_legacy_toolkit(swb_params):
+    swb_params({"mygs", "ne"})
+    xi = np.array([0.0, 0.1, 0.4, 1.0])
+    np.testing.assert_array_equal(coords.swb_grid(xi), np.linspace(0, 1, 4))
+    np.testing.assert_array_equal(coords.swb_seed(xi),
+                                  (1 - np.linspace(0, 1, 4) ** 1.5) ** 1.5)
+    assert coords.swb_grid_kwargs(xi) == {}
+
+
+def test_seed_is_the_same_physical_profile_in_a_phi_run(swb_params):
+    swb_params({"x"})
+    xphi = np.array([0.0, 0.1, 0.4, 1.0])
+    psi = xphi ** 0.8
+    np.testing.assert_array_equal(coords.swb_seed(xphi, psi), (1 - psi ** 1.5) ** 1.5)
+    swb_params(set())                       # legacy toolkit: its own uniform grid
+    np.testing.assert_array_equal(coords.swb_seed(xphi, psi),
+                                  (1 - np.linspace(0, 1, 4) ** 1.5) ** 1.5)
 
 
 def test_check_backend():

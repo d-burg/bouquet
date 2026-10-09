@@ -5,7 +5,7 @@ bouquet re-solves with the dd's current profile, which differs from that
 equilibrium's, so the surfaces move.  Profiles held on ψ_N move with them;
 profiles held on Φ_N (the IDA file's own q map) stay tied to the geometry.
 
-Fixtures (tests/data, one anonymised time slice): ``dd_synthetic.json.gz``
+Fixtures (tests/data, QUARANTINED -- see tests/data/README.md): ``dd_synthetic.json.gz``
 (currents), ``diiid_profs_synthetic.cdf`` (kinetics, on g_synthetic's ψ_N and q) and
 ``g_synthetic.geqdsk`` (the equilibrium IDA was fitted on; also the LCFS).
 
@@ -23,6 +23,10 @@ import sys
 import _harness
 
 _harness.ensure_repo_on_syspath()
+
+from _fixture_quarantine import warn_quarantined  # noqa: E402
+
+warn_quarantined(__name__)   # tests/data/README.md: replace before merge
 
 import numpy as np
 import pytest

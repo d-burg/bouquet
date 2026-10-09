@@ -102,9 +102,15 @@ class TestReadPhi:
         ddp, _ = _write_dd(tmp_path, **kw)
         with pytest.raises(ValueError, match="rho_tor_norm"):
             _read(ddp, "phi_n")
-        if which == "eq" and bad == "missing":   # nor q: the current conversion
-            with pytest.raises(ValueError, match="rho_tor_norm"):   # interpolates in rho
-                _read(ddp, "psi_n")
+        if which == "eq" and bad == "missing":   # nor q: the exact current
+            # conversion (it interpolates in rho) is unavailable -- a psi_n
+            # read falls back to the ratio method, loudly and stamped
+            # (review PR64 B7; a refusal was an undeclared input change)
+            with pytest.warns(UserWarning, match="FALLING BACK"):
+                bp = _read(ddp, "psi_n")
+            conv = bp.li_metrics["imas_current_conversion"]
+            assert conv["method"].startswith("ratio")
+            assert "rho_tor_norm" in conv["reason"]
         else:
             _read(ddp, "psi_n")              # psi_n placement never looks at rho
 
@@ -205,9 +211,12 @@ class TestWriteDrawPhi:
         psiN_d = np.interp(x, _norm(np.asarray(geq.rhovn) ** 2), geq.psi_N)
         assert np.max(np.abs(psiN_d - psiN_t)) > 1e-3   # the maps differ
         self._check_currents(cp, x, self._geom(psiN_d), psiN_d)
+        # the draw's psi at the nodes, in COCOS 11 (psi_11 = -2 pi psi_7 of the
+        # archived eqdsk; review PR64 B4)
         np.testing.assert_allclose(
-            cp["grid"]["psi"],
-            geq.psi_axis + psiN_d * (geq.psi_boundary - geq.psi_axis), rtol=1e-12)
+            cp["grid"]["psi"], -2.0 * np.pi * (
+                geq.psi_axis + psiN_d * (geq.psi_boundary - geq.psi_axis)),
+            rtol=1e-12)
         np.testing.assert_allclose(cp["grid"]["rho_tor_norm"], rho, rtol=0, atol=0)
 
     def test_a_psi_archive_is_unchanged(self, tmp_path):

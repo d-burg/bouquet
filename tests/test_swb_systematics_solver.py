@@ -27,6 +27,10 @@ import _harness
 
 _harness.ensure_repo_on_syspath()
 
+from _fixture_quarantine import warn_quarantined  # noqa: E402
+
+warn_quarantined(__name__)   # tests/data/README.md: replace before merge
+
 import numpy as np
 import pytest
 

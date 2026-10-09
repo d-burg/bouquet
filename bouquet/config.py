@@ -1144,7 +1144,9 @@ class GenerationConfig:
     # The solve method, one of SOLVE_METHODS: "legacy", "swb"
     # (solve_with_bootstrap is the baseline and every draw; IMAS sources) or
     # "engine" (the unified engine).  None: derived from imas_baseline /
-    # reconstruction_engine; set, it sets them (resolve_solve_method).
+    # reconstruction_engine; set, it decides, and they are set to match where
+    # the run is resolved (resolve_solve_method, at prepare_baseline; never
+    # at construction).  A contradicting pair is refused.
     solve_method: Optional[str] = None
     # IMAS baseline + draws: "closure" (legacy) or "swb": solve A at the setup
     # coil reg, solve B with the strong reg toward A's coils is the baseline,
@@ -1155,10 +1157,21 @@ class GenerationConfig:
     # solve A's coils (#VSC toward 0 at 1.0); 1e4 can send SWB to a wrong
     # equilibrium.
     swb_coil_reg_weight: float = 1.0e3
-    # Taper j_phi to 0 from this psi_N to the LCFS in every SWB solve (OFT
-    # taper_edge_jBS; None: off): finite edge current next to a near-degenerate
-    # second null can leave the Picard on a 2-cycle.
-    swb_edge_taper_psi0: Optional[float] = 0.999
+    # swb only.  Taper j_phi to 0 from this psi_N to the LCFS in every SWB
+    # solve (OFT taper_edge_jBS): finite edge current next to a
+    # near-degenerate second null can leave the Picard on a 2-cycle.  OPT-IN
+    # (owner decision D4, 2026-10-09; was 0.999): None is off, and is sent to
+    # the toolkit as taper_edge_jBS=False where it has the option, because a
+    # toolkit whose own default is taper-on keeps it on otherwise
+    # (swb_bootstrap_kwargs).
+    swb_edge_taper_psi0: Optional[float] = None
+    # swb only.  Largest |Ip/Ip_target - 1| an swb solve (solve A, solve B,
+    # every draw) is accepted at; beyond it the solve raises.  Stamped on
+    # _baseline (swb_ip_tol) with each solve's own error (swb_ip_rel_err);
+    # a solve accepted above SWB_IP_WARN (1e-4, the engine's I_p acceptance)
+    # warns.  5e-3 pending owner decision E6 (review PR69 B1: the method's
+    # own solver test measures <= 8e-6).
+    swb_ip_tol: float = 5.0e-3
     # imas_baseline="swb" sawtooth q reset inside SWB (OFT saw_q_s; None = off):
     # Baseline.j_sawteeth becomes SWB's jphi_saw input.  swb_saw_dq / _tol /
     # _ramp map onto OFT's saw_dq / saw_tol / saw_ramp, swb_saw_rule onto
@@ -1507,13 +1520,23 @@ class GenerationConfig:
 
     def _validate_bootstrap_kwargs(self, value):
         """:func:`validate_bootstrap_kwargs` with this config's reserved
-        names, engine and convergence opt-in."""
+        names, engine and convergence opt-in.
+
+        The ONE bootstrap_kwargs validation (construction and reassignment):
+        PR #60's allow-list / capability / convergence-flag checks with
+        PR #69's reserved sets, judged for the solve method the run will use
+        (:func:`solve_method_of` and its effective engine -- the config is
+        not rewritten at construction, review PR69 B4): ``p_fixed`` is
+        reserved for the swb method, and the toolkit capability is checked
+        wherever the keys reach ``solve_with_bootstrap`` (legacy and swb)."""
+        sm = solve_method_of(self)
+        engine = _effective_solve_fields(self, sm, _user_solve_fields(self))[1]
         validate_bootstrap_kwargs(
             value,
             _BOOTSTRAP_RESERVED | self._SAW_RESERVED
             | ({"jphi_fixed"} if self.swb_seed == "source" else set())
-            | ({"p_fixed"} if self.imas_baseline == "swb" else set()),
-            engine=str(getattr(self, "reconstruction_engine", "unified")),
+            | ({"p_fixed"} if sm == "swb" else set()),
+            engine=str(engine),
             convergence_override=bool(getattr(
                 self, "bootstrap_convergence_override", False)))
 
@@ -1570,7 +1593,10 @@ class GenerationConfig:
             raise ValueError(f"swb_saw_ramp={self.swb_saw_ramp!r} must be >= 0")
         if self.swb_saw_rule not in SWB_SAW_RULES:
             raise ValueError(f"swb_saw_rule={self.swb_saw_rule!r} not in {tuple(SWB_SAW_RULES)}")
-        resolve_solve_method(self)
+        _t = self.swb_ip_tol
+        if isinstance(_t, bool) or not (float(_t) > 0.0 and float(_t) < 1.0):
+            raise ValueError(f"swb_ip_tol={_t!r} must be in (0, 1)")
+        solve_method_of(self)      # refuses a contradiction; writes nothing
         self._validate_bootstrap_kwargs(self.bootstrap_kwargs)
         object.__setattr__(self, "_bootstrap_kwargs_armed", True)
         resolve_structured_preset(self, stacklevel=4)
@@ -1750,37 +1776,105 @@ def _bootstrap_kwarg_names():
 SOLVE_METHODS = ("legacy", "swb", "engine")
 
 
-def resolve_solve_method(gc) -> str:
-    """The solve method of *gc*, with ``imas_baseline`` /
-    ``reconstruction_engine`` brought in line with it (in place).
+def _user_solve_fields(gc):
+    """``(imas_baseline, reconstruction_engine)`` as the USER set them.
 
-    ``solve_method=None`` is derived from those two older fields; an explicit
-    value sets them, and refuses a contradicting ``imas_baseline="swb"``.
-    Idempotent; called at construction and again by
-    :class:`bouquet.run.Bouquet` before it builds or draws (a config may have
-    been edited in between)."""
+    :func:`resolve_solve_method` writes both fields to the method's effective
+    values and remembers what it found (``gc._solve_method_written``); a
+    field that still holds the value it wrote is read as the user's earlier
+    value, a field edited since as the edit.  So switching a run back to the
+    default restores the engine instead of leaving the written ``"legacy"``
+    (review PR69 B4)."""
+    cur = (str(getattr(gc, "imas_baseline", "closure")),
+           str(getattr(gc, "reconstruction_engine", "legacy")))
+    w = getattr(gc, "_solve_method_written", None)
+    if not isinstance(w, dict):
+        return cur
+    return tuple(u if c == wr else c
+                 for c, wr, u in zip(cur, w["wrote"], w["user"]))
+
+
+def solve_method_of(gc) -> str:
+    """The solve method of *gc* (one of :data:`SOLVE_METHODS`), WITHOUT
+    touching it: ``solve_method`` when set, else derived from the user's
+    ``imas_baseline`` / ``reconstruction_engine`` (:func:`_user_solve_fields`)
+    -- ``"swb"`` for ``imas_baseline="swb"``, else the engine for
+    ``reconstruction_engine="unified"``, else legacy.
+
+    A contradicting pair is REFUSED, symmetrically: ``imas_baseline="swb"``
+    with ``solve_method`` other than ``"swb"``, and
+    ``reconstruction_engine="legacy"`` (not the default) with
+    ``solve_method="engine"``."""
     sm = getattr(gc, "solve_method", None)
-    swb = str(getattr(gc, "imas_baseline", "closure")) == "swb"
-    if sm is None and not swb:
-        eng = str(getattr(gc, "reconstruction_engine", "legacy")) == "unified"
-        return "engine" if eng else "legacy"
-    if sm is None:
-        sm = "swb"
-    elif sm not in SOLVE_METHODS:
+    if sm is not None and sm not in SOLVE_METHODS:
         raise ValueError(f"generation.solve_method={sm!r} must be one of "
                          f"{SOLVE_METHODS}")
-    # an imas_baseline="swb" this function wrote itself follows a later
-    # solve_method (reconstruction_engine defaults to "unified": never a
-    # contradiction)
-    elif (swb and sm != "swb" and getattr(gc, "_solve_method_written", None)
-          != (gc.imas_baseline, gc.reconstruction_engine)):
+    ib, eng = _user_solve_fields(gc)
+    if sm is None:
+        return "swb" if ib == "swb" else (
+            "engine" if eng == "unified" else "legacy")
+    if ib == "swb" and sm != "swb":
         raise ValueError(f"generation.solve_method={sm!r} contradicts "
                          'imas_baseline="swb"; set solve_method alone')
-    gc.imas_baseline = "swb" if sm == "swb" else (
-        "closure" if gc.imas_baseline == "swb" else gc.imas_baseline)
-    gc.reconstruction_engine = "unified" if sm == "engine" else "legacy"
-    gc._solve_method_written = (gc.imas_baseline, gc.reconstruction_engine)
+    if eng == "legacy" and sm == "engine":
+        raise ValueError('generation.solve_method="engine" contradicts '
+                         'reconstruction_engine="legacy"; set solve_method '
+                         "alone")
     return sm
+
+
+def resolve_solve_method(gc) -> str:
+    """The solve method of *gc* (:func:`solve_method_of`), with
+    ``imas_baseline`` / ``reconstruction_engine`` set to its effective values
+    (in place): ``"swb"`` -> ``("swb", "legacy")``, ``"legacy"`` ->
+    ``(closure, "legacy")``, ``"engine"`` -> ``(closure, "unified")``.
+
+    Called where the run is resolved -- :meth:`bouquet.run.Bouquet.
+    prepare_baseline` (like the engine-dependent defaults), the draw method,
+    the solver setup -- never at construction (review PR69 B4: writing them
+    at construction sent a user who switched ``imas_baseline`` back to the
+    LEGACY engine).  What it found is remembered, so a later switch back
+    restores the user's own fields (:func:`_user_solve_fields`).
+    Idempotent."""
+    sm = solve_method_of(gc)
+    user = _user_solve_fields(gc)
+    ib, eng = _effective_solve_fields(gc, sm, user)
+    gc.imas_baseline, gc.reconstruction_engine = ib, eng
+    gc._solve_method_written = {"wrote": (ib, eng), "user": user}
+    return sm
+
+
+def _effective_solve_fields(gc, sm, user):
+    """``(imas_baseline, reconstruction_engine)`` the method runs with: the
+    user's own when ``solve_method`` is None and ``imas_baseline`` is not
+    ``"swb"`` (they ARE the selection, unchanged -- also a malformed engine
+    name, which validate_engine_settings then refuses by name), else the
+    method's."""
+    if getattr(gc, "solve_method", None) is None and user[0] != "swb":
+        return user
+    ib = "swb" if sm == "swb" else ("closure" if user[0] == "swb" else user[0])
+    return ib, ("unified" if sm == "engine" else "legacy")
+
+
+class _EffectiveSolveFields:
+    """A read-only view of a GenerationConfig whose ``imas_baseline`` /
+    ``reconstruction_engine`` are the solve method's effective values
+    (:func:`resolve_solve_method`'s), for the construction-time checks --
+    which must judge the method the run will use, without the config being
+    rewritten."""
+
+    def __init__(self, gc):
+        object.__setattr__(self, "_gc", gc)
+        ib, eng = _effective_solve_fields(gc, solve_method_of(gc),
+                                          _user_solve_fields(gc))
+        object.__setattr__(self, "imas_baseline", ib)
+        object.__setattr__(self, "reconstruction_engine", eng)
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_gc"), name)
+
+    def __setattr__(self, name, value):
+        raise AttributeError("read-only view")
 
 
 def swb_config_problems(config):
@@ -1836,12 +1930,23 @@ def swb_config_problems(config):
     return p
 
 
-def swb_bootstrap_kwargs(gc):
-    """``bootstrap_kwargs`` for an ``imas_baseline="swb"`` solve: the user's, plus the
-    edge taper from ``swb_edge_taper_psi0``."""
+def swb_bootstrap_kwargs(gc, known=None):
+    """``bootstrap_kwargs`` for an ``imas_baseline="swb"`` solve: the user's,
+    plus the edge taper from ``swb_edge_taper_psi0``.
+
+    Off (``None``, the default) is sent EXPLICITLY as ``taper_edge_jBS=False``
+    to a toolkit that has the option (``known``: the accepted keyword names,
+    default :func:`_bootstrap_kwarg_names`): its own default may be taper-on,
+    and a solver keeps the last ``set_boot_ops`` state (review PR69 B2).  A
+    toolkit without the option has no taper, and gets no key."""
     kw = dict(gc.bootstrap_kwargs)
     if gc.swb_edge_taper_psi0 is not None:
         kw.update(taper_edge_jBS=True, taper_edge_psi0=float(gc.swb_edge_taper_psi0))
+    else:
+        if known is None:
+            known = _bootstrap_kwarg_names()
+        if known is not None and "taper_edge_jBS" in known:
+            kw["taper_edge_jBS"] = False
     return kw
 
 
@@ -2302,10 +2407,14 @@ class BouquetConfig:
         resolve_edge_pressure(self.generation)
         # the unified reconstruction engine's settings (refused by name;
         # engine_* fields changed under the legacy engine are refused too)
+        # (judged for the solve method the run will use; the config itself
+        # is not rewritten here -- resolve_solve_method does that at
+        # prepare_baseline)
         from .engine import validate_engine_settings
-        validate_engine_settings(self.generation)
+        validate_engine_settings(_EffectiveSolveFields(self.generation))
         # bootstrap_kwargs the loop's Redl does not read: loud, not silent
-        deprecated_jbs_settings_warning(self.generation, stacklevel=3)
+        deprecated_jbs_settings_warning(
+            _EffectiveSolveFields(self.generation), stacklevel=3)
 
     # ── serialization (h5 provenance, per-shot templating, SLURM bundles) ──
     def to_dict(self) -> dict:

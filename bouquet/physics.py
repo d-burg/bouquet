@@ -216,8 +216,8 @@ def field_aligned_conversion(F, avg_inv_R, avg_B2):
 
     is exact.  Every conversion in bouquet -- :func:`parallel_to_toroidal`,
     :func:`toroidal_to_parallel` (its exact inverse), :func:`evaluate_jBS`
-    and :func:`bouquet.engine.conversion_factor` (and OpenFUSIONToolkit's SWB
-    output) -- is this one factor
+    and :func:`bouquet.engine.conversion_factor`, and the SWB output after
+    :func:`_swb_jbs_to_toroidal` -- is this one factor
     (2026-10-06; see :func:`parallel_to_toroidal` for what moved).
     """
     return (np.asarray(F, dtype=float) * np.asarray(avg_inv_R, dtype=float)
@@ -396,6 +396,189 @@ def jphi_tokamaker_to_jtor_imas(jphi, geom):
                                  "pprime")
     J = np.asarray(jphi, dtype=float)
     return (pp + inv_R2 * (J - R * pp) / inv_R) / inv_R
+
+
+# ---------------------------------------------------------------------------
+#  OpenFUSIONToolkit's solve_with_bootstrap (SWB) output convention
+# ---------------------------------------------------------------------------
+#: SWB's ``j_BS`` is the Redl ``<j.B>`` projected as ``<j.B> R_avg/F`` (the
+#: upstream Python ``solve_with_bootstrap``: ``j_BS_final = j_BS_neo *
+#: (R_avg / f)``).  :func:`_swb_jbs_to_toroidal` converts it with kappa.
+SWB_JBS_RAVG_OVER_F = "R_avg/F"
+#: SWB's ``j_BS`` is already TokaMaker jphi by (A7), ``kappa <j.B> + p'G``:
+#: the toolkit generation bouquet's toroidal-flux support needs
+#: (``solve_with_bootstrap(x, coord)``; its PR names OFT 1eda3aa as the
+#: change).  :func:`_swb_jbs_to_toroidal` takes ``p'G`` off it.
+SWB_JBS_TOROIDAL = "kappa<j.B>+p'G"
+SWB_JBS_CONVENTIONS = (SWB_JBS_RAVG_OVER_F, SWB_JBS_TOROIDAL)
+#: The upstream projection line that identifies :data:`SWB_JBS_RAVG_OVER_F`
+#: in the installed toolkit's Python ``solve_with_bootstrap``.
+_SWB_RAVG_OVER_F_MARKER = "j_BS_neo * (R_avg / f)"
+_SWB_CONVENTION_CACHE = {}
+
+
+class SwbConventionUnknown(RuntimeError):
+    """The installed toolkit's ``solve_with_bootstrap`` returns its bootstrap
+    in a convention bouquet cannot identify: no SWB-derived current is used,
+    rather than one converted on a guess."""
+
+
+def swb_jbs_convention(solve_with_bootstrap=None, params=None) -> str:
+    """The convention of ``solve_with_bootstrap``'s ``j_BS`` / ``isolated_j_BS``
+    on the INSTALLED toolkit (one of :data:`SWB_JBS_CONVENTIONS`); raises
+    :class:`SwbConventionUnknown` otherwise.
+
+    A capability check, from the function's arguments (``params``; default:
+    :func:`bouquet.coords._swb_params`, the one probe of the toolkit's SWB
+    signature, or the signature of the ``solve_with_bootstrap`` given):
+
+    * :data:`SWB_JBS_TOROIDAL` when it takes the grid ``x`` -- the toolkit
+      generation whose ``solve_with_bootstrap`` returns TokaMaker jphi
+      (``docs/current-conventions.md``, "Where these are used"); upstream
+      OFT's grid argument is ``psi_N``;
+    * otherwise :data:`SWB_JBS_RAVG_OVER_F` when the Python implementation
+      the call runs carries the upstream projection ``j_BS_neo * (R_avg / f)``
+      and has no ``use_python_solve`` switch routing the call elsewhere;
+    * anything else (a Fortran-routed solve, a ``<j.B>/<|B|>`` projection, an
+      unreadable source) is REFUSED: never a silent ``R_avg/F`` path.
+
+    ``solve_with_bootstrap`` defaults to the installed toolkit's.
+    """
+    import inspect
+    if params is None:
+        if solve_with_bootstrap is None:
+            from . import coords as _c
+            params = _c._swb_params()
+        else:
+            try:
+                params = frozenset(
+                    inspect.signature(solve_with_bootstrap).parameters)
+            except (TypeError, ValueError):
+                params = frozenset()
+    if "x" in params:
+        return SWB_JBS_TOROIDAL
+    if "use_python_solve" not in params:
+        if solve_with_bootstrap is None:
+            try:
+                from OpenFUSIONToolkit.TokaMaker.bootstrap import (
+                    solve_with_bootstrap)
+            except Exception:
+                solve_with_bootstrap = None
+        hit = _SWB_CONVENTION_CACHE.get(id(solve_with_bootstrap))
+        if hit is not None and hit[0] is solve_with_bootstrap:
+            src = hit[1]
+        else:
+            try:
+                src = inspect.getsource(solve_with_bootstrap)
+            except (OSError, TypeError):
+                src = ""
+            _SWB_CONVENTION_CACHE[id(solve_with_bootstrap)] = (
+                solve_with_bootstrap, src)
+        if _SWB_RAVG_OVER_F_MARKER in src:
+            return SWB_JBS_RAVG_OVER_F
+    raise SwbConventionUnknown(
+        "the installed OpenFUSIONToolkit's solve_with_bootstrap returns its "
+        "bootstrap in a convention bouquet does not recognise (neither the "
+        "upstream <j.B> R_avg/F projection nor the TokaMaker-jphi output of "
+        "the toolkit with solve_with_bootstrap(x=...)); bouquet will not "
+        "convert it on a guess.  Install one of those toolkits, or use a path "
+        "that does not run solve_with_bootstrap.")
+
+
+def _swb_surfaces(n, psi_pad, psi):
+    """``(kw, inv)``: the keywords addressing SWB's own geometry surfaces and
+    the map back to the ``n`` profile nodes.  ``psi`` None: OFT's uniform
+    ``npsi``/``psi_pad`` grid (the call before grids were passed, bit for
+    bit); otherwise the clipped nodes ``clip(psi, psi_pad, 1 - psi_pad)`` SWB
+    evaluates its geometry on, each distinct surface once."""
+    if psi is None:
+        return dict(npsi=int(n), psi_pad=psi_pad), None
+    psi = np.asarray(psi, dtype=float)
+    if psi.shape != (n,):
+        raise ValueError(f"psi has shape {psi.shape}, expected ({n},) to "
+                         "match the SWB profile")
+    u, inv = np.unique(np.clip(psi, psi_pad, 1.0 - psi_pad),
+                       return_inverse=True)
+    return dict(psi=np.ascontiguousarray(u, dtype=float)), inv
+
+
+def _swb_geometry(mygs, n, psi_pad, psi):
+    """``F``, ``F'``, ``p'``, ``<R>``, ``<1/R>`` (``get_q``, as SWB reads
+    them) and ``<B^2>`` (``sauter_fc``) on SWB's surfaces."""
+    kw, inv = _swb_surfaces(n, psi_pad, psi)
+    _, F, Fp, _, pp = mygs.get_profiles(**kw)
+    _, _, ravgs, _, _, _ = mygs.get_q(**kw)
+    _sfc = getattr(mygs, "sauter_fc", None) or getattr(mygs, "calc_sauter_fc")
+    B2 = _sauter_avg(_sfc(**kw)[-1], "<|B|^2>", _SAUTER_MODB_INDEX)
+    out = dict(F=F, Fp=Fp, pp=pp, R=q_ravg(ravgs, "<R>"),
+               inv_R=q_ravg(ravgs, "<1/R>"), B2=B2)
+    out = {k: np.asarray(v, dtype=float) for k, v in out.items()}
+    if inv is not None:
+        out = {k: v[inv] for k, v in out.items()}
+    return out
+
+
+def swb_pressure_term(mygs, n, psi_pad=1e-3, psi=None):
+    """The pressure-driven ``<j_phi>`` part ``p'(<R> - F^2<1/R>/<B^2>)`` (A7)
+    of the equilibrium *mygs* holds, on SWB's surfaces (``n`` nodes; ``psi``
+    as for :func:`_swb_jbs_to_toroidal`): the third current bucket
+    ``j_pressure`` of an SWB-derived split.
+
+    ``p'`` is signed so the equilibrium's own TokaMaker jphi
+    ``<R>p' + <1/R>FF'/mu0`` is positive, the rule of
+    :func:`capture_equilibrium_fsa` (bouquet's positive-current frame)."""
+    g = _swb_geometry(mygs, n, psi_pad, psi)
+    jphi_eq = g["R"] * g["pp"] + g["inv_R"] * g["F"] * g["Fp"] / (4.0e-7
+                                                                  * np.pi)
+    sign = 1.0 if float(np.sum(jphi_eq)) >= 0.0 else -1.0
+    return sign * g["pp"] * (g["R"] - g["F"] ** 2 * g["inv_R"] / g["B2"])
+
+
+def _swb_jbs_to_toroidal(mygs, j_bs_swb, psi_pad, psi=None, convention=None):
+    """``solve_with_bootstrap``'s ``j_BS`` (or ``isolated_j_BS``) as the
+    field-aligned toroidal bootstrap ``kappa <j.B>`` bouquet stores
+    (:func:`field_aligned_conversion`), whatever the installed toolkit
+    returns (:func:`swb_jbs_convention`):
+
+    * :data:`SWB_JBS_RAVG_OVER_F` -- SWB projected the Redl ``<j.B>`` by
+      ``R_avg/F`` (its own ``# to-do: project j_BS_parallel to j_phi more
+      accurately?``).  Undone and converted with kappa: net factor
+      ``F^2 <1/R> / (<R> <B^2>)``, with ``<R>`` and ``<1/R>`` from ``get_q``
+      -- the SAME quantities SWB used, so the undo is exact -- and ``<B^2>``
+      from ``sauter_fc``.  Left unconverted it is +7 % at psi_N 0.5 and
+      +12-13 % at the pedestal on the synthetic D3D-like example.
+    * :data:`SWB_JBS_TOROIDAL` -- SWB returned ``kappa <j.B> + p'G`` (A7);
+      ``p'G`` (:func:`swb_pressure_term`) comes off: the pressure-driven
+      current is the third bucket ``j_pressure``, never part of ``j_BS``.
+
+    Evaluated on the equilibrium the SWB call just left in ``mygs``: call it
+    IMMEDIATELY after ``solve_with_bootstrap``, before any further solve.
+    ``psi``: the grid passed to SWB (``x`` / ``psi_N``), None for a call that
+    passed none (OFT's uniform grid).  ``convention`` defaults to the
+    installed toolkit's.  :func:`swb_conversion_record` is the stamp.
+    """
+    j = np.asarray(j_bs_swb, dtype=float)
+    conv = swb_jbs_convention() if convention is None else convention
+    if conv == SWB_JBS_TOROIDAL:
+        return j - swb_pressure_term(mygs, j.size, psi_pad, psi)
+    if conv != SWB_JBS_RAVG_OVER_F:
+        raise ValueError(f"convention must be one of {SWB_JBS_CONVENTIONS}, "
+                         f"got {conv!r}")
+    g = _swb_geometry(mygs, j.size, psi_pad, psi)
+    j_dot_B = j * g["F"] / g["R"]           # undo SWB's R_avg/F projection
+    return parallel_to_toroidal(
+        j_dot_B, geom={"F": g["F"], "avg_inv_R": g["inv_R"],
+                       "avg_B2": g["B2"]})
+
+
+def swb_conversion_record(convention=None) -> dict:
+    """The archive stamp of an SWB-derived bootstrap: the toolkit's output
+    convention and what :func:`_swb_jbs_to_toroidal` applied to it."""
+    conv = swb_jbs_convention() if convention is None else convention
+    applied = {SWB_JBS_RAVG_OVER_F: "kappa F/<R> (undo R_avg/F, then kappa)",
+               SWB_JBS_TOROIDAL: "minus p'G (p'G is j_pressure)"}
+    return {"swb_jbs_convention": conv,
+            "swb_jbs_conversion": applied[conv]}
 
 
 def _fsa_over_contour(R, Z, Bp, field):
@@ -698,23 +881,32 @@ def evaluate_jbs_version(eps_definition=EPS_DEFINITION_DEFAULT):
                "OPT-IN eps = <a>/<R> (the /3 definition)")
     return ("evaluate_jBS/4 (Redl 2021 jboot1, NRL/Zavg lnLambda, Koh nu_i*, "
             f"{eps_txt}, psi_N-native, kappa = F<1/R>/<B^2> toroidal "
-            "conversion plus p'G)")
+            "conversion; p'G separate as j_pressure)")
 
 
 #: Version tag of :func:`evaluate_jBS`, recorded with every loop record so an
 #: archive states which evaluator produced its bootstrap.
 #: ``/2`` (2026-10-06): the toroidal output is ``kappa <j.B>``, ``kappa =
-#: F<1/R>/<B^2>`` (was ``<j.B>/(F<1/R>)`` in ``/1``); ``/3``: plus ``p'G``
-#: (PR #64), with the Redl ``eps`` still ``<a>/<R>`` on every OFT build that
-#: ran (PR #60's ``(R_max - R_min)/(2<R>)`` required a fork-only
-#: ``sauter_fc(return_eps=True)`` and raised elsewhere).  ``/4`` (owner
-#: decision E4): the geometric ``eps = (R_max - R_min)/(2<R>)`` by default on
-#: every build -- from ``sauter_fc(return_eps=True)`` where the installed OFT
-#: has it, else from ``get_fsa``'s ``R_min``/``R_max``/``<R>`` (the two agree
-#: to rounding) -- with ``<a>/<R>`` as the opt-in ``eps_definition="a_over_R"``
-#: (whose records carry :func:`evaluate_jbs_version` of it).  ``nu_e*`` and
-#: ``nu_i*`` scale as ``eps^-3/2``, so the default bootstrap moves wherever
-#: the two epsilons differ (most in the pedestal; docs/CHANGES_SUMMARY.md).
+#: F<1/R>/<B^2>`` (was ``<j.B>/(F<1/R>)`` in ``/1``); ``/3`` (PR #64, never
+#: on main): plus ``p'G`` inside the bootstrap, with the Redl ``eps`` still
+#: ``<a>/<R>`` on every OFT build that ran (PR #60's ``(R_max - R_min)/(2<R>)``
+#: required a fork-only ``sauter_fc(return_eps=True)`` and raised elsewhere).
+#: ``/4`` is ONE new convention carrying two owner decisions together:
+#:
+#: * D2 (PR #64): the toroidal output is ``kappa <j.B>`` only, as in ``/2``,
+#:   and ``p'G`` is returned beside it as ``diag["j_pressure"]`` (the third
+#:   current bucket) -- a new tag, so that a ``/3`` record (p'G inside j_BS)
+#:   is never read as this convention (:func:`bouquet.schema.
+#:   read_current_split_convention` keys on the ``/3`` prefix only);
+#: * E4 (PR #60): the geometric ``eps = (R_max - R_min)/(2<R>)`` by default on
+#:   every build -- from ``sauter_fc(return_eps=True)`` where the installed
+#:   OFT has it, else from ``get_fsa``'s ``R_min``/``R_max`` over the sauter
+#:   ``<R>`` (the two agree to rounding) -- with ``<a>/<R>`` as the opt-in
+#:   ``eps_definition="a_over_R"``, whose records carry
+#:   :func:`evaluate_jbs_version` of it (still ``evaluate_jBS/4``, still p'G
+#:   separate; only the eps text differs).  ``nu_e*`` and ``nu_i*`` scale as
+#:   ``eps^-3/2``, so the default bootstrap moves wherever the two epsilons
+#:   differ (most in the pedestal; docs/CHANGES_SUMMARY.md).
 EVALUATE_JBS_VERSION = evaluate_jbs_version(EPS_DEFINITION_DEFAULT)
 
 #: Positional layout of ``sauter_fc``'s geometry block on OFT builds that
@@ -851,15 +1043,18 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
        ``<j_BS.B>``; it is converted with the package's ONE field-aligned
        factor (:func:`field_aligned_conversion`; ``F``, ``<1/R>`` and
        ``<B^2>`` from the SAME surfaces), never through SWB's ``R_avg/F``
-       projection and its undo, and the pressure-driven part is added::
+       projection and its undo::
 
-           <j_phi> = kappa <j.B> + p' (<R> - F^2<1/R>/<B^2>),
-           kappa = F <1/R> / <B^2>
+           <j_phi>_BS = kappa <j.B>,   kappa = F <1/R> / <B^2>
 
-       -- the plain flux-surface average the solver consumes
-       (OpenFUSIONToolkit's ``jphi-linterp``).  ``p'G`` goes with the
-       bootstrap, as FUSE / IMAS.jl assign it (``includes_bootstrap=true``)
-       and as OpenFUSIONToolkit's SWB returns it.
+       -- the field-aligned share of the plain flux-surface average the
+       solver consumes (OpenFUSIONToolkit's ``jphi-linterp``).  The
+       pressure-driven ``p'(<R> - F^2<1/R>/<B^2>)`` of (A7) is NOT in it: it
+       is returned beside it as ``diag["j_pressure"]``, the third current
+       bucket (owner decision D2, 2026-10-09), so the bootstrap multiplier,
+       the per-draw jitter, ``floor_j_BS``, ``DIFF_BS`` and the loop's
+       residual norm act on the bootstrap alone.  IMAS export groups it with
+       the non-inductive currents (FUSE ``includes_bootstrap=true``).
 
     **Refusals, never a silent zero.**  The Redl expressions are undefined
     for non-physical input and on a surface the tracer failed on; the
@@ -951,6 +1146,8 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
         range), ``j_dot_B`` (Redl ``<j.B>``), ``j_tor_full_raw`` (full
         profile, unsmoothed), ``j_tor_raw`` (selected profile before
         smoothing), ``I_BS`` (signed FSA integral of ``j_BS_tor`` [A]),
+        ``j_pressure`` (= ``p_term``: the pressure-driven ``p'G`` on the
+        same nodes, positive-frame ``p'``, never part of ``j_BS_tor``),
         ``eps_definition``, ``eps_formula``, ``eps_route``, ``version``.
     """
     eps_definition = check_eps_definition(
@@ -1013,7 +1210,7 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
     psi_eval = np.clip(psi_N, psi_pad, 1.0 - psi_pad)
     psi_u, inv = np.unique(psi_eval, return_inverse=True)
     psi_u = np.ascontiguousarray(psi_u, dtype=float)
-    _, F_u, _, _, pp_u = mygs.get_profiles(psi=psi_u.copy())
+    _, F_u, Fp_u, _, pp_u = mygs.get_profiles(psi=psi_u.copy())
     # a live TokaMaker exposes sauter_fc; a copy_eq() snapshot
     # (TokaMaker_equilibrium) exposes the same routine as calc_sauter_fc
     _sfc = getattr(mygs, "sauter_fc", None)
@@ -1127,11 +1324,19 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
 
     j_dot_B = _ends_only(j_dot_B, "<j_BS.B>")
 
-    # p'G goes with the bootstrap (FUSE's convention; OFT's SWB output)
+    # the toroidal bootstrap is the field-aligned kappa <j.B> ONLY: the
+    # pressure-driven p'G is its own bucket, j_pressure (owner decision D2,
+    # 2026-10-09), returned beside it and never scaled, jittered, floored or
+    # differenced with the bootstrap.  p' signed so the equilibrium's own
+    # jphi is positive (capture_equilibrium_fsa's rule).
+    _pp = np.asarray(pp_u, dtype=float)[inv]
+    _jeq = R_avg * _pp + inv_R_q * F * np.asarray(Fp_u, dtype=float)[inv] / (
+        4.0e-7 * np.pi)
+    _pp_sign = 1.0 if float(np.sum(_jeq)) >= 0.0 else -1.0
     geom = {"F": F, "avg_inv_R": avg_inv_R, "avg_B2": avg_B2,
-            "avg_R": R_avg, "pprime": np.asarray(pp_u, dtype=float)[inv]}
+            "avg_R": R_avg, "pprime": _pp_sign * _pp}
     p_term = jphi_tokamaker_pressure_term(geom)
-    j_tor_full = _ends_only(parallel_to_toroidal(j_dot_B, geom=geom) + p_term,
+    j_tor_full = _ends_only(parallel_to_toroidal(j_dot_B, geom=geom),
                             "toroidal j_BS")
 
     if isolate_edge:
@@ -1142,7 +1347,7 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
         res = _oft_bs.analyze_bootstrap_edge_spike(psi_N, swb_proj)
         masked = np.asarray(res["masked_spike"], dtype=float)
         j_tor_sel = _ends_only(parallel_to_toroidal(
-            masked * F / R_avg, geom=geom) + p_term, "isolated toroidal j_BS")
+            masked * F / R_avg, geom=geom), "isolated toroidal j_BS")
     else:
         j_tor_sel = j_tor_full
 
@@ -1162,7 +1367,7 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
         n_geometry_surfaces=int(psi_u.size),
         f_T=f_T, nu_e_star=nu_e_star, nu_i_star=nu_i_star, q=q, eps=eps,
         R_avg=R_avg, F=F, avg_inv_R=avg_inv_R, avg_B2=avg_B2,
-        pprime=geom["pprime"], p_term=p_term,
+        pprime=geom["pprime"], p_term=p_term, j_pressure=p_term,
         ln_lambda_e=np.asarray(ln_le, dtype=float),
         ln_lambda_ii=np.asarray(ln_lii, dtype=float),
         dpsi=psi_range, j_dot_B=j_dot_B,

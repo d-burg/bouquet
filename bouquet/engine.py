@@ -294,17 +294,8 @@ def validate_engine_settings(gc) -> None:
         raise ValueError(f"generation.engine_draw_solve_maxits={mx!r} must "
                          "be an integer >= 1, or None for the solver's own "
                          "cap")
-    from .config import GenerationConfig
-    # the legacy default, or None (the engine line's stored configs)
-    if getattr(gc, "draw_solve_maxits", None) not in (
-            None, GenerationConfig.draw_solve_maxits):
-        raise ValueError(
-            f"generation.draw_solve_maxits={gc.draw_solve_maxits!r} set with "
-            "reconstruction_engine='unified': it caps the LEGACY draws and "
-            "the engine never reads it (it would be silently ignored); the "
-            "engine draws' cap is generation.engine_draw_solve_maxits "
-            f"(default {ENGINE_FIELD_DEFAULTS['engine_draw_solve_maxits']})."
-            + LEGACY_ENGINE_HINT)
+    # draw_solve_maxits and the draw-solve rescue (the LEGACY draws' cap):
+    # refused with the standard rule, ENGINE_UNREAD_LEGACY_FIELDS
     dc = vals["engine_delivery_correction"]
     if not isinstance(dc, (bool, np.bool_)):
         raise ValueError(f"generation.engine_delivery_correction must be a "
@@ -493,6 +484,16 @@ ENGINE_UNREAD_LEGACY_FIELDS = {
                               "engine at prepare_baseline(), True for an "
                               "IDS source under "
                               "reconstruction_engine='legacy')",
+    # #75 review (owner decision D5): the legacy draws' cap and its rescue
+    "draw_solve_maxits": "engine_draw_solve_maxits (default "
+                         f"{ENGINE_FIELD_DEFAULTS['engine_draw_solve_maxits']}"
+                         "; the engine draws' cap); leave it unset ('auto': "
+                         "resolved per engine at prepare_baseline(), "
+                         "100 under reconstruction_engine='legacy')",
+    "draw_solve_retry_urf": "nothing: the engine draws are capped by "
+                            "engine_draw_solve_maxits and never rescued",
+    "draw_solve_loose_tol": "nothing: the engine draws are capped by "
+                            "engine_draw_solve_maxits and never rescued",
 }
 
 
@@ -515,7 +516,26 @@ ENGINE_DEPENDENT_DEFAULTS = {
     "perturb_jind_in_anchor": {"unified": False,
                                "legacy": {"reconstruction": False,
                                           "imas": True}},
+    # #75 review: the legacy draws' GS cap (TokaMaker_interface.
+    # DRAW_SOLVE_MAXITS, draws only); the engine never reads it
+    "draw_solve_maxits": {"unified": None, "legacy": 100},
 }
+
+#: The UNSET marker of an :data:`ENGINE_DEPENDENT_DEFAULTS` field whose
+#: ``None`` is a meaningful value (default: ``None`` is the marker).
+#: ``draw_solve_maxits=None`` has meant "the solver's own setup cap" since
+#: the field existed (stored configs carry it so), so "resolve per engine"
+#: is ``"auto"``.
+ENGINE_DEPENDENT_UNSET = {"draw_solve_maxits": "auto"}
+
+
+def engine_dependent_unset(name, value) -> bool:
+    """Whether *value* is the unset marker of engine-dependent field
+    *name* (:data:`ENGINE_DEPENDENT_UNSET`; ``None`` otherwise)."""
+    marker = ENGINE_DEPENDENT_UNSET.get(name)
+    if marker is None:
+        return value is None
+    return isinstance(value, str) and value == marker
 
 
 def _source_kind(source) -> str:
@@ -561,12 +581,14 @@ def resolve_engine_defaults(config, *, stacklevel=2) -> dict:
     rec = {}
     for name in ENGINE_DEPENDENT_DEFAULTS:
         want = engine_validated_value(name, eng, kind)
-        v = getattr(gc, name, None)
+        unset = ENGINE_DEPENDENT_UNSET.get(name)
+        v = getattr(gc, name, unset)
         prev = mine.get(name)
-        if prev is not None and v is not None and _same_value(v, prev[2]) \
+        if prev is not None and not engine_dependent_unset(name, v) \
+                and _same_value(v, prev[2]) \
                 and (prev[0], prev[1]) != (eng, kind):
-            v = None                          # ours, for another engine
-        if v is None:
+            v = unset                         # ours, for another engine
+        if engine_dependent_unset(name, v):
             setattr(gc, name, want)
             mine[name] = (eng, kind, want)
             rec[name] = {"value": want,
@@ -618,7 +640,8 @@ def _legacy_knobs_unread(gc, vals):
         if name in ENGINE_DEPENDENT_DEFAULTS:
             # unset, or the value the engine resolves it to
             d = engine_validated_value(name, "unified", "reconstruction")
-            same = v is None or _same_value(v, d)
+            same = (v is None or engine_dependent_unset(name, v)
+                    or _same_value(v, d))
         else:
             same = (v is None) if d is None else _same_value(v, d)
         if not same:

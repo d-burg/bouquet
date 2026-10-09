@@ -155,6 +155,15 @@ def _select_time_index(time_ms: np.ndarray, time_s: Optional[float]) -> int:
     return int(np.argmin(np.abs(time_ms / 1e3 - time_s)))
 
 
+def ida_time_base(path: str) -> np.ndarray:
+    """The IDA file's own time base [s] (stored in ms), as written -- the
+    axis :func:`bouquet.io.imas._hybrid_timing` matches ``ida_time`` on
+    (the half-step source-time rule) before the slice is read."""
+    import h5py
+    with h5py.File(path, "r") as f:
+        return np.asarray(f["time"][:], dtype=float).ravel() / 1e3
+
+
 def _carbon_tier_usable(nC, ne, sigma_nC=None, sigma_ne=None, *,
                         unit="radii", datasets="n_12C6/n_12C6_err") -> bool:
     """Is the carbon dilution data physical enough to carry the Zeff sigma tier?

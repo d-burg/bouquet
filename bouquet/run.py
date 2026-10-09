@@ -98,6 +98,10 @@ def _terms(mygs, triples):
             for c, tg, w in triples]
 
 
+
+#: "argument not passed" (distinct from an explicit None) for set_slice
+_UNSET = object()
+
 class Bouquet(SwbBaseline):
     """Stateful driver: solver -> baseline -> generate -> filter -> export."""
 
@@ -188,12 +192,19 @@ class Bouquet(SwbBaseline):
         FUSE Z_eff instead of IDA's. ``kinetic_source`` defaults to
         ``"ida_hybrid"`` when an ``ida_path`` is given, else ``"fuse"``.
 
-        ``ida_time`` picks the IDA slice (default ``time``); ``time`` then picks
-        only the dd slices.  With FUSE_JBS_ORDER=replay_first, a row
-        ``(time, ida_time)`` of ``ida_provenance.json["replay_pairing"]`` means
-        the dd j_bootstrap(time) was computed on IDA(ida_time);
-        ``aux['pairing_consistent']`` records that check when the table sits
-        beside ``ids_path``.
+        ``ida_time`` picks the IDA slice (default ``time``; ida_hybrid only,
+        refused otherwise); ``time`` then picks only the dd slices.  The IDA
+        slice is the file's own slice nearest ``ida_time``, accepted within
+        half its local time-step, never interpolated, else refused
+        (``io.imas.IDA_TIME_RULE``).  When the external FUSE tooling ran its
+        bootstrap on a "replay" pairing, a row ``(time, ida_time)`` of the
+        ``ida_provenance.json["replay_pairing"]`` it writes beside the dd
+        means the dd j_bootstrap(time) was computed on IDA(ida_time); the
+        reader checks that table (only when it names this run's IDA file and
+        holds this dd slice) and records the verdict.  The whole pairing
+        record (requested/used IDA time, dt, window, dd slice times,
+        ``pairing_consistent``) is archived in the baseline's
+        ``li_metrics["ida_time_match"]``.
 
         ``LCFS_geqdsk`` is OPTIONAL: a g-file whose LCFS replaces the source
         boundary outline as the isoflux target, for when you have a better
@@ -352,7 +363,7 @@ class Bouquet(SwbBaseline):
         # still write to the old header.
         self.config.output_header = value
 
-    def set_slice(self, *, time=None, ida_time=None, header=None) -> "Bouquet":
+    def set_slice(self, *, time=None, ida_time=_UNSET, header=None) -> "Bouquet":
         """Re-point to a new time slice, reusing the existing solver.
 
         The multi-slice mechanism for the **IMAS path**, where one IDS holds
@@ -370,16 +381,40 @@ class Bouquet(SwbBaseline):
         ``time`` raises. To run several reconstructions, build a fresh
         :class:`Bouquet` per g-file. ``header`` may still be set on either path
         to redirect the output archive.
+
+        ``ida_time`` (``ImasSource.ida_time``, ida_hybrid only) is applied
+        whenever it is passed, with or without ``time``; ``ida_time=None``
+        resets it (the IDA slice then follows ``time``).  Omitted, the
+        configured ``ida_time`` is KEPT -- a re-timed dd slice then stays
+        paired with the same IDA slice, which is announced with a warning
+        (pass ``ida_time=`` to re-pair it; :meth:`run_slices` takes
+        ``ida_times=`` per slice).  A source without ``ida_time`` raises
+        when one is passed.
         """
+        if ida_time is not _UNSET and not hasattr(self.config.source,
+                                                  "ida_time"):
+            raise TypeError(
+                f"{type(self.config.source).__name__} has no ida_time; "
+                "ida_time= applies to an ImasSource (kinetic_source="
+                "'ida_hybrid') only")
         if time is not None:
             if not hasattr(self.config.source, "time"):
                 raise TypeError(
                     f"{type(self.config.source).__name__} has no time axis to "
                     "sweep; build a separate Bouquet per source")
             self.config.source.time = time
-            # a stale IDA slice must not ride along to a new dd slice
-            if hasattr(self.config.source, "ida_time"):
-                self.config.source.ida_time = ida_time
+            _kept = getattr(self.config.source, "ida_time", None)
+            if ida_time is _UNSET and _kept is not None:
+                import warnings
+                warnings.warn(
+                    f"set_slice(time={time!r}) keeps ImasSource.ida_time="
+                    f"{_kept!r}: this dd slice is paired with that IDA "
+                    "slice.  Pass ida_time= to re-pair it, or ida_time=None "
+                    "to read the IDA slice at time", UserWarning,
+                    stacklevel=2)
+        if ida_time is not _UNSET:
+            self.config.source.ida_time = (None if ida_time is None
+                                           else float(ida_time))
         if header is not None:
             self.config.output_header = header
         self.baseline = None
@@ -968,9 +1003,10 @@ class Bouquet(SwbBaseline):
         here -- a baseline not built by :meth:`prepare_baseline`, or a field
         reset afterwards -- is resolved now, as :meth:`prepare_baseline`
         would have, never read as ``None``."""
-        from .engine import ENGINE_DEPENDENT_DEFAULTS
+        from .engine import ENGINE_DEPENDENT_DEFAULTS, engine_dependent_unset
         gc = self.config.generation
-        if any(getattr(gc, n, None) is None for n in ENGINE_DEPENDENT_DEFAULTS):
+        if any(engine_dependent_unset(n, getattr(gc, n, None))
+               for n in ENGINE_DEPENDENT_DEFAULTS):
             self._resolve_engine_defaults()
             self._record_engine_resolved_defaults(self.baseline)
 
@@ -7812,6 +7848,10 @@ class Bouquet(SwbBaseline):
                 write_ifile=gc.write_ifile,
                 ifile_npsi=gc.ifile_npsi,
                 ifile_ntheta=gc.ifile_ntheta,
+                ifile_orientation=dict(
+                    source_current_sign=getattr(bl, "source_current_sign",
+                                                None),
+                    source_b0_sign=getattr(bl, "source_b0_sign", None)),
                 scan_key=gc.scan_key,
                 pfile_bytes=bl.pfile_bytes,
                 baseline_eqdsk_bytes=bl.eqdsk_bytes,
@@ -8656,7 +8696,7 @@ class Bouquet(SwbBaseline):
         return reason
 
     def run_slices(self, times, scan_keys=None, header=None, export=False,
-                   on_refusal="record") -> dict:
+                   on_refusal="record", ida_times=None) -> dict:
         """Sweep an IMAS time series into ONE archive, one ``scan_key`` per slice.
 
         Wraps the ``set_slice -> prepare_baseline -> generate -> filter`` loop
@@ -8681,6 +8721,16 @@ class Bouquet(SwbBaseline):
         slice; after the last slice the count and the reasons are printed
         and warned once.  ``"raise"`` re-raises at the first refusal, the
         behaviour before.
+
+        ``ida_times`` (ida_hybrid; #73): the IDA slice per dd slice, a
+        sequence aligned with ``times`` (an entry ``None`` reads the IDA
+        slice at that dd time) -- e.g. the ``ida_time`` column of FUSE's
+        replay pairing for a replay-paired series.  Each slice's
+        ``ida_time`` is set with :meth:`set_slice` and returned in its
+        summary.  With ``ida_times=None`` every slice reads the IDA slice at
+        its own dd time; a configured ``ImasSource.ida_time`` is then
+        REFUSED (one fixed IDA slice for a whole series is almost certainly
+        a mistake: pass ``ida_times=[t] * len(times)`` to mean it).
         """
         if on_refusal not in ("raise", "record"):
             raise ValueError("on_refusal must be 'raise' or 'record', got "
@@ -8690,12 +8740,34 @@ class Bouquet(SwbBaseline):
             scan_keys = [int(round(t * 1000)) for t in times]     # ms labels
         if len(scan_keys) != len(times):
             raise ValueError("scan_keys must match times in length")
+        if ida_times is None:
+            if getattr(self.config.source, "ida_time", None) is not None:
+                raise ValueError(
+                    f"run_slices: ImasSource.ida_time="
+                    f"{self.config.source.ida_time!r} is configured but no "
+                    "ida_times were given: pass ida_times= (one IDA time per "
+                    "slice, None to follow the slice time), or reset it with "
+                    "set_slice(ida_time=None)")
+            paired = False
+            ida_times = [None] * len(times)
+        else:
+            paired = True
+            if not hasattr(self.config.source, "ida_time"):
+                raise TypeError(
+                    f"run_slices: {type(self.config.source).__name__} has no "
+                    "ida_time; ida_times= applies to an ImasSource only")
+            ida_times = [None if x is None else float(x) for x in ida_times]
+            if len(ida_times) != len(times):
+                raise ValueError("ida_times must match times in length")
         if header is not None:
             self.config.output_header = header
         self.setup_solver()                                       # once
         results = {}
-        for t, sk in zip(times, scan_keys):
-            self.set_slice(time=t)
+        for t, sk, t_ida in zip(times, scan_keys, ida_times):
+            if paired:
+                self.set_slice(time=t, ida_time=t_ida)
+            else:          # no configured ida_time (refused above): none kept
+                self.set_slice(time=t)
             self.config.generation.scan_key = sk
             try:
                 self.prepare_baseline()
@@ -8707,6 +8779,8 @@ class Bouquet(SwbBaseline):
                 results[sk] = dict(time=t, n_all=0, n_sel=0, l_i=float("nan"),
                                    Ip=float("nan"),
                                    refused=reason or f"{type(exc).__name__}: {exc}")
+                if t_ida is not None:
+                    results[sk]["ida_time"] = t_ida
                 continue
             self.generate()
             self.filter()
@@ -8718,6 +8792,8 @@ class Bouquet(SwbBaseline):
                 l_i=float(getattr(bl, "l_i_target", float("nan"))),
                 Ip=float(getattr(bl, "Ip_target", float("nan"))),
             )
+            if t_ida is not None:
+                results[sk]["ida_time"] = t_ida
         refused = {k: r for k, r in results.items() if "refused" in r}
         if refused:
             import warnings

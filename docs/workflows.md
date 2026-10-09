@@ -288,7 +288,7 @@ as an enormous sigma.
 | `floor_j_BS` | `False` | Clip negative bootstrap excursions; only needed with `isolate_edge_jBS=False` on sources that carry an inner negative lobe |
 | `bootstrap_kwargs` | `{}` | Keyword options passed through to `solve_with_bootstrap` on the **legacy** paths (e.g. `{"iterations": 2}`; replaces `swb_iterations`). Checked when the config is built **and whenever the attribute is reassigned**: a key outside the explicit allow-list `config.BOOTSTRAP_KWARGS_ALLOWED` is refused (a typo is refused with or without the toolkit), a key the call sites already set is refused, and on the legacy path a key the **installed** toolkit lacks (the internal-solve options `use_python_solve`, `use_sauter_eps`, `diagnose_bs`, `djBS_tol`, `saw_relax`, `taper_edge_*` exist only on a toolkit with the internal Fortran bootstrap solve) is refused -- warned instead while a stored config is loaded, so an archive written on another build reloads. Under the self-consistent loop SWB runs only for `jbs_init="swb"` and the jBS-delta / `DIFF_BS` caches (a non-empty dict is warned). It reaches **every** SWB call (reconstruction / IMAS baseline, caches, σ=0 check, draws): a stored `swb_iterations=n` (which reached only the draws) loads as `{"iterations": n}` with a warning that the baseline SWB now runs with it too. With `reconstruction_engine="unified"` only the engine's own keys are read -- the edge taper (`taper_edge_jBS`, `taper_edge_psi0`, `taper_edge_shape`; **off** by default, 0.999, quintic; implemented by bouquet, so no toolkit capability is needed) and `use_sauter_eps=True`; any other key is refused (and dropped with a warning from a stored unified config, which never ran it) |
 | `bootstrap_convergence_override` | `False` | The explicit opt-in for the `bootstrap_kwargs` keys that change a **convergence criterion** of the toolkit's bootstrap solve (`config.BOOTSTRAP_CONVERGENCE_KWARGS`: `djBS_tol`, the j_BS freeze threshold; `saw_relax`). Without it such a key is refused; with it the key is accepted with a warning, and the archive's `config_json` records the flag and the values. Legacy paths only (the unified engine refuses those keys). A stored config that carries such a key from before the flag existed loads with it on, warned |
-| `draw_solve_maxits` | `100` | GS iteration cap inside `generate()`. Draw solves converge in ≤ ~25 iterations; one that does not is stuck in a limit cycle just above `nl_tol` and would burn the setup cap (800, ~200–350 s). It is re-solved from where it stopped at each `draw_solve_retry_urf` (default none), then, if `draw_solve_loose_tol` is set (default unset; `2e-5` rescues the cycle), at that `nl_tol`, which accepts it only if the residual really is that small. Failed solves, and what recovered each, are listed per draw in `diagnostics['solve_failures']`, on `Bouquet.solve_failures`, and in one printed `[draw-solves]` line with the largest iteration count seen. `None` keeps the setup cap |
+| `draw_solve_maxits` / `draw_solve_retry_urf` / `draw_solve_loose_tol` | `"auto"` / `()` / `None` | The legacy and swb draws' GS iteration cap and its OPT-IN rescue. `"auto"` resolves at `prepare_baseline()` (recorded in `engine_resolved_defaults`): 100 for the legacy draws; with `reconstruction_engine="unified"` all three are refused (the engine draws use `engine_draw_solve_maxits`, see engine.md "The solve cap", and are never rescued). `None` keeps the solver's setup cap (800), which is also what a stored config without the field, or with `null`, replays. The cap and the rescue act on DRAW solves only: the cold baseline re-solve and the σ=0 reference solve before the draw loop keep the setup cap. Draw solves converge in ≤ ~25 iterations; one that does not sits in a limit cycle just above `nl_tol`. The rescue (off by default) re-solves a capped draw solve from where it stopped at each `draw_solve_retry_urf` (the same criterion), then, if `draw_solve_loose_tol` is set, accepts it at that LOOSER `nl_tol`. With the rescue on every stored draw is stamped `solve_recovered`, and a rescued one `solve_recovered_by`, `solve_nl_tol_accepted`, `solve_residual_upper` / `solve_residual_lower` (bounds: OFT reports no residual value), `solve_strict_nl_tol` and `solve_rescue_its`; `draw_band(rescued="exclude")` and `merge_archives(rescued="exclude")` leave rescued draws out (the default keeps them and warns with their count). Failed solves, and what recovered each, are listed per draw in `diagnostics['solve_failures']`, on `Bouquet.solve_failures`, and in one printed `[draw-solves]` line |
 | `jbs_self_consistent` | `True` | Iterate the bootstrap to self-consistency with the delivered equilibrium (Redl on the caller's own ψ_N grid, re-evaluated after every solve; joint under-relaxation of the bootstrap and the solved current) in the baseline, every closure channel, the MSE stage, every draw and the reconstruction -- see [physics-notes.md](physics-notes.md#self-consistent-bootstrap-jbs_self_consistent). `False` = the **legacy** frozen-SWB bootstrap (legacy engine only; the unified engine refuses it); required with `single_profile_jphi=True` or `recalculate_j_BS=False` (refused otherwise). Not by itself a pre-release reproduction: that needs `reconstruction_engine="legacy"` + `separatrix_pressure="legacy"` too, and the coil-solve mode and the current conversion still differ (CHANGES_SUMMARY, "Reproducing a run made before this release"). A stored config without the field (pre-loop archive) loads as `False` |
 | `jbs_init` | `"anchor"` | The loop's initial guess: Redl on the anchor equilibrium, or `"swb"` (legacy result; A/B only). The fixed point does not depend on it |
 | `jbs_rtol_j` / `jbs_rtol_Ip` | `1e-3` / `1e-4` | Loop convergence: current-weighted L2 residual of the j_BS profile, and its current integral over I_p |
@@ -323,6 +323,24 @@ as an enormous sigma.
 | `capture_npsi` | `257` | FSA grid for that block |
 | `capture_exact_inv_R2` | `True` | Record ⟨1/R²⟩ in the draw's `eq_fsa` block (read from `get_q`, else by flux-surface quadrature). Archived geometry only: since 2026-10-06 the current conversion is the one field-aligned factor `F⟨1/R⟩/⟨B²⟩`, which does not read it |
 | `diagnostic_plots` | `False` | Per-draw diagnostic figures |
+| `write_ifile` / `ifile_npsi` / `ifile_ntheta` | `False` / `129` / `257` | Also archive an OFT i-file (`TokaMaker.save_ifile`: ψ, F, p, q per flux surface and R, Z on the surfaces; GPEC `eq_type="ldp_i"`) per stored draw and for the baseline (`DrawView.ifile_bytes`, `extract(formats=("ifile",))`), traced from the same state and with the same `lcfs_pressure` (the separatrix pressure) and `lcfs_pad` as that state's g-file, so its pressure is the g-file's. Every route writes the baseline i-file (with `coil_drift=None` from the recon-converged state). Each group is stamped `ifile_written` (and `ifile_error` when the save failed), the grid, `ifile_lcfs_pressure` and `ifile_frame`: like every bouquet output it is in the positive-Ip frame (issue #68); the scan's `_baseline` `source_current_sign` / `source_b0_sign` map it back. Refused at `generate()` on a solver without `save_ifile`; a failed state restore after the save rejects the draw (`ifile_restore_failed`). Grid sizes are integers ≥ 2. About 0.5 MB per draw at the defaults |
+
+**Timing the IDA slice (`ImasSource.ida_time`, ida_hybrid only).** By default
+the IDA slice is read at the dd slice `time`; `ida_time` reads it at another
+time while `time` still picks the dd slices (equilibrium, core_profiles,
+core_sources) — for example the IDA slice FUSE paired with a macro step when it
+computed the dd's bootstrap. The IDA slice is the file's own slice nearest the
+requested time, never interpolated, accepted within half the IDA file's local
+time-step (a single-slice IDA file: half the dd step when paired with `time`,
+the 10 µs floor for an explicit `ida_time`); paired with `time` it must also
+sit within half the dd step of the core_profiles slice. Anything else is
+refused. The match — requested and used IDA time, `dt`, the window and its
+basis, the dd slice times, and the verdict of FUSE's `ida_provenance.json`
+replay pairing when that table names this run's IDA file and holds the dd
+slice — is archived in the baseline's `li_metrics["ida_time_match"]`.
+`ida_time` outside ida_hybrid is refused. `set_slice(time=t)` keeps a
+configured `ida_time` (with a warning), `set_slice(ida_time=x)` applies it
+alone, and a series takes one per slice: `run_slices(times, ida_times=[…])`.
 
 ### `FilterConfig` (`b.filtering`)
 
@@ -679,6 +697,17 @@ first refusal (the default before). `Bouquet.run()` records a
 refusal the same way before re-raising. A later baseline or draw written into
 the same scan supersedes the refusal (kept as `refused_reason_superseded`).
 Parallel shards do not write refused records (a refused worker raises).
+
+The parsed dd is **cached per file** (`bouquet.io.imas._load_dd`, keyed on the
+real path, mtime, size and inode) and shared by the legacy reader, the unified
+engine's IDS adapter, the geometry reader and the plotting readers, so a sweep
+(or a `plot_jphi` loop over its scan keys) parses the file once. The cost is
+memory: up to two parsed files, about twice the file size each, stay resident
+for the life of the process — in a `parallel_generate` pool, in every worker
+for its whole `generate()`. `bouquet.io.imas.clear_dd_cache()` releases them;
+call it too after rewriting a dd in place with the same size within the
+filesystem's mtime granule, or across hosts on NFS within its attribute-cache
+window, where the stat key cannot see the change.
 
 ## Process-parallel generation
 

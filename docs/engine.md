@@ -770,9 +770,12 @@ every pass) and the post-homotopy passes through the engine's solve wrapper
 stage and rollback re-solve (installed on the solver for the homotopy stage
 and restored after it). The zero-perturbation draw of
 `verify_sigma0_consistency` runs under it too. The reconstruction runs
-under the solver's own cap. The legacy draws' `draw_solve_maxits` is
-REFUSED under the engine (it would be silently ignored); the legacy path
-never reads `engine_draw_solve_maxits`, so it stays bit-identical.
+under the solver's own cap. The legacy draws' `draw_solve_maxits` (any
+value but `"auto"` / `None`) and their opt-in rescue
+(`draw_solve_retry_urf`, `draw_solve_loose_tol`) are REFUSED under the
+engine by the unread-settings rule (they would be silently ignored); the
+engine draws are never rescued. The legacy path never reads
+`engine_draw_solve_maxits`.
 
 A solve that converges under the cap is untouched (measured on the
 synthetic g-file example, fixed build: loop ≤ 15, post-homotopy ≤ 18,

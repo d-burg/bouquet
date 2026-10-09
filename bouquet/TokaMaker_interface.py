@@ -50,7 +50,9 @@ from .utils import (
     select_closed_lcfs,
     store_equilibrium,
     store_baseline_profiles,
-    try_save_ifile,
+    save_state_ifile,
+    SnapshotRestoreError,
+    stamp_group_attrs,
     store_baseline_state,
     _scan_key,
     _shape_from_boundary,
@@ -175,6 +177,11 @@ DRAW_REJECTION_REASONS = {
     "eqdsk_save_failed": "the draw's g-file could not be written "
                          "(save_eqdsk failed on the delivered state); the "
                          "state is restored and the draw is not archived",
+    # write_ifile: restoring the equilibrium after the i-file save failed
+    "ifile_restore_failed": "restoring the solver state after the draw's "
+                            "i-file save failed (write_ifile): the state the "
+                            "save's tracer left is not trusted, the warm "
+                            "start is restored and the draw is not archived",
 }
 
 
@@ -190,18 +197,27 @@ class DrawAnchorSolveFailed(RuntimeError):
 
 
 # ---- Draw-loop solve guard: a GS iteration cap, its rescue + a failure record
-#: GS iteration cap for the draw loop.  Draw-path solves converge in <= ~25
-#: iterations; those that do not sit in a period-2 Picard cycle just above
-#: nl_tol and would burn the setup cap (800: 200-350 s per failed solve).
-#: Even, so a capped solve stops on the same phase of that cycle.
+#: The LEGACY draws' GS iteration cap (``GenerationConfig.draw_solve_maxits``
+#: ``"auto"`` resolves to it under ``reconstruction_engine="legacy"`` at
+#: ``prepare_baseline()``; bouquet.engine.ENGINE_DEPENDENT_DEFAULTS).  Draw
+#: solves converge in <= ~25 iterations; those that do not sit in a period-2
+#: Picard cycle just above nl_tol and would burn the setup cap (800: 200-350 s
+#: per failed solve).  It caps DRAW solves only: the guard applies it at the
+#: first ``begin_draw`` and lifts it at exit, so the cold baseline re-solve and
+#: the sigma=0 reference solve before the draw loop keep the setup cap
+#: (owner decision D5, 2026-10-09).
 DRAW_SOLVE_MAXITS = 100
 
-#: Rescue of a draw solve that hits the cap, from the state it stopped in:
-#: re-solve at each of these under-relaxation factors, then, when set, at
-#: nl_tol = :data:`DRAW_SOLVE_LOOSE_TOL`.  Both off by default.  The cycle
-#: parks the residual at ~9e-6 whatever the urf; a loose tolerance of 2e-5
-#: accepts it in a few iterations, and only if the residual really is that
-#: small.
+#: The OPT-IN rescue of a draw solve that hits the cap (owner decision D5:
+#: off by default, every rescued draw stamped in the archive, readers able to
+#: exclude rescued draws), from the state it stopped in: re-solve at each of
+#: these under-relaxation factors (a solver-side remedy: the criterion is
+#: unchanged), then, when set, at nl_tol = :data:`DRAW_SOLVE_LOOSE_TOL` --
+#: a LOOSER acceptance criterion than the solver's own nl_tol, so a draw
+#: accepted that way is stamped with the tolerance it met
+#: (``solve_nl_tol_accepted``) and can be excluded downstream
+#: (``draw_band(rescued="exclude")``).  Never applied to a solve outside a
+#: draw (the baseline, the sigma=0 reference).
 DRAW_SOLVE_RETRY_URF = ()
 DRAW_SOLVE_LOOSE_TOL = None
 
@@ -217,21 +233,34 @@ def _bouquet_caller():
 
 
 class DrawSolveGuard:
-    """Cap ``mygs`` maxits for the draw loop, recover solves that hit it, and
-    record every solve that raises.
+    """Cap ``mygs`` maxits for the DRAWS of the draw loop, optionally rescue
+    draw solves that hit it, and record every solve that raises.
 
-    Context manager.  Wraps ``mygs.solve`` on the instance (so the solves inside
-    ``solve_bootstrap`` are seen too); on exit restores it and the solver's
-    settings.  ``maxits=None`` keeps the solver's cap.  A solve that exceeds
-    maxits is retried from where it stopped at each ``retry_urf``, then at
+    Context manager.  Wraps ``mygs.solve`` on the instance (so the solves
+    inside ``solve_bootstrap`` are seen too); on exit restores it and the
+    solver's settings.  The cap and the rescue act on DRAW solves only --
+    between :meth:`begin_draw` with a draw index and the exit; a solve before
+    the first draw (the cold baseline re-solve, the sigma=0 reference solve)
+    runs under the solver's own cap, is never rescued, and is only recorded
+    (``draw=None``).  ``maxits=None`` keeps the solver's cap for the draws
+    too.
+
+    Rescue (opt-in; both off by default): a draw solve that exceeds maxits is
+    retried from where it stopped at each ``retry_urf``, then at
     ``nl_tol=loose_tol`` (None skips a step); the first that converges is
-    returned.  Any other failure, or one no step recovers, raises as before.
-    Every failure is recorded with the draw set by :meth:`begin_draw`,
-    ``exceeded_maxits`` and ``recovered_by`` (``"urf=..."``, ``"nl_tol=..."``
-    or None).  Iteration counts of the solves that converge are kept in
-    ``its`` (headroom check).  With no cap and no recovery the wrapper is a
-    pure pass-through that only records failures; a ``mygs`` without a
-    ``solve`` (a test double) is left alone.
+    returned.  A different failure during a retry SURFACES (raised, chained
+    from the cap failure; ``retry_error`` recorded) -- it is never hidden
+    behind the original error.  Every failure is recorded with its draw,
+    ``exceeded_maxits``, ``recovered_by`` (``"urf=..."``, ``"nl_tol=..."`` or
+    None), the tolerance the accepted solve met (``nl_tol_accepted``), the
+    solver's own (``strict_nl_tol``), the residual bounds those imply
+    (``residual_upper`` / ``residual_lower``: OFT's solve reports no
+    residual value) and each retry's iterations (``attempts``).
+    :meth:`draw_stamp` turns a draw's records into the attrs archived on it.
+    Iteration counts of the draw solves that converge are kept in ``its``.
+    With no cap and no rescue the wrapper is a pure pass-through that only
+    records failures; a ``mygs`` without a ``solve`` (a test double) is left
+    alone.
     """
 
     def __init__(self, mygs, maxits=DRAW_SOLVE_MAXITS, retry_urf=DRAW_SOLVE_RETRY_URF,
@@ -245,17 +274,21 @@ class DrawSolveGuard:
             raise ValueError(f"draw_solve_maxits={maxits!r} must be >= 1 "
                              "or None")
         self.mygs = mygs
+        from .config import validate_draw_solve_rescue
+        validate_draw_solve_rescue(retry_urf, loose_tol)
         self.retry_urf = tuple(float(u) for u in (retry_urf or ()))
-        if any(not 0.0 < u <= 1.0 for u in self.retry_urf):
-            raise ValueError(f"draw_solve_retry_urf={retry_urf!r}: each must be in (0, 1]")
         self.loose_tol = None if loose_tol is None else float(loose_tol)
-        if self.loose_tol is not None and not self.loose_tol > 0.0:
-            raise ValueError(f"draw_solve_loose_tol={loose_tol!r} must be > 0 or None")
         self.draw = None
         self.n_solves = 0
         self.records = []
         self.its = []
         self._active = False
+        self._capped = False
+        self._saved_maxits = None
+
+    @property
+    def rescue_enabled(self):
+        return bool(self.retry_urf) or self.loose_tol is not None
 
     def _retry(self, orig, a, k, **settings):
         """One solve with ``settings`` changed; always restores them."""
@@ -271,6 +304,19 @@ class DrawSolveGuard:
                 setattr(st, n, v)
             self.mygs.update_settings()
 
+    def _set_cap(self, on):
+        """Apply (on) or lift (off) the draw cap on the solver, once."""
+        if self.maxits is None or not self._active or on == self._capped:
+            return
+        mygs = self.mygs
+        if on:
+            self._saved_maxits = mygs.settings.maxits
+            mygs.settings.maxits = self.maxits
+        else:
+            mygs.settings.maxits = self._saved_maxits
+        mygs.update_settings()
+        self._capped = on
+
     def __enter__(self):
         mygs = self.mygs
         if mygs is None or not callable(getattr(mygs, "solve", None)):
@@ -278,18 +324,12 @@ class DrawSolveGuard:
         self._active = True
         self._own_attr = "solve" in getattr(mygs, "__dict__", {})
         self._orig = orig = mygs.solve
-        self._saved_maxits = None
-        if self.maxits is not None:
-            self._saved_maxits = mygs.settings.maxits
-            mygs.settings.maxits = self.maxits
-            mygs.update_settings()
 
-        count_its = (self.maxits is not None or bool(self.retry_urf)
-                     or self.loose_tol is not None)
+        count_its = self.maxits is not None or self.rescue_enabled
 
         def call(*a, **k):
-            if not count_its:
-                return orig(*a, **k)     # no cap, no recovery: pass-through
+            if not count_its or self.draw is None:
+                return orig(*a, **k)     # pass-through (and before any draw)
             # Ask for the iteration count unless the caller did; hand back
             # what the caller asked for.
             want = k.get("return_its", a[1] if len(a) > 1 else False)
@@ -303,28 +343,49 @@ class DrawSolveGuard:
             try:
                 return call(*a, **k)
             except Exception as exc:
+                in_draw = self.draw is not None
                 rec = {"draw": self.draw, "site": _bouquet_caller(),
                        "seconds": time.perf_counter() - t0,
                        "error": f"{type(exc).__name__}: {str(exc).strip()}",
                        "exceeded_maxits": "maxits" in str(exc),
-                       "maxits": self.maxits,
+                       "maxits": self.maxits if in_draw else None,
                        "recovered_by": None, "retry_seconds": 0.0}
                 self.records.append(rec)
-                if "maxits" not in str(exc):
+                if "maxits" not in str(exc) or not in_draw \
+                        or not self.rescue_enabled:
                     raise
+                st = getattr(self.mygs, "settings", None)
+                strict = getattr(st, "nl_tol", None)
+                rec.update(strict_nl_tol=strict, attempts=[])
                 t1 = time.perf_counter()
-                steps = [({"urf": u}, f"urf={u:g}") for u in self.retry_urf]
+                steps = [({"urf": u}, f"urf={u:g}", strict)
+                         for u in self.retry_urf]
                 if self.loose_tol is not None:
-                    steps.append(({"nl_tol": self.loose_tol}, f"nl_tol={self.loose_tol:g}"))
-                for settings, label in steps:
+                    steps.append(({"nl_tol": self.loose_tol},
+                                  f"nl_tol={self.loose_tol:g}", self.loose_tol))
+                for settings, label, tol in steps:
+                    n_its = len(self.its)
                     try:
                         out = self._retry(call, a, k, **settings)
                     except Exception as e2:
+                        rec["attempts"].append(dict(step=label, its=None,
+                                                    error=f"{type(e2).__name__}: {str(e2).strip()}"))
                         if "maxits" not in str(e2):
-                            break
+                            # a different failure: surface it, never the
+                            # original cap error in its place
+                            rec["retry_error"] = rec["attempts"][-1]["error"]
+                            rec["retry_seconds"] = time.perf_counter() - t1
+                            raise e2 from exc
                         continue
-                    rec["recovered_by"] = label
-                    rec["retry_seconds"] = time.perf_counter() - t1
+                    its = self.its[-1] if len(self.its) > n_its else None
+                    rec["attempts"].append(dict(step=label, its=its, error=None))
+                    rec.update(recovered_by=label, nl_tol_accepted=tol,
+                               residual_upper=tol,
+                               # a loose acceptance: the strict criterion
+                               # was not met on the capped solve
+                               residual_lower=(strict if "nl_tol" in settings
+                                               else None),
+                               retry_seconds=time.perf_counter() - t1)
                     return out
                 rec["retry_seconds"] = time.perf_counter() - t1
                 raise
@@ -338,18 +399,56 @@ class DrawSolveGuard:
             self.mygs.solve = self._orig
         else:
             del self.mygs.solve
-        if self._saved_maxits is not None:
-            self.mygs.settings.maxits = self._saved_maxits
-            self.mygs.update_settings()
+        self._set_cap(False)
         self._active = False
         return False
 
     def begin_draw(self, draw):
+        """Enter draw *draw* (``None``: outside the draws): from the first
+        draw on, the cap is applied and the rescue armed."""
         self.draw = draw
+        self._set_cap(draw is not None)
 
     def failures(self, draw):
         """This draw's failed solves, recovered or not (list of dicts)."""
         return [dict(r) for r in self.records if r["draw"] == draw]
+
+    def draw_stamp(self, draw):
+        """The attrs archived on draw *draw*'s group (owner decision D5):
+        ``None`` when the rescue is off (nothing is written: the archive is
+        the one written before the rescue existed), else
+        ``solve_recovered`` and, for a rescued draw, ``solve_recovered_by``
+        (every recovery, ``; ``-joined), ``solve_n_recovered``,
+        ``solve_nl_tol_accepted`` (the loosest tolerance a solve of the draw
+        was accepted at), ``solve_strict_nl_tol``, ``solve_residual_upper``
+        / ``solve_residual_lower`` (the bounds on the residual reached) and
+        ``solve_rescue_its`` (the rescue solves' iterations)."""
+        if not self.rescue_enabled:
+            return None
+        rs = [r for r in self.records
+              if r["draw"] == draw and r.get("recovered_by")]
+        if not rs:
+            return {"solve_recovered": False}
+        tol = [r["nl_tol_accepted"] for r in rs
+               if r.get("nl_tol_accepted") is not None]
+        low = [r["residual_lower"] for r in rs
+               if r.get("residual_lower") is not None]
+        its = [a["its"] for r in rs for a in r.get("attempts", ())
+               if a.get("its") is not None]
+        out = {"solve_recovered": True,
+               "solve_recovered_by": "; ".join(r["recovered_by"] for r in rs),
+               "solve_n_recovered": len(rs)}
+        if tol:
+            out["solve_nl_tol_accepted"] = float(max(tol))
+            out["solve_residual_upper"] = float(max(tol))
+        if low:
+            out["solve_residual_lower"] = float(max(low))
+        strict = rs[0].get("strict_nl_tol")
+        if strict is not None:
+            out["solve_strict_nl_tol"] = float(strict)
+        if its:
+            out["solve_rescue_its"] = int(sum(its))
+        return out
 
     def summary(self):
         """One line: solves run, failed solves, how they were recovered, by site."""
@@ -5210,6 +5309,9 @@ def generate_bouquet(
     write_ifile=False,
     ifile_npsi=129,
     ifile_ntheta=257,
+    # the source orientation stamped with every i-file (issue #68):
+    # {"source_current_sign": .., "source_b0_sign": ..} (None: not stamped)
+    ifile_orientation=None,
     # Archive the ACHIEVED FSA j_phi of each converged solve (baseline + every
     # draw) instead of the prescribed target profile. Set on the IMAS path,
     # where the single-pass jphi-linterp solve lands a few % off its anchor, so
@@ -5475,6 +5577,14 @@ def generate_bouquet(
         warnings.warn(_byp_msg, RuntimeWarning, stacklevel=2)
 
     _edge = resolve_edge_pressure(edge_pressure)
+    # write_ifile: refuse up front, not one WARN per draw (#74 review B4)
+    if write_ifile and not callable(getattr(mygs, "save_ifile", None)):
+        raise RuntimeError(
+            "GenerationConfig.write_ifile=True needs a TokaMaker with "
+            "save_ifile (OFT main since #151); this solver has none -- "
+            "update OFT or set write_ifile=False")
+    _ifile_kw = dict(npsi=int(ifile_npsi), ntheta=int(ifile_ntheta),
+                     psi_pad=psi_pad, orientation=ifile_orientation)
     # ---- rejected draw attempts: one record each, a summary at the end ----
     _rejections = rejection_log if rejection_log is not None else []
     _masked_at_start = dict(ANCHOR_MASKED_FAILURES)
@@ -5589,6 +5699,8 @@ def generate_bouquet(
     _baseline_coils = None
     _recon_Ip = None
     baseline_ifile_bytes = None  # set with the warmstart baseline.eqdsk re-save
+    # the baseline i-file's stamp (write_ifile): set where it is traced
+    _bl_ifile_rec = None
     # self-consistent loop: l_i / q0 / q95 of the jphi-linterp baseline
     # re-solve below (None when it is not run)
     _J_state = None
@@ -6149,6 +6261,20 @@ def generate_bouquet(
                 with _tmp_patch2.NamedTemporaryFile(
                         suffix='.geqdsk', delete=False) as _tf:
                     _tmp_eqdsk_path = _tf.name
+                # The baseline i-file FIRST, snapshot-wrapped, so it is
+                # traced from the very state the bare save_eqdsk below
+                # writes (that save's tracer may move the state; #74
+                # review B6), with the same lcfs_pressure / lcfs_pad as
+                # that g-file (B1).  Nothing changes when write_ifile is
+                # off: the state the eqdsk save sees is the same.
+                if write_ifile:
+                    _bl_if_path, _bl_ifile_rec = save_state_ifile(
+                        mygs, _tmp_eqdsk_path + '.ifile',
+                        p_sep=_edge.p_offset(pressure_solve), **_ifile_kw)
+                    if _bl_if_path is not None:
+                        with open(_bl_if_path, 'rb') as _if:
+                            _bl_if_bytes = _if.read()
+                        os.unlink(_bl_if_path)
                 # nr/nz=257 matches the per-draw save_eqdsk call
                 # inside the per-draw loop further down, so the
                 # baseline and per-draw eqdsks have the same grid
@@ -6172,13 +6298,13 @@ def generate_bouquet(
                 # converged eqdsk + Ip into the H5 _baseline group.
                 baseline_eqdsk_bytes = _new_eqdsk_bytes
                 initial_Ip_target = _new_eq_Ip
-                if write_ifile and try_save_ifile(
-                        mygs, _tmp_eqdsk_path + '.ifile',
-                        npsi=int(ifile_npsi), ntheta=int(ifile_ntheta),
-                        lcfs_pad=psi_pad):
-                    with open(_tmp_eqdsk_path + '.ifile', 'rb') as _if:
-                        baseline_ifile_bytes = _if.read()
-                    os.unlink(_tmp_eqdsk_path + '.ifile')
+                if write_ifile and _bl_ifile_rec is not None \
+                        and _bl_ifile_rec["ifile_written"]:
+                    # archived with the eqdsk it was traced beside
+                    baseline_ifile_bytes = _bl_if_bytes
+                    _bl_ifile_rec["ifile_state"] = (
+                        "the warm-start baseline state (the archived "
+                        "baseline eqdsk's)")
                 if abs(_new_eq_Ip - _old_initial_Ip) > 1.0:
                     _shift_pct = (
                         100.0 * (_new_eq_Ip - _old_initial_Ip)
@@ -6197,10 +6323,20 @@ def generate_bouquet(
                     os.unlink(_tmp_eqdsk_path)
                 except Exception:
                     pass
+            except SnapshotRestoreError:
+                raise                  # the solver state is not trustworthy
             except Exception as _eq_patch_exc:
                 print(f"  [warmstart] baseline.eqdsk re-save skipped "
                       f"({_eq_patch_exc}); H5 baseline will retain "
                       f"the pre-bouquet snapshot")
+                if write_ifile:
+                    # no i-file of a state the archive does not hold
+                    baseline_ifile_bytes = None
+                    _bl_ifile_rec = dict(
+                        (_bl_ifile_rec or {}), ifile_written=False,
+                        ifile_error=("the baseline eqdsk re-save failed "
+                                     f"({_eq_patch_exc}); no i-file of the "
+                                     "archived (pre-bouquet) state"))
             if os.environ.get('PINJ_PROBE', '0') == '1':
                 try:
                     _gs0 = mygs.get_stats(li_normalization='iter',
@@ -6360,6 +6496,40 @@ def generate_bouquet(
     # VIEW onto the gs_equil struct, which every copy_eq/replace_eq swap
     # frees under us (see utils.capture_xpoints).
     _bl_xpts, _bl_div = capture_xpoints(mygs)
+    # write_ifile with no warm-start re-save (coil_drift=None): the baseline
+    # i-file of THIS state -- the recon-converged state these coils and
+    # X-points are captured at -- so every route archives one (#74 review
+    # B2); a failed re-save is stamped above instead, never silently absent
+    if write_ifile and _bl_ifile_rec is None and coil_drift is not None:
+        # the warm-start capture failed before the baseline re-save: the
+        # archive keeps the pre-bouquet eqdsk, of a state no longer held
+        _bl_ifile_rec = dict(
+            ifile_written=False,
+            ifile_error=("the warm-start capture failed before the baseline "
+                         "eqdsk re-save; no i-file of the archived "
+                         "(pre-bouquet) state"))
+    if write_ifile and _bl_ifile_rec is None:
+        import tempfile as _tmp_if
+        with _tmp_if.NamedTemporaryFile(suffix='.ifile',
+                                        delete=False) as _tf:
+            _bl_if_path0 = _tf.name
+        _bl_if_path, _bl_ifile_rec = save_state_ifile(
+            mygs, _bl_if_path0, p_sep=_edge.p_offset(pressure_solve),
+            **_ifile_kw)
+        if _bl_if_path is not None:
+            with open(_bl_if_path, 'rb') as _if:
+                baseline_ifile_bytes = _if.read()
+            os.unlink(_bl_if_path)
+            _bl_ifile_rec["ifile_state"] = (
+                "the recon-converged state on entry to generate_bouquet "
+                "(no warm-start re-save: coil_drift=None)")
+        elif os.path.exists(_bl_if_path0):
+            os.unlink(_bl_if_path0)
+    if write_ifile and not (_bl_ifile_rec or {}).get("ifile_written"):
+        warnings.warn(
+            "write_ifile=True but the baseline has no i-file: "
+            f"{(_bl_ifile_rec or {}).get('ifile_error')}", RuntimeWarning,
+            stacklevel=2)
     if _bl_xpts is None:
         print(f"  NOTE: no baseline X-points captured; "
               f"plot_boundary_point_traces will fall back to the "
@@ -6441,6 +6611,8 @@ def generate_bouquet(
         baseline_meta=baseline_meta,
         profile_coord=coord,
     )
+    if write_ifile and _bl_ifile_rec is not None:
+        stamp_group_attrs(header, scan_key, None, _bl_ifile_rec)
 
     # ---- the ONE reconstruction state (self-consistent loop) ------------
     # What the reconstruction recorded (delivered_state: l_i == l_i_target,
@@ -7755,7 +7927,8 @@ def generate_bouquet(
 
         diagnostics['time'] = elapsed
         # Solves that raised in this draw (caught by the draw path): site,
-        # seconds, error, exceeded_maxits.  Not archived; see DrawSolveGuard.
+        # seconds, error, exceeded_maxits, recovered_by.  The full list is
+        # not archived; a rescued draw is stamped (DrawSolveGuard.draw_stamp).
         diagnostics['solve_failures'] = (solve_guard.failures(count)
                                          if solve_guard is not None else [])
         # the loop's private rebuild context never reaches the archive
@@ -7830,13 +8003,32 @@ def generate_bouquet(
                 pbar.update(1)
             continue
 
-        # Optional OFT i-file for GPEC eq_type='ldp_i', from the same state.
-        ifile_path = None
+        # Optional OFT i-file for GPEC eq_type='ldp_i', from the same state
+        # and with the same lcfs_pressure (this draw's own p_sep) and
+        # lcfs_pad as the g-file just written (#74 review B1).  A failed
+        # save is stamped on the draw (ifile_written=False, ifile_error); a
+        # failed state RESTORE rejects the draw like a failed g-file save.
+        ifile_path, _ifile_rec = None, None
         if write_ifile:
-            ifile_path = try_save_ifile(
-                mygs, os.path.abspath(f"{header}_count={count}.ifile"),
-                npsi=int(ifile_npsi), ntheta=int(ifile_ntheta),
-                lcfs_pad=psi_pad)
+            try:
+                ifile_path, _ifile_rec = save_state_ifile(
+                    mygs, os.path.abspath(f"{header}_count={count}.ifile"),
+                    p_sep=_p_lcfs, **_ifile_kw)
+            except SnapshotRestoreError as _if_exc:
+                _reject(count, "ifile_restore_failed", "save", _if_exc)
+                try:
+                    if _warmstart_eq_snap is not None:
+                        mygs.replace_eq(source_eq=_warmstart_eq_snap)
+                    else:
+                        mygs.set_coil_currents(_baseline_coils)
+                        mygs.set_psi(_baseline_psi, update_bounds=True)
+                except Exception:
+                    pass
+                if os.path.exists(eqdsk_filename):
+                    os.remove(eqdsk_filename)
+                if pbar is not None:
+                    pbar.update(1)
+                continue
 
         # Capture a high-resolution LCFS trace at the SAME mygs state
         # we just saved the eqdsk from.  The eqdsk's RBBBS/ZBBBS is only
@@ -8174,6 +8366,14 @@ def generate_bouquet(
             profile_coord=coord,
             ifile_filepath=ifile_path,
         )
+        if _ifile_rec is not None:
+            stamp_group_attrs(header, scan_key, count, _ifile_rec)
+        # a rescued draw says so in the archive (owner decision D5); nothing
+        # is written while the rescue is off
+        _rescue_stamp = (solve_guard.draw_stamp(count)
+                         if solve_guard is not None else None)
+        if _rescue_stamp:
+            stamp_group_attrs(header, scan_key, count, _rescue_stamp)
         # the method's own per-draw record (engine block, swb attrs)
         _m.store_draw(header, count, scan_key, diagnostics)
         # the draw's edge-pressure record: its p_sep and both pressure frames

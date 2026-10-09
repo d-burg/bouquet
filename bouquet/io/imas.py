@@ -94,17 +94,42 @@ if TYPE_CHECKING:
 
 
 @functools.lru_cache(maxsize=2)
-def _cached_dd(ids_path: str, _mtime_ns: int, _size: int) -> dict:
-    """Parsed ``dd_sim.json`` (up to ~1 GB), cached per (path, mtime, size):
-    a slice sweep reads one file once.  Shared: callers must not mutate it."""
+def _cached_dd(ids_path: str, _mtime_ns: int, _size: int,
+               _ino: int = 0) -> dict:
+    """Parsed ``dd_sim.json`` (up to ~1 GB), cached per (real path, mtime,
+    size, inode): a slice sweep reads one file once.
+
+    READ-ONLY CONTRACT: the cache hands out the SAME parsed object to every
+    caller (the legacy reader, the unified engine's ``IdsAdapter.read``,
+    ``read_imas_geometry`` and the plotting readers).  No caller may write
+    into it; anything that slices or edits a dd (``_slice_in_time`` in
+    ``write_imas_draw``) must work on its own fresh ``json.load`` or a deep
+    copy.  ``tests/test_imas_dd_cache.py`` pins this by digest.
+
+    MEMORY: up to two parsed files (about 2x the file size each, so ~2 GB
+    for a 1 GB dd) stay resident for the life of the process -- in a
+    ``run_parallel`` pool, in every worker for the whole of ``generate()``.
+    :func:`clear_dd_cache` releases them."""
     with open(ids_path, "rb") as fh:
         return json.loads(fh.read())
 
 
-def _load_dd(ids_path: str) -> dict:
-    """``dd_sim.json`` at ``ids_path``, via :func:`_cached_dd`."""
-    st = os.stat(ids_path)
-    return _cached_dd(ids_path, st.st_mtime_ns, st.st_size)
+def _load_dd(ids_path) -> dict:
+    """``dd_sim.json`` at ``ids_path``, via :func:`_cached_dd` (shared,
+    read-only).  Keyed on the real path (``"dd.json"``, its absolute path
+    and a ``Path`` share one entry), mtime_ns, size and inode (a file
+    replaced by rename is re-read).  Limitation: a same-size rewrite within
+    the filesystem's mtime granule, or one seen through a stale NFS
+    attribute cache, is served from the cache -- call
+    :func:`clear_dd_cache` after rewriting a dd in place."""
+    path = os.path.realpath(os.fspath(ids_path))
+    st = os.stat(path)
+    return _cached_dd(path, st.st_mtime_ns, st.st_size, st.st_ino)
+
+
+def clear_dd_cache() -> None:
+    """Release every cached parsed dd (see :func:`_cached_dd`)."""
+    _cached_dd.cache_clear()
 
 # Core-source identifier index for neutral-beam current drive.
 NBI_SOURCE_INDEX = 2          # neutral beam injection -> summed into j_NBI
@@ -1551,48 +1576,220 @@ def _subtract_fast_ni(psi_N, ni, ni_fuse_thermal, z_fast, z2_fast, impurity_Z):
         "evidence": evidence}
 
 
-def _hybrid_timing(source, T, t_eq, t_cp, aux, tol=1e-6):
-    """ida_hybrid: the IDA read time (``source.ida_time``, else ``T``), recording the dd
-    slice times on ``aux``. Warns when ``T`` is not a slice both core_profiles and
-    equilibrium hold exactly (a FUSE macro step): j_bootstrap is then not from the
-    slice asked for."""
+#: The time rule of the ida_hybrid IDA slice (#73 review; the source-time
+#: rule of the core_sources reads applied to the IDA file's own time base),
+#: stamped on every record.
+IDA_TIME_RULE = (
+    "IDA slice: nearest own slice to the requested time (ImasSource.ida_time, "
+    "else the dd slice time), never interpolated, accepted within half the "
+    "IDA file's local time-step (a single-slice IDA file: half the local "
+    "core_profiles step when paired with the dd time, the 1e-05 s floor "
+    "IMAS_SINGLE_TIME_WINDOW_S for an explicit ida_time); paired with the dd "
+    "time (ida_time None) it must also lie within half the local "
+    "core_profiles step of the core_profiles slice read; else refused; dt "
+    "recorded")
+
+
+def _hybrid_timing(source, T, t_eq, t_cp, aux, tol=1e-6, *, cp_times=None,
+                   ida_times=None):
+    """ida_hybrid: the IDA slice time to read, matched by :data:`IDA_TIME_RULE`.
+
+    Records the dd slice times on ``aux`` (``fuse_time_cp``,
+    ``fuse_time_eq``) and the match on ``aux["ida_time_match"]`` (requested
+    and used times, ``dt``, the window and its basis, the offset from the
+    core_profiles slice), which the reader archives in ``li_metrics``.
+    Warns when ``T`` is not a slice both core_profiles and equilibrium hold
+    exactly (a FUSE macro step): j_bootstrap is then not from the slice asked
+    for.  ``ida_times`` [s] defaults to the time base of
+    ``source.ida_path``; ``cp_times`` is the dd's core_profiles time base.
+
+    Raises ``ValueError`` when no IDA slice lies within the window -- the
+    kinetics are never read at another time silently."""
+    import warnings
     t_eq, t_cp = float(t_eq), float(t_cp)
     aux["fuse_time_cp"], aux["fuse_time_eq"] = t_cp, t_eq
     if T is not None and (abs(t_cp - T) > tol or abs(t_eq - t_cp) > tol):
-        import warnings
         warnings.warn(f"ida_hybrid: time={T} s is not a dd macro step (core_profiles "
                       f"{t_cp} s, equilibrium {t_eq} s); its j_bootstrap was not computed "
                       f"on the IDA slice it is paired with")
-    t_ida = getattr(source, "ida_time", None)
-    return T if t_ida is None else float(t_ida)
+    t_cfg = getattr(source, "ida_time", None)
+    explicit = t_cfg is not None
+    t_req = (float(t_cfg) if explicit else
+             float(T) if T is not None else t_cp)
+    if ida_times is None:
+        from .ida import ida_time_base
+        ida_times = ida_time_base(source.ida_path)
+    tt = np.asarray(ida_times, dtype=float).ravel()
+    if tt.size == 0:
+        raise ValueError("ida_hybrid: the IDA file has an empty time base")
+    k = int(np.argmin(np.abs(tt - t_req)))
+    t_used = float(tt[k])
+    dt = t_used - t_req
+    grid = np.unique(tt)
+    half_dd = _half_local_step(cp_times, t_cp, t_used)
+    if grid.size >= 2:
+        kg = int(np.argmin(np.abs(grid - t_used)))
+        half = 0.5 * _local_step(grid, kg, t_req)
+        basis = "half the IDA file's local time-step"
+    elif not explicit and half_dd is not None:
+        half = half_dd
+        basis = ("single-slice IDA file: half the local core_profiles "
+                 "time-step")
+    else:
+        half = IMAS_SINGLE_TIME_WINDOW_S
+        basis = "single-slice IDA file: the floor IMAS_SINGLE_TIME_WINDOW_S"
+    rec = dict(rule=IDA_TIME_RULE, ida_time_configured=t_cfg,
+               ida_time_requested=t_req, ida_time_used=t_used, dt=dt,
+               half_window=float(half), window_basis=basis,
+               ida_n_times=int(tt.size), fuse_time_cp=t_cp, fuse_time_eq=t_eq,
+               dd_offset=t_used - t_cp,
+               dd_half_window=None if half_dd is None else float(half_dd),
+               pairing_consistent=None, replayed_ida_time=None,
+               pairing_table=None)
+    aux["ida_time_match"] = rec
+    span = f"{tt.min():.9g}-{tt.max():.9g} s" if tt.size > 1 else f"{tt[0]:.9g} s"
+    if abs(dt) > half:
+        raise ValueError(
+            f"ida_hybrid: no IDA slice within {basis} ({half:.3g} s) of the "
+            f"requested {'ida_time' if explicit else 'time'} {t_req:.9g} s "
+            f"(nearest IDA slice {t_used:.9g} s, |dt| = {abs(dt):.3g} s; the "
+            f"IDA file holds {span}).  Refusing rather than reading the "
+            "kinetics at another time (never interpolated)")
+    if not explicit:
+        hd = half_dd if half_dd is not None else (
+            half if grid.size >= 2 else IMAS_SINGLE_TIME_WINDOW_S)
+        if abs(t_used - t_cp) > hd:
+            raise ValueError(
+                f"ida_hybrid: the IDA slice {t_used:.9g} s is "
+                f"{abs(t_used - t_cp):.3g} s from the core_profiles slice "
+                f"read ({t_cp:.9g} s), more than half its local time-step "
+                f"({hd:.3g} s): the kinetics would not belong to the dd slice "
+                "they are paired with.  Refusing; set ImasSource.ida_time to "
+                "pair this dd slice with that IDA slice deliberately")
+    elif half_dd is not None and abs(t_used - t_cp) > 2.0 * half_dd:
+        warnings.warn(
+            f"ida_hybrid: ida_time {t_used:.9g} s is "
+            f"{abs(t_used - t_cp):.3g} s from the dd slice {t_cp:.9g} s, more "
+            "than one local dd time-step: check the pairing (recorded as "
+            "ida_time_match.dd_offset)")
+    return t_used
 
 
-def _check_replay_pairing(ids_path, aux, tol=1e-6):
-    """``aux['pairing_consistent']``: whether FUSE's own replay_pairing (ida_provenance.json
-    beside ``ids_path``) says dd j_bootstrap at ``aux['fuse_time_cp']`` was computed on
-    ``aux['ida_time_used']``; None when no table. Read only, never derived."""
+def _check_replay_pairing(ids_path, aux, tol=1e-6, *, ida_path=None):
+    """``aux['pairing_consistent']``: whether FUSE's own replay_pairing
+    (``ida_provenance.json`` beside ``ids_path``, written by the external
+    IDA_fuse tooling) says dd j_bootstrap at ``aux['fuse_time_cp']`` was
+    computed on ``aux['ida_time_used']``; None when there is no table, when
+    it is unreadable, or when it does not describe this run.  Read only,
+    never derived, never raises.
+
+    The table is trusted only when it is BOUND to this run: its
+    ``ida_file`` must be this run's IDA file (*ida_path*; same real path, or
+    the same file name when the table was written on another host), its
+    ``sim_times`` (when present) must hold the dd slice time, and an
+    optional ``dd_sha256`` must be the dd's own.  A directory match alone is
+    not enough (a stale table from another run would otherwise answer).
+    Rows lacking ``outcome`` (or other keys) are tolerated.  The binding
+    and the verdict are written to ``aux['ida_time_match']`` too."""
     import json
-    import os
+    import warnings
     aux["pairing_consistent"] = None
+    rec = aux.get("ida_time_match")
+    table = dict(file="ida_provenance.json", status="absent", bound_by=None)
+    if rec is not None:
+        rec["pairing_table"] = table
     path = os.path.join(os.path.dirname(os.path.abspath(ids_path)), "ida_provenance.json")
     try:
         with open(path) as fh:
-            rows = json.load(fh).get("replay_pairing")
-    except (OSError, ValueError):
+            prov = json.load(fh)
+    except OSError:
         return
+    except ValueError:
+        table["status"] = "unreadable"
+        return
+    if not isinstance(prov, dict):
+        table["status"] = "unreadable"
+        return
+    rows = prov.get("replay_pairing")
     if not rows:
+        table["status"] = "no replay_pairing"
         return
-    row = min(rows, key=lambda r: abs(float(r["t_sim"]) - aux["fuse_time_cp"]))
-    if abs(float(row["t_sim"]) - aux["fuse_time_cp"]) > tol:
+    t_cp = aux.get("fuse_time_cp")
+    # bind the table to this run: the IDA file, the dd slice, the dd itself
+    why = None
+    ida_file = prov.get("ida_file")
+    if ida_file is None or ida_path is None:
+        why = "the table names no ida_file" if ida_file is None else \
+            "no IDA file to compare"
+    elif os.path.realpath(str(ida_file)) == os.path.realpath(str(ida_path)):
+        table["bound_by"] = "ida_file path"
+    elif os.path.basename(str(ida_file)) == os.path.basename(str(ida_path)):
+        table["bound_by"] = "ida_file name"
+    else:
+        why = (f"its ida_file {os.path.basename(str(ida_file))!r} is not this "
+               f"run's {os.path.basename(str(ida_path))!r}")
+    sim = prov.get("sim_times")
+    if why is None and sim is not None and t_cp is not None:
+        try:
+            ok_t = any(abs(float(t) - t_cp) <= tol for t in sim)
+        except (TypeError, ValueError):
+            ok_t = False
+        if not ok_t:
+            why = f"its sim_times do not hold the dd slice {t_cp:.9g} s"
+    if why is None and prov.get("dd_sha256"):
+        if _sha256_file(ids_path) != str(prov["dd_sha256"]):
+            why = "its dd_sha256 is not this dd's"
+        else:
+            table["bound_by"] += " + dd_sha256"
+    if why is not None:
+        table["status"] = f"not bound to this run: {why}"
+        warnings.warn(f"ida_hybrid: {path} does not describe this run ({why}); "
+                      "the replay pairing is not checked (pairing_consistent=None)")
         return
-    ok = row["ida_time"] is not None and abs(float(row["ida_time"]) - aux["ida_time_used"]) <= tol
+    good = []
+    for r in rows:
+        try:
+            good.append((abs(float(r["t_sim"]) - t_cp), r))
+        except (KeyError, TypeError, ValueError):
+            continue
+    if not good or t_cp is None:
+        table["status"] = "no usable rows"
+        return
+    d, row = min(good, key=lambda x: x[0])
+    if d > tol:
+        table["status"] = "no row at the dd slice"
+        return
+    r_ida = row.get("ida_time")
+    try:
+        ok = r_ida is not None and abs(float(r_ida) - aux["ida_time_used"]) <= tol
+    except (TypeError, ValueError):
+        ok = False
+    table["status"] = "checked"
     aux["pairing_consistent"] = ok
-    aux["replayed_ida_time"] = row["ida_time"]
+    aux["replayed_ida_time"] = r_ida
+    if rec is not None:
+        rec.update(pairing_consistent=ok, replayed_ida_time=r_ida,
+                   replay_outcome=row.get("outcome"))
     if not ok:
-        import warnings
-        warnings.warn(f"ida_hybrid: dd j_bootstrap at {aux['fuse_time_cp']} s was computed on "
-                      f"IDA {row['ida_time']} ({row['outcome']}), not the IDA slice read "
-                      f"({aux['ida_time_used']} s)")
+        warnings.warn(f"ida_hybrid: dd j_bootstrap at {t_cp} s was computed on "
+                      f"IDA {r_ida} ({row.get('outcome', 'outcome not recorded')}), "
+                      f"not the IDA slice read ({aux['ida_time_used']} s)")
+
+
+@functools.lru_cache(maxsize=4)
+def _sha256_cached(path, _mtime_ns, _size):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 22), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _sha256_file(path):
+    p = os.path.realpath(path)
+    st = os.stat(p)
+    return _sha256_cached(p, st.st_mtime_ns, st.st_size)
 
 
 def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impurity_Z,
@@ -1878,7 +2075,8 @@ def read_imas_baseline(
     j_sawteeth = s_ip * to_jphi(_m * _saw)
 
     # --- sawtooth model presence/amplitude at this slice (gate input only) ----
-    # Read here because the dd (100s of MB) is not retained past this function.
+    # Read here, from the same parsed dd as the currents above (the cached,
+    # read-only _load_dd object), so no second pass over the file is needed.
     # "active" means the source EXISTS and carries a non-zero j_parallel at this
     # SLICE TIME: a declared-but-idle sawtooth source (all zeros before onset)
     # must NOT admit a ramp slice to the q0 pin.  The entry is read at the
@@ -2005,6 +2203,15 @@ def read_imas_baseline(
     # ni via source.ni_source; Zeff from IDA unless source.zeff_from_fuse. Done
     # before the pressure block so p_recon/Z_imp/p_imp use the IDA kinetics.
     use_ida = bool(kinetic_source == "ida_hybrid" and getattr(source, "ida_path", None))
+    if getattr(source, "ida_time", None) is not None and not use_ida:
+        # #73 review B6: outside ida_hybrid ida_time would move only the
+        # IDA sigmas (resolve_uncertainty), not the kinetics -- refused
+        raise ValueError(
+            f"ImasSource.ida_time={source.ida_time!r} is set but the kinetics "
+            f"do not come from an IDA file (kinetic_source={kinetic_source!r}, "
+            f"ida_path={getattr(source, 'ida_path', None)!r}); it times only "
+            "the ida_hybrid IDA slice -- unset it, or use "
+            "kinetic_source='ida_hybrid' with an ida_path")
     zeff_includes_fast = dd_zeff_includes_fast
     # Geometry guard: does the dd place its profiles where the g-file does?
     _drift = None
@@ -2020,7 +2227,8 @@ def read_imas_baseline(
                    f"{'psi_N' if coord == _coords.PSI else 'Phi_N'})"
                    if use_ida else ""))
     if use_ida:
-        T_ida = _hybrid_timing(source, T, eq["time"][ie], cp_ids["time"][ic], aux)
+        T_ida = _hybrid_timing(source, T, eq["time"][ie], cp_ids["time"][ic], aux,
+                               cp_times=cp_ids["time"])
         (ne, te, ti, ni, Zeff, _omega,
          sigma_ne_ida, sigma_te_ida, sigma_ni_ida, sigma_ti_ida,
          _ida_read, _ni_fast_meta, _ida_map) = _merge_ida_kinetics(
@@ -2056,7 +2264,12 @@ def read_imas_baseline(
         # opening the same file again (and possibly at another slice).
         aux["ida_profiles"] = (str(source.ida_path), _ida_read)
         aux["ida_time_used"] = float(_ida_read.time)
-        _check_replay_pairing(source.ids_path, aux)
+        if aux["ida_time_used"] != T_ida:       # the matched slice, exactly
+            raise RuntimeError(
+                f"ida_hybrid: read_ida returned the slice at "
+                f"{aux['ida_time_used']!r} s, not the matched {T_ida!r} s")
+        _check_replay_pairing(source.ids_path, aux,
+                              ida_path=source.ida_path)
         aux["sigma_ne_ida"] = sigma_ne_ida
         aux["sigma_te_ida"] = sigma_te_ida
         aux["sigma_ni_ida"] = sigma_ni_ida
@@ -2292,7 +2505,12 @@ def read_imas_baseline(
         # from the kinetic profiles.
         pfile_bytes=None,
         li_metrics={"ids_li_1": ids_li_1, "ids_li_3": ids_li_3,
-                    "imas_current_conversion": cur_conv},
+                    "imas_current_conversion": cur_conv,
+                    # ida_hybrid: which IDA slice was paired with this dd
+                    # slice and how (archived with li_metrics on every
+                    # route, like source_time_match)
+                    **({"ida_time_match": dict(aux["ida_time_match"])}
+                       if "ida_time_match" in aux else {})},
         aux=aux,
         p_fast_meta=p_fast_meta,
         sawtooth=sawtooth,

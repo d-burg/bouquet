@@ -191,7 +191,9 @@ _UNREAD_SET = dict(
     anchor_pressure_to_equilibrium=True, imas_corrective_jphi=True,
     jbs_loop_q0_corrector=True, floor_j_BS=True,
     accept_anchor_inband=True, diagnostic_plots=True,
-    isolate_edge_jBS=False, perturb_jind_in_anchor=True)
+    isolate_edge_jBS=False, perturb_jind_in_anchor=True,
+    draw_solve_maxits=40, draw_solve_retry_urf=(0.1,),
+    draw_solve_loose_tol=2e-5)
 
 
 def test_every_unread_field_has_a_stored_load_case():

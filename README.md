@@ -58,9 +58,20 @@ pip install -e ".[dev]"
 **Requires [OpenFUSIONToolkit](https://github.com/hansec/OpenFUSIONToolkit)
 v26.6 or newer** for equilibrium generation (v26.6 introduced the dict-form
 flux-surface-average returns that the exact-fidelity per-draw geometry capture
-depends on; legacy positional layouts are still supported). OFT is installed
-separately, following its own instructions; `tools/install_oft.py` builds a
-given OFT branch or commit, reusing already built external libraries (`--libs`).
+depends on, and `get_fsa`, whose per-surface `R_min`/`R_max` give the Redl
+bootstrap its geometric ε; legacy positional layouts are still supported). An
+upstream build is enough for the default paths (the unified engine and the
+legacy loop). Only two opt-ins need a toolkit with the internal Fortran
+bootstrap solve (OpenFUSIONToolkit PR #271, or a fork carrying it):
+`imas_baseline="swb"` / `solve_method="swb"`, and the `bootstrap_kwargs` keys
+that configure that solve on the legacy path (`use_python_solve`, `djBS_tol`,
+`taper_edge_*`, ...; refused by name on a toolkit without them). Where that
+toolkit's `sauter_fc(return_eps=True)` exists, bouquet takes ε from it; the
+two routes agree. OFT is installed separately, following its own
+instructions; `tools/install_oft.py` builds upstream `main` by default, any
+other repository or branch only when named (`--repo`, `--ref`), reusing
+already built external libraries (`--libs`), and never repoints an existing
+clone's remote.
 Everything else — the GEQDSK/p-file/
 IDA/IMAS readers, COCOS conversion, archive reading, and all plotting — works
 without it. Python dependencies (`numpy`, `scipy`, `matplotlib`, `h5py`) are

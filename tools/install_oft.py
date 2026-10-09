@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 """Build OpenFUSIONToolkit (OFT) at a branch or commit for bouquet.
 
-    python tools/install_oft.py --prefix ~/oft [--ref bouquet_dev] [--repo URL|PATH]
+    python tools/install_oft.py --prefix ~/oft [--ref main] [--repo URL|PATH]
                                 [--libs DIR] [--jobs N]
+
+Defaults to upstream OpenFUSIONToolkit ``main``; any other repository or
+branch (e.g. a fork carrying the internal Fortran bootstrap solve) only by an
+explicit ``--repo`` / ``--ref``.  An existing clone under --prefix is used
+only if its ``origin`` already is ``--repo``: the script never repoints a
+clone's remote (``git remote set-url``) -- give another --prefix instead.
 
 Under --prefix: OpenFUSIONToolkit/ (clone), src_<sha>/ (worktree),
 build_<sha>/ and install_<sha>/.  The external libraries (OFT's
@@ -23,8 +29,10 @@ import shutil
 import subprocess
 import sys
 
-REPO = "https://github.com/StuartBenjamin/OpenFUSIONToolkit.git"
-REF = "bouquet_dev"
+#: Upstream OpenFUSIONToolkit (the repository bouquet's README names) and its
+#: main branch.  A fork / feature branch is used only when named explicitly.
+REPO = "https://github.com/hansec/OpenFUSIONToolkit.git"
+REF = "main"
 LIBS_ARGS = "--build_umfpack=1 --build_arpack=1"
 DONE = ".install_oft_done"
 
@@ -45,12 +53,36 @@ def _git(clone, *args):
     return r.stdout.strip() if r.returncode == 0 else None
 
 
+def _same_repo(a, b):
+    """True when two repository spellings name the same repository (a URL up
+    to a trailing ``.git`` / slash and case of the host, or the same local
+    directory)."""
+    def norm(u):
+        u = (u or "").strip()
+        if os.path.isdir(os.path.expanduser(u)):
+            return os.path.realpath(os.path.expanduser(u))
+        u = u.rstrip("/")
+        if u.endswith(".git"):
+            u = u[:-4]
+        return u.lower()
+    return norm(a) == norm(b)
+
+
 def checkout(prefix, repo, ref):
-    """A detached worktree of ``ref``; returns (source dir, short sha)."""
+    """A detached worktree of ``ref``; returns (source dir, short sha).
+
+    A clone already at ``<prefix>/OpenFUSIONToolkit`` is used only when its
+    ``origin`` is ``repo``; otherwise this refuses (it never runs ``git
+    remote set-url`` on a clone it may not own)."""
     clone = os.path.join(prefix, "OpenFUSIONToolkit")
     if not os.path.isdir(clone):
         _run(["git", "clone", "--no-checkout", repo, clone])
-    _run(["git", "-C", clone, "remote", "set-url", "origin", repo])
+    else:
+        origin = _git(clone, "remote", "get-url", "origin")
+        if origin is None or not _same_repo(origin, repo):
+            sys.exit(f"{clone} already exists with origin {origin!r}, not "
+                     f"{repo!r}; refusing to repoint it.  Use another "
+                     "--prefix, or --repo with that clone's own origin.")
     _run(["git", "-C", clone, "fetch", "--quiet", "origin"])
     sha = next((s for r in (f"origin/{ref}", ref)
                 if (s := _git(clone, "rev-parse", "--verify", "--short=7", r + "^{commit}"))), None)
@@ -102,15 +134,23 @@ def configure_script(cfg, src, build, install):
 
 
 def check(install):
-    """Import OFT from ``install``; warn if bouquet's sauter_fc(return_eps) is missing."""
+    """Import OFT from ``install`` and refuse a build bouquet's Redl
+    evaluator cannot run on: its geometric epsilon needs ``get_fsa`` (OFT
+    v26.6+) or the fork's ``sauter_fc(return_eps=True)``.  Says which."""
     code = ("import inspect; from OpenFUSIONToolkit.TokaMaker import TokaMaker; "
-            "print('return_eps' in inspect.signature(TokaMaker.sauter_fc).parameters)")
+            "print(hasattr(TokaMaker, 'get_fsa'), "
+            "'return_eps' in inspect.signature(TokaMaker.sauter_fc).parameters)")
     env = dict(os.environ, OFT_INSTALL_DIR=install, PYTHONPATH=os.path.join(install, "python"))
     r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
     if r.returncode:
         sys.exit(f"OFT import failed from {install}:\n{r.stderr[-2000:]}")
-    if r.stdout.strip() != "True":
-        print("warning: this build has no sauter_fc(return_eps=True), which bouquet's evaluate_jBS needs")
+    has_fsa, has_eps = (w == "True" for w in r.stdout.split()[:2])
+    if not (has_fsa or has_eps):
+        sys.exit("this OFT build has neither TokaMaker.get_fsa (v26.6+) nor "
+                 "sauter_fc(return_eps=True): bouquet's evaluate_jBS cannot "
+                 "compute its default (geometric) epsilon on it")
+    print("geometric epsilon route: "
+          + ("sauter_fc(return_eps=True)" if has_eps else "get_fsa"))
 
 
 def install_oft(prefix, ref=REF, repo=REPO, libs=None, jobs=2, libs_args=LIBS_ARGS, rebuild=False):
@@ -121,13 +161,21 @@ def install_oft(prefix, ref=REF, repo=REPO, libs=None, jobs=2, libs_args=LIBS_AR
     os.makedirs(prefix, exist_ok=True)
     src, sha = checkout(prefix, repo, ref)
     build, install = (os.path.join(prefix, f"{d}_{sha}") for d in ("build", "install"))
-    if rebuild or not os.path.isfile(os.path.join(install, DONE)):
+    done = os.path.join(install, DONE)
+    stamp = f"{sha}\nlibs={os.path.abspath(libs) if libs else '<prefix>/libs'} {libs_args}\n"
+    # a marker of the older format (the sha alone) says nothing about the
+    # libraries: kept, not rebuilt (the build is hours)
+    if (os.path.isfile(done) and not rebuild
+            and open(done).read() not in (stamp, sha + "\n")):
+        print(f"{install} was built with other libraries; rebuilding")
+        rebuild = True
+    if rebuild or not os.path.isfile(done):
         text = configure_script(libs_config(prefix, src, libs, libs_args, jobs), src, build, install)
         script = os.path.join(prefix, f"config_cmake_{sha}.sh")
         open(script, "w").write(text)
         _run(["bash", script], cwd=prefix, log=os.path.join(prefix, f"cmake_{sha}.log"))
         _run(["make", f"-j{jobs}", "install"], cwd=build, log=os.path.join(prefix, f"make_{sha}.log"))
-        open(os.path.join(install, DONE), "w").write(sha + "\n")
+        open(done, "w").write(stamp)
     else:
         print(f"reusing {install} ({sha})")
     check(install)
@@ -137,8 +185,10 @@ def install_oft(prefix, ref=REF, repo=REPO, libs=None, jobs=2, libs_args=LIBS_AR
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--prefix", required=True, help="where the clone, builds and installs go")
-    p.add_argument("--ref", default=REF, help=f"branch or commit (default {REF})")
-    p.add_argument("--repo", default=REPO, help="OFT git URL or local clone (default %(default)s)")
+    p.add_argument("--ref", default=REF, help=f"branch or commit (default {REF}, upstream)")
+    p.add_argument("--repo", default=REPO,
+                   help="OFT git URL or local clone (default: upstream, %(default)s); "
+                        "a fork only when named here")
     p.add_argument("--libs", help="existing build_libs.py output directory to reuse")
     p.add_argument("--libs-args", default=LIBS_ARGS, help="build_libs.py options (default %(default)r)")
     p.add_argument("--jobs", type=int, default=2, help="make / build_libs threads (default 2)")

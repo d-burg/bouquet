@@ -283,3 +283,12 @@ def test_edge_taper_is_opt_in(swb_oft):
     assert swb_bootstrap_kwargs(gc, known=with_taper) == {
         "diagnose_bs": True, "taper_edge_jBS": True, "taper_edge_psi0": 0.999}
     assert gc.bootstrap_kwargs == {"diagnose_bs": True}          # not mutated
+
+def test_the_swb_redraw_refusal_is_a_registered_rejection_code():
+    """B.md item 4: the code SwbDraws gives a refused seed redraw is in
+    the rejection registry every rejection record is described from."""
+    from bouquet.TokaMaker_interface import DRAW_REJECTION_REASONS
+    d = SD.SwbDraws.__new__(SD.SwbDraws)
+    code = d.rejection_reason(SD.SwbSeedRedrawRefused("no redraw"), "perturb")
+    assert code == SD.SWB_JIND_REJECTION
+    assert code in DRAW_REJECTION_REASONS

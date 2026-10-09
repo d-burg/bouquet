@@ -183,6 +183,13 @@ DRAW_REJECTION_REASONS = {
                             "i-file save failed (write_ifile): the state the "
                             "save's tracer left is not trusted, the warm "
                             "start is restored and the draw is not archived",
+    # solve_method="swb" draws (bouquet.swb_draws.SWB_JIND_REJECTION)
+    "swb_jind_redraw_refused": "an swb draw's GPR redraw of the inductive "
+                               "seed found no non-negative sample in "
+                               "SWB_JIND_MAX_RESAMPLES tries (or the seed's "
+                               "axis value is not positive): the draw is "
+                               "refused rather than run on the unperturbed "
+                               "seed (review PR69 B3)",
 }
 
 

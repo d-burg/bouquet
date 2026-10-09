@@ -1,0 +1,28 @@
+digraph chapters {
+  graph [rankdir=LR, fontname="Helvetica", fontsize=10, nodesep=0.22, ranksep=0.28, bgcolor="white", newrank=true];
+  node  [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=9, fillcolor="#FFFFFF", width=1.55, height=0.62, fixedsize=true];
+  edge  [color="#000000", arrowsize=0.6];
+  main [label="main", shape=cylinder, fillcolor="#00000010", width=0.7];
+  c01 [label="1  MSE term\n(opt-in)", fillcolor="#56B4E933"];
+  c02 [label="2  bootstrap loop\nkernel (off)", fillcolor="#56B4E933"];
+  c03 [label="3  bootstrap loop\non by default", fillcolor="#56B4E933"];
+  c04 [label="4  reversed-Ip\n(in-line copy)", fillcolor="#E69F0033"];
+  c05 [label="5  loop review fixes,\none recon. state", fillcolor="#56B4E933"];
+  c06 [label="6  engine base,\nMSE review fixes", fillcolor="#009E7333"];
+  c07 [label="7  unified engine\n(opt-in)", fillcolor="#009E7333"];
+  c08 [label="8  engine draws", fillcolor="#009E7333"];
+  c09 [label="9  orientation\nfixes", fillcolor="#E69F0033"];
+  c10 [label="10  validation +\nedge pressure", fillcolor="#009E7333"];
+  c11 [label="11  approved\ndefaults", fillcolor="#D55E0033"];
+  c12 [label="12  review fixes,\ncanonical coil solve", fillcolor="#D55E0033"];
+  land [label="one merge\ncommit into main", shape=box, style="rounded,dashed", width=1.35];
+  { rank=same; c01; c07; }
+  { rank=same; c02; c08; }
+  { rank=same; c03; c09; }
+  { rank=same; c04; c10; }
+  { rank=same; c05; c11; }
+  { rank=same; c06; c12; }
+  main -> c01 -> c02 -> c03 -> c04 -> c05 -> c06;
+  c06 -> c07 [constraint=false];
+  c07 -> c08 -> c09 -> c10 -> c11 -> c12 -> land;
+}

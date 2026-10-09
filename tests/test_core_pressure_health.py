@@ -474,6 +474,30 @@ def _region(body, start_pred, stop_pred):
     return body[i0:i1]
 
 
+def _composition_body(func):
+    """The statement list holding the pressure composition: the function's
+    own body, or -- where the reconstruction composes it per l_i-match pass
+    -- the body of its nested ``_fit_match``."""
+    body = _function_body(func)
+    for node in ast.walk(ast.Module(body=body, type_ignores=[])):
+        if isinstance(node, ast.FunctionDef) and node.name == "_fit_match":
+            return node.body
+    return body
+
+
+def _composition_names():
+    """Module-level names the composition region reads (present only on
+    builds that have them), and the reconstruction's own arguments it uses."""
+    import bouquet.TokaMaker_interface as _ti
+    ns = {k: getattr(_ti, k) for k in ("thermal_pressure_charge",
+                                       "solver_pprime")
+          if hasattr(_ti, k)}
+    if hasattr(_ti, "resolve_edge_pressure"):
+        ns["_edge"] = _ti.resolve_edge_pressure(None)
+    ns["jbs_loop"] = None
+    return ns
+
+
 def _assigns(name):
     def pred(s):
         return (isinstance(s, ast.Assign) and len(s.targets) == 1
@@ -503,7 +527,7 @@ def _kinetics(psi_N):
 def test_reconstruction_pressure_composition_is_bit_identical():
     from bouquet.TokaMaker_interface import reconstruct_equilibrium
     from bouquet.utils import pchip_derivative
-    body = _function_body(reconstruct_equilibrium)
+    body = _composition_body(reconstruct_equilibrium)
     region = _region(body, _assigns("pres_tmp"), _assigns("ffp_prof"))
     psi_N = np.linspace(0.0, 1.0, 129)
     ne, te, ni, ti = _kinetics(psi_N)
@@ -516,7 +540,10 @@ def test_reconstruction_pressure_composition_is_bit_identical():
               "ne": ne.copy(), "te": te.copy(), "ni": ni.copy(),
               "ti": ti.copy(), "p_fast": p_fast.copy(), "Z_imp": 6.0,
               "eqdsk": SimpleNamespace(psi_N=psi_N.copy()),
-              "mygs": SimpleNamespace(psi_bounds=(-0.4, 0.15))}
+              "mygs": SimpleNamespace(psi_bounds=(-0.4, 0.15)),
+              **_composition_names(),
+              "_x": psi_N.copy(), "coord": "psi_n",
+              "coords": __import__("bouquet.coords", fromlist=["x"])}
         removed = _run(region, ns, strip)
         if strip:
             assert removed >= 3, "the _pc statements were not found"
@@ -598,12 +625,12 @@ def test_a_failing_record_cannot_escape_either_call_site(monkeypatch):
     ns = {"__name__": "bouquet.run", "__package__": "bouquet", "np": np,
           "psi_N": psi_N, "p_total": p, "_pc": {}, "mygs": _Gs(),
           "core_pressure_hollow_record": boom}
-    _run([_health_try(Bouquet._forward_solve_imas_baseline)], ns, strip=False)
+    _run([_health_try(Bouquet._finish_imas_baseline)], ns, strip=False)
     assert "synthetic failure" in ns["_cph"]["unavailable"]
 
     # and with the real record: a failing get_profiles is recorded, not raised
     ns["core_pressure_hollow_record"] = core_pressure_hollow_record
-    _run([_health_try(Bouquet._forward_solve_imas_baseline)], ns, strip=False)
+    _run([_health_try(Bouquet._finish_imas_baseline)], ns, strip=False)
     ach = ns["_cph"]["achieved"]["total"]
     assert ach["evaluated"] is False and "no equilibrium" in ach["reason"]
     assert ns["_cph"]["input"]["total"]["evaluated"] is True

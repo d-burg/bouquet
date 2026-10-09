@@ -12,7 +12,8 @@ OpenFUSIONToolkit/TokaMaker.
 bouquet generates families ("bouquets") of perturbed equilibria from a baseline
 kinetic equilibrium: correlated Gaussian-process perturbations of n_e, T_e,
 T_i, Z_eff-consistent densities and j_phi drawn within measured uncertainties,
-per-draw Sauter bootstrap recomputation, l_i band conditioning against
+a per-draw bootstrap iterated to self-consistency with each solved
+equilibrium (Redl), l_i band conditioning against
 magnetics, a Grad–Shafranov solve per sample, and coil/boundary in-spec
 filtering — all archived to one self-describing, provenance-stamped HDF5
 database.
@@ -24,8 +25,10 @@ database.
   the separated currents, kinetic profiles, and fast-ion pressure.
 - **Perturb, condition, solve.** Kinetic profiles are sampled from a GP
   posterior with spatially varying correlation lengths; densities follow from
-  quasi-neutrality with the drawn Z_eff; the bootstrap is recomputed per draw
-  and the inductive current is scaled to hold l_i in band.
+  quasi-neutrality with the drawn Z_eff; the bootstrap is re-evaluated on each
+  draw's own equilibrium until it is self-consistent (`jbs_self_consistent`,
+  on by default; `False` keeps the legacy frozen bootstrap) and the inductive
+  current is scaled to hold l_i in band.
 - **Coil-realizable by construction.** Each GS solve runs under a progressive
   coil-bound homotopy, and every draw is tagged `in_spec` against
   engineering-motivated coil-drift and boundary-RMS thresholds.
@@ -56,7 +59,9 @@ pip install -e ".[dev]"
 v26.6 or newer** for equilibrium generation (v26.6 introduced the dict-form
 flux-surface-average returns that the exact-fidelity per-draw geometry capture
 depends on; legacy positional layouts are still supported). OFT is installed
-separately, following its own instructions. Everything else — the GEQDSK/p-file/
+separately, following its own instructions; `tools/install_oft.py` builds a
+given OFT branch or commit, reusing already built external libraries (`--libs`).
+Everything else — the GEQDSK/p-file/
 IDA/IMAS readers, COCOS conversion, archive reading, and all plotting — works
 without it. Python dependencies (`numpy`, `scipy`, `matplotlib`, `h5py`) are
 handled by pip.
@@ -68,6 +73,132 @@ bundled example mesh), and `bq.find_ida()` locates an IDA `.cdf` (`BOUQUET_IDA`,
 a file or a directory searched recursively → walk-up) — kinetic data is
 typically too large to keep in an analysis repo, so a notebook names the file
 without naming the machine. All raise with the full list of locations tried.
+
+### Solver build requirement
+
+The self-consistent bootstrap loop and the unified reconstruction engine
+(`generation.reconstruction_engine="unified"`, the default) were validated on an
+OpenFUSIONToolkit build carrying two fixes on top of upstream, developed on the
+branch `fix/jphi-update-ravgs-and-nonfinite-abort` of the OpenFUSIONToolkit fork
+at `github.com/d-burg/OpenFUSIONToolkit`; they are not yet part of an upstream
+release:
+
+- **jphi-update flux-surface average:** the `<1/R>` average used when a
+  `j_phi` profile is handed to the solver was read one radial node off; the
+  fix uses each surface's own value.
+- **Non-finite abort:** a Grad-Shafranov solve that produces a NaN/Inf now
+  stops at once with an error, instead of iterating to the iteration cap.
+
+On an upstream build bouquet runs, but does not detect the difference (it only
+records the OFT version, git hash and the SHA-256 of the loaded OFT library in
+every archive). Measured on the
+repository's synthetic examples with the live-solver tests (`pytest -m solver`)
+on both builds: every l_i and q value the tests record agreed within 0.12 %
+(l_i(3) of the engine on the g-file example: +0.001 %; q0 and q95: ±0.09 %),
+and the pass/fail verdicts were the same apart from one test that compares with
+numbers measured on one specific build. (Measured before the canonical coil-solve
+mode below; that mode moves the same quantities by at most 5e-4 relative.) A solve that goes non-finite runs to the
+iteration cap on an upstream build (one zero-perturbation check took 5.7×
+longer). Run `verify_sigma0_consistency()` on a new machine or OFT build.
+Which commits and which build the quoted validation numbers were measured on
+is in [docs/validation-provenance.md](docs/validation-provenance.md).
+
+**Results change by default with this release:**
+
+- the **unified reconstruction engine is the default**
+  (`generation.reconstruction_engine="unified"`, was `"legacy"`): one
+  reconstruction loop for g-file and IDS inputs, which also runs the draws
+  ([docs/engine.md](docs/engine.md)). `reconstruction_engine="legacy"`
+  restores the legacy reconstruction and draws (see "Legacy or unified?"
+  below); a configuration stored before the engine existed replays as
+  `"legacy"`. Legacy-only settings are refused under the engine, with that
+  instruction;
+- one `<j.B>` -> `<j_phi>` conversion in the package, `F<1/R>/<B^2>` (the
+  engine's): the legacy bootstrap at the pedestal drops by ~6.4-6.8 % on the
+  synthetic example (it used `<j.B>/(F<1/R>)`); not switchable;
+
+The following hold on both engines:
+
+- the bootstrap is iterated to self-consistency
+  (`generation.jbs_self_consistent=True`); `False` restores the frozen
+  bootstrap (legacy engine only: the unified engine IS the loop);
+- a non-zero separatrix pressure p_sep is kept: the solver is handed the
+  axis target p_axis - p_sep (its own pressure is zero at the boundary), and
+  p_sep is added back wherever pressure, beta or W_MHD is reported or written
+  (`generation.separatrix_pressure="offset"`); `"legacy"` restores the
+  previous behaviour (the full axis pressure as the target);
+- one coil solve for the whole run: the solver's bounded coil mode is entered
+  once, at `setup_solver`, so the reconstruction, the sigma=0 check and every
+  draw use the same coil least-squares solve whatever order they run in.
+  Measured on the synthetic examples, this moves reconstructions by at most
+  5e-7 relative (l_i, q0) and archived draws by at most 5e-4 relative. Yields
+  and in-spec flags are unchanged. It is not switchable: it removes a
+  call-order dependence;
+- the draws' loop may take up to 12 passes (`jbs_max_passes_draw`, was 6),
+  and up to 6 after the homotopy (`jbs_max_passes_post_homotopy`);
+- a draw whose homotopy rollback re-solve fails is now REJECTED
+  (`homotopy_rollback_failed`) instead of continuing from a stale state.
+  This applies on both paths, so legacy yields can change;
+- the IMAS reader reads each beam (NBI) and sawteeth entry at the slice
+  TIME, never interpolated. The `core_sources` slice is the one nearest the
+  `core_profiles` slice read and must lie within half the local
+  `core_profiles` time-step of it, else the read is REFUSED naming both
+  times. Each entry is matched to its nearest own slice, accepted within
+  half its own local step AND within half the local `core_profiles` step;
+  when neither time base has a local step (single-time bases) the window is
+  10 us (`IMAS_SINGLE_TIME_WINDOW_S`, owner-approved 2026-10-07), so a
+  rounding-level mismatch of millisecond-stored times is a match with its
+  dt recorded. A beam entry with no such slice is REFUSED, never read at another time or
+  dropped to zero -- unless it carries no current on its own slices
+  bracketing that time (off there, zero), or the slice comes BEFORE its
+  first own time (off before its record: zero, stamped `off_before_record`,
+  announced once). Every match is recorded with its dt
+  (`Baseline.source_time_match`; the engine's
+  `provenance["source_time_match"]`);
+- a negative pressure at the separatrix is refused under `"offset"`, for the
+  baseline (`prepare_baseline`) as well as the draws. Setting
+  `separatrix_pressure="legacy"` builds such an input as before.
+
+A configuration stored by an earlier version (an archive's config) loads with
+a warning naming every field it changes:
+
+- a field the configuration predates gets the value it was produced with,
+  where that is knowable (a loop configuration without
+  `jbs_relax_current` / `jbs_relax_halve_on` loads with 1.0 / 1, what it
+  ran); otherwise today's default, with a LOUD warning -- on every stored
+  configuration, legacy or unified;
+- a legacy-path field that the unified engine never read loads at its
+  default, because the default is what that run used;
+- `load_config` reads back the coil-solve mode the stored run was in and
+  warns when it predates the canonical (bounded) mode.
+
+See `docs/CHANGES_SUMMARY.md` for every change and how to restore each.
+
+### Legacy or unified?
+
+Use the **unified engine** (the default) for new work: one reconstruction
+loop and one draw route for g-file and IDS inputs, every convergence row
+checked on the delivered equilibrium, and several times faster than the
+legacy path with the bootstrap loop on (reconstructions 38–76 s vs
+150–660 s, draws 60–144 s vs 405–1407 s on the shipped synthetic cases).
+Choose `reconstruction_engine="legacy"` only to reproduce or compare with an
+earlier run, or for a legacy-only feature (the closure channels and
+structured-preset settings, `jbs_self_consistent=False`, SWB mechanics, the
+`diff+C` IMAS workflow). A pre-release run is reproduced by setting
+`reconstruction_engine="legacy"`, `jbs_self_consistent=False` and
+`separatrix_pressure="legacy"` together, up to the canonical coil-solve mode
+(<= 5e-4 relative on draws) and the one current conversion (the frozen
+bootstrap is ~6.4-6.8 % lower at the pedestal), neither of which is
+switchable; a stored configuration that predates these fields gets them on
+load. Legacy-only settings on a unified configuration are refused, not
+ignored, and the error says to set `reconstruction_engine="legacy"`.
+The engine can be named at construction (`from_geqdsk` / `from_imas(...,
+reconstruction_engine="legacy")`) or set afterwards
+(`bq.generation.reconstruction_engine = "legacy"`): the order no longer
+matters, because the settings whose validated value depends on the engine
+(`isolate_edge_jBS`, `perturb_jind_in_anchor`) are left unset by the
+factories and resolved when `prepare_baseline()` runs, and the archive
+records how ([engine.md](docs/engine.md)).
 
 ## Quickstart
 
@@ -81,6 +212,7 @@ b = bq.Bouquet.from_geqdsk(
     profiles="baseline.peqdsk",      # p-file or IDA .cdf (auto-detected)
     mesh=bq.find_mesh(),
     n_draws=20, header="my_run",
+    # reconstruction_engine="legacy",  # the legacy paths (default: "unified")
 )
 
 b.reconstruct()                      # GS reconstruction + fidelity summary
@@ -126,7 +258,7 @@ cfg = bq.load_config("my_run")       # the exact BouquetConfig that made it
 |---|---|---|
 | Solver | `setup_solver()` | Stand up TokaMaker from `SolverConfig`. Idempotent |
 | Baseline | `prepare()` — or `reconstruct()` on the g-file path | Resolve the baseline; `reconstruct()` also prints the reconstruction-fidelity summary |
-| Guard (optional) | `verify_sigma0_consistency()` | One bootstrap solve confirming the *draw* pipeline reproduces the *baseline* j_BS split at σ=0 — recommended on a new machine or OFT build, before spending draw compute |
+| Guard (optional) | `verify_sigma0_consistency()` | Confirms the *draw* pipeline reproduces the *baseline* j_BS split at σ=0 (with the default self-consistent bootstrap: an unperturbed draw, on every route the configuration can use, reproduces the one reconstruction state -- bootstrap, current, l_i -- at the loop's tolerances) — recommended on a new machine or OFT build, before spending draw compute |
 | Draws | `generate()` | Sample, condition, solve, archive to `{header}.h5` |
 | Selection | `filter()` | Coil-drift + boundary-RMS filters, written as non-destructive flags |
 | Export | `export()` / `export_bundle()` / `export_ids()` | Pruned HDF5, per-draw g-file/p-file/profiles-JSON bundle, or one IMAS/OMAS IDS per draw |
@@ -217,7 +349,7 @@ a backend-systematics study.
 | [`docs/coil-constraints.md`](docs/coil-constraints.md) | Coil classes, VSC drift metric, homotopy, `in_spec` |
 | [`docs/io-and-plotting.md`](docs/io-and-plotting.md) | Readers/writers, COCOS, plotting catalogue |
 | [`docs/api-reference.md`](docs/api-reference.md) | Every public name |
-| [`docs/archive-schema.md`](docs/archive-schema.md) | HDF5 archive layout (schema v2) |
+| [`docs/archive-schema.md`](docs/archive-schema.md) | HDF5 archive layout (schema v3) |
 | [`architecture.md`](architecture.md) | Physics assumptions, conventions, numerical approximations, limitations |
 
 ## Testing

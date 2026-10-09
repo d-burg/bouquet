@@ -19,9 +19,11 @@ from collections import OrderedDict
 import numpy as np
 from scipy import interpolate
 
+from ..physics import ELEMENTARY_CHARGE
+
 # Unit conversion: n [10^20/m^3] * T [keV] -> p [kPa]
 # = 1e20 * 1e3 * e / 1e3 = e * 1e20 = 16.0218 kPa per (10^20/m^3 * keV)
-_NT_TO_KPA = 1.602176634e-19 * 1e20  # exactly 16.02176634
+_NT_TO_KPA = ELEMENTARY_CHARGE * 1e20  # exactly 16.02176634
 
 # ---------------------------------------------------------------------------
 # Known profile metadata (adapted from OMFIT OMFITpFile)
@@ -608,7 +610,10 @@ class PFile:
     def compute_quasineutrality(self):
         """Compute impurity density nz1 from quasi-neutrality.
 
-        ``nz1 = (ne - ni - nb) / Z_impurity``
+        ``nz1 = (ne - ni - Z_beam nb) / Z_impurity``
+
+        ``nb`` is a particle density (as in :meth:`compute_zeff`), weighted
+        by the beam charge ``Z_beam`` (the last ``N Z A`` species).
 
         Requires ``ne``, ``ni`` on the same grid and a ``"N Z A"`` block
         with at least one impurity species.  ``nb`` defaults to zero if
@@ -618,6 +623,7 @@ class PFile:
         if nza is None:
             raise ValueError("Ion species (N Z A) block required")
         Z_imp = nza["Z"][0]
+        Z_beam = float(nza["Z"][-1]) if len(nza["Z"]) > 2 else 1.0
 
         psinorm = self._raw["ne"]["psinorm"]
         ne = self._raw["ne"]["data"]
@@ -626,13 +632,13 @@ class PFile:
         if nb is None:
             nb = np.zeros_like(psinorm)
 
-        nz1 = (ne - ni - nb) / Z_imp
+        nz1 = (ne - ni - Z_beam * nb) / Z_imp
         n_neg = np.count_nonzero(nz1 < 0)
         if n_neg:
             warnings.warn(
                 f"Quasi-neutrality produced negative nz1 at {n_neg}/{len(nz1)} "
                 f"grid points (min = {nz1.min():.4g}).  This usually means "
-                f"the perturbed ne is too low relative to ni + nb.  Consider "
+                f"the perturbed ne is too low relative to ni + Z_beam*nb.  Consider "
                 f"skipping quasi-neutrality recomputation and keeping the "
                 f"baseline impurity density instead."
             )

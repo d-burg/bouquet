@@ -1,8 +1,5 @@
 """Physics reductions shared by the baseline resolvers.
 
-Two conversions are needed to bring heterogeneous inputs into bouquet's internal
-conventions:
-
   * :func:`isotropize_fast_pressure` -- collapse an anisotropic (gyrotropic)
     fast-ion pressure to a single scalar, since TokaMaker solves a scalar-pressure
     Grad-Shafranov equation.
@@ -10,7 +7,14 @@ conventions:
   * :func:`parallel_to_toroidal` -- convert a flux-surface-averaged *parallel*
     current density <j.B>/B0 (the IMAS / neoclassical convention for j_ohmic,
     j_bootstrap, and the driven currents) to the *toroidal* current density
-    <j_phi/R>/<1/R>. bouquet stores every current component as toroidal j_phi.
+    bouquet stores and the solver consumes: the plain flux-surface average
+    <j_phi> (TokaMaker's ``jphi-linterp``).  The field-aligned conversion is
+    ONE factor in the whole package, :func:`field_aligned_conversion`
+    (``kappa = F<1/R>/<B^2>``), shared with the unified engine.
+  * :func:`jtor_imas_to_jphi_tokamaker` / :func:`jphi_tokamaker_to_jtor_imas`
+    -- IMAS ``j_tor`` (``<j_phi/R>/<1/R>``) <-> ``<j_phi>`` exactly (A5 of
+    ``docs/current-conventions.md``); :func:`jphi_tokamaker_pressure_term` is
+    the pressure-driven ``p'(<R> - F^2<1/R>/<B^2>)``.
 """
 
 from __future__ import annotations
@@ -18,6 +22,47 @@ from __future__ import annotations
 from typing import Optional
 
 import numpy as np
+
+from . import coords as _coords
+
+
+#: Elementary charge [C] (CODATA 2018, exact): THE eV -> J factor of every
+#: thermal pressure ``p = e * sum_s(n_s * T_s)`` (n in m^-3, T in eV) and of
+#: the Redl drive -- the same constant OFT's ``solve_with_bootstrap`` uses.
+#: Every site in bouquet reads it from here.
+ELEMENTARY_CHARGE = 1.602176634e-19
+
+#: FROZEN LEGACY value (1.6022e-19, 1.46e-5 relative above the exact one)
+#: that the legacy (``jbs_self_consistent=False``) draw pressure and g-file
+#: reconstruction pressure have always used.  It is kept ONLY so the frozen
+#: legacy path stays bit for bit; nothing else may use it.  Select with
+#: :func:`thermal_pressure_charge`.
+ELEMENTARY_CHARGE_LEGACY = 1.6022e-19
+
+
+#: The normalised poloidal flux at which the solver's reported ``q0`` lives:
+#: TokaMaker's ``get_stats()['q_0']`` is ``q`` at its ``axis_pad`` default,
+#: psi_N = 0.02 (the first traced surface), NOT the magnetic axis.  A g-file's
+#: ``qpsi[0]`` (and an IDS ``q[0]``) is the axis value, psi_N = 0.  Compare
+#: like with like: evaluate the input at this radius, or say which radius a
+#: number is at (``q0_psi_N`` in the records).
+SOLVER_Q0_PSI_N = 0.02
+
+
+def thermal_pressure_charge(jbs_loop=None):
+    """The eV -> J factor of the thermal pressure for a run.
+
+    :data:`ELEMENTARY_CHARGE` whenever the self-consistent bootstrap loop is
+    on (``jbs_loop`` a settings dict with ``enabled``, or ``True``) -- the
+    value the modelling-source forward solve and the impurity / Redl terms
+    use, so the reconstruction and its draws share one pressure --
+    and the frozen :data:`ELEMENTARY_CHARGE_LEGACY` on the legacy path.
+    """
+    if isinstance(jbs_loop, dict):
+        on = bool(jbs_loop.get("enabled"))
+    else:
+        on = bool(jbs_loop)
+    return ELEMENTARY_CHARGE if on else ELEMENTARY_CHARGE_LEGACY
 
 
 # Map the legacy positional index of ``TokaMaker.get_q``'s ``ravgs`` array to the
@@ -134,6 +179,75 @@ def isotropize_fast_pressure(p_perp, p_par, method: str):
     )
 
 
+#: ``geom`` keys of the current-convention helpers (per-surface arrays):
+#: ``F`` = R B_phi [T m], ``avg_R`` = <R> [m], ``avg_inv_R`` = <1/R> [1/m],
+#: ``avg_inv_R2`` = <1/R^2> [1/m^2], ``avg_B2`` = <B^2> [T^2], ``pprime`` =
+#: dp/dpsi in the sign/normalisation of the J being converted (TokaMaker psi
+#: per radian; on IMAS COCOS-11 data use -2*pi*dpressure_dpsi), and optional
+#: scalar ``B0``: when present the parallel side is the IMAS <J.B>/B0
+#: (multiplied by B0 on input, divided on output); absent = raw <J.B>.
+CURRENT_GEOM_KEYS = ("F", "avg_R", "avg_inv_R", "avg_inv_R2", "avg_B2", "pprime")
+
+
+def _geom(geom, *keys):
+    """Float arrays for ``keys`` from ``geom``; ValueError naming any missing."""
+    missing = [k for k in keys if geom is None or geom.get(k) is None]
+    if missing:
+        raise ValueError(f"geom is missing {missing} (current-convention "
+                         f"helpers take {list(CURRENT_GEOM_KEYS)} + optional 'B0')")
+    return [np.asarray(geom[k], dtype=float) for k in keys]
+
+
+def field_aligned_conversion(F, avg_inv_R, avg_B2):
+    """``kappa = F <1/R> / <B^2>``: THE ``<j.B>`` -> ``<j_phi>`` factor.
+
+    For a field-aligned current component ``j = lambda(psi) B`` (``lambda =
+    <j.B>/<B^2>``; the neoclassical banana-plateau bootstrap and the driven
+    currents -- the Pfirsch-Schlueter return current has ``<j_PS.B> = 0`` and
+    is not part of the component) with ``B_phi = F/R``::
+
+        <j_phi> = lambda F <1/R> = <j.B> F <1/R> / <B^2> = kappa <j.B>
+
+    ``<j_phi>`` is the plain flux-surface average the solver consumes
+    (OpenFUSIONToolkit's ``jphi-linterp`` ``jphi_update``), and with the
+    pressure-driven part the composition identity of the unified engine
+
+        <j_phi> = kappa <j.B>  +  p' (<R> - F^2 <1/R> / <B^2>)
+
+    is exact.  Every conversion in bouquet -- :func:`parallel_to_toroidal`,
+    :func:`toroidal_to_parallel` (its exact inverse), :func:`evaluate_jBS`
+    and :func:`bouquet.engine.conversion_factor` (and OpenFUSIONToolkit's SWB
+    output) -- is this one factor
+    (2026-10-06; see :func:`parallel_to_toroidal` for what moved).
+    """
+    return (np.asarray(F, dtype=float) * np.asarray(avg_inv_R, dtype=float)
+            / np.asarray(avg_B2, dtype=float))
+
+
+_INV_R2_REFUSED = (
+    "geom carries 'avg_inv_R2': bouquet's <j.B> <-> <j_phi> conversion is "
+    "the one field-aligned factor kappa = F<1/R>/<B^2> "
+    "(physics.field_aligned_conversion) since 2026-10-06; the former "
+    "<1/R^2> branch (the IMAS <j_phi/R>/<1/R> convention, "
+    "<j.B>F<1/R^2>/(<B^2><1/R>)) is gone.  Drop 'avg_inv_R2' from geom "
+    "(or set it to None).")
+
+
+def _analytic_geom(geom):
+    try:
+        F = np.asarray(geom["F"], dtype=float)
+        avg_inv_R = np.asarray(geom["avg_inv_R"], dtype=float)
+        avg_B2 = np.asarray(geom["avg_B2"], dtype=float)
+    except KeyError as missing:
+        raise ValueError(
+            f"geom is missing required key {missing} "
+            "(need 'F', 'avg_inv_R', 'avg_B2'; optional 'B0')"
+        ) from None
+    if geom.get("avg_inv_R2") is not None:
+        raise ValueError(_INV_R2_REFUSED)
+    return F, avg_inv_R, avg_B2
+
+
 def parallel_to_toroidal(
     j_parallel,
     *,
@@ -141,56 +255,48 @@ def parallel_to_toroidal(
     j_tor_total=None,
     geom: Optional[dict] = None,
 ):
-    """Convert FSA parallel current density <j.B>/B0 to toroidal <j_phi/R>/<1/R>.
+    """Convert FSA parallel current density ``<j.B>/B0`` to toroidal ``<j_phi>``.
 
     bouquet stores all current components (inductive/ohmic, bootstrap, NBI, RF)
-    as toroidal j_phi. IMAS/neoclassical outputs are parallel; this applies the
-    per-flux-surface geometric conversion. The correction is typically modest but
-    grows toward the edge / at low aspect ratio.
+    as the toroidal current the solver consumes, the plain flux-surface
+    average ``<j_phi>``.  IMAS/neoclassical outputs are parallel; this applies
+    the per-flux-surface geometric conversion.
 
-    This is needed in TWO places, not just on IMAS input:
-      * IMAS-input bootstrap/ohmic/driven currents (use the *ratio* method).
-      * bouquet's OWN recomputed bootstrap -- TokaMaker ``solve_with_bootstrap``
-        returns a *parallel* j_BS, which must be converted here before it
-        replaces the baseline j_BS (when ``recalculate_j_BS`` is True). Use the
-        *analytic* method with the TokaMaker equilibrium's FSA metrics.
-
-    Two methods:
 
     * **ratio** (preferred, used for FUSE input) -- when the source provides both
       the total parallel current and the total toroidal current (FUSE
       ``core_profiles`` carries ``j_total`` *and* ``j_tor``), form the per-surface
       factor ``c(psi) = j_tor_total / j_parallel_total`` and apply it to the
-      component. Exact to the geometric mapping shared by field-aligned
-      components; self-consistent with the source equilibrium.
+      component. Self-consistent with the source equilibrium.
 
-    * **analytic** -- compute from equilibrium FSA metrics in ``geom`` when
-      totals are unavailable (the reconstruction path, and bouquet's own
-      per-draw ``solve_with_bootstrap`` output). Models the component as
-      field-aligned, ``j = lambda(psi) B`` with ``lambda = <j.B>/<B^2>``
-      (the standard treatment of the neoclassical banana-plateau /
-      driven currents; the Pfirsch-Schlueter return current, which has
-      ``<j_PS.B> = 0``, is by construction not part of the component), so
+    * **analytic** -- the field-aligned factor of
+      :func:`field_aligned_conversion`, from equilibrium FSA metrics in
+      ``geom`` (the reconstruction path, bouquet's own Redl bootstrap)::
 
-          j_tor = <j_phi/R>/<1/R> = lambda * F * <1/R^2> / <1/R>
-                = <j.B> * F * <1/R^2> / (<B^2> <1/R>)
-                = <j.B> / (F <1/R>) * [<B_phi^2>/<B^2>]
+          <j_phi> = kappa <j.B>,   kappa = F <1/R> / <B^2>
 
-      using ``<B_phi^2> = F^2 <1/R^2>`` (exact, since ``B_phi = F/R``).
-      ``geom`` keys:
+      ``geom`` keys: ``F`` (``R B_phi`` [T m]), ``avg_inv_R`` (``<1/R>``
+      [1/m]), ``avg_B2`` (``<B^2>`` [T^2]) and, optionally, ``B0`` (the
+      normalisation of the input: pass the IMAS ``vacuum_toroidal_field`` B0
+      when ``j_parallel`` is ``<j.B>/B0``; default 1 = raw ``<j.B>``
+      [T A/m^2]).  A ``geom`` carrying ``avg_inv_R2`` is REFUSED (the former
+      ``<1/R^2>`` branch is gone; see below).
 
-        ``F``          flux function ``R*B_phi`` [T m]
-        ``avg_inv_R``  ``<1/R>`` [1/m]
-        ``avg_B2``     ``<B^2>`` [T^2]
-        ``avg_inv_R2`` ``<1/R^2>`` [1/m^2], OPTIONAL -- when absent the
-                       bracket ``<B_phi^2>/<B^2>`` is taken as 1,
-                       neglecting ``<B_p^2>/<B^2> ~ (eps/q)^2`` (sub-1%%
-                       at a DIII-D edge); the retained ``1/(F<1/R>)``
-                       projection carries the O(eps^2) geometry.
-        ``B0``         normalisation of the input, OPTIONAL (default 1):
-                       pass the IMAS ``vacuum_toroidal_field`` B0 when
-                       ``j_parallel`` is the IMAS convention ``<j.B>/B0``;
-                       leave at 1 when passing raw ``<j.B>`` [T A/m^2].
+    **Declared default physics change (2026-10-06, owner-approved).**  Until
+    then the package held three conventions: the legacy bootstrap sites
+    (:func:`evaluate_jBS`, ``TokaMaker_interface._swb_jbs_to_toroidal``)
+    called this function without ``<1/R^2>`` -> ``<j.B>/(F<1/R>)``; the IDS
+    exporter passed ``<1/R^2>`` -> ``<j.B>F<1/R^2>/(<B^2><1/R>)`` (the IMAS
+    ``<j_phi/R>/<1/R>`` convention); the unified engine used kappa.  The
+    legacy factor exceeds kappa by
+
+        <B^2>/(F^2 <1/R>^2) = [<B^2>/<B_phi^2>] x [<1/R^2>/<1/R>^2]
+
+    (``<B_phi^2> = F^2 <1/R^2>``): the bracket (the poloidal-field content,
+    ~1.4 %) times the Jensen ratio (~5.2 %) -- +6.8 % at psi_N ~ 0.97 on the
+    synthetic D3D-like example (+1.0 % at 0.1, +4.3 % at 0.5, +6.4 % at
+    0.9; measured 2026-10-06).  The legacy bootstrap at the pedestal therefore drops by that
+    fraction; the engine path is unchanged (it already used kappa).
 
     Pass either (``j_parallel_total``, ``j_tor_total``) for the ratio method or
     ``geom`` for the analytic method.
@@ -217,24 +323,9 @@ def parallel_to_toroidal(
         return j_parallel * c
 
     if geom is not None:
-        try:
-            F = np.asarray(geom["F"], dtype=float)
-            avg_inv_R = np.asarray(geom["avg_inv_R"], dtype=float)
-            avg_B2 = np.asarray(geom["avg_B2"], dtype=float)
-        except KeyError as missing:
-            raise ValueError(
-                f"geom is missing required key {missing} "
-                "(need 'F', 'avg_inv_R', 'avg_B2'; optional 'avg_inv_R2', 'B0')"
-            ) from None
+        F, avg_inv_R, avg_B2 = _analytic_geom(geom)
         j_dot_B = j_parallel * float(geom.get("B0", 1.0))
-        # field-aligned component: j_tor = <j.B> F <1/R^2> / (<B^2> <1/R>);
-        # F^2 <1/R^2> == <B_phi^2>, ~= <B^2> when <1/R^2> is unavailable
-        # (neglects <B_p^2>/<B^2> ~ (eps/q)^2).
-        if "avg_inv_R2" in geom and geom["avg_inv_R2"] is not None:
-            bphi2_over_B2 = F**2 * np.asarray(geom["avg_inv_R2"], dtype=float) / avg_B2
-        else:
-            bphi2_over_B2 = 1.0
-        return j_dot_B * bphi2_over_B2 / (F * avg_inv_R)
+        return j_dot_B * field_aligned_conversion(F, avg_inv_R, avg_B2)
 
     raise ValueError(
         "provide either (j_parallel_total, j_tor_total) for the ratio method "
@@ -243,67 +334,68 @@ def parallel_to_toroidal(
 
 
 def toroidal_to_parallel(j_tor, *, geom: dict):
-    """Inverse of :func:`parallel_to_toroidal` (analytic method).
+    """The exact inverse of :func:`parallel_to_toroidal` (analytic method).
 
-    Convert bouquet's toroidal current density ``<j_phi/R>/<1/R>`` back to the
-    IMAS flux-surface-averaged parallel current ``<j.B>/B0``. This is the
-    write-back direction: bouquet stores every current component (ohmic,
-    bootstrap, driven) as toroidal ``j_phi``; IMAS ``core_profiles.j_ohmic /
-    j_bootstrap / j_total`` are parallel ``<j.B>/B0`` (EUROfusion/IMAS
-    convention, with ``j_phi == <J^phi>/<1/R>``). Uses the draw's OWN
-    flux-surface-averaged (FSA) geometry, so it is exact per surface -- unlike
-    the interim baseline-ratio reconstruction it replaces.
+    Convert bouquet's toroidal current density ``<j_phi>`` back to the IMAS
+    flux-surface-averaged parallel current ``<j.B>/B0`` (the write-back
+    direction: IMAS ``core_profiles.j_ohmic / j_bootstrap / j_total`` are
+    parallel)::
 
-    Physics (verified against Wesson 4th ed. sec 4.4 -- FSA
-    ``<A> = oint (A/B_p) dl / oint dl/B_p``, and the field-aligned /
-    Pfirsch-Schlueter decomposition with ``<j_PS.B> = 0``). For a field-aligned
-    component ``j = lambda(psi) B`` with ``lambda = <j.B>/<B^2>`` and
-    ``B_phi = F/R``:
+        <j.B> = <j_phi> / kappa,   kappa = F <1/R> / <B^2>
 
-        j_tor = <j_phi/R>/<1/R> = <j.B> F <1/R^2> / (<B^2> <1/R>)
+    (:func:`field_aligned_conversion`), so a component converted in by
+    :func:`parallel_to_toroidal` round-trips to machine precision on the same
+    ``geom``.  Uses the draw's OWN flux-surface geometry when given it.
 
-    so the inverse is
-
-        <j.B> = j_tor <B^2> <1/R> / (F <1/R^2>)
-              = j_tor F <1/R> [<B^2>/<B_phi^2>]      (<B_phi^2> = F^2 <1/R^2>)
-
-    and the IMAS parallel current is ``<j.B>/B0``.
-
-    ``geom`` keys (all per-surface arrays unless noted):
-
-        ``F``          flux function ``R*B_phi`` [T m]
-        ``avg_inv_R``  ``<1/R>`` [1/m]
-        ``avg_B2``     ``<B^2>`` [T^2]
-        ``avg_inv_R2`` ``<1/R^2>`` [1/m^2], OPTIONAL -- when absent the exact
-                       ``<B_phi^2> = F^2 <1/R^2>`` is unavailable and the
-                       bracket ``<B^2>/<B_phi^2>`` is taken as 1, neglecting
-                       ``<B_p^2>/<B^2> ~ (eps/q)^2`` (~<1%% at a DIII-D edge).
-                       Provide it (from the captured live equilibrium) for a
-                       machine-exact conversion.
-        ``B0``         output normalisation (default 1): pass the IMAS
-                       ``vacuum_toroidal_field`` B0 to return ``<j.B>/B0``;
-                       leave at 1 to return raw ``<j.B>`` [T A/m^2].
-
-    Round-trips with :func:`parallel_to_toroidal` (analytic) to machine
-    precision when the same ``geom`` (including ``avg_inv_R2``) is used.
+    ``geom`` keys: ``F``, ``avg_inv_R``, ``avg_B2`` and optionally ``B0``
+    (output normalisation: pass the IMAS ``vacuum_toroidal_field`` B0 to
+    return ``<j.B>/B0``; default 1 = raw ``<j.B>`` [T A/m^2]).  A ``geom``
+    carrying ``avg_inv_R2`` is REFUSED: the former ``<1/R^2>`` branch (the
+    inverse of the IMAS ``<j_phi/R>/<1/R>`` convention) is gone since
+    2026-10-06 -- see :func:`parallel_to_toroidal`.
     """
     j_tor = np.asarray(j_tor, dtype=float)
-    try:
-        F = np.asarray(geom["F"], dtype=float)
-        avg_inv_R = np.asarray(geom["avg_inv_R"], dtype=float)
-        avg_B2 = np.asarray(geom["avg_B2"], dtype=float)
-    except KeyError as missing:
-        raise ValueError(
-            f"geom is missing required key {missing} "
-            "(need 'F', 'avg_inv_R', 'avg_B2'; optional 'avg_inv_R2', 'B0')"
-        ) from None
-    if "avg_inv_R2" in geom and geom["avg_inv_R2"] is not None:
-        # <B^2>/<B_phi^2>, exact (B_phi = F/R -> <B_phi^2> = F^2 <1/R^2>)
-        B2_over_Bphi2 = avg_B2 / (F**2 * np.asarray(geom["avg_inv_R2"], dtype=float))
-    else:
-        B2_over_Bphi2 = 1.0
-    j_dot_B = j_tor * F * avg_inv_R * B2_over_Bphi2       # raw <j.B> [T A/m^2]
+    F, avg_inv_R, avg_B2 = _analytic_geom(geom)
+    j_dot_B = j_tor / field_aligned_conversion(F, avg_inv_R, avg_B2)
     return j_dot_B / float(geom.get("B0", 1.0))           # IMAS <j.B>/B0
+
+
+def jpar_to_jphi_tokamaker(j_dot_B, geom):
+    """:func:`parallel_to_toroidal` on a current-convention ``geom``, which
+    may carry ``avg_inv_R2`` (for A5)."""
+    return parallel_to_toroidal(j_dot_B, geom={**geom, "avg_inv_R2": None})
+
+
+def jphi_tokamaker_pressure_term(geom):
+    """Pressure-driven ``<j_phi>``: p'(<R> - F^2<1/R>/<B^2>) (A7)."""
+    F, R, inv_R, B2, pp = _geom(geom, "F", "avg_R", "avg_inv_R", "avg_B2",
+                                "pprime")
+    return pp * (R - F * F * inv_R / B2)
+
+
+def jphi_tokamaker_to_jpar(jphi, geom):
+    """:func:`toroidal_to_parallel` on a current-convention ``geom`` (the
+    field-aligned part only; subtract :func:`jphi_tokamaker_pressure_term`
+    from a total first)."""
+    return toroidal_to_parallel(jphi, geom={**geom, "avg_inv_R2": None})
+
+
+def jtor_imas_to_jphi_tokamaker(j_tor, geom):
+    """IMAS ``j_tor`` -> TokaMaker ``jphi`` (A5):
+    J_TM = <R>p' + <1/R>(J_IMAS<1/R> - p')/<1/R^2>."""
+    R, inv_R, inv_R2, pp = _geom(geom, "avg_R", "avg_inv_R", "avg_inv_R2",
+                                 "pprime")
+    J = np.asarray(j_tor, dtype=float)
+    return R * pp + inv_R * (J * inv_R - pp) / inv_R2
+
+
+def jphi_tokamaker_to_jtor_imas(jphi, geom):
+    """TokaMaker ``jphi`` -> IMAS ``j_tor`` (A5, inverse):
+    J_IMAS = [p' + <1/R^2>(J_TM - <R>p')/<1/R>]/<1/R>."""
+    R, inv_R, inv_R2, pp = _geom(geom, "avg_R", "avg_inv_R", "avg_inv_R2",
+                                 "pprime")
+    J = np.asarray(jphi, dtype=float)
+    return (pp + inv_R2 * (J - R * pp) / inv_R) / inv_R
 
 
 def _fsa_over_contour(R, Z, Bp, field):
@@ -390,8 +482,9 @@ def capture_equilibrium_fsa(mygs, npsi: int = 257, psi_pad: float = 1e-3,
 
     Called at generate time on the converged ``mygs`` (right where the eqdsk is
     saved) so a perturbed draw's OWN flux-surface geometry travels with it into
-    the archive, enabling an **exact** per-draw toroidal->parallel conversion at
-    IDS write-back (:func:`toroidal_to_parallel`) instead of the interim
+    the archive, enabling per-draw conversions at IDS write-back
+    (:func:`toroidal_to_parallel`, and the IMAS ``j_tor`` of A5, from ``F``,
+    ``<1/R>``, ``<1/R^2>``, ``<B^2>`` and ``<R>``) instead of the interim
     baseline-ratio reconstruction.
 
     Returns a dict of 1-D arrays on a uniform ``psi_N`` grid of ``npsi`` points
@@ -400,6 +493,9 @@ def capture_equilibrium_fsa(mygs, npsi: int = 257, psi_pad: float = 1e-3,
 
         ``psi_N``       normalised poloidal flux, [npsi]
         ``F``           R*B_phi flux function [T m]           (get_profiles)
+        ``pprime``      p' [Pa/Wb], signed so ``jphi_eq`` > 0   (get_profiles)
+        ``jphi_eq``     own TokaMaker jphi <R>p' + <1/R>FF'/mu0  [A/m^2]
+        ``avg_R``       <R> [m]                               (get_q)
         ``avg_inv_R``   <1/R> [1/m]                           (sauter_fc)
         ``avg_inv_R2``  <1/R^2> [1/m^2]                       (exact quadrature)
         ``avg_B2``      <B^2> [T^2]                           (sauter_fc)
@@ -408,11 +504,11 @@ def capture_equilibrium_fsa(mygs, npsi: int = 257, psi_pad: float = 1e-3,
         ``f_trap``      trapped fraction f_c                  (sauter_fc)
         ``B_avg``       <|B|> [T]                             (sauter_fc)
 
-    ``exact_inv_R2`` (default True) computes ``<1/R^2>`` -- which TokaMaker does
-    not expose -- by flux-surface quadrature over traced contours
-    (:func:`_capture_exact_inv_R2`), making :func:`toroidal_to_parallel`
-    machine-exact instead of relying on ``<B_phi^2> ~= <B^2>`` (the
-    ``<B_p^2>/<B^2> ~ (eps/q)^2 ~<1%%`` bracket). By default it is traced on the
+    ``exact_inv_R2`` (default True) also records ``<1/R^2>`` (exposed by
+    current OFT builds' ``get_q``; otherwise by flux-surface quadrature over
+    traced contours, :func:`_capture_exact_inv_R2`).  It does not enter the
+    field-aligned factor (:func:`field_aligned_conversion`); the IMAS
+    ``j_tor`` written at IDS export (A5) needs it. By default it is traced on the
     FULL ``npsi`` grid -- same resolution as every other metric, most accurate
     at the edge where the surfaces bunch up and the bootstrap peaks; the trace
     is cheap (a few ms/surface, ~2 s at npsi=257). ``inv_R2_npsi`` (default
@@ -420,11 +516,11 @@ def capture_equilibrium_fsa(mygs, npsi: int = 257, psi_pad: float = 1e-3,
     spline it onto ``psi_N`` -- only worth it for very large bouquets. The
     quadrature is **self-validated** each call: its independently-recomputed
     ``<1/R>`` must agree with ``sauter_fc`` to ``inv_R2_check_rtol`` (default
-    2%), else ``avg_inv_R2`` is dropped (with a warning) and the conversion
-    falls back to the ``<1%`` bracket -- never silently wrong.
+    2%), else ``avg_inv_R2`` is dropped (with a warning) -- never silently
+    wrong.
 
     Set ``exact_inv_R2=False`` to skip the ``<1/R^2>`` surface traces entirely
-    (bracket fallback) if the capture cost is ever material.
+    if the capture cost is ever material.
 
     Pure extraction (no re-solve); ``mygs`` is passed in so this module stays
     OFT-import-free / headless-safe.
@@ -432,8 +528,8 @@ def capture_equilibrium_fsa(mygs, npsi: int = 257, psi_pad: float = 1e-3,
     import warnings
     psi_hat = np.linspace(psi_pad, 1.0 - psi_pad, int(npsi))
 
-    # F(psi) = R*B_phi from the G-S source profiles
-    _, F, _Fp, _P, _Pp = mygs.get_profiles(psi=psi_hat)
+    # F(psi) = R*B_phi and p' from the G-S source profiles
+    _, F, Fp, _P, Pp = mygs.get_profiles(psi=psi_hat)
 
     # <1/R>, <B^2>, f_c from the Sauter flux-surface coefficients. OFT actually
     # returns (psi_hat, f_c, r_avgs, [<|B|>,<|B|^2>]) -- a leading psi grid the
@@ -457,9 +553,21 @@ def capture_equilibrium_fsa(mygs, npsi: int = 257, psi_pad: float = 1e-3,
     _, q, geo_q, *_rest = mygs.get_q(psi=psi_hat, compute_geo=True)
     dV_dpsi = q_ravg(geo_q, "dV/dPsi")
 
+    # get_profiles' p' sign follows the case's flux convention: sign it so the
+    # equilibrium's own TokaMaker jphi is positive, like bouquet's arrays (the
+    # same rule as utils.eq_jphi_profile's pprime_sign).
+    F = np.asarray(F, dtype=float)
+    avg_R = np.asarray(q_ravg(geo_q, "<R>"), dtype=float)
+    jphi_eq = (avg_R * np.asarray(Pp, dtype=float) + np.asarray(avg_inv_R, float)
+               * F * np.asarray(Fp, dtype=float) / (4.0e-7 * np.pi))
+    sign = 1.0 if float(np.sum(jphi_eq)) >= 0.0 else -1.0
+
     out = {
         "psi_N": psi_hat,
-        "F": np.asarray(F, dtype=float),
+        "F": F,
+        "pprime": sign * np.asarray(Pp, dtype=float),
+        "jphi_eq": sign * jphi_eq,
+        "avg_R": avg_R,
         "avg_inv_R": np.asarray(avg_inv_R, dtype=float),
         "avg_B2": np.asarray(avg_B2, dtype=float),
         "q": np.asarray(q, dtype=float),
@@ -515,10 +623,442 @@ def capture_equilibrium_fsa(mygs, npsi: int = 257, psi_pad: float = 1e-3,
                     grid, inv_R2_g, k=3)(psi_hat)
         except Exception as exc:                    # pragma: no cover - live-only
             warnings.warn(
-                f"exact <1/R^2> capture failed ({exc}); IDS export will use the "
-                "<B_phi^2>~=<B^2> bracket (~<1% at the edge). Set "
-                "exact_inv_R2=False to silence.")
+                f"exact <1/R^2> capture failed ({exc}); this draw cannot be "
+                "IDS-exported exactly. Set exact_inv_R2=False to silence.")
     return out
+
+
+#: OpenFUSIONToolkit's ``taper_edge_shape`` codes (bootstrap ``boot_ops``)
+EDGE_TAPER_SHAPES = {1: "cos^2 (Hann)", 2: "quintic smoothstep",
+                     3: "cubic power"}
+
+
+def edge_taper_weight(psi_N, psi0=0.999, shape=2):
+    """The factor SWB's edge taper (``taper_edge_jBS``) multiplies every
+    toroidal current component by: 1 for ``psi_N < psi0``, falling to 0 at
+    ``psi_N = 1`` with *shape* (1 cos^2, 2 quintic smoothstep, 3 cubic).
+    A port of OFT ``grad_shaf_bootstrap.F90:apply_edge_taper`` (standard
+    convention); no taper when ``1 - psi0 < 1e-6``."""
+    psi = np.asarray(psi_N, dtype=float)
+    w = np.ones_like(psi)
+    psi0 = float(psi0)
+    span = 1.0 - psi0
+    if span < 1.0e-6:
+        return w
+    m = psi >= psi0
+    t = np.clip((psi[m] - psi0) / span, 0.0, 1.0)
+    shape = int(shape)
+    if shape == 1:
+        w[m] = np.cos(0.5 * np.pi * t) ** 2
+    elif shape == 2:
+        w[m] = 1.0 - t ** 3 * (6.0 * t ** 2 - 15.0 * t + 10.0)
+    elif shape == 3:
+        w[m] = (1.0 - t) ** 3
+    else:
+        raise ValueError(f"edge_taper_weight: unknown shape {shape!r} "
+                         f"(one of {sorted(EDGE_TAPER_SHAPES)})")
+    return w
+
+
+#: Version tag of :func:`evaluate_jBS`, recorded with every loop record so an
+#: archive states which evaluator produced its bootstrap.
+#: ``/2`` (2026-10-06): the toroidal output is ``kappa <j.B>``, ``kappa =
+#: F<1/R>/<B^2>`` (was ``<j.B>/(F<1/R>)`` in ``/1``); ``/3``: plus ``p'G``.
+EVALUATE_JBS_VERSION = ("evaluate_jBS/3 (Redl 2021 jboot1, NRL/Zavg lnLambda, "
+                        "Koh nu_i*, geometric eps, psi_N-native, "
+                        "kappa = F<1/R>/<B^2> "
+                        "toroidal conversion plus p'G)")
+
+#: Positional layout of ``sauter_fc``'s geometry block on OFT builds that
+#: return it as a ``(3, n)`` array (builds after OpenFUSIONToolkit#313 return
+#: a dict with these keys instead).
+_SAUTER_RAVG_INDEX = {"<R>": 0, "<1/R>": 1, "<a>": 2}
+#: ... and of its ``[<|B|>, <|B|^2>]`` block.
+_SAUTER_MODB_INDEX = {"<|B|>": 0, "<|B|^2>": 1}
+
+#: Elementary charge [C] -- the eV -> J factor of the Redl drive, the same
+#: constant OFT's ``solve_with_bootstrap`` uses (:data:`ELEMENTARY_CHARGE`).
+_EC = ELEMENTARY_CHARGE
+
+
+class JBSEvaluationError(ValueError):
+    """:func:`evaluate_jBS` refused an input or a flux-surface geometry on
+    which the Redl bootstrap is undefined.
+
+    Raised instead of returning ``j_BS = 0`` there.  ``quantity`` names what
+    is wrong, ``psi_N`` / ``index`` the first grid node where it is, and
+    ``n_bad`` how many nodes are affected.  A ``ValueError``, so callers that
+    already treat a malformed evaluator input as a ``ValueError`` see it.
+    """
+
+    def __init__(self, message, *, quantity=None, psi_N=None, index=None,
+                 n_bad=None):
+        super().__init__(message)
+        self.quantity = quantity
+        self.psi_N = psi_N
+        self.index = index
+        self.n_bad = n_bad
+
+
+def _first_bad(bad, psi_N, arr, quantity, rule, what="input"):
+    """Raise :class:`JBSEvaluationError` at the first True of *bad*."""
+    bad = np.asarray(bad, dtype=bool)
+    if not np.any(bad):
+        return
+    i = int(np.argmax(bad))
+    raise JBSEvaluationError(
+        f"evaluate_jBS: {what} {quantity} must be {rule}; got "
+        f"{float(np.asarray(arr, dtype=float)[i])!r} at psi_N="
+        f"{float(psi_N[i]):.6g} (grid index {i}; {int(bad.sum())} of "
+        f"{bad.size} node(s) affected).  The Redl bootstrap is undefined "
+        "there -- refusing to return a silently zeroed j_BS.",
+        quantity=quantity, psi_N=float(psi_N[i]), index=i,
+        n_bad=int(bad.sum()))
+
+
+def _sauter_avg(block, which, index):
+    """Read one flux-surface average off a ``sauter_fc`` output block, dict or
+    positional array (both OFT layouts are in production)."""
+    if isinstance(block, dict):
+        return np.asarray(block[which], dtype=float)
+    return np.asarray(block, dtype=float)[index[which]]
+
+
+def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
+                 isolate_edge=False, smooth_axis=True, coord="psi_n"):
+    r"""Redl bootstrap current on the CURRENT equilibrium, on the caller's grid.
+
+    A faithful port of the inner physics of OpenFUSIONToolkit's
+    ``solve_with_bootstrap`` (SWB) -- NRL electron / ``Zavg`` ion Coulomb
+    logarithms, Koh multi-species ion collisionality, the electron
+    collisionality, ``redl_bootstrap(formula_form='jboot1',
+    use_sign_q=True)`` -- evaluated ONCE on whatever equilibrium ``mygs``
+    holds.  No Grad-Shafranov solve happens inside: the self-consistent loop
+    (:mod:`bouquet.jbs_loop`) owns the solves, this function only reads.
+
+    It differs from SWB's inner evaluation in exactly three ways, each of
+    which is the reason it exists:
+
+    1. **Geometry on the caller's grid.**  ``F``, ``f_T = 1 - f_c``,
+       ``eps = (R_max - R_min)/(2<R>)``, ``q`` and ``<R>`` are sampled at
+       ``psi_eval = clip(psi_N, psi_pad, 1 - psi_pad)`` -- the caller's own
+       surfaces -- not on a uniform grid of the same length.
+    2. **Gradients on the true grid.**  ``d/dpsi = numpy.gradient(y, psi_N,
+       edge_order=2) / (psi_bounds[1] - psi_bounds[0])`` with the CURRENT
+       equilibrium's flux range; a non-uniform ``psi_N`` (e.g. a grid uniform
+       in rho_tor) is differentiated as what it is.
+    3. **Direct toroidal conversion.**  Redl returns the FSA parallel
+       ``<j_BS.B>``; it is converted with the package's ONE field-aligned
+       factor (:func:`field_aligned_conversion`; ``F``, ``<1/R>`` and
+       ``<B^2>`` from the SAME surfaces), never through SWB's ``R_avg/F``
+       projection and its undo, and the pressure-driven part is added::
+
+           <j_phi> = kappa <j.B> + p' (<R> - F^2<1/R>/<B^2>),
+           kappa = F <1/R> / <B^2>
+
+       -- the plain flux-surface average the solver consumes
+       (OpenFUSIONToolkit's ``jphi-linterp``).  ``p'G`` goes with the
+       bootstrap, as FUSE / IMAS.jl assign it (``includes_bootstrap=true``)
+       and as OpenFUSIONToolkit's SWB returns it.
+
+    **Refusals, never a silent zero.**  The Redl expressions are undefined
+    for non-physical input and on a surface the tracer failed on; the
+    historical code mapped the resulting NaN to ``j_BS = 0`` at that node
+    (and a non-positive temperature also corrupts the neighbours' gradients).
+    Instead :class:`JBSEvaluationError` (a ``ValueError``) is raised, naming
+    the quantity and the first ``psi_N`` where it happens, for
+
+    * inputs: ``ne``, ``ni``, ``te``, ``ti`` not strictly positive, or
+      ``zeff < 1``, at ANY node (including the axis and the separatrix);
+    * geometry, at ANY node: a non-finite average, a non-positive ``<R>``,
+      ``<1/R>``, ``<a>``, ``<B^2>`` or ``dV/dpsi``, ``F = 0``, ``q = 0``, or a
+      trapped fraction ``f_T >= 1`` -- the signature of the all-zero row a
+      failed flux-surface trace returns; and ``f_T <= 0`` on any surface
+      other than the clipped axis surface;
+    * a non-finite Redl ``<j.B>`` or toroidal ``j_BS`` at any node that is
+      not an END node (below).
+
+    **End nodes.**  Nodes whose geometry is the CLIPPED axis or separatrix
+    surface -- ``psi_N <= psi_pad`` or ``psi_N >= 1 - psi_pad``, identified by
+    coordinate, not by the value computed there -- are where the geometry is
+    singular by construction (``f_T, eps -> 0`` at the axis, the separatrix
+    limit at the edge).  There, and only there, the historical treatment is
+    kept exactly: a non-finite value is mapped by ``numpy.nan_to_num(...,
+    nan=0.0)``.  How many values that touched is recorded in
+    ``diag["n_nonfinite_zeroed_at_ends"]``.  For every accepted input the
+    returned profile is bit-identical to the pre-refusal evaluator.
+
+    **Grids whose first intervals are finer than ``psi_pad``.**  A grid such
+    as ``[0, 1.7e-4, 6.9e-4, 1.6e-3, ...]`` puts several surfaces inside
+    ``psi_pad``, where the flux-surface tracer cannot resolve geometry.
+    ``psi_pad`` is NOT changed and no surface is merged: every point keeps its
+    own profile values and its own gradient on the true grid, and only the
+    GEOMETRY lookup of the points inside the pad is taken at ``psi_pad`` (the
+    innermost surface the tracer resolves).  Geometry is evaluated once per
+    distinct clipped value and mapped back, so the solver is never handed a
+    repeated surface.  The same holds at the separatrix side.
+
+    Parameters
+    ----------
+    mygs : TokaMaker or TokaMaker_equilibrium
+        Anything exposing ``get_profiles(psi=)``, ``sauter_fc(psi=)`` (a
+        ``copy_eq()`` snapshot names it ``calc_sauter_fc``), ``get_q(psi=)``
+        and ``psi_bounds`` -- a live solver or a snapshot.  Only these primitives are used, so the
+        function runs on every OFT build bouquet supports (they exist with
+        and without the ``psi_N=`` argument of ``solve_with_bootstrap``).
+    psi_N : array_like
+        Strictly increasing run grid in [0, 1] the kinetic profiles live on
+        (ψ_N, or Φ_N with ``coord="phi_n"``).
+    ne, te, ni, ti : array_like
+        Densities [m^-3] and temperatures [eV] on ``psi_N``.
+    zeff : array_like or float
+        Effective charge on ``psi_N`` (a scalar is broadcast).
+    psi_pad : float
+        Geometry clip at the axis and the separatrix (SWB's own default).
+    isolate_edge : bool
+        Return the isolated edge spike (OFT ``analyze_bootstrap_edge_spike``
+        ``masked_spike``, applied in SWB's own projection so the shelf/mask
+        detection is identical) instead of the full profile.
+    smooth_axis : bool
+        Apply :func:`bouquet.TokaMaker_interface.smooth_jbs_transition` (the
+        shared innermost-surface repair every SWB-derived profile receives).
+        ``False`` returns the raw profile (the delta-composition mode needs it).
+    coord : str
+        The run coordinate.  ``"phi_n"``: the nodes are mapped to ψ_N on
+        *mygs*'s own toroidal-flux map (``get_torflux_map``) first, and
+        everything below -- geometry, gradients, end nodes, the edge spike,
+        ``I_BS`` -- works on those ψ_N, exactly as OFT's Fortran bootstrap
+        (``grad_shaf_bootstrap.F90``: kinetic values at the mapped nodes,
+        gradients numerical in ψ).  The profile is returned on the same nodes.
+
+    Returns
+    -------
+    (j_BS_tor, diag)
+        ``j_BS_tor`` -- toroidal FSA current density ``<j_phi>`` =
+        ``kappa <j.B>`` [A/m^2] on ``psi_N`` (isolated/smoothed as
+        requested).  ``diag`` --
+        ``psi_eval``, ``f_T``, ``nu_e_star``, ``nu_i_star``, ``q``, ``eps``,
+        ``R_avg``, ``F``, ``avg_inv_R``, ``avg_B2``, ``dpsi`` (signed flux
+        range), ``j_dot_B`` (Redl ``<j.B>``), ``j_tor_full_raw`` (full
+        profile, unsmoothed), ``j_tor_raw`` (selected profile before
+        smoothing), ``I_BS`` (signed FSA integral of ``j_BS_tor`` [A]),
+        ``version``.
+    """
+    psi_N = np.asarray(psi_N, dtype=float)
+    n = psi_N.size
+    if psi_N.ndim != 1 or n < 3:
+        raise ValueError("evaluate_jBS: psi_N must be 1-D with >= 3 points")
+    if not np.all(np.isfinite(psi_N)):
+        raise ValueError("evaluate_jBS: psi_N contains non-finite values")
+    if np.any(np.diff(psi_N) <= 0.0):
+        raise ValueError("evaluate_jBS: psi_N must be strictly increasing")
+    if psi_N[0] < 0.0 or psi_N[-1] > 1.0:
+        raise ValueError(
+            f"evaluate_jBS: psi_N must lie in [0, 1] (got {psi_N[0]}, "
+            f"{psi_N[-1]})")
+    psi_pad = float(psi_pad)
+    if not (0.0 < psi_pad < 0.5):
+        raise ValueError(f"evaluate_jBS: psi_pad must be in (0, 0.5), got "
+                         f"{psi_pad!r}")
+    x_run = psi_N
+    if _coords.check_coord(coord) == _coords.PHI:
+        psi_N = np.clip(np.asarray(_coords.psi_at(mygs, psi_N, coord),
+                                   dtype=float), 0.0, 1.0)
+        if np.any(np.diff(psi_N) <= 0.0) or not np.all(np.isfinite(psi_N)):
+            raise ValueError("evaluate_jBS: the toroidal-flux map of this "
+                             "equilibrium is not strictly increasing on the "
+                             "run grid")
+
+    def _prof(a, name):
+        a = np.asarray(a, dtype=float)
+        if a.ndim == 0:
+            a = np.full(n, float(a))
+        if a.shape != (n,):
+            raise ValueError(f"evaluate_jBS: {name} has shape {a.shape}, "
+                             f"expected ({n},) to match psi_N")
+        if not np.all(np.isfinite(a)):
+            raise ValueError(f"evaluate_jBS: {name} contains non-finite "
+                             "values")
+        return a
+
+    ne = _prof(ne, "ne")
+    te = _prof(te, "te")
+    ni = _prof(ni, "ni")
+    ti = _prof(ti, "ti")
+    zeff = _prof(zeff, "zeff")
+    # the physical domain of the Redl inputs, at EVERY node
+    for _nm, _a, _unit in (("ne", ne, "m^-3"), ("ni", ni, "m^-3"),
+                           ("te", te, "eV"), ("ti", ti, "eV")):
+        _first_bad(~(_a > 0.0), psi_N, _a, _nm,
+                   f"strictly positive [{_unit}] on every node")
+    _first_bad(~(zeff >= 1.0), psi_N, zeff, "zeff", ">= 1 on every node")
+    # OpenFUSIONToolkit only after the input checks: the refusals above are
+    # the evaluation's own input domain and hold without OFT importable
+    # (bouquet.engine_draws.check_draw_kinetics mirrors them; the fast CI
+    # suite runs without OFT).
+    import OpenFUSIONToolkit.TokaMaker.bootstrap as _oft_bs
+
+    # ---- geometry on the caller's surfaces (distinct clipped values only) ---
+    psi_eval = np.clip(psi_N, psi_pad, 1.0 - psi_pad)
+    psi_u, inv = np.unique(psi_eval, return_inverse=True)
+    psi_u = np.ascontiguousarray(psi_u, dtype=float)
+    _, F_u, _, _, pp_u = mygs.get_profiles(psi=psi_u.copy())
+    # a live TokaMaker exposes sauter_fc; a copy_eq() snapshot
+    # (TokaMaker_equilibrium) exposes the same routine as calc_sauter_fc
+    _sfc = getattr(mygs, "sauter_fc", None)
+    if _sfc is None:
+        _sfc = getattr(mygs, "calc_sauter_fc")
+    try:   # the geometric eps, as OpenFUSIONToolkit's SWB takes it
+        _s = _sfc(psi=psi_u.copy(), return_eps=True)
+    except TypeError:
+        _s = ()
+    if len(_s) != 5:
+        raise RuntimeError("evaluate_jBS needs sauter_fc(return_eps=True), the "
+                           "geometric eps = (R_max - R_min)/(2<R>); this "
+                           "OpenFUSIONToolkit build does not provide it")
+    fc_u, r_sau, modb, eps_u = _s[1:]
+    _, q_u, ravgs_q, *_rest = mygs.get_q(psi=psi_u.copy())
+    F = np.asarray(F_u, dtype=float)[inv]
+    f_T = (1.0 - np.asarray(fc_u, dtype=float))[inv]
+    eps = np.asarray(eps_u, dtype=float)[inv]
+    avg_inv_R = _sauter_avg(r_sau, "<1/R>", _SAUTER_RAVG_INDEX)[inv]
+    avg_B2 = _sauter_avg(modb, "<|B|^2>", _SAUTER_MODB_INDEX)[inv]
+    q = np.asarray(q_u, dtype=float)[inv]
+    R_avg = np.asarray(q_ravg(ravgs_q, "<R>"), dtype=float)[inv]
+    inv_R_q = np.asarray(q_ravg(ravgs_q, "<1/R>"), dtype=float)[inv]
+    dV_dpsi = np.abs(np.asarray(q_ravg(ravgs_q, "dV/dPsi"), dtype=float))[inv]
+
+    # ---- geometry validity, at EVERY node (a failed trace is a zero row) ---
+    # END nodes: geometry sampled on the clipped axis / separatrix surface,
+    # identified by COORDINATE (psi_eval at the clip), never by the value
+    end = (psi_eval <= psi_pad) | (psi_eval >= 1.0 - psi_pad)
+    axis_end = psi_eval <= psi_pad
+    _a_sau = _sauter_avg(r_sau, "<a>", _SAUTER_RAVG_INDEX)[inv]
+    _R_sau = _sauter_avg(r_sau, "<R>", _SAUTER_RAVG_INDEX)[inv]
+    with np.errstate(invalid="ignore"):
+        for _nm, _a in (("F", F), ("f_T = 1 - f_c", f_T), ("eps", eps),
+                        ("<a>", _a_sau),
+                        ("<R> (sauter_fc)", _R_sau),
+                        ("<1/R> (sauter_fc)", avg_inv_R), ("<B^2>", avg_B2),
+                        ("q", q), ("<R> (get_q)", R_avg),
+                        ("<1/R> (get_q)", inv_R_q), ("dV/dpsi", dV_dpsi)):
+            _first_bad(~np.isfinite(_a), psi_N, _a, _nm, "finite",
+                       what="flux-surface average")
+        for _nm, _a in (("eps", eps), ("<a>", _a_sau),
+                        ("<R> (sauter_fc)", _R_sau),
+                        ("<1/R> (sauter_fc)", avg_inv_R), ("<B^2>", avg_B2),
+                        ("<R> (get_q)", R_avg), ("<1/R> (get_q)", inv_R_q),
+                        ("dV/dpsi", dV_dpsi)):
+            _first_bad(~(_a > 0.0), psi_N, _a, _nm,
+                       "positive (zero is the row a failed flux-surface "
+                       "trace returns)", what="flux-surface average")
+        _first_bad(F == 0.0, psi_N, F, "F", "non-zero (failed trace?)",
+                   what="flux function")
+        _first_bad(q == 0.0, psi_N, q, "q", "non-zero (failed trace?)",
+                   what="safety factor")
+        _first_bad(~(f_T < 1.0), psi_N, f_T, "f_T = 1 - f_c",
+                   "< 1 (f_c = 0 is the row a failed trace returns)",
+                   what="trapped fraction")
+        _first_bad(~(f_T > 0.0) & ~axis_end, psi_N, f_T, "f_T = 1 - f_c",
+                   "> 0 away from the clipped axis surface",
+                   what="trapped fraction")
+
+    # ---- gradients on the TRUE grid, current flux range ---------------------
+    bounds = np.asarray(mygs.psi_bounds, dtype=float)
+    psi_range = float(bounds[1] - bounds[0])
+    if psi_range == 0.0 or not np.isfinite(psi_range):
+        raise ValueError(f"evaluate_jBS: degenerate psi_bounds {bounds}")
+
+    def _d(y):
+        return np.gradient(y, psi_N, edge_order=2) / psi_range
+
+    dn_e = _d(ne)
+    dT_e = _d(te)
+    dn_i = _d(ni)
+    dT_i = _d(ti)
+
+    # ---- collisionality (verbatim SWB physics) ------------------------------
+    ln_le, ln_lii = _oft_bs.calculate_ln_lambda(
+        te, ti, ne, ni, zeff,
+        electron_lnLambda_model="NRL", ion_lnLambda_model="Zavg")
+    Zdom = 1.0                         # deuterium main ion
+    Zavg = ne / ni
+    Zion = (Zdom ** 2 * Zavg * zeff) ** 0.25
+    nu_i_star = (4.90e-18 * np.abs(q) * R_avg * ni
+                 * Zion ** 4 * ln_lii / (ti ** 2 * eps ** 1.5))
+    nu_e_star = (6.921e-18 * np.abs(q) * R_avg * ne
+                 * zeff * ln_le / (te ** 2 * eps ** 1.5))
+
+    j_dot_B, _coeffs = _oft_bs.redl_bootstrap(
+        psi_N=psi_N, Te=te, Ti=ti, ne=ne, ni=ni,
+        pe=_EC * (ne * te), pi=_EC * (ni * ti),
+        Zeff=zeff, R=R_avg, q=q, eps=eps, fT=f_T, I_psi=F,
+        dT_e_dpsi=dT_e, dT_i_dpsi=dT_i,
+        dn_e_dpsi=dn_e, dn_i_dpsi=dn_i,
+        ln_lambda_e=ln_le, ln_lambda_ii=ln_lii,
+        nu_e_star_override=nu_e_star, nu_i_star_override=nu_i_star,
+        use_legacy_L34=False, use_sign_q=True, formula_form="jboot1")
+    n_zeroed = [0]
+
+    def _ends_only(y, what):
+        """The historical ``nan_to_num(y, nan=0.0)`` at END nodes only; a
+        non-finite value anywhere else is refused."""
+        y = np.asarray(y, dtype=float)
+        bad = ~np.isfinite(y)
+        _first_bad(bad & ~end, psi_N, y, what,
+                   "finite away from the clipped axis/separatrix nodes",
+                   what="Redl result")
+        n_zeroed[0] += int(np.count_nonzero(bad & end))
+        return np.nan_to_num(y, nan=0.0)
+
+    j_dot_B = _ends_only(j_dot_B, "<j_BS.B>")
+
+    # p'G goes with the bootstrap (FUSE's convention; OFT's SWB output)
+    geom = {"F": F, "avg_inv_R": avg_inv_R, "avg_B2": avg_B2,
+            "avg_R": R_avg, "pprime": np.asarray(pp_u, dtype=float)[inv]}
+    p_term = jphi_tokamaker_pressure_term(geom)
+    j_tor_full = _ends_only(parallel_to_toroidal(j_dot_B, geom=geom) + p_term,
+                            "toroidal j_BS")
+
+    if isolate_edge:
+        # SWB isolates the spike on its OWN projection <j.B> R_avg/F (the
+        # shelf/mask detection is value-dependent), and bouquet then converts
+        # the masked spike by the per-surface factor.  Same order here.
+        swb_proj = j_dot_B * (R_avg / F)
+        res = _oft_bs.analyze_bootstrap_edge_spike(psi_N, swb_proj)
+        masked = np.asarray(res["masked_spike"], dtype=float)
+        j_tor_sel = _ends_only(parallel_to_toroidal(
+            masked * F / R_avg, geom=geom) + p_term, "isolated toroidal j_BS")
+    else:
+        j_tor_sel = j_tor_full
+
+    if smooth_axis:
+        from .TokaMaker_interface import smooth_jbs_transition
+        j_out = smooth_jbs_transition(j_tor_sel)
+    else:
+        j_out = np.asarray(j_tor_sel, dtype=float).copy()
+
+    # FSA current of the delivered profile ('fsa' measure: V'/2pi <1/R>).
+    w_fsa = dV_dpsi / (2.0 * np.pi) * inv_R_q * abs(psi_range)
+    from scipy.integrate import trapezoid as _trap
+    I_BS = float(_trap(w_fsa * j_out, psi_N))
+
+    diag = dict(
+        psi_eval=psi_eval, psi_pad=psi_pad,
+        n_geometry_surfaces=int(psi_u.size),
+        f_T=f_T, nu_e_star=nu_e_star, nu_i_star=nu_i_star, q=q, eps=eps,
+        R_avg=R_avg, F=F, avg_inv_R=avg_inv_R, avg_B2=avg_B2,
+        pprime=geom["pprime"], p_term=p_term,
+        ln_lambda_e=np.asarray(ln_le, dtype=float),
+        ln_lambda_ii=np.asarray(ln_lii, dtype=float),
+        dpsi=psi_range, j_dot_B=j_dot_B,
+        j_tor_full_raw=j_tor_full, j_tor_raw=np.asarray(j_tor_sel, float),
+        I_BS=I_BS, isolate_edge=bool(isolate_edge),
+        n_nonfinite_zeroed_at_ends=int(n_zeroed[0]),
+        smooth_axis=bool(smooth_axis), version=EVALUATE_JBS_VERSION,
+        coord=str(coord), x=np.asarray(x_run, dtype=float), psi_N=psi_N,
+    )
+    return j_out, diag
 
 
 def effective_impurity_charge(ne, ni, zeff, min_dilution=1e-3):
@@ -570,16 +1110,12 @@ def impurity_charge_with_fast_ions(ne, ni, zeff, z_fast=None):
     ~1 ulp), which is far below any physics scale but enough to move an
     archive that the repo's regeneration contract says must be reproducible.
 
-    ASSUMPTION (load-bearing, not verified here): the source's ``zeff`` is
-    normalized to the FULL ``ne`` with only THERMAL species in its numerator
-    -- i.e. ``zeff = sum_thermal(n_s Z_s^2) / ne``.  That is what the
-    ``zeff * ne / ne_th`` renormalization assumes and what the local
-    fallback numerator in :mod:`bouquet.io.imas` builds.  If a producer's
-    ``zeff`` already carries the fast-ion contribution in its numerator, the
-    fast-ion charge is counted twice and ``Z_imp`` comes out too high.  The
-    convention of any given producer has not been confirmed against a real
-    data file; treat a source whose documented convention differs as out of
-    scope for this helper.
+    CONVENTION: ``zeff`` must have only THERMAL species in its numerator,
+    over the FULL ``ne`` (``sum_thermal(n_s Z_s^2) / ne``) -- what the
+    ``zeff * ne / ne_th`` renormalization assumes.  A thermal+fast numerator
+    (IMAS's own ``zeff`` expression, and a MEASURED Z_eff) counts the fast
+    charge twice and ``Z_imp`` comes out too high, so :mod:`bouquet.io.imas`
+    passes its own thermal-numerator recomputation, never the dd's ``zeff``.
     """
     ne = np.asarray(ne, dtype=float)
     if z_fast is None:
@@ -595,7 +1131,39 @@ def impurity_charge_with_fast_ions(ne, ni, zeff, z_fast=None):
     return effective_impurity_charge(ne_th, ni, zeff_th), ne_th
 
 
-def main_ion_density_from_zeff(ne, zeff, Z_imp, z_fast=None):
+def fast_ion_density_equivalent(z_fast, z2_fast, Z_imp):
+    """The fast-ion part of a main-ion density derived from a MEASURED Z_eff [m^-3].
+
+    Each fast species enters quasineutrality with weight ``Z_s`` and the Z_eff
+    numerator with ``Z_s^2``, so::
+
+        sum_s n_s^fast Z_s (Z_imp - Z_s) / (Z_imp - 1)
+            == (Z_imp z_fast - z2_fast) / (Z_imp - 1)
+
+    with ``z_fast = sum_s Z_s n_s^fast`` and ``z2_fast = sum_s Z_s^2 n_s^fast``
+    (no beam charge assumed).  A hydrogenic beam gives the fast density; a
+    species at ``Z_imp`` gives zero.
+    """
+    Z_imp = float(Z_imp)
+    if not Z_imp > 1.0:
+        raise ValueError(f"Z_imp must exceed 1 (got {Z_imp})")
+    return (Z_imp * np.asarray(z_fast, dtype=float)
+            - np.asarray(z2_fast, dtype=float)) / (Z_imp - 1.0)
+
+
+def _require_z2(z2_fast, who):
+    if z2_fast is None:
+        raise ValueError(
+            f"{who}: zeff_includes_fast=True needs z2_fast (= sum_s Z_s^2 "
+            f"n_s^fast) as well as z_fast. A measured Z_eff weights each fast "
+            f"species by Z_s^2 while quasineutrality weights it by Z_s, so the "
+            f"two moments are independent and the beam charge cannot be "
+            f"inferred from z_fast alone. Pass Baseline.z2_fast.")
+    return z2_fast
+
+
+def main_ion_density_from_zeff(ne, zeff, Z_imp, z_fast=None, z2_fast=None,
+                               zeff_includes_fast=False):
     """Main-ion density from (ne, Zeff) under single-impurity quasineutrality.
 
     ::
@@ -607,18 +1175,29 @@ def main_ion_density_from_zeff(ne, zeff, Z_imp, z_fast=None):
     ``nz >= 0`` -- the consistent (ne, ni, Zeff, nz) set that the independent
     per-channel draws cannot provide. Returns ``ni``.
 
-    With a fast-ion charge profile ``z_fast`` the thermal quasineutrality is
-    ``ni + Z_imp nz = ne - z_fast`` while ``zeff`` keeps the full-``ne``
-    normalization, giving
+    With a fast-ion population the result is the THERMAL main-ion density, and
+    which formula gives it depends on what is in ``zeff``'s numerator.  The
+    fast population enters through its charge moments ``z_fast`` (= sum_s Z_s
+    n_s^fast) and ``z2_fast`` (= sum_s Z_s^2 n_s^fast); see
+    :func:`fast_ion_density_equivalent`.  Both branches reduce to the plain
+    form when the fast population is absent.
 
-    ::
+    ``zeff_includes_fast=False`` -- THERMAL numerator over the full ``ne``
+    (``zeff = sum_thermal(n_s Z_s^2)/ne``).  Only the charge matters here::
 
         ni = (Z_imp (ne - z_fast) - Zeff ne) / (Z_imp - 1)
 
-    which reduces to the plain form at ``z_fast = 0``.  The corresponding
-    physical bounds on a full-``ne`` Zeff are
-    ``ne_th/ne <= Zeff <= Z_imp ne_th/ne`` (both reduce to the familiar
-    ``[1, Z_imp]`` without fast ions).
+    ``zeff_includes_fast=True`` -- ALL ions in the numerator, fast included.
+    This is IMAS's ``zeff`` expression (``ion.density`` = thermal + fast), and
+    what a MEASURED Z_eff is: VB bremsstrahlung counts a beam ion by
+    its own Z_s exactly like a thermal one, and a CER Z_eff built as
+    ``1 + Z(Z-1) nC/ne`` inherits the same normalisation.  Then ``z2_fast`` is
+    REQUIRED, because the numerator weights the beam by ``Z_s^2``::
+
+        ni = ne (Z_imp - Zeff)/(Z_imp - 1) - (Z_imp z_fast - z2_fast)/(Z_imp - 1)
+
+    The two conventions differ by ``z2_fast/(Z_imp - 1)``; :func:`zeff_bounds`
+    gives each one's validity window.
     """
     ne = np.asarray(ne, dtype=float)
     zeff = np.asarray(zeff, dtype=float)
@@ -627,13 +1206,48 @@ def main_ion_density_from_zeff(ne, zeff, Z_imp, z_fast=None):
         raise ValueError(f"Z_imp must exceed 1 (got {Z_imp})")
     if z_fast is None:
         return ne * (Z_imp - zeff) / (Z_imp - 1.0)
+    if zeff_includes_fast:
+        _require_z2(z2_fast, "main_ion_density_from_zeff")
+        return (ne * (Z_imp - zeff) / (Z_imp - 1.0)
+                - fast_ion_density_equivalent(z_fast, z2_fast, Z_imp))
     ne_th = np.maximum(ne - np.asarray(z_fast, dtype=float), 0.0)
     return (Z_imp * ne_th - zeff * ne) / (Z_imp - 1.0)
 
 
+def zeff_bounds(ne, Z_imp, z_fast=None, z2_fast=None,
+                zeff_includes_fast=False):
+    """``(lo, hi)`` on Z_eff: the window where ni >= 0 and nz >= 0.
+
+    A Z_eff draw is clipped to it.  Without fast ions it is ``[1, Z_imp]``;
+    with them it follows the convention of :func:`main_ion_density_from_zeff`::
+
+        zeff_includes_fast=False
+            [ne_th/ne,                     Z_imp ne_th/ne]
+        zeff_includes_fast=True
+            [1 + (z2_fast - z_fast)/ne,    Z_imp - (Z_imp z_fast - z2_fast)/ne]
+
+    Both reduce to ``[1, Z_imp]`` when the fast population is absent, and the
+    ``True`` window reduces to ``[1, Z_imp - (Z_imp - 1) z_fast/ne]`` for a
+    hydrogenic beam.  Returns scalars when ``z_fast`` is None and arrays
+    otherwise; ``hi`` is not clamped above ``lo``, so a surface whose fast
+    population overwhelms ``ne`` yields an empty window the caller can detect.
+    """
+    Z_imp = float(Z_imp)
+    if z_fast is None:
+        return 1.0, Z_imp
+    ne = np.asarray(ne, dtype=float)
+    _ne = np.clip(ne, 1e-30, None)
+    zf = np.asarray(z_fast, dtype=float)
+    if zeff_includes_fast:
+        z2 = np.asarray(_require_z2(z2_fast, "zeff_bounds"), dtype=float)
+        return 1.0 + (z2 - zf) / _ne, Z_imp - (Z_imp * zf - z2) / _ne
+    f = np.clip(zf / _ne, 0.0, 1.0)
+    return 1.0 - f, Z_imp * (1.0 - f)
+
+
 # Elementary charge [C] -- thermal pressure p = e * sum_s(n_s * T_s) with n in
-# m^-3 and T in eV.
-_EC = 1.602176634e-19
+# m^-3 and T in eV (:data:`ELEMENTARY_CHARGE`).
+_EC = ELEMENTARY_CHARGE
 
 
 def impurity_pressure(ne, ni, ti, Z_imp):

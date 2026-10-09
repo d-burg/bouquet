@@ -22,6 +22,8 @@ still wired in at all.
 from __future__ import annotations
 
 import ast
+
+import pytest
 import inspect
 import re
 
@@ -193,10 +195,10 @@ class _JphiBaselineStub:
         self.state = "cold-analytic"            # the recon state is now GONE
 
     def set_targets(self, Ip=None, pax=None):
-        pass
+        self.pax = pax
 
     def set_profiles(self, pp_prof=None, ffp_prof=None):
-        pass
+        self.pp = None if pp_prof is None else pp_prof["y"]
 
     def solve(self):
         if self._fail:
@@ -217,12 +219,23 @@ class _JphiBaselineStub:
         return (0.0, 1.0)
 
 
-def _run_block(stub, capsys=None):
+#: the edge-pressure settings the block is run at: the pre-change ones (the
+#: inline expressions bit for bit) and the defaults since 2026-10-02
+#: ("offset": the axis target is p_axis - p_sep)
+EDGES = ("pre_change", "default")
+_P_EDGE = 500.0                      # p_sep of the block's solve pressure
+
+
+def _run_block(stub, capsys=None, edge="pre_change"):
     """Exec the shipped jphi_baseline block against ``stub``."""
     import numpy as np
     from bouquet.TokaMaker_interface import (_count_masked_anchor_failure,
                                              ANCHOR_MASKED_FAILURES)
     from bouquet.utils import _shape_from_boundary, pchip_derivative
+    from bouquet import coords
+    from bouquet.edge_pressure import (PRE_CHANGE_EDGE_PRESSURE,
+                                       resolve_edge_pressure, solver_pax,
+                                       solver_pp_profile)
 
     psi_N = np.linspace(0.0, 1.0, 65)
     th = np.linspace(0.0, 2.0 * np.pi, 128)
@@ -233,8 +246,16 @@ def _run_block(stub, capsys=None):
         safe_trace_surf=lambda g, v: lcfs,
         _shape_from_boundary=_shape_from_boundary,
         pchip_derivative=pchip_derivative,
+        coords=coords, coord="psi_n",
+        # the block builds its P' and axis target through the one helper
+        # (bouquet.edge_pressure); at the pre-change settings it is the
+        # inline expressions it replaced, bit for bit
+        # (tests/test_edge_pressure.py)
+        solver_pp_profile=solver_pp_profile, solver_pax=solver_pax,
+        _edge=resolve_edge_pressure(PRE_CHANGE_EDGE_PRESSURE
+                                    if edge == "pre_change" else None),
         initial_Ip_target=1.0e6,
-        pressure_solve=1.0e4 * (1.0 - psi_N ** 2),
+        pressure_solve=1.0e4 * (1.0 - psi_N ** 2) + _P_EDGE,
         input_j_phi=1.0e6 * (1.0 - psi_N ** 2),
         jphi_diff=None,
         recon_lcfs_ref=None,
@@ -250,7 +271,9 @@ def _run_block(stub, capsys=None):
     return ns
 
 
-def test_a_failed_baseline_solve_restores_the_state_the_reinit_discarded():
+@pytest.mark.parametrize("edge", EDGES)
+def test_a_failed_baseline_solve_restores_the_state_the_reinit_discarded(
+        edge):
     """FAILURE INJECTION: solve raises after init_psi -> state must be restored.
 
     ``init_psi`` throws away the reconstruction's converged equilibrium for a
@@ -262,7 +285,7 @@ def test_a_failed_baseline_solve_restores_the_state_the_reinit_discarded():
     which then poisons the warm start of every subsequent draw.
     """
     stub = _JphiBaselineStub(fail=True)
-    _run_block(stub)
+    _run_block(stub, edge=edge)
 
     assert stub.init_psi_called, "the re-init did not run; test premise is void"
     assert stub.replaced_with is not None, (
@@ -290,11 +313,16 @@ def test_the_snapshot_is_taken_before_init_psi_discards_the_state():
         "reconstruction's converged state")
 
 
-def test_a_successful_baseline_solve_does_not_restore_anything():
+@pytest.mark.parametrize("edge", EDGES)
+def test_a_successful_baseline_solve_does_not_restore_anything(edge):
     """Guard the guard: the restore must be on the FAILURE path only, or the
     baseline solve's own result would be thrown away."""
     stub = _JphiBaselineStub(fail=False)
-    _run_block(stub)
+    _run_block(stub, edge=edge)
+    # the axis target the block hands the solver, at each setting
+    p0 = 1.0e4 + _P_EDGE
+    assert stub.pax == (p0 if edge == "pre_change" else p0 - _P_EDGE)
+    assert stub.pp[-1] == 0.0                   # the pin, on at both
 
     assert stub.init_psi_called
     assert stub.replaced_with is None, (

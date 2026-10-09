@@ -57,7 +57,13 @@ __all__ = [
     "until_n_delivered",
 ]
 
-_FILTER_FLAGS = ("passes_coil_filter", "passes_boundary_filter")
+#: Per-draw pass flags ANDed into ``selected``.  ``passes_draw_band`` is
+#: written at archive time on draws made by the unified engine only
+#: (bouquet.engine_draws: its post-hoc l_i band / constrain_sawteeth
+#: verdict); a legacy draw never carries it, so its ``selected`` is exactly
+#: the coil + boundary verdict as before.
+_FILTER_FLAGS = ("passes_coil_filter", "passes_boundary_filter",
+                 "passes_draw_band")
 
 
 # --------------------------------------------------------------------------

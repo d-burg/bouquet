@@ -21,8 +21,9 @@ from .schema import write_profile
 #: == the g-file reader's ``li["li(2)"]`` key (whose name is historical and
 #: misleading -- it is not Jackson's li(2)).
 #:
-#: This is the ONLY estimator bouquet and TokaMaker agree on (0.17% across the
-#: DIII-D 169510 beta-scan g-files); the li(1)/EFIT pair differs by +3.3%
+#: This is the ONLY estimator bouquet and TokaMaker agree on (0.17% across a
+#: 16-equilibrium beta-scan set of reconstruction g-files); the li(1)/EFIT
+#: pair differs by +3.3%
 #: because TokaMaker projects the padded surface onto the true separatrix
 #: before summing perimeter.  Targeting one and measuring the other is
 #: issue #20.  Written into every archive's ``_baseline`` group as
@@ -50,37 +51,124 @@ class OpenLCFSContourWarning(UserWarning):
 _LCFS_CLOSURE_RTOL = 1e-3
 
 
-def select_closed_lcfs(segs, context=""):
-    r"""Pick the longest **closed** contour segment from *segs*.
+def _encloses(poly, pt):
+    """Whether the closed polyline *poly* (first vertex repeated or not)
+    encloses the point *pt*: even-odd ray crossing, exact for a simple
+    polygon (a level-set curve does not cross itself)."""
+    x, y = float(pt[0]), float(pt[1])
+    px, py = poly[:, 0], poly[:, 1]
+    qx, qy = np.roll(px, -1), np.roll(py, -1)
+    straddle = (py > y) != (qy > y)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        xc = px + (y - py) * (qx - px) / (qy - py)
+    return bool(np.count_nonzero(straddle & (xc > x)) % 2)
 
-    On a diverted equilibrium the :math:`\psi = \psi_\mathrm{LCFS}` level set
-    contains the open separatrix branch running down to the divertor as well
-    as the closed LCFS.  The open branch spans the full vessel height, so it
-    frequently carries *more* points than the closed boundary -- and a plain
-    ``max(segs, key=len)`` then silently returns the wrong curve.  Measured on
-    a diverted lower-single-null case, that mis-selection reported a boundary
-    RMS of 891.86 mm (open branch, n=1070) where the true closed-LCFS value is
-    2.06 mm (n=969), which flipped the acceptance verdict PASS -> CHECK.  A
-    second case selected the closed branch only because it happened to be
-    longer, so the defect is general rather than case-specific (issue #33).
 
-    Closedness is tested directly -- first vertex coincident with last, within
-    :data:`_LCFS_CLOSURE_RTOL` of the segment's own bounding-box diagonal --
-    rather than inferred from length.
+def _enclosed_area(poly):
+    """|area| enclosed by the closed polyline *poly* (shoelace)."""
+    x, y = poly[:, 0], poly[:, 1]
+    return 0.5 * abs(float(np.dot(x, np.roll(y, -1))
+                           - np.dot(y, np.roll(x, -1))))
+
+
+def _turn_about(seg, pt):
+    """The part of the OPEN polyline *seg* that goes once around *pt*,
+    closed where the curve comes nearest to itself.
+
+    A level-set curve at the X-point flux value can come out of a linear
+    contouring as ONE open segment: divertor leg -> around the plasma ->
+    other leg.  The plasma boundary is then the stretch between the two
+    passes of the X-point, which are an element apart; anywhere else two
+    points of the curve that have the axis between them are a plasma width
+    apart.  So: of all vertex pairs ``(i, j)`` whose stretch ``seg[i..j]``,
+    closed by the straight chord ``j -> i``, winds once around *pt* (the
+    winding number of that polygon is ``round((theta_j - theta_i) / 2 pi)``
+    with ``theta`` the unwrapped polar angle about *pt*, since the chord
+    turns by less than ``pi``), the pair with the SHORTEST chord.
+
+    Returns ``(loop, gap)`` -- *loop* closed (first vertex repeated), *gap*
+    the chord length -- or ``None`` when no stretch of the segment goes
+    around *pt*.
+    """
+    d = seg - np.asarray(pt, dtype=float)[None, :]
+    if not np.all(np.hypot(d[:, 0], d[:, 1]) > 0.0):
+        return None
+    th = np.unwrap(np.arctan2(d[:, 1], d[:, 0]))
+    if np.ptp(th) <= np.pi:
+        return None
+    turn = np.abs(th[None, :] - th[:, None])
+    once = np.triu((turn > np.pi) & (turn < 3.0 * np.pi), k=1)
+    if not once.any():
+        return None
+    chord = np.hypot(seg[None, :, 0] - seg[:, None, 0],
+                     seg[None, :, 1] - seg[:, None, 1])
+    chord[~once] = np.inf
+    i, j = np.unravel_index(int(np.argmin(chord)), chord.shape)
+    loop = np.vstack([seg[i:j + 1], seg[i:i + 1]])
+    return loop, float(chord[i, j])
+
+
+def select_closed_lcfs(segs, context="", axis=None):
+    r"""Pick the plasma boundary among the contour segments *segs* of the
+    :math:`\psi = \psi_\mathrm{LCFS}` level set.
+
+    On a diverted equilibrium that level set contains more than the plasma
+    boundary: the open separatrix branches running to the divertor, and
+    possibly CLOSED loops elsewhere on the mesh (around a coil, in the
+    private-flux region).  Two selection rules, by what the caller knows:
+
+    **With** *axis* (the magnetic axis ``(R, Z)``; what every solver-side
+    caller passes).  The plasma boundary is, by definition, the first curve
+    of the level set met going outward from the magnetic axis: the INNERMOST
+    curve that goes once around the axis.  So the candidates are
+
+    * every closed segment that encloses *axis* (a loop around a coil does
+      not, whatever its length), and
+    * for every open segment, the stretch of it that goes once around
+      *axis*, closed at the curve's nearest approach to itself
+      (:func:`_turn_about`: a linear contouring at the X-point value can
+      join the boundary and both divertor legs into a single open curve;
+      the boundary is the stretch between its two passes of the X-point),
+
+    and the one enclosing the smallest area is returned (two curves of one
+    level set do not cross, so "smallest area" is "innermost").  Nothing is
+    decided on length.  If no curve goes around the axis there is no
+    boundary to return: ``None``, with an :class:`OpenLCFSContourWarning`
+    -- never a far loop.  Measured on diverted reconstructions where the
+    boundary came out joined to its legs, the longest-closed rule below
+    returned a loop some 2 m from the plasma (boundary "RMS" 1.8-2.0 m where
+    the boundary's own curve is millimetres from its target).
+
+    **Without** *axis* (``None``, the historical call): the longest **closed**
+    segment.  The open branch spans the full vessel height, so it frequently
+    carries *more* points than the closed boundary -- and a plain
+    ``max(segs, key=len)`` then silently returns the wrong curve.  Measured
+    on a diverted lower-single-null case, that mis-selection reported a
+    boundary RMS of 891.86 mm (open branch, n=1070) where the true
+    closed-LCFS value is 2.06 mm (n=969), which flipped the acceptance
+    verdict PASS -> CHECK (issue #33).  Closedness is tested directly --
+    first vertex coincident with last, within :data:`_LCFS_CLOSURE_RTOL` of
+    the segment's own bounding-box diagonal -- rather than inferred from
+    length.  This rule cannot tell the boundary from another closed loop and
+    is kept only for a caller that has no axis.
 
     Parameters
     ----------
     segs : sequence of ndarray, shape (N, 2)
         Candidate contour segments, as returned by matplotlib ``allsegs``.
     context : str, optional
-        Caller label, used only in the fallback warning message.
+        Caller label, used only in the warning messages.
+    axis : (float, float), optional
+        ``(R, Z)`` of the magnetic axis.
 
     Returns
     -------
     ndarray, shape (N, 2) or None
-        The longest closed segment; the longest segment overall (with an
-        :class:`OpenLCFSContourWarning`) if none closes; ``None`` when no
-        candidate survives -- either *segs* was empty, or every entry had
+        With *axis*: the innermost curve around the axis (closed, first
+        vertex repeated), or ``None`` (with a warning) when there is none.
+        Without: the longest closed segment; the longest segment overall
+        (with an :class:`OpenLCFSContourWarning`) if none closes.  ``None``
+        also when no candidate survives -- *segs* empty, or every entry had
         4 or fewer vertices and was discarded as degenerate.  Callers must
         treat ``None`` as "no usable contour" and fall back accordingly.
     """
@@ -88,13 +176,39 @@ def select_closed_lcfs(segs, context=""):
     if not segs:
         return None
 
-    closed = []
+    closed, opened = [], []
     for s in segs:
         span = np.ptp(s, axis=0)
         diag = float(np.hypot(*span))
         gap = float(np.hypot(*(s[0] - s[-1])))
         if diag > 0.0 and gap <= _LCFS_CLOSURE_RTOL * diag:
             closed.append(s)
+        else:
+            opened.append(s)
+
+    if axis is not None:
+        axis = np.asarray(axis, dtype=float).reshape(2)
+        if not np.all(np.isfinite(axis)):
+            raise ValueError(f"select_closed_lcfs: axis={axis!r} is not a "
+                             "finite (R, Z)")
+        around = [s for s in closed if _encloses(s, axis)]
+        for s in opened:
+            turn = _turn_about(s, axis)
+            if turn is not None and _encloses(turn[0], axis):
+                around.append(turn[0])
+        if around:
+            return min(around, key=_enclosed_area)
+        warnings.warn(
+            f"no contour at the LCFS flux level goes around the magnetic "
+            f"axis{' in ' + context if context else ''} "
+            f"({len(closed)} closed, {len(opened)} open segment(s), none "
+            f"enclosing R={axis[0]:.4g}, Z={axis[1]:.4g}): no boundary "
+            f"metric is derived (a curve elsewhere on the mesh is not the "
+            f"plasma boundary).",
+            OpenLCFSContourWarning,
+            stacklevel=2,
+        )
+        return None
 
     if closed:
         return max(closed, key=len)
@@ -108,6 +222,22 @@ def select_closed_lcfs(segs, context=""):
         stacklevel=2,
     )
     return max(segs, key=len)
+
+
+def magnetic_axis_of(mygs):
+    """``(R, Z)`` of the solver's magnetic axis for
+    :func:`select_closed_lcfs`, or ``None`` when the object carries none
+    (a test double) or reports the solver's "no O-point" value (R <= 0)."""
+    o = getattr(mygs, "o_point", None)
+    if o is None:
+        return None
+    try:
+        o = np.asarray(o, dtype=float).reshape(-1)
+    except (TypeError, ValueError):
+        return None
+    if o.size != 2 or not np.all(np.isfinite(o)) or not o[0] > 0.0:
+        return None
+    return float(o[0]), float(o[1])
 
 
 class DerivativeSanityWarning(UserWarning):
@@ -245,11 +375,29 @@ def safe_save_eqdsk(mygs, filename, **kwargs):
     **kwargs
         Passed through to `mygs.save_eqdsk(...)`.
     '''
+    return _snapshot_save(mygs, mygs.save_eqdsk, filename, **kwargs)
+
+
+def try_save_ifile(mygs, filename, **kwargs):
+    r'''Snapshot/restore-wrapped `mygs.save_ifile` (see :func:`safe_save_eqdsk`),
+    returning `filename`; on failure warn, remove any partial file and return
+    None (the i-file is optional; the run continues without it).'''
+    try:
+        _snapshot_save(mygs, mygs.save_ifile, filename, **kwargs)
+        return filename
+    except Exception as exc:
+        print(f"  WARN: save_ifile failed ({exc}); stored without an i-file")
+        if os.path.exists(filename):
+            os.remove(filename)
+        return None
+
+
+def _snapshot_save(mygs, save, filename, **kwargs):
     if not hasattr(mygs, 'copy_eq') or not hasattr(mygs, 'replace_eq'):
-        return mygs.save_eqdsk(filename, **kwargs)
+        return save(filename, **kwargs)
     saved = mygs.copy_eq()
     try:
-        return mygs.save_eqdsk(filename, **kwargs)
+        return save(filename, **kwargs)
     finally:
         mygs.replace_eq(source_eq=saved)
 
@@ -605,20 +753,12 @@ def pchip_derivative(x, y, x_eval=None, strict=False):
 #  Flux-surface-averaged plasma-current integral
 # =====================================================================
 #
-# ``TokaMaker.compute_flux_integral`` is NOT ``int_plasma f dA``.  Measured on
-# the synthetic D3D-like example (see ``tests/test_fsa_current_integral.py``):
-#
-#   * it integrates over the whole ``reg == 1`` (limiter) region, and the
-#     flux-function interpolator returns the profile's EDGE value everywhere
-#     outside the LCFS (``gs_prof_interp_apply`` CASE(4) returns 0 -- the LCFS
-#     end of the internal psi coordinate -- off the plasma, and ``gs_flux_int``
-#     then evaluates the profile there).  ``compute_flux_integral(1.0)`` is
-#     therefore 2.83853 m^2, the LIMITER-region area, against a true plasma
-#     cross-section of 1.79005 m^2;
-#   * so for a profile with a finite edge value the excess area is charged at
-#     ``f(psi_N=1)``.  On the archived total that is
-#     ``1.36e5 A/m^2 * 1.05 m^2 = 1.43e5 A``, i.e. +11.9 % of I_p -- almost the
-#     whole of the +12.9 % "representation bias" 7dc254b calibrated away.
+# ``TokaMaker.compute_flux_integral`` integrates its input as an area
+# density, so a TokaMaker jphi array needs eq. A5
+# (``physics.jphi_tokamaker_to_jtor_imas``) first (docs/current-conventions.md,
+# A9c); on OFT builds whose ``gs_flux_int`` covers the whole ``reg == 1``
+# limiter region it is also +11.9 % of I_p high on the D3D-like example
+# (``_AnchorIpRenorm``).
 #
 # The measure below never uses the mesh integral.  It is the textbook
 # axisymmetric current integral,
@@ -1076,10 +1216,79 @@ def ip_roundtrip_gate(ip_closed, Ip_measured, posterior=None, sigma_Ip=None,
 SOFT_IP_FLAG_PREFIX = "soft Ip beyond 1 sigma_Ip"
 
 
+#: Half-width of the bootstrap-model prior: the closure's bootstrap scale is
+#: expected within ``1 +/- 0.5`` (the +/-50 % j_BS uncertainty prior).  A
+#: scale outside it is a CLOSURE FAILURE -- the closure paid for I_p / l_i
+#: by rescaling the bootstrap beyond what the bootstrap model's uncertainty
+#: allows -- not a finding about the bootstrap.  Flagged, never clamped.
+BS_SCALE_PRIOR_HALFWIDTH = 0.5
+#: The reason prefix :func:`closure_health` flags such a scale with.
+BOOTSTRAP_PRIOR_FLAG = "bootstrap_scale_out_of_prior"
+
+
+def bootstrap_prior_reason(bs_scale, halfwidth=BS_SCALE_PRIOR_HALFWIDTH):
+    """The ``closure_limited`` reason for a bootstrap scale outside the
+    +/-50 % prior (``|s_bs - 1| > halfwidth``), or ``None`` inside it.  A
+    non-finite scale is not judged here (:func:`closure_health` flags it as
+    unreadable)."""
+    try:
+        sb = float(bs_scale)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(sb) or abs(sb - 1.0) <= float(halfwidth):
+        return None
+    return (f"{BOOTSTRAP_PRIOR_FLAG}: bs_scale {sb:.3f} outside "
+            f"1 +/- {float(halfwidth):g} (the +/-50 % bootstrap prior) -- a "
+            "closure failure, not a finding")
+
+
+def warn_bootstrap_prior(reason, where):
+    """Print (and warn) a :data:`BOOTSTRAP_PRIOR_FLAG` reason LOUDLY."""
+    import warnings
+    msg = f"{where}: {reason}"
+    print(f"[closure-health] WARNING {msg}", flush=True)
+    warnings.warn(msg, RuntimeWarning, stacklevel=3)
+
+
+def bootstrap_prior_record(bs_scale, basis, where):
+    """A closure-health block for a path that has a bootstrap scale but no
+    Ip closure to judge (the legacy g-file reconstruction): the scale
+    against the +/-50 % prior (:func:`bootstrap_prior_reason`), flagged
+    loudly (:func:`warn_bootstrap_prior`) when outside, never clamped."""
+    bs = float(bs_scale)
+    reason = bootstrap_prior_reason(bs)
+    if reason is not None:
+        warn_bootstrap_prior(reason, where)
+    return dict(
+        bs_scale=bs, bs_scale_basis=str(basis),
+        closure_limited=reason is not None,
+        closure_limited_reasons=(() if reason is None else (reason,)),
+        closure_limited_thresholds=dict(
+            bs_prior_halfwidth=float(BS_SCALE_PRIOR_HALFWIDTH),
+            bs_scale_min=1.0 - float(BS_SCALE_PRIOR_HALFWIDTH),
+            bs_scale_max=1.0 + float(BS_SCALE_PRIOR_HALFWIDTH)))
+
+
+def merge_closure_flags(metrics, health):
+    """Fold a :func:`closure_health` record's flags into a reconstruction
+    metrics dict (``closure_limited`` / ``closure_limited_reasons``, the
+    convention :meth:`bouquet.run.Bouquet._flag_nonconverged_recon_loop`
+    uses), without repeating a reason already there.  Returns *metrics*."""
+    reasons = list(metrics.get("closure_limited_reasons", ()) or ())
+    for r in health.get("closure_limited_reasons", ()) or ():
+        if r not in reasons:
+            reasons.append(r)
+    if reasons:
+        metrics["closure_limited"] = True
+        metrics["closure_limited_reasons"] = tuple(reasons)
+    return metrics
+
+
 def closure_health(ohm_scale, bs_scale, Ip_target_signed, c_affine,
                    ip_ind, ip_bs, ip_fix,
-                   mismatch_max_pct=10.0, bs_scale_min=0.5,
-                   soft_ip_residual_sigma=None):
+                   mismatch_max_pct=10.0,
+                   bs_prior_halfwidth=BS_SCALE_PRIOR_HALFWIDTH,
+                   soft_ip_residual_sigma=None, where=None):
     """Per-slice closure-health record for every ohmic-mode channel.
 
     ``Ip_target_signed`` and ``c_affine`` must carry the SAME
@@ -1093,7 +1302,10 @@ def closure_health(ohm_scale, bs_scale, Ip_target_signed, c_affine,
     components miss Ip, the unscaled and closed bootstrap fractions, and flag
     the slice **closure-limited** when the reconciliation asked of one scale
     is large: raw mismatch beyond ``mismatch_max_pct`` of Ip, or the bootstrap
-    scaled below ``bs_scale_min``.  A refusal (scale outside (0.2, 5), or a
+    scaled outside its +/-50 % prior, ``|bs_scale - 1| >
+    bs_prior_halfwidth`` (reason :data:`BOOTSTRAP_PRIOR_FLAG`, printed and
+    warned loudly; until 2026-10-06 only ``bs_scale < 0.5`` was flagged and
+    a scale above 1.5 passed silently).  A refusal (scale outside (0.2, 5), or a
     singular q0 system) is closure-limited by construction and raises before
     this is reached.  Downstream consumers (Delta' pipelines) should treat
     closure-limited slices as unvalidated regardless of channel -- that is
@@ -1134,8 +1346,10 @@ def closure_health(ohm_scale, bs_scale, Ip_target_signed, c_affine,
     if abs(mismatch_pct) > float(mismatch_max_pct):
         reasons.append(f"raw components miss Ip by {mismatch_pct:+.1f}% "
                        f"(> {float(mismatch_max_pct):g}%)")
-    if float(bs_scale) < float(bs_scale_min):
-        reasons.append(f"bs_scale {float(bs_scale):.3f} < {float(bs_scale_min):g}")
+    _prior = bootstrap_prior_reason(bs_scale, bs_prior_halfwidth)
+    if _prior is not None:
+        reasons.append(_prior)
+        warn_bootstrap_prior(_prior, where or "closure_health")
     if (soft_ip_residual_sigma is not None
             and np.isfinite(float(soft_ip_residual_sigma))
             and abs(float(soft_ip_residual_sigma)) > 1.0):
@@ -1147,8 +1361,12 @@ def closure_health(ohm_scale, bs_scale, Ip_target_signed, c_affine,
         f_BS_closed=float(f_bs_closed),
         closure_limited=bool(reasons),
         closure_limited_reasons=tuple(reasons),
-        closure_limited_thresholds=dict(mismatch_max_pct=float(mismatch_max_pct),
-                                        bs_scale_min=float(bs_scale_min)),
+        # the record's keys are unchanged (bs_scale_min = 1 - halfwidth);
+        # the prior is symmetric, its upper edge 1 + halfwidth (the reason
+        # says so; the engine's and the legacy g-file's blocks record it)
+        closure_limited_thresholds=dict(
+            mismatch_max_pct=float(mismatch_max_pct),
+            bs_scale_min=1.0 - float(bs_prior_halfwidth)),
     )
 
 
@@ -1283,8 +1501,10 @@ def structured_default_weights(K):
     ``"K basis functions but 4/4 ind/bs weights"`` -- including for the
     documented ``structured_basis={"kind": "constant"}`` one-liner, which is
     how the channel is meant to be collapsed back onto a single scalar pair.
-    For any other K the default is therefore UNIFORM (no prior), and the
-    recorded ``name`` says so, so a reader of the archive can never mistake it
+    For any other K the default is therefore UNIFORM -- no prior while the
+    closure has only Ip/axis/l_i rows, but a sigma = 1 prior on every
+    coefficient once ``mse_data`` adds its chi^2 (see
+    :data:`STRUCTURED_WEIGHTS_UNIFORM`) -- and the recorded ``name`` says so, so a reader of the archive can never mistake it
     for the physics ladder.  Supplying ``structured_weights`` explicitly is
     unaffected.
     """
@@ -1298,10 +1518,21 @@ def structured_default_weights(K):
                 ind=(1.0,) * K, bs=(1.0,) * K)
 
 
-#: The ONE documented alternative, for a sensitivity: no prior at all, every
-#: coefficient penalised equally.  The difference between the two answers is
-#: the part of the result that the physics prior -- not the data -- is holding
-#: up, and it is meant to be reported, not hidden.
+#: The ONE documented alternative, for a sensitivity: every coefficient
+#: penalised equally.  The difference between the two answers is the part of
+#: the result that the physics prior -- not the data -- is holding up, and it
+#: is meant to be reported, not hidden.
+#:
+#: "No prior" is exact only WITHOUT MSE data.  The hard channel solves
+#: ``min x'Wx s.t. C x = d``, which is invariant under ``W -> c W``: only the
+#: RATIOS of the weights matter, and uniform weights express no preference.
+#: With ``mse_data`` the objective becomes ``x'Wx + chi2_MSE(x)``, and the
+#: weights are then an ABSOLUTE ``sigma^-2`` (in peak-normalised coefficient
+#: units) that trades against the chords' chi^2 -- scaling W changes the
+#: answer, and this ladder is a sigma = 1 prior on every coefficient, not the
+#: absence of one.  (The soft solver always read its ladders as absolute
+#: sigmas; the hard channel now does too, which is what keeps the two solvers
+#: in agreement when handed the same sigma statement.)
 STRUCTURED_WEIGHTS_UNIFORM = dict(name="uniform",
                                   ind=(1.0, 1.0, 1.0, 1.0),
                                   bs=(1.0, 1.0, 1.0, 1.0))
@@ -1369,7 +1600,8 @@ STRUCTURED_PRESETS = {
 #: another device or another source, run it and read the recorded
 #: closure-health flags (the 0.2 < s < 5 scale bounds, |s_bs - 1| > 0.5, the q0
 #: miss, the l_i z-score) before trusting the answer, and consider
-#: :data:`STRUCTURED_WEIGHTS_UNIFORM` as the no-prior sensitivity.
+#: :data:`STRUCTURED_WEIGHTS_UNIFORM` as the no-prior sensitivity (without
+#: MSE data; with it the uniform ladder is a sigma = 1 prior -- see there).
 STRUCTURED_PRESET_DEFAULT = "li_soft_onesided"
 
 #: The ``structured_preset`` spelling that DECLINES the default preset and
@@ -2010,7 +2242,8 @@ def _li_record(li_model, li_anchor, li_target, li_grad, x, Ip_pinned=None):
 SIGN_ITER_MAX = 8
 
 
-def _one_sided_sign_iterate(solve_for, K, who, max_iter=SIGN_ITER_MAX):
+def _one_sided_sign_iterate(solve_for, K, who, max_iter=SIGN_ITER_MAX,
+                            start_pattern=None):
     r"""Solve an asymmetric-Tikhonov structured closure by SIGN ITERATION.
 
     The one-sided prior (see :func:`close_ip_structured`) penalises an
@@ -2056,7 +2289,9 @@ def _one_sided_sign_iterate(solve_for, K, who, max_iter=SIGN_ITER_MAX):
     *solve_for* takes a length-*K* boolean pattern (True = "this coefficient
     is on the up side") and returns a tuple whose FIRST entry is the full
     ``(2K,)`` coefficient vector.  The iteration starts from the all-down
-    pattern, costs zero GS solves (each step is the same linear algebra the
+    pattern (or *start_pattern*: the closure's logged retry from a previous
+    solution's coefficients starts from THEIR sign pattern), costs zero GS
+    solves (each step is the same linear algebra the
     symmetric channel does once), and is capped at *max_iter*.  ``a_k == 0``
     counts as DOWN, which is the only convention that leaves the symmetric
     case (``sigma_up == sigma_down``) settling on the first solve.
@@ -2069,7 +2304,11 @@ def _one_sided_sign_iterate(solve_for, K, who, max_iter=SIGN_ITER_MAX):
     which is a finding to report.
     """
     _fmt = lambda p: "".join("+" if v else "-" for v in p)
-    pattern = (False,) * int(K)
+    pattern = ((False,) * int(K) if start_pattern is None
+               else tuple(bool(v) for v in start_pattern))
+    if len(pattern) != int(K):
+        raise ValueError(f"{who}: start_pattern has {len(pattern)} entries, "
+                         f"expected {int(K)}")
     seen = [pattern]
     for it in range(1, int(max_iter) + 1):
         out = solve_for(pattern)
@@ -2120,12 +2359,304 @@ def _one_sided_ladder_check(sig_up, sig_down, who):
             "penalty")
 
 
+# ── MSE pitch angles as a third measurement on the structured closure ───────
+#
+# Ip and l_i are GLOBAL numbers; measured MSE pitch angles are LOCAL, one per
+# chord, and they see exactly the radial redistribution the multiplier
+# profiles carry.  The term added to the structured objective is
+#
+#     chi2_MSE(x) = sum_k ((tan_gamma_pred,k(x) - tan_gamma_meas,k) / sigma_eff,k)^2
+#
+# with sigma_eff = sigma / sqrt(weight) (the fit weight folded in once; see
+# bouquet.mse.mse_chords) and the forward model of bouquet.mse.mse_tan_gamma.
+#
+# Unlike Ip and l_i, tan_gamma is NOT a functional of the multiplier profiles
+# at frozen anchor geometry: it is the field of the RE-SOLVED equilibrium at
+# the chord, so every evaluation is a Grad-Shafranov solve.  The solvers below
+# therefore never see the forward model; they see its LINEARISATION about a
+# point x0 whose equilibrium has been solved,
+#
+#     tan_gamma(x) ~= tan_gamma(x0) + J (x - x0),
+#
+# with J taken by forward finite differences in the free coefficients
+# (structured_mse_jacobian, one solve per free coefficient).  Every term of the
+# objective stays quadratic or Gauss-Newton-shaped, so the hard KKT solve and
+# the soft Gauss-Newton solve take it as ordinary least-squares rows, and the
+# one-sided prior's sign iteration still applies (the objective is still
+# convex on the hard channel).  structured_mse_outer is the outer loop around
+# them: solve -> read tan_gamma off the solved equilibrium -> record how far the
+# linear model was from what the solve delivered.
+
+#: closure-health reason prefix for every flag the MSE stage raises, so a later
+#: stage that rebuilds the reason list (the q0/l_i corrector) can carry them
+#: forward instead of dropping them.
+MSE_FLAG_PREFIX = "MSE: "
+
+#: Default forward-difference step of :func:`structured_mse_jacobian`, in
+#: coefficient units (a peak-normalised basis function moves the multiplier
+#: by this much at its centre).  A numerical-differentiation step, not a
+#: tolerance: nothing is accepted or refused on it.
+STRUCTURED_MSE_FD_STEP = 0.02
+
+
+def structured_mse_linear_model(x0, tg0, J, ch, who="structured MSE"):
+    """Validated linear model of the MSE forward model about ``x0``.
+
+    ``x0`` (2K,) is the coefficient vector whose equilibrium was SOLVED,
+    ``tg0`` (n,) the synthetic tan(gamma) read off that solve, ``J`` (n, 2K)
+    ``d tan_gamma / d x`` and *ch* the chord dict of
+    :func:`bouquet.mse.mse_chords` (its ``tgamma`` and ``sigma_eff`` are the
+    measurement).  Returns the dict the structured solvers take as
+    ``mse_lin``.  Raises ``ValueError`` on a shape mismatch and
+    ``RuntimeError`` on a non-finite entry.
+    """
+    x0 = np.asarray(x0, dtype=float).ravel()
+    tg0 = np.asarray(tg0, dtype=float).ravel()
+    J = np.asarray(J, dtype=float)
+    tg = np.asarray(ch["tgamma"], dtype=float).ravel()
+    sig = np.asarray(ch["sigma_eff"], dtype=float).ravel()
+    n = tg.size
+    if tg0.shape != (n,) or sig.shape != (n,) or J.shape != (n, x0.size):
+        raise ValueError(f"{who}: linear model shapes disagree (tg0 "
+                         f"{tg0.shape}, J {J.shape}, x0 {x0.shape}, "
+                         f"{n} chords)")
+    for nm, v in (("x0", x0), ("tan_gamma(x0)", tg0), ("J", J),
+                  ("tgamma", tg), ("sigma_eff", sig)):
+        if not np.all(np.isfinite(v)):
+            raise RuntimeError(f"{who}: non-finite {nm} in the MSE linear "
+                               "model")
+    if np.any(sig <= 0.0):
+        raise ValueError(f"{who}: sigma_eff must be positive")
+    return dict(x0=x0, tg0=tg0, J=J, tgamma=tg, sigma_eff=sig, n=int(n))
+
+
+def _mse_lsq_rows(mse_lin, K, who):
+    """``(M, m)`` with the MSE residual vector ``z(x) = M x - m`` (sigma units)."""
+    J = np.asarray(mse_lin["J"], dtype=float)
+    if J.shape[1] != 2 * int(K):
+        raise ValueError(f"{who}: the MSE Jacobian has {J.shape[1]} columns "
+                         f"but the basis carries {2 * int(K)} coefficients")
+    sig = np.asarray(mse_lin["sigma_eff"], dtype=float)
+    M = J / sig[:, None]
+    m = (np.asarray(mse_lin["tgamma"], dtype=float)
+         - np.asarray(mse_lin["tg0"], dtype=float)
+         + J @ np.asarray(mse_lin["x0"], dtype=float)) / sig
+    return M, m
+
+
+def _mse_record(mse_lin, x, objective_model, free_dim=None):
+    """The MSE block of a structured solver's result (model space).
+
+    ``mse_free_dim`` is the dimension of the free-coefficient space left once
+    the HARD constraint rows are imposed -- the space the MSE term can act
+    in.  0 means the closure is fully determined by its hard rows and the MSE
+    term can only be evaluated, never fitted.
+    """
+    if mse_lin is None:
+        return {}
+    M, m = _mse_lsq_rows(mse_lin, np.asarray(x).size // 2, "mse record")
+    z = M @ np.asarray(x, dtype=float) - m
+    z0 = M @ np.asarray(mse_lin["x0"], dtype=float) - m
+    return dict(
+        mse_n_chords=int(mse_lin["n"]),
+        mse_chi2_model=float(z @ z),
+        mse_chi2_linearisation_point=float(z0 @ z0),
+        mse_residual_sigma_model=z,
+        mse_objective_model=float(objective_model),
+        mse_free_dim=(None if free_dim is None else int(free_dim)),
+    )
+
+
+def structured_prior_value(out):
+    """The trust-prior term of a structured result, ``sum W x^2`` as solved.
+
+    Uses the weights in force at the solution: on a one-sided inductive prior
+    the up-side weight where ``a_k > 0`` (the same ``a_k == 0`` -> down rule
+    the sign iteration uses); hard-pinned coefficients (``W = inf``) are 0 and
+    contribute nothing.
+    """
+    a = np.asarray(out["a"], dtype=float)
+    b = np.asarray(out["b"], dtype=float)
+    W_ind = np.asarray(out["weights_ind"], dtype=float)
+    W_up = out.get("weights_ind_up")
+    if W_up is not None:
+        W_ind = np.where(a > 0.0, np.asarray(W_up, dtype=float), W_ind)
+    W = np.concatenate([W_ind, np.asarray(out["weights_bs"], dtype=float)])
+    x = np.concatenate([a, b])
+    use = np.isfinite(W) & (W > 0.0)
+    return float(np.sum(W[use] * x[use] ** 2))
+
+
+def structured_objective_no_mse(out):
+    """The structured objective WITHOUT its MSE term, at the solution.
+
+    Soft solver: the posterior-mode objective (prior + Ip/l_i/axis
+    measurement terms); hard solver: the trust prior (the constraints are
+    exact and contribute nothing).  With an MSE term present its model chi^2
+    is removed, so the same number can be compared across a closure solved
+    with and without MSE.
+    """
+    if str(out.get("solver")) == "soft-GaussNewton":
+        # the Gauss-Newton objective carries the MSE rows when present
+        return (float(out["objective"])
+                - float(out.get("mse_chi2_model") or 0.0))
+    return structured_prior_value(out)
+
+
+def structured_mse_jacobian(tan_gamma_of, x0, tg0, free, step=STRUCTURED_MSE_FD_STEP):
+    """Forward-difference ``d tan_gamma / d x`` at ``x0``, free columns only.
+
+    ``tan_gamma_of(x)`` must return the synthetic tan(gamma) of the equilibrium
+    SOLVED with coefficients *x* (one GS solve per call); ``tg0`` is its value
+    at ``x0``, already known.  Columns of pinned coefficients (``free`` False)
+    are left at zero -- they cannot move.  Costs ``free.sum()`` calls.
+    """
+    x0 = np.asarray(x0, dtype=float).ravel()
+    tg0 = np.asarray(tg0, dtype=float).ravel()
+    free = np.asarray(free, dtype=bool).ravel()
+    h = float(step)
+    if not (np.isfinite(h) and h > 0.0):
+        raise ValueError(f"structured_mse_jacobian: step must be finite and "
+                         f"positive, got {step!r}")
+    if free.shape != x0.shape:
+        raise ValueError("structured_mse_jacobian: free mask and x0 differ in "
+                         "shape")
+    J = np.zeros((tg0.size, x0.size), dtype=float)
+    for i in np.nonzero(free)[0]:
+        xp = x0.copy()
+        xp[i] += h
+        tg_i = np.asarray(tan_gamma_of(xp), dtype=float).ravel()
+        if tg_i.shape != tg0.shape or not np.all(np.isfinite(tg_i)):
+            raise RuntimeError("structured_mse_jacobian: the perturbed solve "
+                               f"for coefficient {int(i)} returned an unusable "
+                               "tan(gamma)")
+        J[:, i] = (tg_i - tg0) / h
+    return J
+
+
+def structured_mse_outer(x_pred, F_pred, tg_pred, tan_gamma_of, resolve, ch,
+                         free, fd_step=STRUCTURED_MSE_FD_STEP, n_steps=1):
+    r"""Add the MSE chi^2 to a solved structured closure: linearise, re-solve.
+
+    *x_pred* is the coefficient vector of a closure solved WITHOUT the MSE term
+    and whose equilibrium has been solved; *F_pred* its objective
+    (:func:`structured_objective_no_mse`) and *tg_pred* the synthetic
+    tan(gamma) read off its equilibrium.  ``tan_gamma_of(x)`` solves the
+    equilibrium of coefficients *x* and returns its tan(gamma);
+    ``resolve(mse_lin)`` re-runs the SAME closure with the MSE linear model
+    ``mse_lin`` (:func:`structured_mse_linear_model`) and returns its result
+    dict.
+
+    **Method.**  (1) ``J`` by forward differences at *x_pred*
+    (:func:`structured_mse_jacobian`, ``free.sum()`` solves).  (2) Up to
+    *n_steps* chord-method steps: the closure is re-solved with
+    ``tan_gamma(x) ~= tan_gamma(x_lin) + J (x - x_lin)``, the new coefficients'
+    equilibrium is SOLVED and its tan(gamma) read back, and the linearisation
+    point moves there -- the offset is refreshed from the solve, ``J`` is kept.
+    Cost: ``free.sum() + n_steps`` solves, and the last solve is the delivered
+    equilibrium.
+
+    **What is approximated, and how that is measured.**  Only the forward
+    model; the Ip, l_i, axis and prior terms are the closure's own algebra.
+    Each step records the linearisation residual ``(tan_gamma_solved -
+    tan_gamma_linear) / sigma_eff`` per chord (its max and RMS), and the
+    achieved objective ``F_noMSE(x) + chi2(tan_gamma_solved)``.  The linear
+    step cannot raise the MODEL objective (the re-solve minimises it and the
+    linearisation point is feasible for it), so an achieved objective ABOVE
+    the predictor's is a statement that the linear model failed on this
+    slice; it is returned as a flag (never retried, never hidden).  Each
+    step's achieved objective is also logged against the previous step's
+    (``objective_rose_vs_previous``) -- a record, not a stop test: the step
+    count is *n_steps*, fixed, and nothing here iterates to convergence.
+    This judges the stage's OWN last solve; whether the equilibrium the slice
+    finally delivers (after the q0/l_i corrector) is worse than the pre-MSE
+    closure is judged separately, on that equilibrium
+    (``Bouquet._structured_mse_delivered``).
+
+    Returns ``dict(out, x, tg, record, flags)``.
+    """
+    from .mse import mse_chi2
+
+    x_pred = np.asarray(x_pred, dtype=float).ravel()
+    tg_pred = np.asarray(tg_pred, dtype=float).ravel()
+    n_steps = int(n_steps)
+    if n_steps < 1:
+        raise ValueError(f"structured_mse_outer: n_steps must be >= 1, got "
+                         f"{n_steps}")
+    chi2_0, z0 = mse_chi2(tg_pred, ch)
+    F_before = float(F_pred) + chi2_0
+    J = structured_mse_jacobian(tan_gamma_of, x_pred, tg_pred, free,
+                                step=fd_step)
+    x_lin, tg_lin = x_pred, tg_pred
+    steps = []
+    out = x_new = tg_new = None
+    for _s in range(n_steps):
+        lin = structured_mse_linear_model(x_lin, tg_lin, J, ch)
+        out = resolve(lin)
+        x_new = np.concatenate([np.asarray(out["a"], dtype=float),
+                                np.asarray(out["b"], dtype=float)])
+        tg_new = np.asarray(tan_gamma_of(x_new), dtype=float).ravel()
+        if tg_new.shape != tg_pred.shape or not np.all(np.isfinite(tg_new)):
+            raise RuntimeError("structured_mse_outer: the solve of the "
+                               "MSE-constrained closure returned an unusable "
+                               "tan(gamma)")
+        tg_lin_pred = tg_lin + J @ (x_new - x_lin)
+        lres = (tg_new - tg_lin_pred) / ch["sigma_eff"]
+        chi2_new, z_new = mse_chi2(tg_new, ch)
+        F_nomse = structured_objective_no_mse(out)
+        _F_prev = (F_before if not steps
+                   else steps[-1]["objective_achieved"])
+        steps.append(dict(
+            chi2_model=float(out["mse_chi2_model"]),
+            chi2_achieved=float(chi2_new),
+            objective_model=float(out["mse_objective_model"]),
+            objective_achieved=float(F_nomse + chi2_new),
+            linearisation_residual_max_sigma=float(np.max(np.abs(lres))),
+            linearisation_residual_rms_sigma=float(np.sqrt(np.mean(lres ** 2))),
+            coeff_step_max=float(np.max(np.abs(x_new - x_lin))),
+            # logged, never acted on: this step's achieved objective against
+            # the previous step's (the predictor's, for the first step)
+            objective_previous=float(_F_prev),
+            objective_rose_vs_previous=bool(
+                not (F_nomse + chi2_new <= _F_prev)),
+        ))
+        x_lin, tg_lin = x_new, tg_new
+    chi2_f, z_f = mse_chi2(tg_new, ch)
+    F_after = steps[-1]["objective_achieved"]
+    flags = []
+    if not (np.isfinite(F_after) and F_after <= F_before):
+        flags.append(MSE_FLAG_PREFIX
+                     + f"achieved objective rose {F_before:.6g} -> "
+                       f"{F_after:.6g} (linearisation residual max "
+                       f"{steps[-1]['linearisation_residual_max_sigma']:.3g} "
+                       "sigma): the linear tan(gamma) model failed on this "
+                       "slice")
+    record = dict(
+        chi2_before=float(chi2_0), chi2_after=float(chi2_f),
+        chi2_model_after=steps[-1]["chi2_model"],
+        residual_sigma_before=z0, residual_sigma_after=z_f,
+        tgamma_pred_before=tg_pred, tgamma_pred_after=tg_new,
+        objective_before=float(F_before),
+        objective_after_model=steps[-1]["objective_model"],
+        objective_after=float(F_after),
+        jacobian=J, fd_step=float(fd_step),
+        n_fd_solves=int(np.count_nonzero(free)), n_steps=n_steps,
+        n_solves=int(np.count_nonzero(free)) + n_steps,
+        steps=steps,
+    )
+    return dict(out=out, x=x_new, tg=tg_new, record=record, flags=flags)
+
+
 def close_ip_structured(psi_N, w_lin, c_affine, Ip_target_signed,
                         j_ind, j_bs, j_fix, basis=None, weights=None,
                         axis=None, scale_bounds=(0.2, 5.0), cond_rtol=1e-6,
                         li_target=None, li_kind="li_1", li_geom=None,
-                        sigma_ind_up=None):
+                        sigma_ind_up=None, mse_lin=None, basis_x=None):
     r"""Minimal-norm radial multiplier profiles closing Ip (and optionally q0).
+
+    ``basis_x``: the abscissa the basis lives on when it is not *psi_N* (a
+    Phi_N run: the basis on the run grid, the integrals over the nodes'
+    psi_N); ``None``: *psi_N*.
 
     The ``closure_channel="structured"`` algebra.  Unknowns are two smooth
     multiplier PROFILES on a small basis :math:`\phi_k`,
@@ -2224,6 +2755,22 @@ def close_ip_structured(psi_N, w_lin, c_affine, Ip_target_signed,
     confirmation, and any result obtained with this prior has to be reported
     with that caveat attached.
 
+    **MSE pitch angles (optional).**  ``mse_lin`` -- the linear model of
+    :func:`structured_mse_linear_model` -- adds
+    ``chi2_MSE(x) = sum_k ((tg0 + J (x - x0) - tg_meas)_k / sigma_eff_k)^2``
+    to the minimised norm, on the same scale (the trust weights are
+    ``sigma^-2``).  This makes the ABSOLUTE scale of the weights load-bearing:
+    without MSE the answer is invariant under ``W -> c W``, with it the
+    weights trade against the chords' chi^2, so a uniform ladder is a
+    sigma = 1 prior and a ladder written in "relative" units changes meaning
+    (see :data:`STRUCTURED_WEIGHTS_UNIFORM`).  The constraints are still imposed exactly: the problem
+    becomes an equality-constrained least-squares one, solved on the
+    constraint null space in the same ``y = W^(1/2) x`` scaling (no normal
+    equations), and stays convex, so the one-sided sign iteration's exactness
+    argument is unchanged.  ``None`` (the default) leaves every line of the
+    solve above untouched.  The forward model is linearised by the CALLER
+    (:func:`structured_mse_outer`); this solver never sees an equilibrium.
+
     **Refusals** (``RuntimeError``, never a quiet clamp): a non-finite input;
     constraint rows that are DEGENERATE against the relative floor
     ``cond_rtol`` (the row-normalised constraint matrix's smallest singular
@@ -2281,7 +2828,8 @@ def close_ip_structured(psi_N, w_lin, c_affine, Ip_target_signed,
                            "Ip_target_signed")
 
     basis_spec = dict(STRUCTURED_BASIS_DEFAULT if basis is None else basis)
-    Phi = structured_basis_eval(basis_spec, psi)             # (K, N)
+    bx = psi if basis_x is None else np.asarray(basis_x, dtype=float)
+    Phi = structured_basis_eval(basis_spec, bx)              # (K, N)
     K = Phi.shape[0]
     wspec = dict(structured_default_weights(K) if weights is None else weights)
     W_ind = np.atleast_1d(np.asarray(wspec["ind"], dtype=float)).astype(float)
@@ -2333,8 +2881,9 @@ def close_ip_structured(psi_N, w_lin, c_affine, Ip_target_signed,
                    (j_ind0, j_bs0, j_fix0, j_ref0, psi0)):
             raise RuntimeError("close_ip_structured: non-finite axis row "
                                f"{(psi0, j_ind0, j_bs0, j_fix0, j_ref0)}")
-        phi0 = structured_basis_eval(basis_spec,
-                                     np.array([psi0], dtype=float))[:, 0]
+        phi0 = structured_basis_eval(basis_spec, np.array(
+            [psi0 if basis_x is None else float(np.interp(psi0, psi, bx))],
+            dtype=float))[:, 0]
         rows.append(np.concatenate([phi0 * j_ind0, phi0 * j_bs0]))
         rhs.append(j_ref0 - j_ind0 - j_bs0 - j_fix0)
         names.append("axis current (q0)")
@@ -2408,6 +2957,12 @@ def close_ip_structured(psi_N, w_lin, c_affine, Ip_target_signed,
             "carry; Ip and the axis current cannot both be imposed on this "
             "split")
 
+    mse_M = mse_m = None
+    _mse_free_dim = [None]
+    if mse_lin is not None:
+        _M, mse_m = _mse_lsq_rows(mse_lin, K, "close_ip_structured")
+        mse_M = _M[:, free]
+
     def _kkt(Wf_now):
         """Minimal-norm solve for ONE fixed set of trust weights.
 
@@ -2436,6 +2991,26 @@ def close_ip_structured(psi_N, w_lin, c_affine, Ip_target_signed,
                 f"Cn W^(-1/2) is rank deficient (singular values {sv}) -- the "
                 "free coefficients cannot carry these constraints")
         y = Vt.T @ ((U.T @ dn) / sv)
+        if mse_M is not None:
+            # min ||y||^2 + ||M x - m||^2 / W_max  s.t.  Aw y = dn, with
+            # x = W^(-1/2) y (the objective x'Wx = W_max ||y||^2 in this
+            # scaling).  y_p above is the minimum-norm particular solution,
+            # orthogonal to the null space N of Aw, so y = y_p + N z and
+            # ||y||^2 = ||y_p||^2 + ||z||^2: one least-squares solve in z.
+            _wmax = float(np.max(Wf_now))
+            Mw = (mse_M * scal[None, :]) / np.sqrt(_wmax)
+            mw = mse_m / np.sqrt(_wmax)
+            Nn = np.linalg.svd(Aw, full_matrices=True)[2][Aw.shape[0]:].T
+            _mse_free_dim[0] = int(Nn.shape[1])
+            if Nn.shape[1]:
+                G = np.vstack([np.eye(Nn.shape[1]), Mw @ Nn])
+                hvec = np.concatenate([np.zeros(Nn.shape[1]), mw - Mw @ y])
+                zz = np.linalg.lstsq(G, hvec, rcond=None)[0]
+                if not np.all(np.isfinite(zz)):
+                    raise RuntimeError(
+                        "close_ip_structured: the MSE least-squares step is "
+                        "non-finite")
+                y = y + Nn @ zz
         x_now = np.zeros(2 * K, dtype=float)
         x_now[free] = scal * y
         return x_now, sv
@@ -2507,6 +3082,17 @@ def close_ip_structured(psi_N, w_lin, c_affine, Ip_target_signed,
                            + (1.0 + b @ phi0) * j_bs0 + j_fix0 - j_ref0)
     li_rec = _li_record(li_model, li_anchor, li_target, li_grad, x,
                         Ip_pinned=Ip_target_signed)
+    mse_rec = {}
+    if mse_lin is not None:
+        _prior = structured_prior_value(dict(
+            a=a, b=b, weights_ind=W_ind, weights_ind_up=W_ind_up,
+            weights_bs=W_bs))
+        _Mz = _mse_lsq_rows(mse_lin, K, "close_ip_structured")
+        _z = _Mz[0] @ x - _Mz[1]
+        mse_rec = _mse_record(mse_lin, x, _prior + float(_z @ _z),
+                              free_dim=_mse_free_dim[0])
+        names = list(names) + [f"MSE tan(gamma) chi2 ({int(mse_lin['n'])} "
+                               "chords, linearised)"]
 
     return dict(
         s_ind=s_ind, s_bs=s_bs, a=a, b=b, basis=basis_spec,
@@ -2541,6 +3127,7 @@ def close_ip_structured(psi_N, w_lin, c_affine, Ip_target_signed,
         constraint_cond=float(sv_c[0] / sv_c[-1]),
         solver="hard-KKT",
         **li_rec,
+        **mse_rec,
     )
 
 
@@ -2606,6 +3193,55 @@ def _sigma_ladder(spec, K, K_default, who, name):
     return s
 
 
+#: Factor on the rounding-noise estimate of the soft closure's objective
+#: (``eps * sum_i (2 |r_i| m_i + r_i^2)``, see
+#: :func:`close_ip_structured_soft`): the acceptance test compares TWO noisy
+#: evaluations (F and F_new), so a decrease is resolvable only above twice the
+#: noise of one.
+NOISE_FLOOR_FACTOR = 2.0
+
+#: The refusal :func:`soft_closure_with_retry` retries (and no other).
+_LEVENBERG_REFUSAL = "Levenberg damping could not find a descent step"
+
+
+def soft_closure_with_retry(solve, x_prev=None, who="structured closure"):
+    """``solve(x0)`` with ONE logged retry from *x_prev* after a no-descent
+    refusal.
+
+    *solve* is ``lambda x0: close_ip_structured_soft(..., x0=x0)``; whether
+    that solve may accept at the objective's noise floor is the lambda's own
+    ``accept_noise_floor`` argument (the loop's callers pass ``True``), not
+    something this wrapper decides.  The first
+    call starts at ``s == 1`` (``x0=None``) exactly as every caller always
+    did.  If -- and only if -- it raises the Levenberg "could not find a
+    descent step" refusal and *x_prev* (the previous pass's coefficients) is
+    given, it is called ONCE more from *x_prev*.  A second refusal is a real
+    refusal and is raised, carrying both messages.  Any other error is raised
+    at once.  The returned dict gains ``closure_retry`` (0/1) and, after a
+    retry, ``closure_retry_first_error``.
+    """
+    try:
+        out = solve(None)
+        out["closure_retry"] = 0
+        out["closure_retry_first_error"] = None
+        return out
+    except RuntimeError as e:
+        if x_prev is None or _LEVENBERG_REFUSAL not in str(e):
+            raise
+        first = str(e)
+    print(f"[{who}] closure refused ({first[:160]}); ONE retry from the "
+          "previous pass's coefficients (closure_retry=1)", flush=True)
+    try:
+        out = solve(np.asarray(x_prev, dtype=float))
+    except RuntimeError as e2:
+        raise RuntimeError(
+            f"{e2} [after one retry from the previous pass's coefficients; "
+            f"first refusal: {first[:300]}]") from e2
+    out["closure_retry"] = 1
+    out["closure_retry_first_error"] = first[:300]
+    return out
+
+
 def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
                              Ip_sigma, j_ind, j_bs, j_fix,
                              basis=None, sigma_ind=None, sigma_bs=None,
@@ -2613,8 +3249,11 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
                              li_geom=None, axis=None, axis_sigma=None,
                              scale_bounds=(0.2, 5.0), rtol=1e-10,
                              max_iter=100, cond_rtol=1e-6,
-                             sigma_ind_up=None):
+                             sigma_ind_up=None, mse_lin=None, x0=None,
+                             accept_noise_floor=False, basis_x=None):
     r"""The POSTERIOR-MODE structured closure: Ip and l_i as measurements.
+
+    ``basis_x``: as in :func:`close_ip_structured`.
 
     :func:`close_ip_structured` treats Ip (and the axis current, and l_i) as
     things that are *true*: it imposes them exactly and lets the trust norm
@@ -2704,6 +3343,60 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
     a run that hits *max_iter* without either is a ``RuntimeError``, never a
     quietly-returned half-solution.
 
+    **When no damped step can be verified downhill** (all Levenberg tries
+    fail the ``F (1 + 1e-14)`` test) the iterate is accepted only when it is
+    stationary to within what the objective can resolve, and refused
+    otherwise:
+
+    * ``stop_reason="gradient_floor"`` -- the scaled gradient is below
+      ``rtol * max|J| * max(sqrt F, 1)`` (the historical test, unchanged);
+    * ONLY with ``accept_noise_floor=True`` (the self-consistent bootstrap
+      loop's callers pass it; the default ``False`` is the historical,
+      strict behaviour -- no noise estimate is formed, and the refusal below
+      is raised exactly where, and with exactly the message, it always was):
+      ``stop_reason="noise_floor"`` -- the gradient is at the floor the
+      objective's ROUNDING NOISE implies AND every Levenberg try's predicted
+      decrease (and the undamped Gauss-Newton step's) is below that noise.
+      The noise is estimated from the rows themselves:
+      ``noise_F = NOISE_FLOOR_FACTOR * eps * sum_i (2 |r_i| m_i + F/n)``
+      with ``m_i`` the sum of the magnitudes of the terms row ``i`` is
+      computed from, in its own sigma units (e.g. ``(|Ip0| + sum|row_j x_j|
+      + |Ip_t|) / sigma_Ip`` for the Ip row: an MA-scale difference over a
+      kA-scale sigma is where the noise comes from); the gradient floor it
+      implies is ``||J||_2 sqrt(noise_F)`` -- a larger gradient could not
+      hide its Gauss-Newton decrease (``>= |g|^2 / ||J||_2^2``) in the
+      noise.  Such an iterate is within rounding of the minimiser: a further
+      decrease exists only below the resolution of F, far below the
+      ``rtol`` relative-change test that ends every ordinary run.  The
+      gradient, the predicted decrease and the noise estimate are recorded
+      (``gn_stop``, ``n_noise_floor_accepts``) AND printed.  A noise
+      estimate that is not finite or not positive accepts nothing (the
+      refusal stands);
+    * otherwise ``RuntimeError`` ("Levenberg damping could not find a
+      descent step") -- unchanged.
+
+    **This is an acceptance-criterion change** relative to the historical
+    solver: every ``noise_floor`` return is a case the historical test
+    REFUSED.  It was approved for the self-consistent bootstrap loop only,
+    which is why it is opt-in: with ``accept_noise_floor=False`` (the
+    default, and what every frozen-bootstrap / ``jbs_self_consistent=False``
+    caller must pass) the solver returns and refuses exactly what it did
+    before the loop existed.
+
+    ``x0`` (optional, full ``(2K,)`` coefficients) starts Gauss-Newton there
+    instead of at ``s == 1`` (projected onto the hard-constraint manifold),
+    and the one-sided sign iteration from ``x0``'s sign pattern: the logged
+    single retry the self-consistent bootstrap loop takes from the previous
+    pass's coefficients after a refusal (:func:`soft_closure_with_retry`).
+    It changes the path, never the minimiser of a convex problem.
+
+    **MSE pitch angles (optional).**  ``mse_lin`` (the linear model of
+    :func:`structured_mse_linear_model`) appends one residual per chord,
+    ``(tg0 + J (x - x0) - tg_meas) / sigma_eff``, to the Gauss-Newton residual
+    vector: the chi^2 of the linearised forward model joins the objective as a
+    fourth measurement term.  Linear in *x*, so it adds nothing to the
+    solver's nonlinearity.  ``None`` (the default) leaves the solve untouched.
+
     **Refusals** (``RuntimeError``): non-finite input, a degenerate hard
     constraint system (against ``cond_rtol``), non-convergence, and -- as in
     the hard channel -- an ``s_ind``/``s_bs`` that leaves *scale_bounds*
@@ -2746,7 +3439,8 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
                            "Ip_target_signed")
 
     basis_spec = dict(STRUCTURED_BASIS_DEFAULT if basis is None else basis)
-    Phi = structured_basis_eval(basis_spec, psi)             # (K, N)
+    bx = psi if basis_x is None else np.asarray(basis_x, dtype=float)
+    Phi = structured_basis_eval(basis_spec, bx)              # (K, N)
     K = Phi.shape[0]
     _dflt = sigma_from_weights(None, K)
     sig_ind = _sigma_ladder(sigma_ind, K, _dflt["ind"],
@@ -2778,8 +3472,9 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
                    (j_ind0, j_bs0, j_fix0, j_ref0, psi0)):
             raise RuntimeError("close_ip_structured_soft: non-finite axis row "
                                f"{(psi0, j_ind0, j_bs0, j_fix0, j_ref0)}")
-        phi0 = structured_basis_eval(basis_spec,
-                                     np.array([psi0], dtype=float))[:, 0]
+        phi0 = structured_basis_eval(basis_spec, np.array(
+            [psi0 if basis_x is None else float(np.interp(psi0, psi, bx))],
+            dtype=float))[:, 0]
         axis_row = np.concatenate([phi0 * j_ind0, phi0 * j_bs0])
         axis0 = j_ind0 + j_bs0 + j_fix0
 
@@ -2800,6 +3495,9 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
         if s is not None and not (np.isfinite(float(s)) and float(s) > 0.0):
             raise ValueError(f"close_ip_structured_soft: {nm} must be None "
                              f"(hard) or finite and positive, got {s!r}")
+    mse_M = mse_m = None
+    if mse_lin is not None:
+        mse_M, mse_m = _mse_lsq_rows(mse_lin, K, "close_ip_structured_soft")
 
     # ---- unknowns: pinned (sigma == 0) coefficients leave the problem -------
     sig_full = np.concatenate([sig_ind, sig_bs])
@@ -2856,6 +3554,18 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
         x[free] = xf
         return x
 
+    # the start of Gauss-Newton: s == 1 (z = 0), or the caller's x0 projected
+    # onto the hard-constraint manifold (the logged retry's start)
+    z_start = np.zeros(N.shape[1], dtype=float)
+    if x0 is not None:
+        _x0 = np.asarray(x0, dtype=float).ravel()
+        if _x0.shape != (2 * K,) or not np.all(np.isfinite(_x0)):
+            raise ValueError("close_ip_structured_soft: x0 must be a finite "
+                             f"({2 * K},) coefficient vector, got shape "
+                             f"{_x0.shape}")
+        z_start = N.T @ (_x0[free] - x_p)
+    gn_stops = []
+
     def _gauss_newton(sig_f):
         """One posterior-mode solve for ONE fixed inductive prior ladder.
 
@@ -2886,24 +3596,83 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
                 r.append((li_x - float(li_target)) / float(li_sigma))
                 J.append(structured_li_gradient(li_model, x)[free]
                          / float(li_sigma))
+            if mse_M is not None:
+                r.extend(mse_M @ x - mse_m)
+                J.extend(mse_M[:, free])
             r = np.asarray(r, dtype=float)
             Jx = np.asarray(J, dtype=float).reshape(r.size, n)
             return r, Jx @ N
 
+        def _row_magnitudes(z):
+            """Per residual row (same order as ``_resid_jac``): the sum of the
+            magnitudes of the terms the row is computed from, in the row's own
+            sigma units -- ``eps`` times it bounds the row's rounding error."""
+            xf = x_p + N @ z
+            mxf = np.abs(x_p) + np.abs(N) @ np.abs(z)
+            x = _full(xf)
+            m = []
+            for i in np.nonzero(prior_active)[0]:
+                m.append(mxf[i] / sig_f[i])
+            if Ip_sigma is not None:
+                m.append((abs(Ip0) + float(np.abs(ip_row) @ np.abs(x))
+                          + abs(float(Ip_target_signed))) / float(Ip_sigma))
+            if axis_row is not None and axis_sigma is not None:
+                m.append((abs(axis0) + float(np.abs(axis_row) @ np.abs(x))
+                          + abs(j_ref0)) / float(axis_sigma))
+            if li_model is not None:
+                a_, b_ = x[:K], x[K:]
+                mS = (abs(li_model["S0"]) + float(np.abs(li_model["S_ind"])
+                                                  @ np.abs(a_))
+                      + float(np.abs(li_model["S_bs"]) @ np.abs(b_)))
+                mI = (abs(li_model["Ip0"]) + float(np.abs(li_model["Ip_ind"])
+                                                   @ np.abs(a_))
+                      + float(np.abs(li_model["Ip_bs"]) @ np.abs(b_)))
+                S_ = float(li_model["S0"] + li_model["S_ind"] @ a_
+                           + li_model["S_bs"] @ b_)
+                I_ = float(li_model["Ip0"] + li_model["Ip_ind"] @ a_
+                           + li_model["Ip_bs"] @ b_)
+                li_x, _ipx = structured_li_of(li_model, x)
+                rel = (mS / max(abs(S_), 1e-300) + 2.0 * mI
+                       / max(abs(I_), 1e-300) + 3.0)
+                m.append((abs(li_x) * rel + abs(float(li_target)))
+                         / float(li_sigma))
+            if mse_M is not None:
+                m.extend(np.abs(mse_M) @ np.abs(x) + np.abs(mse_m))
+            return np.asarray(m, dtype=float)
+
+        def _noise_of_F(z, r, F):
+            """The objective's rounding-noise estimate, or ``None`` when it
+            cannot be trusted: a shape mismatch, or a value that is not
+            finite and positive (an infinite estimate would accept anything,
+            a zero or negative one is meaningless).  ``None`` accepts
+            nothing, so this guard can only make acceptance stricter."""
+            m = _row_magnitudes(z)
+            if m.shape != r.shape:          # defensive: never guess
+                return None
+            with np.errstate(over="ignore", invalid="ignore"):
+                noise = float(NOISE_FLOOR_FACTOR * np.finfo(float).eps
+                              * (float(np.sum(2.0 * np.abs(r) * m)) + F))
+            if not (np.isfinite(noise) and noise > 0.0):
+                return None
+            return noise
+
         # ---- Gauss-Newton with a Levenberg damping fallback ---------------------
         nz = N.shape[1]
-        z = np.zeros(nz, dtype=float)
+        z = np.array(z_start, dtype=float, copy=True)
         r, J = _resid_jac(z)
         F = float(r @ r)
         lam = 0.0
         n_iter = 0
         converged = nz == 0            # nothing free to fit: the hard rows decide
+        gstop = dict(stop_reason=("no free coefficient: the hard rows decide"
+                                  if converged else None))
         for n_iter in range(1, int(max_iter) + 1):
             if converged:
                 n_iter -= 1
                 break
             step = None
             trial_lam = lam
+            pred_trials = []
             for _ in range(16):
                 if trial_lam <= 0.0:
                     Ja, ra = J, -r
@@ -2914,6 +3683,8 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
                 if not np.all(np.isfinite(d)):
                     trial_lam = max(10.0 * trial_lam, 1.0e-8)
                     continue
+                _Jd = J @ d
+                pred_trials.append(-float(2.0 * (r @ _Jd) + _Jd @ _Jd))
                 r_new, J_new = _resid_jac(z + d)
                 F_new = float(r_new @ r_new)
                 # a hair of slack so a step that is downhill in exact arithmetic
@@ -2938,11 +3709,62 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
                     * max(float(np.sqrt(F)), 1.0)
                 if gnorm <= floor:
                     converged = True
+                    gstop = dict(stop_reason="gradient_floor", gradient=gnorm,
+                                 gradient_floor=floor)
+                    break
+                if not accept_noise_floor:
+                    # the historical refusal, verbatim (strict path: the
+                    # frozen-bootstrap / jbs_self_consistent=False callers)
+                    raise RuntimeError(
+                        "close_ip_structured_soft: Levenberg damping could not "
+                        f"find a descent step at objective {F:.6e} (scaled "
+                        f"gradient {gnorm:.3e} > floor {floor:.3e}) -- the "
+                        "measurement rows and the prior are inconsistent on "
+                        "this basis")
+                # Noise-aware test (opt-in, the self-consistent bootstrap
+                # loop only): is the iterate stationary to within what the
+                # objective can RESOLVE?  (see the docstring)
+                noise = _noise_of_F(z, r, F)
+                _dgn = np.linalg.lstsq(J, -r, rcond=None)[0]
+                _Jd = J @ _dgn
+                pred_gn = (-float(2.0 * (r @ _Jd) + _Jd @ _Jd)
+                           if np.all(np.isfinite(_dgn)) else float("inf"))
+                pred_max = max([pred_gn] + pred_trials)
+                g2 = float(np.linalg.norm(J.T @ r))
+                sJ = float(np.linalg.norm(J, 2)) if J.size else 0.0
+                gfloor_noise = (None if noise is None
+                                else sJ * float(np.sqrt(noise)))
+                if (noise is not None and np.isfinite(pred_max)
+                        and gfloor_noise is not None
+                        and np.isfinite(gfloor_noise)
+                        and pred_max <= noise and g2 <= gfloor_noise):
+                    converged = True
+                    gstop = dict(stop_reason="noise_floor", gradient=gnorm,
+                                 gradient_l2=g2, gradient_floor=floor,
+                                 gradient_floor_noise=gfloor_noise,
+                                 predicted_decrease=pred_max,
+                                 predicted_decrease_gn=pred_gn,
+                                 noise_F=noise, objective=F,
+                                 n_trials=len(pred_trials),
+                                 noise_factor=float(NOISE_FLOOR_FACTOR))
+                    # an acceptance the historical test refused: never
+                    # silent (recorded in gn_stop AND printed)
+                    print("[close_ip_structured_soft] NOISE-FLOOR "
+                          "ACCEPTANCE (the historical gradient test "
+                          f"refused): objective {F:.6e}, scaled gradient "
+                          f"{gnorm:.3e} > floor {floor:.3e}; predicted "
+                          f"decrease {pred_max:.3e} <= rounding noise "
+                          f"{noise:.3e} (factor {NOISE_FLOOR_FACTOR:g}), "
+                          f"|J^T r|_2 {g2:.3e} <= {gfloor_noise:.3e}",
+                          flush=True)
                     break
                 raise RuntimeError(
                     "close_ip_structured_soft: Levenberg damping could not find a "
                     f"descent step at objective {F:.6e} (scaled gradient "
-                    f"{gnorm:.3e} > floor {floor:.3e}) -- the measurement rows and "
+                    f"{gnorm:.3e} > floor {floor:.3e}; predicted decrease "
+                    f"{pred_max:.3e} vs rounding noise of the objective "
+                    + ("n/a" if noise is None else f"{noise:.3e}")
+                    + ") -- the measurement rows and "
                     "the prior are inconsistent on this basis")
             d, r, J, F_new = step
             lam = 0.0 if trial_lam == 0.0 else max(trial_lam / 10.0, 1.0e-12)
@@ -2953,17 +3775,19 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
             F, F_prev = F_new, F
             if dF <= float(rtol) * max(F, 1.0e-300) or stepped:
                 converged = True
+                gstop = dict(stop_reason=("step" if stepped else
+                                          "objective_change"))
                 break
         if not converged:
             raise RuntimeError(
                 f"close_ip_structured_soft: Gauss-Newton did not converge in "
                 f"{max_iter} iterations (objective {F:.6e}); refusing to return a "
                 "half-solved posterior mode")
-
-        return z, F, n_iter, lam
+        gn_stops.append(dict(gstop))
+        return z, F, n_iter, lam, gstop
 
     if sig_ind_up is None:
-        z, F, n_iter, lam = _gauss_newton(sig_f)
+        z, F, n_iter, lam, gstop = _gauss_newton(sig_f)
         sig_f_used = sig_f
         sign_pattern, n_sign_iter = None, 0
     else:
@@ -2971,12 +3795,14 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
             s_now = np.concatenate(
                 [np.where(np.asarray(pat, dtype=bool), sig_ind_up, sig_ind),
                  sig_bs])[free]
-            z_n, F_n, ni_n, lam_n = _gauss_newton(s_now)
-            return (_full(x_p + N @ z_n), z_n, F_n, ni_n, lam_n, s_now)
+            z_n, F_n, ni_n, lam_n, gs_n = _gauss_newton(s_now)
+            return (_full(x_p + N @ z_n), z_n, F_n, ni_n, lam_n, s_now, gs_n)
 
+        _start = (None if x0 is None else
+                  tuple(bool(v) for v in (np.asarray(x0, float)[:K] > 0.0)))
         _out, sign_pattern, n_sign_iter = _one_sided_sign_iterate(
-            _solve_for, K, "close_ip_structured_soft")
-        _x, z, F, n_iter, lam, sig_f_used = _out
+            _solve_for, K, "close_ip_structured_soft", start_pattern=_start)
+        _x, z, F, n_iter, lam, sig_f_used, gstop = _out
 
     x = _full(x_p + N @ z)
     a, b = x[:K], x[K:]
@@ -3029,7 +3855,10 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
                 ["axis current (q0)" + ("" if axis_sigma is None
                                         else " (soft)")])
              + ([] if li_model is None else
-                [f"l_i ({li_model['li_kind']}, soft)"]))
+                [f"l_i ({li_model['li_kind']}, soft)"])
+             + ([] if mse_lin is None else
+                [f"MSE tan(gamma) chi2 ({int(mse_lin['n'])} chords, "
+                 "linearised)"]))
     prior_chi2 = float(np.sum(
         (x[free][prior_active] / sig_f_used[prior_active]) ** 2))
 
@@ -3074,7 +3903,13 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
         kkt_singular_values=None, kkt_cond=None,
         constraint_singular_values=None, constraint_cond=None,
         solver="soft-GaussNewton",
+        gn_stop=dict(gstop),
+        gn_stop_reason=gstop.get("stop_reason"),
+        n_noise_floor_accepts=int(sum(
+            1 for g in gn_stops if g.get("stop_reason") == "noise_floor")),
+        started_from_x0=bool(x0 is not None),
         **li_rec,
+        **_mse_record(mse_lin, x, float(F), free_dim=int(N.shape[1])),
     )
 
 
@@ -3218,12 +4053,65 @@ def _default_scan_key(ref, scan_key):
     return scan_key
 
 
+def group_coord(grp):
+    """An archive group's ``profile_coord`` attr (absent: ``"psi_n"``)."""
+    v = grp.attrs.get("profile_coord", "psi_n")
+    return v.decode() if isinstance(v, bytes) else str(v)
+
+
+def profile_coord(h5path, scan_key=None):
+    """The archive's profile coordinate, the baseline group's ``profile_coord``
+    attr; ``"psi_n"`` for archives written before it existed.
+
+    ``scan_key=None`` on a scan layout reads the scan points' baselines and
+    returns their common coordinate (raises if they differ).
+    """
+    import h5py
+
+    bkey = _scan_key(scan_key)
+    try:
+        with h5py.File(h5path, "r") as hf:
+            if bkey is not None:
+                return group_coord(hf[f"scan/{bkey}/_baseline"])
+            if "_baseline" in hf:
+                return group_coord(hf["_baseline"])
+            coords = {group_coord(g["_baseline"])
+                      for g in hf.get("scan", {}).values() if "_baseline" in g}
+    except (OSError, KeyError):
+        return "psi_n"
+    if len(coords) > 1:
+        raise ValueError(f"{h5path}: scan points differ in profile_coord "
+                         f"{sorted(coords)}; pass scan_key")
+    return coords.pop() if coords else "psi_n"
+
+
 def _group_path(scan_key, count):
     """Return the internal HDF5 group path for a given entry."""
     bkey = _scan_key(scan_key)
     if bkey is not None:
         return f"scan/{bkey}/{int(count)}"
     return str(int(count))
+
+
+def stamp_group_attrs(header, scan_key, count, attrs):
+    """Set ``attrs`` on one archived draw group, or on ``_baseline`` when
+    ``count`` is None. A dict value ``{name: x}`` is stored as two attrs,
+    ``<key>_names`` and ``<key>_values``; None values are skipped.
+    """
+    import numpy as np
+    bkey = _scan_key(scan_key)
+    path = (_group_path(scan_key, count) if count is not None
+            else (f"scan/{bkey}/_baseline" if bkey is not None else "_baseline"))
+    with h5py.File(f"{header}.h5", "a") as hf:
+        grp = hf[path]
+        for k, v in attrs.items():
+            if v is None:
+                continue
+            if isinstance(v, dict):
+                grp.attrs[f"{k}_names"] = np.array(list(v), dtype="S")
+                grp.attrs[f"{k}_values"] = np.array(list(v.values()), dtype=float)
+            else:
+                grp.attrs[k] = v
 
 
 # ====================================================================
@@ -3336,6 +4224,107 @@ def stamp_source_orientation(h5path_or_header, scan_key=None,
         grp.attrs["current_frame"] = CURRENT_FRAME
 
 
+#: The coil-solve mode every solve of a run is in since 2026-10-06
+#: (bouquet.solver_state.enter_bounded_coil_mode at Bouquet.setup_solver).
+CANONICAL_COIL_SOLVE_MODE = "bounded"
+
+
+def stamp_coil_solve_mode(h5path_or_header, scan_key=None, mode=None):
+    """Record the coil-solve mode the run's solver was in
+    (``Baseline.coil_solve_mode``) as the ``coil_solve_mode`` attr of the
+    ``_baseline`` group (both paths; an engine archive also carries it in
+    the baseline's engine record).  No-op without a mode or a
+    ``_baseline`` group."""
+    if mode is None:
+        return
+    path = _resolve_h5(h5path_or_header)
+    gp = _baseline_group_path(scan_key)
+    with h5py.File(path, "a") as hf:
+        if gp in hf:
+            hf[gp].attrs["coil_solve_mode"] = str(mode)
+
+
+def stamp_engine_resolved_defaults(h5path_or_header, scan_key=None,
+                                   record=None):
+    """Record how the engine-dependent settings were resolved
+    (``Baseline.engine_resolved_defaults``, from
+    :func:`bouquet.engine.resolve_engine_defaults`: field -> ``{"value",
+    "origin"}``, ``origin`` ``"resolved from engine=<x>"`` or
+    ``"explicit"``) as the JSON attr ``engine_resolved_defaults_json`` of
+    the ``_baseline`` group.  No-op without a record or a ``_baseline``
+    group."""
+    if not record:
+        return
+    import json
+    path = _resolve_h5(h5path_or_header)
+    gp = _baseline_group_path(scan_key)
+    with h5py.File(path, "a") as hf:
+        if gp in hf:
+            hf[gp].attrs["engine_resolved_defaults_json"] = json.dumps(
+                record, sort_keys=True)
+
+
+def load_engine_resolved_defaults(h5path_or_header, scan_key=None):
+    """The record :func:`stamp_engine_resolved_defaults` wrote, or ``None``
+    for an archive that predates it (before 2026-10-07)."""
+    import json
+    path = _resolve_h5(h5path_or_header)
+    gp = _baseline_group_path(scan_key)
+    with h5py.File(path, "r") as hf:
+        if gp not in hf:
+            return None
+        v = hf[gp].attrs.get("engine_resolved_defaults_json")
+    if v is None:
+        return None
+    return json.loads(v.decode() if isinstance(v, bytes) else str(v))
+
+
+def load_coil_solve_mode(h5path_or_header, scan_key=None):
+    """``(mode, where)``: the coil-solve mode an archive's run was in -- the
+    ``_baseline`` attr :func:`stamp_coil_solve_mode` writes, else the
+    baseline engine record's ``coil_solve_mode`` -- or ``(None, None)``
+    for an archive that predates the record (before 2026-10-06)."""
+    path = _resolve_h5(h5path_or_header)
+    gp = _baseline_group_path(scan_key)
+    with h5py.File(path, "r") as hf:
+        if gp not in hf:
+            return None, None
+        grp = hf[gp]
+        v = grp.attrs.get("coil_solve_mode")
+        if v is not None:
+            return (v.decode() if isinstance(v, bytes) else str(v)), \
+                "_baseline attr coil_solve_mode"
+        from .engine import read_engine_json
+        rec = read_engine_json(grp)
+    if rec and rec.get("coil_solve_mode") is not None:
+        return str(rec["coil_solve_mode"]), "baseline engine record"
+    return None, None
+
+
+def _warn_replayed_coil_solve_mode(path, scan_key):
+    """Warn when a stored run's coil-solve mode is not the canonical one
+    (or not recorded: the archive predates the record)."""
+    import warnings
+    try:
+        mode, where = load_coil_solve_mode(path, scan_key)
+    except (OSError, KeyError, ValueError):
+        return
+    if mode == CANONICAL_COIL_SOLVE_MODE:
+        return
+    state = ("records no coil_solve_mode: it predates the canonical "
+             "coil-solve mode" if mode is None else
+             f"records coil_solve_mode={mode!r} ({where}), not the "
+             "canonical one")
+    warnings.warn(
+        f"stored run {os.path.basename(str(path))!r}"
+        + ("" if scan_key is None else f" (scan {scan_key!r})")
+        + f" {state} (one bounded coil solve entered at setup_solver, "
+        "2026-10-06; not switchable): replaying this config runs every solve "
+        "bounded -- results may differ from the stored run (measured <= 5e-7 "
+        "relative on reconstructions and <= 5e-4 on archived draws; yields "
+        "and in-spec flags unchanged)", UserWarning, stacklevel=3)
+
+
 GENERATION_PROVENANCE_KEYS = ("n_requested", "n_requested_source",
                               "generation_mode", "n_attempted", "n_stored",
                               "attempt_outcomes_json", "bouquet_version",
@@ -3417,11 +4406,15 @@ def _supersede_refusal(scan_grp):
     if "refused_reason" in scan_grp.attrs:
         scan_grp.attrs["refused_reason_superseded"] = scan_grp.attrs["refused_reason"]
         del scan_grp.attrs["refused_reason"]
+    if "refused_time" in scan_grp.attrs:
+        scan_grp.attrs["refused_time_superseded"] = scan_grp.attrs["refused_time"]
+        del scan_grp.attrs["refused_time"]
 
 
-def write_refused_scan(h5path_or_header, scan_key, reason):
+def write_refused_scan(h5path_or_header, scan_key, reason, time=None):
     """Record a slice that was REFUSED before any draw (closure refusal, no
-    reference, ...) as an empty ``scan/<key>`` carrying ``refused_reason``.
+    reference, ...) as an empty ``scan/<key>`` carrying ``refused_reason``
+    (and ``refused_time`` [s], the slice time, when *time* is given).
 
     A series reader then returns ``status="refused"`` for that key instead of
     a silent gap. Refuses to overwrite a scan that already holds draws.
@@ -3443,6 +4436,8 @@ def write_refused_scan(h5path_or_header, scan_key, reason):
         if any(str(k).lstrip("-").isdigit() for k in grp.keys()):
             raise ValueError(f"scan/{bkey} already holds draws; not marking it refused")
         grp.attrs["refused_reason"] = str(reason)
+        if time is not None:
+            grp.attrs["refused_time"] = float(time)
         grp.attrs["bouquet_version"] = str(__version__)
 
 
@@ -3484,7 +4479,15 @@ def load_config(h5path_or_header, scan_key=None):
                 f"per-scan configs present: {scan_cfgs or 'none'}). Only files "
                 "written by a provenance-aware Bouquet carry a config.")
         raw = node[()]
-    return BouquetConfig.from_json(raw.decode() if isinstance(raw, bytes) else str(raw))
+        _sk = (bkey if bkey is not None else
+               (scan_cfgs[0] if len(scan_cfgs) == 1 else None))
+    cfg = BouquetConfig.from_json(raw.decode() if isinstance(raw, bytes)
+                                  else str(raw))
+    # the coil-solve mode the stored run was in, read back: a replay runs
+    # the canonical (bounded) mode, so an archive without the record (or
+    # with another mode) is said to differ (2026-10-06)
+    _warn_replayed_coil_solve_mode(path, _sk)
+    return cfg
 
 
 # ====================================================================
@@ -3533,6 +4536,9 @@ def store_equilibrium(
     j_BS_edge=None,
     pfile_bytes=None,
     Zeff=None,
+    z_fast=None,
+    z2_fast=None,
+    Z_imp=None,
     coil_currents=None,
     psi_N_kinetic=None,
     homotopy_pass=None,
@@ -3541,6 +4547,7 @@ def store_equilibrium(
     max_F_drift_pct=None,
     max_VSC_drift_pct=None,
     in_spec=None,
+    jbs_delta_active=None,
     inspec_F_max=None,
     inspec_VSC_max=None,
     perturbed_lcfs_ref=None,
@@ -3550,6 +4557,9 @@ def store_equilibrium(
     diverted=None,
     aux=None,
     eq_fsa=None,
+    jbs_loop=None,
+    profile_coord="psi_n",
+    ifile_filepath=None,
 ):
     """
     Write one perturbed equilibrium into the HDF5 database.
@@ -3579,10 +4589,20 @@ def store_equilibrium(
         1-D isolated edge bootstrap current [A m^-2].
     pfile_bytes : bytes or None
         Raw p-file content to store alongside the g-file bytes.
+    ifile_filepath : str or None
+        OFT i-file (``save_ifile``) to store as the ``ifile`` blob.
     Zeff : array_like or None
         1-D effective charge profile (dimensionless).
     coil_currents : dict or None
         Coil currents {name: current_A} from TokaMaker.
+    profile_coord : str
+        Coordinate of ``psi_N`` / ``psi_N_kinetic`` (``attrs["profile_coord"]``).
+    jbs_loop : dict or None
+        The draw's self-consistent bootstrap record
+        (``GenerationConfig.jbs_self_consistent``): written as the group
+        attrs ``jbs_converged`` / ``jbs_n_passes`` and the full record as
+        JSON in ``jbs_loop_json``.  ``None`` (the legacy path) writes nothing,
+        so a legacy archive is unchanged.
     """
     db_path = os.path.abspath(f"{header}.h5")
     if not os.path.isfile(db_path):
@@ -3606,8 +4626,11 @@ def store_equilibrium(
 
         # ---- raw eqdsk (opaque binary -- bit-perfect; schema-v2 fixed
         # name, the group path carries the coordinates) --------------------
-        from .schema import EQDSK_DS
+        from .schema import EQDSK_DS, IFILE_DS
         grp.create_dataset(EQDSK_DS, data=np.void(eqdsk_bytes))
+        if ifile_filepath is not None:
+            with open(ifile_filepath, "rb") as fh:
+                grp.create_dataset(IFILE_DS, data=np.void(fh.read()))
 
         # ---- 1-D profiles -----------------------------------------------
         write_profile(grp, "psi_N", psi_N)
@@ -3649,6 +4672,7 @@ def store_equilibrium(
         grp.attrs["count"]  = int(count)
         if scan_key is not None:
             grp.attrs["scan_key"] = scan_key
+        grp.attrs["profile_coord"] = str(profile_coord)
 
         # ---- optional: p-file bytes ----------------------------------------
         # Per-draw pfile blobs are only stored for TEXT p-files (rewritten with
@@ -3665,6 +4689,14 @@ def store_equilibrium(
         # ---- optional: Zeff profile ----------------------------------------
         if Zeff is not None:
             write_profile(grp, "Zeff", Zeff)
+
+        # ---- optional: fast-ion charge moments (psi_N_kinetic) --------------
+        # Written per draw so one entry recovers the thermal ne - z_fast.
+        for _k, _v in (("z_fast", z_fast), ("z2_fast", z2_fast)):
+            if _v is not None:
+                write_profile(grp, _k, _v)
+        if Z_imp:
+            grp.attrs["Z_imp"] = float(Z_imp)
 
         # ---- optional: coil currents ---------------------------------------
         if coil_currents is not None:
@@ -3688,6 +4720,8 @@ def store_equilibrium(
             grp.attrs["max_VSC_drift_pct"] = float(max_VSC_drift_pct)
         if in_spec is not None:
             grp.attrs["in_spec"] = bool(in_spec)
+        if jbs_delta_active is not None:
+            grp.attrs["jbs_delta_active"] = bool(jbs_delta_active)
         if inspec_F_max is not None:
             grp.attrs["inspec_F_max"] = float(inspec_F_max)
         if inspec_VSC_max is not None:
@@ -3733,8 +4767,8 @@ def store_equilibrium(
         # ---- Live-equilibrium FSA block (optional subgroup) --------------
         # Captured from the converged TokaMaker equilibrium at the same state
         # the eqdsk was saved from, so this draw's own flux geometry enables
-        # an exact toroidal<->parallel conversion at IMAS export
-        # (physics.capture_equilibrium_fsa -> physics.toroidal_to_parallel).
+        # exact current conversions at IMAS export
+        # (physics.capture_equilibrium_fsa -> io.imas.write_imas_draw).
         if eq_fsa:
             from .schema import EQ_FSA_GROUP, EQ_FSA_UNITS
             fsa_grp = grp.create_group(EQ_FSA_GROUP)
@@ -3747,16 +4781,89 @@ def store_equilibrium(
                 if _u:
                     ds.attrs["units"] = _u
 
+        # ---- self-consistent bootstrap record (schema v3 jbs_loop block;
+        # None -- the frozen bootstrap -- writes nothing) -------------------
+        from .schema import write_jbs_loop
+        write_jbs_loop(grp, jbs_loop)
+
+
+def load_jbs_loop(header, count, scan_key=None):
+    """The self-consistent bootstrap record of one draw, or ``None``.
+
+    Reads the schema-v3 ``jbs_loop`` block (:data:`bouquet.schema.
+    JBS_LOOP_ATTRS`) :func:`store_equilibrium` writes when the draw's
+    bootstrap came from the loop; frozen-bootstrap draws (v2 archives,
+    ``jbs_self_consistent=False``) carry none.  ``count="_baseline"`` reads
+    the baseline's record (see :func:`store_baseline_jbs_loop`).
+    """
+    from .schema import read_jbs_loop
+    db_path = _resolve_h5(header)
+    with h5py.File(db_path, "r") as hf:
+        grp_path = (_baseline_group_path(scan_key) if count == "_baseline"
+                    else _group_path(scan_key, count))
+        if grp_path not in hf:
+            raise KeyError(f"{grp_path} not in {db_path}")
+        return read_jbs_loop(hf[grp_path])
+
+
+def _baseline_group_path(scan_key=None):
+    bkey = _scan_key(scan_key)
+    return f"scan/{bkey}/_baseline" if bkey is not None else "_baseline"
+
+
+def store_baseline_jbs_loop(header, record, scan_key=None):
+    """Write the baseline's self-consistent bootstrap record (schema-v3
+    ``jbs_loop`` block) onto the archive's ``_baseline`` group.
+
+    ``record`` is the baseline's loop record (``li_metrics["jbs_loop"]`` on
+    the IMAS path, ``reconstruction_metrics["jbs_loop"]`` on the geqdsk
+    path); ``None`` (a frozen baseline) writes nothing.  No-op when the
+    archive has no ``_baseline`` group yet.
+    """
+    if record is None:
+        return
+    from .schema import write_jbs_loop
+    db_path = _resolve_h5(header)
+    with h5py.File(db_path, "a") as hf:
+        gp = _baseline_group_path(scan_key)
+        if gp in hf:
+            write_jbs_loop(hf[gp], record)
+
+
+#: ``_baseline`` attribute carrying the ONE reconstruction state record
+#: (self-consistent loop only; JSON).  See docs/archive-schema.md.
+DELIVERED_STATE_ATTR = "delivered_state_json"
+
+
+def store_baseline_state(header, record, scan_key=None):
+    """Write the reconstruction's delivered-state record (self-consistent
+    loop) onto the archive's ``_baseline`` group as the JSON attribute
+    :data:`DELIVERED_STATE_ATTR`: the recorded l_i / q0 / q95 of the one
+    reconstruction state, the request normalisation, and what the run's
+    baseline re-solve (the saved baseline g-file) carries beside them.
+    ``None`` writes nothing; no-op without a ``_baseline`` group.
+    """
+    if record is None:
+        return
+    import json
+    from .jbs_loop import jsonable
+    db_path = _resolve_h5(header)
+    with h5py.File(db_path, "a") as hf:
+        gp = _baseline_group_path(scan_key)
+        if gp in hf:
+            hf[gp].attrs[DELIVERED_STATE_ATTR] = json.dumps(
+                jsonable(record), allow_nan=True)
+
 
 def load_eq_fsa(header, count, scan_key=None):
     """Load one draw's live-equilibrium FSA block, or ``None`` if not captured.
 
     Returns a dict of 1-D arrays (``psi_N``, ``F``, ``avg_inv_R``,
     ``avg_inv_R2`` (present only when the exact quadrature succeeded),
-    ``avg_B2``, ``q``, ``dV_dpsi``, ``f_trap``, ``B_avg``) -- the geometry
-    :func:`bouquet.physics.toroidal_to_parallel` needs for an exact IMAS
-    write-back. ``None`` for archives written without live capture (fall back
-    to the baseline-ratio reconstruction).
+    ``avg_B2``, ``q``, ``dV_dpsi``, ``f_trap``, ``B_avg``; newer archives also
+    ``avg_R``, ``pprime``, ``jphi_eq``) -- the geometry the exact IMAS
+    write-back needs (:func:`bouquet.io.imas.write_imas_draw`). ``None`` for
+    archives written without live capture.
     """
     from .schema import EQ_FSA_GROUP
     h5path = _resolve_h5(header)
@@ -3847,6 +4954,11 @@ def load_equilibrium(header, count, scan_key=None, eqdsk_out_dir=None):
         # ---- optional: Zeff -----------------------------------------------
         if "Zeff" in grp:
             result["Zeff"] = np.array(grp["Zeff"])
+        for _k in ("z_fast", "z2_fast"):
+            if _k in grp:
+                result[_k] = np.array(grp[_k])
+        if "Z_imp" in grp.attrs:
+            result["Z_imp"] = float(grp.attrs["Z_imp"])
 
         # ---- optional: p-file bytes ----------------------------------------
         # Text p-file sources are stored per draw (draw-perturbed); binary IDA
@@ -3873,6 +4985,57 @@ def load_equilibrium(header, count, scan_key=None, eqdsk_out_dir=None):
 # ====================================================================
 #  Baseline (input) profile storage
 # ====================================================================
+#: Subgroup of ``_baseline`` holding :attr:`Baseline.mse_record`.
+MSE_RECORD_GROUP = "structured_mse"
+
+
+def _write_mse_record(grp, mse_record):
+    """Write ``Baseline.mse_record`` as datasets under ``grp/structured_mse``.
+
+    Every entry is a dataset (numbers as float64 / int64 arrays, strings as a
+    variable-length UTF-8 string dataset), so the size scales with the chord
+    count without touching HDF5's 64 kB attribute cap.  A value that is
+    neither numeric nor a list of strings is refused (``TypeError``) here,
+    before anything is half-written into the group.
+    """
+    prepared = {}
+    for k, v in mse_record.items():
+        if isinstance(v, (list, tuple)) and all(isinstance(x, str) for x in v) \
+                and len(v) > 0:
+            prepared[k] = ("str", [str(x) for x in v])
+            continue
+        a = np.asarray(v)
+        if a.dtype.kind in "biuf":
+            prepared[k] = ("num", a.astype(np.int64 if a.dtype.kind in "biu"
+                                           else np.float64))
+        elif a.size == 0:
+            prepared[k] = ("num", np.zeros(0, dtype=np.float64))
+        else:
+            raise TypeError(f"mse_record[{k!r}] is neither numeric nor a list "
+                            f"of strings (dtype {a.dtype}); refusing to "
+                            "archive it")
+    sub = grp.create_group(MSE_RECORD_GROUP)
+    for k, (kind, v) in prepared.items():
+        if kind == "str":
+            sub.create_dataset(k, data=np.asarray(v, dtype=object),
+                               dtype=h5py.string_dtype(encoding="utf-8"))
+        else:
+            sub.create_dataset(k, data=v)
+
+
+def _read_mse_record(sub):
+    """Inverse of :func:`_write_mse_record`: a dict of arrays / str lists."""
+    out = {}
+    for k in sub.keys():
+        ds = sub[k]
+        if h5py.check_string_dtype(ds.dtype) is not None:
+            out[k] = [x.decode() if isinstance(x, bytes) else str(x)
+                      for x in ds[()]]
+        else:
+            out[k] = np.array(ds)
+    return out
+
+
 def _json_default_for_h5(o):
     """``json.dumps(default=...)`` for archive metadata: numpy -> native,
     tuples/sets -> lists, everything else -> ``str`` (never dropped)."""
@@ -3904,6 +5067,9 @@ def store_baseline_profiles(
     scan_key=None,
     l_i_scale=LI_SCALE,
     pressure_thermal=None,
+    z_fast=None,
+    z2_fast=None,
+    Z_imp=None,
     eqdsk_bytes=None,
     pfile_bytes=None,
     psi_N_kinetic=None,
@@ -3917,7 +5083,10 @@ def store_baseline_profiles(
     j_BS=None,
     j_inductive=None,
     source_kind=None,
+    mse_record=None,
     baseline_meta=None,
+    profile_coord="psi_n",
+    ifile_bytes=None,
 ):
     """
     Store the input (baseline) profiles and their uncertainties.
@@ -3934,6 +5103,15 @@ def store_baseline_profiles(
         from perturbed equilibria.
     pfile_bytes : bytes or None
         Raw baseline p-file content.
+    ifile_bytes : bytes or None
+        Raw baseline OFT i-file content (``write_ifile`` runs).
+    mse_record : dict or None
+        ``Baseline.mse_record`` (structured closure with MSE data): per-chord
+        arrays and the Jacobian, written as DATASETS in the subgroup
+        ``structured_mse`` -- never as attributes, whose size HDF5 caps at
+        64 kB -- so the archive holds any number of chords.  Strings (the
+        exclusion reasons) are stored as a variable-length string dataset.
+        ``None`` writes nothing.
     baseline_meta : dict or None
         Baseline provenance (``Baseline.li_metrics``): the l_i comparison,
         forward-solve residuals, ``jBS_baseline_mode``, the closure scales
@@ -3973,6 +5151,12 @@ def store_baseline_profiles(
         write_profile(grp, "pressure", pressure)
         if pressure_thermal is not None:
             write_profile(grp, "pressure_thermal", pressure_thermal)
+        # fast-ion charge moments: needed to recover ne - z_fast downstream
+        for _k, _v in (("z_fast", z_fast), ("z2_fast", z2_fast)):
+            if _v is not None:
+                write_profile(grp, _k, _v)
+        if Z_imp:
+            grp.attrs["Z_imp"] = float(Z_imp)
         write_profile(grp, "j_phi", j_phi)
         if j_BS is not None:
             write_profile(grp, "j_BS", j_BS)
@@ -4010,6 +5194,11 @@ def store_baseline_profiles(
         # the source-decoupled aux switchboard): "imas" or "geqdsk".
         if source_kind is not None:
             grp.attrs["source_kind"] = str(source_kind)
+        # Coordinate of the psi_N / psi_N_kinetic grids (bouquet.coords);
+        # absent on older archives, which are all "psi_n".
+        grp.attrs["profile_coord"] = str(profile_coord)
+        if mse_record:
+            _write_mse_record(grp, mse_record)
         # Baseline provenance / closure health (see the docstring).  The
         # record is small (scalars, short profiles of the multiplier
         # min/max, reason strings), so one JSON attr is the right shape.
@@ -4023,6 +5212,8 @@ def store_baseline_profiles(
 
         if eqdsk_bytes is not None:
             grp.create_dataset("eqdsk", data=np.void(eqdsk_bytes))
+        if ifile_bytes is not None:
+            grp.create_dataset("ifile", data=np.void(ifile_bytes))
         if pfile_bytes is not None:
             grp.create_dataset("pfile", data=np.void(pfile_bytes))
 
@@ -4184,6 +5375,11 @@ def load_baseline_profiles(h5path_or_header, scan_key=None):
             )
         grp = hf[grp_path]
         for key in grp.keys():
+            if isinstance(grp[key], h5py.Group):
+                # the structured closure's per-chord MSE record (the only
+                # subgroup a baseline carries)
+                result[key] = _read_mse_record(grp[key])
+                continue
             result[key] = np.array(grp[key])
         for attr in grp.attrs:
             result[attr] = grp.attrs[attr]
@@ -4250,6 +5446,11 @@ def load_equilibrium_by_path(h5path_or_header, count, scan_key=None):
 
         if "Zeff" in grp:
             result["Zeff"] = np.array(grp["Zeff"])
+        for _k in ("z_fast", "z2_fast"):
+            if _k in grp:
+                result[_k] = np.array(grp[_k])
+        if "Z_imp" in grp.attrs:
+            result["Z_imp"] = float(grp.attrs["Z_imp"])
 
         # auxiliary ("switchboard") perturbed profiles -- aux_zeff, aux_omega_tor,
         # aux_chi_e, ... on psi_N_kinetic -- so per-draw plots (draw_zeff, the aux

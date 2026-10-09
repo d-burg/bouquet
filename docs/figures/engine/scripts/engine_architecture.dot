@@ -1,0 +1,20 @@
+digraph engine {
+  graph [rankdir=TB, fontname="Helvetica", fontsize=11, nodesep=0.35, ranksep=0.35, bgcolor="white"];
+  node  [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=10, color="#000000", fillcolor="#FFFFFF"];
+  edge  [fontname="Helvetica", fontsize=9, color="#000000"];
+  gf  [label="g-file input\nparallel current = input - Redl bootstrap at the anchor, smoothed\nrows: Ip (exact), l_i(3) hard, optional q0", fillcolor="#56B4E933"];
+  ids [label="IDS input\ninductive = |B0| (total - bootstrap - driven sources)\ndriven sources held fixed; rows: Ip, l_i soft, optional q0 and MSE", fillcolor="#56B4E933"];
+  anchor [label="anchor: the source's own current, one two-pass solve\n(seeds the geometry and the first Redl bootstrap;\ncoil solve in the bounded mode from solver setup on)"];
+  comp [label="compose the toroidal current on the latest solved geometry\nJ = F<1/R>/<B^2> [s_ind <j.B>_ind + s_bs <j.B>_BS + <j.B>_fixed] + p'(<R> - F^2<1/R>/<B^2>)", fillcolor="#E69F0033"];
+  clos [label="closure (no solve): measurement rows and their misfits, prior\n(structured, or one of the scalar closures)"];
+  solve [label="relax (factor 0.7), then ONE Grad-Shafranov solve\n(edge: P' pinned to zero, axis target p_axis - p_sep)", fillcolor="#D55E0033"];
+  meas [label="measure on the solved state: Redl bootstrap, l_i, Ip, q0, MSE pitch angles"];
+  upd [label="update the bootstrap target (relaxation 0.7), the row misfits,\nthe MSE Jacobian (fixed finite difference, offset refreshed)"];
+  crit [label="all criteria met on 2 consecutive passes?\n(bootstrap profile 1e-3, bootstrap current 1e-4,\n|change in l_i| 1e-3, |change in q0| 2e-3; at most 8 passes)", shape=diamond, style="filled", fillcolor="#FFFFFF"];
+  deliv [label="delivery solve (two passes) and a check on every row\n= the reconstruction (stored with its engine record)", fillcolor="#009E7333"];
+  draws [label="draws: closure coefficients held, Ip amplitude, one bootstrap loop\nfrom the reconstruction state; homotopy; at most 100 solver iterations;\nthe zero-perturbation draw reproduces the reconstruction", fillcolor="#CC79A733"];
+  gf -> anchor; ids -> anchor; anchor -> comp; comp -> clos -> solve -> meas -> upd -> crit;
+  crit -> comp [label="  no: next pass"];
+  crit -> deliv [label="yes"];
+  deliv -> draws [label="draw generation"];
+}

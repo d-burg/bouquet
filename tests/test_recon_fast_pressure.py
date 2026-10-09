@@ -58,11 +58,13 @@ def test_impurity_pressure_is_zero_for_falsy_Z_imp():
 def test_impurity_pressure_matches_the_one_zeff_model():
     """nz = (ne - ni)/Z_imp thermalized at ti -- the term single-ion omits.
 
-    Note: ``physics`` uses the CODATA elementary charge (1.602176634e-19)
-    while the thermal terms use ``EC = 1.6022e-19``, a 1.5e-5 relative
-    difference confined to the impurity term.  Harmless for recon-vs-draw
-    consistency (both call THIS function), so the test pins the physics
-    module's own constant rather than asserting the two agree.
+    Note: ``physics`` uses the CODATA elementary charge
+    (``physics.ELEMENTARY_CHARGE``, 1.602176634e-19).  Under the
+    self-consistent loop the thermal terms use the same constant; only the
+    frozen legacy path keeps ``ELEMENTARY_CHARGE_LEGACY = 1.6022e-19`` for its
+    thermal terms (a 1.5e-5 relative difference to the impurity term there).
+    Harmless for recon-vs-draw consistency (both call THIS function), so the
+    test pins the physics module's own constant.
     """
     from bouquet.physics import impurity_pressure, _EC as EC
 
@@ -131,7 +133,7 @@ def test_recon_and_draw_kin_to_eq_agree_on_the_same_inputs():
     recon_k2e = _materialize_nested(
         _baseline._resolve_reconstruction, "to_eq",
         dict(np=np, pchip_interp=pchip_interp,
-             psi_N_kin=psi_kin, psi_N=psi_eq),
+             x_kin=psi_kin, x_run=psi_eq),
     )
 
     # A smooth core profile, a pedestal-like profile (where a linear regrid
@@ -241,7 +243,10 @@ def test_p_fast_enters_the_recon_pressure_additively():
                      if not ln.strip().startswith("#"))
 
     # the thermal base, then p_fast ADDED to it (not subtracted, not assigned)
-    assert re.search(r"pres_tmp\s*=\s*1\.6022e-19\s*\*\s*\(ne\s*\*\s*te\s*\+\s*"
+    # (its eV -> J factor is physics.thermal_pressure_charge(jbs_loop): the
+    # one ELEMENTARY_CHARGE under the loop, the frozen 1.6022e-19 otherwise)
+    assert re.search(r"pres_tmp\s*=\s*thermal_pressure_charge\(jbs_loop\)"
+                     r"\s*\*\s*\(ne\s*\*\s*te\s*\+\s*"
                      r"ni\s*\*\s*ti\)", code), (
         "the thermal single-ion base of the recon pressure changed shape")
     m = re.search(r"pres_tmp\s*=\s*pres_tmp\s*([+-])\s*np\.asarray\(p_fast",

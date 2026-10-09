@@ -261,3 +261,29 @@ def test_hold_sawteeth_must_be_a_bool():
     from bouquet.config import ImasSource
     with pytest.raises(ValueError, match="hold_sawteeth"):
         ImasSource(ids_path="x.json", hold_sawteeth="no")
+
+
+@pytest.mark.parametrize("s_ip, s_b0", [(-1.0, 1.0), (1.0, -1.0),
+                                        (-1.0, -1.0)])
+def test_rf_and_other_channels_read_in_the_positive_ip_frame(tmp_path, s_ip,
+                                                             s_b0):
+    """Every driven channel, not only the beams, is brought into the
+    positive-Ip frame: a mirrored copy (tests/_mirror_dd.py) with EC, IC,
+    fusion and sawteeth entries reads bit-identically, records included."""
+    import _mirror_dd as mdd
+    dd = _example()
+    cs_t = dd["core_sources"]["time"]
+    dd = _with(dd,
+               _entry(dd, 3, "ec", cs_t, [5.0e3, 6.0e3, 7.0e3]),
+               _entry(dd, 5, "ic", cs_t, [1.0e3, 2.0e3, 3.0e3]),
+               _entry(dd, 6, "fusion", cs_t, [4.0e2, 5.0e2, 6.0e2]),
+               _entry(dd, 701, "sawteeth", cs_t, [3.0e3, 3.0e3, 3.0e3]))
+    ref = _read(_write(tmp_path, dd, "pos.json"))
+    bl = _read(_write(tmp_path, mdd.mirror_dd(dd, s_ip, s_b0), "mir.json"))
+    assert bl.source_current_sign == s_ip
+    for k in ("j_NBI", "j_RF", "j_other", "j_sawteeth", "j_inductive",
+              "j_BS", "j_phi"):
+        np.testing.assert_array_equal(getattr(bl, k), getattr(ref, k), k)
+    assert np.all(np.asarray(ref.j_RF) > 0) and np.all(
+        np.asarray(ref.j_other) > 0)
+    assert bl.source_time_match["entries"] == ref.source_time_match["entries"]

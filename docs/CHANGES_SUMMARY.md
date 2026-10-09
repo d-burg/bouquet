@@ -8,6 +8,33 @@ Where each number below was measured, and how this branch's chapter commits
 map to the original history on the archival tag
 `archive/engine-unified-2116923`: [validation-provenance.md](validation-provenance.md).
 
+### PRs #70 / #71: review fixes (2026-10-09)
+
+- **IMAS delivered state holds `j_other` once** (#70, blocker): the legacy
+  diff/rescale loop draws counted `j_other` twice; both σ=0 guards now hold the
+  draws' own fixed channels (`j_NBI + j_RF + j_other`) and record
+  `split_closure`.
+- **Bootstrap multiplier on loop draws** (#70): `bs_scale` rides in the loop
+  composer's scale (range re-centred, as before #70); SWB draws keep it after
+  SWB; one helper for `generate()` and both guards; a non-uniform `s_bs(ψ)`
+  with loop draws is refused.  The two structured-MSE stages record
+  `bs_scale_profile`.
+- **One source-time rule for every driven channel** (#70): the legacy reader
+  reads beams, RF, other and sawteeth through the engine adapter's call with
+  the engine's arguments (refusals, off stamps and announcements identical;
+  `source_time_match` gains `driven_sources` / `ignored_sources` /
+  `off_sources` / `sawteeth_hold`).  `ImasSource.hold_sawteeth` (default True)
+  opts out of the sawteeth hold (legacy reader only; refused by the engine).
+- **`swb_seed` default `None`** (#70): resolved to the toolkit's `jphi_fixed`
+  capability; an explicit `"source"` is refused only at an SWB call.
+- **Single-slice IMAS export** (#71): the output holds ONE slice -- the
+  core_profiles slice the reader reads, not the requested time -- cut by the
+  IMAS structure (entry lists, outlines and radial profiles are never cut).
+  core_sources entries keep their bracketing / first / last own slices and the
+  read's windows are written under `bouquet_time_window`, so an export re-reads
+  with the same `source_time_match` and driven currents.  Scripts that indexed
+  the exported file by the template's slice index must use index 0.
+
 ### Reproducing a run made before this release; what moves on the default path
 
 - **Recipe.** `reconstruction_engine="legacy"` (the legacy reconstruction and

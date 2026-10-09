@@ -1090,17 +1090,30 @@ class GenerationConfig:
     # validated in __post_init__).  The unified engine reads only the
     # edge-taper keys (taper off by default).  Replaces swb_iterations.
     bootstrap_kwargs: dict = field(default_factory=dict)
-    # GS iteration cap for generate()'s draw loop (TokaMaker_interface.
-    # DrawSolveGuard).  Draw solves converge in <= ~25 iterations; a failing
-    # one sits in a limit cycle and burns the whole cap.  None keeps the
-    # solver's setup cap (800).  Every draw solve that raises is recorded: per
-    # draw in diagnostics['solve_failures'], on Bouquet.solve_failures, and in
-    # one printed "[draw-solves]" line.
-    draw_solve_maxits: Optional[int] = 100
-    # A draw solve that hits that cap is retried from where it stopped at each
-    # of these GS under-relaxation factors, then accepted at
-    # nl_tol = draw_solve_loose_tol (None, the default, skips; 2e-5 rescues
-    # the cycle); recorded as recovered_by.
+    # GS iteration cap for the DRAW solves of generate()'s legacy / swb draw
+    # loop (TokaMaker_interface.DrawSolveGuard): applied from the first draw
+    # on, never to the cold baseline re-solve or the sigma=0 reference solve
+    # before it.  Draw solves converge in <= ~25 iterations; a failing one
+    # sits in a limit cycle and burns the whole cap.  "auto" (default) is
+    # resolved per engine at prepare_baseline() (engine.ENGINE_DEPENDENT_
+    # DEFAULTS; recorded in engine_resolved_defaults): 100 under "legacy";
+    # under "unified" the engine draws are capped by engine_draw_solve_maxits
+    # and any other value is refused.  None keeps the solver's setup cap
+    # (800) -- what a stored config with null, or without the field, ran.
+    # Every draw solve that raises is recorded: per draw in
+    # diagnostics['solve_failures'], on Bouquet.solve_failures, and in one
+    # printed "[draw-solves]" line.
+    draw_solve_maxits: Union[int, str, None] = "auto"
+    # OPT-IN rescue of a capped DRAW solve (owner decision D5, 2026-10-09;
+    # both off by default; refused under the unified engine): retried from
+    # where it stopped at each of these GS under-relaxation factors (a
+    # solver-side remedy), then accepted at nl_tol = draw_solve_loose_tol --
+    # a LOOSER acceptance criterion than the solver's own nl_tol.  Every
+    # rescued draw is stamped in the archive (solve_recovered,
+    # solve_recovered_by, solve_nl_tol_accepted, solve_residual_upper/lower,
+    # solve_strict_nl_tol) and stats.draw_band / merge_archives can exclude
+    # rescued draws (rescued="exclude"; the default includes them with a
+    # warning count).  The swb draws get it too (stamped the same way).
     draw_solve_retry_urf: tuple = ()
     draw_solve_loose_tol: Optional[float] = None
     # SWB inputs on the IMAS path (baseline split, draws, sigma=0 check):
@@ -1540,10 +1553,37 @@ class GenerationConfig:
                     _v, numbers.Integral) or _v < 2:
                 raise ValueError(f"{_n}={_v!r} must be an integer >= 2")
         _m = self.draw_solve_maxits
-        if _m is not None and (isinstance(_m, bool) or not isinstance(
-                _m, numbers.Integral) or _m < 1):
+        if _m is not None and _m != "auto" and (
+                isinstance(_m, bool) or not isinstance(_m, numbers.Integral)
+                or _m < 1):
             raise ValueError(f"draw_solve_maxits={_m!r} must be an integer "
-                             ">= 1, or None for the solver's own cap")
+                             ">= 1, 'auto' (resolved per engine at "
+                             "prepare_baseline()) or None for the solver's "
+                             "own cap")
+        validate_draw_solve_rescue(self.draw_solve_retry_urf,
+                                   self.draw_solve_loose_tol)
+
+
+def validate_draw_solve_rescue(retry_urf, loose_tol):
+    """Refuse a malformed rescue setting (``draw_solve_retry_urf`` each a
+    real number in (0, 1]; ``draw_solve_loose_tol`` None or a finite real
+    > 0) -- at config time and again at the guard."""
+    import math
+    import numbers
+    if isinstance(retry_urf, (str, bytes)) or not hasattr(
+            retry_urf if retry_urf is not None else (), "__iter__"):
+        raise ValueError(f"draw_solve_retry_urf={retry_urf!r} must be a "
+                         "sequence of under-relaxation factors in (0, 1]")
+    for u in (retry_urf or ()):
+        if isinstance(u, bool) or not isinstance(u, numbers.Real) \
+                or not 0.0 < float(u) <= 1.0:
+            raise ValueError(f"draw_solve_retry_urf={retry_urf!r}: each "
+                             "must be a number in (0, 1]")
+    if loose_tol is not None and (
+            isinstance(loose_tol, bool) or not isinstance(loose_tol, numbers.Real)
+            or not math.isfinite(float(loose_tol)) or not float(loose_tol) > 0.0):
+        raise ValueError(f"draw_solve_loose_tol={loose_tol!r} must be a "
+                         "finite number > 0, or None (the default: off)")
 
 
 def validate_structured_mse_settings(gc) -> None:
@@ -2441,6 +2481,18 @@ def _stored_config_compat(gend: dict) -> None:
                         stacklevel=3)
                     gend[name] = ENGINE_FIELD_DEFAULTS[name]
                     break
+    if "draw_solve_maxits" not in gend:
+        # predates the field (#66, 2026-09-30): its draws ran under the
+        # solver's setup cap -- replayed so, not under today's resolved cap
+        # (#75 review B8); the unified engine never read it: set silently
+        if eng != "unified":
+            warnings.warn(
+                "stored config has no generation.draw_solve_maxits (it "
+                "predates the field): loading it with None, the solver's own "
+                "setup cap its draws ran under, so it reproduces what it "
+                "recorded; today's default is 'auto' (100 for the legacy "
+                "draws)", UserWarning, stacklevel=3)
+        gend["draw_solve_maxits"] = None
     if gend.get("jbs_self_consistent") and \
             "jbs_max_passes_post_homotopy" not in gend:
         val, why = FIELD_PRE_INTRODUCTION["jbs_max_passes_post_homotopy"]
@@ -2484,6 +2536,19 @@ def _stored_config_compat(gend: dict) -> None:
         "unified" if eng == "unified" else "")
     if eng != "unified":
         return
+    # (b') before (c): a cap the engine READ then moves to its own field
+    if "engine_draw_solve_maxits" not in gend:
+        cap = gend.get("draw_solve_maxits")
+        warnings.warn(
+            "stored unified config has no generation.engine_draw_solve_maxits "
+            "(it predates the field, 2026-09-30): the engine draws were then "
+            f"capped by draw_solve_maxits={cap!r}, so it is loaded as "
+            f"engine_draw_solve_maxits={cap!r} (draw_solve_maxits cleared: "
+            "the engine refuses it now); today's default is "
+            f"{ENGINE_FIELD_DEFAULTS['engine_draw_solve_maxits']}",
+            UserWarning, stacklevel=3)
+        gend["engine_draw_solve_maxits"] = cap
+        gend["draw_solve_maxits"] = None
     # (c) every legacy-path field the engine never reads: the engine
     # ignored a stored non-default value (the factories set
     # isolate_edge_jBS / perturb_jind_in_anchor for the legacy path
@@ -2500,8 +2565,11 @@ def _stored_config_compat(gend: dict) -> None:
         if name in ENGINE_DEPENDENT_DEFAULTS:
             # stored before 2026-10-07 as the engine's value (then the
             # dataclass default), or unset since: loaded unchanged
+            from .engine import engine_dependent_unset
             d = engine_validated_value(name, "unified", "reconstruction")
-            same = gend[name] is None or _same_value(gend[name], d)
+            same = (gend[name] is None
+                    or engine_dependent_unset(name, gend[name])
+                    or _same_value(gend[name], d))
         else:
             same = (gend[name] is None) if d is None else \
                 _same_value(gend[name], d)
@@ -2525,18 +2593,6 @@ def _stored_config_compat(gend: dict) -> None:
                 f"{d!r}, which the engine now requires -- the stored run "
                 "is unchanged", UserWarning, stacklevel=3)
             gend["homotopy_passes"] = d
-    if "engine_draw_solve_maxits" not in gend:
-        cap = gend.get("draw_solve_maxits")
-        warnings.warn(
-            "stored unified config has no generation.engine_draw_solve_maxits "
-            "(it predates the field, 2026-09-30): the engine draws were then "
-            f"capped by draw_solve_maxits={cap!r}, so it is loaded as "
-            f"engine_draw_solve_maxits={cap!r} (draw_solve_maxits cleared: "
-            "the engine refuses it now); today's default is "
-            f"{ENGINE_FIELD_DEFAULTS['engine_draw_solve_maxits']}",
-            UserWarning, stacklevel=3)
-        gend["engine_draw_solve_maxits"] = cap
-        gend["draw_solve_maxits"] = None
     _pre_introduction_backfill(gend, list(_ENGINE_ONLY_PRE_INTRODUCTION),
                                "unified")
 

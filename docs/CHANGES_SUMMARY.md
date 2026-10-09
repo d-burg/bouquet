@@ -1,5 +1,75 @@
 # Bouquet — change summaries
 
+## Unreleased — the collaborator's #72–#75, integrated (2026-10-09)
+
+### Legacy draw-solve cap and the opt-in rescue (#75; owner decision D5)
+
+- **`draw_solve_maxits` default `"auto"`**, resolved per engine at
+  `prepare_baseline()` (`engine.ENGINE_DEPENDENT_DEFAULTS`, recorded in
+  `engine_resolved_defaults`): **100 for the legacy and swb draws** (was the
+  solver's setup cap, 800, before #75), nothing under the unified engine
+  (refused there with the standard unread-settings rule, as are the rescue
+  fields). `None` still means the setup cap; a stored config without the
+  field (before #66) or with `null` replays uncapped. `"auto"` rather than
+  `None` because `None` has meant the setup cap in every stored config.
+  **Legacy numbers can move** where a draw solve needed 101–800 iterations:
+  such a draw now fails its cap (it is rejected, not archived). The
+  legacy-engine `tests/test_systematics.py` run is affected the same way.
+- **Draws only.** The cap (and the rescue) are applied at the first draw
+  and lifted at the end: the cold jphi-linterp baseline re-solve and the
+  sigma=0 (jBS-delta / DIFF_BS) reference anchor solve before the draw loop
+  run under the setup cap and are never rescued (in #75 as merged they ran
+  at 100, and a loose-tolerance rescue could have reached them).
+- **The rescue is OPT-IN** (`draw_solve_retry_urf`, default `()`;
+  `draw_solve_loose_tol`, default `None`): a capped draw solve is re-solved
+  from where it stopped at each urf (the same criterion), then accepted at
+  `nl_tol = draw_solve_loose_tol` -- a looser acceptance than the solver's
+  own `nl_tol`. With it on, every stored draw is stamped `solve_recovered`
+  and a rescued one also `solve_recovered_by`, `solve_nl_tol_accepted`,
+  `solve_residual_upper` / `solve_residual_lower` (OFT reports no residual
+  value: the bounds are the tolerances the solve did and did not meet),
+  `solve_strict_nl_tol` and `solve_rescue_its`. Off, nothing is written.
+  The swb draws get the same rescue and stamps; the engine draws never.
+  Validated at config time. A different failure during a retry is raised
+  (chained from the cap failure), not hidden behind it.
+- **Readers:** `draw_band` / `draw_bands(rescued="include"|"exclude")` and
+  `merge_archives(rescued=...)`: by default rescued draws are kept, listed
+  (`provenance["rescued_draws"]`, `merge_rescued_json`) and warned with
+  their count; `"exclude"` drops them (`rescued:<recovered_by>`).
+
+### OFT i-file archive (#74)
+
+- The i-file (`write_ifile=True`, off by default) now carries the same
+  separatrix pressure (`lcfs_pressure`) and `lcfs_pad` as the g-file of the
+  same state: its `p` was `p_sep` lower under the default
+  `separatrix_pressure="offset"`. The baseline i-file is written on every
+  route (with `coil_drift=None` from the recon-converged state) and traced
+  from the state its g-file is written from. Each group is stamped
+  `ifile_written` / `ifile_error`, the grid, `ifile_lcfs_pressure` and
+  `ifile_frame` (the positive-Ip frame, issue #68) plus the source signs. A
+  solver without `save_ifile` is refused at `generate()`; a failed state
+  restore after the save rejects the draw (`ifile_restore_failed`).
+  `extract(formats=("ifile",))`; `utils.read_ifile`.
+
+### IDA slice timing (#73)
+
+- `ImasSource.ida_time` (ida_hybrid only; refused otherwise): the IDA slice
+  is matched on the IDA file's own time base -- nearest, never
+  interpolated, within half its local step (a single-slice file: half the
+  dd step when paired with `time`, the 10 µs floor for an explicit
+  `ida_time`); paired with `time` it must also sit within half the dd step
+  of the core_profiles slice. Else refused. The match and FUSE's replay
+  pairing verdict are archived in `li_metrics["ida_time_match"]`.
+  `set_slice(time=)` keeps a configured `ida_time`, `set_slice(ida_time=)`
+  applies it alone, `run_slices(ida_times=[...])` pairs a series.
+
+### dd cache (#72)
+
+- The parsed dd is cached per file (real path, mtime, size, inode) and now
+  shared by the unified engine's IDS adapter and the plotting readers too,
+  so a sweep parses each dd once. Up to two parsed files stay resident per
+  process (`bouquet.io.imas.clear_dd_cache()` releases them).
+
 ## Unreleased — the unified engine becomes the default; one current conversion (owner decisions, 2026-10-06)
 
 **Both change results by default.**
@@ -1023,8 +1093,10 @@ which applies to every path.*
   solve still rejects with its code. Every capped solve is recorded (stage,
   iterations, seconds, outcome) on `Bouquet.engine_draw_cap_events` and the
   draw's `homotopy.cap_events`. `draw_solve_maxits` is refused under the
-  engine; the legacy draws are unchanged (`draw_solve_maxits` default
-  `None`; frozen-code AST test passes). The fast test that asserted the old
+  engine; the legacy draws were unchanged at the time (`draw_solve_maxits`
+  default `None` then; since the #75 integration it is `"auto"`, resolved
+  to 100 for the legacy draws only -- see "Legacy draw-solve cap and the
+  opt-in rescue" above; frozen-code AST test passes). The fast test that asserted the old
   rule at homotopy pass 2 now asserts the rollback.
 - **Engine presets `two_scalar_li` and `structured_uniform` (not defaults).**
   `two_scalar_li`: one scalar on the inductive, one on the bootstrap
@@ -1429,11 +1501,14 @@ legacy corrector already takes its step.
   the q0 changes are labels (`tests/test_legacy_path_stage0_bitwise.py`, a
   fast form of the out-of-tree legacy A/B probe).
 - **Optional draw-loop iteration cap** (`draw_solve_maxits`, default `None` =
-  the solver's own cap, so nothing changes unless it is set), with a record
-  of every draw solve that raises (`diagnostics['solve_failures']`,
-  `Bouquet.solve_failures`, one `[draw-solves]` line). Ported from the
-  collaborator's pull request with the same field name; its re-solve of a
-  capped solve at a looser tolerance is NOT ported (not approved).
+  the solver's own cap at the time), with a record of every draw solve that
+  raises (`diagnostics['solve_failures']`, `Bouquet.solve_failures`, one
+  `[draw-solves]` line). Ported from the collaborator's pull request with
+  the same field name; its re-solve of a capped solve at a looser tolerance
+  was NOT ported then. Superseded by the #75 integration (owner decision D5,
+  2026-10-09): the default is now `"auto"` (100 for the legacy draws, draws
+  only) and the rescue exists as an OPT-IN, stamped per draw -- see "Legacy
+  draw-solve cap and the opt-in rescue" above.
 
 ## Unreleased — MSE pitch angles on the structured closure (opt-in)
 

@@ -1003,9 +1003,10 @@ class Bouquet(SwbBaseline):
         here -- a baseline not built by :meth:`prepare_baseline`, or a field
         reset afterwards -- is resolved now, as :meth:`prepare_baseline`
         would have, never read as ``None``."""
-        from .engine import ENGINE_DEPENDENT_DEFAULTS
+        from .engine import ENGINE_DEPENDENT_DEFAULTS, engine_dependent_unset
         gc = self.config.generation
-        if any(getattr(gc, n, None) is None for n in ENGINE_DEPENDENT_DEFAULTS):
+        if any(engine_dependent_unset(n, getattr(gc, n, None))
+               for n in ENGINE_DEPENDENT_DEFAULTS):
             self._resolve_engine_defaults()
             self._record_engine_resolved_defaults(self.baseline)
 

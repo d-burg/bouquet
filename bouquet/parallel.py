@@ -451,7 +451,8 @@ def _read_worker_record(src, base_path):
 #  merge per-worker shards into one archive
 # --------------------------------------------------------------------------
 def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
-                   baseline_match_rtol=1e-6, config=None, missing_workers=None):
+                   baseline_match_rtol=1e-6, config=None, missing_workers=None,
+                   rescued="include"):
     """Concatenate per-worker shard archives into ``{out_header}.h5``.
 
     Draw groups are renumbered to a contiguous running index; under schema v2
@@ -485,7 +486,17 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
     delivered by the shards merged. Shards whose worker records disagree on
     the generation mode or the shared target, or that counted against
     different boundary cuts, are refused before anything is written.
+
+    ``rescued`` (owner decision D5): draws whose solve was rescued by the
+    opt-in draw-solve rescue (stamped ``solve_recovered``) are merged by
+    default (``"include"``, counted and warned); ``"exclude"`` leaves them
+    out.  Either way, when any shard holds one, the scan group records
+    ``merge_rescued_json`` (the policy, the count and each rescued draw's
+    shard, index and ``recovered_by``).
     """
+    if rescued not in ("include", "exclude"):
+        raise ValueError(f"rescued must be 'include' or 'exclude', got "
+                         f"{rescued!r}")
     import warnings
     import h5py
     from .utils import (initialize_equilibrium_database, _scan_key,
@@ -588,6 +599,7 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
 
     offset = 0
     workers = []
+    _resc = []                  # rescued draws met in the shards
     n_unrecorded = 0            # shards with no worker record (draws still merged)
     with h5py.File(out_path, "a") as out:
         if bkey is not None and base_path not in out:
@@ -623,6 +635,17 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
                     and str(k).lstrip("-").isdigit()
                 )
                 for i in idxs:
+                    _ga = parent[str(i)].attrs
+                    if bool(_ga.get("solve_recovered", False)):
+                        _rb = _ga.get("solve_recovered_by", "")
+                        _resc.append(dict(
+                            shard=os.path.basename(sp), index=int(i),
+                            recovered_by=(_rb.decode() if isinstance(_rb, bytes)
+                                          else str(_rb)),
+                            merged_as=(None if rescued == "exclude"
+                                       else int(offset))))
+                        if rescued == "exclude":
+                            continue
                     dst = _group_path(scan_key, offset)
                     out.copy(parent[str(i)], dst)
                     g = out[dst]
@@ -632,6 +655,18 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
                     # coordinate. load_equilibrium resolves by the fixed name.
                     offset += 1
 
+    if _resc:
+        with h5py.File(out_path, "a") as out:
+            gp = base_path if base_path else "/"
+            out[gp].attrs["merge_rescued_json"] = json.dumps(dict(
+                policy=rescued, n_rescued=len(_resc), draws=_resc))
+        if rescued == "include":
+            warnings.warn(
+                f"merge_archives: {len(_resc)} merged draw(s) had their solve "
+                "RESCUED (solve_recovered; a different urf or a looser "
+                "nl_tol) -- recorded in merge_rescued_json; pass "
+                "rescued='exclude' to leave them out", UserWarning,
+                stacklevel=2)
     # Run-level provenance on the merged archive (schema/version/timestamp
     # always; config_json when the caller supplied the run config).
     from .utils import write_provenance

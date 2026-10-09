@@ -605,7 +605,7 @@ def draw_band(archive, scan_key, evaluate, *, quantities=None,
               selection="selected", require_filter=True, min_n=15,
               hard_min=5, pole_rule="majority_regular",
               percentiles=(16, 84), method="linear", exclude=None,
-              baseline=True, evaluator_meta=None) -> dict:
+              baseline=True, evaluator_meta=None, rescued="include") -> dict:
     """Across-draw uncertainty band for quantities computed per draw.
 
     ``evaluate`` is a callable taking a draw view (a
@@ -622,7 +622,12 @@ def draw_band(archive, scan_key, evaluate, *, quantities=None,
     Population: draws flagged by ``selection`` (default ``"selected"``, the
     filters stamped on the archive -- an archive with no ``coil_filter`` stamp
     raises :class:`UnfilteredArchiveError` unless ``require_filter=False``),
-    minus ``exclude={draw: reason}``; then, per quantity, status ``"ok"``, then
+    minus ``exclude={draw: reason}``, minus -- with ``rescued="exclude"`` --
+    the draws whose solve was rescued by the opt-in draw-solve rescue
+    (stamped ``solve_recovered``; dropped as ``rescued:<recovered_by>``;
+    the default ``"include"`` keeps them, lists them in the provenance's
+    ``rescued_draws`` and warns with their count); then, per quantity,
+    status ``"ok"``, then
     ``regular``, then a finite value. Every removal is returned with its reason
     in ``dropped`` and counts are reported at each stage, including the
     requested count. Draws that failed before archiving are not visible in the
@@ -654,6 +659,9 @@ def draw_band(archive, scan_key, evaluate, *, quantities=None,
     ``KeyError``.
     """
     _validate(selection, pole_rule, percentiles, min_n, hard_min)
+    if rescued not in RESCUED_POLICIES:
+        raise ValueError(f"rescued must be one of {RESCUED_POLICIES}, got "
+                         f"{rescued!r}")
     percentiles = tuple(percentiles)
     meta = dict(evaluator_meta or {})
     ar = _as_archive(archive)
@@ -694,6 +702,7 @@ def draw_band(archive, scan_key, evaluate, *, quantities=None,
     if unknown:
         raise KeyError(f"exclude names draws not stored in scan {skey!r}: {unknown}")
 
+    resc = rescued_draws(ar.path, key, stored)
     common_dropped = []
     to_eval = []
     for d in stored:
@@ -701,8 +710,19 @@ def draw_band(archive, scan_key, evaluate, *, quantities=None,
             common_dropped.append((d, "not_selected"))
         elif d in excl:
             common_dropped.append((d, f"user:{excl[d]}"))
+        elif rescued == "exclude" and d in resc:
+            common_dropped.append((d, f"rescued:{resc[d]}"))
         else:
             to_eval.append(d)
+    _resc_in = sorted(d for d in to_eval if d in resc)
+    if _resc_in:
+        import warnings
+        warnings.warn(
+            f"draw_band: scan {skey!r} includes {len(_resc_in)} draw(s) whose "
+            f"solve was RESCUED (draws {_resc_in}: a different urf, or "
+            "accepted at a looser nl_tol than the solver's; see each draw's "
+            "solve_* attrs); pass rescued='exclude' to band without them",
+            UserWarning, stacklevel=2)
 
     is_map = isinstance(evaluate, Mapping)
     if not is_map and not callable(evaluate):
@@ -758,6 +778,11 @@ def draw_band(archive, scan_key, evaluate, *, quantities=None,
         "bouquet_version": ctx["bouquet_version"],
         "evaluator_meta": meta,
     }
+    if resc or rescued != "include":
+        # only where it says something: an archive without rescued draws
+        # (the rescue is opt-in) keeps the record it had
+        base_prov["rescued"] = rescued
+        base_prov["rescued_draws"] = {int(d): r for d, r in resc.items()}
 
     out = {}
     for q in qs:
@@ -868,6 +893,32 @@ def _baseline_entry(base_res, q, label_default):
     if value is None or not math.isfinite(value):
         return (reason or "non_finite"), None
     return (reason or "ok"), float(value)
+
+
+#: What a band does with draws whose solve was RESCUED by the opt-in draw
+#: solve rescue (``GenerationConfig.draw_solve_retry_urf`` /
+#: ``draw_solve_loose_tol``; stamped ``solve_recovered`` on the draw):
+#: ``"include"`` (default: kept, counted and warned) or ``"exclude"``
+#: (dropped as ``rescued:<recovered_by>``).  Owner decision D5, 2026-10-09.
+RESCUED_POLICIES = ("include", "exclude")
+
+
+def rescued_draws(path, key, draws) -> dict:
+    """``{draw: recovered_by}`` for the *draws* of scan *key* stamped
+    ``solve_recovered`` (a rescued solve; see
+    :meth:`bouquet.TokaMaker_interface.DrawSolveGuard.draw_stamp`)."""
+    import h5py
+    from .utils import _group_path
+    out = {}
+    with h5py.File(path, "r") as hf:
+        for d in draws:
+            gp = _group_path(key, d)
+            if gp not in hf:
+                continue
+            a = hf[gp].attrs
+            if bool(a.get("solve_recovered", False)):
+                out[int(d)] = str(_decode(a.get("solve_recovered_by", "")))
+    return out
 
 
 def _any_flag(ar, key, draws, flag):

@@ -1,5 +1,51 @@
 # Bouquet — change summaries
 
+## Unreleased — the PR #56 kinetic combination is EXPERIMENTAL and opt-in (owner decision 2026-10-09)
+
+**What and why.** PR #56's IDA/FUSE ion coupling is not the default for 1.4.0.
+On real H-mode slices the combined route moved core n_i and Z_eff far outside
+the measurement uncertainties (and the IDA n_i disagreed with the dd's total
+n_i well beyond the 1 % gate), so it is opt-in pending validation. The
+defaults are the routes before PR #56 (main `afe1a99` / `6116d5f`):
+
+| Field | Default (pre-#56) | Opt-in (EXPERIMENTAL) |
+|---|---|---|
+| `ReconstructionSource.ni_source`, `ImasSource.ni_source`, `read_ida(ni_source=)`, `from_imas(ni_source=)` | `"standard"` (new value): Z_eff = the stored VB value, n_i from it by quasineutrality, σ_ni the n_e fraction; the Z_eff envelope from the carbon > VB > scalar ladder; on `ida_hybrid` Z_eff stays the dd's and n_i = n_e,IDA (Z − Z_eff,dd)/(Z − 1) | `"Zeff"` / `"CER"` / `"all"` (`ida_ion_route`) |
+| `ImasSource.zeff_fast_ions` (new) | `False`: the bootstrap gets the thermal-only Z_eff of the dd's densities | `True` (`fuse_zeff_fast_ions`): the `_dd_zeff` classification and the fast-ion term |
+| `ImasSource.ni_subtract_fast` (new) | `False`: no beam subtraction | `True` with an experimental `ni_source` (`ida_ni_beam_subtraction`) |
+| `UncertaintyConfig.kinetic_clips` (new) | `None` (auto: off unless a PR #56 kinetic feature is on): a Z_eff draw held in `physics.zeff_bounds` only, n_i not clipped | `True` (`kinetic_sampler_clips`): the floor at 1, the n_i floor / ceiling, the passive Z_eff aux clip |
+| `UncertaintyConfig.ni_from_zeff` | `None` (auto): always derived | auto follows the PR #56 rule only with an experimental `ni_source` |
+
+**Kept from PR #56 regardless of route:** the n_i-as-increment σ=0 fix and the
+shared sampler (`kinetic_sampler/3` = `/2` with the clips opt-in; the record
+carries `clips_enabled`), the per-draw clip counters, the new reader channels
+(`ensemble_median`, `q`, `zeff_provenance`, `read_ida_cer` fixes), and the
+`zeff_dd_provenance` record (`convention="thermal-only"`, `source="default"`
+unless opted in).
+
+**Verified:** with defaults, `read_ida` returns afe1a99's output bit for bit on
+the synthetic IDA fixture and on an ensemble file (every field the pre-#56
+reader returned; `tests/test_ida_standard_route.py`, against the afe1a99
+reader itself and an independent recomputation). `tests/test_zeff_sigma_ladder.py`
+is main's pre-#56 file again and passes unchanged; the PR #56 versions of the
+tests opt in explicitly (`test_zeff_sigma_ladder_experimental.py` and the
+others).
+
+**What moves against the integration chain's defaults:** every IDA run
+(reconstruction and `ida_hybrid`), every FUSE run on a dd with a beam (the
+bootstrap Z_eff), and draws where a PR #56 clip used to bind. Against main:
+nothing on these routes beyond the increment σ=0 fix (legacy draws with the
+Z_eff channel) and the other declared changes of this release.
+
+**Registry.** `bouquet.experimental.REGISTRY` lists every experimental feature
+(the four above, `solve_method="swb"` and `bootstrap_convergence_override`) with
+its validation TODO. `prepare_baseline()` warns once per enabled feature
+(`ExperimentalFeatureWarning`); the list is on `Baseline.experimental_features`,
+in the engine record, and on the archive's `_baseline` attr
+`experimental_features_json` on every solve method; `stats.draw_band` and the
+archive views print it. See docs/workflows.md, "Experimental features and their
+validation status".
+
 ## Unreleased — cross-file hooks of the integrated #56–#75 chain (2026-10-09)
 
 ### Legacy `solve_with_bootstrap` results converted to the field-aligned bootstrap (PR #64 B1; legacy numbers move)
@@ -140,6 +186,10 @@
   `ni_floor_0` (thermal n_i floored at 0) and `ni_ceiling` (n_i capped at
   `ne - z_fast`). The assumptions and their literature basis:
   [physics-notes.md, "Kinetic assumptions"](physics-notes.md#kinetic-assumptions-z_eff-n_i-and-the-clips-pr-56).
+- **Superseded in part (owner decision 2026-10-09, first entry above):**
+  `kinetic_sampler/3` keeps the increment form and the counters, but the floor
+  at 1, the n_i floor / ceiling and the aux clip are opt-in
+  (`UncertaintyConfig.kinetic_clips`).
 
 ## Unreleased — the collaborator's #72–#75, integrated (2026-10-09)
 

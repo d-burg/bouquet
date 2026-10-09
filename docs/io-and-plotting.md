@@ -148,6 +148,20 @@ as off, an offset `core_sources` base as a refusal).  No non-schema key is
 written, so strict IMAS validators accept the export; the reader also honours
 the block as a direct key of the node (exports written before 2026-10-09).
 
+The equilibrium is the one IDS a cut keeps more than one slice of.  On a
+time-dependent run FUSE converts the `core_profiles` currents on the
+PREVIOUS equilibrium slice, and the reader pairs them with whichever of the
+slice nearest the `core_profiles` time and the last one before it reproduces
+`j_tor` from `j_total`; it reads `ip`, `l_i`, the pressure and the boundary
+at the slice nearest the requested time.  A pure cut (`_slice_in_time`)
+keeps every one of those slices, so it re-reads with the same currents bit
+for bit, and records them and their roles under `bouquet_time_window` in
+`equilibrium.code.parameters`; it also records the `core_profiles` times
+next to the kept slice (the ida_hybrid time rule's local step).  An exported
+DRAW holds one equilibrium slice -- the draw's own, whose geometry its
+currents are written on -- and records the template slice the template's
+currents were paired with (used by `fidelity="reconstruct"`).
+
 Current-convention conversions are in `bouquet.physics`
 ([current-conventions.md](current-conventions.md)):
 `jtor_imas_to_jphi_tokamaker()` / `jphi_tokamaker_to_jtor_imas()`,

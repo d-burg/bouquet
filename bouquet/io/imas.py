@@ -168,6 +168,21 @@ IMAS_SINGLE_TIME_WINDOW_S = 1e-5
 #:   ``{"core_profiles_time", "core_sources_time", "window_own",
 #:   "window_core_profiles"}`` (:func:`_source_slice_at`'s two windows).
 #:
+#: Two records of the cut itself sit under the same key (read back only as
+#: stated):
+#:
+#: * ``equilibrium.code.parameters`` -- the equilibrium slices kept and their
+#:   roles (:func:`equilibrium_slices_read`: ``kept_times``,
+#:   ``targets_time``, ``orientation_time``, ``current_pairing_times``;
+#:   :func:`write_imas_draw`: the one slice of the draw and
+#:   ``template_current_pairing_time``).  A record only: the reader's
+#:   selection rules find the same slices among the kept ones;
+#: * ``core_profiles.code.parameters`` -- ``{"core_profiles_time",
+#:   "time_neighbours"}``, the core_profiles times adjacent to the kept
+#:   slice, which the ida_hybrid time rule's local step uses
+#:   (:func:`_cp_time_grid`; honoured only when the file's one time is
+#:   ``core_profiles_time``).
+#:
 #: A template ``parameters`` string that is itself a JSON object keeps its
 #: keys; any other non-empty one is kept verbatim under
 #: :data:`IMAS_EXPORT_TEMPLATE_PARAMETERS_KEY`.  The reader also accepts the
@@ -1287,6 +1302,22 @@ def _jtor_from_jpar(j_par, geom):
         + jphi_tokamaker_pressure_term(geom), geom)
 
 
+def paired_equilibrium_candidates(eq_times, t_cp):
+    """Indices of the ``equilibrium`` slices :func:`_paired_current_geometry`
+    considers for the core_profiles slice at ``t_cp`` [s]: the slice nearest
+    ``t_cp``, then the last one strictly before it (FUSE's pairing on a
+    time-dependent run) when that is another slice.  The one rule shared by
+    the reader and the single-slice export cut (:func:`_slice_in_time`,
+    which keeps exactly these slices so a cut re-reads identically)."""
+    te = np.asarray(eq_times, dtype=float)
+    k_near = int(np.argmin(np.abs(te - t_cp)))
+    cands = [k_near]
+    before = np.nonzero(te < t_cp - 1e-9 * max(1.0, abs(t_cp)))[0]
+    if before.size and int(before[-1]) != k_near:
+        cands.append(int(before[-1]))
+    return cands
+
+
 def _paired_current_geometry(eq, cp, t_cp, j_total=None, j_tor=None):
     """``(geom, meta)`` on the core_profiles grid from the equilibrium slice
     FUSE paired with the core_profiles slice at ``t_cp``.
@@ -1303,11 +1334,7 @@ def _paired_current_geometry(eq, cp, t_cp, j_total=None, j_tor=None):
         raise ValueError("core_profiles grid lacks rho_tor_norm, the "
                          "coordinate the IMAS current conversion uses")
     rho = np.asarray(cp["grid"]["rho_tor_norm"], dtype=float)
-    k_near = int(np.argmin(np.abs(te - t_cp)))
-    cands = [k_near]
-    before = np.nonzero(te < t_cp - 1e-9 * max(1.0, abs(t_cp)))[0]
-    if before.size and int(before[-1]) != k_near:
-        cands.append(int(before[-1]))
+    cands = paired_equilibrium_candidates(te, t_cp)
     best, err = None, None
     for k in cands:
         try:
@@ -2365,7 +2392,7 @@ def read_imas_baseline(
                    if use_ida else ""))
     if use_ida:
         T_ida = _hybrid_timing(source, T, eq["time"][ie], cp_ids["time"][ic], aux,
-                               cp_times=cp_ids["time"])
+                               cp_times=_cp_time_grid(cp_ids))
         (ne, te, ti, ni, Zeff, _omega,
          sigma_ne_ida, sigma_te_ida, sigma_ni_ida, sigma_ti_ida,
          _ida_read, _ni_fast_meta, _ida_map) = _merge_ida_kinetics(
@@ -2467,6 +2494,14 @@ def read_imas_baseline(
     # non-inductive currents.
     j_pressure = None if p_term is None else s_ip * p_term
     j_inductive = j_phi - j_BS - j_NBI - j_RF - j_other
+    if cur_geom is not None:
+        # which equilibrium slice the currents were converted on (the
+        # pairing, _paired_current_geometry) and how well it reproduced
+        # j_tor: a record, so a re-read (e.g. of a single-slice export) can
+        # be checked to pair the same way
+        cur_conv.update(equilibrium_time=float(cur_meta["time"]),
+                        core_profiles_time=float(cur_meta["t_core_profiles"]),
+                        jtor_mismatch=float(cur_meta["jtor_mismatch"]))
     cur_conv.update(
         pressure=("j_pressure (p'G) carried by j_inductive in the solve split"
                   if j_pressure is not None else
@@ -2799,9 +2834,10 @@ def _is_time_tagged_aos(v):
 
 
 def _cut_axis0(v, i, n):
-    """``[v[i]]`` when *v* is a list of length *n* (> 1), else *v*."""
+    """``[v[i]]`` when *v* is a list of length *n* (> 1), else *v*; *i* may
+    be a list of indices (kept in that order)."""
     if isinstance(v, list) and n > 1 and len(v) == n:
-        return [v[i]]
+        return [v[k] for k in i] if isinstance(i, list) else [v[i]]
     return v
 
 
@@ -2850,36 +2886,50 @@ def _cut_dynamic(node, t, base_n=0, base_i=0):
             _cut_dynamic(v, t, base_n, base_i)
 
 
-def _cut_ids(ids, t):
+def _cut_ids(ids, t, keep=None):
     """Cut one IDS to the time *t*: its ``time`` base, the homogeneous-time
     arrays on it (``vacuum_toroidal_field.b0``, ``code.output_flag``, every
     array under the IDS-level ``global_quantities``), then its dynamic
     parts (:func:`_cut_dynamic`).  Returns the kept index on its time base
-    (``None`` without one)."""
+    (``None`` without one).
+
+    ``keep`` (times [s]): keep the slice nearest EACH of them instead (on
+    the time base and in every time-tagged array of structures, in time
+    order) -- the equilibrium slices the reader reads at one core_profiles
+    slice (:func:`equilibrium_slices_read`)."""
     tb = ids.get("time")
     i, n = None, 0
     if isinstance(tb, list) and len(tb) > 0:
         n = len(tb)
         i = _nearest_index(tb, t, "time")
-        ids["time"] = [tb[i]]
+        idx = (i if keep is None else
+               sorted({_nearest_index(tb, x, "time") for x in keep}))
+        ids["time"] = _cut_axis0(tb, idx, n) if n > 1 else list(tb)
         vtf = ids.get("vacuum_toroidal_field")
         if isinstance(vtf, dict) and "b0" in vtf:
-            vtf["b0"] = _cut_axis0(vtf["b0"], i, n)
+            vtf["b0"] = _cut_axis0(vtf["b0"], idx, n)
         code = ids.get("code")
         if isinstance(code, dict) and "output_flag" in code:
-            code["output_flag"] = _cut_axis0(code["output_flag"], i, n)
+            code["output_flag"] = _cut_axis0(code["output_flag"], idx, n)
         gq = ids.get("global_quantities")
         if isinstance(gq, dict):
-            _cut_leaves(gq, i, n)
+            _cut_leaves(gq, idx, n)
     for k, v in list(ids.items()):
         if k in ("time", "global_quantities"):
             continue
         if _is_time_tagged_aos(v):
-            kept = v[_nearest_index([e["time"] for e in v], t, k)]
-            ids[k] = [kept]
-            _cut_dynamic(kept, t, 0, 0)
+            own = [e["time"] for e in v]
+            if keep is None:
+                kept = [v[_nearest_index(own, t, k)]]
+            else:
+                kept = [v[j] for j in sorted(
+                    {_nearest_index(own, x, k) for x in keep})]
+            ids[k] = kept
+            for e in kept:
+                _cut_dynamic(e, t, 0, 0)
         elif isinstance(v, (dict, list)):
-            _cut_dynamic(v, t, n, 0 if i is None else i)
+            _cut_dynamic(v, t, n, 0 if i is None else (
+                i if keep is None else idx))
     return i
 
 
@@ -2959,7 +3009,69 @@ def _cut_core_sources(cs, cp_times, ic, t_cp):
                 window_basis=rec["window_basis"]))
 
 
-def _slice_in_time(dd, t):
+#: How the single-slice cut chose the equilibrium slices it kept (recorded
+#: under :data:`IMAS_EXPORT_TIME_WINDOW_KEY` in ``equilibrium.code.parameters``).
+EQUILIBRIUM_CUT_RULE = (
+    "every equilibrium slice the reader reads at this core_profiles slice: "
+    "the one nearest the requested time (targets: ip, l_i, pressure, q, "
+    "boundary, F0), the one nearest the core_profiles time (current "
+    "orientation and b0 sign) and the last one strictly before it (with the "
+    "nearest, the candidates the core_profiles currents are paired with: "
+    "paired_equilibrium_candidates)")
+
+
+def equilibrium_slices_read(eq_times, t, t_cp):
+    """The ``equilibrium`` slices :func:`read_imas_baseline` (and the
+    engine's IDS adapter) read for the request time *t* [s] whose
+    core_profiles slice is at *t_cp*: ``{"targets": i, "orientation": j,
+    "current_pairing": [k, ...]}`` (indices on *eq_times*).
+
+    ``targets`` is the slice nearest *t* (ip, l_i, pressure, q0, the jphi
+    anchor, the boundary and F0; *t* None -> nearest *t_cp*), ``orientation``
+    the slice nearest *t_cp* (:func:`orientation_slice_index`) and
+    ``current_pairing`` the candidates the core_profiles currents are
+    converted on (:func:`paired_equilibrium_candidates`)."""
+    te = np.asarray(eq_times, dtype=float)
+    k_cp = int(np.argmin(np.abs(te - t_cp)))
+    i_t = (k_cp if t is None or te.size == 1 else
+           int(np.argmin(np.abs(te - float(t)))))
+    return {"targets": i_t, "orientation": k_cp,
+            "current_pairing": paired_equilibrium_candidates(te, t_cp)}
+
+
+def _record_cp_time_grid(cp, cpt, ic, t_cp):
+    """Record, in ``core_profiles.code.parameters`` (under
+    :data:`IMAS_EXPORT_TIME_WINDOW_KEY`), the core_profiles times adjacent
+    to the kept slice: the only thing the reader takes from the slices a
+    cut drops (the half local step of the ida_hybrid time rule,
+    :func:`_hybrid_timing`; :func:`_cp_time_grid` reads it back)."""
+    grid = np.unique(np.asarray(cpt, dtype=float))
+    if grid.size < 2:
+        return
+    k = int(np.argmin(np.abs(grid - t_cp)))
+    nb = grid[max(k - 1, 0):k + 2]
+    _set_export_window(cp, dict(core_profiles_time=float(t_cp),
+                                time_neighbours=[float(x) for x in nb]))
+
+
+def _cp_time_grid(cp_ids):
+    """The core_profiles time base the reader's local-step windows use: the
+    IDS ``time``, or -- for a single-slice export that recorded them
+    (:func:`_record_cp_time_grid`) and whose one time is the recorded slice
+    -- the adjacent times of the dd it was cut from."""
+    tb = cp_ids.get("time")
+    if isinstance(tb, list) and len(tb) == 1:
+        meta = _get_export_window(cp_ids)
+        try:
+            if (meta is not None
+                    and float(meta["core_profiles_time"]) == float(tb[0])):
+                return [float(x) for x in meta["time_neighbours"]]
+        except (KeyError, TypeError, ValueError):
+            pass
+    return tb
+
+
+def _slice_in_time(dd, t, equilibrium="read"):
     """Cut a dd in place to the ONE slice the reader reads at time *t* [s].
 
     The cut is taken at the core_profiles slice nearest *t* (the slice
@@ -2972,7 +3084,21 @@ def _slice_in_time(dd, t):
     time-tagged arrays of structures, signals, and the homogeneous-time
     arrays named there.  Lists of entries (sources, coils, beams, probes),
     static geometry (coil and limiter outlines) and radial profiles are
-    never cut, whatever their length.  Returns ``t_cp``."""
+    never cut, whatever their length.  Returns ``t_cp``.
+
+    ``equilibrium``: ``"read"`` (default) keeps EVERY equilibrium slice the
+    reader reads at that core_profiles slice (:func:`equilibrium_slices_read`:
+    the slice nearest *t*, the one nearest ``t_cp`` and the last one before
+    ``t_cp``, which FUSE pairs the core_profiles currents with on a
+    time-dependent run), so the cut re-reads identically; the kept times and
+    their roles are recorded under :data:`IMAS_EXPORT_TIME_WINDOW_KEY` in
+    ``equilibrium.code.parameters``.  ``"one"`` keeps only the slice nearest
+    ``t_cp`` (:func:`write_imas_draw`: a draw is ONE equilibrium, and its
+    currents are written on its own geometry).  core_profiles keeps the one
+    slice; its adjacent times are recorded (:func:`_record_cp_time_grid`)."""
+    if equilibrium not in ("read", "one"):
+        raise ValueError(f"equilibrium must be 'read' or 'one', got "
+                         f"{equilibrium!r}")
     cp = dd.get("core_profiles") if isinstance(dd.get("core_profiles"),
                                                 dict) else {}
     cpt = cp.get("time")
@@ -2986,10 +3112,30 @@ def _slice_in_time(dd, t):
     cs = dd.get("core_sources")
     if isinstance(cs, dict):
         _cut_core_sources(cs, cpt if cpt else None, ic, t_cp)
+    if isinstance(cpt, list) and len(cpt) > 1:
+        _record_cp_time_grid(cp, cpt, ic, t_cp)
+    eq = dd.get("equilibrium")
+    keep_eq, eq_rec = None, None
+    if (equilibrium == "read" and isinstance(eq, dict)
+            and isinstance(eq.get("time"), list) and len(eq["time"]) > 1):
+        te = [float(x) for x in eq["time"]]
+        roles = equilibrium_slices_read(te, t, t_cp)
+        keep_eq = sorted({te[roles["targets"]], te[roles["orientation"]]}
+                         | {te[k] for k in roles["current_pairing"]})
+        eq_rec = dict(
+            core_profiles_time=t_cp,
+            requested_time=None if t is None else float(t),
+            kept_times=keep_eq,
+            targets_time=te[roles["targets"]],
+            orientation_time=te[roles["orientation"]],
+            current_pairing_times=[te[k] for k in roles["current_pairing"]],
+            rule=EQUILIBRIUM_CUT_RULE)
     for name, ids in dd.items():
         if name == "core_sources" or not isinstance(ids, dict):
             continue
-        _cut_ids(ids, t_cp)
+        _cut_ids(ids, t_cp, keep=keep_eq if name == "equilibrium" else None)
+    if eq_rec is not None:
+        _set_export_window(eq, eq_rec)
     return t_cp
 
 
@@ -3144,7 +3290,10 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
     own slice), with the windows of that read recorded under
     :data:`IMAS_EXPORT_TIME_WINDOW_KEY` in the schema-legal
     ``code.parameters`` JSON string so a re-read matches the same entries
-    exactly.  The template is this function's own fresh ``json.load``, never
+    exactly.  The equilibrium holds the ONE slice the draw is written into
+    (the template's paired slice, which a pure cut keeps, is used only for
+    ``fidelity="reconstruct"`` and recorded).  The template is this
+    function's own fresh ``json.load``, never
     the shared parsed dd of :func:`_load_dd` (#72: the cut mutates it).
 
     bouquet's arrays are TokaMaker ``jphi``; they are written as IMAS
@@ -3218,9 +3367,31 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
     ic = _nearest_index(cp_ids["time"], time, "core_profiles")
     # Only the exported slice is written: every IDS is cut at the
     # core_profiles slice nearest the time, core_sources by the reader's rule
-    # with its windows recorded (#71).  This MUST stay before ie = ic = 0:
-    # every index below addresses the one kept slice.
-    _slice_in_time(out, eq_ids["time"][ie] if time is None else time)
+    # with its windows recorded (#71).  The cut first keeps every equilibrium
+    # slice the reader reads there (the template's currents are paired with
+    # one of them: _paired_current_geometry), so the template-geometry
+    # conversion below uses the slice the template's currents belong to;
+    # the equilibrium is then cut to the ONE slice the draw is written into
+    # (a draw is one equilibrium, and its currents are written on its own
+    # geometry, so a re-read pairs them with it).  This MUST stay before
+    # ie = ic = 0: every index below addresses the one kept slice.
+    t_cp = _slice_in_time(out, eq_ids["time"][ie] if time is None else time)
+    cp = cp_ids["profiles_1d"][0]
+    tmpl_geom, tmpl_pair = None, None
+    if fidelity != "exact" and t_cp is not None:
+        try:
+            tmpl_geom, tmpl_pair = _paired_current_geometry(
+                eq_ids, cp, t_cp, cp.get("j_total"), cp.get("j_tor"))
+        except (KeyError, TypeError, ValueError):
+            tmpl_geom = None
+    _cut_ids(eq_ids, t_cp)
+    _set_export_window(eq_ids, dict(
+        core_profiles_time=t_cp, kept_times=[float(x) for x in eq_ids["time"]],
+        rule=("write_imas_draw: the draw's own equilibrium, the one slice "
+              "kept (nearest the core_profiles time); the exported currents "
+              "are written on its geometry"),
+        template_current_pairing_time=(None if tmpl_pair is None
+                                       else tmpl_pair["time"])))
     ie = ic = 0
 
     h5 = _resolve_h5(h5path_or_header)
@@ -3275,16 +3446,11 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
     # --- source orientation to restore (see the docstring) -----------------
     s_I, s_B, s_q = _export_orientation(out, ie, ic, stamp)
 
-    # Baseline (template) geometry for fidelity="reconstruct", read before the
-    # slice is overwritten with the draw's eqdsk.
-    cp = cp_ids["profiles_1d"][ic]
-    tmpl_geom = None
-    if fidelity != "exact":
-        try:
-            tmpl_geom = _fuse_current_geometry(
-                eq_ids, ie, cp["grid"]["rho_tor_norm"])
-        except (KeyError, TypeError, ValueError):
-            tmpl_geom = None
+    # Baseline (template) geometry for fidelity="reconstruct" (tmpl_geom):
+    # read above, before the cut to one equilibrium slice and before the
+    # slice is overwritten with the draw's eqdsk -- on the equilibrium slice
+    # the template's own currents are paired with (as the reader converts
+    # them), not merely the nearest one.
 
     # --- equilibrium IDS from the eqdsk (lossless to the eqdsk grid) ---------
     # The archived eqdsk is COCOS 7 (TokaMaker: psi per radian, decreasing

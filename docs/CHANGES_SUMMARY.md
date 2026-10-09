@@ -233,6 +233,19 @@ map to the original history on the archival tag
   read's windows are written under `bouquet_time_window`, so an export re-reads
   with the same `source_time_match` and driven currents.  Scripts that indexed
   the exported file by the template's slice index must use index 0.
+- **The cut keeps the paired equilibrium slices** (#71 follow-up): on a
+  time-dependent dd the reader converts the core_profiles currents on the
+  equilibrium slice FUSE paired them with -- the PREVIOUS slice -- and reads
+  its targets at the slice nearest the requested time.  A pure cut now keeps
+  each of these (`equilibrium_slices_read`; recorded in
+  `equilibrium.code.parameters`) and the core_profiles times next to its one
+  slice, so it re-reads bit-identically (keeping only the nearest slice
+  moved the re-read j_pressure by 3.9 % and j_phi by 0.18 % of peak on a
+  real time-dependent dd).  An exported draw still holds one equilibrium
+  slice, the draw's own; `fidelity="reconstruct"` now converts on the
+  template's PAIRED slice.  The reader stamps the pairing
+  (`li_metrics["imas_current_conversion"]`: `equilibrium_time`,
+  `core_profiles_time`, `jtor_mismatch`).
 
 ### Reproducing a run made before this release; what moves on the default path
 

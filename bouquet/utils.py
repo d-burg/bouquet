@@ -4383,6 +4383,38 @@ def stamp_engine_resolved_defaults(h5path_or_header, scan_key=None,
                 record, sort_keys=True)
 
 
+def stamp_experimental_features(h5path_or_header, scan_key=None,
+                                features=()):
+    """Record the EXPERIMENTAL features the run enabled
+    (``Baseline.experimental_features``; :data:`bouquet.experimental.
+    REGISTRY` keys) as the JSON attr ``experimental_features_json`` of the
+    ``_baseline`` group -- always, ``[]`` when none, so an archive without
+    the attr is recognisably one that predates the record.  No-op without
+    a ``_baseline`` group."""
+    import json
+    path = _resolve_h5(h5path_or_header)
+    gp = _baseline_group_path(scan_key)
+    with h5py.File(path, "a") as hf:
+        if gp in hf:
+            hf[gp].attrs["experimental_features_json"] = json.dumps(
+                [str(f) for f in (features or ())])
+
+
+def load_experimental_features(h5path_or_header, scan_key=None):
+    """The list :func:`stamp_experimental_features` wrote (``[]``: none
+    enabled), or ``None`` for an archive that predates the record."""
+    import json
+    path = _resolve_h5(h5path_or_header)
+    gp = _baseline_group_path(scan_key)
+    with h5py.File(path, "r") as hf:
+        if gp not in hf:
+            return None
+        v = hf[gp].attrs.get("experimental_features_json")
+    if v is None:
+        return None
+    return list(json.loads(v.decode() if isinstance(v, bytes) else str(v)))
+
+
 def load_engine_resolved_defaults(h5path_or_header, scan_key=None):
     """The record :func:`stamp_engine_resolved_defaults` wrote, or ``None``
     for an archive that predates it (before 2026-10-07)."""

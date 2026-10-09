@@ -1239,7 +1239,8 @@ class GenerationConfig:
     # IMAS baseline + draws: "closure" (legacy) or "swb": solve A at the setup
     # coil reg, solve B with the strong reg toward A's coils is the baseline,
     # and every draw is solve B with resampled kinetics and inductive seed
-    # (bouquet.swb).
+    # (bouquet.swb).  "swb" is EXPERIMENTAL -- see
+    # bouquet.experimental.REGISTRY["swb_solve_method"].
     imas_baseline: str = "closure"
     # imas_baseline="swb": weight of solve B's (and every draw's) coil reg toward
     # solve A's coils (#VSC toward 0 at 1.0); 1e4 can send SWB to a wrong

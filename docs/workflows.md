@@ -10,6 +10,7 @@ controls it. See [`../README.md`](../README.md) for the short version and
 - [Stage reference](#stage-reference)
 - [What is perturbed vs. held fixed](#what-is-perturbed-vs-held-fixed)
 - [Configuration reference](#configuration-reference)
+- [Experimental features and their validation status](#experimental-features-and-their-validation-status)
 - [until-N in-spec draws](#until-n-in-spec-draws)
 - [Workflow presets and the guard](#workflow-presets-and-the-guard)
 - [Reading an archive back](#reading-an-archive-back)
@@ -271,8 +272,8 @@ as an enormous sigma.
 | `single_profile_jphi` | `False` | Legacy path: perturb the TOTAL `j_phi` as one profile (no inductive / bootstrap split; no per-draw Sauter call). `jphi_scalar_sigma` then applies to the total, a larger absolute perturbation -- re-tune it. Needs `jbs_self_consistent=False` (refused otherwise); the unified engine refuses it |
 | `jBS_scale_range` | `(0.99, 1.01)` | Legacy draws: the per-draw multiplicative spread of the bootstrap (uniform in the range; default `None` -> `(0.99, 1.01)` on 2026-06-04). The baseline's multiplier (`bs_scale` / `s_bs(ψ)`) is applied after SWB on SWB draws and re-centres this range on loop draws -- see [physics-notes.md](physics-notes.md) ("The bootstrap multiplier") |
 | `swb_seed` | `None` | IMAS path, every legacy SWB call (baseline split, draws, σ=0 check): `"source"` seeds SWB with the source's `j_inductive` and holds its NBI + RF + other current fixed (`jphi_fixed`); `"generic"` the `(1 - s^1.5)^1.5` seed. `None` resolves at `prepare_baseline()` to `"source"` when the installed OFT's `solve_with_bootstrap` takes `jphi_fixed`, else `"generic"` -- never an error; an explicit `"source"` on a toolkit without `jphi_fixed` is refused at the first SWB call only. Stamped in `li_metrics["swb_seed"]` |
-| `solve_method` | `None` | The internal solve method: `"legacy"`, `"swb"` (`solve_with_bootstrap` is the baseline and every draw; IMAS sources) or `"engine"` (the unified engine). `None` derives it from `imas_baseline` / `reconstruction_engine`. Nothing is rewritten at construction; the effective fields are set where the run is resolved (`prepare_baseline()`, the draw method, the solver setup) and a later switch back restores the user's own fields. A contradicting pair (`imas_baseline="swb"` with another method, `reconstruction_engine="legacy"` with `"engine"`) is refused |
-| `imas_baseline` | `"closure"` | IMAS path: `"swb"` selects the swb method (solve A at the setup coil reg, solve B with a strong reg toward A's coils is the baseline, every draw is solve B with resampled kinetics and a GPR redraw of the inductive seed; 20 negative redraws refuse the draw, `swb_jind_redraw_refused`) |
+| `solve_method` | `None` | The internal solve method: `"legacy"`, `"swb"` (**EXPERIMENTAL**, [`swb_solve_method`](#experimental-features-and-their-validation-status); `solve_with_bootstrap` is the baseline and every draw; IMAS sources) or `"engine"` (the unified engine). `None` derives it from `imas_baseline` / `reconstruction_engine`. Nothing is rewritten at construction; the effective fields are set where the run is resolved (`prepare_baseline()`, the draw method, the solver setup) and a later switch back restores the user's own fields. A contradicting pair (`imas_baseline="swb"` with another method, `reconstruction_engine="legacy"` with `"engine"`) is refused |
+| `imas_baseline` | `"closure"` | IMAS path: `"swb"` (**EXPERIMENTAL**, [`swb_solve_method`](#experimental-features-and-their-validation-status)) selects the swb method (solve A at the setup coil reg, solve B with a strong reg toward A's coils is the baseline, every draw is solve B with resampled kinetics and a GPR redraw of the inductive seed; 20 negative redraws refuse the draw, `swb_jind_redraw_refused`) |
 | `swb_coil_reg_weight` | `1e3` | swb only: weight of solve B's (and every draw's) coil reg toward solve A's coils |
 | `swb_edge_taper_psi0` | `None` | swb only: taper `j_phi` to zero from this ψ_N to the LCFS in every SWB solve (OFT `taper_edge_jBS`). **Opt-in** (owner decision D4; was 0.999): `None` is off and is sent as `taper_edge_jBS=False` where the toolkit has the option (a toolkit whose own default is taper-on keeps it on otherwise; such a taper with the setting off warns). The channel taper factor is measured, not assumed |
 | `swb_ip_tol` | `5e-3` | swb only: the largest `|Ip/Ip_target - 1|` an swb solve (solve A, solve B, every draw) is accepted at; beyond it the solve raises. Validated in (0, 1); stamped on `_baseline` (`swb_ip_tol`, `swb_ip_rel_err`, `swb_ip_rel_err_solve_A`) and per draw (`swb_ip_rel_err`); a solve accepted above 1e-4 (the engine's acceptance) warns. Value pending owner decision E6 |
@@ -304,7 +305,7 @@ as an enormous sigma.
 | `imas_corrective_jphi` | `False` | Opt-in corrective j_phi iteration on the IMAS baseline solve (still being validated) |
 | `floor_j_BS` | `False` | Clip negative bootstrap excursions; only needed with `isolate_edge_jBS=False` on sources that carry an inner negative lobe |
 | `bootstrap_kwargs` | `{}` | Keyword options passed through to `solve_with_bootstrap` on the **legacy** paths (e.g. `{"iterations": 2}`; replaces `swb_iterations`). Checked when the config is built **and whenever the attribute is reassigned**: a key outside the explicit allow-list `config.BOOTSTRAP_KWARGS_ALLOWED` is refused (a typo is refused with or without the toolkit), a key the call sites already set is refused, and on the legacy path a key the **installed** toolkit lacks (the internal-solve options `use_python_solve`, `use_sauter_eps`, `diagnose_bs`, `djBS_tol`, `saw_relax`, `taper_edge_*` exist only on a toolkit with the internal Fortran bootstrap solve) is refused -- warned instead while a stored config is loaded, so an archive written on another build reloads. Under the self-consistent loop SWB runs only for `jbs_init="swb"` and the jBS-delta / `DIFF_BS` caches (a non-empty dict is warned). It reaches **every** SWB call (reconstruction / IMAS baseline, caches, σ=0 check, draws): a stored `swb_iterations=n` (which reached only the draws) loads as `{"iterations": n}` with a warning that the baseline SWB now runs with it too. With `reconstruction_engine="unified"` only the engine's own keys are read -- the edge taper (`taper_edge_jBS`, `taper_edge_psi0`, `taper_edge_shape`; **off** by default, 0.999, quintic; implemented by bouquet, so no toolkit capability is needed) and `use_sauter_eps=True`; any other key is refused (and dropped with a warning from a stored unified config, which never ran it) |
-| `bootstrap_convergence_override` | `False` | The explicit opt-in for the `bootstrap_kwargs` keys that change a **convergence criterion** of the toolkit's bootstrap solve (`config.BOOTSTRAP_CONVERGENCE_KWARGS`: `djBS_tol`, the j_BS freeze threshold; `saw_relax`). Without it such a key is refused; with it the key is accepted with a warning, and the archive's `config_json` records the flag and the values. Legacy paths only (the unified engine refuses those keys). A stored config that carries such a key from before the flag existed loads with it on, warned |
+| `bootstrap_convergence_override` | `False` | **EXPERIMENTAL** ([`bootstrap_convergence_override`](#experimental-features-and-their-validation-status)). The explicit opt-in for the `bootstrap_kwargs` keys that change a **convergence criterion** of the toolkit's bootstrap solve (`config.BOOTSTRAP_CONVERGENCE_KWARGS`: `djBS_tol`, the j_BS freeze threshold; `saw_relax`). Without it such a key is refused; with it the key is accepted with a warning, and the archive's `config_json` records the flag and the values. Legacy paths only (the unified engine refuses those keys). A stored config that carries such a key from before the flag existed loads with it on, warned |
 | `draw_solve_maxits` / `draw_solve_retry_urf` / `draw_solve_loose_tol` | `"auto"` / `()` / `None` | The legacy and swb draws' GS iteration cap and its OPT-IN rescue. `"auto"` resolves at `prepare_baseline()` (recorded in `engine_resolved_defaults`): 100 for the legacy draws; with `reconstruction_engine="unified"` all three are refused (the engine draws use `engine_draw_solve_maxits`, see engine.md "The solve cap", and are never rescued). `None` keeps the solver's setup cap (800), which is also what a stored config without the field, or with `null`, replays. The cap and the rescue act on DRAW solves only: the cold baseline re-solve and the σ=0 reference solve before the draw loop keep the setup cap. Draw solves converge in ≤ ~25 iterations; one that does not sits in a limit cycle just above `nl_tol`. The rescue (off by default) re-solves a capped draw solve from where it stopped at each `draw_solve_retry_urf` (the same criterion), then, if `draw_solve_loose_tol` is set, accepts it at that LOOSER `nl_tol`. With the rescue on every stored draw is stamped `solve_recovered`, and a rescued one `solve_recovered_by`, `solve_nl_tol_accepted`, `solve_residual_upper` / `solve_residual_lower` (bounds: OFT reports no residual value), `solve_strict_nl_tol` and `solve_rescue_its`; `draw_band(rescued="exclude")` and `merge_archives(rescued="exclude")` leave rescued draws out (the default keeps them and warns with their count). Failed solves, and what recovered each, are listed per draw in `diagnostics['solve_failures']`, on `Bouquet.solve_failures`, and in one printed `[draw-solves]` line |
 | `jbs_self_consistent` | `True` | Iterate the bootstrap to self-consistency with the delivered equilibrium (Redl on the caller's own ψ_N grid, re-evaluated after every solve; joint under-relaxation of the bootstrap and the solved current) in the baseline, every closure channel, the MSE stage, every draw and the reconstruction -- see [physics-notes.md](physics-notes.md#self-consistent-bootstrap-jbs_self_consistent). `False` = the **legacy** frozen-SWB bootstrap (legacy engine only; the unified engine refuses it); required with `single_profile_jphi=True` or `recalculate_j_BS=False` (refused otherwise). Not by itself a pre-release reproduction: that needs `reconstruction_engine="legacy"` + `separatrix_pressure="legacy"` too, and the coil-solve mode and the current conversion still differ (CHANGES_SUMMARY, "Reproducing a run made before this release"). A stored config without the field (pre-loop archive) loads as `False` |
 | `jbs_init` | `"anchor"` | The loop's initial guess: Redl on the anchor equilibrium, or `"swb"` (legacy result; A/B only). The fixed point does not depend on it |
@@ -427,6 +428,104 @@ anisotropic fast-pressure reduction applied before the isotropic GS solve.
 > calibrated to a realistic `<P>` measurement uncertainty) is currently a
 > `generate_bouquet` keyword only — it is not surfaced on `GenerationConfig`,
 > so the class API always uses the default.
+
+## Experimental features and their validation status
+
+A feature listed here is reachable only by an explicit configuration value and
+is not validated on real data, so it is never a default. The list is
+`bouquet.experimental.REGISTRY` (the block below is generated from it by
+`bouquet.experimental.docs_markdown()`, and a test holds the two in step).
+When a run enables one:
+
+- `Bouquet.prepare_baseline()` emits one `bouquet.experimental.ExperimentalFeatureWarning`
+  per feature, naming it and its open validation items;
+- the baseline record carries the list (`Baseline.experimental_features`) and the
+  archive carries it as the `_baseline` attr `experimental_features_json` on every
+  solve method (engine, legacy, swb), next to `engine_resolved_defaults_json`
+  (`[]` when none; absent on an archive that predates the record;
+  `utils.load_experimental_features`);
+- `stats.draw_band` adds it to every record's provenance and limitations, and
+  `BouquetArchive` / `ScanView` print it with their summaries.
+
+`bouquet.experimental.experimental_features_enabled(config)` lists the keys a
+configuration enables. The PR #56 kinetic combination is here because on real
+H-mode slices the combined route moved core n_i and Z_eff far outside the
+measurement uncertainties; it is opt-in pending validation. (The geometric
+Redl ε default of PR #60 is a declared physics change, not an experimental
+feature.)
+
+<!-- experimental-registry:begin (generated by bouquet.experimental.docs_markdown) -->
+
+#### `ida_ion_route` (experimental; introduced PR #56, 1.4.0)
+
+Z_eff and n_i from the PR #56 IDA ladder: the visible-bremsstrahlung Z_eff ('Zeff'), the CER carbon density ('CER'), or the clamped mean of the two ('all'), with the route disagreement folded into sigma_ni / sigma_Zeff, the 'IDA-resolved' Z_eff envelope and the PR #56 auto rule of UncertaintyConfig.ni_from_zeff.  On ida_hybrid it also takes Z_eff and n_i from the IDA file instead of the dd (unless ImasSource.zeff_from_fuse).  Default 'standard': Z_eff is the file's VB value (the dd's on ida_hybrid), n_i follows from it by quasineutrality with the n_e-fraction sigma, and the Z_eff envelope comes from the carbon > VB > scalar ladder.
+
+Enabled by: `ReconstructionSource.ni_source in ('Zeff', 'CER', 'all') with an IDA .cdf profiles_path or uncertainty.ida_path`; `ImasSource.ni_source in ('Zeff', 'CER', 'all') with an ida_path or uncertainty.ida_path`
+
+Validation to do:
+
+- compare the IDA-derived n_i against the dd's total n_i on >= 5 real slices; agree within the combined 1-sigma envelope, or explain each disagreement
+- Z_eff on axis: the VB+CER mean against the CER-only and the VB-only routes on the same slices, with the route tension (zeff_route_chi) reported
+- I_BS, l_i(3), q0 and beta_N sensitivity to the route on >= 5 real H-mode slices, against the standard route and the measurement uncertainties
+- old IDA vintages without Zeff_err ('all' falls to CER alone): show the CER-only Z_eff is no worse than VB on those files
+
+#### `fuse_zeff_fast_ions` (experimental; introduced PR #56, 1.4.0)
+
+On the FUSE (IMAS) path, classify the dd's stored Z_eff against the thermal-only and the thermal+fast numerators (io.imas._dd_zeff) and, where it counts the fast ions (or when no Z_eff is stored and the dd carries a beam), hand the bootstrap Z_eff_th + z2_fast/n_e with Baseline.zeff_includes_fast=True.  Default: the thermal-only Z_eff recomputed from the dd's thermal ion densities.
+
+Enabled by: `ImasSource.zeff_fast_ions=True`
+
+Validation to do:
+
+- on >= 5 real beam-heated dd's: the classification against the dd's own j_bootstrap (which numerator reproduces it)
+- I_BS and l_i sensitivity to the fast-ion term on the same dd's
+
+#### `ida_ni_beam_subtraction` (experimental; introduced PR #56, 1.4.0)
+
+ida_hybrid with an experimental ni_source: subtract the dd's fast-ion density equivalent from the IDA (total) n_i to give a thermal n_i (io.imas._subtract_fast_ni).  The IDA n_i and the dd's total n_i are compared at psi_N 0, 0.2, ..., 0.8 and a disagreement above 1 % warns.  Default: no subtraction.
+
+Enabled by: `ImasSource.ni_subtract_fast=True (with kinetic_source='ida_hybrid' and an experimental ni_source)`
+
+Validation to do:
+
+- the IDA n_i against the dd's total n_i on >= 5 real beam slices (the gate the subtraction prints); the disagreement must be within the measurement uncertainty before the subtracted density can be trusted
+- the thermal n_i floor at 0 must not bind on real slices
+
+#### `kinetic_sampler_clips` (experimental; introduced PR #56, 1.4.0)
+
+The PR #56 clips in the kinetic sampler: a drawn Z_eff floored at 1 even where physics.zeff_bounds allows less (thermal-numerator Z_eff with a beam), a derived n_i held in [0, n_e - z_fast], an independent n_i capped at n_e - z_fast when Z_imp is declared, and a passive Z_eff aux draw clipped to the same window.  Every clip that fires is counted per draw.  Default: only the Z_eff window physics.zeff_bounds gives (the bound in place before PR #56).
+
+Enabled by: `UncertaintyConfig.kinetic_clips=True`; `UncertaintyConfig.kinetic_clips=None (auto) with ida_ion_route, fuse_zeff_fast_ions or ida_ni_beam_subtraction enabled`
+
+Validation to do:
+
+- per-clip counts on a real ensemble (KineticDraw.clips): the fraction of draws and nodes each clip moves
+- the bias each clip introduces in the drawn Z_eff, n_i and I_BS distributions against the unclipped draws, same seed
+
+#### `swb_solve_method` (experimental; introduced PR #64 / #69 / #70, 1.4.0)
+
+solve_with_bootstrap as the baseline and every draw on the IMAS path (bouquet.swb): solve A at the setup coil regularisation, solve B regularised toward A's coils, the draws solve B with resampled kinetics; I_p accepted within swb_ip_tol; the edge taper (swb_edge_taper_psi0) opt-in.
+
+Enabled by: `GenerationConfig.solve_method='swb'`; `GenerationConfig.imas_baseline='swb'`
+
+Validation to do:
+
+- a real-data arm on an OpenFUSIONToolkit build whose solve_with_bootstrap takes x / jphi_fixed / p_fixed (every real-data arm so far was refused at prepare_baseline)
+- swb_ip_tol statistics: the distribution of each solve's |I_p/I_p,target - 1| (swb_ip_rel_err) over real draws, against the 5e-3 acceptance
+- taper off (swb_edge_taper_psi0=None) verified on real slices: the Picard 2-cycle the taper was added for does not occur, or is caught
+
+#### `bootstrap_convergence_override` (experimental; introduced PR #60, 1.4.0)
+
+Accept the bootstrap_kwargs keys that change a convergence criterion of the toolkit's internal bootstrap solve (BOOTSTRAP_CONVERGENCE_KWARGS: djBS_tol, saw_relax).  Legacy and swb paths only; the unified engine refuses it.
+
+Enabled by: `GenerationConfig.bootstrap_convergence_override=True`
+
+Validation to do:
+
+- for each key, the converged j_BS, l_i and q0 against the toolkit's default criterion on >= 5 real slices; a value that changes a converged result beyond the default criterion's own residual is a loosened criterion and must be flagged
+- the effective values stamped per run are read back by load_config and shown with the archive summary
+
+<!-- experimental-registry:end -->
 
 ## until-N in-spec draws
 

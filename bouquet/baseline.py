@@ -311,6 +311,10 @@ class Baseline:
     # imas_baseline="swb": solve B's record (alpha, coils, lcfs, li_3, Ip, split),
     # the reference the sigma=0 check compares against.
     swb_baseline: Optional[dict] = None
+    # The EXPERIMENTAL features the run enables (bouquet.experimental.
+    # REGISTRY keys, Bouquet.prepare_baseline); [] when none.  Archived as
+    # the _baseline attr experimental_features_json on every solve method.
+    experimental_features: Optional[list] = None
 
     def __repr__(self):
         # concise summary -- the default dataclass repr dumps every numpy array,
@@ -323,7 +327,9 @@ class Baseline:
         return (f"Baseline(provenance={self.provenance!r}, "
                 f"Ip={self.Ip_target/1e6:.3f} MA, l_i={self.l_i_target:.3f}, "
                 f"grids: {ng} eq / {nk} kinetic"
-                + (f", aux={aux}" if aux else "") + ")")
+                + (f", aux={aux}" if aux else "")
+                + (f", EXPERIMENTAL={list(self.experimental_features)}"
+                   if self.experimental_features else "") + ")")
 
 
 def resolve_baseline(config: "BouquetConfig", mygs=None) -> Baseline:

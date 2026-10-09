@@ -123,6 +123,9 @@ class Bouquet(SwbBaseline):
         # prepare_baseline(): how the engine-dependent settings were resolved
         # (bouquet.engine.resolve_engine_defaults)
         self._engine_resolved_defaults: Optional[dict] = None
+        # prepare_baseline(): the EXPERIMENTAL features the config enables
+        # (bouquet.experimental.REGISTRY keys), warned there
+        self._experimental_features: Optional[list] = None
         self._selection = None                    # filter() result
 
     # ── constructors ----------------------------------------------------
@@ -878,6 +881,12 @@ class Bouquet(SwbBaseline):
         from .baseline import resolve_baseline
         from .config import ImasSource, resolve_solve_method
         resolve_solve_method(self.config.generation)
+        # EXPERIMENTAL features (bouquet.experimental.REGISTRY): one
+        # ExperimentalFeatureWarning each, naming its validation TODO; the
+        # list goes on the baseline record and into the archive
+        from .experimental import warn_experimental_features
+        self._experimental_features = warn_experimental_features(
+            self.config, stacklevel=3)
 
         # The engine-dependent settings (isolate_edge_jBS,
         # perturb_jind_in_anchor) are resolved HERE, once, for the engine
@@ -898,6 +907,7 @@ class Bouquet(SwbBaseline):
             from .engine import prepare_engine_baseline
             _bl = prepare_engine_baseline(self)
             self._record_engine_resolved_defaults(_bl)
+            self._record_experimental_features(_bl)
             self._record_coil_solve_mode(_bl)
             self._report_sigma_exceeds_profile(_bl)
             self._remember_baseline_state()
@@ -995,6 +1005,7 @@ class Bouquet(SwbBaseline):
         if self.baseline.reconstruction_metrics is not None:
             self._print_reconstruction_summary()
         self._record_engine_resolved_defaults(self.baseline)
+        self._record_experimental_features(self.baseline)
         self._record_coil_solve_mode(self.baseline)
         self._report_sigma_exceeds_profile(self.baseline)
         self._remember_baseline_state()
@@ -1054,6 +1065,23 @@ class Bouquet(SwbBaseline):
         if isinstance(getattr(bl, "engine", None), dict):
             bl.engine["engine_resolved_defaults"] = {
                 k: dict(v) for k, v in rec.items()}
+
+    def _record_experimental_features(self, bl) -> None:
+        """Put the EXPERIMENTAL features this run enables
+        (:func:`bouquet.experimental.experimental_features_enabled`, warned
+        at :meth:`prepare_baseline`) on *bl* (``Baseline.
+        experimental_features``, archived as the ``_baseline`` attr
+        ``experimental_features_json``) and, under the unified engine, in
+        its record, next to ``engine_resolved_defaults``."""
+        from .experimental import experimental_features_enabled
+        if bl is None or not hasattr(bl, "experimental_features"):
+            return
+        on = getattr(self, "_experimental_features", None)
+        if on is None:
+            on = experimental_features_enabled(self.config)
+        bl.experimental_features = list(on)
+        if isinstance(getattr(bl, "engine", None), dict):
+            bl.engine["experimental_features"] = list(on)
 
     def _record_coil_solve_mode(self, bl) -> None:
         """Record the coil-solve mode the solver ran the reconstruction in --
@@ -8127,10 +8155,19 @@ class Bouquet(SwbBaseline):
         stamp_coil_solve_mode(header, scan_key=gc.scan_key,
                               mode=getattr(bl, "coil_solve_mode", None))
         # how the engine-dependent settings were resolved (both paths)
-        from .utils import stamp_engine_resolved_defaults
+        from .utils import (stamp_engine_resolved_defaults,
+                            stamp_experimental_features)
         stamp_engine_resolved_defaults(
             header, scan_key=gc.scan_key,
             record=getattr(bl, "engine_resolved_defaults", None))
+        # the EXPERIMENTAL features the run enabled (every solve method;
+        # [] when none): the baseline's record, else the config's
+        from .experimental import experimental_features_enabled
+        _xf = getattr(bl, "experimental_features", None)
+        stamp_experimental_features(
+            header, scan_key=gc.scan_key,
+            features=(experimental_features_enabled(self.config)
+                      if _xf is None else _xf))
         # IMAS path: the source's current orientation (what the reader
         # multiplied every dd current by to reach bouquet's positive frame).
         from .config import ImasSource

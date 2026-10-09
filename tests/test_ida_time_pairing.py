@@ -353,3 +353,23 @@ def test_run_slices_refuses_a_configured_ida_time_without_ida_times(monkeypatch)
     seen = _stub_slices(b2, monkeypatch)
     b2.run_slices([1.04, 1.08])                          # unpaired: as before
     assert seen == [(1.04, None), (1.08, None)]
+
+
+def test_the_ida_zeff_provenance_is_in_the_baseline_record(files):
+    """PR #56 (owner item E2 stamp, integration hook): how IDA's Z_eff /
+    n_i were resolved rides in li_metrics (archived as _baseline
+    li_metrics_json) on the IMAS ida_hybrid route, beside the dd's own
+    numerator decision, and the reconstruction route's loader returns it."""
+    from types import SimpleNamespace
+    from bouquet.baseline import _load_kinetic_profiles
+    ddp, cdf = files
+    bl = _read(ddp, cdf)
+    prov = bl.li_metrics["zeff_provenance"]
+    assert prov["source"] in ("VB+CER mean", "CER", "VB")
+    assert set(prov["weights"]) == {"VB", "CER"}
+    assert (bl.li_metrics["zeff_dd_provenance"]["baseline_zeff_from"]
+            .startswith("IDA"))
+    json.dumps(bl.li_metrics)
+    kin = _load_kinetic_profiles(SimpleNamespace(
+        profiles_path=cdf, time=1.0, impurity_Z=Z_IMP, ni_source="all"))
+    assert kin["zeff_provenance"] == prov

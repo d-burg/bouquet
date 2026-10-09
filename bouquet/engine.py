@@ -2756,7 +2756,12 @@ def _gfile_baseline(bq, eng, res, rec, ad, iso_pts, iso_w):
         aux={"zeff": np.asarray(kn["Zeff"], dtype=float)}, recon=recon,
         reconstruction_metrics=metrics, jphi_request_offset=offset,
         delivered_state=ds, engine=rec,
-        edge_pressure=rec.get("edge_pressure"))
+        edge_pressure=rec.get("edge_pressure"),
+        # PR #56 (owner item E2 stamp): how the IDA Z_eff / n_i were
+        # resolved; archived as _baseline li_metrics_json (as on the legacy
+        # reconstruction route)
+        li_metrics=({"zeff_provenance": dict(kn["zeff_provenance"])}
+                    if kn.get("zeff_provenance") else None))
 
 
 def _ids_baseline(bq, eng, res, rec, bl_src):

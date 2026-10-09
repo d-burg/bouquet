@@ -1076,6 +1076,9 @@ def _load_kinetic_profiles(source) -> dict:
             Zeff=np.clip(np.asarray(ida.Zeff, dtype=float), 1.0, None),
             raw_bytes=ida.raw_bytes,
             q=None if ida.q is None else np.asarray(ida.q, dtype=float),
+            # how IDA's Z_eff / n_i were resolved (rung, weights, window,
+            # clamps; PR #56) -- archived with the baseline record
+            zeff_provenance=getattr(ida, "zeff_provenance", None),
         )
 
     # Osborne p-file: ne/ni in 1e20 m^-3, Te/Ti in keV -> SI.
@@ -1399,8 +1402,12 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
         # store_baseline_profiles archives it (report-only; see
         # physics.core_pressure_hollow_record).
         core_pressure_hollow=_cph_recon,
-        li_metrics=({"core_pressure_hollow": _cph_recon}
-                    if _cph_recon else None),
+        li_metrics=({k: v for k, v in (
+            ("core_pressure_hollow", _cph_recon),
+            # PR #56 (owner item E2 stamp): how the IDA Z_eff / n_i were
+            # resolved; archived as _baseline li_metrics_json
+            ("zeff_provenance", kin.get("zeff_provenance"))) if v}
+            or None),
         jphi_request_offset=_request_offset,
         delivered_state=_delivered,
         edge_pressure=(recon_metrics or {}).get("edge_pressure"),

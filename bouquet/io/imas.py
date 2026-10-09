@@ -2540,6 +2540,13 @@ def read_imas_baseline(
                     # convention was decided (_dd_zeff), and whether the
                     # baseline's zeff_includes_fast follows it or the
                     # measured IDA Z_eff
+                    # PR #56 (owner item E2 stamp): how the IDA Z_eff /
+                    # n_i were resolved (rung, weights, window, clamps)
+                    **({"zeff_provenance": dict(
+                        aux["ida_profiles"][1].zeff_provenance)}
+                       if "ida_profiles" in aux and getattr(
+                           aux["ida_profiles"][1], "zeff_provenance", None)
+                       else {}),
                     "zeff_dd_provenance": dict(
                         _zeff_dd_rec,
                         baseline_zeff_includes_fast=bool(zeff_includes_fast),

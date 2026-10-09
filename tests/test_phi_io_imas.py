@@ -102,9 +102,15 @@ class TestReadPhi:
         ddp, _ = _write_dd(tmp_path, **kw)
         with pytest.raises(ValueError, match="rho_tor_norm"):
             _read(ddp, "phi_n")
-        if which == "eq" and bad == "missing":   # nor q: the current conversion
-            with pytest.raises(ValueError, match="rho_tor_norm"):   # interpolates in rho
-                _read(ddp, "psi_n")
+        if which == "eq" and bad == "missing":   # nor q: the exact current
+            # conversion (it interpolates in rho) is unavailable -- a psi_n
+            # read falls back to the ratio method, loudly and stamped
+            # (review PR64 B7; a refusal was an undeclared input change)
+            with pytest.warns(UserWarning, match="FALLING BACK"):
+                bp = _read(ddp, "psi_n")
+            conv = bp.li_metrics["imas_current_conversion"]
+            assert conv["method"].startswith("ratio")
+            assert "rho_tor_norm" in conv["reason"]
         else:
             _read(ddp, "psi_n")              # psi_n placement never looks at rho
 

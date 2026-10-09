@@ -57,8 +57,12 @@ origin is recorded as ``Baseline.source_current_sign_origin``.
 
 Note: ``j_BS`` read here is the FUSE bootstrap baseline, but it is *overridden*
 when ``GenerationConfig.recalculate_j_BS`` is True -- bouquet then recomputes
-bootstrap per draw via TokaMaker ``solve_with_bootstrap``, whose output is
-already TokaMaker ``jphi``.
+bootstrap per draw via TokaMaker ``solve_with_bootstrap``, whose output
+:func:`bouquet.physics._swb_jbs_to_toroidal` converts to the field-aligned
+``kappa <j.B>`` (the toolkit's own convention is identified, never assumed).
+
+The pressure-driven ``p'G`` (A7) is its own bucket (owner decision D2,
+2026-10-09): never in ``j_BS``; the read records it as ``Baseline.j_pressure``.
 """
 
 from __future__ import annotations
@@ -78,7 +82,8 @@ from ..physics import (fast_ion_density_equivalent, impurity_pressure,
                        jphi_tokamaker_to_jpar,
                        jphi_tokamaker_to_jtor_imas,
                        jtor_imas_to_jphi_tokamaker,
-                       main_ion_density_from_zeff)
+                       main_ion_density_from_zeff, parallel_to_toroidal)
+from ..schema import SPLIT_PRESSURE_IN_INDUCTIVE
 
 from ..physics import ELEMENTARY_CHARGE as _EC  # p = e * sum_s(n_s * T_s)
 
@@ -980,6 +985,13 @@ def _refuse_mixed_orientation(bad, ip, cur_sign, origin):
 #: equilibrium.profiles_1d fields the current conversions need (IMAS.jl names).
 _FUSE_GEOM_FIELDS = ("rho_tor_norm", "f", "gm1", "gm5", "gm8", "gm9",
                      "dpressure_dpsi")
+#: ``li_metrics["imas_current_conversion"]["method"]`` of an IMAS read: the
+#: exact conversion on the paired equilibrium geometry (A5-A7), or the
+#: per-surface ratio ``c = j_tor/j_total`` the reader falls back to (with a
+#: warning) when that geometry is absent.
+IMAS_CURRENT_EXACT = "exact (A5-A7, paired equilibrium geometry)"
+IMAS_CURRENT_RATIO_FALLBACK = ("ratio c = j_tor/j_total (fallback: the "
+                               "equilibrium geometry is absent)")
 
 
 def _fsa_from_profiles_2d(ts, nlevels=257):
@@ -1696,20 +1708,51 @@ def read_imas_baseline(
     x_run = psi_N if coord == _coords.PSI else _dd_phi_n(cp, psi_N)
 
     # The conversions below run in the frame of the dd's geometry: the
-    # currents times _m, the results times s_ip (current_frame).
-    _m, s_ip, cur_geom, cur_meta = current_frame(
-        eq, cp, float(cp_ids["time"][ic]), cur_sign, ip_signed)
+    # currents times _m, the results times s_ip (current_frame).  A dd whose
+    # equilibrium lacks the averages the exact conversion needs (f, gm1, gm5,
+    # gm8, gm9, dpressure_dpsi -- or a profiles_2d to trace them -- and
+    # core_profiles rho_tor_norm) falls back, loudly and stamped, to the
+    # per-surface ratio method every reader used before PR #64 (review
+    # PR64 B7: refusing it was an undeclared breaking input change).
+    cur_conv = dict(method=IMAS_CURRENT_EXACT)
+    try:
+        _m, s_ip, cur_geom, cur_meta = current_frame(
+            eq, cp, float(cp_ids["time"][ic]), cur_sign, ip_signed)
+    except ValueError as _geom_exc:
+        cur_geom = None
+        _m, s_ip = 1.0, float(cur_sign)
+        cur_meta = {"index": ie, "time": float(eq["time"][ie]),
+                    "t_core_profiles": float(cp_ids["time"][ic]),
+                    "jtor_mismatch": float("nan")}
+        cur_conv = dict(method=IMAS_CURRENT_RATIO_FALLBACK,
+                        reason=str(_geom_exc))
+        import warnings
+        warnings.warn(
+            "IMAS reader: the exact IMAS -> TokaMaker current conversion "
+            f"(A5-A7) is unavailable ({_geom_exc}); FALLING BACK to the "
+            "per-surface ratio c = j_tor/j_total of the pre-PR #64 reader "
+            "(j_phi = core_profiles.j_tor, no p'G split).  Recorded as "
+            "li_metrics['imas_current_conversion'].", stacklevel=2)
     j_total = _m * np.asarray(cp["j_total"], dtype=float)     # total <J.B>/B0
     j_tor = _m * np.asarray(cp["j_tor"], dtype=float)         # total IMAS j_tor
     j_boot = _m * np.asarray(cp["j_bootstrap"], dtype=float)  # <J.B>/B0 (inductive = residual)
 
-    # Exact conversions to TokaMaker jphi on the geometry FUSE used for this
-    # core_profiles slice (see _paired_current_geometry).
-    p_term = jphi_tokamaker_pressure_term(cur_geom)       # p'G -> bootstrap
+    if cur_geom is not None:
+        # Exact conversions to TokaMaker jphi on the geometry FUSE used for
+        # this core_profiles slice (see _paired_current_geometry).  The
+        # pressure-driven p'G is its own bucket (owner decision D2): never in
+        # j_BS; recorded as Baseline.j_pressure.
+        p_term = jphi_tokamaker_pressure_term(cur_geom)
 
-    def to_jphi(j_par):
-        return jpar_to_jphi_tokamaker(j_par, cur_geom)
-    j_BS = to_jphi(j_boot) + p_term
+        def to_jphi(j_par):
+            return jpar_to_jphi_tokamaker(j_par, cur_geom)
+    else:
+        p_term = None
+
+        def to_jphi(j_par):
+            return parallel_to_toroidal(j_par, j_parallel_total=j_total,
+                                        j_tor_total=j_tor)
+    j_BS = to_jphi(j_boot)
 
     # --- NBI: sum beam-source parallel currents, then convert ---
     # Each beam entry is read at the core_sources slice TIME, not at its list
@@ -2019,20 +2062,41 @@ def read_imas_baseline(
     # runs in the dd's own orientation (its signed F, B0 and p'); the results
     # are then put into bouquet's positive-current frame by s_ip (A5 and A7
     # are odd in a whole-dd reversal, so this is exact).
-    j_phi_dd = jtor_imas_to_jphi_tokamaker(j_tor, cur_geom)
-    _pk = float(np.max(np.abs(j_phi_dd)))
-    _closure = float(np.max(np.abs(to_jphi(j_total) + p_term - j_phi_dd))) / _pk
+    if cur_geom is not None:
+        j_phi_dd = jtor_imas_to_jphi_tokamaker(j_tor, cur_geom)
+        _pk = float(np.max(np.abs(j_phi_dd)))
+        _closure = float(np.max(np.abs(to_jphi(j_total) + p_term
+                                       - j_phi_dd))) / _pk
+    else:                       # the ratio fallback: j_tor as TokaMaker jphi
+        j_phi_dd = j_tor.copy()
+        _pk = float(np.max(np.abs(j_phi_dd)))
+        _closure = float("nan")
     _dconv = (j_phi_dd - j_tor) / _pk
     j_phi = s_ip * j_phi_dd
     j_BS = s_ip * j_BS
+    # The solve split carries p'G in the residual inductive (the solver needs
+    # the total; the pre-PR #64 convention).  j_pressure records it as its
+    # own bucket: the archive writes j_inductive - j_pressure and j_pressure
+    # (schema.write_current_split), the IDS exporter groups it with the
+    # non-inductive currents.
+    j_pressure = None if p_term is None else s_ip * p_term
     j_inductive = j_phi - j_BS - j_NBI - j_RF - j_other
-    print(f"  [imas] currents -> TokaMaker jphi on equilibrium t="
-          f"{cur_meta['time']:.4f} s (core_profiles t="
-          f"{cur_meta['t_core_profiles']:.4f} s; j_tor reproduced to "
-          f"{cur_meta['jtor_mismatch']:.1e}); j_total closure "
-          f"{_closure:.1e} of peak; jphi - j_tor: axis {_dconv[0]:+.2%}, "
-          f"max {_dconv[np.argmax(np.abs(_dconv))]:+.2%} of peak")
-    if not cur_meta["jtor_mismatch"] <= 1e-3:
+    cur_conv.update(
+        pressure=("j_pressure (p'G) carried by j_inductive in the solve split"
+                  if j_pressure is not None else
+                  "no p'G split (ratio fallback): carried by every component"),
+        current_split_convention=SPLIT_PRESSURE_IN_INDUCTIVE)
+    if cur_geom is None:
+        print("  [imas] currents -> TokaMaker jphi by the RATIO FALLBACK "
+              "c = j_tor/j_total (no equilibrium geometry; j_phi = j_tor)")
+    else:
+        print(f"  [imas] currents -> TokaMaker jphi on equilibrium t="
+              f"{cur_meta['time']:.4f} s (core_profiles t="
+              f"{cur_meta['t_core_profiles']:.4f} s; j_tor reproduced to "
+              f"{cur_meta['jtor_mismatch']:.1e}); j_total closure "
+              f"{_closure:.1e} of peak; jphi - j_tor: axis {_dconv[0]:+.2%}, "
+              f"max {_dconv[np.argmax(np.abs(_dconv))]:+.2%} of peak")
+    if cur_geom is not None and not cur_meta["jtor_mismatch"] <= 1e-3:
         import warnings
         warnings.warn(
             f"core_profiles.j_tor is not reproduced from j_total by any "
@@ -2123,10 +2187,12 @@ def read_imas_baseline(
     jphi_diff = None
     if anchor_jtor_to_equilibrium:
         # IMAS j_tor -> TokaMaker jphi on the slice's own grid (exact, in the
-        # dd's frame), then onto the run nodes, in the positive frame.
-        eq_jphi = jtor_imas_to_jphi_tokamaker(
-            _m * np.asarray(eqp1["j_tor"], dtype=float),
-            _fuse_current_geometry(eq, ie))
+        # dd's frame), then onto the run nodes, in the positive frame.  The
+        # ratio fallback takes j_tor as it is (the pre-PR #64 anchor).
+        eq_jphi = _m * np.asarray(eqp1["j_tor"], dtype=float)
+        if cur_geom is not None:
+            eq_jphi = jtor_imas_to_jphi_tokamaker(
+                eq_jphi, _fuse_current_geometry(eq, ie))
         eq_jtor = s_ip * np.interp(x_at, x_eq, eq_jphi[_o])
         jphi_diff = eq_jtor - j_phi
 
@@ -2157,7 +2223,7 @@ def read_imas_baseline(
     if _bad:
         _refuse_mixed_orientation(_bad, ip_signed, cur_sign, cur_origin)
 
-    return Baseline(
+    bl = Baseline(
         psi_N=x_run,
         j_phi=j_phi,
         j_inductive=j_inductive,
@@ -2189,7 +2255,8 @@ def read_imas_baseline(
         # (generate_bouquet would try to parse it). Per-draw p-files are built
         # from the kinetic profiles.
         pfile_bytes=None,
-        li_metrics={"ids_li_1": ids_li_1, "ids_li_3": ids_li_3},
+        li_metrics={"ids_li_1": ids_li_1, "ids_li_3": ids_li_3,
+                    "imas_current_conversion": cur_conv},
         aux=aux,
         p_fast_meta=p_fast_meta,
         sawtooth=sawtooth,
@@ -2198,6 +2265,10 @@ def read_imas_baseline(
         source_b0_sign=b0_sign,
         source_time_match=source_time_match,
     )
+    # the third current bucket (owner decision D2), beside the solve split
+    # (which carries it in j_inductive; li_metrics["imas_current_conversion"])
+    bl.j_pressure = j_pressure
+    return bl
 
 
 # ===========================================================================

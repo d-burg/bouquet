@@ -66,6 +66,19 @@ def test_set_case_resets_every_per_case_attribute(tmp_path, toy_bouquet_solver):
         assert getattr(b, k) is v, k
 
 
+def test_an_instance_method_override_survives_set_case(tmp_path, toy_bouquet_solver):
+    """A hook or stand-in installed on the instance (b.prepare_baseline = f)
+    is not per-case state: set_case keeps it."""
+    b = _bq(tmp_path)
+    b.setup_solver()
+
+    def prep():
+        return "stand-in"
+    b.prepare_baseline = prep
+    b.set_case(header=str(tmp_path / "next"), scan_key=1)
+    assert b.prepare_baseline is prep
+
+
 def test_the_device_settings_are_restored_between_cases(tmp_path, toy_bouquet_solver):
     """A case that dies between cap_solver and uncap_solver (or leaves an
     instance-level solve wrapper) must not hand maxits=100 or the wrapper

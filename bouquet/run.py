@@ -458,9 +458,12 @@ class Bouquet(SwbBaseline):
         """Every per-case attribute back to its constructor value; the ones prepare_baseline / generate /
         filter created are removed (getattr(..., None) then reads None).  :data:`SOLVER_ATTRS` stay."""
         init = getattr(self, "_init_state", {})
+        cls = type(self)
         for k in list(vars(self)):
             if k in self.SOLVER_ATTRS:
                 continue
+            if callable(getattr(cls, k, None)) or isinstance(getattr(cls, k, None), property):
+                continue            # an instance override of a method (a hook, a test stand-in), not state
             if k in init:
                 setattr(self, k, copy.deepcopy(init[k]))
             else:

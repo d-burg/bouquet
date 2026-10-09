@@ -157,18 +157,88 @@ IMAS_SINGLE_TIME_WINDOW_S = 1e-5
 #: hold one time and an entry only the own slices the rule consults, so the
 #: half-step windows would collapse to :data:`IMAS_SINGLE_TIME_WINDOW_S` and
 #: an entry matched at an offset own time would re-read as off, an offset
-#: core_sources base as a refusal.  Written in two places:
+#: core_sources base as a refusal.  Stored in the SCHEMA-LEGAL
+#: ``code.parameters`` string (a JSON object; :func:`_set_export_window`),
+#: under this key, in two places:
 #:
-#: * ``core_sources[IMAS_EXPORT_TIME_WINDOW_KEY]`` -- the core_sources slice:
+#: * ``core_sources.code.parameters`` -- the core_sources slice:
 #:   ``{"core_profiles_time", "core_sources_time", "window", "window_basis"}``
 #:   (:func:`core_sources_slice`'s window and its basis at the original read);
-#: * ``core_sources.source[j][IMAS_EXPORT_TIME_WINDOW_KEY]`` -- one entry:
+#: * ``core_sources.source[j].code.parameters`` -- one entry:
 #:   ``{"core_profiles_time", "core_sources_time", "window_own",
 #:   "window_core_profiles"}`` (:func:`_source_slice_at`'s two windows).
 #:
-#: The reader honours a block only when its two times equal the slice times
-#: it is reading (the exported slice itself); anywhere else it is ignored.
+#: A template ``parameters`` string that is itself a JSON object keeps its
+#: keys; any other non-empty one is kept verbatim under
+#: :data:`IMAS_EXPORT_TEMPLATE_PARAMETERS_KEY`.  The reader also accepts the
+#: block as a direct key of the node (exports written before it moved).  It
+#: honours a block only when its two times equal the slice times it is
+#: reading (the exported slice itself); anywhere else it is ignored.
 IMAS_EXPORT_TIME_WINDOW_KEY = "bouquet_time_window"
+#: Where a template's non-JSON ``code.parameters`` text is kept when the
+#: export window is added to it.
+IMAS_EXPORT_TEMPLATE_PARAMETERS_KEY = "template_parameters"
+
+
+def _get_export_window(node):
+    """The export window block of an IDS node (``core_sources`` or one of its
+    ``source`` entries): from its ``code.parameters`` JSON string, else (an
+    export written before the block moved there) the node's own key; None
+    when absent or unreadable."""
+    import json
+    if not isinstance(node, dict):
+        return None
+    code = node.get("code")
+    par = code.get("parameters") if isinstance(code, dict) else None
+    if isinstance(par, str) and par.strip():
+        try:
+            obj = json.loads(par)
+        except ValueError:
+            obj = None
+        if isinstance(obj, dict) and isinstance(
+                obj.get(IMAS_EXPORT_TIME_WINDOW_KEY), dict):
+            return obj[IMAS_EXPORT_TIME_WINDOW_KEY]
+    legacy = node.get(IMAS_EXPORT_TIME_WINDOW_KEY)
+    return legacy if isinstance(legacy, dict) else None
+
+
+def _set_export_window(node, meta):
+    """Record the export window block *meta* in *node*'s schema-legal
+    ``code.parameters`` string (JSON), keeping what the template had there
+    (its JSON keys, or its text under
+    :data:`IMAS_EXPORT_TEMPLATE_PARAMETERS_KEY`)."""
+    import json
+    code = node.get("code")
+    if not isinstance(code, dict):
+        code = node["code"] = {}
+    par = code.get("parameters")
+    obj = {}
+    if isinstance(par, str) and par.strip():
+        try:
+            obj = json.loads(par)
+        except ValueError:
+            obj = None
+        if not isinstance(obj, dict):
+            obj = {IMAS_EXPORT_TEMPLATE_PARAMETERS_KEY: par}
+    obj[IMAS_EXPORT_TIME_WINDOW_KEY] = meta
+    code["parameters"] = json.dumps(obj)
+    node.pop(IMAS_EXPORT_TIME_WINDOW_KEY, None)
+
+
+def _drop_export_window(node):
+    """Remove an export window block from *node* (both locations)."""
+    import json
+    node.pop(IMAS_EXPORT_TIME_WINDOW_KEY, None)
+    code = node.get("code")
+    par = code.get("parameters") if isinstance(code, dict) else None
+    if isinstance(par, str) and par.strip():
+        try:
+            obj = json.loads(par)
+        except ValueError:
+            return
+        if isinstance(obj, dict):
+            obj.pop(IMAS_EXPORT_TIME_WINDOW_KEY, None)
+            code["parameters"] = json.dumps(obj)
 
 
 def _export_window(meta, t_cp, t_src):
@@ -387,8 +457,7 @@ def core_sources_slice(src_ids, cp_times, ic, T=None, who="IMAS reader"):
     t_src = float(tt[isrc])
     dt = t_src - t_cp
     half, basis = _cp_window(cpt, tt, t_cp, t_src)
-    _meta = _export_window(src_ids.get(IMAS_EXPORT_TIME_WINDOW_KEY), t_cp,
-                           t_src)
+    _meta = _export_window(_get_export_window(src_ids), t_cp, t_src)
     if _meta is not None and cpt.size == 1 and tt.size == 1:
         # a single-slice export: the window of the read it came from
         half, basis = float(_meta["window"]), str(_meta["window_basis"])
@@ -440,8 +509,7 @@ def _source_slice_at(s, isrc, t_slice, n_time, base_times=None, *,
         tt = np.asarray(times, dtype=float)
         t_ref = float(t_slice if t_cp is None else t_cp)
         k, dt, half = _entry_time_window(times, t_slice, base_times)
-        _meta = _export_window(s.get(IMAS_EXPORT_TIME_WINDOW_KEY), t_ref,
-                               t_slice)
+        _meta = _export_window(_get_export_window(s), t_ref, t_slice)
         if _meta is not None:
             # a single-slice export keeps only the own slices this rule
             # consults: the windows are those of the read it came from
@@ -2836,7 +2904,8 @@ def _cut_core_sources(cs, cp_times, ic, t_cp):
     its first and last own slice (recorded in the match); one without them
     keeps the slice at the core_sources index.  The windows of this read
     (the core_sources slice window, each entry's own and core_profiles
-    windows) are written under :data:`IMAS_EXPORT_TIME_WINDOW_KEY`: with
+    windows) are recorded under :data:`IMAS_EXPORT_TIME_WINDOW_KEY` in the
+    schema-legal ``code.parameters`` JSON string: with
     one time on each base the re-read's half-step windows would otherwise
     collapse to :data:`IMAS_SINGLE_TIME_WINDOW_S`.  The entry list itself
     is never cut."""
@@ -2862,11 +2931,11 @@ def _cut_core_sources(cs, cp_times, ic, t_cp):
             keep = set(_entry_bracketing_slices(times, t_src))
             keep.update((int(np.argmin(tt)), int(np.argmax(tt))))
             s["profiles_1d"] = [pr[k] for k in sorted(keep)]
-            s[IMAS_EXPORT_TIME_WINDOW_KEY] = dict(
+            _set_export_window(s, dict(
                 core_profiles_time=rec["core_profiles_time"],
                 core_sources_time=t_src,
                 window_own=erec.get("window_own"),
-                window_core_profiles=erec.get("window_core_profiles"))
+                window_core_profiles=erec.get("window_core_profiles")))
         elif pr and (n_time is None or len(pr) == n_time) and isrc < len(pr):
             s["profiles_1d"] = [pr[isrc]]
         for k, v in list(s.items()):
@@ -2884,10 +2953,10 @@ def _cut_core_sources(cs, cp_times, ic, t_cp):
         if isinstance(code, dict) and "output_flag" in code:
             code["output_flag"] = _cut_axis0(code["output_flag"], isrc, n)
         if t_src is not None and rec["core_profiles_time"] is not None:
-            cs[IMAS_EXPORT_TIME_WINDOW_KEY] = dict(
+            _set_export_window(cs, dict(
                 core_profiles_time=rec["core_profiles_time"],
                 core_sources_time=t_src, window=rec["window"],
-                window_basis=rec["window_basis"])
+                window_basis=rec["window_basis"]))
 
 
 def _slice_in_time(dd, t):
@@ -3073,7 +3142,8 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
     structure; ``core_sources`` is cut by the reader's own source-time rule
     (each entry keeps its slices bracketing the time plus its first and last
     own slice), with the windows of that read recorded under
-    :data:`IMAS_EXPORT_TIME_WINDOW_KEY` so a re-read matches the same entries
+    :data:`IMAS_EXPORT_TIME_WINDOW_KEY` in the schema-legal
+    ``code.parameters`` JSON string so a re-read matches the same entries
     exactly.  The template is this function's own fresh ``json.load``, never
     the shared parsed dd of :func:`_load_dd` (#72: the cut mutates it).
 

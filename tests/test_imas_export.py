@@ -200,11 +200,14 @@ class TestExactImasExport:
         # the entry keeps the own slices the reader's rule consults at the
         # core_profiles slice read (1.0 s: itself) and its first / last,
         # with the windows of that read (IMAS_EXPORT_TIME_WINDOW_KEY)
-        from bouquet.io.imas import IMAS_EXPORT_TIME_WINDOW_KEY as _K
+        from bouquet.io.imas import _get_export_window as _W
         src0 = dd["core_sources"]["source"][0]
         assert src0["profiles_1d"] == [{"time": 1.0}, {"time": 1.5}]
-        assert src0[_K]["core_profiles_time"] == 1.0
-        assert dd["core_sources"][_K]["window"] == pytest.approx(0.25)
+        assert _W(src0)["core_profiles_time"] == 1.0
+        assert _W(dd["core_sources"])["window"] == pytest.approx(0.25)
+        # in the schema-legal code.parameters string, not a non-schema key
+        assert "bouquet_time_window" not in dd["core_sources"]
+        assert "bouquet_time_window" not in src0
         # every IDS is cut at the core_profiles slice read (1.0 s), not at
         # the caller's 1.1 s: pf_active keeps its sample nearest 1.0 s
         assert dd["pf_active"]["coil"][0]["current"] == {"time": [0.9], "data": [1.0]}

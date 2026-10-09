@@ -46,7 +46,7 @@ def _src(index, name, times, amps, n=4):
 #  (1) structure-keyed cut
 # ---------------------------------------------------------------------------
 def test_three_sources_on_a_three_time_base_stay_three_sources():
-    from bouquet.io.imas import IMAS_EXPORT_TIME_WINDOW_KEY, _slice_in_time
+    from bouquet.io.imas import _get_export_window, _slice_in_time
     t = [0.5, 1.0, 1.5]
     dd = {"core_profiles": {"time": t, "profiles_1d": [
               {"time": x, "grid": {"psi": [0.0, 1.0, 2.0]}} for x in t]},
@@ -62,8 +62,7 @@ def test_three_sources_on_a_three_time_base_stay_three_sources():
     for s, amps in zip(cs["source"], ([1, 2, 3], [4, 5, 6], [7, 8, 9])):
         # the slice read (bracketing = itself at dt 0) + first + last
         assert [q["time"] for q in s["profiles_1d"]] == t
-        assert s[IMAS_EXPORT_TIME_WINDOW_KEY]["window_own"] == \
-            pytest.approx(0.25)
+        assert _get_export_window(s)["window_own"] == pytest.approx(0.25)
     # entries on a finer own grid keep only the slices the rule consults
     dd["core_sources"]["source"][0] = _src(2, "nbi", [0.5, 0.75, 1.0, 1.25,
                                                       1.5], [1, 2, 3, 4, 5])
@@ -173,7 +172,8 @@ def _assert_same_match(a, b):
 @pytest.mark.skipif(not os.path.isfile(_OMAS),
                     reason="synthetic IMAS example absent")
 def test_a_single_slice_cut_re_reads_identically(tmp_path):
-    from bouquet.io.imas import IMAS_EXPORT_TIME_WINDOW_KEY, _slice_in_time
+    from bouquet.io.imas import (_drop_export_window, _get_export_window,
+                                 _slice_in_time)
     dd = _multi_slice_template()
     p0 = tmp_path / "multi.json"
     p0.write_text(json.dumps(dd))
@@ -189,7 +189,7 @@ def test_a_single_slice_cut_re_reads_identically(tmp_path):
     _slice_in_time(cut, T)
     assert cut["core_profiles"]["time"] == [T]
     assert cut["core_sources"]["time"] == [2.23]
-    assert IMAS_EXPORT_TIME_WINDOW_KEY in cut["core_sources"]
+    assert _get_export_window(cut["core_sources"]) is not None
     p1 = tmp_path / "one.json"
     p1.write_text(json.dumps(cut))
     bl = _read(str(p1))
@@ -201,9 +201,9 @@ def test_a_single_slice_cut_re_reads_identically(tmp_path):
     # without the recorded windows the same file re-reads differently: the
     # core_sources base 30 ms off the single core_profiles time is refused
     bare = copy.deepcopy(cut)
-    bare["core_sources"].pop(IMAS_EXPORT_TIME_WINDOW_KEY)
+    _drop_export_window(bare["core_sources"])
     for s in bare["core_sources"]["source"]:
-        s.pop(IMAS_EXPORT_TIME_WINDOW_KEY, None)
+        _drop_export_window(s)
     p2 = tmp_path / "bare.json"
     p2.write_text(json.dumps(bare))
     with pytest.raises(ValueError, match="the single-time floor"):
@@ -215,11 +215,13 @@ def test_a_single_slice_cut_re_reads_identically(tmp_path):
 def test_recorded_windows_are_ignored_away_from_the_slice_they_describe(
         tmp_path):
     """A block whose times are not the slice read plays no part."""
-    from bouquet.io.imas import IMAS_EXPORT_TIME_WINDOW_KEY, _slice_in_time
+    from bouquet.io.imas import (_get_export_window, _set_export_window,
+                                 _slice_in_time)
     cut = _multi_slice_template()
     _slice_in_time(cut, T)
-    cut["core_sources"][IMAS_EXPORT_TIME_WINDOW_KEY]["core_profiles_time"] = \
-        T + 1e-3
+    _w = dict(_get_export_window(cut["core_sources"]))
+    _w["core_profiles_time"] = T + 1e-3
+    _set_export_window(cut["core_sources"], _w)
     p = tmp_path / "moved.json"
     p.write_text(json.dumps(cut))
     with pytest.raises(ValueError, match="the single-time floor"):
@@ -275,3 +277,41 @@ def test_write_imas_draw_re_reads_as_the_archive_on_both_readers(tmp_path):
     assert c1.provenance["off_sources"] == c0.provenance["off_sources"]
     for k in ("nbi", "rf", "other"):
         np.testing.assert_array_equal(c1.jB_fix_parts[k], c0.jB_fix_parts[k])
+
+
+def test_the_window_lives_in_code_parameters_and_keeps_the_templates():
+    """Owner recommendation (integration): the export window is recorded in
+    the schema-legal ``code.parameters`` string (JSON), never as a
+    non-schema key; a template's JSON parameters keep their keys, its other
+    text is kept verbatim; an export written with the old direct key still
+    re-reads."""
+    import json
+    from bouquet.io.imas import (IMAS_EXPORT_TEMPLATE_PARAMETERS_KEY,
+                                 IMAS_EXPORT_TIME_WINDOW_KEY,
+                                 _get_export_window, _set_export_window,
+                                 _slice_in_time)
+    t = [0.5, 1.0, 1.5]
+    dd = {"core_profiles": {"time": t, "profiles_1d": [
+              {"time": x, "grid": {"psi": [0.0, 1.0, 2.0]}} for x in t]},
+          "core_sources": {"time": t,
+                           "code": {"name": "m", "parameters": "<p>x</p>"},
+                           "source": [_src(2, "nbi", t, [1.0, 2.0, 3.0])]}}
+    dd["core_sources"]["source"][0]["code"] = {
+        "parameters": json.dumps({"model": "a"})}
+    _slice_in_time(dd, 1.0)
+    cs = dd["core_sources"]
+    assert IMAS_EXPORT_TIME_WINDOW_KEY not in cs
+    top = json.loads(cs["code"]["parameters"])
+    assert top[IMAS_EXPORT_TEMPLATE_PARAMETERS_KEY] == "<p>x</p>"
+    assert top[IMAS_EXPORT_TIME_WINDOW_KEY]["core_sources_time"] == 1.0
+    assert cs["code"]["name"] == "m"
+    s0 = cs["source"][0]
+    ent = json.loads(s0["code"]["parameters"])
+    assert ent["model"] == "a" and IMAS_EXPORT_TIME_WINDOW_KEY in ent
+    assert _get_export_window(s0) == ent[IMAS_EXPORT_TIME_WINDOW_KEY]
+    # an export from before the move (a direct key) is still honoured
+    old = {IMAS_EXPORT_TIME_WINDOW_KEY: {"window": 0.1}}
+    assert _get_export_window(old) == {"window": 0.1}
+    _set_export_window(old, {"window": 0.2})        # and moved when rewritten
+    assert IMAS_EXPORT_TIME_WINDOW_KEY not in old
+    assert _get_export_window(old) == {"window": 0.2}

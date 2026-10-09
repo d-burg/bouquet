@@ -134,15 +134,19 @@ or on the IDS time when homogeneous), `vacuum_toroidal_field.b0`,
 outlines and radial profiles are never cut.  `core_sources` is cut with the
 reader's own time rule: each entry keeps its own slices bracketing the slice
 time and its first and last, and the windows of that read (the core_sources
-slice window, each entry's own and core_profiles windows) are written under
-`bouquet_time_window` (`bouquet.io.imas.IMAS_EXPORT_TIME_WINDOW_KEY`) on
-`core_sources` and on each entry.  The reader honours a block only when its
+slice window, each entry's own and core_profiles windows) are recorded under
+the key `bouquet_time_window` (`bouquet.io.imas.IMAS_EXPORT_TIME_WINDOW_KEY`)
+inside the schema-legal `code.parameters` string (a JSON object) of
+`core_sources` and of each entry; a template's own `code.parameters` keeps
+its JSON keys, and any other text it held is kept under
+`template_parameters`.  The reader honours a block only when its
 times are the slice it reads, so an export re-reads with the same
 `source_time_match` record and the same driven currents as the source it
 came from; without it the windows of a one-time file would collapse to the
 10 µs single-time floor (an entry matched at an offset own time would re-read
-as off, an offset `core_sources` base as a refusal).  Strict IMAS validators
-that reject unknown keys will flag `bouquet_time_window`.
+as off, an offset `core_sources` base as a refusal).  No non-schema key is
+written, so strict IMAS validators accept the export; the reader also honours
+the block as a direct key of the node (exports written before 2026-10-09).
 
 Current-convention conversions are in `bouquet.physics`
 ([current-conventions.md](current-conventions.md)):

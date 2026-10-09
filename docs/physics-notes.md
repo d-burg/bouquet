@@ -317,10 +317,12 @@ kinetics, unified engine, OFT main). The full default (R_geo in ε **and** in
   I_BS −1.0 %).
 
 On real H-mode pedestals (strongly shaped surfaces) the change from `⟨a⟩/⟨R⟩`
-to `(R_max − R_min)/(2⟨R⟩)` measured about −4 to −5 % in I_BS and about
-−20 % in pedestal j_BS at ψ_N ≈ 0.98 (−8 to −11 % at 0.95), with l_i(3) about
-+0.5 % and q0 about +0.8 %; the default moves further than that by the
-`R_geo` steps above (not yet measured on real data). How far j_BS falls
+to `(R_max − R_min)/(2⟨R⟩)` measured I_BS −4 to −10 % and pedestal j_BS −16
+to −32 % at ψ_N ≈ 0.98 across eleven slices (the lower end on slices whose
+kinetics come from the dd, the upper end on IDA-kinetics slices with steeper
+pedestals; −8 to −11 % at 0.95 on the former), with l_i(3) +0.5 to +1.0 % and
+q0 about +0.8 %; the default moves further than that by the `R_geo` steps
+above (not yet measured on real data). How far j_BS falls
 depends on how strongly shaped the surfaces are and how collisional the
 pedestal is: ν\* rises most in the pedestal, where the definitions differ
 most.

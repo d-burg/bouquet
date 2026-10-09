@@ -149,9 +149,11 @@ restores the index pairing.
   the ν\* R, ×1.07–1.08 there, the rest). Against `"a_over_R"`: j_BS −16 % at
   0.98, −31 % at 0.99, peak −4.3 %, I_BS −1.6 % (ε alone −12 % / −23 % /
   −1.0 %). On real H-mode pedestals the `⟨a⟩/⟨R⟩` → `(R_max − R_min)/(2⟨R⟩)`
-  step alone measured I_BS about −4 to −5 % and pedestal j_BS about −20 % at
-  ψ_N ≈ 0.98 (−8 to −11 % at 0.95), l_i(3) about +0.5 %, q0 about +0.8 %; the
-  default moves further by the `R_geo` steps (not yet measured on real data).
+  step alone measured I_BS −4 to −10 % and pedestal j_BS −16 to −32 % at
+  ψ_N ≈ 0.98 across eleven slices (dd-kinetics slices at the lower end,
+  IDA-kinetics slices with steeper pedestals at the upper end), l_i(3) +0.5
+  to +1.0 %, q0 about +0.8 %; the default moves further by the `R_geo` steps
+  (not yet measured on real data).
   The reason is the shaping: `⟨a⟩` includes the vertical extent of an
   elongated surface, and the dl/B_p-weighted `⟨R⟩` is pulled toward the
   X-point near the separatrix (−7 % below `R_geo` at ψ_N 0.99), so both

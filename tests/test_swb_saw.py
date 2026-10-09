@@ -76,6 +76,7 @@ class TestConfig:
                 generation=GenerationConfig(swb_saw_q=1.025,
                                             reconstruction_engine="legacy")),
             _resolve_engine_defaults=lambda: None,
+            _revalidate_generation_settings=lambda: None,
             _check_jbs_loop_workflow=lambda gc: None,
             _check_structured_mse_reachable=lambda cfg: None)
         with pytest.raises(ValueError, match="swb_saw_q"):

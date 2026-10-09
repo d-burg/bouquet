@@ -354,13 +354,6 @@ def replay(tmp_path_factory):
     base["l_i_target"] = float(
         mygs.get_stats(lcfs_pad=pad, li_normalization="iter")["l_i"])
 
-    # The golden predates p'G going with the bootstrap: its draws' j_inductive
-    # carries it.  Move it over (the baseline's p'G: this reconstruction's
-    # j_BS minus the golden's).
-    _pr = _legacy_golden()["baseline"]["profiles"]
-    p_g = np.asarray(gen_model["baseline_j_BS"], dtype=float) - np.interp(
-        psi_N, np.asarray(_pr["psi_N"], float), np.asarray(_pr["j_BS"], float))
-
     z = np.zeros_like(psi_pf)
     zj = np.zeros_like(psi_N)
     with open(_GEQ, 'rb') as fh:
@@ -431,7 +424,7 @@ def replay(tmp_path_factory):
                  else "generate()'s baseline"))
         results["mode3"][i] = _run(
             work + f"/m3_{i}", d["ne"], d["te"], d["ni"], d["ti"],
-            d["jphi"], d["jind"] - p_g, d["li3"], pin_jphi=False,
+            d["jphi"], d["jind"], d["li3"], pin_jphi=False,
             Zeff_run=(_zeff_eq(d["zeff"]) if d["zeff"] is not None
                       else np.asarray(_gen_kw["Zeff"], dtype=float)),
             jBS_scale_range=(_s, _s), **gen_model)

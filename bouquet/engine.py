@@ -126,8 +126,11 @@ def mse_scheme_text(scheme) -> str:
 ENGINE_EDGE_TAPER_DEFAULT = {"taper_edge_jBS": False, "taper_edge_psi0": 0.999,
                              "taper_edge_shape": 2}
 #: The ``bootstrap_kwargs`` keys the engine honours (the edge taper; and
-#: ``use_sauter_eps`` at True, which evaluate_jBS always is).  Any other key
-#: configures solve_with_bootstrap, which the engine never runs: refused.
+#: ``use_sauter_eps`` at True: the geometric ``eps = (R_max - R_min)/(2<R>)``
+#: is evaluate_jBS's default since ``evaluate_jBS/4`` (owner decision E4),
+#: so True asks for what the engine already does; ``False`` -- SWB's
+#: ``<a>/<R>`` -- is refused, see :func:`validate_engine_settings`).  Any other
+#: key configures solve_with_bootstrap, which the engine never runs: refused.
 ENGINE_BOOTSTRAP_KWARGS = frozenset(ENGINE_EDGE_TAPER_DEFAULT) | {
     "use_sauter_eps"}
 
@@ -353,8 +356,11 @@ def validate_engine_settings(gc) -> None:
     if not bool(bk.get("use_sauter_eps", True)):
         raise ValueError(
             "generation.bootstrap_kwargs['use_sauter_eps']=False: the "
-            "engine's Redl evaluation (physics.evaluate_jBS) always takes "
-            "eps from sauter_fc")
+            "engine's Redl evaluation (physics.evaluate_jBS) uses the "
+            "geometric eps = (R_max - R_min)/(2<R>) (evaluate_jBS/4, owner "
+            "decision E4); the <a>/<R> of use_sauter_eps=False is "
+            "physics.evaluate_jBS(..., eps_definition='a_over_R'), which no "
+            "engine setting selects")
     if engine_edge_taper(gc)["on"] and not resolve_edge_pressure(
             gc).edge_pprime_pin:
         raise ValueError(
@@ -494,6 +500,14 @@ ENGINE_UNREAD_LEGACY_FIELDS = {
                             "engine_draw_solve_maxits and never rescued",
     "draw_solve_loose_tol": "nothing: the engine draws are capped by "
                             "engine_draw_solve_maxits and never rescued",
+    # review PR60 B8: the opt-in for solve_with_bootstrap's convergence keys
+    # (djBS_tol, saw_relax), which the engine refuses with every other SWB
+    # key -- the flag itself unlocks nothing under the engine
+    "bootstrap_convergence_override": "nothing: the engine never runs "
+                                      "solve_with_bootstrap (its bootstrap "
+                                      "is physics.evaluate_jBS), and the "
+                                      "convergence keys the flag admits are "
+                                      "refused under the engine",
 }
 
 

@@ -42,7 +42,9 @@ _SET = dict(
     isolate_edge_jBS=False, perturb_jind_in_anchor=True,
     # #75 review (owner decision D5): the legacy draws' cap and its rescue
     draw_solve_maxits=40, draw_solve_retry_urf=(0.1,),
-    draw_solve_loose_tol=2e-5)
+    draw_solve_loose_tol=2e-5,
+    # review PR60 B8: the SWB convergence-key opt-in
+    bootstrap_convergence_override=True)
 
 
 def test_every_unread_field_has_a_case():

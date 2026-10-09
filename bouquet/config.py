@@ -2815,7 +2815,7 @@ def _stored_config_compat(gend: dict) -> None:
 
     (c) A stored ``"unified"`` config carrying a non-default value of ANY
     legacy-path field the engine never reads
-    (:data:`bouquet.engine.ENGINE_UNREAD_LEGACY_FIELDS`, 21 fields; or
+    (:data:`bouquet.engine.ENGINE_UNREAD_LEGACY_FIELDS`; or
     ``homotopy_passes`` with ``engine_draw_homotopy=False``) is loaded at
     the default, with a warning naming the field: the engine ignored the
     value, so the default reproduces what the stored config actually ran.

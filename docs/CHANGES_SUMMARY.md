@@ -1,5 +1,31 @@
 # Bouquet — change summaries
 
+## Unreleased — PR #56 (IDA/FUSE ion coupling) and PR #60 (bootstrap options), integrated
+
+### Kinetic draws: `kinetic_sampler/2` (PR #56)
+
+- **One sampler for every path** (`bouquet.kinetic_sampler`, version
+  `KINETIC_SAMPLER_VERSION = "kinetic_sampler/2 ..."`). A main-ion density
+  derived from a Z_eff draw is now an **increment on the baseline**,
+  `ni = bl.ni + ni_of(ne_d, Zeff_d) - ni_of(ne, Zeff)`, instead of the
+  absolute `ni_of(ne_d, Zeff_d)`.
+- **Why:** the absolute form does not return `bl.ni` at sigma = 0 whenever the
+  baseline is not single-impurity quasineutral at the median `Z_imp`
+  (multi-species or beam p-files, IDA) -- a sigma = 0 violation of the legacy
+  path (pinned by
+  `tests/test_kinetic_sampler.py::test_sigma0_returns_the_baseline_ni_on_a_non_quasineutral_baseline`).
+- **What moves:** legacy draws with the Z_eff channel on (the default
+  channel) differ seed-for-seed from `/1`; each profile is now
+  `base + (sample - mean) b0` (ULP-level differences on ne, Te, Ti). Engine
+  draws are unchanged except where one of the clips below binds.
+- **Clips, unchanged in value, now counted per draw** (`KineticDraw.clips`,
+  `KineticDraw.record()`; a log line names every clip that fires):
+  `zeff_floor_1` (Z_eff lifted to 1 where `zeff_bounds` alone allowed less),
+  `zeff_window_lo/hi`, the same three for a passive Z_eff aux draw,
+  `ni_floor_0` (thermal n_i floored at 0) and `ni_ceiling` (n_i capped at
+  `ne - z_fast`). The assumptions and their literature basis:
+  [physics-notes.md, "Kinetic assumptions"](physics-notes.md#kinetic-assumptions-z_eff-n_i-and-the-clips-pr-56).
+
 ## Unreleased — the unified engine becomes the default; one current conversion (owner decisions, 2026-10-06)
 
 **Both change results by default.**

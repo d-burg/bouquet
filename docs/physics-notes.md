@@ -19,6 +19,7 @@ covers the guarantees a user should know about and the knobs that change them.
 - [Hybrid kinetics on the IMAS path](#hybrid-kinetics-on-the-imas-path)
 - [Current and field orientation](#current-and-field-orientation)
 - [Z_eff-primary density scheme](#z_eff-primary-density-scheme)
+- [Kinetic assumptions: Z_eff, n_i and the clips (PR #56)](#kinetic-assumptions-z_eff-n_i-and-the-clips-pr-56)
 - [Corrective j_phi iteration](#corrective-j_phi-iteration)
 - [The structured closure and its l_i constraint](#the-structured-closure-and-its-l_i-constraint)
 - [Core-pressure hollowness record](#core-pressure-hollowness-record)
@@ -968,6 +969,80 @@ carbon 6.0 by default — set it for your device). n_i, n_z, and Z_eff therefore
 stay mutually consistent in every sample, which a naive independent-perturbation
 scheme cannot guarantee. One Z_eff value per draw. See
 [architecture.md §4](../architecture.md#4-quasi-neutrality-and-impurity-handling).
+
+## Kinetic assumptions: Z_eff, n_i and the clips (PR #56)
+
+These are the defaults the IDA / FUSE ion coupling (PR #56) introduced. The
+owner accepted them as the standard approach on the condition that each is
+stated, justified and cited here, and that each is visible in the records
+(the stamps named below). None of them is a tunable tolerance.
+
+**1. The Z_eff the bootstrap sees counts every ion's charge, fast ions
+included, when the source's Z_eff does (FUSE beam shots).**
+Neoclassical theory enters Z_eff through the electron-ion collision frequency
+and the Sauter/Redl coefficients, with Z_eff = Σ_j n_j Z_j² / n_e summed over
+the ion species the electrons collide with (Sauter, Angioni & Lin-Liu, Phys.
+Plasmas 6, 2834 (1999); Redl et al., Phys. Plasmas 28, 022502 (2021)). Electrons scatter off fast ions exactly as off thermal
+ones (the e-i collision operator depends on the target's charge and density,
+not on its distribution while v_fast ≪ v_the; Helander & Sigmar, *Collisional
+Transport in Magnetized Plasmas*, CUP 2002), so a beam population
+belongs in the numerator. IMAS.jl's Z_eff expression for
+`core_profiles.profiles_1d.zeff` sums over all ions, fast ones included, and
+FUSE computes its own bootstrap from the stored Z_eff (Meneghini et al., FUSE,
+arXiv:2409.05894, 2024); a dd may however carry a Z_eff stored before the beam
+was added. bouquet therefore classifies
+a dd's stored Z_eff against both numerators on the core (`io.imas._dd_zeff`)
+and passes `Zeff_th + Σ Z_s² n_s^fast / n_e` to the bootstrap when the dd's
+Z_eff includes the fast ions (with no stored Z_eff and a beam present, always).
+*Caveat:* the ion-ion terms of the theory assume Maxwellian ions; the fast-ion
+contribution to the ion collisionality is an approximation, small where
+n_fast ≪ n_i. *Stamp:* `Baseline.zeff_includes_fast`.
+
+**2. IDA Z_eff and n_i: the mean of the bremsstrahlung (VB) and carbon-CER
+routes (`ni_source="all"`), each clamped to the single-impurity window first.**
+The two routes measure the same quantity independently: visible
+bremsstrahlung gives Z_eff from the continuum, CER gives n_C and so
+Z_eff = 1 + Z(Z-1) n_C/n_e under single-impurity quasineutrality (Wesson,
+*Tokamaks*, 4th ed., OUP 2011; the agreement of the two at DIII-D when
+C6+ dominates: Callahan et al., JINST 14 C10002, 2019). IDA itself fits both
+within one Bayesian model (Fischer et al., Fusion Sci. Technol. 58, 675,
+2010). The combination is an **equal-weight** mean, not the
+inverse-variance (minimum-variance) one. Justification: the file's VB
+`Zeff_err` (8-9 % core, 44-130 % SOL on the demo files, `io/ida.py`) is
+dominated by calibration and mantle-subtraction systematics rather than
+independent random error, so inverse-variance weights would mostly track
+those systematics; equal weights treat the two independent techniques
+symmetrically. (Inverse-variance weighting is the natural refinement if the
+VB σ is ever shown to be statistical.) Where the routes disagree beyond their combined σ, the excess
+is added to the envelope as a one-sided between-route variance,
+`max(Δ² - σ_Δ², 0)/4` -- the random-effects construction of DerSimonian &
+Laird (Control. Clin. Trials 7, 177, 1986) for two estimates of an equal-weight
+mean. Each route is clamped to `[1, Z]` before the mean (`Z_eff,CER ≤ Z ⇔
+n_C ≤ n_e/Z ⇔ n_i ≥ 0`), so `n_i(mean Z_eff)` equals the mean of the per-route
+n_i exactly. When a route has no usable envelope (old vintages without
+`Zeff_err`, or no `n_12C6_err`) the other route alone sets the value.
+*Stamp:* `IDAProfiles.zeff_provenance` (convention, rung, weights, window,
+number of nodes each route was clamped at).
+
+**3. The clips on a drawn Z_eff and n_i (`bouquet.kinetic_sampler`).**
+
+| Clip | Bound | Physical basis | Counter (`KineticDraw.clips`) |
+|---|---|---|---|
+| Z_eff window | `physics.zeff_bounds`: n_i ≥ 0 and n_z ≥ 0 | quasineutrality n_e = n_i + Z n_z + z_fast with non-negative densities | `zeff_window_lo`, `zeff_window_hi` |
+| Z_eff floor | Z_eff ≥ 1 | for a plasma of ions with Z_j ≥ 1 whose numerator and denominator count the same ions, Σ n_j Z_j² ≥ Σ n_j Z_j = n_e | `zeff_floor_1` |
+| thermal n_i floor | n_i ≥ 0 | a density is non-negative | `ni_floor_0` |
+| n_i ceiling | n_i ≤ n_e - z_fast | quasineutrality with non-negative impurity density: n_e = n_i + Z n_z + z_fast | `ni_ceiling` |
+
+*Caveat on the floor at 1:* with the **thermal-numerator** Z_eff convention
+and a fast population, Z_eff,th = (n_i + Z² n_z)/n_e can legitimately be
+below 1 (the fast ions carry part of n_e but none of the numerator), and
+`zeff_bounds` allows it; the floor then lifts such a draw (biasing Z_eff up and
+n_i down). This is the case `zeff_floor_1` counts separately from the
+physical window, so its frequency can be measured on a real run before the
+floor is revisited. Every clip changes values exactly as before; only the
+counting is new. Each draw's `record()` carries the sampler version
+`kinetic_sampler/2` and the counters, and a log line names every clip that
+fires.
 
 ## Corrective j_phi iteration
 

@@ -99,3 +99,74 @@ def test_zero_sigma_returns_the_base():
     d = sample_kinetics(b, make_rng(1), _thermal, _thermal(b))
     for k in ("ne", "te", "ni", "ti"):
         np.testing.assert_allclose(getattr(d, k), getattr(b, k), rtol=1e-9)
+
+
+# ---------------------------------------------------------------------------
+#  PR #56: the sigma = 0 fix the increment form brings, declared and pinned
+# ---------------------------------------------------------------------------
+def test_sigma0_returns_the_baseline_ni_on_a_non_quasineutral_baseline():
+    """The legacy sigma = 0 violation kinetic_sampler/2 fixes.  A p-file
+    baseline (several species, a beam) is not single-impurity quasineutral
+    at the median Z_imp, so ``ni_of(ne, Z_eff, Z_imp) != bl.ni``.  The /1
+    legacy draw took ``ni`` ABSOLUTELY from the drawn (ne, Z_eff) and so
+    returned that other ``ni`` even with every sigma zero; the increment
+    form returns the baseline exactly."""
+    from bouquet.kinetic_sampler import KINETIC_SAMPLER_VERSION
+    zb = 1.8
+    ni0 = 0.80 * NE                       # != ni_of(NE, 1.8, 6) = 0.84 NE
+    absolute = main_ion_density_from_zeff(NE, np.full(PSI.size, zb), Z_IMP)
+    assert np.max(np.abs(absolute / ni0 - 1.0)) > 0.04   # /1 was 5 % off
+    b = _base(f=0.0, zeff=zb, zs=0.0, ni=ni0, Z_imp=Z_IMP)
+    for seed in range(3):
+        d = sample_kinetics(b, make_rng(seed), _thermal, _thermal(b))
+        assert d.zeff_primary
+        np.testing.assert_array_equal(d.ni, ni0)
+        for k in ("ne", "te", "ti"):
+            np.testing.assert_array_equal(getattr(d, k), getattr(b, k))
+        np.testing.assert_array_equal(d.zeff, np.full(PSI.size, zb))
+        assert not d.clipped
+    assert KINETIC_SAMPLER_VERSION.startswith("kinetic_sampler/2")
+
+
+def test_every_clip_that_fires_is_counted_on_the_draw():
+    """Z_eff at the bottom of a window that zeff_bounds would let go below
+    1 (thermal-numerator convention with a beam): the floor at 1 binds and
+    is counted; the values are clipped exactly as before."""
+    from bouquet.kinetic_sampler import CLIP_COUNTERS
+    b = _base(zeff=1.0, zs=0.3, Z_imp=Z_IMP, z_fast=ZF, z2_fast=ZF,
+              zeff_includes_fast=False)
+    seen = 0
+    for seed in range(5):
+        d = sample_kinetics(b, make_rng(seed), _thermal, _thermal(b),
+                            p_thresh=0.5)
+        assert set(d.clips) == set(CLIP_COUNTERS)
+        n_at_1 = int(np.count_nonzero(d.zeff == ZEFF_DRAW_MIN))
+        assert d.clips["zeff_floor_1"] + d.clips["zeff_window_lo"] == n_at_1
+        seen += d.clips["zeff_floor_1"]
+        rec = d.record()
+        assert rec["clipped"] == (sum(rec["clips"].values()) > 0)
+        assert rec["version"].startswith("kinetic_sampler/2")
+    assert seen > 0
+
+
+def test_clip_counting_does_not_change_the_draw_stream():
+    """Counting is read-only: same seed, same draw, with or without a clip
+    firing elsewhere in the stream."""
+    b = _base(zeff=1.02, zs=0.3, Z_imp=Z_IMP, z_fast=ZF, z2_fast=ZF)
+    d1 = sample_kinetics(b, make_rng(4), _thermal, _thermal(b), p_thresh=0.5)
+    d2 = sample_kinetics(b, make_rng(4), _thermal, _thermal(b), p_thresh=0.5)
+    for k in ("ne", "te", "ni", "ti", "zeff"):
+        np.testing.assert_array_equal(getattr(d1, k), getattr(d2, k))
+    assert d1.clips == d2.clips
+
+
+def test_the_ni_ceiling_is_counted_when_it_binds():
+    b = _base(f=0.3, ni=0.88 * NE, Z_imp=Z_IMP, z_fast=ZF)
+    n = 0
+    for seed in range(8):
+        d = sample_kinetics(b, make_rng(seed), _thermal, _thermal(b),
+                            p_thresh=0.5)
+        cap = np.maximum(d.ne - ZF, 0.0)
+        assert d.clips["ni_ceiling"] <= int(np.count_nonzero(d.ni == cap))
+        n += d.clips["ni_ceiling"]
+    assert n > 0

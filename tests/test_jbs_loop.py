@@ -704,7 +704,7 @@ class _MockEq:
                           (self.B0 ** 2) * (1 + eps ** 2)])
         if self.legacy:
             rav = np.vstack([rav["<R>"], rav["<1/R>"], rav["<a>"]])
-        return psi, fc, rav, modb
+        return (psi, fc, rav, modb) + ((r / R,) if kw.get("return_eps") else ())
 
     def get_q(self, psi=None, **kw):
         self.calls.append(("get_q", np.array(psi)))
@@ -886,7 +886,7 @@ def _ph_setup(monkeypatch, kind):
     Jstar = _shape(x)
     calls = {"corr": [], "renorm": 0}
     monkeypatch.setattr(L, "residual_weights",
-                        lambda eq, psi_N, psi_pad=1e-3: (np.ones_like(x), x,
+                        lambda eq, psi_N, psi_pad=1e-3, coord="psi_n": (np.ones_like(x), x,
                                                          "test"))
 
     def _renorm(mygs, psi_N, target, Ip, pad, label=""):
@@ -966,8 +966,11 @@ def test_the_post_homotopy_ceiling_is_not_read_with_the_loop_off():
     g = GenerationConfig(jbs_self_consistent=False)
     assert jbs_settings(g, draw=True)["enabled"] is False
     src = inspect.getsource(Bouquet.generate)
-    assert re.search(r'jbs_loop=\(_jbs_draw if _jbs_draw\["enabled"\] '
-                     r'else None\)', src)
+    assert re.search(r'jbs_loop=_m\.draw_jbs_loop\(_jbs_draw if '
+                     r'_jbs_draw\["enabled"\]\s+else None\)', src)
+    # the draw method hands it on (swb: never the loop)
+    from bouquet.draw_methods import DrawMethod
+    assert DrawMethod().draw_jbs_loop(None) is None
     gen = inspect.getsource(TI.generate_bouquet)
     calls = [m.start() for m in re.finditer(r"_post_homotopy_jbs\(", gen)]
     assert len(calls) == 1

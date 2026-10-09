@@ -133,7 +133,7 @@ def test_recon_and_draw_kin_to_eq_agree_on_the_same_inputs():
     recon_k2e = _materialize_nested(
         _baseline._resolve_reconstruction, "to_eq",
         dict(np=np, pchip_interp=pchip_interp,
-             psi_N_kin=psi_kin, psi_N=psi_eq),
+             x_kin=psi_kin, x_run=psi_eq),
     )
 
     # A smooth core profile, a pedestal-like profile (where a linear regrid

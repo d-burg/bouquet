@@ -160,7 +160,7 @@ class ToyGS:
 
 
 def _toy_redl(eq, psi_N, ne, te, ni, ti, Zeff, psi_pad=1e-3,
-              isolate_edge=False, smooth_axis=True):
+              isolate_edge=False, smooth_axis=True, coord="psi_n"):
     """Bootstrap that depends on the kinetics AND on the equilibrium."""
     kin = (np.asarray(ne, float) * np.asarray(te, float)) / (
         np.asarray(ne, float)[0] * np.asarray(te, float)[0])
@@ -240,7 +240,7 @@ def toy(monkeypatch):
         monkeypatch.setattr(mod, "eq_jphi_profile", prof)
         monkeypatch.setattr(mod, "Ip_fsa_weights", wts)
     monkeypatch.setattr(L, "residual_weights",
-                        lambda eq, psi_N, psi_pad=1e-3: (_W.copy(), _X,
+                        lambda eq, psi_N, psi_pad=1e-3, coord="psi_n": (_W.copy(), _X,
                                                          "toy"))
     monkeypatch.setattr(P, "evaluate_jBS", _toy_redl)
     monkeypatch.delenv("BOUQUET_R2_IP_MODE", raising=False)

@@ -171,6 +171,11 @@ def test_generate_bouquet_threads_the_guard_through_the_draw_loop():
 def test_bouquet_generate_enters_the_guard_with_the_config():
     from bouquet.run import Bouquet
     src = inspect.getsource(Bouquet.generate)
-    assert "DrawSolveGuard(self.mygs, gc.draw_solve_maxits)" in src
+    # the draw method's cap: legacy the config's, swb a higher one, engine none
+    assert "_m.solve_maxits(gc.draw_solve_maxits)" in src
+    from bouquet.draw_methods import DrawMethod
+    from bouquet.swb_draws import SWB_DRAW_MAXITS, SwbDraws
+    assert DrawMethod().solve_maxits(50) == 50
+    assert SwbDraws(None, [1.0], [0.0]).solve_maxits(None) == SWB_DRAW_MAXITS
     assert "solve_guard=_solve_guard" in src
     assert "print(_solve_guard.summary())" in src

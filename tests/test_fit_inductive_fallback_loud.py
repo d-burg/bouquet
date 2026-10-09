@@ -30,7 +30,7 @@ def _profiles():
     return j_ind + j_BS, j_BS
 
 
-def _proxy(mygs, j, psi_pad):
+def _proxy(mygs, j, psi_pad, x=None, coord="psi_n"):
     """Peakedness: axis value over the flux-grid mean (monotone in the
     inductive amplitude when the bootstrap is edge-peaked)."""
     j = np.asarray(j, dtype=float)
@@ -94,9 +94,9 @@ def test_an_unbracketed_target_falls_back_to_one_loudly(monkeypatch,
 
 def test_a_non_finite_residual_is_named_as_such(monkeypatch):
     new, log = _run(TI.fit_inductive_profile, 1.0, False, monkeypatch,
-                    proxy=lambda m, j, p: float("nan"))
+                    proxy=lambda m, j, p, *a: float("nan"))
     old, _ = _run(PRE.fit_inductive_profile, 1.0, False, monkeypatch,
-                  proxy=lambda m, j, p: float("nan"))
+                  proxy=lambda m, j, p, *a: float("nan"))
     _assert_bit_identical(new, old)
     assert new["ind_scale"] == 1.0 and new["ind_scale_fallback"] is True
     assert "non-finite" in new["ind_scale_fallback_record"]["reason"]

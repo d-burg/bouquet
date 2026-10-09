@@ -117,7 +117,7 @@ def test_every_archived_draw_and_the_baseline_carry_p_scale(
         jBS_scale_range=(0.99, 1.01), coil_drift=0.01,
         homotopy_passes=[(0.05, 0.1), (0.01, 0.01)], seed=12345,
         capture_live_eq=False, store_achieved_jphi=True,
-        jbs_loop=G.loop_settings, rejection_log=[], engine_draw=G,
+        jbs_loop=G.loop_settings, rejection_log=[], draw_method=G,
         coil_filter="legacy", delivered_state=ds)
     assert len(diags) == 2
     # the baseline's: from its reconstruction's record

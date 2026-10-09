@@ -43,7 +43,7 @@ def _write_direct(path, nr=32):
         for k, v in [("n_e", ne), ("T_e", te), ("T_12C6", ti), ("Zeff", zeff)]:
             f[k] = np.stack([v, v])                       # (n_time, n_radial)
         for k, v in [("n_e_err", 0.05 * ne), ("T_e_err", 0.04 * te),
-                     ("T_12C6_err", 0.06 * ti)]:
+                     ("T_12C6_err", 0.06 * ti), ("Zeff_err", 0.10 * zeff)]:
             f[k] = np.stack([v, v])
         cer = _cer_values(psi)
         for k, v in cer.items():
@@ -158,3 +158,134 @@ class TestReadCER:
             sigma_omega_tor=cer.sigma_omega_tor, sigma_v_pol=cer.sigma_v_pol)
         assert E_r.shape == cer.psi_N.shape
         assert np.all(np.isfinite(E_r)) and np.any(info["sigma"] > 0)
+
+
+def _write_consistent(path, nr=64, nc_scale=1.0, seed=0):
+    """Direct-layout file whose two ni routes agree exactly at ``nc_scale=1``.
+
+    Zeff is built from the carbon density by single-impurity quasineutrality,
+    so any tension the reader reports is the injected ``nc_scale`` offset plus
+    the statistical noise added here.
+    """
+    Z, rng = 6.0, np.random.default_rng(seed)
+    psi = np.linspace(0, 1.2, nr)
+    ne = 5e19 * (1 - 0.8 * (psi / 1.2) ** 2)
+    nc = 0.01 * ne                                  # 1% carbon
+    zeff = 1.0 + Z * (Z - 1.0) * nc / ne            # consistent with nc
+    te = 3000.0 * (1 - 0.9 * (psi / 1.2) ** 2) + 50.0
+    s_ne, s_zeff, s_nc = 0.05 * ne, 0.03 * zeff, 0.10 * nc
+    with h5py.File(path, "w") as f:
+        f["time"] = np.array([3000.0])
+        f["psi_n"] = psi
+        for k, v in [("n_e", ne + s_ne * rng.standard_normal(nr)), ("T_e", te),
+                     ("T_12C6", 0.9 * te),
+                     ("Zeff", zeff + s_zeff * rng.standard_normal(nr)),
+                     ("n_12C6", nc * nc_scale + s_nc * rng.standard_normal(nr))]:
+            f[k] = np.asarray(v)[None, :]
+        for k, v in [("n_e_err", s_ne), ("T_e_err", 0.04 * te),
+                     ("T_12C6_err", 0.06 * te), ("Zeff_err", s_zeff),
+                     ("n_12C6_err", s_nc)]:
+            f[k] = np.asarray(v)[None, :]
+
+
+def _plain_sigma_ni(path, Z=6.0):
+    """sigma_ni from the Jacobian terms alone, with no discrepancy systematic.
+
+    Recomputed from the file rather than from read_ida, so the tests below
+    compare the reader against an independent propagation.
+    """
+    with h5py.File(path, "r") as f:
+        ne, s_ne = f["n_e"][0], f["n_e_err"][0]
+        zeff, s_zeff = f["Zeff"][0], f["Zeff_err"][0]
+        s_nc = f["n_12C6_err"][0]
+    w = 0.5                                        # ni_source="all"
+    d_ne = w * (Z - np.clip(zeff, 1.0, Z)) / (Z - 1.0) + w
+    return np.sqrt((w * ne / (Z - 1.0) * s_zeff) ** 2
+                   + (w * Z * s_nc) ** 2 + (d_ne * s_ne) ** 2)
+
+
+class TestRouteDiscrepancy:
+    def test_agreeing_routes_are_not_inflated(self, tmp_path):
+        p = tmp_path / "ok.cdf"
+        _write_consistent(str(p))
+        ida = read_ida(str(p), time=3.0)
+        # chi ~ 1: the routes differ only by their own statistical errors
+        assert 0.4 < np.median(ida.ni_route_chi) < 1.6
+        assert 0.4 < np.median(ida.zeff_route_chi) < 1.6
+        plain = _plain_sigma_ni(str(p))
+        assert np.allclose(ida.sigma_ni, plain, rtol=0.05)
+        # max(., 0): never below the plain propagation (1-ulp slack: the two
+        # evaluate the same algebra in a different order)
+        assert np.all(ida.sigma_ni >= plain * (1.0 - 1e-12))
+
+    def test_disagreeing_routes_inflate_sigma(self, tmp_path):
+        p = tmp_path / "bad.cdf"
+        _write_consistent(str(p), nc_scale=2.5)      # CER route 2.5x off
+        ida = read_ida(str(p), time=3.0)
+        plain = _plain_sigma_ni(str(p))
+        assert np.median(ida.ni_route_chi) > 3.0
+        assert np.median(ida.zeff_route_chi) > 3.0
+        assert np.all(ida.sigma_ni >= plain)
+        assert np.median(ida.sigma_ni / plain) > 1.1
+
+    def test_single_route_has_no_discrepancy_term(self, tmp_path):
+        p = tmp_path / "bad.cdf"
+        _write_consistent(str(p), nc_scale=2.5)
+        for src in ("Zeff", "CER"):
+            ida = read_ida(str(p), time=3.0, ni_source=src)
+            assert ida.ni_route_chi is None
+            assert ida.zeff_route_chi is None
+            assert np.all(np.isfinite(ida.sigma_ni)) and np.all(ida.sigma_ni > 0)
+
+    def test_the_two_chis_are_measured_in_their_own_channels(self, tmp_path):
+        # Same disagreement, different Jacobians: ne cancels partly in ni and
+        # not at all in Z_eff, so the two tensions must not be one number.
+        p = tmp_path / "bad.cdf"
+        _write_consistent(str(p), nc_scale=2.5)
+        ida = read_ida(str(p), time=3.0)
+        assert not np.allclose(ida.ni_route_chi, ida.zeff_route_chi, rtol=1e-3)
+
+
+def test_all_route_clamps_each_route_before_the_mean(tmp_path):
+    # Zeff_CER > Z near the axis (nC > ne/Z): that route's ni floors at 0
+    # before the mean, as ida_fuse's ida_resolve does.
+    Z, nr = 6.0, 40
+    psi = np.linspace(0, 1.2, nr)
+    ne = 5e19 * (1 - 0.8 * (psi / 1.2) ** 2)
+    nc = ne / Z * np.where(psi < 0.2, 1.05, 0.02)
+    zeff = 1.5 + 0.0 * psi
+    te = 3000.0 * (1 - 0.9 * (psi / 1.2) ** 2) + 50.0
+    p = tmp_path / "clamp.cdf"
+    with h5py.File(p, "w") as f:
+        f["time"] = np.array([3000.0])
+        f["psi_n"] = psi
+        for k, v in [("n_e", ne), ("T_e", te), ("T_12C6", 0.9 * te),
+                     ("Zeff", zeff), ("n_12C6", nc)]:
+            f[k] = v[None, :]
+        for k, v in [("n_e_err", 0.05 * ne), ("T_e_err", 0.04 * te),
+                     ("T_12C6_err", 0.06 * te), ("Zeff_err", 0.1 * zeff),
+                     ("n_12C6_err", 0.1 * nc)]:
+            f[k] = v[None, :]
+    ida = read_ida(str(p), time=3.0, impurity_Z=Z)
+    assert ida.sigma_Zeff_source == "VB+CER"
+    expected = 0.5 * (ne * (Z - zeff) / (Z - 1) + np.maximum(ne - Z * nc, 0.0))
+    np.testing.assert_allclose(ida.ni, expected, rtol=1e-12)
+    assert np.all(ida.ni <= ne)
+
+
+@pytest.mark.parametrize("layout", ["direct", "ensemble"])
+def test_read_ida_omega_both_layouts(tmp_path, layout):
+    from bouquet.io.imas import _read_ida_omega
+    p = str(tmp_path / f"{layout}.cdf")
+    psi_N = np.linspace(0.0, 1.0, 17)
+    if layout == "direct":
+        _write_direct(p)
+        with h5py.File(p, "r") as f:
+            ipsi, om = f["psi_n"][:], f["omega_tor_12C6"][1]
+        t = 3.5
+    else:
+        _write_ensemble(p)
+        with h5py.File(p, "r") as f:
+            ipsi, om = f["psi_n"][0][0], f["omega_tor_12C6"][0].mean(axis=0)
+        t = 3.0
+    np.testing.assert_allclose(_read_ida_omega(p, t, psi_N), np.interp(psi_N, ipsi, om))

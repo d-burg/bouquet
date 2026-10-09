@@ -158,7 +158,9 @@ def test_every_helper_call_is_handed_the_functions_one_settings_object():
     bad = []
     for where, fn, ch in calls:
         i = HELPERS[fn]
-        ok = (len(ch.args) == i + 1 and not ch.keywords
+        # coord=: the run coordinate a Phi_N run tags the profile with
+        ok = (len(ch.args) == i + 1
+              and all(k.arg == "coord" for k in ch.keywords)
               and ast.unparse(ch.args[i]) in SETTINGS_NAMES)
         if not ok:
             bad.append((where, ast.unparse(ch)))
@@ -177,8 +179,9 @@ def test_the_settings_object_is_only_ever_the_resolved_configuration():
                 and len(v.args) == 1 and not v.keywords
                 and ast.unparse(v.args[0]) in RESOLVE_FROM):
             continue
-        # the engine draw context's own settings, on the engine branch only
-        if src == "_eng.ctx.edge" and where[1] == "generate_bouquet":
+        # the draw method's settings (the resolved ones, or the engine draw
+        # context's own: test_the_engine_branch_binding_is_gated_on_the_engine)
+        if src == "_m.edge(_edge)" and where[1] == "generate_bouquet":
             continue
         bad.append((where, ast.unparse(node)))
     assert not bad, bad
@@ -191,20 +194,18 @@ def test_the_settings_object_is_only_ever_the_resolved_configuration():
 
 
 def test_the_engine_branch_binding_is_gated_on_the_engine():
-    """``_edge = _eng.ctx.edge`` sits under ``if _eng is not None`` (so the
-    legacy path never executes it)."""
-    path = os.path.join(_PKG, "TokaMaker_interface.py")
-    with open(path) as fh:
-        tree = ast.parse(fh.read())
-    found = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.If):
-            continue
-        for st in node.body:
-            if (isinstance(st, ast.Assign)
-                    and ast.unparse(st) == "_edge = _eng.ctx.edge"):
-                found.append(ast.unparse(node.test))
-    assert found == ["_eng is not None"], found
+    """``_edge = _m.edge(_edge)``: the legacy and swb methods keep the resolved
+    settings; only the engine method returns its draw context's own."""
+    from types import SimpleNamespace
+    from bouquet.draw_methods import DrawMethod
+    from bouquet.engine_draws import GenerateEngineDraws
+    from bouquet.swb_draws import SwbDraws
+    edge = object()
+    assert DrawMethod().edge(edge) is edge
+    assert SwbDraws.edge is DrawMethod.edge
+    eng = GenerateEngineDraws.__new__(GenerateEngineDraws)
+    eng.ctx = SimpleNamespace(edge="ctx")
+    assert eng.edge(edge) == "ctx"
 
 
 def test_every_caller_passes_the_settings_on():

@@ -232,6 +232,7 @@ def _run_block(stub, capsys=None, edge="pre_change"):
     from bouquet.TokaMaker_interface import (_count_masked_anchor_failure,
                                              ANCHOR_MASKED_FAILURES)
     from bouquet.utils import _shape_from_boundary, pchip_derivative
+    from bouquet import coords
     from bouquet.edge_pressure import (PRE_CHANGE_EDGE_PRESSURE,
                                        resolve_edge_pressure, solver_pax,
                                        solver_pp_profile)
@@ -245,6 +246,7 @@ def _run_block(stub, capsys=None, edge="pre_change"):
         safe_trace_surf=lambda g, v: lcfs,
         _shape_from_boundary=_shape_from_boundary,
         pchip_derivative=pchip_derivative,
+        coords=coords, coord="psi_n",
         # the block builds its P' and axis target through the one helper
         # (bouquet.edge_pressure); at the pre-change settings it is the
         # inline expressions it replaced, bit for bit

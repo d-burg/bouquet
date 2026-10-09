@@ -55,6 +55,8 @@ from typing import Optional
 
 import numpy as np
 
+from .draw_methods import DrawMethod
+
 #: Version stamp of the engine draw (recorded with every draw).
 ENGINE_DRAW_VERSION = "unified-engine-draw/1"
 
@@ -239,7 +241,8 @@ class EngineDrawContext:
     :class:`EngineDrawRefused`."""
 
     def __init__(self, eng, res, *, loop, native, q0_row=False,
-                 label="engine draw", bootstrap_refresh=False):
+                 label="engine draw", bootstrap_refresh=False, Z_imp=None,
+                 zeff_includes_fast=False):
         from .engine import _lin, complete_geometry  # noqa: F401
         from .edge_pressure import pressure_gradient, resolve_edge_pressure
         from .utils import closure_sign_convention, structured_basis_eval
@@ -250,7 +253,10 @@ class EngineDrawContext:
         #: edge_pressure): every draw solve and report uses the same
         self.edge = resolve_edge_pressure(
             (getattr(eng, "s", None) or {}).get("edge_pressure"))
+        #: the run grid (psi_N, or Phi_N); integrals and interpolations use
+        #: each geometry's own psi_N (geom["psi_N"]), the basis this grid
         self.psi = np.asarray(eng.psi, dtype=float)
+        self.coord = str(getattr(getattr(eng, "b", None), "coord", "psi_n"))
         self.label = str(label)
         self.loop = dict(loop)
         #: engine_draw_bootstrap_refresh: restart the loop's bootstrap after
@@ -292,8 +298,9 @@ class EngineDrawContext:
         # ---- the pressure term's p' on G* for a draw's pressure (pass 1)
         psi_q = np.asarray(g["psi_q"], dtype=float)
         self._psi_q = psi_q
-        self.dPq_star = np.interp(psi_q, self.psi, pressure_gradient(
-            self.psi, np.asarray(self.c.pressure, dtype=float)))
+        _gp = np.asarray(g["psi_N"], dtype=float)
+        self.dPq_star = np.interp(psi_q, _gp, pressure_gradient(
+            _gp, np.asarray(self.c.pressure, dtype=float)))
         pp = np.asarray(g["pprime"], dtype=float)
         nn = float(self.dPq_star @ self.dPq_star)
         self.sigma_p = float(pp @ self.dPq_star) / nn if nn > 0.0 else 0.0
@@ -324,6 +331,10 @@ class EngineDrawContext:
         self.native = {k: np.asarray(v, dtype=float)
                        for k, v in nat.items() if v is not None}
         self.psi_kin = self.native["psi_N"]
+        #: the baseline's impurity charge and Z_eff convention (the sampler's
+        #: Z_eff window and ni derivation; bouquet.kinetic_sampler)
+        self.Z_imp = None if not Z_imp else float(Z_imp)
+        self.zeff_includes_fast = bool(zeff_includes_fast)
         self._kin_eq_native = {k: _pchip(self.psi_kin, self.native[k],
                                          self.psi)
                                for k in ("ne", "te", "ni", "ti")}
@@ -342,7 +353,7 @@ class EngineDrawContext:
                     "active q0 row (not requested, or the sawtooth gate "
                     "rejected it)")
             self.q0_target = float(st.q0_target)
-            self.row0 = float(np.interp(float(psi_q[0]), self.psi, J))
+            self.row0 = float(np.interp(float(psi_q[0]), _gp, J))
 
     # ---- composition -----------------------------------------------------
     def compose(self, geom, jB_ind, jB_bs):
@@ -365,8 +376,9 @@ class EngineDrawContext:
         ``p'`` on ``G*`` and ``d p / d psi_N``.  Exactly ``G*`` at zero
         perturbation."""
         from .edge_pressure import pressure_gradient
-        dPq = np.interp(self._psi_q, self.psi, pressure_gradient(
-            self.psi, np.asarray(pressure, dtype=float)))
+        _gp = np.asarray(self.geom["psi_N"], dtype=float)
+        dPq = np.interp(self._psi_q, _gp, pressure_gradient(
+            _gp, np.asarray(pressure, dtype=float)))
         g = dict(self.geom)
         g["pprime"] = np.asarray(self.geom["pprime"], dtype=float) \
             + self.sigma_p * (dPq - self.dPq_star)
@@ -488,125 +500,54 @@ def sample_draw_inputs(ctx, rng, unc, flux_integral, *, scale=1.0,
 def sample_kinetics(ctx, rng, unc, flux_integral, *, p_thresh=0.05,
                     max_pressure_iter=None):
     """The kinetic half of a draw (``jB_ind`` left at the reconstruction's):
+    :func:`bouquet.kinetic_sampler.sample_kinetics` -- the sampler every
+    solve path shares -- matched on the engine grid's thermal pressure
+    (``<.>`` the solver's flux integral), then put on the engine grid in
+    increment form (exactly the base at zero perturbation).
 
-    * ne, Te, (Zeff -> ni via quasineutrality | ni), Ti on the kinetic grid,
-      redrawn together until ``mean |<p>_th - <p>_th,draw| / <p>_th`` is
-      within *p_thresh* (a FRACTION), ``<.>`` the solver's flux integral;
-    * the auxiliary channels (``unc["aux_sigmas"]``) in their dict order.
-
-    Every drawn profile is formed as ``base + (sample - mean) * norm`` so a
-    zero sigma is exactly the base.  *unc*: ``sigma_ne, sigma_te,
-    sigma_ni, sigma_ti`` (kinetic grid), ``n_ls, t_ls``, optional
-    ``aux_sigmas, aux_baselines, aux_length_scales``."""
-    from .sampling import _draw_monotonic_perturbation, generate_perturbed_GPR
-    from .TokaMaker_interface import _MAX_PRESSURE_ITER
-    if max_pressure_iter is None:
-        max_pressure_iter = _MAX_PRESSURE_ITER
-    psi_kin, psi = ctx.psi_kin, ctx.psi
+    *unc*: ``sigma_ne, sigma_te, sigma_ni, sigma_ti`` (kinetic grid),
+    ``n_ls, t_ls``, optional ``aux_sigmas, aux_baselines,
+    aux_length_scales, ni_from_zeff, zeff_dne``."""
+    from .kinetic_sampler import KineticBase, sample_kinetics as _sample
     nat = ctx.native
-    ne, te, ni, ti = (nat[k] for k in ("ne", "te", "ni", "ti"))
-    z_fast = nat.get("z_fast")
-    s_ne, s_te, s_ni, s_ti = (np.asarray(unc[k], dtype=float) for k in
-                              ("sigma_ne", "sigma_te", "sigma_ni",
-                               "sigma_ti"))
-    n_ls, t_ls, j_ls = unc["n_ls"], unc["t_ls"], unc["j_ls"]
-    aux_sigmas = unc.get("aux_sigmas") or None
-    aux_baselines = unc.get("aux_baselines") or {}
-    aux_ls = unc.get("aux_length_scales") or {}
-
-    def _mono(base, sig, ls):
-        mn = base / base[0]
-        smp = _draw_monotonic_perturbation(psi_kin, mn, sig / base[0], ls,
-                                           rng=rng)
-        return base + (smp - mn) * base[0]
-
-    zeff_active = bool(aux_sigmas) and ("zeff" in aux_sigmas) \
-        and aux_baselines.get("zeff") is not None
-    Z_imp = None
-    if zeff_active:
-        from .physics import impurity_charge_with_fast_ions
-        Z_imp, _ = impurity_charge_with_fast_ions(
-            ne, ni, np.asarray(aux_baselines["zeff"], dtype=float),
-            np.zeros_like(ne) if z_fast is None else z_fast)
-
-    def _zclip(z, ne_):
-        if z_fast is None:
-            return np.clip(z, 1.0, Z_imp * (1.0 - 1e-9))
-        fth = np.clip((ne_ - np.asarray(z_fast, dtype=float))
-                      / np.clip(ne_, 1e10, None), 0.0, 1.0)
-        return np.clip(z, np.maximum(fth, 1e-9), Z_imp * fth * (1.0 - 1e-9))
-
+    base = KineticBase(
+        psi_kin=ctx.psi_kin, ne=nat["ne"], te=nat["te"], ni=nat["ni"],
+        ti=nat["ti"], sigma_ne=unc["sigma_ne"], sigma_te=unc["sigma_te"],
+        sigma_ni=unc["sigma_ni"], sigma_ti=unc["sigma_ti"],
+        n_ls=unc["n_ls"], t_ls=unc["t_ls"],
+        aux_sigmas=unc.get("aux_sigmas") or None,
+        aux_baselines=unc.get("aux_baselines") or None,
+        aux_length_scales=unc.get("aux_length_scales") or None,
+        Z_imp=ctx.Z_imp, z_fast=nat.get("z_fast"), z2_fast=nat.get("z2_fast"),
+        zeff_includes_fast=ctx.zeff_includes_fast,
+        ni_from_zeff=bool(unc.get("ni_from_zeff", True)),
+        zeff_dne=unc.get("zeff_dne"))
+    psi = ctx.psi
     inp = float(flux_integral(psi, ctx.pressure_thermal_base))
-    thr = float(p_thresh) * 100.0
-    p_err, n_iter = np.inf, 0
-    zeff_draw = None
-    while p_err > thr:
-        n_iter += 1
-        if n_iter > max_pressure_iter:
-            raise RuntimeError(
-                f"Pressure match not found within {max_pressure_iter} "
-                f"iterations (last error {p_err:.2f}% vs threshold "
-                f"{thr:.2f}%)")
-        ne_d = _mono(ne, s_ne, n_ls)
-        te_d = _mono(te, s_te, t_ls)
-        if zeff_active and Z_imp is not None:
-            from .physics import main_ion_density_from_zeff
-            zb = np.asarray(aux_baselines["zeff"], dtype=float)
-            zs = np.asarray(aux_sigmas["zeff"], dtype=float)
-            z0 = float(np.max(np.abs(zb))) or 1.0
-            zmn = zb / z0
-            smp = np.atleast_1d(np.asarray(np.squeeze(generate_perturbed_GPR(
-                psi_kin, zmn, zs / z0, length_scale=aux_ls.get("zeff", 0.4),
-                n_samples=1, rng=rng)), dtype=float))
-            zeff_draw = _zclip(zb + (smp - zmn) * z0, ne_d)
-            ni_d = ni + (main_ion_density_from_zeff(ne_d, zeff_draw, Z_imp,
-                                                    z_fast=z_fast)
-                         - main_ion_density_from_zeff(ne, _zclip(zb, ne),
-                                                      Z_imp, z_fast=z_fast))
-        else:
-            ni_d = _mono(ni, s_ni, n_ls)
-        ti_d = _mono(ti, s_ti, t_ls)
-        nat_d = dict(ne=ne_d, te=te_d, ni=ni_d, ti=ti_d)
-        kin = ctx.eq_kinetics(nat_d)
-        _p, th = ctx.pressures(kin)
-        tmp = float(flux_integral(psi, th))
-        p_err = float(np.mean(np.abs(inp - tmp) / inp) * 100.0)
-    # ---- the auxiliary channels (the switchboard), in dict order
-    aux_out = {}
-    if aux_sigmas:
-        for name, es in aux_sigmas.items():
-            if name == "zeff" and zeff_draw is not None:
-                continue
-            eb = aux_baselines.get(name)
-            if eb is None:
-                continue
-            eb = np.asarray(eb, dtype=float)
-            es = np.asarray(es, dtype=float)
-            e0 = float(np.max(np.abs(eb)))
-            if not (e0 > 0):
-                e0 = 1.0
-            emn = eb / e0
-            smp = np.squeeze(generate_perturbed_GPR(
-                psi_kin, emn, es / e0, length_scale=aux_ls.get(name, 0.4),
-                n_samples=1, rng=rng))
-            aux_out[name] = np.atleast_1d(np.asarray(eb + (smp - emn) * e0,
-                                                     dtype=float))
-        if zeff_draw is not None:
-            aux_out["zeff"] = zeff_draw
+
+    def _thermal(d):
+        return float(flux_integral(psi, ctx.pressures(ctx.eq_kinetics(
+            d.native))[1]))
+
+    kd = _sample(base, rng, _thermal, inp, p_thresh=p_thresh,
+                 max_pressure_iter=max_pressure_iter)
+    aux_out = kd.aux
     dz = None
-    if "zeff" in aux_out and aux_baselines.get("zeff") is not None:
-        zb = np.asarray(aux_baselines["zeff"], dtype=float)
-        dz = (np.clip(_pchip(psi_kin, aux_out["zeff"], psi), 1.0, None)
-              - np.clip(_pchip(psi_kin, zb, psi), 1.0, None))
-    kin = ctx.eq_kinetics(nat_d, zeff_eq_delta=dz)
+    zb = (unc.get("aux_baselines") or {}).get("zeff")
+    if "zeff" in aux_out and zb is not None:
+        zb = np.asarray(zb, dtype=float)
+        dz = (np.clip(_pchip(ctx.psi_kin, aux_out["zeff"], psi), 1.0, None)
+              - np.clip(_pchip(ctx.psi_kin, zb, psi), 1.0, None))
+    kin = ctx.eq_kinetics(kd.native, zeff_eq_delta=dz)
     p, th = ctx.pressures(kin)
     return EngineDrawInputs(
-        kinetics=kin, kinetics_native=nat_d, pressure=p, pressure_thermal=th,
+        kinetics=kin, kinetics_native=kd.native, pressure=p,
+        pressure_thermal=th,
         jB_ind=np.asarray(ctx.c.jB_ind, dtype=float).copy(), aux=aux_out,
-        sampler=dict(pressure_match_iterations=int(n_iter),
-                     pressure_match_err_pct=float(p_err),
+        sampler=dict(pressure_match_iterations=kd.iterations,
+                     pressure_match_err_pct=kd.p_err_pct,
                      p_thresh=float(p_thresh),
-                     zeff_primary=bool(zeff_draw is not None),
+                     zeff_primary=kd.zeff_primary,
                      rng_stream=RNG_STREAM))
 
 
@@ -704,11 +645,12 @@ class _DrawPasses:
             amp.update(d_ind=float(d_ind), a_ind=float(1.0 + d_ind))
         else:
             psi0 = float(geom["psi_q"][0])
+            gx = np.asarray(geom["psi_N"], dtype=float)
             A = np.array([[li_, lb_],
-                          [float(np.interp(psi0, ctx.psi, p["ind"])),
-                           float(np.interp(psi0, ctx.psi, p["bs"]))]])
+                          [float(np.interp(psi0, gx, p["ind"])),
+                           float(np.interp(psi0, gx, p["bs"]))]])
             rhs = np.array([dIp, float(self.pin.row)
-                            - float(np.interp(psi0, ctx.psi, J0))])
+                            - float(np.interp(psi0, gx, J0))])
             try:
                 dd = np.linalg.solve(A, rhs)
             except np.linalg.LinAlgError as e:
@@ -768,12 +710,12 @@ class _DrawPasses:
             q_row=float(m["q_row"]), Ip=_f(m.get("Ip")), delivery=dstat,
             n_solves=int(self.b.n_solves)))
         self.geom = g1
-        meas = dict(w=g1["w_lin"] * conversion_factor(g1), x=ctx.psi,
+        meas = dict(w=g1["w_lin"] * conversion_factor(g1), x=g1["psi_N"],
                     li=m["li"], redl=m["redl"])
         if self.pin is not None:
             meas["q0"] = m["q_row"]
             meas["axis_current_solved"] = float(np.interp(
-                float(g1["psi_q"][0]), ctx.psi, jint))
+                float(g1["psi_q"][0]), g1["psi_N"], jint))
         return meas
 
     def on_pass(self, k, meas, J, entry):
@@ -1056,7 +998,8 @@ def post_homotopy(ctx, backend, draw, settings, *, coil_guard=None,
     g = complete_geometry(m["geom"])
     w = g["w_lin"] * conversion_factor(g)
     J = scale * np.asarray(m["redl"], dtype=float)
-    chk = check_delivered(J, jbs_used, w, ctx.psi, float(ctx.c.Ip), settings)
+    chk = check_delivered(J, jbs_used, w, g["psi_N"], float(ctx.c.Ip),
+                          settings)
     rec = dict(check=jsonable(dict(chk)),
                accepted_without_passes=bool(chk["ok"]),
                solve="engine draw step (x* held, Ip amplitude), one "
@@ -1187,19 +1130,26 @@ def engine_rejection_reason(exc, stage):
 #  generate(): the hook generate_bouquet calls
 # ---------------------------------------------------------------------------
 def tokamaker_backend(mygs, contract, *, psi_pad, q_psi, maxits,
-                      edge_pressure=None):
+                      edge_pressure=None, edge_taper=None, coord="psi_n"):
     """The draw's backend on a live solver (monkeypatched by the fast
-    tests).  ``edge_pressure``: the reconstruction's settings
-    (:mod:`bouquet.edge_pressure`)."""
+    tests).  ``edge_pressure`` / ``edge_taper``: the reconstruction's
+    settings (:mod:`bouquet.edge_pressure`, :func:`bouquet.engine.
+    engine_edge_taper`)."""
     from .engine import TokaMakerBackend
     return TokaMakerBackend(mygs, contract, psi_pad=psi_pad, li_kind="li_3",
                             q_psi=q_psi, maxits=maxits,
-                            edge_pressure=edge_pressure)
+                            edge_pressure=edge_pressure,
+                            edge_taper=edge_taper, coord=coord)
 
 
-class GenerateEngineDraws:
-    """What ``generate_bouquet(engine_draw=...)`` runs per draw (built by
-    ``Bouquet.generate`` from the live reconstruction)."""
+class GenerateEngineDraws(DrawMethod):
+    """The unified engine's draw method (``solve_method="engine"``): what
+    ``generate_bouquet(draw_method=...)`` runs per draw, built by
+    ``Bouquet.generate`` from the live reconstruction.  Its hooks are the
+    :class:`~bouquet.draw_methods.DrawMethod` protocol
+    (docs/draw-methods.md)."""
+
+    name = "engine"
 
     def __init__(self, ctx, *, unc, psi_pad, q_psi=None, maxits=None,
                  homotopy=True, l_i_tolerance=0.05, p_thresh=0.05,
@@ -1216,6 +1166,8 @@ class GenerateEngineDraws:
         self.q_psi = q_psi
         self.maxits = maxits
         self.homotopy = bool(homotopy)
+        #: jBS_scale_range handed to the draws (set by Bouquet._draw_method)
+        self.scale_range = None
         self.l_i_tolerance = float(l_i_tolerance)
         self.p_thresh = float(p_thresh)
         self.max_proxy_draws = int(max_proxy_draws)
@@ -1237,8 +1189,14 @@ class GenerateEngineDraws:
         self.sigma0_probe = None
 
     # ---- the pressure the baseline re-solve and every draw use --------
-    def solve_pressure(self, psi_N=None):
+    def solve_pressure(self, psi_N=None, pressure_solve=None):
+        """The engine's own solve pressure (the contract's: thermal +
+        impurity + fast), the one its reconstruction and every draw solve."""
         return np.asarray(self.ctx.c.pressure, dtype=float).copy()
+
+    def edge(self, edge=None):
+        """The reconstruction's own edge-pressure settings."""
+        return self.ctx.edge
 
     def backend(self, mygs):
         from types import SimpleNamespace
@@ -1247,9 +1205,11 @@ class GenerateEngineDraws:
                              kinetics=c.kinetics)
         return tokamaker_backend(mygs, dc, psi_pad=self.psi_pad,
                                  q_psi=self.q_psi, maxits=self.maxits,
-                                 edge_pressure=self.ctx.edge)
+                                 edge_pressure=self.ctx.edge,
+                                 edge_taper=self.ctx.eng.s.get("edge_taper"),
+                                 coord=self.ctx.coord)
 
-    def lcfs_pressure(self):
+    def lcfs_pressure(self, p_lcfs=None):
         """The separatrix pressure a written g-file of the CURRENT draw
         carries (its own ``p_sep`` under ``separatrix_pressure="offset"``,
         0 under ``"legacy"``)."""
@@ -1279,6 +1239,10 @@ class GenerateEngineDraws:
                 "engine draws (reconstruction_engine='unified') refuse: "
                 + "; ".join(bad) + " -- legacy draw modes that would be "
                 "silently ignored")
+        print("[engine draws] every draw runs on the unified engine "
+              "(bouquet.engine_draws): x* held, the Ip row as an inductive "
+              "amplitude, one bootstrap loop from the reconstruction state",
+              flush=True)
 
     def rejection_reason(self, exc, stage):
         """The rejection code; with a cap set, a post-homotopy pass whose
@@ -1344,7 +1308,7 @@ class GenerateEngineDraws:
               f"converging -> {what}", flush=True)
         return ev
 
-    def announce_rollback_failed(self, exc, after):
+    def announce_rollback_failed(self, exc, after, legacy=None):
         """Print and record a homotopy rollback re-solve that failed for a
         reason other than the cap: the draw is REJECTED
         (``homotopy_rollback_failed``) -- an engine draw never goes on from a
@@ -1483,7 +1447,7 @@ class GenerateEngineDraws:
 
     # ---- one draw ---------------------------------------------------------
     def draw(self, mygs, rng, scale, count, *, coil_guard=None,
-             bnd_diag=None, solve_guard=None):
+             bnd_diag=None, solve_guard=None, inputs=None, legacy=None):
         """The legacy 7-tuple ``(ne, te, ni, ti, w_ExB, j_phi,
         diagnostics)`` of one engine draw (kinetic-grid profiles)."""
         ctx = self.ctx
@@ -1546,6 +1510,26 @@ class GenerateEngineDraws:
             clock.start("homotopy")
         return rec, jb_tor, jb_tor, jphi
 
+    def post_homotopy_jbs(self, settings, coil_guard=None, legacy=None):
+        """The post-homotopy bootstrap check: the engine draw's own passes."""
+        return self.post_homotopy(settings, coil_guard=coil_guard)
+
+    def post_homotopy_split(self, j_phi, spike, full, legacy=None):
+        """The re-solved draw's split: the engine draw's own fixed parts, no
+        clip (archival re-splits on the archived state)."""
+        return j_phi - full - self.solved_fixed(), full, None
+
+    def drift_without_homotopy(self, mygs, baseline_coils, coil_drift, *,
+                               ip_aligned, skip_hard):
+        """``engine_draw_homotopy=False``: the coil drift of the loop's own
+        delivered draw, judged at the spec (no homotopy stage)."""
+        if self.homotopy or not ip_aligned or skip_hard:
+            return None
+        out = self.measured_drifts(mygs, baseline_coils, coil_drift)
+        print("  [homotopy] SKIPPED (engine_draw_homotopy=False): coil drift "
+              "measured on the draw's delivered equilibrium", flush=True)
+        return out
+
     def solved_fixed(self):
         """``kappa x <j.B>_fix`` on the geometry the draw's last solved
         request was composed on (the loop's, or the post-homotopy passes')."""
@@ -1553,7 +1537,7 @@ class GenerateEngineDraws:
         dp = d.get("passes_post_homotopy") or d["passes"]
         return np.asarray(dp.last["parts"]["driven"], dtype=float)
 
-    def archived_split(self, diagnostics, j_phi):
+    def archived_split(self, diagnostics, j_phi, default=None):
         """``(j_BS, j_inductive)`` of the archived draw against its archived
         *j_phi*: the bootstrap and fixed parts of :meth:`post_hoc` (the
         archived equilibrium's), the inductive the residual -- NEVER
@@ -1564,8 +1548,8 @@ class GenerateEngineDraws:
         # the PARALLEL parts of the archived split (schema: the draw's
         # ``jB_parallel/`` subgroup; docs/archive-schema.md): the bootstrap
         # and fixed <j.B> the toroidal parts were converted from, and the
-        # field-aligned inductive <j.B> = (j_inductive - P) / kappa, P the
-        # pressure-driven p'(<R> - F^2<1/R>/<B^2>) of the archived state --
+        # field-aligned inductive <j.B> = j_inductive / kappa (the toroidal
+        # j_BS carries the pressure-driven P = p'(<R> - F^2<1/R>/<B^2>)) --
         # so j_phi = kappa (jB_inductive + jB_BS + jB_NBI + jB_RF) + P
         # exactly, and an IDS export carries no pressure-driven current in
         # any parallel field (io.imas.write_imas_draw)
@@ -1573,7 +1557,7 @@ class GenerateEngineDraws:
         P = np.asarray(sp["j_pressure"], dtype=float)
         self._cur["parallel"] = dict(
             psi_N=np.asarray(self.ctx.psi, dtype=float).copy(),
-            jB_inductive=(j_ind - P) / kap,
+            jB_inductive=j_ind / kap,
             jB_BS=np.asarray(sp["jB_BS"], dtype=float).copy(),
             jB_NBI=np.asarray(sp["jB_NBI"], dtype=float).copy(),
             jB_RF=np.asarray(sp["jB_RF"], dtype=float).copy(),
@@ -1581,11 +1565,11 @@ class GenerateEngineDraws:
         neg = j_ind < 0.0
         diagnostics["engine"]["archived"]["split"] = dict(
             convention=("j_phi: the archived equilibrium's achieved FSA "
-                        "current; j_BS: s_bs (1 + d_bs) scale Redl and "
-                        "j_NBI/j_RF: the fixed <j.B>, both times "
-                        "F<1/R>/<B^2> of the archived equilibrium; "
-                        "j_inductive: the residual (carries the pressure-"
-                        "driven term), never clipped"),
+                        "current; j_BS: s_bs (1 + d_bs) scale Redl times "
+                        "F<1/R>/<B^2> plus the pressure-driven p'G, and "
+                        "j_NBI/j_RF: the fixed <j.B> times F<1/R>/<B^2>, of "
+                        "the archived equilibrium; j_inductive: the "
+                        "residual, never clipped"),
             j_NBI=sp["j_NBI"].tolist(), j_RF=sp["j_RF"].tolist(),
             n_negative_inductive=int(np.sum(neg)),
             min_inductive=float(np.min(j_ind)),
@@ -1598,6 +1582,10 @@ class GenerateEngineDraws:
                   f"negative on {int(np.sum(neg))} nodes (min "
                   f"{float(np.min(j_ind)):.3e} A/m^2); recorded, not "
                   "clipped", flush=True)
+        # the draw's returned diagnostics carry the archived split too (with
+        # p'G on j_BS, as the baseline's)
+        diagnostics["j_BS"] = np.asarray(sp["j_BS"], dtype=float).copy()
+        diagnostics["j_inductive"] = j_ind.copy()
         return np.asarray(sp["j_BS"], dtype=float).copy(), j_ind
 
     def mark(self, stage):
@@ -1644,8 +1632,9 @@ class GenerateEngineDraws:
         # bootstrap model (x* held: s_bs (1 + d_bs) x scale x Redl) and its
         # fixed parts, both converted with THIS state's F<1/R>/<B^2>; the
         # residual against the archived j_phi is :meth:`archived_split`'s
-        from .engine import conversion_factor, pressure_term
-        kap = conversion_factor(fin["geom"])
+        from .engine import composed_factor, split_pressure_term
+        kap = composed_factor(fin["geom"])
+        P = split_pressure_term(fin["geom"])
         dpl = cur["draw"].get("passes_post_homotopy") or cur["draw"]["passes"]
         fx = self.ctx.c.jB_fix_parts
         _amp = 1.0 + float(dpl.last["amp"].get("d_bs", 0.0))
@@ -1657,11 +1646,11 @@ class GenerateEngineDraws:
                  + np.asarray(fx.get("other", 0.0), dtype=float))
         cur["final_split"] = dict(
             j_BS=(_amp * self.ctx.s_bs * kap * _scale
-                  * np.asarray(fin["redl"], dtype=float)),
+                  * np.asarray(fin["redl"], dtype=float)) + P,
             j_NBI=kap * jB_NBI, j_RF=kap * jB_RF,
             jB_BS=jB_BS, jB_NBI=jB_NBI * np.ones_like(kap),
             jB_RF=jB_RF * np.ones_like(kap), kappa=kap,
-            j_pressure=pressure_term(fin["geom"]))
+            j_pressure=P)
         rec["archived"]["deltas"] = dict(
             l_i_3=float(fin["li"]) - float(self.ctx.ref["l_i"]),
             l_i_1=(None if (rec["archived"]["l_i_1"] is None
@@ -1683,7 +1672,7 @@ class GenerateEngineDraws:
         clock.start("archive")
         return v["in_spec"]
 
-    def stored_pressures(self):
+    def stored_pressures(self, thermal=None, total=None):
         inp = self._cur["draw"]["inputs"]
         return (np.asarray(inp.pressure_thermal, dtype=float).copy(),
                 np.asarray(inp.pressure, dtype=float).copy())
@@ -1736,6 +1725,61 @@ class GenerateEngineDraws:
                 _write_draw_block(header, count, scan_key, rec, band,
                                   parallel=cur.get("parallel"))
         return bool(ok and (band is None or band)), reasons
+
+    # ---- Bouquet.generate -------------------------------------------------
+    def draw_env(self, env):
+        return self.unc
+
+    def scale_settings(self, jbs_range, bs_mult):
+        return self.scale_range, bs_mult
+
+    def loop_settings_for(self, settings):
+        """The engine draw's loop settings (the draw ceiling, the current
+        gate standing, the post-homotopy ceiling)."""
+        return dict(self.loop_settings)
+
+    def loop_codes(self, codes):
+        return tuple(codes) + ("jbs_non_finite", "engine_closure_refused")
+
+    # the legacy draws' solve cap is not the engine's: its solves are capped
+    # by engine_draw_solve_maxits (cap_solver) alone
+    def solve_maxits(self, maxits):
+        return None
+
+    def summarize(self, bq):
+        """Every engine-draw solve that stopped at engine_draw_solve_maxits
+        (stage, iterations, seconds, rolled back or rejected)."""
+        bq.engine_draw_cap_events = [dict(e) for e in self.cap_events]
+        if self.cap_events:
+            from collections import Counter as _Ctr
+            _by = _Ctr((e["stage"], e["outcome"]) for e in self.cap_events)
+            print(f"[generate] {len(self.cap_events)} engine-draw GS "
+                  f"solve(s) stopped at engine_draw_solve_maxits="
+                  f"{self.maxits}: " + ", ".join(
+                      f"{st} {oc} x{n}" for (st, oc), n in
+                      sorted(_by.items()))
+                  + "; per-solve records: Bouquet.engine_draw_cap_events")
+
+    @classmethod
+    def verify_sigma0(cls, bq):
+        """The engine draw at zero perturbation (``Bouquet.
+        _verify_sigma0_engine``)."""
+        if bq.baseline is None or bq.mygs is None:
+            raise ValueError("call setup_solver() + prepare_baseline() / "
+                             "reconstruct() before verify_sigma0_consistency()")
+        bq._refuse_unified_engine_draws("verify_sigma0_consistency()")
+        return bq._verify_sigma0_engine()
+
+    @classmethod
+    def workflow_problems(cls, bq):
+        """ONE draw route (x* held, the Ip amplitude) for both input types
+        replaces Fix C and the standard l_i loop: their per-path route rules
+        do not apply."""
+        if bq.config.generation.perturb_jind_in_anchor:
+            print("NOTE: reconstruction_engine='unified' -- "
+                  "perturb_jind_in_anchor (a legacy route choice) is not "
+                  "read; every draw runs on the engine")
+        return []
 
     def store_baseline(self, header, scan_key, baseline):
         """The baseline's ``engine`` block (the reconstruction record, with
@@ -1827,10 +1871,13 @@ def context_from_run(run, gc, bl):
     """The :class:`EngineDrawContext` of a live reconstruction and its
     Baseline (the kinetic-grid base the sampler perturbs)."""
     native = dict(psi_N=bl.psi_N_kinetic, ne=bl.ne, te=bl.te, ni=bl.ni,
-                  ti=bl.ti, z_fast=getattr(bl, "z_fast", None))
+                  ti=bl.ti, z_fast=getattr(bl, "z_fast", None),
+                  z2_fast=getattr(bl, "z2_fast", None))
     return EngineDrawContext(
         run["engine"], run["result"], loop=draw_loop_settings(gc),
-        native=native, q0_row=bool(getattr(gc, "engine_draw_q0_row", False)),
+        native=native, Z_imp=getattr(bl, "Z_imp", None),
+        zeff_includes_fast=bool(getattr(bl, "zeff_includes_fast", False)),
+        q0_row=bool(getattr(gc, "engine_draw_q0_row", False)),
         bootstrap_refresh=bool(getattr(gc, "engine_draw_bootstrap_refresh",
                                        False)))
 
@@ -1884,8 +1931,8 @@ def zero_perturbation_loop_verdict(ctx, d):
     rec = d["record"]
     meas = d["passes"].last
     w = meas["geom"]["w_lin"] * conversion_factor(meas["geom"])
-    cmp_ = profile_residuals(d["jbs_used"], ctx.lam, w, ctx.psi,
-                             float(ctx.c.Ip))
+    cmp_ = profile_residuals(d["jbs_used"], ctx.lam, w,
+                             meas["geom"]["psi_N"], float(ctx.c.Ip))
     dl = rec["deltas"]
     conv = bool(rec["loop"]["converged"])
     ident = rec["identity"]
@@ -1931,7 +1978,7 @@ def zero_perturbation_archived_verdict(ctx, jbs_carried, fin):
     g = complete_geometry(fin["geom"])
     w = g["w_lin"] * conversion_factor(g)
     cmp_ = profile_residuals(np.asarray(jbs_carried, dtype=float), ctx.lam,
-                             w, ctx.psi, float(ctx.c.Ip))
+                             w, g["psi_N"], float(ctx.c.Ip))
     dli = float(fin["li"]) - float(ctx.ref["l_i"])
     stats = fin.get("stats") or {}
     q95 = _f(stats.get("q_95"))

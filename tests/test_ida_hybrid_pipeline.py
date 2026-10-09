@@ -111,21 +111,26 @@ def _write_inputs(work):
 # ---------------------------------------------------------------------------
 #  the probe (subprocess): everything that needs the solver
 # ---------------------------------------------------------------------------
+#: the experimental options this end-to-end test exercises
+_PR56 = dict(ni_source="all", ni_subtract_fast=True)
+
+
 def _probe(work, method):
     import warnings
     import bouquet as bq
     from bouquet.baseline import resolve_uncertainty
 
     ddp, cdf = _write_inputs(work)
+    # the EXPERIMENTAL PR #56 IDA route (bouquet.experimental.REGISTRY), opted in
     src = bq.ImasSource(ids_path=ddp, time=_TIME, ida_path=cdf, impurity_Z=_Z,
-                        LCFS_geqdsk=_GEQ)
+                        LCFS_geqdsk=_GEQ, **_PR56)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         bl_reader = bq.read_imas_baseline(src, kinetic_source="ida_hybrid")
     header = os.path.join(work, "run")
     run = bq.Bouquet.from_imas(ddp, mesh=_MESH, time=_TIME, n_draws=_N_DRAWS,
                                header=header, ida_path=cdf, LCFS_geqdsk=_GEQ,
-                               impurity_Z=_Z, solve_method=method)
+                               impurity_Z=_Z, solve_method=method, **_PR56)
     run.config.generation.seed = _SEED
     run.prepare()
     rb = run.baseline

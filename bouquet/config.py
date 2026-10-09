@@ -178,19 +178,23 @@ class ReconstructionSource:
     stripped), beryllium 4, neon 10. For a p-file this is informational: the
     Osborne ``N Z A`` footer carries the species directly and is authoritative.
 
-    ``ni_source`` picks the IDA Z_eff / main-ion density route: ``"Zeff"``
-    (the visible-bremsstrahlung Z_eff, single-impurity quasineutrality),
-    ``"CER"`` (``Z_eff = 1 + Z(Z-1) n_C/n_e`` from the measured ``n_12C6``,
-    i.e. ``ni = ne - Z_imp n_C``; needs ``impurity_Z=6``), or ``"all"``
-    (default since PR #56): the equal-weight mean of the two, each clamped to
-    ``[1, Z_imp]`` first, with their disagreement beyond the combined sigma
-    added to ``sigma_ni`` / ``sigma_Zeff``.  With ``"all"`` a file lacking one
-    route's envelope (``Zeff_err``, or ``n_12C6_err``) falls to the other
-    route ALONE -- an older vintage without ``Zeff_err`` gets the CER value.
-    The baseline Z_eff fed to the bootstrap is this resolved value
-    (``IDAProfiles.zeff_provenance`` records the rung, weights and clamp
-    counts; docs/physics-notes.md "Kinetic assumptions").  Before PR #56 the
-    baseline Z_eff was the raw VB value.  Ignored for p-files.
+    ``ni_source`` picks the IDA Z_eff / main-ion density route.
+    ``"standard"`` (the default): Z_eff is the file's visible-bremsstrahlung
+    value, n_i follows from it by single-impurity quasineutrality with the
+    n_e-fraction sigma, and the Z_eff envelope comes from the carbon > VB >
+    scalar ladder (``UncertaintyConfig.zeff_sigma_source``).
+    EXPERIMENTAL -- see ``bouquet.experimental.REGISTRY["ida_ion_route"]``:
+    ``"Zeff"`` (the VB Z_eff with a propagated sigma_ni), ``"CER"``
+    (``Z_eff = 1 + Z(Z-1) n_C/n_e`` from the measured ``n_12C6``, i.e.
+    ``ni = ne - Z_imp n_C``; needs ``impurity_Z=6``) or ``"all"``: the
+    equal-weight mean of the two, each clamped to ``[1, Z_imp]`` first, with
+    their disagreement beyond the combined sigma added to ``sigma_ni`` /
+    ``sigma_Zeff``; a file lacking one route's envelope falls to the other
+    route ALONE (an older vintage without ``Zeff_err`` gets the CER value).
+    ``IDAProfiles.zeff_provenance`` records the route.  The PR #56 routes are
+    opt-in pending validation: on real H-mode slices the combined route moved
+    core n_i and Z_eff far outside the measurement uncertainties.  Ignored
+    for p-files.
     """
 
     geqdsk_path: str
@@ -198,7 +202,8 @@ class ReconstructionSource:
     cocos: int = 1
     time: Optional[float] = None       # IDA time slice [s] (multi-time .cdf files)
     impurity_Z: float = 6.0            # effective impurity charge (carbon); set per machine
-    ni_source: str = "all"             # IDA path: "Zeff" | "CER" (n_12C6) | "all" (mean)
+    # IDA path: "standard" | EXPERIMENTAL "Zeff" | "CER" | "all" (see above)
+    ni_source: str = "standard"
     profile_overrides: dict = field(default_factory=dict)  # name -> array, manual override
     # reconstruction knobs
     psi_pad: float = 1e-3
@@ -215,6 +220,13 @@ class ReconstructionSource:
     def __post_init__(self):
         from .coords import run_coord
         run_coord(self.coord)
+        _check_ni_source(self.ni_source, "ReconstructionSource")
+
+
+def _check_ni_source(v, who):
+    from .experimental import NI_SOURCES
+    if v not in NI_SOURCES:
+        raise ValueError(f"{who}.ni_source={v!r} must be one of {NI_SOURCES}")
 
 
 @dataclass
@@ -242,19 +254,23 @@ class ImasSource:
     # When set, the baseline ne/Te/Ti/ni/Z_eff/omega_tor come from this IDA
     # .cdf (externally fit, smoother across time than FUSE's per-slice fits),
     # resampled onto the FUSE core_profiles psi_N grid; currents, equilibrium,
-    # p_fast and anchors stay FUSE.  ni via ni_source; zeff_from_fuse=True keeps
-    # FUSE's Z_eff (consistent with FUSE's j_ohmic).  The sigma envelopes come
-    # from the same file (resolve_uncertainty).
+    # p_fast and anchors stay FUSE.  With ni_source="standard" (the default)
+    # Z_eff stays the dd's and n_i follows from it and the IDA n_e (as before
+    # PR #56); the EXPERIMENTAL ni_source routes take Z_eff / n_i from IDA.
+    # Pass the same file as UncertaintyConfig.ida_path (from_imas does) for
+    # the IDA sigma envelopes.
     ida_path: Optional[str] = None
     impurity_Z: float = 6.0            # machine impurity charge (carbon); ni dilution
-    # IDA Z_eff / ni route for ida_hybrid: "Zeff" | "CER" | "all" (mean; see
-    # ReconstructionSource.ni_source).  The IDA ni is a measured TOTAL: the
-    # FUSE fast-ion density equivalent is subtracted to give the thermal ni.
-    ni_source: str = "all"
-    # ida_hybrid only: True keeps FUSE's Z_eff (consistent with FUSE's own
-    # j_ohmic / j_bootstrap) while ne/Te/Ti/ni come from IDA; False (default)
-    # takes IDA's resolved Z_eff, which counts the fast ions in its numerator
-    # (a measured Z_eff), so Baseline.zeff_includes_fast is True.
+    # Z_eff / ni route for ida_hybrid (and for an IDA sigma file):
+    # "standard" (default) | EXPERIMENTAL "Zeff" | "CER" | "all" -- see
+    # ReconstructionSource.ni_source and
+    # bouquet.experimental.REGISTRY["ida_ion_route"].
+    ni_source: str = "standard"
+    # ida_hybrid with an EXPERIMENTAL ni_source only: True keeps the dd's
+    # Z_eff while ne/Te/Ti/ni come from IDA; False takes IDA's resolved Z_eff,
+    # which counts the fast ions in its numerator (a measured Z_eff), so
+    # Baseline.zeff_includes_fast is True.  Under ni_source="standard" the
+    # Z_eff is the dd's either way.
     zeff_from_fuse: bool = False
     # OPTIONAL. A gEQDSK whose LCFS replaces the dd boundary outline as the
     # isoflux separatrix target. Leave None to use the source's own boundary.
@@ -298,6 +314,18 @@ class ImasSource:
     # unified engine always holds it and refuses False.  Stamped in
     # Baseline.source_time_match["sawteeth_hold"] (archived with li_metrics).
     hold_sawteeth: bool = True
+    # EXPERIMENTAL -- see bouquet.experimental.REGISTRY["fuse_zeff_fast_ions"].
+    # True classifies the dd's stored Z_eff against the thermal-only and the
+    # thermal+fast numerators (io.imas._dd_zeff) and hands the bootstrap the
+    # thermal+fast Z_eff where the dd's convention counts the fast ions.
+    # False (default, as before PR #56): the thermal-only Z_eff recomputed
+    # from the dd's thermal ion densities.
+    zeff_fast_ions: bool = False
+    # EXPERIMENTAL -- see
+    # bouquet.experimental.REGISTRY["ida_ni_beam_subtraction"].  ida_hybrid
+    # with an experimental ni_source: subtract the dd's fast-ion density
+    # equivalent from the IDA (total) n_i.  False (default): no subtraction.
+    ni_subtract_fast: bool = False
 
     def __post_init__(self):
         from .coords import run_coord
@@ -305,6 +333,17 @@ class ImasSource:
         if not isinstance(self.hold_sawteeth, bool):
             raise ValueError(f"hold_sawteeth={self.hold_sawteeth!r}: must be "
                              "True or False")
+        _check_ni_source(self.ni_source, "ImasSource")
+        for _n in ("zeff_fast_ions", "ni_subtract_fast"):
+            if not isinstance(getattr(self, _n), bool):
+                raise ValueError(f"ImasSource.{_n}={getattr(self, _n)!r}: "
+                                 "must be True or False")
+        if self.ni_subtract_fast and self.ni_source == "standard":
+            raise ValueError(
+                "ImasSource.ni_subtract_fast=True subtracts the beam density "
+                "from an IDA-derived n_i, but ni_source='standard' derives n_i "
+                "from the dd's own (thermal) Z_eff; set an experimental "
+                "ni_source ('Zeff' | 'CER' | 'all') or drop ni_subtract_fast")
 
 
 BaselineSource = Union[ReconstructionSource, ImasSource]
@@ -476,22 +515,23 @@ class UncertaintyConfig:
     # An explicit aux_sigmas['zeff'] always overrides this.
     zeff_scalar_sigma: float = 0.05
     # Where the Z_eff envelope's MAGNITUDE comes from (the channel is enabled
-    # by zeff_scalar_sigma > 0 either way):
-    #   "auto"     -- the IDA-resolved envelope (bouquet.io.ida.read_ida
-    #                 walks VB+CER > CER > VB over what the file supports,
-    #                 the route disagreement folded in; the same resolution
-    #                 the baseline Z_eff and ni came from) > the scalar.
-    #   "carbon"   -- single-route override: the bare carbon-propagated
-    #                 envelope (n_12C6_err / the dilution posterior), for an
-    #                 A/B against the combined one; loud fallback.
-    #   "measured" -- require the IDA-resolved envelope; loud fallback.
-    #   "scalar"   -- always the flat zeff_scalar_sigma fraction (the only
-    #                 behaviour before 1.4.0).
+    # by zeff_scalar_sigma > 0 either way).  With the source's
+    # ni_source="standard" (the default) the ladder is carbon > VB > scalar:
+    #   "auto"     -- carbon-propagated (n_12C6_err / the dilution
+    #                 posterior) > VB-measured (Zeff_err / the Z_eff sample
+    #                 spread) > the scalar.
+    #   "carbon"   -- the same order, warning on a fallback.
+    #   "measured" -- VB-measured, warning on a fallback.
+    #   "scalar"   -- always the flat zeff_scalar_sigma fraction.
+    # With an EXPERIMENTAL ni_source (bouquet.experimental.REGISTRY
+    # ["ida_ion_route"]) "auto"/"measured" take the IDA-resolved envelope
+    # (read_ida walks VB+CER > CER > VB, the route disagreement folded in)
+    # and "carbon" is a single-route override.
     # The measured tiers are eligible only when the Z_eff baseline came from
-    # the sigma .cdf itself: the reconstruction source's own profiles file,
-    # or ImasSource.ida_path (ida_hybrid; also with zeff_from_fuse=True, the
-    # envelope then carried absolute).  A p-file baseline, or a different
-    # .cdf vintage named via ida_path, is refused: it would mix channels.  That file
+    # the sigma .cdf itself: the reconstruction source's own profiles file
+    # (or, on the experimental route only, ImasSource.ida_path).  A p-file
+    # or IMAS/FUSE Z_eff baseline, or a different .cdf vintage named via
+    # ida_path, is refused: it would mix channels.  That file
     # test compares RESOLVED paths (expanduser + realpath, samefile when both
     # exist), so a relative-vs-absolute, '~'-prefixed, trailing-slash or
     # symlinked spelling of the same file stays eligible.
@@ -502,19 +542,27 @@ class UncertaintyConfig:
     zeff_sigma_source: str = "auto"
 
     # With the zeff channel active: True derives ni per draw from the drawn
-    # (ne, Zeff) as an increment on the baseline ni (kinetic_sampler/2;
+    # (ne, Zeff) as an increment on the baseline ni (kinetic_sampler/3;
     # sigma_ni unused); False draws ni from its own sigma_ni and Z_eff
     # passively AFTER Ti (a different RNG order).
-    # None = auto (PR #56): True when ni's sigma is the flat ni_scalar_sigma
-    # fallback, or when ni AND the Z_eff envelope are the same IDA resolution
-    # (Z_eff tier "IDA-resolved"; sigma_ni kept via IDAProfiles.zeff_dne);
-    # False for any other real ni envelope -- an explicit
-    # sigma_profiles["ni"], an IDA ni with zeff_sigma_source="scalar" or
-    # "carbon", an IDA sigma file paired with a p-file baseline.  NOTE: auto
-    # therefore changes with the Z_eff tier; pin it explicitly for an A/B of
-    # Z_eff envelopes.  Before PR #56 ni was always derived when the channel
-    # had dilution.
+    # None = auto: True (ni is always derived when the channel has dilution,
+    # as before PR #56) -- unless the source's ni_source is EXPERIMENTAL
+    # (bouquet.experimental.REGISTRY["ida_ion_route"]), where the PR #56 rule
+    # applies: True when ni's sigma is the flat ni_scalar_sigma fallback, or
+    # when ni AND the Z_eff envelope are the same IDA resolution (Z_eff tier
+    # "IDA-resolved"; sigma_ni kept via IDAProfiles.zeff_dne); False for any
+    # other real ni envelope.  That rule changes with the Z_eff tier; pin
+    # this field explicitly for an A/B of Z_eff envelopes.
     ni_from_zeff: Optional[bool] = None
+    # EXPERIMENTAL -- see bouquet.experimental.REGISTRY["kinetic_sampler_clips"].
+    # The PR #56 clips of the kinetic sampler: a drawn Z_eff floored at 1
+    # where physics.zeff_bounds allows less, a derived n_i held in
+    # [0, ne - z_fast], an independent n_i capped at ne - z_fast when Z_imp is
+    # declared, a passive Z_eff aux draw clipped to the window.  None = auto:
+    # on only when an experimental PR #56 kinetic feature is (ida_ion_route,
+    # fuse_zeff_fast_ions, ida_ni_beam_subtraction); False: only the
+    # zeff_bounds window (the bound in place before PR #56); True: on.
+    kinetic_clips: Optional[bool] = None
 
     # GPR correlation length scales (psi_N units) -- define the perturbation
     n_ls: float = 0.5                      # density
@@ -1139,7 +1187,8 @@ class GenerationConfig:
     # bootstrap_kwargs is refused.  True: accepted with a warning, and the
     # config_json of every archive carries both this flag and the values.
     # Legacy paths only (the unified engine never runs solve_with_bootstrap
-    # and refuses those keys).
+    # and refuses those keys).  EXPERIMENTAL -- see
+    # bouquet.experimental.REGISTRY["bootstrap_convergence_override"].
     bootstrap_convergence_override: bool = False
     # GS iteration cap for the DRAW solves of generate()'s legacy / swb draw
     # loop (TokaMaker_interface.DrawSolveGuard): applied from the first draw
@@ -1184,7 +1233,8 @@ class GenerationConfig:
     # "engine" (the unified engine).  None: derived from imas_baseline /
     # reconstruction_engine; set, it decides, and they are set to match where
     # the run is resolved (resolve_solve_method, at prepare_baseline; never
-    # at construction).  A contradicting pair is refused.
+    # at construction).  A contradicting pair is refused.  "swb" is
+    # EXPERIMENTAL -- see bouquet.experimental.REGISTRY["swb_solve_method"].
     solve_method: Optional[str] = None
     # IMAS baseline + draws: "closure" (legacy) or "swb": solve A at the setup
     # coil reg, solve B with the strong reg toward A's coils is the baseline,

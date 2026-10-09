@@ -507,7 +507,7 @@ def sample_kinetics(ctx, rng, unc, flux_integral, *, p_thresh=0.05,
 
     *unc*: ``sigma_ne, sigma_te, sigma_ni, sigma_ti`` (kinetic grid),
     ``n_ls, t_ls``, optional ``aux_sigmas, aux_baselines,
-    aux_length_scales, ni_from_zeff, zeff_dne``."""
+    aux_length_scales, ni_from_zeff, zeff_dne, kinetic_clips``."""
     from .kinetic_sampler import KineticBase, sample_kinetics as _sample
     nat = ctx.native
     base = KineticBase(
@@ -521,7 +521,8 @@ def sample_kinetics(ctx, rng, unc, flux_integral, *, p_thresh=0.05,
         Z_imp=ctx.Z_imp, z_fast=nat.get("z_fast"), z2_fast=nat.get("z2_fast"),
         zeff_includes_fast=ctx.zeff_includes_fast,
         ni_from_zeff=bool(unc.get("ni_from_zeff", True)),
-        zeff_dne=unc.get("zeff_dne"))
+        zeff_dne=unc.get("zeff_dne"),
+        clips=bool(unc.get("kinetic_clips", False)))
     psi = ctx.psi
     inp = float(flux_integral(psi, ctx.pressure_thermal_base))
 
@@ -548,7 +549,7 @@ def sample_kinetics(ctx, rng, unc, flux_integral, *, p_thresh=0.05,
                      pressure_match_err_pct=kd.p_err_pct,
                      p_thresh=float(p_thresh),
                      zeff_primary=kd.zeff_primary,
-                     # the sampler version (kinetic_sampler/2) and its
+                     # the sampler version (kinetic_sampler/3) and its
                      # per-draw clip counters (PR #56 B3/B4/B7), archived in
                      # the draw record's "inputs"
                      kinetic_sampler=kd.record(),

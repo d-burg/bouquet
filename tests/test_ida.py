@@ -208,7 +208,7 @@ class TestRouteDiscrepancy:
     def test_agreeing_routes_are_not_inflated(self, tmp_path):
         p = tmp_path / "ok.cdf"
         _write_consistent(str(p))
-        ida = read_ida(str(p), time=3.0)
+        ida = read_ida(str(p), time=3.0, ni_source="all")   # EXPERIMENTAL route
         # chi ~ 1: the routes differ only by their own statistical errors
         assert 0.4 < np.median(ida.ni_route_chi) < 1.6
         assert 0.4 < np.median(ida.zeff_route_chi) < 1.6
@@ -221,7 +221,7 @@ class TestRouteDiscrepancy:
     def test_disagreeing_routes_inflate_sigma(self, tmp_path):
         p = tmp_path / "bad.cdf"
         _write_consistent(str(p), nc_scale=2.5)      # CER route 2.5x off
-        ida = read_ida(str(p), time=3.0)
+        ida = read_ida(str(p), time=3.0, ni_source="all")   # EXPERIMENTAL route
         plain = _plain_sigma_ni(str(p))
         assert np.median(ida.ni_route_chi) > 3.0
         assert np.median(ida.zeff_route_chi) > 3.0
@@ -242,7 +242,7 @@ class TestRouteDiscrepancy:
         # not at all in Z_eff, so the two tensions must not be one number.
         p = tmp_path / "bad.cdf"
         _write_consistent(str(p), nc_scale=2.5)
-        ida = read_ida(str(p), time=3.0)
+        ida = read_ida(str(p), time=3.0, ni_source="all")   # EXPERIMENTAL route
         assert not np.allclose(ida.ni_route_chi, ida.zeff_route_chi, rtol=1e-3)
 
 
@@ -266,7 +266,7 @@ def test_all_route_clamps_each_route_before_the_mean(tmp_path):
                      ("T_12C6_err", 0.06 * te), ("Zeff_err", 0.1 * zeff),
                      ("n_12C6_err", 0.1 * nc)]:
             f[k] = v[None, :]
-    ida = read_ida(str(p), time=3.0, impurity_Z=Z)
+    ida = read_ida(str(p), time=3.0, impurity_Z=Z, ni_source="all")
     assert ida.sigma_Zeff_source == "VB+CER"
     expected = 0.5 * (ne * (Z - zeff) / (Z - 1) + np.maximum(ne - Z * nc, 0.0))
     np.testing.assert_allclose(ida.ni, expected, rtol=1e-12)

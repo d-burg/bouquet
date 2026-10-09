@@ -156,8 +156,9 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
                    [current_split_convention]  where p'G sits (below)
                    [kinetic_sampler_json]  legacy / swb draws: the shared
                                        kinetic sampler's record (version
-                                       kinetic_sampler/2, pressure match,
-                                       clip counters; engine draws carry it
+                                       kinetic_sampler/3, clips_enabled,
+                                       pressure match, clip counters;
+                                       engine draws carry it
                                        in engine_json's inputs)
                    [swb_jbs_convention, swb_jbs_conversion]  draws whose
                                        bootstrap came from solve_with_bootstrap

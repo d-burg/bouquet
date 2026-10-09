@@ -175,7 +175,8 @@ class Bouquet(SwbBaseline):
     def from_imas(cls, ids_path, *, mesh, time=None, ida_time=None,
                   n_draws=20, header="bouquet",
                   ida_path=None, LCFS_geqdsk=None, impurity_Z=6.0,
-                  ni_source="all", zeff_from_fuse=False,
+                  ni_source="standard", zeff_from_fuse=False,
+                  zeff_fast_ions=False, ni_subtract_fast=False,
                   kinetic_source=None, anchor_pressure_to_equilibrium=False,
                   reconstruction_engine=None, solve_method=None,
                   **solver_kwargs) -> "Bouquet":
@@ -185,12 +186,17 @@ class Bouquet(SwbBaseline):
         ``bq.uncertainty`` / ``bq.generation`` afterwards for advanced knobs.
 
         IDA-hybrid kinetics: pass ``ida_path`` (an IDA ``.cdf``) to take the
-        baseline ne/Te/Ti/Zeff/omega_tor (and the ne/Te/ni/Ti/Z_eff sigma
-        envelopes) from IDA fits while keeping FUSE currents/equilibrium.
-        ``ni_source`` picks the IDA ni route ("Zeff"/"CER"/"all") for both the
-        baseline ni and its propagated sigma; ``zeff_from_fuse=True`` keeps the
-        FUSE Z_eff instead of IDA's. ``kinetic_source`` defaults to
-        ``"ida_hybrid"`` when an ``ida_path`` is given, else ``"fuse"``.
+        baseline ne/Te/Ti/omega_tor (and the kinetic sigma envelopes) from IDA
+        fits while keeping FUSE currents/equilibrium.  With
+        ``ni_source="standard"`` (the default) Z_eff stays the dd's and n_i
+        follows from it and the IDA n_e.  EXPERIMENTAL
+        (``bouquet.experimental.REGISTRY``): ``ni_source`` "Zeff"/"CER"/"all"
+        takes Z_eff and n_i from IDA (``zeff_from_fuse=True`` keeps the dd's
+        Z_eff), ``ni_subtract_fast=True`` subtracts the dd's beam density from
+        that n_i, and ``zeff_fast_ions=True`` gives the bootstrap the dd's
+        thermal+fast Z_eff where its convention counts the fast ions.
+        ``kinetic_source`` defaults to ``"ida_hybrid"`` when an ``ida_path``
+        is given, else ``"fuse"``.
 
         ``ida_time`` picks the IDA slice (default ``time``; ida_hybrid only,
         refused otherwise); ``time`` then picks only the dd slices.  The IDA
@@ -236,6 +242,8 @@ class Bouquet(SwbBaseline):
             source=ImasSource(ids_path=ids_path, time=time, ida_time=ida_time, ida_path=ida_path,
                               impurity_Z=impurity_Z, ni_source=ni_source,
                               zeff_from_fuse=zeff_from_fuse,
+                              zeff_fast_ions=zeff_fast_ions,
+                              ni_subtract_fast=ni_subtract_fast,
                               LCFS_geqdsk=LCFS_geqdsk),
             solver=SolverConfig(mesh_path=mesh, **solver_kwargs),
             generation=GenerationConfig(n_equils=n_draws,
@@ -7391,6 +7399,7 @@ class Bouquet(SwbBaseline):
                     aux_length_scales=env.get("aux_length_scales"),
                     ni_from_zeff=env.get("ni_from_zeff", True),
                     zeff_dne=env.get("zeff_dne"),
+                    kinetic_clips=bool(env.get("kinetic_clips", False)),
                     # generate_bouquet's own defaults for these two
                     max_proxy_draws=500, p_thresh=0.05,
                     rng=make_rng(gc.seed),
@@ -7961,6 +7970,8 @@ class Bouquet(SwbBaseline):
                 # Who draws ni when zeff is active (see UncertaintyConfig).
                 ni_from_zeff=env.get("ni_from_zeff", True),
                 zeff_dne=env.get("zeff_dne"),
+                # EXPERIMENTAL PR #56 sampler clips (resolve_uncertainty)
+                kinetic_clips=bool(env.get("kinetic_clips", False)),
                 progress_callback=progress_callback,
                 # shared until-N hooks (bouquet.parallel); None on the serial path
                 on_inspec=on_inspec,

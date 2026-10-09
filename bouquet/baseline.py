@@ -424,11 +424,13 @@ def zeff_sigma_eligibility(source, ida_path):
 
     The measured tiers are absolute sigmas from one IDA ``.cdf`` and pair
     only with a Z_eff baseline from that same file: the source's own
-    ``profiles_path`` (:class:`ReconstructionSource`) or ``ida_path``
+    ``profiles_path`` (:class:`ReconstructionSource`) or, on the
+    EXPERIMENTAL ``ni_source`` routes only, ``ida_path``
     (:class:`ImasSource`; ``zeff_from_fuse=True`` stays eligible, the
-    envelope carried absolute).  Refusals: no IDA file configured; the
-    source declares no ``.cdf``; different files (compared resolved, by
-    :func:`_same_path`).
+    envelope carried absolute).  Refusals: no IDA file configured; an
+    :class:`ImasSource` with ``ni_source="standard"`` (its Z_eff is the
+    dd's); the source declares no ``.cdf``; different files (compared
+    resolved, by :func:`_same_path`).
     """
     import os
 
@@ -438,8 +440,17 @@ def zeff_sigma_eligibility(source, ida_path):
         return False, "no IDA sigma file is configured (no ladder applies)"
     ida_name = os.path.basename(_norm_path(ida_path)) or str(ida_path)
 
+    from .experimental import IDA_ION_ROUTES
     if isinstance(source, ReconstructionSource):
         own, own_kind = str(getattr(source, "profiles_path", "") or ""), "profiles file"
+    elif (isinstance(source, ImasSource)
+          and getattr(source, "ni_source", "standard") not in IDA_ION_ROUTES):
+        # ni_source="standard" (as before PR #56): the IMAS/ida_hybrid Z_eff
+        # is the dd's, never the IDA one
+        return False, (
+            "the Z_eff baseline comes from the IMAS/FUSE source rather than "
+            f"from {ida_name}; pairing a FUSE Z_eff with an IDA-measured "
+            "envelope would mix channels")
     elif isinstance(source, ImasSource):
         own, own_kind = str(getattr(source, "ida_path", "") or ""), "ida_path"
     else:
@@ -464,10 +475,32 @@ def zeff_sigma_eligibility(source, ida_path):
 def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
                           zeff_is_ida, measured_sigma, measured_source,
                           carbon_sigma=None, carbon_source="none",
-                          ineligible_reason="", ida_in_play=False):
+                          ineligible_reason="", ida_in_play=False,
+                          ladder="standard"):
     """The Z_eff envelope ladder: highest-fidelity tier available per file.
 
-    Returns ``(sigma_array, label, meta)``.  Tiers, in fidelity order:
+    Returns ``(sigma_array, label, meta)``.
+
+    ``ladder="standard"`` (the default; the source's ``ni_source`` is
+    ``"standard"``) -- tiers, in fidelity order:
+
+    1. **carbon-propagated** (``sigma_Zeff_carbon``: n_12C6_err on the direct
+       layout, the dilution's own posterior on the ensemble layout).  The
+       Zeff-primary scheme perturbs Zeff precisely to move the DILUTION
+       ``ni = ne - Z nC``, and CER carbon density is that dilution's direct
+       measurement; drawing Zeff with this sigma IS error propagation
+       through ``ni = ne - Z nC``.
+    2. **VB-measured** (``sigma_Zeff``: the file's Zeff_err / Zeff sample
+       spread).  Conservative -- the visible-bremsstrahlung inversion's own
+       error, which carries n_e^2 sqrt(T_e) propagation, calibration and
+       mantle-subtraction systematics.
+    3. the flat ``zeff_scalar_sigma`` fraction of ``|Z_eff|``.
+
+    ``zeff_sigma_source`` picks "auto" (carbon > VB > scalar), "carbon",
+    "measured" (VB), "scalar".
+
+    ``ladder="resolved"`` (EXPERIMENTAL, an experimental ``ni_source``;
+    ``bouquet.experimental.REGISTRY["ida_ion_route"]``) -- tiers:
 
     1. **IDA-resolved** (``sigma_Zeff``): the envelope
        :func:`bouquet.io.ida.read_ida` resolved by walking
@@ -513,6 +546,10 @@ def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
         raise ValueError(
             f"zeff_sigma_source={zeff_sigma_source!r} is not one of "
             "'auto', 'carbon', 'measured', 'scalar'")
+    if ladder not in ("standard", "resolved"):
+        raise ValueError(f"ladder={ladder!r} is not 'standard' or 'resolved'")
+    _resolved = ladder == "resolved"
+    _measured_tier = "IDA-resolved" if _resolved else "VB-measured"
     base = np.abs(np.asarray(base_zeff, dtype=float))
     scalar_env = float(zeff_scalar_sigma) * base
     scalar_label = f"scalar zeff_scalar_sigma={float(zeff_scalar_sigma):g}"
@@ -552,18 +589,21 @@ def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
         _why = ineligible_reason or (
             "the Z_eff baseline does not come from the IDA file supplying "
             "the sigmas")
-        _attempted = {"auto": ("IDA-resolved",),
-                      "carbon": ("carbon-propagated", "IDA-resolved"),
-                      "measured": ("IDA-resolved",),
+        _attempted = {"auto": (("IDA-resolved",) if _resolved else
+                               ("carbon-propagated", "VB-measured")),
+                      "carbon": ("carbon-propagated", _measured_tier),
+                      "measured": (_measured_tier,),
                       "scalar": ()}[zeff_sigma_source]
         for _t in _attempted:
             skipped.append((_t, f"source ineligible: {_why}"))
     else:
-        # "auto" takes the reader's resolved envelope: read_ida has already
+        # standard: carbon > VB > scalar.  resolved (experimental): "auto"
+        # takes the reader's resolved envelope -- read_ida has already
         # walked VB+CER > CER > VB (see bouquet.io.ida), and it is the route
-        # ni was derived from.  "carbon" stays as an explicit single-route
-        # override.
-        if zeff_sigma_source == "carbon":
+        # ni was derived from -- and "carbon" stays as an explicit
+        # single-route override.
+        if (zeff_sigma_source == "carbon"
+                or (zeff_sigma_source == "auto" and not _resolved)):
             c = _usable(carbon_sigma, "carbon-propagated")
             if c is not None:
                 env, tier = c, "carbon-propagated"
@@ -574,23 +614,26 @@ def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
                                 "missing dataset: this file provides no "
                                 "n_12C6 uncertainty"))
         if env is None and zeff_sigma_source in ("auto", "carbon", "measured"):
-            m = _usable(measured_sigma, "IDA-resolved")
+            m = _usable(measured_sigma, _measured_tier)
             if m is not None:
-                env, tier = m, "IDA-resolved"
+                env, tier = m, _measured_tier
                 provenance = str(measured_source)
                 label = f"measured IDA ({measured_source})"
                 # A rung the reader could not reach is still a fallback, and
                 # no fallback down this ladder is silent: read_ida only
                 # prints its notice, which a batch run loses.
-                if str(measured_source) != "VB+CER":
+                if _resolved and str(measured_source) != "VB+CER":
                     skipped.append(
                         ("VB+CER", "missing dataset: this file supports only "
                                    f"the {measured_source} route, so the "
                                    "envelope carries no cross-route check"))
             elif measured_sigma is None:
-                skipped.append(("IDA-resolved",
+                skipped.append((_measured_tier,
                                 "missing dataset: this IDA file carries no "
-                                "usable Z_eff envelope on either route"))
+                                "usable Z_eff envelope on either route"
+                                if _resolved else
+                                "missing dataset: this IDA file carries no "
+                                "Zeff uncertainty (older direct vintage)"))
 
     if env is None:
         env, tier = scalar_env, "scalar"
@@ -754,13 +797,20 @@ def resolve_uncertainty(config, baseline) -> dict:
     src = config.source
     psi_kin = np.asarray(baseline.psi_N_kinetic, dtype=float)
 
+    # The PR #56 Z_eff / n_i route (EXPERIMENTAL; bouquet.experimental.
+    # REGISTRY["ida_ion_route"]) or the standard one.
+    from .experimental import STANDARD_NI_SOURCE, ida_ion_route_on
+    _ion_route = ida_ion_route_on(src, unc)
     # IDA file for the sigmas: unc.ida_path, else the source's own .cdf.
     ida_path = unc.ida_path
     if ida_path is None:
         if isinstance(src, ReconstructionSource) \
                 and src.profiles_path.endswith(".cdf"):
             ida_path = src.profiles_path
-        elif isinstance(src, ImasSource):
+        elif isinstance(src, ImasSource) and _ion_route:
+            # EXPERIMENTAL route only: the IMAS source's own IDA file; under
+            # ni_source="standard" only unc.ida_path supplies IDA sigmas
+            # (from_imas sets it), as before PR #56
             ida_path = getattr(src, "ida_path", None)
 
     # IDA arrays (read once) available as a fallback below
@@ -795,7 +845,8 @@ def resolve_uncertainty(config, baseline) -> dict:
             ida = read_ida(
                 ida_path, time=_t_req,
                 sigma_mode=unc.sigma_mode, sigma_method=unc.sigma_method,
-                ni_source=getattr(src, "ni_source", "all"),
+                ni_source=(getattr(src, "ni_source", STANDARD_NI_SOURCE)
+                           if _ion_route else STANDARD_NI_SOURCE),
                 # the carbon tier's Z(Z-1) propagation is quadratically
                 # Z-sensitive; the kinetics loader already passes this, and
                 # omitting it here silently pinned the sigma math to carbon
@@ -831,8 +882,8 @@ def resolve_uncertainty(config, baseline) -> dict:
         # The ida_hybrid read's sigma_ni, placed on the baseline grid with
         # the baseline ni itself.
         _sni = (baseline.aux or {}).get("sigma_ni_ida")
-        if (_shared is not None and ida is _shared[1] and _sni is not None
-                and np.shape(_sni) == psi_kin.shape):
+        if (_ion_route and _shared is not None and ida is _shared[1]
+                and _sni is not None and np.shape(_sni) == psi_kin.shape):
             ida_sig["ni"] = np.asarray(_sni, dtype=float)
         if getattr(ida, "sigma_Zeff", None) is not None:
             _ida_zeff_sigma = _to_kin(ida.sigma_Zeff)
@@ -975,6 +1026,7 @@ def resolve_uncertainty(config, baseline) -> dict:
             carbon_source=_ida_zeff_carbon_source,
             ineligible_reason=_zeff_inelig,
             ida_in_play=ida_path is not None,
+            ladder="resolved" if _ion_route else "standard",
         )
         user_sigmas["zeff"] = _z_env
         out["zeff_sigma_tier"] = _z_meta
@@ -985,11 +1037,13 @@ def resolve_uncertainty(config, baseline) -> dict:
                       f"{_sk['reason']}")
 
     # --- who draws ni when the zeff channel is active ------------------------
-    # Derived per draw from the drawn (ne, Zeff) when ni and Z_eff are one IDA
-    # resolution (zeff_dne keeps sigma_ni) or ni has only the scalar fallback;
-    # any other real ni envelope stays its own channel.  unc.ni_from_zeff wins.
+    # Standard route: always derived (as before PR #56).  EXPERIMENTAL route
+    # (PR #56 rule): derived per draw from the drawn (ne, Zeff) when ni and
+    # Z_eff are one IDA resolution (zeff_dne keeps sigma_ni) or ni has only
+    # the scalar fallback; any other real ni envelope stays its own channel.
+    # unc.ni_from_zeff wins either way.
     _ida_pair = bool(
-        ida_sig is not None and _won["ni"].startswith("IDA")
+        _ion_route and ida_sig is not None and _won["ni"].startswith("IDA")
         and (out["zeff_sigma_tier"] or {}).get("tier") == "IDA-resolved"
         and "zeff" not in (unc.aux_baselines or {})
         and not getattr(src, "zeff_from_fuse", False)
@@ -997,8 +1051,14 @@ def resolve_uncertainty(config, baseline) -> dict:
              or "ida_profiles" in (baseline.aux or {}))
         and getattr(ida, "zeff_dne", None) is not None)
     _nfz = getattr(unc, "ni_from_zeff", None)
-    out["ni_from_zeff"] = (bool(_won["ni"].startswith("scalar") or _ida_pair)
-                           if _nfz is None else bool(_nfz))
+    out["ni_from_zeff"] = (
+        bool(_nfz) if _nfz is not None else
+        bool(_won["ni"].startswith("scalar") or _ida_pair) if _ion_route
+        else True)
+    # the PR #56 sampler clips (EXPERIMENTAL; kinetic_sampler_clips): the
+    # explicit setting, else on only with a PR #56 kinetic feature
+    from .experimental import kinetic_clips_on
+    out["kinetic_clips"] = bool(kinetic_clips_on(config))
     out["zeff_dne"] = (_to_kin(ida.zeff_dne)
                        if _ida_pair and out["ni_from_zeff"] else None)
     if bool(getattr(unc, "log_sigma_sources", True)) and "zeff" in user_sigmas:
@@ -1096,7 +1156,7 @@ def _load_kinetic_profiles(source) -> dict:
     if path.endswith(".cdf"):
         from .io.ida import read_ida
         ida = read_ida(path, time=source.time, impurity_Z=source.impurity_Z,
-                       ni_source=source.ni_source)
+                       ni_source=getattr(source, "ni_source", "standard"))
         return dict(
             psi_N=np.asarray(ida.psi_N, dtype=float),
             ne=np.asarray(ida.ne, dtype=float),

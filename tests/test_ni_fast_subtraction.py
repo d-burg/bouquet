@@ -1,4 +1,8 @@
-"""Thermal ni for the bootstrap on the ida_hybrid path.
+"""Thermal ni for the bootstrap on the ida_hybrid path -- EXPERIMENTAL
+(PR #56; bouquet.experimental.REGISTRY["ida_ion_route"],
+["ida_ni_beam_subtraction"], ["fuse_zeff_fast_ions"]).  Every read here opts
+in explicitly (:data:`PR56`); the defaults, which are the pre-#56 reader, are
+pinned in :class:`TestDefaultsArePre56`.
 
 IDA's ni is a TOTAL deuteron density (VB Z_eff and CER carbon do not see the
 beam); FUSE's bootstrap uses ``density_thermal`` only, so the dd's fast
@@ -193,9 +197,14 @@ def _build(tmp_path, fast_frac=0.2, with_fast_density=True, dd_mutate=None):
     return str(ddp), str(cdf), ni_total, ni_fast, ni_th
 
 
+#: the experimental PR #56 options this module exercises
+PR56 = dict(ni_source="all", ni_subtract_fast=True, zeff_fast_ions=True)
+
+
 def _read(ddp, cdf, **kw):
     return read_imas_baseline(
-        ImasSource(ids_path=ddp, time=1.0, ida_path=cdf, impurity_Z=Z_IMP, **kw),
+        ImasSource(ids_path=ddp, time=1.0, ida_path=cdf, impurity_Z=Z_IMP,
+                   **{**PR56, **kw}),
         kinetic_source="ida_hybrid")
 
 
@@ -223,7 +232,7 @@ class TestEndToEnd:
         bl = _read(ddp, cdf)
         cfg = BouquetConfig(
             source=ImasSource(ids_path=ddp, time=1.0, ida_path=cdf,
-                              impurity_Z=Z_IMP),
+                              impurity_Z=Z_IMP, **PR56),
             solver=SolverConfig(mesh_path="unused"), output_header="unused")
         env = resolve_uncertainty(cfg, bl)
         np.testing.assert_allclose(env["sigma_ni"], bl.aux["sigma_ni_ida"],
@@ -322,7 +331,8 @@ class TestDdZeffConvention:
     def _fuse(self, tmp_path, kind):
         ddp, *_ = _build(tmp_path, dd_mutate=_store_zeff(kind))
         return read_imas_baseline(
-            ImasSource(ids_path=ddp, time=1.0, impurity_Z=Z_IMP),
+            ImasSource(ids_path=ddp, time=1.0, impurity_Z=Z_IMP,
+                       zeff_fast_ions=True),
             kinetic_source="fuse")
 
     @pytest.mark.parametrize("kind, expected",
@@ -370,7 +380,8 @@ class TestDdZeffConvention:
     def test_no_beam_is_bit_identical_to_the_thermal_recompute(self, tmp_path):
         ddp, *_ = _build(tmp_path, fast_frac=0.0, dd_mutate=_store_zeff("all"))
         bl = read_imas_baseline(ImasSource(ids_path=ddp, time=1.0,
-                                           impurity_Z=Z_IMP),
+                                           impurity_Z=Z_IMP,
+                                           zeff_fast_ions=True),
                                 kinetic_source="fuse")
         dd = json.load(open(ddp))["core_profiles"]["profiles_1d"][0]
         ne = np.asarray(dd["electrons"]["density_thermal"], dtype=float)
@@ -404,7 +415,10 @@ class TestBeamClosure:
             f["T_e"][...] = np.asarray(cp["electrons"]["temperature"])[None, :]
             f["T_12C6"][...] = np.asarray(cp["ion"][0]["temperature"])[None, :]
         src = ImasSource(ids_path=ddp, time=1.0, impurity_Z=Z_IMP,
-                         ida_path=cdf if ks == "ida_hybrid" else None)
+                         ida_path=cdf if ks == "ida_hybrid" else None,
+                         zeff_fast_ions=True,
+                         **(dict(ni_source="all", ni_subtract_fast=True)
+                            if ks == "ida_hybrid" else {}))
         with pytest.warns(UserWarning) as rec:     # p_fast_reduction='auto'
             bl = read_imas_baseline(src, kinetic_source=ks,
                                     anchor_pressure_to_equilibrium=anchor)
@@ -651,3 +665,70 @@ class TestPFileFastIonBlock:
             pf.compute_quasineutrality()
         nz1 = np.asarray(pf["nz1"]["data"]) * 1e20
         np.testing.assert_allclose(nz1, nC + nb / 6.0, rtol=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# owner decision 2026-10-09: the PR #56 combination is opt-in; the defaults
+# are the reader before PR #56
+# ---------------------------------------------------------------------------
+class TestDefaultsArePre56:
+    def _dd_thermal(self, ddp):
+        cp = json.load(open(ddp))["core_profiles"]["profiles_1d"][0]
+        ne = np.asarray(cp["electrons"]["density_thermal"], dtype=float)
+        num = np.zeros_like(ne)
+        for ion in cp["ion"]:
+            Z = float(ion["element"][0]["z_n"])
+            num += np.asarray(ion["density_thermal"], dtype=float) * Z * Z
+        return ne, num / ne
+
+    @pytest.mark.parametrize("kind", [None, "thermal", "all"])
+    def test_fuse_bootstrap_zeff_is_thermal_only(self, tmp_path, kind):
+        """kinetic_source='fuse', a 20 % beam: whatever the stored zeff's
+        numerator, the bootstrap Z_eff is the thermal recompute, the
+        convention flag stays False, and aux['zeff'] is the stored zeff (or
+        the thermal one without it) -- as before PR #56."""
+        ddp, *_ = _build(tmp_path, dd_mutate=_store_zeff(kind))
+        bl = read_imas_baseline(ImasSource(ids_path=ddp, time=1.0,
+                                           impurity_Z=Z_IMP),
+                                kinetic_source="fuse")
+        ne, zth = self._dd_thermal(ddp)
+        np.testing.assert_array_equal(bl.Zeff, zth)
+        assert bl.zeff_includes_fast is False
+        cp = json.load(open(ddp))["core_profiles"]["profiles_1d"][0]
+        np.testing.assert_array_equal(
+            bl.aux["zeff"], np.asarray(cp["zeff"], dtype=float)
+            if kind is not None else zth)
+        rec = bl.li_metrics["zeff_dd_provenance"]
+        assert rec["convention"] == "thermal-only" and rec["source"] == "default"
+
+    def test_ida_hybrid_keeps_the_dd_zeff_and_derives_ni_from_it(self, tmp_path):
+        """ida_hybrid defaults: n_e/T_e/T_i from IDA; Z_eff the dd's thermal
+        one; n_i = n_e(IDA) (Z - Z_eff)/(Z - 1); no beam subtraction."""
+        from bouquet.physics import main_ion_density_from_zeff
+        ddp, cdf, *_ = _build(tmp_path)
+        bl = read_imas_baseline(
+            ImasSource(ids_path=ddp, time=1.0, ida_path=cdf, impurity_Z=Z_IMP),
+            kinetic_source="ida_hybrid")
+        _, zth = self._dd_thermal(ddp)
+        np.testing.assert_array_equal(bl.Zeff, zth)
+        assert bl.zeff_includes_fast is False
+        ida = bl.aux["ida_profiles"][1]
+        assert ida.zeff_provenance["ni_source"] == "standard"
+        np.testing.assert_array_equal(bl.ne, ida.ne)
+        np.testing.assert_array_equal(
+            bl.ni, main_ion_density_from_zeff(
+                ida.ne, np.clip(zth, 1.0, Z_IMP), Z_IMP))
+        assert bl.aux["ni_fast_meta"]["applied"] is False
+        assert bl.li_metrics["zeff_dd_provenance"]["baseline_zeff_from"] == "dd"
+
+    def test_the_beam_subtraction_needs_an_ida_route(self, tmp_path):
+        with pytest.raises(ValueError, match="ni_subtract_fast"):
+            ImasSource(ids_path="x.json", ni_subtract_fast=True)
+
+    def test_subtraction_is_opt_in_on_the_experimental_route(self, tmp_path):
+        """ni_source='all' without ni_subtract_fast: the IDA total n_i is
+        used as is (the subtraction is its own opt-in)."""
+        ddp, cdf, ni_total, *_ = _build(tmp_path)
+        bl = _read(ddp, cdf, ni_subtract_fast=False)
+        assert bl.aux["ni_fast_meta"]["applied"] is False
+        np.testing.assert_allclose(bl.ni, ni_total, rtol=2e-6)

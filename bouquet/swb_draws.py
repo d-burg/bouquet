@@ -58,7 +58,7 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
              p_fast=None, z_fast=None, z2_fast=None, zeff_includes_fast=False,
              Z_imp=None, aux_sigmas=None, aux_baselines=None,
              aux_length_scales=None, ni_from_zeff=True, zeff_dne=None,
-             isolate_edge_jBS=False):
+             isolate_edge_jBS=False, kinetic_clips=False):
     """One ``imas_baseline="swb"`` draw: the baseline's solve B with resampled
     inputs.
 
@@ -101,7 +101,7 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
             zeff_includes_fast=zeff_includes_fast, Z_imp=Z_imp,
             aux_sigmas=aux_sigmas, aux_baselines=aux_baselines,
             aux_length_scales=aux_length_scales, ni_from_zeff=ni_from_zeff,
-            zeff_dne=zeff_dne)
+            zeff_dne=zeff_dne, kinetic_clips=kinetic_clips)
         ne_p, te_p, ni_p, ti_p = _k["ne"], _k["te"], _k["ni"], _k["ti"]
         ne_eq, te_eq, ni_eq, ti_eq = _k["ne_eq"], _k["te_eq"], _k["ni_eq"], _k["ti_eq"]
         Zeff, aux_out = _k["Zeff"], _k["aux"]
@@ -245,7 +245,8 @@ class SwbDraws(DrawMethod):
             aux_sigmas=i["aux_sigmas"], aux_baselines=i["aux_baselines"],
             aux_length_scales=i["aux_length_scales"],
             ni_from_zeff=i["ni_from_zeff"], zeff_dne=i["zeff_dne"],
-            isolate_edge_jBS=i["isolate_edge_jBS"])
+            isolate_edge_jBS=i["isolate_edge_jBS"],
+            kinetic_clips=bool(i.get("kinetic_clips", False)))
 
     def announce_coil_reg(self):
         print("  [swb] coil reg left to the per-draw recipe; drift "

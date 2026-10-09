@@ -2623,7 +2623,8 @@ def draw_kinetics(mygs, psi_N, pressure, ne, te, ni, ti,
                   p_fast=None, z_fast=None, z2_fast=None,
                   zeff_includes_fast=False, Z_imp=None, p_diff=None,
                   aux_sigmas=None, aux_baselines=None, aux_length_scales=None,
-                  ni_from_zeff=True, zeff_dne=None, thermal_charge=None):
+                  ni_from_zeff=True, zeff_dne=None, thermal_charge=None,
+                  kinetic_clips=False):
     """One kinetic draw matched to the baseline <P>: the shared sampler
     (:mod:`bouquet.kinetic_sampler`, the one the legacy and engine draws use)
     on ``mygs``'s current equilibrium, for :func:`swb_draw`.  Returns a dict:
@@ -2642,7 +2643,7 @@ def draw_kinetics(mygs, psi_N, pressure, ne, te, ni, ti,
         aux_baselines=aux_baselines, aux_length_scales=aux_length_scales,
         Z_imp=Z_imp, z_fast=z_fast, z2_fast=z2_fast,
         zeff_includes_fast=zeff_includes_fast, ni_from_zeff=ni_from_zeff,
-        zeff_dne=zeff_dne)
+        zeff_dne=zeff_dne, clips=bool(kinetic_clips))
 
     def _thermal(d):
         return mygs.flux_integral(_x, thermal_charge * (
@@ -3091,6 +3092,9 @@ def perturb_kinetic_equilibrium(
     aux_length_scales=None,
     ni_from_zeff=True,
     zeff_dne=None,
+    # EXPERIMENTAL PR #56 sampler clips (bouquet.experimental.REGISTRY
+    # ["kinetic_sampler_clips"]; KineticBase.clips)
+    kinetic_clips=False,
     max_proxy_draws=500,
     bnd_diag_callback=None,
     # Differential bootstrap (DIFF_BS=1 mode):
@@ -3404,7 +3408,7 @@ def perturb_kinetic_equilibrium(
         aux_baselines=aux_baselines, aux_length_scales=aux_length_scales,
         Z_imp=Z_imp, z_fast=z_fast, z2_fast=z2_fast,
         zeff_includes_fast=zeff_includes_fast, ni_from_zeff=ni_from_zeff,
-        zeff_dne=zeff_dne)
+        zeff_dne=zeff_dne, clips=bool(kinetic_clips))
     # eV -> J: the exact constant under the self-consistent loop (the
     # value the reconstruction / modelling-source forward solve uses), the
     # frozen legacy value otherwise (physics.thermal_pressure_charge)
@@ -5164,7 +5168,7 @@ def perturb_kinetic_equilibrium(
         # (issue #23); see _AnchorIpRenorm.inductive_share.
         "r2_f_ind": _r2_f_ind_used,
         "aux": aux_out,
-        # the shared sampler's version (kinetic_sampler/2) and this draw's
+        # the shared sampler's version (kinetic_sampler/3) and this draw's
         # clip counters (PR #56 B3/B4/B7), archived by generate_bouquet
         "kinetic_sampler": _kd.record(),
         # the SWB output convention and the conversion applied (PR64 B1)
@@ -5421,6 +5425,7 @@ def generate_bouquet(
     aux_length_scales=None,
     ni_from_zeff=True,
     zeff_dne=None,
+    kinetic_clips=False,         # EXPERIMENTAL; see perturb_kinetic_equilibrium
     progress_callback=None,
     source_kind=None,
     capture_live_eq=True,
@@ -7392,6 +7397,7 @@ def generate_bouquet(
                     aux_sigmas=aux_sigmas, aux_baselines=aux_baselines,
                     aux_length_scales=aux_length_scales,
                     ni_from_zeff=ni_from_zeff, zeff_dne=zeff_dne,
+                    kinetic_clips=kinetic_clips,
                     isolate_edge_jBS=isolate_edge_jBS),
                 legacy=lambda: perturb_kinetic_equilibrium(
                     mygs,
@@ -7438,6 +7444,7 @@ def generate_bouquet(
                     aux_length_scales=aux_length_scales,
                     ni_from_zeff=ni_from_zeff,
                     zeff_dne=zeff_dne,
+                    kinetic_clips=kinetic_clips,
                     max_proxy_draws=max_proxy_draws,
                     p_thresh=p_thresh,
                     # the run's single Generator -- every GPR draw in this draw

@@ -14,10 +14,14 @@ Operational DIII-D ``IDA_*.cdf`` layout (verified against a real IDA file):
     the separatrix to ~1.2; ``time`` is in milliseconds. Units are already SI
     (n_e in m^-3; T_e, T_12C6 in eV).
 
-There is no stored main-ion density; ``ni`` can come from ``Zeff``
-reconstructed from visible bremsstrahlung data (``ni_source="Zeff"``), from
-the measured carbon density ``n_12C6`` from charge exchange recombination
-(``ni_source="CER"``), or from the mean of the two (``ni_source="all"``, default).
+There is no stored main-ion density.  By default (``ni_source="standard"``)
+``Zeff`` is the file's visible-bremsstrahlung value and ``ni`` is derived from
+``(ne, Zeff)`` under single-impurity quasineutrality with the machine impurity
+charge ``impurity_Z`` (carbon Z=6 by default), its sigma the ne fraction.
+EXPERIMENTAL (``bouquet.experimental.REGISTRY["ida_ion_route"]``): ``ni`` from
+``Zeff`` with a propagated sigma (``ni_source="Zeff"``), from the measured
+carbon density ``n_12C6`` from charge exchange recombination
+(``ni_source="CER"``), or from the mean of the two (``ni_source="all"``).
 With both active, their disagreement beyond statistical error widens
 ``sigma_ni``.
 """
@@ -210,7 +214,7 @@ def read_ida(
     sigma_mode: str = "auto",
     sigma_method: str = "percentile",   # ensemble-layout band estimator
     ensemble_median: bool = False,      # ensemble-layout central estimator
-    ni_source: str = "all",
+    ni_source: str = "standard",
     impurity_Z: float = 6.0,
     sigma_ni_from_ne: Optional[bool] = None,
 ) -> IDAProfiles:
@@ -233,13 +237,19 @@ def read_ida(
         ``"std"`` -> sample standard deviation. Unused for the direct layout.
     ensemble_median : bool
         Ensemble central estimator: sample mean (default) or median.
-    ni_source : {"Zeff", "CER", "all"}
-        Which measurement the main-ion density comes from. ``"Zeff"``
-        applies single-impurity quasineutrality to ``(ne, Zeff)``; ``"CER"``
-        subtracts the measured carbon density ``n_12C6``; ``"all"`` takes the
-        mean of the two (default). An explicit route needs its own ``*_err``
-        dataset on the direct layout and raises without it; ``"all"`` uses
-        whichever routes the file supports.
+    ni_source : {"standard", "Zeff", "CER", "all"}
+        Which measurement the main-ion density comes from.  ``"standard"``
+        (default): ``Zeff`` is the file's VB value as stored, ``ni`` follows
+        from ``(ne, clip(Zeff, 1, Z))`` by single-impurity quasineutrality and
+        ``sigma_ni = |ni| sigma_ne/ne``; ``sigma_Zeff`` is the file's own
+        Z_eff envelope (``Zeff_err`` or the sample spread), and the Z_eff
+        envelope ladder (carbon > VB > scalar) is resolved downstream.
+        EXPERIMENTAL (``bouquet.experimental.REGISTRY["ida_ion_route"]``):
+        ``"Zeff"`` applies quasineutrality to ``(ne, Zeff)`` with a
+        propagated sigma; ``"CER"`` subtracts the measured carbon density
+        ``n_12C6``; ``"all"`` takes the mean of the two. An explicit route
+        needs its own ``*_err`` dataset on the direct layout and raises
+        without it; ``"all"`` uses whichever routes the file supports.
     impurity_Z : float
         Impurity charge Z (carbon Z=6).
     sigma_ni_from_ne : bool, optional
@@ -275,9 +285,10 @@ def read_ida(
     if sigma_method not in ("percentile", "std"):
         raise ValueError(
             f"unknown sigma_method {sigma_method!r}; expected 'percentile' or 'std'")
-    if ni_source not in ("Zeff", "CER", "all"):
+    if ni_source not in ("standard", "Zeff", "CER", "all"):
         raise ValueError(
-            f"unknown ni_source {ni_source!r}; expected 'Zeff', 'CER', or 'all'")
+            f"unknown ni_source {ni_source!r}; expected 'standard', 'Zeff', "
+            "'CER', or 'all'")
     if ni_source == "CER" and float(impurity_Z) != 6.0:
         raise ValueError(
             f"ni_source={ni_source!r} requires impurity_Z=6.0, got {impurity_Z!r}: "
@@ -432,7 +443,47 @@ def read_ida(
                 print("[read_ida] Zeff-vs-carbon cross-check skipped: no "
                       "valid core (psi_N<=0.9) carbon points in this file")
 
-        # ---- the Z_eff / n_i ladder: VB+CER > CER > VB -------------------
+        if ni_source == "standard":
+            # The established route (as before PR #56): the VB Z_eff as
+            # stored, ni from it at the single-impurity window [1, Z] (so
+            # 0 <= ni <= ne), sigma_ni the ne fraction.  The Z_eff envelope
+            # is the file's own; the carbon > VB > scalar choice is made by
+            # baseline.resolve_zeff_envelope.
+            ni = main_ion_density_from_zeff(
+                ne, np.clip(Zeff, 1.0, impurity_Z), impurity_Z)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                _frac = np.where(ne > 0, sigma_ne / ne, 0.0)
+            sigma_ni = np.abs(ni) * _frac
+            sigma_Zeff_source = ("ensemble-samples" if is_ensemble else
+                                 "Zeff_err" if sigma_Zeff is not None
+                                 else "none")
+            ni_route_chi = zeff_route_chi = zeff_dne = None
+            zeff_provenance = dict(
+                convention=("measured (VB bremsstrahlung; includes any fast "
+                            "ions the measurement sees)"),
+                source="VB", ni_source="standard",
+                weights=dict(VB=1.0, CER=0.0),
+                window=[1.0, float(impurity_Z)],
+                n_clipped_vb=int(np.count_nonzero(
+                    (np.asarray(Zeff, dtype=float) < 1.0)
+                    | (np.asarray(Zeff, dtype=float) > impurity_Z))),
+                n_clipped_cer=0, n_nodes=int(np.size(ne)),
+                impurity_Z=float(impurity_Z),
+                note=("Zeff is the stored VB value (not clipped); the window "
+                      "applies to the ni derivation only"))
+            return IDAProfiles(
+                psi_N=psi_N, ne=ne, te=te, ni=ni, ti=ti, Zeff=Zeff,
+                sigma_ne=sigma_ne, sigma_te=sigma_te, sigma_ni=sigma_ni,
+                sigma_ti=sigma_ti, time=t_sel,
+                raw_bytes=raw_bytes, sigma_Zeff=sigma_Zeff,
+                sigma_Zeff_source=sigma_Zeff_source,
+                sigma_Zeff_carbon=sigma_Zeff_carbon,
+                sigma_Zeff_carbon_source=sigma_Zeff_carbon_source,
+                zeff_carbon_dev=zeff_carbon_dev,
+                ni_route_chi=None, zeff_route_chi=None, zeff_dne=None,
+                q=q_ida, zeff_provenance=zeff_provenance)
+
+        # ---- EXPERIMENTAL (PR #56): the Z_eff / n_i ladder VB+CER > CER > VB
         # Zeff_CER = 1 + Z(Z-1) nC/ne <=> ni = ne - Z nC, so ni is taken from
         # the resolved Z_eff and (ne, ni, Z_eff) stay quasineutral.  ne, Zeff_VB
         # and nC are independent (cov = 0); ne's two derivatives are summed.

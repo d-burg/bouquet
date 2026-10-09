@@ -1037,10 +1037,22 @@ scheme cannot guarantee. One Z_eff value per draw. See
 
 ## Kinetic assumptions: Z_eff, n_i and the clips (PR #56)
 
-These are the defaults the IDA / FUSE ion coupling (PR #56) introduced. The
-owner accepted them as the standard approach on the condition that each is
-stated, justified and cited here, and that each is visible in the records
-(the stamps named below). None of them is a tunable tolerance.
+These are the assumptions of the IDA / FUSE ion coupling (PR #56). **Since
+1.4.0 they are EXPERIMENTAL and opt-in, not defaults** (owner decision
+2026-10-09): on real H-mode slices the combined route moved core n_i and Z_eff
+far outside the measurement uncertainties, so it awaits validation. Each is
+listed in `bouquet.experimental.REGISTRY` with its open validation items (see
+[workflows.md, Experimental features](workflows.md#experimental-features-and-their-validation-status)):
+item 1 is `fuse_zeff_fast_ions` (`ImasSource.zeff_fast_ions=True`), item 2 is
+`ida_ion_route` (`ni_source="Zeff" | "CER" | "all"`; the beam subtraction
+on `ida_hybrid` is `ida_ni_beam_subtraction`, `ImasSource.ni_subtract_fast`),
+and the floor at 1 and the n_i floor / ceiling of item 3 are
+`kinetic_sampler_clips` (`UncertaintyConfig.kinetic_clips`). The defaults
+are the routes before PR #56: the thermal-only dd Z_eff, the IDA VB Z_eff
+with n_i from quasineutrality and the carbon > VB > scalar envelope ladder,
+and only the `zeff_bounds` window on a drawn Z_eff. Each assumption is stated,
+justified and cited here, and each is visible in the records (the stamps named
+below). None of them is a tunable tolerance.
 
 **1. The Z_eff the bootstrap sees counts every ion's charge, fast ions
 included, when the source's Z_eff does (FUSE beam shots).**
@@ -1106,8 +1118,9 @@ n_i down). This is the case `zeff_floor_1` counts separately from the
 physical window, so its frequency can be measured on a real run before the
 floor is revisited. Every clip changes values exactly as before; only the
 counting is new. Each draw's `record()` carries the sampler version
-`kinetic_sampler/2` and the counters, and a log line names every clip that
-fires.
+(`kinetic_sampler/3`), whether the clips were on (`clips_enabled`) and the
+counters, and a log line names every clip that fires. Default (clips off):
+only the Z_eff window row applies.
 
 ## Corrective j_phi iteration
 

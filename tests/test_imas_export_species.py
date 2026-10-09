@@ -84,7 +84,9 @@ def _inputs(work, carbon=1.4, ti=1.1, fast=0.15):
 def _read(path, **kw):
     from bouquet.config import ImasSource
     from bouquet.io.imas import read_imas_baseline
-    src = {k: kw.pop(k) for k in ("ida_path", "impurity_Z") if k in kw}
+    src = {k: kw.pop(k) for k in ("ida_path", "impurity_Z", "ni_source",
+                                  "ni_subtract_fast", "zeff_fast_ions")
+           if k in kw}
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         return read_imas_baseline(ImasSource(ids_path=str(path), time=T,
@@ -152,7 +154,9 @@ def exported(tmp_path_factory):
     from bouquet.io.imas import write_imas_draw
     work = str(tmp_path_factory.mktemp("ida_export"))
     ddp, cdf = _inputs(work)
-    bl = _read(ddp, ida_path=cdf, impurity_Z=Z, kinetic_source="ida_hybrid")
+    # the EXPERIMENTAL PR #56 IDA route (bouquet.experimental.REGISTRY)
+    bl = _read(ddp, ida_path=cdf, impurity_Z=Z, kinetic_source="ida_hybrid",
+               ni_source="all", ni_subtract_fast=True)
     assert bl.Z_imp == Z and bl.zeff_includes_fast
     d = _draw(bl)
     arc = os.path.join(work, "draw.h5")
@@ -172,7 +176,9 @@ def test_the_ida_hybrid_draw_re_reads_with_the_default_reader(exported):
     and the Z_eff convention is recognised as the draw's (measured: fast
     ions in the numerator)."""
     bl, d = exported["bl"], exported["d"]
-    rr = _read(exported["out"])                       # default: dd kinetics
+    # dd kinetics; the draw's Z_eff counts the fast ions, which the reader
+    # recognises with the EXPERIMENTAL convention classification
+    rr = _read(exported["out"], zeff_fast_ions=True)
     for k, a in (("ne", d["ne"]), ("te", d["te"]), ("ni", d["ni"]),
                  ("ti", d["ti"])):
         np.testing.assert_array_equal(getattr(rr, k), a, k)

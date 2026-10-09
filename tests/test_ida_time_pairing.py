@@ -363,7 +363,7 @@ def test_the_ida_zeff_provenance_is_in_the_baseline_record(files):
     from types import SimpleNamespace
     from bouquet.baseline import _load_kinetic_profiles
     ddp, cdf = files
-    bl = _read(ddp, cdf)
+    bl = _read(ddp, cdf, ni_source="all")      # the EXPERIMENTAL IDA route
     prov = bl.li_metrics["zeff_provenance"]
     assert prov["source"] in ("VB+CER mean", "CER", "VB")
     assert set(prov["weights"]) == {"VB", "CER"}

@@ -292,13 +292,17 @@ class TestIdaHybridPhi:
 
     def test_the_envelope_follows_the_same_map(self, tmp_path):
         from bouquet.baseline import resolve_uncertainty
-        from bouquet.config import BouquetConfig, ImasSource, SolverConfig
+        from bouquet.config import (BouquetConfig, ImasSource, SolverConfig,
+                                    UncertaintyConfig)
         ddp, cdf, _ = self._build(tmp_path)
         bl = self._read(ddp, cdf, "phi_n")
+        # the IDA sigma file wired as from_imas wires it (under the default
+        # ni_source="standard" only uncertainty.ida_path supplies IDA sigmas)
         cfg = BouquetConfig(
             source=ImasSource(ids_path=ddp, time=1.0, ida_path=cdf,
                               impurity_Z=6.0, coord="phi_n"),
-            solver=SolverConfig(mesh_path="unused"), output_header="unused")
+            solver=SolverConfig(mesh_path="unused"), output_header="unused",
+            uncertainty=UncertaintyConfig(ida_path=cdf))
         env = resolve_uncertainty(cfg, bl)
         np.testing.assert_allclose(env["sigma_te"], bl.aux["sigma_te_ida"], rtol=1e-12)
 

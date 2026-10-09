@@ -6,10 +6,12 @@ grid.  RNG order: ``ne``, ``Te``, then ``Z_eff`` (deriving ``ni``) or ``ni``,
 then ``Ti`` -- redrawn together until the pressure integral is within
 ``p_thresh`` -- then each auxiliary channel.  Every profile is
 ``base + (sample - mean) * b0``, so a zero sigma returns the base exactly.
-A drawn Z_eff is clipped to :func:`bouquet.physics.zeff_bounds` (floor 1); a
-derived ``ni`` is an increment on the baseline ``ni``; a drawn ``ni`` is held
-inside ``[0, ne - z_fast]`` when ``Z_imp`` is declared.  Every clip that
-moves a node is counted on the draw (:attr:`KineticDraw.clips`,
+A drawn Z_eff is clipped to :func:`bouquet.physics.zeff_bounds`; a derived
+``ni`` is an increment on the baseline ``ni``.  The PR #56 clips -- the
+Z_eff floor at 1, ``ni`` held inside ``[0, ne - z_fast]``, the passive Z_eff
+aux clip -- are EXPERIMENTAL and opt-in (``KineticBase.clips``;
+``bouquet.experimental.REGISTRY["kinetic_sampler_clips"]``).  Every clip
+that moves a node is counted on the draw (:attr:`KineticDraw.clips`,
 :meth:`KineticDraw.record`); the version is :data:`KINETIC_SAMPLER_VERSION`.
 """
 from dataclasses import dataclass, field
@@ -17,7 +19,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
-#: drawn Z_eff floor (a Z_eff draw is never below this)
+#: drawn Z_eff floor of the EXPERIMENTAL clips (``KineticBase.clips``)
 ZEFF_DRAW_MIN = 1.0
 
 #: Version of the kinetic draw, to be recorded with every draw.
@@ -36,10 +38,16 @@ ZEFF_DRAW_MIN = 1.0
 #: Z_eff channel on therefore differ from ``/1`` (seed-for-seed); engine
 #: draws differ only where a clip binds.  Every clip that fires is counted
 #: per draw (:attr:`KineticDraw.clips`).
+#: ``/3`` (1.4.0): ``/2`` with the PR #56 clips (the floor at 1, the ``ni``
+#: floor and ceiling, the passive Z_eff aux clip) EXPERIMENTAL and opt-in
+#: (:attr:`KineticBase.clips`); by default a Z_eff draw is held in
+#: :func:`bouquet.physics.zeff_bounds` alone (the window before PR #56) and
+#: ``ni`` is not clipped.  With ``clips=True`` a draw equals ``/2``'s.  The
+#: record says which (``clips_enabled``).
 KINETIC_SAMPLER_VERSION = (
-    "kinetic_sampler/2 (shared sampler; derived ni = increment on the "
-    "baseline ni; Z_eff window floored at 1; ni in [0, ne - z_fast]; "
-    "clips counted per draw)")
+    "kinetic_sampler/3 (shared sampler; derived ni = increment on the "
+    "baseline ni; Z_eff window = zeff_bounds; PR #56 clips opt-in; clips "
+    "counted per draw)")
 
 #: The names of :attr:`KineticDraw.clips` (each the number of kinetic-grid
 #: nodes the clip moved, on the ACCEPTED draw).
@@ -96,6 +104,10 @@ class KineticBase:
     zeff_includes_fast: bool = False
     ni_from_zeff: bool = True
     zeff_dne: Optional[np.ndarray] = None
+    #: EXPERIMENTAL PR #56 clips (the Z_eff floor at 1, ni in
+    #: [0, ne - z_fast], the passive Z_eff aux clip); False keeps only the
+    #: zeff_bounds window
+    clips: bool = False
 
     def __post_init__(self):
         for k in ("psi_kin", "ne", "te", "ni", "ti", "sigma_ne", "sigma_te",
@@ -118,8 +130,12 @@ class KineticBase:
                               self.aux_baselines, self.Z_imp, self.z_fast)
 
     def zeff_window(self, ne, Z_imp):
-        """``(lo, hi)`` a Z_eff draw is clipped to on *ne* (``hi`` None: open)."""
+        """``(lo, hi)`` a Z_eff draw is clipped to on *ne* (``hi`` None: open):
+        :meth:`zeff_bounds_raw`, floored at :data:`ZEFF_DRAW_MIN` only with
+        the experimental :attr:`clips`."""
         lo, hi = self.zeff_bounds_raw(ne, Z_imp)
+        if not self.clips:
+            return lo, hi
         return np.maximum(lo, ZEFF_DRAW_MIN), hi
 
     def zeff_bounds_raw(self, ne, Z_imp):
@@ -154,6 +170,8 @@ class KineticDraw:
     #: when nothing was clipped
     clips: dict = field(default_factory=lambda: dict.fromkeys(
         CLIP_COUNTERS, 0))
+    #: whether the experimental PR #56 clips were on (KineticBase.clips)
+    clips_enabled: bool = False
 
     @property
     def native(self) -> dict:
@@ -168,6 +186,7 @@ class KineticDraw:
         """JSON-safe per-draw stamp: the sampler version, the pressure match
         and the clip counters (for the draw's archive record)."""
         return dict(version=KINETIC_SAMPLER_VERSION,
+                    clips_enabled=bool(self.clips_enabled),
                     zeff_primary=bool(self.zeff_primary),
                     iterations=int(self.iterations),
                     p_err_pct=float(self.p_err_pct),
@@ -187,7 +206,8 @@ def _count_zeff_clips(raw, lo_bounds, lo, hi, prefix=""):
     lo = np.broadcast_to(np.asarray(lo, dtype=float), raw.shape)
     lo_b = np.broadcast_to(np.asarray(lo_bounds, dtype=float), raw.shape)
     below = raw < lo
-    floor1 = below & (lo_b < ZEFF_DRAW_MIN) & (lo <= ZEFF_DRAW_MIN)
+    # lifted by the floor (the experimental clips) above zeff_bounds' edge
+    floor1 = below & (lo_b < ZEFF_DRAW_MIN) & (lo > lo_b)
     out = {prefix + "zeff_floor_1": int(np.count_nonzero(floor1)),
            prefix + "zeff_window_lo": int(np.count_nonzero(below & ~floor1)),
            prefix + "zeff_window_hi": 0}
@@ -278,13 +298,14 @@ def sample_kinetics(base: KineticBase, rng, thermal_integral: Callable,
                 zeff_draw, b.zeff_bounds_raw(ne_d, Z_imp)[0], _lo, _hi))
             zeff_draw = _clip_zeff(zeff_draw, _lo, _hi)
             ni_d = b.ni + (_ni_of(ne_d, zeff_draw) - ni_of_base)
-            _cap = b.ni_ceiling(ne_d)
-            clips["ni_floor_0"] = int(np.count_nonzero(ni_d < 0.0))
-            clips["ni_ceiling"] = int(np.count_nonzero(ni_d > _cap))
-            ni_d = np.clip(ni_d, 0.0, _cap)
+            if b.clips:
+                _cap = b.ni_ceiling(ne_d)
+                clips["ni_floor_0"] = int(np.count_nonzero(ni_d < 0.0))
+                clips["ni_ceiling"] = int(np.count_nonzero(ni_d > _cap))
+                ni_d = np.clip(ni_d, 0.0, _cap)
         else:
             ni_d = _mono(b.ni, b.sigma_ni, b.n_ls)
-            if b.Z_imp:
+            if b.clips and b.Z_imp:
                 _cap = b.ni_ceiling(ne_d)
                 clips["ni_ceiling"] = int(np.count_nonzero(ni_d > _cap))
                 ni_d = np.minimum(ni_d, _cap)
@@ -302,7 +323,7 @@ def sample_kinetics(base: KineticBase, rng, thermal_integral: Callable,
             continue
         ep = _gpr(np.asarray(eb, dtype=float), np.asarray(es, dtype=float),
                   aux_ls.get(name, 0.4))
-        if name == "zeff":
+        if name == "zeff" and b.clips:
             _lo, _hi = b.zeff_window(ne_d, Z_imp)
             clips.update(_count_zeff_clips(
                 ep, b.zeff_bounds_raw(ne_d, Z_imp)[0], _lo, _hi,
@@ -317,6 +338,7 @@ def sample_kinetics(base: KineticBase, rng, thermal_integral: Callable,
     draw.iterations = int(n_iter)
     draw.p_err_pct = float(p_err)
     draw.clips = clips
+    draw.clips_enabled = bool(b.clips)
     if draw.clipped:
         print("  [kinetic_sampler] clip(s) fired on this draw (nodes moved): "
               + ", ".join(f"{k}={v}" for k, v in clips.items() if v))

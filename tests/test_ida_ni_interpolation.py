@@ -29,7 +29,9 @@ def _merge(monkeypatch, ida):
     monkeypatch.setattr(IDA, "read_ida", lambda *a, **k: ida)
     monkeypatch.setattr(I, "_read_ida_omega", lambda *a, **k: None)
     psi = np.linspace(0.0, 1.0, 101)                  # finer run grid
-    return psi, I._merge_ida_kinetics(psi, None, None, None, "x.cdf", 1.0, _Z)
+    # the EXPERIMENTAL IDA route (PR #56): ni rebuilt from IDA's (ne, Z_eff)
+    return psi, I._merge_ida_kinetics(psi, None, None, None, "x.cdf", 1.0, _Z,
+                                      ni_source="all")
 
 
 def test_the_run_grid_ni_is_the_formula_of_the_run_grid_ne_and_zeff(monkeypatch):

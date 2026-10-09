@@ -1,4 +1,7 @@
-"""ni and Z_eff from one IDA resolution are drawn as one channel: ni is
+"""EXPERIMENTAL route (PR #56; bouquet.experimental.REGISTRY["ida_ion_route"]),
+opted in explicitly throughout.
+
+ni and Z_eff from one IDA resolution are drawn as one channel: ni is
 derived from the drawn (ne, Zeff), and IDAProfiles.zeff_dne (the CER route's
 ne dependence) keeps the reader's sigma_ni.
 """
@@ -46,7 +49,7 @@ def _derived_sigma_ni(r):
 
 class TestReader:
     def test_vb_only_zeff_does_not_move_with_ne(self, tmp_path):
-        r = read_ida(_write(tmp_path / "a.cdf", carbon=False))
+        r = read_ida(_write(tmp_path / "a.cdf", carbon=False), ni_source="all")
         np.testing.assert_array_equal(r.zeff_dne, 0.0)
 
     def test_cer_only_zeff_is_one_over_ne(self, tmp_path):
@@ -59,7 +62,7 @@ class TestReader:
         np.testing.assert_allclose(_derived_sigma_ni(r), r.sigma_ni, rtol=1e-10)
 
     def test_without_the_coupling_the_derived_sigma_is_wrong(self, tmp_path):
-        r = read_ida(_write(tmp_path / "a.cdf"))
+        r = read_ida(_write(tmp_path / "a.cdf"), ni_source="all")
         r.zeff_dne = np.zeros_like(r.ne)
         core = r.psi_N < 0.9
         assert np.max(np.abs(_derived_sigma_ni(r) / r.sigma_ni - 1.0)[core]) > 0.05
@@ -88,9 +91,9 @@ class TestResolve:
         from bouquet.baseline import resolve_uncertainty
         from bouquet.config import ReconstructionSource
         cdf = _write(tmp_path / "own.cdf")
-        r = read_ida(cdf)
+        r = read_ida(cdf, ni_source="all")
         src = ReconstructionSource(geqdsk_path=str(tmp_path / "g"), profiles_path=cdf,
-                                   time=3.0)
+                                   time=3.0, ni_source="all")
         return resolve_uncertainty(_cfg(tmp_path, src, unc), _bl(r.psi_N, r.ne, r.Zeff)), r
 
     def test_an_ida_pair_derives_ni_from_zeff(self, tmp_path):
@@ -101,7 +104,7 @@ class TestResolve:
 
     def test_an_explicit_ni_envelope_stays_independent(self, tmp_path):
         from bouquet.config import UncertaintyConfig
-        r = read_ida(_write(tmp_path / "own.cdf"))
+        r = read_ida(_write(tmp_path / "own.cdf"), ni_source="all")
         env, _ = self._recon(tmp_path, UncertaintyConfig(
             sigma_profiles={"ni": 0.1 * r.ne}))
         assert not env["ni_from_zeff"] and env["zeff_dne"] is None
@@ -118,11 +121,11 @@ class TestResolve:
         from bouquet.baseline import resolve_uncertainty
         from bouquet.config import ImasSource
         cdf = _write(tmp_path / "ida.cdf")
-        r = read_ida(cdf)
+        r = read_ida(cdf, ni_source="all")
         bl = _bl(r.psi_N, r.ne, r.Zeff)
         bl.aux = {"ida_profiles": (cdf, r), "zeff": r.Zeff}
         src = ImasSource(ids_path=str(tmp_path / "dd.json"), time=3.0, ida_path=cdf,
-                         zeff_from_fuse=zeff_from_fuse)
+                         zeff_from_fuse=zeff_from_fuse, ni_source="all")
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             env = resolve_uncertainty(_cfg(tmp_path, src), bl)
@@ -142,7 +145,8 @@ def test_with_a_beam_the_draws_spread_ni_by_the_archived_sigma(tmp_path):
         warnings.simplefilter("ignore")
         bl = _read(ddp, cdf)
         env = resolve_uncertainty(_cfg(tmp_path, ImasSource(
-            ids_path=ddp, time=1.0, ida_path=cdf, impurity_Z=Z_IMP)), bl)
+            ids_path=ddp, time=1.0, ida_path=cdf, impurity_Z=Z_IMP,
+            ni_source="all", ni_subtract_fast=True)), bl)
     assert env["ni_from_zeff"] and env["zeff_dne"] is not None
     assert Z_IMP == Z
     s_der = _derived_sigma_ni(types.SimpleNamespace(
@@ -218,7 +222,7 @@ def _draws(r, zeff_dne, n=600, seed=3):
 
 class TestDraw:
     def test_draws_keep_both_reader_envelopes(self, tmp_path, no_oft):
-        r = read_ida(_write(tmp_path / "a.cdf"))
+        r = read_ida(_write(tmp_path / "a.cdf"), ni_source="all")
         ne, zf, ni, conf = _draws(r, r.zeff_dne)
         core = r.psi_N[conf] < 0.8
         # sampling + monotonic-rejection slack; without zeff_dne ni falls ~12 % short
@@ -229,7 +233,7 @@ class TestDraw:
         np.testing.assert_allclose(zf, (ni + Z * Z * nz) / ne, rtol=1e-9)
 
     def test_the_coupling_is_the_ne_zeff_correlation(self, tmp_path, no_oft):
-        r = read_ida(_write(tmp_path / "a.cdf"))
+        r = read_ida(_write(tmp_path / "a.cdf"), ni_source="all")
         ne, zf, _, conf = _draws(r, r.zeff_dne, n=400)
         _, zf0, _, _ = _draws(r, None, n=400)
         i = int(np.argmin(np.abs(r.psi_N[conf] - 0.3)))

@@ -58,7 +58,8 @@ def test_zeff_draw_is_never_below_one(zeff_includes_fast):
     # baseline Z_eff at the bottom of the window: draws push below 1 unless
     # floored
     b = _base(zeff=1.02, zs=0.3, Z_imp=Z_IMP, z_fast=ZF, z2_fast=ZF,
-              zeff_includes_fast=zeff_includes_fast)
+              zeff_includes_fast=zeff_includes_fast,
+              clips=True)            # EXPERIMENTAL PR #56 clips, opted in
     for seed in range(5):
         d = sample_kinetics(b, make_rng(seed), _thermal, _thermal(b),
                             p_thresh=0.5)
@@ -68,7 +69,7 @@ def test_zeff_draw_is_never_below_one(zeff_includes_fast):
 
 
 def test_independent_ni_held_below_the_thermal_electrons():
-    b = _base(f=0.3, ni=0.88 * NE, Z_imp=Z_IMP, z_fast=ZF)
+    b = _base(f=0.3, ni=0.88 * NE, Z_imp=Z_IMP, z_fast=ZF, clips=True)
     for seed in range(5):
         d = sample_kinetics(b, make_rng(seed), _thermal, _thermal(b),
                             p_thresh=0.5)
@@ -125,7 +126,7 @@ def test_sigma0_returns_the_baseline_ni_on_a_non_quasineutral_baseline():
             np.testing.assert_array_equal(getattr(d, k), getattr(b, k))
         np.testing.assert_array_equal(d.zeff, np.full(PSI.size, zb))
         assert not d.clipped
-    assert KINETIC_SAMPLER_VERSION.startswith("kinetic_sampler/2")
+    assert KINETIC_SAMPLER_VERSION.startswith("kinetic_sampler/3")
 
 
 def test_every_clip_that_fires_is_counted_on_the_draw():
@@ -134,7 +135,7 @@ def test_every_clip_that_fires_is_counted_on_the_draw():
     is counted; the values are clipped exactly as before."""
     from bouquet.kinetic_sampler import CLIP_COUNTERS
     b = _base(zeff=1.0, zs=0.3, Z_imp=Z_IMP, z_fast=ZF, z2_fast=ZF,
-              zeff_includes_fast=False)
+              zeff_includes_fast=False, clips=True)
     seen = 0
     for seed in range(5):
         d = sample_kinetics(b, make_rng(seed), _thermal, _thermal(b),
@@ -145,7 +146,8 @@ def test_every_clip_that_fires_is_counted_on_the_draw():
         seen += d.clips["zeff_floor_1"]
         rec = d.record()
         assert rec["clipped"] == (sum(rec["clips"].values()) > 0)
-        assert rec["version"].startswith("kinetic_sampler/2")
+        assert rec["version"].startswith("kinetic_sampler/3")
+        assert rec["clips_enabled"] is True
     assert seen > 0
 
 
@@ -161,7 +163,7 @@ def test_clip_counting_does_not_change_the_draw_stream():
 
 
 def test_the_ni_ceiling_is_counted_when_it_binds():
-    b = _base(f=0.3, ni=0.88 * NE, Z_imp=Z_IMP, z_fast=ZF)
+    b = _base(f=0.3, ni=0.88 * NE, Z_imp=Z_IMP, z_fast=ZF, clips=True)
     n = 0
     for seed in range(8):
         d = sample_kinetics(b, make_rng(seed), _thermal, _thermal(b),
@@ -170,3 +172,57 @@ def test_the_ni_ceiling_is_counted_when_it_binds():
         assert d.clips["ni_ceiling"] <= int(np.count_nonzero(d.ni == cap))
         n += d.clips["ni_ceiling"]
     assert n > 0
+
+
+# ---------------------------------------------------------------------------
+#  1.4.0 owner decision: the PR #56 clips are EXPERIMENTAL and opt-in
+# ---------------------------------------------------------------------------
+def test_default_keeps_only_the_zeff_bounds_window():
+    """Default (clips off): a Z_eff draw is held in physics.zeff_bounds
+    alone -- the pre-#56 window, which with a beam and the thermal
+    numerator reaches below 1 -- and n_i is not clipped."""
+    from bouquet.physics import zeff_bounds
+    b = _base(zeff=1.0, zs=0.3, Z_imp=Z_IMP, z_fast=ZF, z2_fast=ZF,
+              zeff_includes_fast=False)
+    assert b.clips is False
+    below = 0
+    for seed in range(5):
+        d = sample_kinetics(b, make_rng(seed), _thermal, _thermal(b),
+                            p_thresh=0.5)
+        lo, hi = zeff_bounds(d.ne, Z_IMP, ZF, ZF, False)
+        assert np.all(d.zeff >= lo) and np.all(d.zeff <= hi)
+        below += int(np.count_nonzero(d.zeff < ZEFF_DRAW_MIN))
+        assert d.clips["zeff_floor_1"] == 0
+        assert d.clips["ni_floor_0"] == 0 and d.clips["ni_ceiling"] == 0
+        assert d.record()["clips_enabled"] is False
+    assert below > 0          # the floor at 1 would have bound here
+
+
+def test_default_passive_zeff_aux_draw_is_not_clipped():
+    """Default: a passive Z_eff aux draw (ni_from_zeff=False) is the raw GP
+    sample, as before PR #56; with clips=True it is held in the window."""
+    b0 = _base(zeff=1.0, zs=0.3, Z_imp=Z_IMP, ni_from_zeff=False)
+    b1 = _base(zeff=1.0, zs=0.3, Z_imp=Z_IMP, ni_from_zeff=False, clips=True)
+    lo_seen = False
+    for seed in range(5):
+        d0 = sample_kinetics(b0, make_rng(seed), _thermal, _thermal(b0),
+                             p_thresh=0.5)
+        d1 = sample_kinetics(b1, make_rng(seed), _thermal, _thermal(b1),
+                             p_thresh=0.5)
+        assert np.all(d1.aux["zeff"] >= ZEFF_DRAW_MIN)
+        lo_seen |= bool(np.any(d0.aux["zeff"] < ZEFF_DRAW_MIN))
+        np.testing.assert_array_equal(
+            np.maximum(d0.aux["zeff"], ZEFF_DRAW_MIN), d1.aux["zeff"])
+    assert lo_seen
+
+
+def test_clips_change_nothing_where_none_binds():
+    """Same seed, a baseline far from every bound: the opt-in clips leave
+    the draw bit-identical to the default."""
+    b0 = _base(zeff=2.0, zs=0.05, Z_imp=Z_IMP)
+    b1 = _base(zeff=2.0, zs=0.05, Z_imp=Z_IMP, clips=True)
+    d0 = sample_kinetics(b0, make_rng(11), _thermal, _thermal(b0), p_thresh=0.5)
+    d1 = sample_kinetics(b1, make_rng(11), _thermal, _thermal(b1), p_thresh=0.5)
+    assert not d1.clipped
+    for k in ("ne", "te", "ni", "ti", "zeff"):
+        np.testing.assert_array_equal(getattr(d0, k), getattr(d1, k))

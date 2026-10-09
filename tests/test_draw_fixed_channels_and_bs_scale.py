@@ -216,6 +216,42 @@ def test_the_scaling_rule_per_draw_kind(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+#  B4
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("req, cap, want", [
+    (None, True, "source"), (None, False, "generic"),
+    ("source", True, "source"), ("source", False, "source_unavailable"),
+    ("generic", True, "generic"), ("generic", False, "generic")])
+def test_swb_seed_resolves_to_the_toolkit_and_refuses_only_at_an_swb_call(
+        monkeypatch, req, cap, want):
+    import bouquet.coords as C
+    monkeypatch.setattr(C, "_SWB_PARAMS", frozenset(
+        {"x", "jphi_fixed"} if cap else {"x"}), raising=False)
+    b = _bouquet(SimpleNamespace(achieved=np.ones(_N)))
+    b.config.generation.swb_seed = req
+    mode, rec = b._resolve_swb_seed()
+    assert mode == want and rec["resolved"] == want
+    assert rec["requested"] == req and rec["oft_jphi_fixed"] is cap
+    b._swb_seed_record = rec
+    b.baseline.swb_seed_profile = None
+    if want == "source_unavailable":
+        with pytest.raises(RuntimeError, match="needs an OpenFUSIONToolkit"):
+            b._swb_inputs(None, _X, "psi_n")
+    else:
+        monkeypatch.setattr(C, "psi_at", lambda mygs, x, coord: x)
+        seed, kw = b._swb_inputs(None, _X, "psi_n")
+        assert kw == {} and seed.shape == _X.shape
+
+
+def test_swb_seed_default_is_none_and_validated():
+    assert GenerationConfig().swb_seed is None
+    for v in (None, "source", "generic"):
+        GenerationConfig(swb_seed=v)
+    with pytest.raises(ValueError, match="swb_seed"):
+        GenerationConfig(swb_seed="auto")
+
+
+# ---------------------------------------------------------------------------
 #  B5
 # ---------------------------------------------------------------------------
 def test_the_ohmic_structured_mse_stage_records_the_multiplier():

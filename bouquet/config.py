@@ -1117,8 +1117,15 @@ class GenerationConfig:
     # SWB inputs on the IMAS path (baseline split, draws, sigma=0 check):
     # "source" seeds SWB with the source's j_inductive and holds the rest of
     # its current (NBI + RF + other) fixed via jphi_fixed; "generic" uses the
-    # (1 - s^1.5)^1.5 seed and no fixed current.  g-file paths: "generic".
-    swb_seed: str = "source"
+    # (1 - s^1.5)^1.5 seed and no fixed current.  None (the default) is
+    # resolved at prepare_baseline(): "source" when the installed
+    # OpenFUSIONToolkit's solve_with_bootstrap takes jphi_fixed, else
+    # "generic" -- never an error.  An explicit "source" on a toolkit
+    # without jphi_fixed is refused at the first SWB call (not when no SWB
+    # runs).  The resolution is stamped in li_metrics["swb_seed"].  g-file
+    # paths: "generic".  The swb solve method needs "source" (None resolves
+    # to it there; its toolkit check refuses one without jphi_fixed).
+    swb_seed: Optional[str] = None
     # The solve method, one of SOLVE_METHODS: "legacy", "swb"
     # (solve_with_bootstrap is the baseline and every draw; IMAS sources) or
     # "engine" (the unified engine).  None: derived from imas_baseline /
@@ -1513,8 +1520,8 @@ class GenerationConfig:
         switches the channel on -- ``structured_preset=None`` resolves to the
         DEFAULT preset only when the channel is already ``"structured"``.
         """
-        if self.swb_seed not in ("source", "generic"):
-            raise ValueError(f"swb_seed={self.swb_seed!r} not in ('source', 'generic')")
+        if self.swb_seed not in (None, "source", "generic"):
+            raise ValueError(f"swb_seed={self.swb_seed!r} not in (None, 'source', 'generic')")
         if self.imas_baseline not in ("closure", "swb"):
             raise ValueError(
                 f"imas_baseline={self.imas_baseline!r} not in ('closure', 'swb')")
@@ -1531,7 +1538,7 @@ class GenerationConfig:
         validate_bootstrap_kwargs(
             self.bootstrap_kwargs,
             _BOOTSTRAP_RESERVED | self._SAW_RESERVED
-            | ({"jphi_fixed"} if self.swb_seed == "source" else set())
+            | ({"jphi_fixed"} if self.swb_seed in (None, "source") else set())
             | ({"p_fixed"} if self.imas_baseline == "swb" else set()))
         resolve_structured_preset(self, stacklevel=4)
         validate_structured_mse_settings(self)
@@ -1707,8 +1714,8 @@ def swb_config_problems(config):
         p.append("needs an ImasSource")
     if gc.kinetic_source != "ida_hybrid":
         p.append(f"kinetic_source={gc.kinetic_source!r} (only 'ida_hybrid' for now)")
-    if gc.swb_seed != "source":
-        p.append("swb_seed must be 'source' (the source split is the SWB input)")
+    if gc.swb_seed not in (None, "source"):
+        p.append("swb_seed must be 'source' or None (the source split is the SWB input)")
     for name in ("single_profile_jphi", "imas_corrective_jphi", "jbs_delta_mode",
                  "anchor_pressure_to_equilibrium"):
         if getattr(gc, name, False):

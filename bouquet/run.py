@@ -4653,7 +4653,11 @@ class Bouquet(SwbBaseline):
         # any closure touches bl), shared by the baseline split, the draws and
         # the sigma=0 check.
         bl.swb_seed_profile = bl.swb_jphi_fixed = bl.swb_jphi_saw = None
-        if self.config.generation.swb_seed == "source":
+        # resolved here, capability-checked at the SWB call (PR #70 review
+        # B4: the "source" default raised on a toolkit without jphi_fixed
+        # even when no SWB call ever runs)
+        _seed_mode, self._swb_seed_record = self._resolve_swb_seed()
+        if _seed_mode == "source":
             self._swb_source_split(psi_N)
         if self.config.generation.recalculate_j_BS:
             from .TokaMaker_interface import smooth_jbs_transition
@@ -6055,6 +6059,8 @@ class Bouquet(SwbBaseline):
         # baseline's metrics so every slice of a sweep carries its dt
         if getattr(bl, "source_time_match", None):
             metrics["source_time_match"] = bl.source_time_match
+        if getattr(self, "_swb_seed_record", None):
+            metrics["swb_seed"] = dict(self._swb_seed_record)
         bl.li_metrics = metrics
         # Target TokaMaker li_3 ('iter').  The IMAS path is not itself affected
         # by the geqdsk estimator mismatch (both sides come from TokaMaker),
@@ -6344,14 +6350,56 @@ class Bouquet(SwbBaseline):
         rec["jBS_scale_range"] = None if rng is None else [float(v) for v in rng]
         return rng, mult, rec
 
+    def _resolve_swb_seed(self):
+        """``(mode, record)`` of ``GenerationConfig.swb_seed`` for this run.
+
+        ``None`` (the default) resolves to ``"source"`` when the installed
+        OpenFUSIONToolkit's ``solve_with_bootstrap`` takes ``jphi_fixed``,
+        else to ``"generic"`` -- never an error, whether or not SWB runs.  An
+        explicit ``"source"`` on a toolkit without ``jphi_fixed`` is
+        ``"source_unavailable"``: nothing is raised here (no SWB may run);
+        the first SWB call that would use it raises
+        (:meth:`_swb_inputs`, ``generate()``).  Stamped in
+        ``li_metrics["swb_seed"]``."""
+        gc = self.config.generation
+        req = getattr(gc, "swb_seed", None)
+        cap = "jphi_fixed" in coords._swb_params()
+        if req is None:
+            mode = "source" if cap else "generic"
+            how = ("auto: this OpenFUSIONToolkit's solve_with_bootstrap "
+                   + ("takes jphi_fixed" if cap else
+                      "has no jphi_fixed, so the generic seed"))
+        elif req == "source" and not cap:
+            mode = "source_unavailable"
+            how = ("set 'source', but this OpenFUSIONToolkit's "
+                   "solve_with_bootstrap has no jphi_fixed: refused at the "
+                   "first SWB call")
+        else:
+            mode, how = str(req), "set"
+        return mode, dict(requested=req, resolved=mode,
+                          oft_jphi_fixed=bool(cap), how=how)
+
+    def _swb_source_unavailable(self):
+        """The refusal of an explicit ``swb_seed="source"`` at an SWB call
+        on a toolkit without ``jphi_fixed``."""
+        return RuntimeError(
+            "swb_seed='source' needs an OpenFUSIONToolkit whose "
+            "solve_with_bootstrap takes jphi_fixed, and an SWB call is about "
+            "to run; set swb_seed='generic' (or None: resolved to the "
+            "toolkit's capability)")
+
     def _swb_inputs(self, mygs, psi_N, coord):
         """``(inductive seed, extra SWB kwargs)``: the baseline's source seed
-        and ``jphi_fixed`` when set (``swb_seed="source"``), else the generic
-        seed and no kwargs.
+        and ``jphi_fixed`` when set (``swb_seed`` resolved to "source"), else
+        the generic seed and no kwargs.  An explicit ``swb_seed="source"``
+        the toolkit cannot honour is refused here, at the SWB call.
         """
         bl = self.baseline
         if getattr(bl, "swb_seed_profile", None) is not None:
             return bl.swb_seed_profile, {"jphi_fixed": bl.swb_jphi_fixed}
+        if (getattr(self, "_swb_seed_record", None) or {}).get(
+                "resolved") == "source_unavailable":
+            raise self._swb_source_unavailable()
         return coords.swb_seed(psi_N, coords.psi_at(mygs, psi_N, coord)), {}
 
     def verify_sigma0_consistency(self, tol_frac=0.02, draw_route=True,
@@ -7706,6 +7754,12 @@ class Bouquet(SwbBaseline):
         # j_BS at scale 1; engine: the range on top of s_bs(x*)).
         _jbs_range, _bs_mult, _bs_scaling = self._draw_bootstrap_scaling(_m)
         self._draw_bootstrap_scaling_record = _bs_scaling
+        if ((getattr(self, "_swb_seed_record", None) or {}).get("resolved")
+                == "source_unavailable" and bool(gc.recalculate_j_BS)
+                and not self._draws_run_jbs_loop(_m)):
+            # the draws would call SWB with the generic seed in place of the
+            # source seed that was asked for
+            raise self._swb_source_unavailable()
 
         # The LCFS boundary cut, resolved ONCE and OUTSIDE the output capture:
         # the announcement must reach the user (inside the capture it went to

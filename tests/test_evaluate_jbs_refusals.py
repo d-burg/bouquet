@@ -28,9 +28,8 @@ _bs = pytest.importorskip(
 
 from bouquet.physics import (EVALUATE_JBS_VERSION, JBSEvaluationError,  # noqa: E402
                              _EC, _SAUTER_MODB_INDEX, _SAUTER_RAVG_INDEX,
-                             _sauter_avg, evaluate_jBS,
-                             jpar_to_jphi_tokamaker,
-                             jphi_tokamaker_pressure_term, q_ravg)
+                             _sauter_avg, evaluate_jBS, parallel_to_toroidal,
+                             q_ravg)
 from test_jbs_loop import _MockEq, _kin  # noqa: E402
 
 
@@ -82,7 +81,7 @@ def _evaluate_jBS_reference(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
     psi_eval = np.clip(psi_N, psi_pad, 1.0 - psi_pad)
     psi_u, inv = np.unique(psi_eval, return_inverse=True)
     psi_u = np.ascontiguousarray(psi_u, dtype=float)
-    _, F_u, _, _, pp_u = mygs.get_profiles(psi=psi_u.copy())
+    _, F_u, _, _, _ = mygs.get_profiles(psi=psi_u.copy())
     # a live TokaMaker exposes sauter_fc; a copy_eq() snapshot
     # (TokaMaker_equilibrium) exposes the same routine as calc_sauter_fc
     _sfc = getattr(mygs, "sauter_fc", None)
@@ -138,10 +137,8 @@ def _evaluate_jBS_reference(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
         use_legacy_L34=False, use_sign_q=True, formula_form="jboot1")
     j_dot_B = np.nan_to_num(np.asarray(j_dot_B, dtype=float), nan=0.0)
 
-    geom = {"F": F, "avg_inv_R": avg_inv_R, "avg_B2": avg_B2,
-            "avg_R": R_avg, "pprime": np.asarray(pp_u, dtype=float)[inv]}
-    p_term = jphi_tokamaker_pressure_term(geom)
-    j_tor_full = np.nan_to_num(jpar_to_jphi_tokamaker(j_dot_B, geom) + p_term,
+    geom = {"F": F, "avg_inv_R": avg_inv_R, "avg_B2": avg_B2}
+    j_tor_full = np.nan_to_num(parallel_to_toroidal(j_dot_B, geom=geom),
                                nan=0.0)
 
     if isolate_edge:
@@ -151,8 +148,8 @@ def _evaluate_jBS_reference(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
         swb_proj = j_dot_B * (R_avg / F)
         res = _oft_bs.analyze_bootstrap_edge_spike(psi_N, swb_proj)
         masked = np.asarray(res["masked_spike"], dtype=float)
-        j_tor_sel = np.nan_to_num(jpar_to_jphi_tokamaker(
-            masked * F / R_avg, geom) + p_term, nan=0.0)
+        j_tor_sel = np.nan_to_num(parallel_to_toroidal(
+            masked * F / R_avg, geom=geom), nan=0.0)
     else:
         j_tor_sel = j_tor_full
 
@@ -393,18 +390,49 @@ def test_a_negative_trapped_fraction_inside_the_plasma_is_refused():
 
 
 # ---------------------------------------------------------------------------
-#  the toroidal conversion is the exact TokaMaker jphi (A7, incl. p'G)
+#  the toroidal conversion is the package's one field-aligned factor
 # ---------------------------------------------------------------------------
-def test_the_toroidal_conversion_is_the_exact_one_with_the_pressure_term():
-    """Pins the convention: TokaMaker
-    ``jphi = F<1/R><j.B>/<B^2> + p'(<R> - F^2<1/R>/<B^2>)`` -- the field-
-    aligned part and the pressure-driven p'G on the bootstrap, as the IMAS
-    reader and OFT's own SWB output carry it."""
+def test_the_toroidal_conversion_is_the_one_field_aligned_factor():
+    """Pins the convention the evaluator shares with the frozen path's
+    ``_swb_jbs_to_toroidal`` and the unified engine: ``<j_phi> = kappa
+    <j.B>``, ``kappa = F <1/R> / <B^2>``.  Until 2026-10-06 this pinned
+    ``<j.B> / (F <1/R>)``; the owner-approved change (one conversion in the
+    package) moved it -- by ``[<B^2>/<B_phi^2>] [<1/R^2>/<1/R>^2]``, ~6.8 %
+    at the pedestal of the synthetic D3D-like example -- and it must not
+    move again by accident.  (PR #64 moved p'G into it; the owner decided
+    on 2026-10-09 that p'G is a separate bucket, D2: restored, and the
+    reference below is the physics module's own factor, not this
+    evaluator's.)"""
+    from bouquet.physics import field_aligned_conversion
     x = np.linspace(0.0, 1.0, 151)
     _j, d = evaluate_jBS(_MockEq(), x, *_kin(x), smooth_axis=False)
-    exp = (d["F"] * d["avg_inv_R"] * d["j_dot_B"] / d["avg_B2"]
-           + d["pprime"] * (d["R_avg"] - d["F"] ** 2 * d["avg_inv_R"]
-                            / d["avg_B2"]))
-    np.testing.assert_allclose(d["j_tor_full_raw"], exp, rtol=1e-14, atol=0)
-    np.testing.assert_array_equal(d["p_term"], d["pprime"] * (
-        d["R_avg"] - d["F"] ** 2 * d["avg_inv_R"] / d["avg_B2"]))
+    np.testing.assert_array_equal(
+        d["j_tor_full_raw"],
+        d["j_dot_B"] * (d["F"] * d["avg_inv_R"] / d["avg_B2"]))
+    np.testing.assert_array_equal(
+        d["j_tor_full_raw"],
+        d["j_dot_B"] * field_aligned_conversion(d["F"], d["avg_inv_R"],
+                                                d["avg_B2"]))
+
+
+def test_the_pressure_driven_current_is_returned_beside_the_bootstrap():
+    """D2 (owner decision 2026-10-09): ``p'G`` is the third bucket.  The
+    evaluator returns it as ``diag["j_pressure"]`` -- ``p'(<R> -
+    F^2<1/R>/<B^2>)`` on the same nodes -- and the bootstrap profile it
+    returns carries none of it."""
+    class _PressureEq(_MockEq):
+        def get_profiles(self, psi=None, **kw):
+            psi_, F, *_rest = super().get_profiles(psi=psi, **kw)
+            p = np.asarray(psi, dtype=float)
+            return psi_, F, 0.01 * (1.0 - p) / F, 0 * F, 2.0e5 * (1.0 - p)
+
+    x = np.linspace(0.0, 1.0, 151)
+    j0, d0 = evaluate_jBS(_MockEq(), x, *_kin(x), smooth_axis=False)
+    j, d = evaluate_jBS(_PressureEq(), x, *_kin(x), smooth_axis=False)
+    G = d["R_avg"] - d["F"] ** 2 * d["avg_inv_R"] / d["avg_B2"]
+    np.testing.assert_array_equal(d["j_pressure"], d["pprime"] * G)
+    assert np.max(np.abs(d["j_pressure"])) > 1e3
+    # p' moves no bootstrap value: the profile is p'-free
+    np.testing.assert_array_equal(j, j0)
+    np.testing.assert_array_equal(j, d["j_tor_full_raw"])
+    assert "/4" in d["version"] and "j_pressure" in d["version"]

@@ -154,13 +154,19 @@ class _ExampleEq:
         z = np.zeros_like(p)
         return p, F, z, z, z
 
-    def sauter_fc(self, psi=None, npsi=None, psi_pad=None, return_eps=False):
+    def sauter_fc(self, psi=None, npsi=None, psi_pad=None):
         p = self._grid(psi, npsi, psi_pad)
         r = {"<R>": self._R(p), "<1/R>": self._at("avg_inv_R", p),
              "<a>": 0.6 * np.sqrt(p) + 1e-3}
         modb = np.array([self._at("B_avg", p), self._at("avg_B2", p)])
-        out = (p, self._at("f_trap", p), r, modb)
-        return out + ((r["<a>"] / r["<R>"],) if return_eps else ())
+        return (p, self._at("f_trap", p), r, modb)
+
+    def get_fsa(self, psi=None, npsi=None, psi_pad=None):
+        # OpenFUSIONToolkit main's route to the geometric eps (the default):
+        # a half-width 0.85 <a>, distinct from the opt-in <a>/<R>
+        p = self._grid(psi, npsi, psi_pad)
+        R, hw = self._R(p), 0.85 * (0.6 * np.sqrt(p) + 1e-3)
+        return {"psi_norm": p, "<R>": R, "R_min": R - hw, "R_max": R + hw}
 
     def get_q(self, psi=None, npsi=None, psi_pad=None, compute_geo=False):
         p = self._grid(psi, npsi, psi_pad)

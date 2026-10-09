@@ -213,8 +213,8 @@ collisionality, `redl_bootstrap(formula_form='jboot1', use_sign_q=True)`) run
 **once on the equilibrium it is handed -- no solve inside** -- with three
 differences, each the point of the helper:
 
-1. geometry (`F`, `f_T = 1 − f_c`, `ε = ⟨a⟩/⟨R⟩`, `q`, `⟨R⟩`) is sampled on the
-   **caller's** surfaces, `clip(ψ_N, psi_pad, 1 − psi_pad)`;
+1. geometry (`F`, `f_T = 1 − f_c`, `ε` -- see below --, `q`, `⟨R⟩`) is sampled
+   on the **caller's** surfaces, `clip(ψ_N, psi_pad, 1 − psi_pad)`;
 2. gradients are taken on the **true** grid, `numpy.gradient(y, ψ_N,
    edge_order=2)`, divided by the **current** flux range;
 3. Redl's `⟨j·B⟩` is converted to TokaMaker `jphi = ⟨j_φ⟩` exactly, by (A7) of
@@ -251,14 +251,40 @@ bit-identical to the evaluator before the refusals (a fast test compares it
 against a verbatim copy). The production callers clip `Z_eff` at 1 before
 calling, as they always did.
 
+**The inverse aspect ratio ε (`evaluate_jBS/4`, owner decision E4,
+2026-10-09).** ε enters the Redl collisionalities, `ν*_e, ν*_i ∝ ε^-3/2`
+(Sauter, Angioni & Lin-Liu, Phys. Plasmas 6, 2834 (1999); Redl et al., Phys.
+Plasmas 28, 022502 (2021)); the trapped fraction `f_T` comes from the field
+and does not depend on it. The default is now the **geometric**
+`ε = (R_max − R_min)/(2⟨R⟩)` per flux surface -- the half-width of the surface
+over its flux-surface-averaged major radius, the definition the Sauter
+formula requires (owner). It is computed on every OpenFUSIONToolkit build:
+from `sauter_fc(return_eps=True)` where the installed build has it (the fork's
+Fortran, `(rmax_surf − rmin_surf)/(2⟨R⟩)`), else from `get_fsa`'s per-surface
+`R_min`/`R_max` over the `sauter_fc` `⟨R⟩` (OFT ≥ v26.6, `physics.geometric_eps`);
+it never raises for the missing fork option. The previous `ε = ⟨a⟩/⟨R⟩`
+(`⟨a⟩` the dl/B_p-weighted mean distance from the magnetic axis; OFT main's own
+SWB still uses it) is the explicit opt-in `evaluate_jBS(...,
+eps_definition="a_over_R")`, for A/B. Every result names the definition, the
+route and the version (`diag["eps_definition"]`, `["eps_route"]`,
+`["version"]`; the opt-in's version string says `OPT-IN eps = <a>/<R>`).
+*Consequence (measured on the synthetic D3D-like IMAS baseline, same
+equilibrium and kinetics, our OFT via `get_fsa`):* `⟨a⟩/⟨R⟩` exceeds the
+geometric ε by ×1.18 at ψ_N 0.1, ×1.20 at 0.5, ×1.32 at 0.9, ×1.38 at 0.95 and
+×1.43 at 0.98, so ν* rises ×1.27 / 1.31 / 1.52 / 1.62 / 1.72 there; j_BS moves
++0.2 % / +0.4 % / +2.1 % / −1.0 % / −8.2 %, its peak −2.0 % and its integral
+−0.46 %. (`get_fsa`'s own `⟨R⟩` differs from `sauter_fc`'s by 2.9e-6 relative
+on that equilibrium -- two traces -- which is why the `sauter_fc` `⟨R⟩` is the
+denominator.)
+
 On a uniform grid it reproduces SWB's first-pass `⟨j·B⟩` **bit for bit** (on a
-build whose SWB accepts `psi_N=`). Grids whose first intervals are finer than
+build whose SWB accepts `psi_N=`, with the ε that build's SWB uses). Grids whose first intervals are finer than
 `psi_pad` (a ρ-uniform grid near the axis) are handled without changing
 `psi_pad` and without merging surfaces: every point keeps its own profile value
 and gradient; only the geometry of the points inside the pad is looked up at
 `psi_pad`, once. It uses only primitives present on every supported OFT build
-(`get_profiles`, `sauter_fc`, `get_q`, `psi_bounds`, `redl_bootstrap`,
-`calculate_ln_lambda`), in either of their return layouts.
+(`get_profiles`, `sauter_fc`, `get_fsa`, `get_q`, `psi_bounds`,
+`redl_bootstrap`, `calculate_ln_lambda`), in either of their return layouts.
 
 ### The loop
 

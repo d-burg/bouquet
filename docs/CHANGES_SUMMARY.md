@@ -2,6 +2,28 @@
 
 ## Unreleased — PR #56 (IDA/FUSE ion coupling) and PR #60 (bootstrap options), integrated
 
+### Redl ε: the geometric `(R_max − R_min)/(2⟨R⟩)` by default (`evaluate_jBS/4`, PR #60, owner decision E4)
+
+- **Default physics change, declared.** `evaluate_jBS`'s inverse aspect ratio
+  is now `ε = (R_max − R_min)/(2⟨R⟩)` on every OpenFUSIONToolkit build (from
+  `sauter_fc(return_eps=True)` where the build has it, else from `get_fsa`'s
+  `R_min`/`R_max` over the `sauter_fc` `⟨R⟩`). PR #60 as submitted required
+  the fork-only `return_eps` and raised `RuntimeError` on every other build
+  (the default engine and the legacy loop could not prepare a baseline); it
+  never raises for that now. `ε = ⟨a⟩/⟨R⟩` (versions `/1`-`/3`) is the opt-in
+  `eps_definition="a_over_R"`.
+- **Version.** `EVALUATE_JBS_VERSION` is `evaluate_jBS/4 (..., geometric eps =
+  (R_max-R_min)/(2<R>), ...)`; `/3` keeps its meaning (p′G with the bootstrap,
+  PR #64), and an opt-in run records `evaluate_jbs_version("a_over_R")`, which
+  names `OPT-IN eps = <a>/<R>`. `diag["eps_definition"]`/`["eps_route"]` per
+  evaluation.
+- **What moves** (synthetic D3D-like, same equilibrium and kinetics): ν* ×1.27
+  at ψ_N 0.1 rising to ×1.72 at 0.98 (`ν* ∝ ε^-3/2`); j_BS +0.2 % core, +2.1 %
+  at 0.9, −1.0 % at 0.95, −8.2 % at 0.98; peak −2.0 %; I_BS −0.46 %. Every
+  default-path bootstrap (unified engine and legacy loop) changes accordingly;
+  goldens that pin `evaluate_jBS` output need regeneration.
+  [physics-notes.md](physics-notes.md#the-evaluator-physicsevaluate_jbs).
+
 ### Kinetic draws: `kinetic_sampler/2` (PR #56)
 
 - **One sampler for every path** (`bouquet.kinetic_sampler`, version

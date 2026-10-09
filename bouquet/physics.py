@@ -660,14 +660,62 @@ def edge_taper_weight(psi_N, psi0=0.999, shape=2):
     return w
 
 
+#: The inverse aspect ratio entering the Redl collisionalities
+#: (``nu_e*, nu_i* ~ eps^-3/2``), by name.  ``"geometric"`` (default since
+#: ``evaluate_jBS/4``): ``eps = (R_max - R_min) / (2 <R>)`` per flux surface,
+#: the half-width of the surface over its flux-surface-averaged major radius
+#: -- the definition the Sauter (1999) / Redl (2021) fits are written in
+#: (owner decision E4, 2026-10-09).  ``"a_over_R"``: ``eps = <a>/<R>``, the
+#: dl/B_p-weighted mean distance from the magnetic axis over ``<R>`` (OFT
+#: ``sauter_fc``'s ``<a>``), the definition of ``evaluate_jBS/1..3`` and of
+#: OpenFUSIONToolkit main's own ``solve_with_bootstrap``; kept as an explicit
+#: opt-in for A/B comparison.
+EPS_DEFINITIONS = {
+    "geometric": "(R_max - R_min)/(2<R>)",
+    "a_over_R": "<a>/<R>",
+}
+#: The default of :func:`evaluate_jBS`'s ``eps_definition``.
+EPS_DEFINITION_DEFAULT = "geometric"
+
+
+def check_eps_definition(eps_definition):
+    """Validate an ``eps_definition`` name; returns it."""
+    if eps_definition not in EPS_DEFINITIONS:
+        raise ValueError(
+            f"eps_definition={eps_definition!r} is not one of "
+            f"{sorted(EPS_DEFINITIONS)} "
+            f"({'; '.join(f'{k}: {v}' for k, v in EPS_DEFINITIONS.items())})")
+    return eps_definition
+
+
+def evaluate_jbs_version(eps_definition=EPS_DEFINITION_DEFAULT):
+    """The :data:`EVALUATE_JBS_VERSION` string for an ``eps_definition``
+    (the opt-in ``"a_over_R"`` is named in the tag, so a record says which
+    epsilon produced its bootstrap)."""
+    eps_definition = check_eps_definition(eps_definition)
+    eps_txt = ("geometric eps = (R_max-R_min)/(2<R>)"
+               if eps_definition == "geometric" else
+               "OPT-IN eps = <a>/<R> (the /3 definition)")
+    return ("evaluate_jBS/4 (Redl 2021 jboot1, NRL/Zavg lnLambda, Koh nu_i*, "
+            f"{eps_txt}, psi_N-native, kappa = F<1/R>/<B^2> toroidal "
+            "conversion plus p'G)")
+
+
 #: Version tag of :func:`evaluate_jBS`, recorded with every loop record so an
 #: archive states which evaluator produced its bootstrap.
 #: ``/2`` (2026-10-06): the toroidal output is ``kappa <j.B>``, ``kappa =
-#: F<1/R>/<B^2>`` (was ``<j.B>/(F<1/R>)`` in ``/1``); ``/3``: plus ``p'G``.
-EVALUATE_JBS_VERSION = ("evaluate_jBS/3 (Redl 2021 jboot1, NRL/Zavg lnLambda, "
-                        "Koh nu_i*, geometric eps, psi_N-native, "
-                        "kappa = F<1/R>/<B^2> "
-                        "toroidal conversion plus p'G)")
+#: F<1/R>/<B^2>`` (was ``<j.B>/(F<1/R>)`` in ``/1``); ``/3``: plus ``p'G``
+#: (PR #64), with the Redl ``eps`` still ``<a>/<R>`` on every OFT build that
+#: ran (PR #60's ``(R_max - R_min)/(2<R>)`` required a fork-only
+#: ``sauter_fc(return_eps=True)`` and raised elsewhere).  ``/4`` (owner
+#: decision E4): the geometric ``eps = (R_max - R_min)/(2<R>)`` by default on
+#: every build -- from ``sauter_fc(return_eps=True)`` where the installed OFT
+#: has it, else from ``get_fsa``'s ``R_min``/``R_max``/``<R>`` (the two agree
+#: to rounding) -- with ``<a>/<R>`` as the opt-in ``eps_definition="a_over_R"``
+#: (whose records carry :func:`evaluate_jbs_version` of it).  ``nu_e*`` and
+#: ``nu_i*`` scale as ``eps^-3/2``, so the default bootstrap moves wherever
+#: the two epsilons differ (most in the pedestal; docs/CHANGES_SUMMARY.md).
+EVALUATE_JBS_VERSION = evaluate_jbs_version(EPS_DEFINITION_DEFAULT)
 
 #: Positional layout of ``sauter_fc``'s geometry block on OFT builds that
 #: return it as a ``(3, n)`` array (builds after OpenFUSIONToolkit#313 return
@@ -724,8 +772,60 @@ def _sauter_avg(block, which, index):
     return np.asarray(block, dtype=float)[index[which]]
 
 
+def _accepts_kw(fn, name):
+    """True when callable *fn* takes keyword *name* (explicitly or through
+    ``**kwargs``); False when its signature cannot be read."""
+    import inspect
+    try:
+        params = inspect.signature(fn).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(p.name == name or p.kind is p.VAR_KEYWORD for p in params)
+
+
+def geometric_eps(mygs, psi_u, sauter_fn=None, R_avg=None):
+    """``(eps, route)``: ``(R_max - R_min)/(2<R>)`` on the surfaces *psi_u*.
+
+    ``route`` is ``"sauter_fc(return_eps=True)"`` when the installed OFT's
+    ``sauter_fc`` returns it (a 5-tuple: the fork's Fortran,
+    ``(rmax_surf - rmin_surf)/(2 r_avgs(:,1))`` with ``r_avgs(:,1)`` the
+    ``sauter_fc`` ``<R>``), else ``"get_fsa"``: the per-surface ``R_min`` and
+    ``R_max`` of OFT's ``get_fsa`` (OFT >= v26.6) over *R_avg* -- pass the
+    ``sauter_fc`` ``<R>`` of the same surfaces to divide by exactly the
+    fork's denominator (``get_fsa``'s own ``<R>`` comes from a separate
+    trace: 2.9e-6 relative apart on the synthetic D3D-like example); without
+    it ``get_fsa``'s ``<R>`` is used.  Never raises for a missing fork
+    option; raises :class:`RuntimeError` only when the build offers neither
+    (pre-v26.6), naming ``eps_definition="a_over_R"``.  A failed trace's zero
+    row gives ``eps = 0`` (refused by the caller)."""
+    psi_u = np.ascontiguousarray(psi_u, dtype=float)
+    if sauter_fn is None:
+        sauter_fn = getattr(mygs, "sauter_fc", None) or getattr(
+            mygs, "calc_sauter_fc")
+    if _accepts_kw(sauter_fn, "return_eps"):
+        out = sauter_fn(psi=psi_u.copy(), return_eps=True)
+        if len(out) == 5:
+            return np.asarray(out[4], dtype=float), "sauter_fc(return_eps=True)"
+    get_fsa = getattr(mygs, "get_fsa", None)
+    if get_fsa is None:
+        raise RuntimeError(
+            "evaluate_jBS: the geometric eps = (R_max - R_min)/(2<R>) needs "
+            "OpenFUSIONToolkit's get_fsa (v26.6 or newer) or "
+            "sauter_fc(return_eps=True); this build has neither.  Upgrade "
+            "OpenFUSIONToolkit, or pass eps_definition='a_over_R' for the "
+            "<a>/<R> epsilon of evaluate_jBS/3")
+    f = get_fsa(psi=psi_u.copy())
+    r_min = np.asarray(f["R_min"], dtype=float)
+    r_max = np.asarray(f["R_max"], dtype=float)
+    r_avg = np.asarray(f["<R>"] if R_avg is None else R_avg, dtype=float)
+    eps = np.divide(r_max - r_min, 2.0 * r_avg, out=np.zeros_like(r_avg),
+                    where=r_avg > 0.0)
+    return eps, "get_fsa"
+
+
 def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
-                 isolate_edge=False, smooth_axis=True, coord="psi_n"):
+                 isolate_edge=False, smooth_axis=True, coord="psi_n",
+                 eps_definition=None):
     r"""Redl bootstrap current on the CURRENT equilibrium, on the caller's grid.
 
     A faithful port of the inner physics of OpenFUSIONToolkit's
@@ -740,7 +840,7 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
     which is the reason it exists:
 
     1. **Geometry on the caller's grid.**  ``F``, ``f_T = 1 - f_c``,
-       ``eps = (R_max - R_min)/(2<R>)``, ``q`` and ``<R>`` are sampled at
+       ``eps`` (``eps_definition``), ``q`` and ``<R>`` are sampled at
        ``psi_eval = clip(psi_N, psi_pad, 1 - psi_pad)`` -- the caller's own
        surfaces -- not on a uniform grid of the same length.
     2. **Gradients on the true grid.**  ``d/dpsi = numpy.gradient(y, psi_N,
@@ -830,6 +930,15 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
         ``I_BS`` -- works on those ψ_N, exactly as OFT's Fortran bootstrap
         (``grad_shaf_bootstrap.F90``: kinetic values at the mapped nodes,
         gradients numerical in ψ).  The profile is returned on the same nodes.
+    eps_definition : {"geometric", "a_over_R"}, optional
+        The inverse aspect ratio of the Redl collisionalities (``nu* ~
+        eps^-3/2``; :data:`EPS_DEFINITIONS`).  ``None`` = the default
+        :data:`EPS_DEFINITION_DEFAULT` = ``"geometric"``, ``(R_max -
+        R_min)/(2<R>)`` -- from ``sauter_fc(return_eps=True)`` when the
+        installed OFT has it, else from ``get_fsa`` (:func:`geometric_eps`;
+        never raises for the missing fork option).  ``"a_over_R"``: ``<a>/<R>``
+        (``evaluate_jBS/3``), the explicit opt-in for A/B.  The definition, its
+        route and the version tag are in ``diag``.
 
     Returns
     -------
@@ -842,8 +951,10 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
         range), ``j_dot_B`` (Redl ``<j.B>``), ``j_tor_full_raw`` (full
         profile, unsmoothed), ``j_tor_raw`` (selected profile before
         smoothing), ``I_BS`` (signed FSA integral of ``j_BS_tor`` [A]),
-        ``version``.
+        ``eps_definition``, ``eps_formula``, ``eps_route``, ``version``.
     """
+    eps_definition = check_eps_definition(
+        EPS_DEFINITION_DEFAULT if eps_definition is None else eps_definition)
     psi_N = np.asarray(psi_N, dtype=float)
     n = psi_N.size
     if psi_N.ndim != 1 or n < 3:
@@ -908,15 +1019,18 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
     _sfc = getattr(mygs, "sauter_fc", None)
     if _sfc is None:
         _sfc = getattr(mygs, "calc_sauter_fc")
-    try:   # the geometric eps, as OpenFUSIONToolkit's SWB takes it
-        _s = _sfc(psi=psi_u.copy(), return_eps=True)
-    except TypeError:
-        _s = ()
-    if len(_s) != 5:
-        raise RuntimeError("evaluate_jBS needs sauter_fc(return_eps=True), the "
-                           "geometric eps = (R_max - R_min)/(2<R>); this "
-                           "OpenFUSIONToolkit build does not provide it")
-    fc_u, r_sau, modb, eps_u = _s[1:]
+    # the plain call (every OFT build): f_c, [<R>, <1/R>, <a>], [<|B|>, <|B|^2>]
+    fc_u, r_sau, modb = _sfc(psi=psi_u.copy())[-3:]
+    if eps_definition == "geometric":
+        eps_u, eps_route = geometric_eps(
+            mygs, psi_u, _sfc,
+            R_avg=_sauter_avg(r_sau, "<R>", _SAUTER_RAVG_INDEX))
+    else:   # the opt-in <a>/<R> of evaluate_jBS/3
+        # (a failed trace's zero row makes this 0/0; it is refused below)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            eps_u = (_sauter_avg(r_sau, "<a>", _SAUTER_RAVG_INDEX)
+                     / _sauter_avg(r_sau, "<R>", _SAUTER_RAVG_INDEX))
+        eps_route = "sauter_fc <a>/<R>"
     _, q_u, ravgs_q, *_rest = mygs.get_q(psi=psi_u.copy())
     F = np.asarray(F_u, dtype=float)[inv]
     f_T = (1.0 - np.asarray(fc_u, dtype=float))[inv]
@@ -1055,7 +1169,10 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
         j_tor_full_raw=j_tor_full, j_tor_raw=np.asarray(j_tor_sel, float),
         I_BS=I_BS, isolate_edge=bool(isolate_edge),
         n_nonfinite_zeroed_at_ends=int(n_zeroed[0]),
-        smooth_axis=bool(smooth_axis), version=EVALUATE_JBS_VERSION,
+        smooth_axis=bool(smooth_axis),
+        eps_definition=eps_definition,
+        eps_formula=EPS_DEFINITIONS[eps_definition], eps_route=eps_route,
+        version=evaluate_jbs_version(eps_definition),
         coord=str(coord), x=np.asarray(x_run, dtype=float), psi_N=psi_N,
     )
     return j_out, diag

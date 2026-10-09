@@ -12,7 +12,13 @@ maps -- are in ``test_jbs_loop.py``; (d) and (e) also run live below):
 (a) ``evaluate_jBS`` on a uniform grid equals ``solve_with_bootstrap``'s own
     FIRST-pass Redl evaluation on the same equilibrium, bit for bit (needs an
     OFT build whose ``solve_with_bootstrap`` takes ``psi_N=``; skipped with the
-    reason otherwise);
+    reason otherwise), with the epsilon THAT build's SWB uses: ``<a>/<R>`` on
+    OpenFUSIONToolkit main (``eps_definition="a_over_R"``), the geometric
+    ``(R_max - R_min)/(2<R>)`` where SWB has ``use_sauter_eps`` on (the fork);
+(a2) the two routes to the geometric epsilon -- ``sauter_fc(return_eps=True)``
+    and ``get_fsa``'s ``R_min``/``R_max`` over the ``sauter_fc`` ``<R>`` --
+    agree to rounding on a solved equilibrium (the comparison skips on builds
+    without the fork option; the evaluation itself never does);
 (b) the same physical profiles on a uniform and on a strongly non-uniform
     (rho-like) psi_N grid give the same j_BS on a live equilibrium, while the
     legacy uniform reading of the non-uniform arrays does not (defect A);
@@ -100,7 +106,7 @@ def _imas_probe(outdir, part):
     from bouquet.baseline import resolve_baseline
     from bouquet.jbs_loop import (JBSNotConverged, profile_residuals,
                                   residual_weights, weighted_norm)
-    from bouquet.physics import evaluate_jBS
+    from bouquet.physics import _accepts_kw, evaluate_jBS, geometric_eps
     from bouquet.TokaMaker_interface import _draw_jbs_composer
     from bouquet.utils import pchip_interp
     import OpenFUSIONToolkit.TokaMaker.bootstrap as B
@@ -128,9 +134,35 @@ def _imas_probe(outdir, part):
            np.clip(k2e(bl.Zeff), 1.0, None))
     out["grid_uniform"] = bool(np.allclose(np.diff(psi), psi[1] - psi[0]))
 
-    # (a) bit-level against SWB's first Redl evaluation on the same state
-    if "psi_N" in inspect.signature(B.solve_with_bootstrap).parameters:
-        j_new, d_new = evaluate_jBS(mygs, psi, *kin, smooth_axis=False)
+    # (a2) the two routes to the geometric eps, on the solved surfaces
+    pu = np.unique(np.clip(psi, 1e-3, 1.0 - 1e-3))
+    _sau = mygs.sauter_fc(psi=pu.copy())
+    _R_sau = np.asarray(_sau[2]["<R>"] if isinstance(_sau[2], dict)
+                        else _sau[2][0], dtype=float)
+    e_fsa, _r = geometric_eps(mygs, pu, sauter_fn=lambda **k: _sau,
+                              R_avg=_R_sau)
+    out["a2"] = dict(
+        route_fsa=_r, R_avg_fsa_vs_sauter=float(np.max(np.abs(
+            np.asarray(mygs.get_fsa(psi=pu.copy())["<R>"]) / _R_sau - 1.0))))
+    if _accepts_kw(mygs.sauter_fc, "return_eps"):
+        e_fork, r_fork = geometric_eps(mygs, pu)
+        out["a2"].update(route_fork=r_fork, max_rel=float(np.max(
+            np.abs(e_fsa / e_fork - 1.0))))
+    else:
+        out["a2"]["skip"] = ("this OFT build's sauter_fc has no return_eps "
+                             "(the fork-only option), so only the get_fsa "
+                             "route exists here")
+
+    # (a) bit-level against SWB's first Redl evaluation on the same state,
+    # with the epsilon this build's SWB itself uses
+    _swb_par = inspect.signature(B.solve_with_bootstrap).parameters
+    _use_sauter = _swb_par.get("use_sauter_eps")
+    swb_eps = ("geometric" if _use_sauter is not None
+               and bool(_use_sauter.default) else "a_over_R")
+    out["a_eps_definition"] = swb_eps
+    if "psi_N" in _swb_par:
+        j_new, d_new = evaluate_jBS(mygs, psi, *kin, smooth_axis=False,
+                                    eps_definition=swb_eps)
         cap = {}
         orig = B.redl_bootstrap
 
@@ -658,6 +690,17 @@ def test_a_evaluator_equals_swbs_first_pass_bit_for_bit(imas):
     assert imas["grid_uniform"], "the synthetic dd grid should be uniform"
     assert all(a["inputs_bitwise"].values()), a["inputs_bitwise"]
     assert a["bitwise"], f"<j.B> differs from SWB's first pass by {a['max_abs']}"
+
+
+@pytest.mark.solver
+@solver_only
+def test_a2_the_two_geometric_eps_routes_agree_to_rounding(imas):
+    a2 = imas["a2"]
+    assert a2["route_fsa"] == "get_fsa"
+    if "skip" in a2:
+        pytest.skip(a2["skip"])
+    assert a2["route_fork"] == "sauter_fc(return_eps=True)"
+    assert a2["max_rel"] <= 1e-12, a2
 
 
 @pytest.mark.solver

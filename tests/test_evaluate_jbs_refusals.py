@@ -13,7 +13,10 @@ The bit-identity half compares the new function against a verbatim copy of
 the evaluator as it was before this change (:func:`_evaluate_jBS_reference`
 below) on the synthetic mock equilibrium of ``test_jbs_loop`` over several
 grids and options: for every accepted input the output is identical to the
-last bit.
+last bit.  The reference uses the ``<a>/<R>`` epsilon of that time, so the
+comparison runs with the explicit opt-in ``eps_definition="a_over_R"``; the
+default geometric epsilon (``evaluate_jBS/4``) is tested in
+``test_evaluate_jbs_eps.py``.
 
 Synthetic inputs only; no device data.  Needs OFT's pure-Python ``bootstrap``
 module (Redl); skipped with a reason when OFT is absent.
@@ -223,7 +226,8 @@ def test_every_accepted_input_is_bit_identical_to_the_historical_evaluator(
     kw = dict(isolate_edge=isolate_edge, smooth_axis=smooth_axis)
     j_ref, d_ref = _evaluate_jBS_reference(_MockEq(legacy=legacy), x, *k,
                                            **kw)
-    j_new, d_new = evaluate_jBS(_MockEq(legacy=legacy), x, *k, **kw)
+    j_new, d_new = evaluate_jBS(_MockEq(legacy=legacy), x, *k,
+                                eps_definition="a_over_R", **kw)
     np.testing.assert_array_equal(j_new, j_ref)
     for key in _DIAG_ARRAYS:
         np.testing.assert_array_equal(np.asarray(d_new[key]),
@@ -240,7 +244,7 @@ def test_bit_identity_holds_for_scalar_zeff_and_other_flux_ranges():
             j_ref, _ = _evaluate_jBS_reference(
                 _MockEq(psi_bounds=bounds), x, ne, te, ni, ti, zeff)
             j_new, _ = evaluate_jBS(_MockEq(psi_bounds=bounds), x, ne, te,
-                                    ni, ti, zeff)
+                                    ni, ti, zeff, eps_definition="a_over_R")
             np.testing.assert_array_equal(j_new, j_ref)
 
 
@@ -267,7 +271,8 @@ def test_the_clipped_axis_surface_keeps_the_historical_zeroing(grid):
     with np.errstate(invalid="ignore"):
         j_ref, d_ref = _evaluate_jBS_reference(_AxisLimitEq(), x, *k,
                                                smooth_axis=False)
-        j_new, d_new = evaluate_jBS(_AxisLimitEq(), x, *k, smooth_axis=False)
+        j_new, d_new = evaluate_jBS(_AxisLimitEq(), x, *k, smooth_axis=False,
+                                    eps_definition="a_over_R")
     np.testing.assert_array_equal(j_new, j_ref)
     n_end = int(np.count_nonzero(x <= 1e-3))
     assert np.all(j_new[:n_end] == 0.0)
@@ -361,6 +366,11 @@ class _FailedTraceEq(_MockEq):
         psi_, q, rav, *rest = super().get_q(psi=psi, **kw)
         rav = {k: self._zero(psi, v) for k, v in rav.items()}
         return (psi_, self._zero(psi, q), rav, *rest)
+
+    def get_fsa(self, psi=None, **kw):
+        f = super().get_fsa(psi=psi, **kw)
+        return {k: (self._zero(psi, v) if k != "psi_norm" else v)
+                for k, v in f.items()}
 
 
 @pytest.mark.parametrize("bad_psi", [0.5, 1e-3, 1.0 - 1e-3])

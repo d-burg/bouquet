@@ -673,12 +673,22 @@ class _MockEq:
     was asked for, so the tests can see exactly which surfaces the evaluator
     queried.  Dict layouts (current OFT); ``legacy=True`` returns the
     positional-array layout of older builds.
+
+    The surfaces are shaped: the mean distance from the axis ``<a> = r`` and
+    the half-width ``(R_max - R_min)/2 = HALF_WIDTH r`` differ, so the two
+    Redl epsilons (``<a>/<R>``, the opt-in; ``(R_max - R_min)/(2<R>)``, the
+    default) are distinguishable.  ``fork=False`` (default) is
+    OpenFUSIONToolkit main: ``sauter_fc`` ignores ``return_eps`` and the
+    geometric epsilon comes from ``get_fsa``; ``fork=True`` also returns it
+    from ``sauter_fc(return_eps=True)`` (the fork's 5-tuple).
     """
 
     R0, a, B0 = 1.7, 0.6, 2.0
+    HALF_WIDTH = 0.85
 
-    def __init__(self, legacy=False, psi_bounds=(-0.9, 0.1)):
+    def __init__(self, legacy=False, psi_bounds=(-0.9, 0.1), fork=False):
         self.legacy = legacy
+        self.fork = fork
         self.psi_bounds = np.asarray(psi_bounds, dtype=float)
         self.calls = []
 
@@ -704,7 +714,15 @@ class _MockEq:
                           (self.B0 ** 2) * (1 + eps ** 2)])
         if self.legacy:
             rav = np.vstack([rav["<R>"], rav["<1/R>"], rav["<a>"]])
-        return (psi, fc, rav, modb) + ((r / R,) if kw.get("return_eps") else ())
+        if self.fork and kw.get("return_eps"):
+            return (psi, fc, rav, modb, self.HALF_WIDTH * r / R)
+        return (psi, fc, rav, modb)
+
+    def get_fsa(self, psi=None, **kw):
+        self.calls.append(("get_fsa", np.array(psi)))
+        psi, r, eps, R = self._geo(psi)
+        hw = self.HALF_WIDTH * r
+        return {"psi_norm": psi, "<R>": R, "R_min": R - hw, "R_max": R + hw}
 
     def get_q(self, psi=None, **kw):
         self.calls.append(("get_q", np.array(psi)))

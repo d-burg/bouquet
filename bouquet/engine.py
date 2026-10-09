@@ -52,6 +52,7 @@ from typing import Optional
 
 import numpy as np
 
+from . import coords
 from .edge_pressure import (pressure_frames, resolve_edge_pressure,
                             solver_pax, solver_pp_profile)
 
@@ -117,6 +118,39 @@ def mse_scheme_text(scheme) -> str:
         "; re-taken by the same finite differences at each MSE loop's "
         "convergence, the loop continuing with it while its Gauss-Newton "
         "step exceeds the stage's criterion")
+
+
+#: The engine's SWB edge taper (OFT's ``taper_edge_*`` of
+#: ``solve_with_bootstrap``), off by default as in OFT; read from
+#: ``GenerationConfig.bootstrap_kwargs`` and overridden there.
+ENGINE_EDGE_TAPER_DEFAULT = {"taper_edge_jBS": False, "taper_edge_psi0": 0.999,
+                             "taper_edge_shape": 2}
+#: The ``bootstrap_kwargs`` keys the engine honours (the edge taper; and
+#: ``use_sauter_eps`` at True, which evaluate_jBS always is).  Any other key
+#: configures solve_with_bootstrap, which the engine never runs: refused.
+ENGINE_BOOTSTRAP_KWARGS = frozenset(ENGINE_EDGE_TAPER_DEFAULT) | {
+    "use_sauter_eps"}
+
+
+def engine_edge_taper(gc) -> dict:
+    """``dict(on, psi0, shape)``: the engine's edge taper from
+    ``bootstrap_kwargs`` (:data:`ENGINE_EDGE_TAPER_DEFAULT` where unset)."""
+    from .physics import EDGE_TAPER_SHAPES
+    bk = dict(ENGINE_EDGE_TAPER_DEFAULT)
+    bk.update({k: v for k, v in (getattr(gc, "bootstrap_kwargs", None)
+                                 or {}).items() if k in bk})
+    on, psi0, shape = (bk["taper_edge_jBS"], bk["taper_edge_psi0"],
+                       bk["taper_edge_shape"])
+    if not isinstance(on, (bool, np.bool_)):
+        raise ValueError(f"bootstrap_kwargs['taper_edge_jBS'] must be a "
+                         f"bool, got {on!r}")
+    if not (np.isfinite(float(psi0)) and 0.0 < float(psi0) < 1.0):
+        raise ValueError(f"bootstrap_kwargs['taper_edge_psi0'] must be in "
+                         f"(0, 1), got {psi0!r}")
+    if int(shape) not in EDGE_TAPER_SHAPES or int(shape) != shape:
+        raise ValueError(f"bootstrap_kwargs['taper_edge_shape'] must be one "
+                         f"of {sorted(EDGE_TAPER_SHAPES)}, got {shape!r}")
+    return dict(on=bool(on), psi0=float(psi0), shape=int(shape))
 
 
 #: Rows each preset admits (``Ip`` is mandatory for every preset).
@@ -314,6 +348,28 @@ def validate_engine_settings(gc) -> None:
                          "generation.mse_data is None")
     _mse_knobs_unread(gc, rows)
     _legacy_knobs_unread(gc, vals)
+    bk = dict(getattr(gc, "bootstrap_kwargs", None) or {})
+    swb_only = sorted(set(bk) - ENGINE_BOOTSTRAP_KWARGS)
+    if swb_only:
+        raise ValueError(
+            f"generation.bootstrap_kwargs keys {swb_only} configure "
+            "solve_with_bootstrap, which reconstruction_engine='unified' "
+            "never runs (they would be silently ignored); the engine reads "
+            f"only {sorted(ENGINE_BOOTSTRAP_KWARGS)}")
+    if not bool(bk.get("use_sauter_eps", True)):
+        raise ValueError(
+            "generation.bootstrap_kwargs['use_sauter_eps']=False: the "
+            "engine's Redl evaluation (physics.evaluate_jBS) always takes "
+            "eps from sauter_fc")
+    if engine_edge_taper(gc)["on"] and not resolve_edge_pressure(
+            gc).edge_pprime_pin:
+        raise ValueError(
+            "the engine's edge taper (bootstrap_kwargs['taper_edge_jBS']=True) "
+            "refuses edge_pprime_pin=False: the taper takes the "
+            "request to zero at the LCFS while the unpinned P' stays finite "
+            "there, and the solve does not converge.  Either turn the taper "
+            "off (bootstrap_kwargs={'taper_edge_jBS': False}) or zero the "
+            "edge pressure gradient (edge_pprime_pin=True)")
     for name, want in (("jbs_self_consistent", True),
                        ("recalculate_j_BS", True),
                        ("single_profile_jphi", False)):
@@ -416,7 +472,6 @@ ENGINE_UNREAD_LEGACY_FIELDS = {
     "jbs_loop_q0_corrector": "engine_rows with 'q0' (engine_draw_q0_row "
                              "keeps it in the draws)",
     "floor_j_BS": "nothing: the engine never floors the bootstrap",
-    "swb_iterations": "nothing: the engine never runs SWB",
     "accept_anchor_inband": "nothing: the engine draws have no legacy "
                             "anchor in-band shortcut",
     "diagnostic_plots": "nothing: the engine draws make no per-draw SWB "
@@ -651,6 +706,7 @@ def engine_settings(gc) -> dict:
             gc, "engine_draw_bootstrap_refresh", False)),
         draw_solve_maxits=engine_draw_maxits(gc),
         edge_pressure=resolve_edge_pressure(gc).record(),
+        edge_taper=engine_edge_taper(gc),
         loop=loop,
         q0_tol=float(gc.q0_tol),
         structured_li_tol=float(gc.structured_li_tol),
@@ -711,6 +767,15 @@ def conversion_factor(geom) -> np.ndarray:
     return field_aligned_conversion(geom["F"], geom["inv_R"], geom["B2"])
 
 
+def composed_factor(geom) -> np.ndarray:
+    """:func:`conversion_factor` times the edge taper the geometry carries:
+    the factor :func:`compose` turns a parallel component into its share of
+    the request with."""
+    kap = conversion_factor(geom)
+    w = geom.get("edge_taper")
+    return kap if w is None else kap * np.asarray(w, dtype=float)
+
+
 def pressure_term(geom) -> np.ndarray:
     """``p'(<R> - F^2<1/R>/<B^2>)``: the pressure-driven (diamagnetic +
     Pfirsch-Schlueter) part of ``<j_phi>``, whose ``<j.B>`` is zero."""
@@ -730,6 +795,12 @@ def compose(geom, jB_ind, jB_bs, jB_fix, s_ind=1.0, s_bs=1.0):
     ind = np.asarray(s_ind) * kap * np.asarray(jB_ind, dtype=float)
     bs = np.asarray(s_bs) * kap * np.asarray(jB_bs, dtype=float)
     fix = kap * np.asarray(jB_fix, dtype=float)
+    # the SWB edge taper (geom["edge_taper"], set by the backend that
+    # measured the geometry): every component goes to zero at the LCFS
+    w = geom.get("edge_taper")
+    if w is not None:
+        w = np.asarray(w, dtype=float)
+        ind, bs, fix, P = ind * w, bs * w, fix * w, P * w
     return ind + bs + fix + P, dict(ind=ind, bs=bs, fix=fix, pressure=P,
                                     kappa=kap)
 
@@ -815,7 +886,8 @@ class EngineState:
         from .jbs_loop import jsonable
         g = self.geom or {}
         keep = ("psi_N", "psi_q", "F", "R_avg", "inv_R", "inv_R2", "B2",
-                "pprime", "dV_dpsi", "dpsi_dpsiN", "w_lin", "c_affine")
+                "pprime", "dV_dpsi", "dpsi_dpsiN", "w_lin", "c_affine",
+                "edge_taper")
         return jsonable(dict(
             x=self.x, lambda_bs=self.lambda_bs,
             li_discrepancy=self.li_discrepancy, q0_row=self.q0_row,
@@ -960,7 +1032,7 @@ class UnifiedEngine:
             # closed pass solves)
             from .jbs_loop import AxisRowPin
             q = self.rows["q0"]
-            j0a = float(np.interp(float(g0["psi_q"][0]), self.psi,
+            j0a = float(np.interp(float(g0["psi_q"][0]), g0["psi_N"],
                                   anchor["achieved"]))
             row0 = j0a * float(anchor["q_row"]) / float(q["target"])
             self.pin = AxisRowPin(q["target"], self.s["q0_tol"], row0,
@@ -1084,7 +1156,11 @@ class UnifiedEngine:
                             closure_sign_convention, ip_roundtrip_gate,
                             soft_closure_with_retry, structured_basis_eval)
         c = self.c
-        psi = self.psi
+        # integrals and interpolations over the geometry's psi_N; the basis
+        # on the run grid (identical in a psi_N run)
+        psi = np.asarray(geom["psi_N"], dtype=float)
+        _bx = (None if getattr(self.b, "coord", "psi_n") == "psi_n"
+               else self.psi)
         _, parts = compose(geom, c.jB_ind, lam_bs, c.jB_fix)
         j_ind, j_bs = parts["ind"], parts["bs"]
         j_fix = parts["fix"] + parts["pressure"]
@@ -1104,7 +1180,7 @@ class UnifiedEngine:
         li = self.rows.get("l_i")
         if li is not None:
             li_t = float(li["target"]) - float(self.state.li_discrepancy)
-        Phi = structured_basis_eval(self.basis, psi)
+        Phi = structured_basis_eval(self.basis, self.psi)
         K = Phi.shape[0]
         if x is not None:
             x = np.asarray(x, dtype=float)
@@ -1129,7 +1205,7 @@ class UnifiedEngine:
                         li_geom=(geom["li_geom"] if li else None),
                         axis=axis, axis_sigma=None,
                         sigma_ind_up=self.sigma_up, mse_lin=mse_lin, x0=x0,
-                        accept_noise_floor=True)
+                        accept_noise_floor=True, basis_x=_bx)
                 out = soft_closure_with_retry(_solve, x_prev=x_prev,
                                               who=self.label + " closure")
             else:
@@ -1138,7 +1214,7 @@ class UnifiedEngine:
                     j_fix, basis=self.basis, weights=self.weights, axis=axis,
                     li_target=li_t, li_kind=(li["kind"] if li else "li_1"),
                     li_geom=(geom["li_geom"] if li else None),
-                    sigma_ind_up=self.sigma_up, mse_lin=mse_lin)
+                    sigma_ind_up=self.sigma_up, mse_lin=mse_lin, basis_x=_bx)
             xs = np.concatenate([np.asarray(out["a"], float),
                                  np.asarray(out["b"], float)])
             jc = out["s_ind"] * j_ind + out["s_bs"] * j_bs + j_fix
@@ -1224,12 +1300,12 @@ class UnifiedEngine:
             p["mse_dtg_max_sigma"] = float(np.max(np.abs(tg - prev) / self.rows[
                 "mse"]["chords"]["sigma_eff"]))
         self._pending = p
-        meas = dict(w=g1["w_lin"] * conversion_factor(g1), x=self.psi,
+        meas = dict(w=g1["w_lin"] * conversion_factor(g1), x=g1["psi_N"],
                     li=m["li"], redl=m["redl"],
                     q0=(m["q_row"] if "q0" in self.rows else None))
         if "q0" in self.rows:
             meas["axis_current_solved"] = float(np.interp(
-                float(g1["psi_q"][0]), self.psi, jint))
+                float(g1["psi_q"][0]), g1["psi_N"], jint))
         # the next pass composes on this pass's solved geometry
         st.geom = g1
         st.x = cl["x"]
@@ -1928,7 +2004,7 @@ class UnifiedEngine:
                            final=True)
         g1 = complete_geometry(m["geom"])
         w = g1["w_lin"] * conversion_factor(g1)
-        chk = check_delivered(m["redl"], lam, w, self.psi,
+        chk = check_delivered(m["redl"], lam, w, g1["psi_N"],
                               float(self.rows["Ip"]["target"]), lp)
         checks = dict(loop=dict(r_j=chk["r_j"], r_I=chk["r_I"],
                                 ok=bool(chk["ok"])))
@@ -1942,7 +2018,7 @@ class UnifiedEngine:
             misses.append(f"|dl_i| vs the last pass {dli:.2e} "
                           f"(tol {lp['tol_li']:g})")
         from .jbs_loop import _relative_difference
-        cur = _relative_difference(cl["jc"], prev["jint"], w, self.psi)
+        cur = _relative_difference(cl["jc"], prev["jint"], w, g1["psi_N"])
         checks["current_residual"] = dict(value=cur, tol=lp["rtol_j"],
                                           ok=bool(cur is not None
                                                   and cur <= lp["rtol_j"]))
@@ -2067,10 +2143,24 @@ class TokaMakerBackend:
     measurement carries both pressure frames (``pressure_frames``)."""
 
     def __init__(self, mygs, contract, *, psi_pad=1e-3, li_kind="li_3",
-                 q_psi=None, chords=None, maxits=None, edge_pressure=None):
+                 q_psi=None, chords=None, maxits=None, edge_pressure=None,
+                 edge_taper=None, coord="psi_n"):
         self.mygs = mygs
         self.c = contract
+        #: the run grid (psi_N, or Phi_N with coord="phi_n"); every solve
+        #: tags its profiles with coord and every measurement samples the
+        #: geometry at the nodes' psi_N on that solve's own map
         self.psi = np.asarray(contract.psi_N, dtype=float)
+        self.coord = coords.check_coord(coord)
+        #: the SWB edge taper's factor on psi (engine_edge_taper(); None:
+        #: off), carried on every measured geometry so compose() applies it;
+        #: in a Phi_N run it is re-evaluated on each geometry's psi_N
+        self.edge_taper = None
+        self._taper = None
+        if edge_taper and edge_taper.get("on"):
+            from .physics import edge_taper_weight
+            self._taper = (float(edge_taper["psi0"]), int(edge_taper["shape"]))
+            self.edge_taper = edge_taper_weight(self.psi, *self._taper)
         self.psi_pad = float(psi_pad)
         self.li_kind = str(li_kind)
         self.q_psi = (float(np.clip(self.psi[0], psi_pad, 1 - psi_pad))
@@ -2105,8 +2195,10 @@ class TokaMakerBackend:
     def flux_integral(self, psi_N, profile):
         """The solver's flux-surface integral of *profile* on the current
         equilibrium (the draw sampler's pressure match)."""
-        return self.mygs.flux_integral(np.asarray(psi_N, dtype=float),
-                                       np.asarray(profile, dtype=float))
+        return self.mygs.flux_integral(
+            np.asarray(coords.psi_at(self.mygs, np.asarray(psi_N, dtype=float),
+                                     self.coord), dtype=float),
+            np.asarray(profile, dtype=float))
 
     def redl(self, kinetics=None):
         """Redl ``<j.B>`` on the CURRENT equilibrium with *kinetics*
@@ -2118,7 +2210,7 @@ class TokaMakerBackend:
         _j, d = evaluate_jBS(self.mygs.copy_eq(), self.psi, kin["ne"],
                              kin["te"], kin["ni"], kin["ti"], kin["zeff"],
                              psi_pad=self.psi_pad, isolate_edge=False,
-                             smooth_axis=False)
+                             smooth_axis=False, coord=self.coord)
         return smooth_jbs_transition(np.asarray(d["j_dot_B"], dtype=float))
 
     def p_sep(self) -> float:
@@ -2133,7 +2225,7 @@ class TokaMakerBackend:
         if not np.all(np.isfinite(req)):
             raise EngineSolveError("engine: refusing to hand a non-finite "
                                    "request to the GS solver")
-        ffp = {"type": "jphi-linterp", "y": req, "x": self.psi}
+        ffp = coords.oft_prof("jphi-linterp", self.psi, req, self.coord)
         saved = None
         if self.maxits is not None:
             saved = int(mygs.settings.maxits)
@@ -2148,7 +2240,8 @@ class TokaMakerBackend:
                 mygs.set_targets(Ip=float(self.c.Ip),
                                  pax=solver_pax(self.p, self.edge))
                 mygs.set_profiles(pp_prof=solver_pp_profile(
-                    self.psi, self.p, psi_range, self.edge), ffp_prof=ffp)
+                    self.psi, self.p, psi_range, self.edge,
+                    coord=self.coord), ffp_prof=ffp)
                 _t0 = time.perf_counter()
                 try:
                     mygs.solve()
@@ -2179,19 +2272,28 @@ class TokaMakerBackend:
                             li_achieved, li_closure_geometry)
         mygs, kin, pad = self.mygs, self._kinetics(), self.psi_pad
         eq = mygs.copy_eq()
-        geom = fsa_current_geometry(eq, self.psi, psi_pad=pad,
-                                    want_pprime=True)
+        # the nodes' psi_N on THIS solve's map (the nodes themselves in a
+        # psi_N run): every integral and interpolation of this measurement
+        # uses geom["psi_N"]
+        geom = fsa_current_geometry(
+            eq, np.asarray(coords.psi_at(eq, self.psi, self.coord), float),
+            psi_pad=pad, want_pprime=True)
         if geom["inv_R2"] is None:
             raise EngineSolveError("engine: this OFT build's get_q returns no "
                                    "<1/R^2>; the jphi-linterp Ip measure "
                                    "cannot be formed")
         _j, d = evaluate_jBS(eq, self.psi, kin["ne"], kin["te"], kin["ni"],
                              kin["ti"], kin["zeff"], psi_pad=pad,
-                             isolate_edge=False, smooth_axis=False)
+                             isolate_edge=False, smooth_axis=False,
+                             coord=self.coord)
         redl = smooth_jbs_transition(np.asarray(d["j_dot_B"], dtype=float))
         geom["F"] = np.asarray(d["F"], dtype=float)
         geom["B2"] = np.asarray(d["avg_B2"], dtype=float)
         geom["li_geom"] = li_closure_geometry(eq, geom, psi_pad=pad)
+        geom["edge_taper"] = self.edge_taper
+        if self._taper is not None and self.coord != coords.PSI:
+            from .physics import edge_taper_weight
+            geom["edge_taper"] = edge_taper_weight(geom["psi_N"], *self._taper)
         li = float(li_achieved(eq, li_kind=self.li_kind, psi_pad=pad)[0])
         # q on the geometry's own surfaces (the legacy _q0_of reads index 0
         # of the same call), at the row radius
@@ -2360,6 +2462,7 @@ def engine_record(eng, res, wall_s=None) -> dict:
                       li_row_relaxation=eng.s.get("li_row_relaxation", 1.0),
                       ids_inductive=eng.s.get("ids_inductive", "auto"),
                       edge_pressure=eng.s.get("edge_pressure"),
+                      edge_taper=eng.s.get("edge_taper"),
                       loop=eng.s["loop"]),
         convergence=convergence_table(eng.s),
         composition=("J = F<1/R>/<B^2> [s_ind <j.B>_ind + s_bs <j.B>_BS + "
@@ -2394,11 +2497,20 @@ def engine_record(eng, res, wall_s=None) -> dict:
 ENGINE_SPLIT_CONVENTION = (
     "unified engine: jphi-linterp REQUEST of the delivery solve (one "
     "jphi-linterp solve of j_phi reproduces the delivered equilibrium); "
-    "j_BS = s_bs F<1/R>/<B^2> <j.B>_BS*, j_NBI/j_RF = F<1/R>/<B^2> <j.B>_fix "
-    "(j_RF: the rf part plus any other driven source entry) "
-    "on the delivery composition's geometry; j_inductive the residual "
-    "(it carries s_ind F<1/R>/<B^2> <j.B>_ind, the pressure-driven term "
-    "p'(<R> - F^2<1/R>/<B^2>) and any delivery correction)")
+    "j_BS = s_bs F<1/R>/<B^2> <j.B>_BS* + p'(<R> - F^2<1/R>/<B^2>) (the "
+    "pressure-driven term on the bootstrap, as IMAS j_bootstrap), "
+    "j_NBI/j_RF = F<1/R>/<B^2> <j.B>_fix (j_RF: the rf part plus any other "
+    "driven source entry) on the delivery composition's geometry, all times "
+    "its edge taper; j_inductive the residual (it carries s_ind "
+    "F<1/R>/<B^2> <j.B>_ind and any delivery correction)")
+
+
+def split_pressure_term(geom):
+    """The pressure-driven current the archived j_BS carries: p'G times the
+    geometry's edge taper."""
+    P = pressure_term(geom)
+    w = geom.get("edge_taper")
+    return P if w is None else P * np.asarray(w, dtype=float)
 
 
 def _lcfs_deviation_mm(mygs, pts):
@@ -2432,10 +2544,13 @@ def _split(eng, res):
     """The Baseline's toroidal split of the delivered request."""
     st, c = res["state"], eng.c
     g = st.geom
-    kap = conversion_factor(g)
+    kap = composed_factor(g)
     out = eng.delivered_closure["out"]
     R = np.asarray(st.request, dtype=float)
-    j_BS = np.asarray(out["s_bs"], float) * kap * np.asarray(st.lambda_bs)
+    # the bootstrap carries the pressure-driven p'G (docs/current-
+    # conventions.md, A7), as the IMAS reader's and evaluate_jBS's do
+    j_BS = (np.asarray(out["s_bs"], float) * kap * np.asarray(st.lambda_bs)
+            + split_pressure_term(g))
     j_NBI = kap * np.asarray(c.jB_fix_parts["nbi"], float)
     # j_RF carries the RF part AND any other driven core_sources entry (the
     # IDS adapter's "other" part; absent on the g-file path), so the split
@@ -2602,7 +2717,10 @@ def _gfile_baseline(bq, eng, res, rec, ad, iso_pts, iso_w):
         eqdsk_bytes = fh.read()
     kn = c.kinetics_native
     return Baseline(
-        psi_N=psi, j_phi=R, j_inductive=j_ind, j_BS=j_BS,
+        # the run grid (the g-file's psi_N, or its Phi_N in a toroidal-flux
+        # run); recon keeps the g-file's own psi_N
+        psi_N=np.asarray(c.psi_N, dtype=float), coord=ad.coord,
+        j_phi=R, j_inductive=j_ind, j_BS=j_BS,
         psi_N_kinetic=np.asarray(kn["psi_N"], float), ne=kn["ne"],
         te=kn["te"], ni=kn["ni"], ti=kn["ti"], Zeff=kn["Zeff"],
         Ip_target=float(c.Ip), l_i_target=float(m["li"]),
@@ -2649,6 +2767,9 @@ def _ids_baseline(bq, eng, res, rec, bl_src):
                        for r in ch["closure_limited_reasons"])))
     bl.j_phi, bl.j_inductive, bl.j_BS = R, j_ind, j_BS
     bl.j_NBI, bl.j_RF = j_NBI, j_RF
+    # the engine's j_RF carries every other driven entry (sawteeth included):
+    # the reader's j_other / j_sawteeth are not separate channels here
+    bl.j_other, bl.j_sawteeth = None, None
     bl.jBS_diff, bl.jphi_diff, bl.p_diff = None, None, None
     bl.bs_scale = float(out["bs_scale_eff"])
     bl.ohm_scale = float(out["ohm_scale_eff"])
@@ -2821,6 +2942,8 @@ def prepare_engine_baseline(bq):
                 mygs, c0, psi_pad=psi_pad, li_kind="li_3",
                 chords=(None if mse is None else mse["chords"]),
                 edge_pressure=s["edge_pressure"],
+                edge_taper=s["edge_taper"],
+                coord=getattr(ad, "coord", "psi_n"),
                 # the reconstruction runs under the solver's own cap
                 # (engine_draw_solve_maxits caps the DRAWS only)
                 maxits=None)

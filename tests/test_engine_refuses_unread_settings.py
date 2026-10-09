@@ -35,7 +35,7 @@ _SET = dict(
     structured_ip_sigma_frac=0.005, structured_soft=True,
     structured_li_max_corrector_steps=3,
     anchor_pressure_to_equilibrium=True, imas_corrective_jphi=True,
-    jbs_loop_q0_corrector=True, floor_j_BS=True, swb_iterations=2,
+    jbs_loop_q0_corrector=True, floor_j_BS=True,
     accept_anchor_inband=True, diagnostic_plots=True,
     # owner-approved 2026-10-05: refused too (the factories no longer set
     # them for a unified configuration)
@@ -174,3 +174,23 @@ def test_the_engines_own_value_of_an_engine_dependent_field_is_accepted(
     validate_engine_settings(_unified(**{name: None}))
     validate_engine_settings(_unified(**{name: engine_validated_value(
         name, "unified", "reconstruction")}))
+
+
+def test_swb_only_bootstrap_kwargs_are_refused_under_the_engine():
+    with pytest.raises(ValueError, match="never runs"):
+        validate_engine_settings(_unified(bootstrap_kwargs={"iterations": 2}))
+    with pytest.raises(ValueError, match="use_sauter_eps"):
+        validate_engine_settings(
+            _unified(bootstrap_kwargs={"use_sauter_eps": False}))
+    validate_engine_settings(_unified(bootstrap_kwargs={
+        "use_sauter_eps": True, "taper_edge_psi0": 0.995}))
+
+
+def test_the_engine_edge_taper_is_off_by_default_and_overridable():
+    assert engine_settings(_unified())["edge_taper"] == dict(
+        on=False, psi0=0.999, shape=2)
+    on = engine_settings(_unified(bootstrap_kwargs={"taper_edge_jBS": True}))
+    assert on["edge_taper"]["on"] is True
+    with pytest.raises(ValueError, match="taper_edge_shape"):
+        validate_engine_settings(
+            _unified(bootstrap_kwargs={"taper_edge_shape": 4}))

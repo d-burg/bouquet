@@ -53,6 +53,8 @@ from typing import Optional
 
 import numpy as np
 
+from . import coords
+
 #: Version stamp of the contract (recorded with every engine run).
 CONTRACT_VERSION = "engine-contract/1"
 
@@ -389,15 +391,28 @@ class GFileAdapter:
         self.eqdsk = eqdsk
         psi_N = np.asarray(eqdsk.psi_N, dtype=float)
         kin = _load_kinetic_profiles(src)
-        psi_kin = np.asarray(kin["psi_N"], dtype=float)
+        # run grids, as the legacy reconstruction builds them
+        # (coords.gfile_run_grids); psi_N keeps the g-file's psi_N (the
+        # inductive basis and the q-row radius are psi_N constructs)
+        self.coord = coords.run_coord(getattr(src, "coord", coords.PSI))
+        self._psi_g = psi_N
+        try:
+            x_run, psi_kin, _in, kin = coords.gfile_run_grids(
+                eqdsk, kin, src.profiles_path, self.coord)
+        except ValueError as exc:
+            raise EngineInputRefused(f"g-file adapter: {exc}") from exc
+        psi_kin = np.asarray(psi_kin, dtype=float)
+        psi_map = None if _in is None else (psi_N, x_run)
 
         def to_eq(a):
-            return pchip_interp(psi_kin, a, psi_N)
+            return pchip_interp(psi_kin, a, x_run)
 
         ne, te, ni, ti = (to_eq(kin[k]) for k in ("ne", "te", "ni", "ti"))
         zeff = np.clip(to_eq(kin["Zeff"]), 1.0, None)
         fc = cfg.fixed_components
-        p_fast_kin = _resolve_fixed(fc.p_fast, fc.psi_N, psi_kin)
+        fc_x = coords.to_run_grid(fc.psi_N, getattr(fc, "coord", coords.RUN),
+                                  psi_map)
+        p_fast_kin = _resolve_fixed(fc.p_fast, fc_x, psi_kin)
         p_fast = (to_eq(p_fast_kin) if fc.p_fast is not None
                   else np.zeros_like(psi_N))
         Z_imp = getattr(fc, "Z_imp", None)
@@ -419,8 +434,8 @@ class GFileAdapter:
                    f"{int(eqdsk.cocos)} (sigma_RpZ {_srpz:+.0f})"))
         # user fixed parts are TOROIDAL (FixedComponentsConfig); converted to
         # parallel in finalize() with the anchor geometry
-        self._fix_tor = dict(nbi=_resolve_fixed(fc.j_NBI, fc.psi_N, psi_N),
-                             rf=_resolve_fixed(fc.j_RF, fc.psi_N, psi_N))
+        self._fix_tor = dict(nbi=_resolve_fixed(fc.j_NBI, fc_x, x_run),
+                             rf=_resolve_fixed(fc.j_RF, fc_x, x_run))
         psi_pad = float(src.psi_pad)
         from .engine import gfile_li_row_tol
         tol = (gfile_li_row_tol() if self.li_row_tol is None
@@ -449,7 +464,7 @@ class GFileAdapter:
             mse=mse_rows(cfg.generation, self.orientation),
         )
         c = EngineContract(
-            kind="gfile", psi_N=psi_N,
+            kind="gfile", psi_N=x_run,
             kinetics=dict(ne=ne, te=te, ni=ni, ti=ti, zeff=zeff),
             kinetics_native=dict(psi_N=psi_kin, ne=kin["ne"], te=kin["te"],
                                  ni=kin["ni"], ti=kin["ti"], Zeff=kin["Zeff"],
@@ -503,7 +518,8 @@ class GFileAdapter:
         jB_fix = jB_nbi + jB_rf
         resid = self._jB_in - np.asarray(jB_bs_anchor, float) - jB_fix
         src = self.source
-        jB_ind = inductive_basis(c.psi_N, resid, k=int(src.n_k),
+        # on the g-file's psi_N (its bridge and core thresholds are psi_N)
+        jB_ind = inductive_basis(self._psi_g, resid, k=int(src.n_k),
                                  psi_bridge=float(src.psi_bridge))
         c.jB_ind = jB_ind
         c.jB_fix = jB_fix
@@ -1038,8 +1054,19 @@ class IdsAdapter:
             current_sign_origin=sgn_origin)
         psi = np.asarray(cp["grid"]["psi"], dtype=float)
         psi_N = (psi - psi[0]) / (psi[-1] - psi[0])
-        if not np.allclose(psi_N, np.asarray(bl.psi_N, float), rtol=0.0,
-                           atol=1e-12):
+        # the run grid: the reader's (psi_N, or Phi_N in a toroidal-flux run,
+        # the same nodes relabelled); psi_cp keeps the nodes' psi_N for the
+        # q-row radius
+        self.coord = coords.check_coord(getattr(bl, "coord", coords.PSI))
+        psi_cp = psi_N
+        if self.coord == coords.PHI:
+            x_run = np.asarray(bl.psi_N, float)
+            if x_run.shape != psi_N.shape:
+                raise EngineInputRefused("IDS adapter: the core_profiles grid "
+                                         "differs from the reader's")
+            psi_N = x_run
+        elif not np.allclose(psi_N, np.asarray(bl.psi_N, float), rtol=0.0,
+                             atol=1e-12):
             raise EngineInputRefused("IDS adapter: the core_profiles grid "
                                      "differs from the reader's")
         n = psi_N.size
@@ -1181,12 +1208,16 @@ class IdsAdapter:
         # takes them: they are NOT multiplied by the source's factor (only
         # the dd's own currents are)
         fc = cfg.fixed_components
+        # fc.psi_N in the run coordinate (a psi_n input via the dd's map)
+        fc_x = coords.to_run_grid(fc.psi_N, getattr(fc, "coord", coords.RUN),
+                                  None if self.coord == coords.PSI
+                                  else (psi_cp, psi_N))
         user_fix = {}
         if fc.j_NBI is not None:
-            user_fix["nbi"] = np.interp(psi_N, fc.psi_N, fc.j_NBI) \
+            user_fix["nbi"] = np.interp(psi_N, fc_x, fc.j_NBI) \
                 if fc.psi_N is not None else np.asarray(fc.j_NBI, float)
         if fc.j_RF is not None:
-            user_fix["rf"] = np.interp(psi_N, fc.psi_N, fc.j_RF) \
+            user_fix["rf"] = np.interp(psi_N, fc_x, fc.j_RF) \
                 if fc.psi_N is not None else np.asarray(fc.j_RF, float)
         self._user_fix_tor = user_fix
         # kinetics + pressure exactly as the reader resolved them (thermal +
@@ -1214,7 +1245,7 @@ class IdsAdapter:
         psi_eq = np.asarray(eqp1["psi"], dtype=float)
         psiN_eq = (psi_eq - psi_eq[0]) / (psi_eq[-1] - psi_eq[0])
         o = np.argsort(psiN_eq)
-        q_psi = _q0_psi(psi_N, self.psi_pad)
+        q_psi = _q0_psi(psi_cp, self.psi_pad)
         q_t = None
         if "q" in eqp1:
             q_t = float(abs(np.interp(q_psi, psiN_eq[o],

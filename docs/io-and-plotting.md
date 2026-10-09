@@ -119,14 +119,17 @@ them with propagated uncertainty.
 currents (`j_ohmic` / `j_bootstrap`), kinetic profiles, fast-ion pressure, and
 rotation — and `read_imas_geometry()` pulls the boundary and vacuum `R·B_t` for
 a given slice. `write_imas_draw()` / `export_imas_drawset()` go the other way,
-reconstructing one or all perturbed IDS from an archive; `fidelity` selects
+reconstructing one or all perturbed IDS from an archive, each holding only
+the exported time slice of the template; `fidelity` selects
 where the parallel current split's geometry factor comes from (see
 [workflows.md](workflows.md#ids-current-split-fidelity)).
 
-Current-convention conversions are in `bouquet.physics`:
-`parallel_to_toroidal()`, `toroidal_to_parallel()` (both FSA-geometry aware),
-`isotropize_fast_pressure()`, `fast_pressure_residual()`,
-`infer_fast_pressure()`.
+Current-convention conversions are in `bouquet.physics`
+([current-conventions.md](current-conventions.md)):
+`jtor_imas_to_jphi_tokamaker()` / `jphi_tokamaker_to_jtor_imas()`,
+`jpar_to_jphi_tokamaker()` / `jphi_tokamaker_to_jpar()`,
+`jphi_tokamaker_pressure_term()`. Also `isotropize_fast_pressure()`,
+`fast_pressure_residual()`, `infer_fast_pressure()`.
 
 `read_imas_baseline()` also has to decide which **fast-pressure storage
 convention** a dd uses: IMAS.jl/FUSE write `pressure_fast_parallel` and

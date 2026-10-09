@@ -1,20 +1,28 @@
 """Unit tests for bouquet.physics -- pure numpy, no OFT/solver required.
 
-Covers the two convention reductions used by the baseline resolvers and the
-per-draw bootstrap recompute:
+Covers the convention reductions used by the baseline resolvers, the per-draw
+bootstrap recompute and the IDS write-back:
 
   * isotropize_fast_pressure -- anisotropic fast pressure -> scalar GS pressure
   * parallel_to_toroidal     -- FSA parallel current <j.B> -> toroidal
                                 <j_phi> = kappa <j.B>, kappa = F<1/R>/<B^2>
                                 (2026-10-06; was <j_phi/R>/<1/R>), ratio +
                                 analytic methods
+  * current conventions      -- TokaMaker jphi = <j_phi> vs IMAS j_tor =
+                                <j_phi/R>/<1/R> vs parallel <J.B>
+                                (docs/current-conventions.md, A5-A7)
 """
 
 import numpy as np
 import pytest
 
 from bouquet.physics import (isotropize_fast_pressure, parallel_to_toroidal,
-                             toroidal_to_parallel)
+                             toroidal_to_parallel, jpar_to_jphi_tokamaker,
+                             jphi_tokamaker_pressure_term,
+                             jtor_imas_to_jphi_tokamaker,
+                             jphi_tokamaker_to_jtor_imas)
+
+_MU0 = 4.0e-7 * np.pi
 
 
 def _fsa_metrics_circular(R0=1.7, a=0.55, F=3.4, Bp0=0.35, npol=20000):
@@ -38,6 +46,7 @@ def _fsa_metrics_circular(R0=1.7, a=0.55, F=3.4, Bp0=0.35, npol=20000):
         return np.sum(A * w) / np.sum(w)
     geom = {
         "F": F,
+        "avg_R": fsa(R),
         "avg_inv_R": fsa(1.0 / R),
         "avg_inv_R2": fsa(1.0 / R**2),
         "avg_B2": fsa(B2),
@@ -45,11 +54,24 @@ def _fsa_metrics_circular(R0=1.7, a=0.55, F=3.4, Bp0=0.35, npol=20000):
     return geom, dict(th=th, R=R, Bp=Bp, Bphi=Bphi, B2=B2, F=F, fsa=fsa)
 
 
+def _synthetic_geom(n=64, seed=0):
+    """Profile-shaped geometry on n surfaces (Jensen-consistent averages)."""
+    rng = np.random.default_rng(seed)
+    x = np.linspace(0.0, 1.0, n)
+    inv_R = 0.58 + 0.06 * x + 1e-3 * rng.standard_normal(n)
+    return {
+        "F": -3.3 + 0.08 * x,                      # COCOS-11-like negative F
+        "avg_R": 1.0 / inv_R * (1.0 + 0.03 * x**2),
+        "avg_inv_R": inv_R,
+        "avg_inv_R2": inv_R**2 * (1.0 + 0.05 * x**2),
+        "avg_B2": 3.6 + 2.0 * x**2,
+        "pprime": 4.0e4 * (1.0 - x**2) + 3.0e5 * np.exp(-((x - 0.95) / 0.03) ** 2),
+    }
+
+
 # ---------------------------------------------------------------------------
-# Physics benchmark: proper-FSA quadrature vs the conversion formula, and the
-# <B_phi^2> = F^2 <1/R^2> identity. Verified against Wesson sec 4.4 (FSA def,
-# field-aligned + Pfirsch-Schlueter split) and the IMAS/EUROfusion convention
-# j_phi == <J^phi>/<1/R>.
+# Physics benchmark: proper-FSA quadrature vs the conversion formulas, and the
+# <B_phi^2> = F^2 <1/R^2> identity (Wesson sec 4.4).
 # ---------------------------------------------------------------------------
 class TestFSAQuadratureBenchmark:
     def test_forward_matches_independent_fsa_quadrature(self):
@@ -66,10 +88,31 @@ class TestFSAQuadratureBenchmark:
         j_tor_direct = f["fsa"](lam * f["Bphi"])
         j_tor_formula = parallel_to_toroidal(np.array([jdotB]), geom=g)[0]
         assert np.isclose(j_tor_formula, j_tor_direct, rtol=1e-10)
+        # and its IMAS j_tor image (A5), by direct quadrature too
+        J_IMAS_direct = f["fsa"](lam * f["Bphi"] / f["R"]) / geom["avg_inv_R"]
+        assert np.isclose(jphi_tokamaker_to_jtor_imas(
+            j_tor_formula, {**geom, "pprime": 0.0}), J_IMAS_direct, rtol=1e-10)
+
+    def test_gs_current_matches_independent_fsa_quadrature(self):
+        # j_phi = R p' + FF'/(mu0 R) with J.B = F p' + F' B^2/mu0 pointwise:
+        # A3/A4 by direct quadrature equal A7 (field-aligned + p'G) and A5.
+        geom, f = _fsa_metrics_circular()
+        pp, FFp = 5.0e4, -0.8                        # p' [Pa/Wb], FF' [T^2 m^2/Wb]
+        Fp = FFp / f["F"]
+        jphi = f["R"] * pp + FFp / (_MU0 * f["R"])
+        jdotB = f["fsa"](f["F"] * pp + Fp * f["B2"] / _MU0)
+        g = {**geom, "pprime": pp}
+        J_TM_direct = f["fsa"](jphi)
+        J_IMAS_direct = f["fsa"](jphi / f["R"]) / geom["avg_inv_R"]
+        J_TM = jpar_to_jphi_tokamaker(jdotB, g) + jphi_tokamaker_pressure_term(g)
+        assert np.isclose(J_TM, J_TM_direct, rtol=1e-10)
+        assert np.isclose(jtor_imas_to_jphi_tokamaker(J_IMAS_direct, g),
+                          J_TM_direct, rtol=1e-10)
+        assert np.isclose(jphi_tokamaker_to_jtor_imas(J_TM_direct, g),
+                          J_IMAS_direct, rtol=1e-10)
 
     def test_bphi2_identity(self):
-        # <B_phi^2> = F^2 <1/R^2> exactly (B_phi = F/R), the identity the
-        # analytic bracket relies on.
+        # <B_phi^2> = F^2 <1/R^2> exactly (B_phi = F/R)
         geom, f = _fsa_metrics_circular()
         avg_Bphi2 = f["fsa"](f["Bphi"] ** 2)
         assert np.isclose(avg_Bphi2, f["F"] ** 2 * geom["avg_inv_R2"], rtol=1e-12)
@@ -82,9 +125,18 @@ class TestFSAQuadratureBenchmark:
         cyl = geom["F"] ** 2 * geom["avg_inv_R"] ** 2 / geom["avg_B2"]
         assert not np.isclose(cyl, 1.0, atol=1e-3)   # genuine O(eps^2)+Bp effect
 
+    def test_conventions_differ_at_finite_aspect_ratio(self):
+        # sanity: the conversions are not vacuous at eps~0.32
+        geom, _ = _fsa_metrics_circular()
+        g = {**geom, "pprime": 0.0}
+        J = np.array([1.0e6])
+        assert not np.isclose(jphi_tokamaker_to_jtor_imas(J, g)[0], J[0], rtol=1e-3)
+        assert not np.isclose(jphi_tokamaker_pressure_term({**g, "pprime": 1.0}),
+                              0.0, atol=1e-3)
+
 
 # ---------------------------------------------------------------------------
-# toroidal_to_parallel -- the IDS write-back inverse
+# Current-convention helpers: inverses, A6 consistency, limits, errors
 # ---------------------------------------------------------------------------
 class TestToroidalToParallel:
     def test_round_trip_exact(self):
@@ -115,9 +167,69 @@ class TestToroidalToParallel:
         with pytest.raises(ValueError, match="avg_inv_R2"):
             toroidal_to_parallel(np.array([7.7e5]), geom=geom)
 
-    def test_missing_key_raises(self):
-        with pytest.raises(ValueError, match="missing required key"):
-            toroidal_to_parallel(np.array([1.0]), geom={"F": 3.4, "avg_B2": 4.0})
+
+class TestCurrentConventions:
+    def test_jtor_jphi_pair_inverts(self):
+        g = _synthetic_geom()
+        J = 1.5e6 * (1.0 - np.linspace(0.0, 1.0, g["F"].size) ** 2) + 2e5
+        assert np.allclose(jtor_imas_to_jphi_tokamaker(jphi_tokamaker_to_jtor_imas(J, g), g),
+                           J, rtol=1e-12)
+        assert np.allclose(jphi_tokamaker_to_jtor_imas(jtor_imas_to_jphi_tokamaker(J, g), g),
+                           J, rtol=1e-12)
+
+    def test_a6_via_a7_then_a5_equals_direct_a6(self):
+        # A6 written out (IMAS.jl JparB_2_JtoR, includes_bootstrap=true) equals
+        # the TokaMaker route: A7 (field-aligned + p'G) then A5 (TM -> IMAS)
+        g = _synthetic_geom()
+        jB = 9.0e5 * np.linspace(1.0, 0.1, g["F"].size)
+        F, R2, R1, B2, pp = (g["F"], g["avg_inv_R2"], g["avg_inv_R"], g["avg_B2"],
+                             g["pprime"])
+        a6 = F * R2 * jB / (B2 * R1) + pp * (1.0 - F**2 * R2 / B2) / R1
+        via = jphi_tokamaker_to_jtor_imas(
+            jpar_to_jphi_tokamaker(jB, g) + jphi_tokamaker_pressure_term(g), g)
+        assert np.allclose(via, a6, rtol=1e-12)
+
+    def test_component_split_sums_to_total(self):
+        # each component field-aligned, p'G counted once (on the bootstrap)
+        g = _synthetic_geom()
+        n = g["F"].size
+        jB_oh, jB_bs, jB_cd = (8e5 * np.ones(n), 2e5 * np.linspace(0, 1, n),
+                               5e4 * np.ones(n))
+        total = jpar_to_jphi_tokamaker(jB_oh + jB_bs + jB_cd, g) \
+            + jphi_tokamaker_pressure_term(g)
+        parts = (jpar_to_jphi_tokamaker(jB_oh, g)
+                 + jpar_to_jphi_tokamaker(jB_bs, g) + jphi_tokamaker_pressure_term(g)
+                 + jpar_to_jphi_tokamaker(jB_cd, g))
+        assert np.allclose(parts, total, rtol=1e-13)
+
+    def test_cylinder_limit(self):
+        # B_p -> 0, no R variation: jphi = <J.B>/B, IMAS == TokaMaker, G = 0
+        R0, B = 1.7, 2.0
+        g = {"F": R0 * B, "avg_R": R0, "avg_inv_R": 1 / R0,
+             "avg_inv_R2": 1 / R0**2, "avg_B2": B**2, "pprime": 3e4}
+        J = np.array([1.0e6, 2.0e5])
+        assert np.allclose(jpar_to_jphi_tokamaker(J * B, g), J)
+        assert np.allclose(jphi_tokamaker_pressure_term(g), 0.0, atol=1e-9)
+        assert np.allclose(jphi_tokamaker_to_jtor_imas(J, g), J)
+
+    def test_cocos_sign_safety(self):
+        # flipping F and <J.B> together leaves jphi unchanged
+        g = _synthetic_geom()
+        jB = np.full(g["F"].size, 1.0e6)
+        assert np.allclose(jpar_to_jphi_tokamaker(jB, g),
+                           jpar_to_jphi_tokamaker(-jB, {**g, "F": -g["F"]}))
+        assert np.allclose(jphi_tokamaker_pressure_term(g),
+                           jphi_tokamaker_pressure_term({**g, "F": -g["F"]}))
+
+    @pytest.mark.parametrize("fn,keys", [
+        (jphi_tokamaker_pressure_term, ["pprime"]),
+        (lambda g: jtor_imas_to_jphi_tokamaker(1.0, g), ["avg_inv_R2"]),
+        (lambda g: jphi_tokamaker_to_jtor_imas(1.0, g), ["avg_R"]),
+    ])
+    def test_missing_key_raises(self, fn, keys):
+        g = {k: v for k, v in _synthetic_geom().items() if k not in keys}
+        with pytest.raises(ValueError, match="geom is missing"):
+            fn(g)
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +322,44 @@ class TestExactInvR2Quadrature:
         R = eq.R0 + r * np.cos(th)
         w = 1.0 / (eq.Bp0 * eq.R0 / R)
         assert np.isclose(inv_R_chk[0], np.sum(w / R) / np.sum(w), rtol=1e-3)
+
+
+class _MockProfilesEquil:
+    """get_profiles / sauter_fc / get_q stand-in for capture_equilibrium_fsa;
+    ``s`` flips the case's flux sign (p' and F' together)."""
+    def __init__(self, s=1.0):
+        self.s = s
+
+    def get_profiles(self, psi):
+        x = np.asarray(psi)
+        F = 3.4 - 0.05 * x
+        return x, F, self.s * (-0.05 + 0 * x), 1e5 * (1 - x), self.s * 1e5 + 0 * x
+
+    def sauter_fc(self, psi):
+        x = np.asarray(psi)
+        return x, 0.3 + 0 * x, {"<R>": 1.7 + 0 * x, "<1/R>": 0.6 + 0 * x}, \
+            {"<|B|>": 2.0 + 0 * x, "<|B|^2>": 4.1 + 0 * x}
+
+    def get_q(self, psi, compute_geo=True):
+        x = np.asarray(psi)
+        return x, 1 + 2 * x, {"<R>": 1.70 + 0.02 * x, "<1/R>": 0.6 + 0 * x,
+                              "<1/R^2>": 0.37 + 0 * x, "dV/dPsi": 10 + 0 * x}
+
+
+class TestCaptureEquilibriumFsa:
+    @pytest.mark.parametrize("s", [1.0, -1.0])
+    def test_captures_current_geometry_with_positive_jphi(self, s):
+        from bouquet.physics import capture_equilibrium_fsa
+        out = capture_equilibrium_fsa(_MockProfilesEquil(s), npsi=9)
+        for k in ("avg_R", "pprime", "jphi_eq", "avg_inv_R2"):
+            assert k in out
+        x = out["psi_N"]
+        R, F = 1.70 + 0.02 * x, 3.4 - 0.05 * x
+        jphi = R * 1e5 + 0.6 * F * (-0.05) / _MU0        # the s = +1 profile
+        assert np.all(jphi > 0)
+        assert np.allclose(out["jphi_eq"], jphi)          # sign follows jphi_eq
+        assert np.allclose(out["pprime"], 1e5)
+        assert np.allclose(out["avg_R"], R)
 
 
 # ---------------------------------------------------------------------------

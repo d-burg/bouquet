@@ -80,7 +80,7 @@ class _KeepBestStub:
     def solve(self):
         pass
 
-    def get_profiles(self, npsi=None, psi_pad=None):
+    def get_profiles(self, npsi=None, psi_pad=None, psi=None):
         out = self._outputs[min(self._it, len(self._outputs) - 1)]
         self._it += 1
         # get_jphi_from_GS(f*fp, pp, <R>, <1/R>) must return `out`; the monkey-
@@ -89,7 +89,7 @@ class _KeepBestStub:
         return (None, np.zeros_like(out), np.zeros_like(out), None,
                 np.zeros_like(out))
 
-    def get_q(self, npsi=None, psi_pad=None):
+    def get_q(self, npsi=None, psi_pad=None, psi=None):
         n = self.psi_N.size
         ravgs = {"<R>": np.ones(n), "<1/R>": np.ones(n),
                  "<1/R^2>": np.ones(n), "dV/dPsi": np.ones(n)}

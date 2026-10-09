@@ -735,20 +735,12 @@ def pchip_derivative(x, y, x_eval=None, strict=False):
 #  Flux-surface-averaged plasma-current integral
 # =====================================================================
 #
-# ``TokaMaker.compute_flux_integral`` is NOT ``int_plasma f dA``.  Measured on
-# the synthetic D3D-like example (see ``tests/test_fsa_current_integral.py``):
-#
-#   * it integrates over the whole ``reg == 1`` (limiter) region, and the
-#     flux-function interpolator returns the profile's EDGE value everywhere
-#     outside the LCFS (``gs_prof_interp_apply`` CASE(4) returns 0 -- the LCFS
-#     end of the internal psi coordinate -- off the plasma, and ``gs_flux_int``
-#     then evaluates the profile there).  ``compute_flux_integral(1.0)`` is
-#     therefore 2.83853 m^2, the LIMITER-region area, against a true plasma
-#     cross-section of 1.79005 m^2;
-#   * so for a profile with a finite edge value the excess area is charged at
-#     ``f(psi_N=1)``.  On the archived total that is
-#     ``1.36e5 A/m^2 * 1.05 m^2 = 1.43e5 A``, i.e. +11.9 % of I_p -- almost the
-#     whole of the +12.9 % "representation bias" 7dc254b calibrated away.
+# ``TokaMaker.compute_flux_integral`` integrates its input as an area
+# density, so a TokaMaker jphi array needs eq. A5
+# (``physics.jphi_tokamaker_to_jtor_imas``) first (docs/current-conventions.md,
+# A9c); on OFT builds whose ``gs_flux_int`` covers the whole ``reg == 1``
+# limiter region it is also +11.9 % of I_p high on the D3D-like example
+# (``_AnchorIpRenorm``).
 #
 # The measure below never uses the mesh integral.  It is the textbook
 # axisymmetric current integral,
@@ -2641,8 +2633,12 @@ def close_ip_structured(psi_N, w_lin, c_affine, Ip_target_signed,
                         j_ind, j_bs, j_fix, basis=None, weights=None,
                         axis=None, scale_bounds=(0.2, 5.0), cond_rtol=1e-6,
                         li_target=None, li_kind="li_1", li_geom=None,
-                        sigma_ind_up=None, mse_lin=None):
+                        sigma_ind_up=None, mse_lin=None, basis_x=None):
     r"""Minimal-norm radial multiplier profiles closing Ip (and optionally q0).
+
+    ``basis_x``: the abscissa the basis lives on when it is not *psi_N* (a
+    Phi_N run: the basis on the run grid, the integrals over the nodes'
+    psi_N); ``None``: *psi_N*.
 
     The ``closure_channel="structured"`` algebra.  Unknowns are two smooth
     multiplier PROFILES on a small basis :math:`\phi_k`,
@@ -2814,7 +2810,8 @@ def close_ip_structured(psi_N, w_lin, c_affine, Ip_target_signed,
                            "Ip_target_signed")
 
     basis_spec = dict(STRUCTURED_BASIS_DEFAULT if basis is None else basis)
-    Phi = structured_basis_eval(basis_spec, psi)             # (K, N)
+    bx = psi if basis_x is None else np.asarray(basis_x, dtype=float)
+    Phi = structured_basis_eval(basis_spec, bx)              # (K, N)
     K = Phi.shape[0]
     wspec = dict(structured_default_weights(K) if weights is None else weights)
     W_ind = np.atleast_1d(np.asarray(wspec["ind"], dtype=float)).astype(float)
@@ -2866,8 +2863,9 @@ def close_ip_structured(psi_N, w_lin, c_affine, Ip_target_signed,
                    (j_ind0, j_bs0, j_fix0, j_ref0, psi0)):
             raise RuntimeError("close_ip_structured: non-finite axis row "
                                f"{(psi0, j_ind0, j_bs0, j_fix0, j_ref0)}")
-        phi0 = structured_basis_eval(basis_spec,
-                                     np.array([psi0], dtype=float))[:, 0]
+        phi0 = structured_basis_eval(basis_spec, np.array(
+            [psi0 if basis_x is None else float(np.interp(psi0, psi, bx))],
+            dtype=float))[:, 0]
         rows.append(np.concatenate([phi0 * j_ind0, phi0 * j_bs0]))
         rhs.append(j_ref0 - j_ind0 - j_bs0 - j_fix0)
         names.append("axis current (q0)")
@@ -3234,8 +3232,10 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
                              scale_bounds=(0.2, 5.0), rtol=1e-10,
                              max_iter=100, cond_rtol=1e-6,
                              sigma_ind_up=None, mse_lin=None, x0=None,
-                             accept_noise_floor=False):
+                             accept_noise_floor=False, basis_x=None):
     r"""The POSTERIOR-MODE structured closure: Ip and l_i as measurements.
+
+    ``basis_x``: as in :func:`close_ip_structured`.
 
     :func:`close_ip_structured` treats Ip (and the axis current, and l_i) as
     things that are *true*: it imposes them exactly and lets the trust norm
@@ -3421,7 +3421,8 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
                            "Ip_target_signed")
 
     basis_spec = dict(STRUCTURED_BASIS_DEFAULT if basis is None else basis)
-    Phi = structured_basis_eval(basis_spec, psi)             # (K, N)
+    bx = psi if basis_x is None else np.asarray(basis_x, dtype=float)
+    Phi = structured_basis_eval(basis_spec, bx)              # (K, N)
     K = Phi.shape[0]
     _dflt = sigma_from_weights(None, K)
     sig_ind = _sigma_ladder(sigma_ind, K, _dflt["ind"],
@@ -3453,8 +3454,9 @@ def close_ip_structured_soft(psi_N, w_lin, c_affine, Ip_target_signed,
                    (j_ind0, j_bs0, j_fix0, j_ref0, psi0)):
             raise RuntimeError("close_ip_structured_soft: non-finite axis row "
                                f"{(psi0, j_ind0, j_bs0, j_fix0, j_ref0)}")
-        phi0 = structured_basis_eval(basis_spec,
-                                     np.array([psi0], dtype=float))[:, 0]
+        phi0 = structured_basis_eval(basis_spec, np.array(
+            [psi0 if basis_x is None else float(np.interp(psi0, psi, bx))],
+            dtype=float))[:, 0]
         axis_row = np.concatenate([phi0 * j_ind0, phi0 * j_bs0])
         axis0 = j_ind0 + j_bs0 + j_fix0
 
@@ -4033,12 +4035,65 @@ def _default_scan_key(ref, scan_key):
     return scan_key
 
 
+def group_coord(grp):
+    """An archive group's ``profile_coord`` attr (absent: ``"psi_n"``)."""
+    v = grp.attrs.get("profile_coord", "psi_n")
+    return v.decode() if isinstance(v, bytes) else str(v)
+
+
+def profile_coord(h5path, scan_key=None):
+    """The archive's profile coordinate, the baseline group's ``profile_coord``
+    attr; ``"psi_n"`` for archives written before it existed.
+
+    ``scan_key=None`` on a scan layout reads the scan points' baselines and
+    returns their common coordinate (raises if they differ).
+    """
+    import h5py
+
+    bkey = _scan_key(scan_key)
+    try:
+        with h5py.File(h5path, "r") as hf:
+            if bkey is not None:
+                return group_coord(hf[f"scan/{bkey}/_baseline"])
+            if "_baseline" in hf:
+                return group_coord(hf["_baseline"])
+            coords = {group_coord(g["_baseline"])
+                      for g in hf.get("scan", {}).values() if "_baseline" in g}
+    except (OSError, KeyError):
+        return "psi_n"
+    if len(coords) > 1:
+        raise ValueError(f"{h5path}: scan points differ in profile_coord "
+                         f"{sorted(coords)}; pass scan_key")
+    return coords.pop() if coords else "psi_n"
+
+
 def _group_path(scan_key, count):
     """Return the internal HDF5 group path for a given entry."""
     bkey = _scan_key(scan_key)
     if bkey is not None:
         return f"scan/{bkey}/{int(count)}"
     return str(int(count))
+
+
+def stamp_group_attrs(header, scan_key, count, attrs):
+    """Set ``attrs`` on one archived draw group, or on ``_baseline`` when
+    ``count`` is None. A dict value ``{name: x}`` is stored as two attrs,
+    ``<key>_names`` and ``<key>_values``; None values are skipped.
+    """
+    import numpy as np
+    bkey = _scan_key(scan_key)
+    path = (_group_path(scan_key, count) if count is not None
+            else (f"scan/{bkey}/_baseline" if bkey is not None else "_baseline"))
+    with h5py.File(f"{header}.h5", "a") as hf:
+        grp = hf[path]
+        for k, v in attrs.items():
+            if v is None:
+                continue
+            if isinstance(v, dict):
+                grp.attrs[f"{k}_names"] = np.array(list(v), dtype="S")
+                grp.attrs[f"{k}_values"] = np.array(list(v.values()), dtype=float)
+            else:
+                grp.attrs[k] = v
 
 
 # ====================================================================
@@ -4463,6 +4518,9 @@ def store_equilibrium(
     j_BS_edge=None,
     pfile_bytes=None,
     Zeff=None,
+    z_fast=None,
+    z2_fast=None,
+    Z_imp=None,
     coil_currents=None,
     psi_N_kinetic=None,
     homotopy_pass=None,
@@ -4471,6 +4529,7 @@ def store_equilibrium(
     max_F_drift_pct=None,
     max_VSC_drift_pct=None,
     in_spec=None,
+    jbs_delta_active=None,
     inspec_F_max=None,
     inspec_VSC_max=None,
     perturbed_lcfs_ref=None,
@@ -4481,6 +4540,7 @@ def store_equilibrium(
     aux=None,
     eq_fsa=None,
     jbs_loop=None,
+    profile_coord="psi_n",
 ):
     """
     Write one perturbed equilibrium into the HDF5 database.
@@ -4514,6 +4574,8 @@ def store_equilibrium(
         1-D effective charge profile (dimensionless).
     coil_currents : dict or None
         Coil currents {name: current_A} from TokaMaker.
+    profile_coord : str
+        Coordinate of ``psi_N`` / ``psi_N_kinetic`` (``attrs["profile_coord"]``).
     jbs_loop : dict or None
         The draw's self-consistent bootstrap record
         (``GenerationConfig.jbs_self_consistent``): written as the group
@@ -4586,6 +4648,7 @@ def store_equilibrium(
         grp.attrs["count"]  = int(count)
         if scan_key is not None:
             grp.attrs["scan_key"] = scan_key
+        grp.attrs["profile_coord"] = str(profile_coord)
 
         # ---- optional: p-file bytes ----------------------------------------
         # Per-draw pfile blobs are only stored for TEXT p-files (rewritten with
@@ -4602,6 +4665,14 @@ def store_equilibrium(
         # ---- optional: Zeff profile ----------------------------------------
         if Zeff is not None:
             write_profile(grp, "Zeff", Zeff)
+
+        # ---- optional: fast-ion charge moments (psi_N_kinetic) --------------
+        # Written per draw so one entry recovers the thermal ne - z_fast.
+        for _k, _v in (("z_fast", z_fast), ("z2_fast", z2_fast)):
+            if _v is not None:
+                write_profile(grp, _k, _v)
+        if Z_imp:
+            grp.attrs["Z_imp"] = float(Z_imp)
 
         # ---- optional: coil currents ---------------------------------------
         if coil_currents is not None:
@@ -4625,6 +4696,8 @@ def store_equilibrium(
             grp.attrs["max_VSC_drift_pct"] = float(max_VSC_drift_pct)
         if in_spec is not None:
             grp.attrs["in_spec"] = bool(in_spec)
+        if jbs_delta_active is not None:
+            grp.attrs["jbs_delta_active"] = bool(jbs_delta_active)
         if inspec_F_max is not None:
             grp.attrs["inspec_F_max"] = float(inspec_F_max)
         if inspec_VSC_max is not None:
@@ -4670,8 +4743,8 @@ def store_equilibrium(
         # ---- Live-equilibrium FSA block (optional subgroup) --------------
         # Captured from the converged TokaMaker equilibrium at the same state
         # the eqdsk was saved from, so this draw's own flux geometry enables
-        # an exact toroidal<->parallel conversion at IMAS export
-        # (physics.capture_equilibrium_fsa -> physics.toroidal_to_parallel).
+        # exact current conversions at IMAS export
+        # (physics.capture_equilibrium_fsa -> io.imas.write_imas_draw).
         if eq_fsa:
             from .schema import EQ_FSA_GROUP, EQ_FSA_UNITS
             fsa_grp = grp.create_group(EQ_FSA_GROUP)
@@ -4763,10 +4836,10 @@ def load_eq_fsa(header, count, scan_key=None):
 
     Returns a dict of 1-D arrays (``psi_N``, ``F``, ``avg_inv_R``,
     ``avg_inv_R2`` (present only when the exact quadrature succeeded),
-    ``avg_B2``, ``q``, ``dV_dpsi``, ``f_trap``, ``B_avg``) -- the geometry
-    :func:`bouquet.physics.toroidal_to_parallel` needs for an exact IMAS
-    write-back. ``None`` for archives written without live capture (fall back
-    to the baseline-ratio reconstruction).
+    ``avg_B2``, ``q``, ``dV_dpsi``, ``f_trap``, ``B_avg``; newer archives also
+    ``avg_R``, ``pprime``, ``jphi_eq``) -- the geometry the exact IMAS
+    write-back needs (:func:`bouquet.io.imas.write_imas_draw`). ``None`` for
+    archives written without live capture.
     """
     from .schema import EQ_FSA_GROUP
     h5path = _resolve_h5(header)
@@ -4857,6 +4930,11 @@ def load_equilibrium(header, count, scan_key=None, eqdsk_out_dir=None):
         # ---- optional: Zeff -----------------------------------------------
         if "Zeff" in grp:
             result["Zeff"] = np.array(grp["Zeff"])
+        for _k in ("z_fast", "z2_fast"):
+            if _k in grp:
+                result[_k] = np.array(grp[_k])
+        if "Z_imp" in grp.attrs:
+            result["Z_imp"] = float(grp.attrs["Z_imp"])
 
         # ---- optional: p-file bytes ----------------------------------------
         # Text p-file sources are stored per draw (draw-perturbed); binary IDA
@@ -4965,6 +5043,9 @@ def store_baseline_profiles(
     scan_key=None,
     l_i_scale=LI_SCALE,
     pressure_thermal=None,
+    z_fast=None,
+    z2_fast=None,
+    Z_imp=None,
     eqdsk_bytes=None,
     pfile_bytes=None,
     psi_N_kinetic=None,
@@ -4980,6 +5061,7 @@ def store_baseline_profiles(
     source_kind=None,
     mse_record=None,
     baseline_meta=None,
+    profile_coord="psi_n",
 ):
     """
     Store the input (baseline) profiles and their uncertainties.
@@ -5042,6 +5124,12 @@ def store_baseline_profiles(
         write_profile(grp, "pressure", pressure)
         if pressure_thermal is not None:
             write_profile(grp, "pressure_thermal", pressure_thermal)
+        # fast-ion charge moments: needed to recover ne - z_fast downstream
+        for _k, _v in (("z_fast", z_fast), ("z2_fast", z2_fast)):
+            if _v is not None:
+                write_profile(grp, _k, _v)
+        if Z_imp:
+            grp.attrs["Z_imp"] = float(Z_imp)
         write_profile(grp, "j_phi", j_phi)
         if j_BS is not None:
             write_profile(grp, "j_BS", j_BS)
@@ -5079,6 +5167,9 @@ def store_baseline_profiles(
         # the source-decoupled aux switchboard): "imas" or "geqdsk".
         if source_kind is not None:
             grp.attrs["source_kind"] = str(source_kind)
+        # Coordinate of the psi_N / psi_N_kinetic grids (bouquet.coords);
+        # absent on older archives, which are all "psi_n".
+        grp.attrs["profile_coord"] = str(profile_coord)
         if mse_record:
             _write_mse_record(grp, mse_record)
         # Baseline provenance / closure health (see the docstring).  The
@@ -5326,6 +5417,11 @@ def load_equilibrium_by_path(h5path_or_header, count, scan_key=None):
 
         if "Zeff" in grp:
             result["Zeff"] = np.array(grp["Zeff"])
+        for _k in ("z_fast", "z2_fast"):
+            if _k in grp:
+                result[_k] = np.array(grp[_k])
+        if "Z_imp" in grp.attrs:
+            result["Z_imp"] = float(grp.attrs["Z_imp"])
 
         # auxiliary ("switchboard") perturbed profiles -- aux_zeff, aux_omega_tor,
         # aux_chi_e, ... on psi_N_kinetic -- so per-draw plots (draw_zeff, the aux

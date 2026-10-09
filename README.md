@@ -59,7 +59,9 @@ pip install -e ".[dev]"
 v26.6 or newer** for equilibrium generation (v26.6 introduced the dict-form
 flux-surface-average returns that the exact-fidelity per-draw geometry capture
 depends on; legacy positional layouts are still supported). OFT is installed
-separately, following its own instructions. Everything else — the GEQDSK/p-file/
+separately, following its own instructions; `tools/install_oft.py` builds a
+given OFT branch or commit, reusing already built external libraries (`--libs`).
+Everything else — the GEQDSK/p-file/
 IDA/IMAS readers, COCOS conversion, archive reading, and all plotting — works
 without it. Python dependencies (`numpy`, `scipy`, `matplotlib`, `h5py`) are
 handled by pip.

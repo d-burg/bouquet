@@ -93,7 +93,9 @@ def read_jbs_loop(grp):
         raw = raw.decode()
     return json.loads(str(raw))
 
-# Bare dataset name -> unit string (empty = dimensionless).
+# Bare dataset name -> unit string (empty = dimensionless).  ``psi_N`` /
+# ``psi_N_kinetic`` hold the run grid in the group's ``profile_coord``
+# ("psi_n" or "phi_n"; absent = "psi_n").
 PROFILE_UNITS = {
     "psi_N": "",
     "psi_N_kinetic": "",
@@ -109,11 +111,14 @@ PROFILE_UNITS = {
     "pressure": "Pa",
     "pressure_thermal": "Pa",
     "Zeff": "",
+    "z_fast": "m^-3",
+    "z2_fast": "m^-3",
     "sigma_ne": "m^-3",
     "sigma_te": "eV",
     "sigma_ni": "m^-3",
     "sigma_ti": "eV",
     "sigma_jphi": "A m^-2",
+    "swb_j_saw": "A m^-2",
     "coil_currents": "A",
 }
 
@@ -125,12 +130,16 @@ COIL_NAMES_DS = "coil_names"
 
 # Live-equilibrium flux-surface-average block (optional per-draw subgroup),
 # captured from the converged TokaMaker equilibrium at generate time to enable
-# an exact toroidal<->parallel current conversion at IMAS export. All on the
-# eq_fsa psi_N grid. See physics.capture_equilibrium_fsa.
+# exact TokaMaker-jphi -> IMAS current conversions at export. All on the
+# eq_fsa psi_N grid, which is always ψ_N, even in a Φ_N (profile_coord="phi_n")
+# archive. See physics.capture_equilibrium_fsa.
 EQ_FSA_GROUP = "eq_fsa"
 EQ_FSA_UNITS = {
     "psi_N": "",
     "F": "T m",             # R*B_phi
+    "pprime": "Pa Wb^-1",   # p', signed so jphi_eq > 0
+    "jphi_eq": "A m^-2",    # own TokaMaker jphi <R>p' + <1/R>FF'/mu0
+    "avg_R": "m",           # <R>
     "avg_inv_R": "m^-1",    # <1/R>
     "avg_inv_R2": "m^-2",   # <1/R^2> (exact quadrature; may be absent)
     "avg_B2": "T^2",        # <B^2>

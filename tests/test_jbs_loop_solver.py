@@ -144,9 +144,11 @@ def _imas_probe(outdir, part):
 
         B.redl_bootstrap = _spy
         try:
+            py = ({"use_python_solve": True} if "use_python_solve" in
+                  inspect.signature(B.solve_with_bootstrap).parameters else {})
             B.solve_with_bootstrap(mygs, *kin[:4], kin[4], bl.Ip_target,
                                    np.ones_like(psi), psi_N=psi,
-                                   verbose=False)
+                                   verbose=False, **py)   # the spy is on the Python Redl
         except _Stop:
             pass
         finally:
@@ -514,6 +516,9 @@ def _legacy_probe(outdir, part):
     L.run_jbs_loop = _tripwire("run_jbs_loop")
     _swb = B.solve_with_bootstrap
 
+    import functools
+
+    @functools.wraps(_swb)        # keeps the signature bouquet inspects
     def _count_swb(*a, **k):
         calls["solve_with_bootstrap"] += 1
         return _swb(*a, **k)

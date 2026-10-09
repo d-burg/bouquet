@@ -15,9 +15,8 @@ Checked here, on the synthetic example's own flux-surface averages (the
 golden fixture's captured ``eq_fsa`` block):
 
 * ``physics.parallel_to_toroidal`` / ``toroidal_to_parallel``,
-  ``physics.evaluate_jBS`` (its toroidal output), ``TokaMaker_interface.
-  _swb_jbs_to_toroidal`` and ``engine.conversion_factor`` agree with kappa
-  bit for bit;
+  ``physics.evaluate_jBS`` (its toroidal output) and
+  ``engine.conversion_factor`` agree with kappa bit for bit;
 * the old legacy factor exceeded kappa by exactly the bracket
   ``<B^2>/<B_phi^2>`` times the Jensen ratio ``<1/R^2>/<1/R>^2``;
 * the engine's composition is unchanged: its request is rebuilt bit for bit
@@ -125,12 +124,11 @@ def test_the_old_legacy_factor_was_bracket_times_jensen_high(fsa):
 
 
 # ---------------------------------------------------------------------------
-#  evaluate_jBS and _swb_jbs_to_toroidal, on a mock of the example
+#  evaluate_jBS, on a mock of the example
 # ---------------------------------------------------------------------------
 class _ExampleEq:
     """A mygs stand-in serving the example's captured averages: the
-    primitives ``evaluate_jBS`` (``psi=``) and ``_swb_jbs_to_toroidal``
-    (``npsi=``, ``psi_pad=``) read.  ``<R>`` and ``<a>`` are not captured;
+    primitives ``evaluate_jBS`` reads.  ``<R>`` and ``<a>`` are not captured;
     plausible synthetic values stand in (neither enters the conversion)."""
 
     def __init__(self, fsa):
@@ -156,12 +154,13 @@ class _ExampleEq:
         z = np.zeros_like(p)
         return p, F, z, z, z
 
-    def sauter_fc(self, psi=None, npsi=None, psi_pad=None):
+    def sauter_fc(self, psi=None, npsi=None, psi_pad=None, return_eps=False):
         p = self._grid(psi, npsi, psi_pad)
         r = {"<R>": self._R(p), "<1/R>": self._at("avg_inv_R", p),
              "<a>": 0.6 * np.sqrt(p) + 1e-3}
         modb = np.array([self._at("B_avg", p), self._at("avg_B2", p)])
-        return p, self._at("f_trap", p), r, modb
+        out = (p, self._at("f_trap", p), r, modb)
+        return out + ((r["<a>"] / r["<R>"],) if return_eps else ())
 
     def get_q(self, psi=None, npsi=None, psi_pad=None, compute_geo=False):
         p = self._grid(psi, npsi, psi_pad)
@@ -211,18 +210,6 @@ def test_evaluate_jBS_toroidal_output_is_kappa(fsa, fake_redl):
     np.testing.assert_array_equal(d["j_tor_full_raw"], d["j_dot_B"] * kap)
     np.testing.assert_array_equal(_j, d["j_dot_B"] * kap)
     assert "kappa" in d["version"]
-
-
-def test_swb_jbs_to_toroidal_is_kappa(fsa):
-    from bouquet.TokaMaker_interface import _swb_jbs_to_toroidal
-    eq = _ExampleEq(fsa)
-    p = fsa["psi_N"]
-    jB = _jdotB(p)
-    R_avg = eq._R(p)
-    swb = jB * R_avg / fsa["F"]            # SWB's own R_avg/F projection
-    out = _swb_jbs_to_toroidal(eq, swb, 1e-3)
-    kap = _kappa_literal(fsa["F"], fsa["avg_inv_R"], fsa["avg_B2"])
-    np.testing.assert_allclose(out, jB * kap, rtol=1e-14, atol=0.0)
 
 
 # ---------------------------------------------------------------------------

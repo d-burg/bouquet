@@ -194,8 +194,12 @@ def test_baseline_meta_is_the_last_generate_bouquet_parameter():
     params = [n for n, p in inspect.signature(generate_bouquet).parameters.items()
               if p.kind is not inspect.Parameter.VAR_KEYWORD]   # **kwargs is last by syntax
     # every parameter added since 1.3.1 sits after the positional-capable
-    # options, in the order it was added
-    assert params[-3:] == ["baseline_meta", "on_inspec", "stop_check"]
+    # options, in the order it was added (bootstrap_kwargs replaced the
+    # trailing **kwargs, review PR60 B5; then the D2 split convention and
+    # the sawteeth share of j_other, 2026-10-09)
+    assert params[-6:] == ["baseline_meta", "on_inspec", "stop_check",
+                           "bootstrap_kwargs", "baseline_split",
+                           "j_sawteeth"]
 
 
 # ---------------------------------------------------------------------------

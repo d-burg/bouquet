@@ -5416,7 +5416,6 @@ def generate_bouquet(
     j_NBI=None,
     j_RF=None,
     j_other=None,
-    j_sawteeth=None,
     aux_sigmas=None,
     aux_baselines=None,
     aux_length_scales=None,
@@ -5488,8 +5487,13 @@ def generate_bouquet(
     # Appended after baseline_meta for the same positional-compatibility reason.
     on_inspec=None,
     stop_check=None,
-    baseline_split=None,
+    # appended in the order added (positional compatibility): the explicit
+    # solve_with_bootstrap options (they replace **kwargs, review PR60 B5),
+    # the archive's current-split convention (D2), the sawteeth share of
+    # j_other (review PR70 B10)
     bootstrap_kwargs=None,
+    baseline_split=None,
+    j_sawteeth=None,
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
 

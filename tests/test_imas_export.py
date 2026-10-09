@@ -158,7 +158,8 @@ class TestExactImasExport:
 
     def test_writes_only_the_exported_slice(self, tmp_path):
         # a multi-slice template: every time series is cut to the sample
-        # nearest `time`, on its own time base; static data is kept
+        # nearest the core_profiles slice read at `time`, on its own time
+        # base; static data is kept
         arc = str(tmp_path / "run.h5"); _make_archive(arc, with_fsa=True)
         tmpl = str(tmp_path / "tmpl.json"); psi, template = _make_template(tmpl)
         times = [0.5, 1.0, 1.5]
@@ -185,8 +186,17 @@ class TestExactImasExport:
             assert [s["time"] for s in dd[ids][aos]] == [1.0]
         assert dd["core_profiles"]["global_quantities"]["ip"] == [2.0]
         assert dd["core_sources"]["time"] == [1.0]
-        assert dd["core_sources"]["source"][0]["profiles_1d"] == [{"time": 1.0}]
-        assert dd["pf_active"]["coil"][0]["current"] == {"time": [1.2], "data": [2.0]}
+        # the entry keeps the own slices the reader's rule consults at the
+        # core_profiles slice read (1.0 s: itself) and its first / last,
+        # with the windows of that read (IMAS_EXPORT_TIME_WINDOW_KEY)
+        from bouquet.io.imas import IMAS_EXPORT_TIME_WINDOW_KEY as _K
+        src0 = dd["core_sources"]["source"][0]
+        assert src0["profiles_1d"] == [{"time": 1.0}, {"time": 1.5}]
+        assert src0[_K]["core_profiles_time"] == 1.0
+        assert dd["core_sources"][_K]["window"] == pytest.approx(0.25)
+        # every IDS is cut at the core_profiles slice read (1.0 s), not at
+        # the caller's 1.1 s: pf_active keeps its sample nearest 1.0 s
+        assert dd["pf_active"]["coil"][0]["current"] == {"time": [0.9], "data": [1.0]}
         assert dd["wall"] == template["wall"]
         # the draw is written onto the kept slice
         psiN_t = (psi - psi[0]) / (psi[-1] - psi[0])

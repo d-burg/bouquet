@@ -120,6 +120,39 @@ SAWTOOTH_SOURCE_INDEX = 701
 #: half-step window is used and this floor plays no part.
 IMAS_SINGLE_TIME_WINDOW_S = 1e-5
 
+#: Key of the time-match windows a single-slice export (:func:`_slice_in_time`,
+#: :func:`write_imas_draw`) records so a re-read applies the windows of the
+#: read it came from.  Cut to one slice, core_profiles and core_sources each
+#: hold one time and an entry only the own slices the rule consults, so the
+#: half-step windows would collapse to :data:`IMAS_SINGLE_TIME_WINDOW_S` and
+#: an entry matched at an offset own time would re-read as off, an offset
+#: core_sources base as a refusal.  Written in two places:
+#:
+#: * ``core_sources[IMAS_EXPORT_TIME_WINDOW_KEY]`` -- the core_sources slice:
+#:   ``{"core_profiles_time", "core_sources_time", "window", "window_basis"}``
+#:   (:func:`core_sources_slice`'s window and its basis at the original read);
+#: * ``core_sources.source[j][IMAS_EXPORT_TIME_WINDOW_KEY]`` -- one entry:
+#:   ``{"core_profiles_time", "core_sources_time", "window_own",
+#:   "window_core_profiles"}`` (:func:`_source_slice_at`'s two windows).
+#:
+#: The reader honours a block only when its two times equal the slice times
+#: it is reading (the exported slice itself); anywhere else it is ignored.
+IMAS_EXPORT_TIME_WINDOW_KEY = "bouquet_time_window"
+
+
+def _export_window(meta, t_cp, t_src):
+    """The export window block *meta* when it describes the slice pairing
+    (*t_cp*, *t_src*) exactly, else ``None``."""
+    if not isinstance(meta, dict) or t_cp is None or t_src is None:
+        return None
+    try:
+        if (float(meta["core_profiles_time"]) == float(t_cp)
+                and float(meta["core_sources_time"]) == float(t_src)):
+            return meta
+    except (KeyError, TypeError, ValueError):
+        return None
+    return None
+
 
 def _local_step(grid, k, toward):
     """The local time-step of the sorted, distinct *grid* at node *k*, on
@@ -323,6 +356,11 @@ def core_sources_slice(src_ids, cp_times, ic, T=None, who="IMAS reader"):
     t_src = float(tt[isrc])
     dt = t_src - t_cp
     half, basis = _cp_window(cpt, tt, t_cp, t_src)
+    _meta = _export_window(src_ids.get(IMAS_EXPORT_TIME_WINDOW_KEY), t_cp,
+                           t_src)
+    if _meta is not None and cpt.size == 1 and tt.size == 1:
+        # a single-slice export: the window of the read it came from
+        half, basis = float(_meta["window"]), str(_meta["window_basis"])
     rec = dict(core_profiles_time=t_cp, core_sources_time=t_src, dt=dt,
                window=half, window_basis=basis, rule=SOURCE_TIME_RULE)
     if abs(dt) > half:
@@ -371,6 +409,14 @@ def _source_slice_at(s, isrc, t_slice, n_time, base_times=None, *,
         tt = np.asarray(times, dtype=float)
         t_ref = float(t_slice if t_cp is None else t_cp)
         k, dt, half = _entry_time_window(times, t_slice, base_times)
+        _meta = _export_window(s.get(IMAS_EXPORT_TIME_WINDOW_KEY), t_ref,
+                               t_slice)
+        if _meta is not None:
+            # a single-slice export keeps only the own slices this rule
+            # consults: the windows are those of the read it came from
+            half = float(_meta["window_own"])
+            if _meta.get("window_core_profiles") is not None:
+                cp_half = float(_meta["window_core_profiles"])
         br = _entry_bracketing_slices(times, t_slice)
         rec.update(own_time_nearest=float(tt[k]),
                    dt=float(tt[k]) - t_ref, window_own=float(half),
@@ -2288,32 +2334,213 @@ def archived_pressure_term(eqdsk_bytes, psi_N):
     return np.interp(np.asarray(psi_N, dtype=float), hit[0], hit[1])
 
 
-def _slice_in_time(node, t, n=0, i=0):
-    """Cut an IDS tree in place to the samples nearest ``t`` [s].
+#: Signal fields cut with their time base (IMAS ``signal_flt_1d`` and kin:
+#: ``data``, its errors and ``validity_timed`` share the signal's time axis).
+_SIGNAL_TIMED_FIELDS = ("data", "data_error_upper", "data_error_lower",
+                        "validity_timed")
 
-    An array of structures whose elements carry a scalar ``time`` keeps the
-    element nearest ``t`` on those times (a core_sources source can hold fewer
-    slices than its IDS).  Any other list as long as the innermost enclosing
-    ``time`` array -- the IDS's, or a signal's own -- keeps that array's entry
-    nearest ``t``, as does the ``time`` array itself.
-    """
+
+def _is_time_tagged_aos(v):
+    """An array of structures whose elements each carry a scalar ``time``
+    (a dynamic AoS: ``equilibrium.time_slice``, ``core_profiles.profiles_1d``,
+    ``core_sources.source[*].profiles_1d``, ...)."""
+    return (isinstance(v, list) and len(v) > 0 and all(
+        isinstance(e, dict) and isinstance(e.get("time"), (int, float))
+        and not isinstance(e.get("time"), bool) for e in v))
+
+
+def _cut_axis0(v, i, n):
+    """``[v[i]]`` when *v* is a list of length *n* (> 1), else *v*."""
+    if isinstance(v, list) and n > 1 and len(v) == n:
+        return [v[i]]
+    return v
+
+
+def _cut_dynamic(node, t, base_n=0, base_i=0):
+    """Cut the dynamic parts of an IDS subtree in place, keyed on the IMAS
+    structure, never on a list's length alone:
+
+    * a time-tagged array of structures keeps its element nearest *t*
+      (that element is recursed into for its own signals);
+    * a signal -- a structure with ``data`` -- keeps its sample nearest *t*
+      on its OWN ``time`` (a non-empty list), or, without one, on the IDS
+      time base (*base_n* samples, index *base_i*: a homogeneous-time IDS);
+      ``data``, its errors and ``validity_timed`` are cut, nothing else;
+    * a summary-style ``{"value": [...]}`` on the IDS time base is cut;
+    * anything else -- entry lists (``core_sources.source``,
+      ``pf_active.coil``, ``nbi.unit``, ...), coil and limiter outlines,
+      radial profiles -- is left whole."""
     if isinstance(node, list):
         for v in node:
             if isinstance(v, (dict, list)):
-                _slice_in_time(v, t, n, i)
+                _cut_dynamic(v, t, base_n, base_i)
         return
-    if isinstance(node.get("time"), list):
-        n = len(node["time"])
-        i = _nearest_index(node["time"], t, "time") if n else 0
-    for k, v in node.items():
-        if v and isinstance(v, list) and all(
-                isinstance(e, dict) and isinstance(e.get("time"), (int, float))
-                for e in v):
-            node[k] = [v[_nearest_index([e["time"] for e in v], t, k)]]
-        elif isinstance(v, list) and len(v) == n > 1:
-            node[k] = [v[i]]
+    if not isinstance(node, dict):
+        return
+    if "data" in node and isinstance(node.get("data"), list):
+        own = node.get("time")
+        if isinstance(own, list) and len(own) > 0:
+            i = _nearest_index(own, t, "signal time")
+            n = len(own)
+            node["time"] = [own[i]]
+        else:
+            i, n = base_i, base_n
+        for f in _SIGNAL_TIMED_FIELDS:
+            if f in node:
+                node[f] = _cut_axis0(node[f], i, n)
+    if isinstance(node.get("value"), list):
+        node["value"] = _cut_axis0(node["value"], base_i, base_n)
+    for k, v in list(node.items()):
+        if k in _SIGNAL_TIMED_FIELDS or k == "time":
+            continue
+        if _is_time_tagged_aos(v):
+            kept = v[_nearest_index([e["time"] for e in v], t, k)]
+            node[k] = [kept]
+            _cut_dynamic(kept, t, 0, 0)
         elif isinstance(v, (dict, list)):
-            _slice_in_time(v, t, n, i)
+            _cut_dynamic(v, t, base_n, base_i)
+
+
+def _cut_ids(ids, t):
+    """Cut one IDS to the time *t*: its ``time`` base, the homogeneous-time
+    arrays on it (``vacuum_toroidal_field.b0``, ``code.output_flag``, every
+    array under the IDS-level ``global_quantities``), then its dynamic
+    parts (:func:`_cut_dynamic`).  Returns the kept index on its time base
+    (``None`` without one)."""
+    tb = ids.get("time")
+    i, n = None, 0
+    if isinstance(tb, list) and len(tb) > 0:
+        n = len(tb)
+        i = _nearest_index(tb, t, "time")
+        ids["time"] = [tb[i]]
+        vtf = ids.get("vacuum_toroidal_field")
+        if isinstance(vtf, dict) and "b0" in vtf:
+            vtf["b0"] = _cut_axis0(vtf["b0"], i, n)
+        code = ids.get("code")
+        if isinstance(code, dict) and "output_flag" in code:
+            code["output_flag"] = _cut_axis0(code["output_flag"], i, n)
+        gq = ids.get("global_quantities")
+        if isinstance(gq, dict):
+            _cut_leaves(gq, i, n)
+    for k, v in list(ids.items()):
+        if k in ("time", "global_quantities"):
+            continue
+        if _is_time_tagged_aos(v):
+            kept = v[_nearest_index([e["time"] for e in v], t, k)]
+            ids[k] = [kept]
+            _cut_dynamic(kept, t, 0, 0)
+        elif isinstance(v, (dict, list)):
+            _cut_dynamic(v, t, n, 0 if i is None else i)
+    return i
+
+
+def _cut_leaves(node, i, n):
+    """Every list in *node* (a homogeneous-time ``global_quantities``)
+    holding *n* samples keeps sample *i*."""
+    for k, v in list(node.items()):
+        if isinstance(v, dict):
+            _cut_leaves(v, i, n)
+        else:
+            node[k] = _cut_axis0(v, i, n)
+
+
+def _cut_core_sources(cs, cp_times, ic, t_cp):
+    """Cut ``core_sources`` with the READER's rule, so the export re-reads
+    as the archive it came from.
+
+    The core_sources slice is the one :func:`core_sources_slice` reads with
+    the core_profiles slice *ic* (refused as the reader refuses).  Each
+    entry carrying per-slice times keeps the own slices the rule consults
+    at that time -- those bracketing it (the nearest is one of them) -- and
+    its first and last own slice (recorded in the match); one without them
+    keeps the slice at the core_sources index.  The windows of this read
+    (the core_sources slice window, each entry's own and core_profiles
+    windows) are written under :data:`IMAS_EXPORT_TIME_WINDOW_KEY`: with
+    one time on each base the re-read's half-step windows would otherwise
+    collapse to :data:`IMAS_SINGLE_TIME_WINDOW_S`.  The entry list itself
+    is never cut."""
+    isrc, t_src, rec = core_sources_slice(cs, cp_times, ic, t_cp,
+                                          who="IMAS export")
+    tb = cs.get("time")
+    n_time = len(tb) if tb else None
+    cp_half = (None if (rec["core_profiles_time"] is None or t_src is None)
+               else _cp_window(cp_times, tb, rec["core_profiles_time"],
+                               t_src)[0])
+    for s in cs.get("source", []) or []:
+        if not isinstance(s, dict):
+            continue
+        pr = s.get("profiles_1d") or []
+        times = [q.get("time") for q in pr if isinstance(q, dict)]
+        if pr and t_src is not None and len(times) == len(pr) and all(
+                isinstance(x, (int, float)) for x in times):
+            erec = {}
+            _source_slice_at(s, isrc, t_src, n_time, cp_times,
+                             t_cp=rec["core_profiles_time"], cp_half=cp_half,
+                             rec=erec)
+            tt = np.asarray(times, dtype=float)
+            keep = set(_entry_bracketing_slices(times, t_src))
+            keep.update((int(np.argmin(tt)), int(np.argmax(tt))))
+            s["profiles_1d"] = [pr[k] for k in sorted(keep)]
+            s[IMAS_EXPORT_TIME_WINDOW_KEY] = dict(
+                core_profiles_time=rec["core_profiles_time"],
+                core_sources_time=t_src,
+                window_own=erec.get("window_own"),
+                window_core_profiles=erec.get("window_core_profiles"))
+        elif pr and (n_time is None or len(pr) == n_time) and isrc < len(pr):
+            s["profiles_1d"] = [pr[isrc]]
+        for k, v in list(s.items()):
+            if k != "profiles_1d" and _is_time_tagged_aos(v):
+                s[k] = [v[_nearest_index([e["time"] for e in v],
+                                         t_src if t_src is not None else t_cp,
+                                         k)]]
+    if tb:
+        n = len(tb)
+        cs["time"] = [tb[isrc]]
+        vtf = cs.get("vacuum_toroidal_field")
+        if isinstance(vtf, dict) and "b0" in vtf:
+            vtf["b0"] = _cut_axis0(vtf["b0"], isrc, n)
+        code = cs.get("code")
+        if isinstance(code, dict) and "output_flag" in code:
+            code["output_flag"] = _cut_axis0(code["output_flag"], isrc, n)
+        if t_src is not None and rec["core_profiles_time"] is not None:
+            cs[IMAS_EXPORT_TIME_WINDOW_KEY] = dict(
+                core_profiles_time=rec["core_profiles_time"],
+                core_sources_time=t_src, window=rec["window"],
+                window_basis=rec["window_basis"])
+
+
+def _slice_in_time(dd, t):
+    """Cut a dd in place to the ONE slice the reader reads at time *t* [s].
+
+    The cut is taken at the core_profiles slice nearest *t* (the slice
+    :func:`read_imas_baseline` reads, ``t_cp``), not at *t*: every IDS keeps
+    its sample nearest ``t_cp`` on its own time base (``pf_active`` and
+    other signals on their own ``time``), and ``core_sources`` is cut with
+    the reader's own rule (:func:`_cut_core_sources`), recording the windows
+    of the read so a re-read applies them.  What is cut is keyed on the IMAS
+    structure (:func:`_cut_ids`, :func:`_cut_dynamic`): the IDS ``time``,
+    time-tagged arrays of structures, signals, and the homogeneous-time
+    arrays named there.  Lists of entries (sources, coils, beams, probes),
+    static geometry (coil and limiter outlines) and radial profiles are
+    never cut, whatever their length.  Returns ``t_cp``."""
+    cp = dd.get("core_profiles") if isinstance(dd.get("core_profiles"),
+                                                dict) else {}
+    cpt = cp.get("time")
+    if isinstance(cpt, list) and len(cpt) > 0:
+        ic = _nearest_index(cpt, t, "core_profiles")
+        t_cp = float(cpt[ic])
+    else:
+        ic, t_cp = 0, (None if t is None else float(t))
+    if t_cp is None:
+        return None
+    cs = dd.get("core_sources")
+    if isinstance(cs, dict):
+        _cut_core_sources(cs, cpt if cpt else None, ic, t_cp)
+    for name, ids in dd.items():
+        if name == "core_sources" or not isinstance(ids, dict):
+            continue
+        _cut_ids(ids, t_cp)
+    return t_cp
 
 
 def _signed_b0(out, ie, ic):

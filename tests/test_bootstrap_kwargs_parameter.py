@@ -51,3 +51,27 @@ def test_the_options_reach_every_solve_with_bootstrap_call(toy, monkeypatch):
         bootstrap_kwargs=bk)
     assert seen and all(k.get("iterations") == 3 for k in seen)
     assert bk == {"iterations": 3}
+
+
+def _cfg(**gen):
+    from bouquet.config import (BouquetConfig, GenerationConfig,
+                                ReconstructionSource, SolverConfig)
+    return BouquetConfig(
+        source=ReconstructionSource(geqdsk_path="g.geqdsk",
+                                    profiles_path="p.cdf", time=1.0),
+        solver=SolverConfig(mesh_path="m.h5"), output_header="H",
+        generation=GenerationConfig(**gen))
+
+
+@pytest.mark.parametrize("entry", ["prepare_baseline", "generate"])
+def test_an_in_place_edit_is_refused_where_the_run_is_resolved(entry):
+    """Review PR60 B3/B6 (integration hook): gc.bootstrap_kwargs["k"] = v
+    bypasses the reassignment check; prepare_baseline() and generate()
+    validate again, before any solve."""
+    from bouquet.run import Bouquet
+    b = Bouquet.__new__(Bouquet)
+    b.config = _cfg(reconstruction_engine="legacy")
+    b.baseline, b.mygs = object(), object()
+    b.config.generation.bootstrap_kwargs["iteratoins"] = 3   # typo, in place
+    with pytest.raises(ValueError, match="iteratoins"):
+        getattr(b, entry)()

@@ -876,6 +876,10 @@ class Bouquet(SwbBaseline):
         # configured now -- whatever it was when the config was built -- and
         # the resolution goes on the baseline and into the archive.
         self._resolve_engine_defaults()
+        # an in-place edit (gc.bootstrap_kwargs["k"] = v) bypasses the
+        # reassignment check: validate again where the run is resolved
+        # (after the engine-dependent values are resolved for THIS engine)
+        self._revalidate_generation_settings()
 
         # GenerationConfig.reconstruction_engine="unified": the ONE
         # reconstruction engine (bouquet.engine) builds the baseline for
@@ -1009,6 +1013,25 @@ class Bouquet(SwbBaseline):
                for n in ENGINE_DEPENDENT_DEFAULTS):
             self._resolve_engine_defaults()
             self._record_engine_resolved_defaults(self.baseline)
+
+    def _revalidate_generation_settings(self) -> None:
+        """Re-run the construction-time checks of ``bootstrap_kwargs``
+        (:meth:`GenerationConfig._validate_bootstrap_kwargs`: allow-list,
+        reserved names, convergence opt-in, toolkit capability) and of the
+        unified engine's settings (:func:`bouquet.engine.
+        validate_engine_settings`, judged for the solve method the run will
+        use) on the CURRENT config.  Reassigning ``bootstrap_kwargs`` is
+        checked by ``__setattr__``; an in-place mutation
+        (``gc.bootstrap_kwargs["k"] = v``) or an edited engine field is not,
+        so :meth:`prepare_baseline` and :meth:`generate` call this (review
+        PR60 B3/B6)."""
+        gc = self.config.generation
+        if not hasattr(gc, "_validate_bootstrap_kwargs"):
+            return                       # not a GenerationConfig (test stubs)
+        gc._validate_bootstrap_kwargs(gc.bootstrap_kwargs)
+        from .config import _EffectiveSolveFields
+        from .engine import validate_engine_settings
+        validate_engine_settings(_EffectiveSolveFields(gc))
 
     def _record_engine_resolved_defaults(self, bl) -> None:
         """Put the resolution record of the engine-dependent settings
@@ -7709,6 +7732,9 @@ class Bouquet(SwbBaseline):
         if self.mygs is None:
             raise ValueError("call setup_solver() before generate()")
         self._ensure_engine_defaults_resolved()
+        # (review PR60 B3) the config may have been edited in place since
+        # prepare_baseline(): the bootstrap_kwargs and engine checks again
+        self._revalidate_generation_settings()
         self._refuse_unified_engine_draws("generate()")
 
         self._validate_workflow()

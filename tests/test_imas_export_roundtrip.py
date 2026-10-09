@@ -4,22 +4,19 @@ The exporter writes IMAS parallel currents (``<j.B>/B0``).  The engine's
 IDS adapter reads them back as ``<j.B>`` parts and composes
 ``<j_phi> = kappa <j.B> + P`` with the pressure-driven term
 ``P = p'(<R> - F^2<1/R>/<B^2>)`` recovered from the pressure.  An archived
-toroidal ``j_inductive`` is the residual ``j_phi - j_BS - fixed`` and so
-CARRIES ``P``; before 2026-10-06 the exporter converted it as it was, so
-``P / kappa`` sat inside the exported ``j_ohmic`` / ``j_total`` and the
-re-read counted it twice.  These tests build a fake draw archive whose
+toroidal ``j_BS`` CARRIES ``P``; the exporter takes it off before
+converting, so no exported parallel current counts it.  These tests build a fake draw archive whose
 ``<j.B>`` parts are known, export it into the synthetic IMAS example, read
 the export with the reader + adapter, and require the parts and the
 composed ``<j_phi>`` back to 1e-9 relative:
 
 * an ENGINE archive (the draw's ``jB_parallel/`` subgroup, schema) --
   written from the stored parts, no conversion;
-* a LEGACY-style archive (no ``jB_parallel/``; ``P`` frozen in
-  ``j_inductive``) -- ``P`` from the archived eqdsk subtracted before the
-  ``eq_fsa`` conversion.
+* a LEGACY-style archive (no ``jB_parallel/``; ``P`` in ``j_BS``) --
+  ``P`` from the archived eqdsk subtracted before the ``eq_fsa``
+  conversion.
 
-Both archives carry an ``eq_fsa`` block, so the pre-fix exporter (which
-converted ``j_inductive`` with it, ``P`` included) fails both.  Solver-free.
+Solver-free.
 """
 import json
 import os
@@ -124,7 +121,7 @@ def _export_and_read(tmp_path, arc):
     return c, jB_bs_read, cp[ic]
 
 
-def _check(s, c, jB_bs_read, cp, j_phi, P):
+def _check(s, c, jB_bs_read, j_phi, P):
     jB = s["jB"]
     assert _rel(c.jB_ind, jB["ind"]) <= RTOL
     assert _rel(jB_bs_read, jB["bs"]) <= RTOL
@@ -133,8 +130,6 @@ def _check(s, c, jB_bs_read, cp, j_phi, P):
     # the composed <j_phi> of what was read IS the archived <j_phi>
     composed = s["kap"] * (c.jB_ind + jB_bs_read + c.jB_fix) + P
     assert _rel(composed, j_phi) <= RTOL
-    # j_tor is the archived toroidal current, as before
-    assert _rel(np.abs(cp["j_tor"]), j_phi) <= RTOL
 
 
 def test_engine_archive_round_trips_through_the_ids_adapter(source,
@@ -144,14 +139,14 @@ def test_engine_archive_round_trips_through_the_ids_adapter(source,
     P = 3.0e4 * psi * (1.0 - psi) + 1.0e3     # the archived state's P
     fix = jB["nbi"] + jB["rf"]
     j_phi = kap * (jB["ind"] + jB["bs"] + fix) + P
-    j_bs = kap * jB["bs"]
-    j_ind = j_phi - j_bs - kap * fix          # the residual: carries P
+    j_bs = kap * jB["bs"] + P                 # the split's j_BS carries P
+    j_ind = j_phi - j_bs - kap * fix
     arc = str(tmp_path / "engine.h5")
     _write_archive(arc, s, j_phi, j_ind, j_bs, parallel=dict(
         psi_N=psi, jB_inductive=jB["ind"], jB_BS=jB["bs"], jB_NBI=jB["nbi"],
         jB_RF=jB["rf"], kappa=kap, j_pressure=P))
-    c, jbs, cp = _export_and_read(tmp_path, arc)
-    _check(s, c, jbs, cp, j_phi, P)
+    c, jbs, _ = _export_and_read(tmp_path, arc)
+    _check(s, c, jbs, j_phi, P)
 
 
 def test_legacy_archive_export_subtracts_the_pressure_driven_term(source,
@@ -160,17 +155,17 @@ def test_legacy_archive_export_subtracts_the_pressure_driven_term(source,
     s = source
     kap, jB, psi = s["kap"], s["jB"], s["psi"]
     # P of the archived eqdsk -- what the exporter subtracts; the draw's
-    # j_inductive carries it (the legacy residual)
+    # j_BS carries it
     P = archived_pressure_term(s["eqb"], psi)
     assert np.max(np.abs(P)) > 1e-2 * np.max(np.abs(kap * jB["ind"]))
     fix = jB["nbi"] + jB["rf"]
-    j_ind = kap * jB["ind"] + P
-    j_bs = kap * jB["bs"]
+    j_ind = kap * jB["ind"]
+    j_bs = kap * jB["bs"] + P
     j_phi = j_ind + j_bs + kap * fix
     arc = str(tmp_path / "legacy.h5")
     _write_archive(arc, s, j_phi, j_ind, j_bs)
-    c, jbs, cp = _export_and_read(tmp_path, arc)
-    _check(s, c, jbs, cp, j_phi, P)
+    c, jbs, _ = _export_and_read(tmp_path, arc)
+    _check(s, c, jbs, j_phi, P)
 
 
 def test_jB_parallel_identity_is_what_the_schema_states(tmp_path):

@@ -216,15 +216,14 @@ def test_a_masked_resample_loop_failure_has_its_own_counter():
 
 
 def test_every_rejection_path_of_the_draw_loop_records_a_reason():
-    """Both `continue` exits of generate_bouquet's draw loop record a
-    rejection first -- there is no silent rejection path."""
+    """Every `continue` exit of generate_bouquet's draw loop (the draw, the
+    post-align checks, a failed g-file save) records a rejection first --
+    there is no silent rejection path."""
     import inspect
     from bouquet.TokaMaker_interface import generate_bouquet
     src = inspect.getsource(generate_bouquet)
     body = src.split("    for count in eq_iter:", 1)[1]
-    parts = body.split("\n                continue\n")
-    parts2 = body.split("\n            continue\n")
-    n_cont = body.count("continue\n")
-    assert n_cont == 2, n_cont
-    for seg in (parts[0], parts2[0]):
+    segs = body.split("continue\n")[:-1]
+    assert len(segs) == 3, len(segs)
+    for seg in segs:
         assert "_reject(" in seg[-3000:]

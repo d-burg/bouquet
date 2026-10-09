@@ -704,7 +704,7 @@ class _MockEq:
                           (self.B0 ** 2) * (1 + eps ** 2)])
         if self.legacy:
             rav = np.vstack([rav["<R>"], rav["<1/R>"], rav["<a>"]])
-        return psi, fc, rav, modb
+        return (psi, fc, rav, modb) + ((r / R,) if kw.get("return_eps") else ())
 
     def get_q(self, psi=None, **kw):
         self.calls.append(("get_q", np.array(psi)))
@@ -886,7 +886,7 @@ def _ph_setup(monkeypatch, kind):
     Jstar = _shape(x)
     calls = {"corr": [], "renorm": 0}
     monkeypatch.setattr(L, "residual_weights",
-                        lambda eq, psi_N, psi_pad=1e-3: (np.ones_like(x), x,
+                        lambda eq, psi_N, psi_pad=1e-3, coord="psi_n": (np.ones_like(x), x,
                                                          "test"))
 
     def _renorm(mygs, psi_N, target, Ip, pad, label=""):

@@ -473,7 +473,8 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
     own guard -- unlike the pre-merge check in :func:`parallel_generate` it
     also covers the SLURM CLI path, where drifted baselines (heterogeneous
     nodes, a stray ``nthreads>1``) would otherwise merge silently, mixing
-    draws accepted against different l_i targets. A listed shard that does not
+    draws accepted against different l_i targets. Shards whose baselines differ
+    in ``profile_coord`` (ψ_N vs Φ_N grids) also raise. A listed shard that does not
     exist on disk raises (missing workers must be handled by the caller, not
     dropped silently).
 
@@ -488,7 +489,7 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
     import warnings
     import h5py
     from .utils import (initialize_equilibrium_database, _scan_key,
-                        _group_path)
+                        _group_path, group_coord)
 
     bkey = _scan_key(scan_key)
     base_path = f"scan/{bkey}" if bkey is not None else None
@@ -504,6 +505,11 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
             return None
         return float(a["l_i_target"]), float(a["Ip_target"])
 
+    def _baseline_coord(src):
+        parent = src[base_path] if base_path else src
+        return (group_coord(parent["_baseline"]) if "_baseline" in parent
+                else None)
+
     def _inloop_cut(src):
         parent = src[base_path] if base_path else src
         a = parent.attrs
@@ -516,7 +522,7 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
         return (("until_n", rec.get("shared_target"), rec.get("total_cap"))
                 if "shared_target" in rec else ("fixed", None, None))
 
-    targets = []
+    targets, shard_coords = [], {}
     cuts = {}
     modes = {}
     for sp in shard_paths:
@@ -529,8 +535,15 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
                 "or drop the path explicitly from shard_paths.")
         with h5py.File(sp, "r") as src:
             targets.append((sp, _baseline_targets(src)))
+            c = _baseline_coord(src)
+            if c is not None:
+                shard_coords[sp] = c
             cuts[sp] = _inloop_cut(src)
             modes[sp] = _mode(src)
+    if len(set(shard_coords.values())) > 1:
+        raise RuntimeError(
+            f"shards differ in profile_coord: {shard_coords}. "
+            "Nothing was merged.")
     _mode_set = {m for m in modes.values() if m is not None}
     if len(_mode_set) > 1:
         raise RuntimeError(

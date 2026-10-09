@@ -100,11 +100,9 @@ is what keeps it from silently regressing.
 ## Bootstrap current treatment
 
 The per-draw bootstrap comes from TokaMaker's Sauter/Redl
-`solve_with_bootstrap`, whose parallel output is converted to toroidal with the
-package's one field-aligned factor `κ = F⟨1/R⟩/⟨B²⟩`
-(`bouquet.physics.field_aligned_conversion`, via `parallel_to_toroidal`; on
-SWB's `⟨R⟩/F`-projected output the net factor is `F²⟨1/R⟩/(⟨R⟩⟨B²⟩)`). See
-"The evaluator" below for the 2026-10-06 change of this conversion.
+`solve_with_bootstrap`, whose output is already TokaMaker `jphi` (field-aligned
+part plus the pressure term p′G; see [current-conventions.md](current-conventions.md))
+and is used as is.
 
 Two composition modes:
 
@@ -173,8 +171,10 @@ Two consequences of the default:
   `generation` section). A current config always carries the field. An
   unknown (e.g. misspelt) `generation` key is refused, naming the nearest
   valid key, so a typo can no longer land on this legacy default.
-- `swb_iterations` is the legacy path's Picard count; under the loop it is
-  ignored, and a non-default value raises a `DeprecationWarning` saying so.
+- `bootstrap_kwargs` configures `solve_with_bootstrap`; under the loop SWB
+  runs only for `jbs_init="swb"` and the jBS-delta / `DIFF_BS` caches, so a
+  non-empty dict raises a `DeprecationWarning` saying where it acts.  (It
+  replaced `swb_iterations`; a stored value loads as `{"iterations": n}`.)
 
 The archive says which model a group carries: the schema-v3 `jbs_loop` block
 (below) is present exactly where the loop ran; plots label the bootstrap
@@ -216,22 +216,12 @@ differences, each the point of the helper:
    **caller's** surfaces, `clip(ψ_N, psi_pad, 1 − psi_pad)`;
 2. gradients are taken on the **true** grid, `numpy.gradient(y, ψ_N,
    edge_order=2)`, divided by the **current** flux range;
-3. Redl's `⟨j·B⟩` is converted to the toroidal FSA density directly -- not
-   through SWB's `⟨R⟩/F` projection and its undo on a uniform grid -- with the
-   package's **one** field-aligned conversion (`physics.field_aligned_conversion`,
-   the unified engine's `engine.conversion_factor`; `F`, `⟨1/R⟩`, `⟨B²⟩` of the
-   same surfaces):
-
-   ```
-   ⟨j_φ⟩ = κ ⟨j·B⟩,   κ = F⟨1/R⟩/⟨B²⟩
-   ```
-
-   For a field-aligned component `j = λB` (`λ = ⟨j·B⟩/⟨B²⟩`, `B_φ = F/R`),
-   `⟨j_φ⟩ = λF⟨1/R⟩` exactly, and `⟨j_φ⟩` -- the plain flux-surface average --
-   is what OFT's `jphi-linterp` consumes, so with the pressure-driven part the
-   composition identity `⟨j_φ⟩ = κ⟨j·B⟩ + p′(⟨R⟩ − F²⟨1/R⟩/⟨B²⟩)` is exact.
-   `toroidal_to_parallel` (the IDS export) is its exact inverse, and the frozen
-   path's `_swb_jbs_to_toroidal` uses the same factor.
+3. Redl's `⟨j·B⟩` is converted to TokaMaker `jphi = ⟨j_φ⟩` exactly, by (A7) of
+   [current-conventions](current-conventions.md): the field-aligned
+   `F⟨1/R⟩⟨j·B⟩/⟨B²⟩` plus the pressure-driven `p′(⟨R⟩ − F²⟨1/R⟩/⟨B²⟩)`, all of
+   the same surfaces. The bootstrap component carries `p′G`, as IMAS
+   `j_bootstrap` and OFT's own SWB output do, and the IDS export inverts the
+   same relations.
 
    **Declared default physics change (2026-10-06, owner-approved).** Until then
    the legacy sites converted with `⟨j·B⟩/(F⟨1/R⟩)` (`⟨1/R²⟩` not passed) and
@@ -240,8 +230,8 @@ differences, each the point of the helper:
    content: ≈ 1.5 % at ψ_N ≈ 0.97 on the synthetic D3D-like example) × the
    Jensen ratio `⟨1/R²⟩/⟨1/R⟩²` (≈ 5 % there) -- **+6.8 %** at the pedestal
    (+1.0 % at ψ_N 0.1, +4.3 % at 0.5, +6.4 % at 0.9). The legacy bootstrap
-   drops by that fraction; the unified engine, which already used κ, is
-   unchanged (`tests/test_one_conversion.py`). (The bracket alone, ~1.4 % at
+   drops by that fraction (before `p′G` is added); the unified engine,
+   which already used κ, is unchanged (`tests/test_one_conversion.py`). (The bracket alone, ~1.4 % at
    the peak, is what this page used to quote; the Jensen term was missed.)
 
 **Refusals, never a silent zero.** The historical evaluation mapped every NaN
@@ -997,6 +987,15 @@ A related, accepted artifact: a localized ~8–10% dip in core j_phi relative to
 the input g-file, which is an l_i-versus-peakedness tradeoff intrinsic to
 matching both. Pinning the core has been tried and is unstable. See
 [architecture.md §16](../architecture.md#16-known-limitations-and-future-work).
+
+**Known error, kept for legacy bit-identity: index-for-index ψ_N readbacks.** On a uniform ψ_N grid (every g-file run), the legacy path samples the solver at its own padded points, `linspace(psi_pad, 1 - psi_pad, n)`, and pairs those samples index for index with profiles on the nodes, `linspace(0, 1, n)`. Each pairing is misplaced by up to `psi_pad`, most of all at the edge.
+
+Sites:
+- the corrective iteration's measurement (`_corrective_output_jphi`, `coords.readback_kw`'s uniform branch);
+- the cylindrical l_i proxy (`calc_cylindrical_li_proxy`);
+- the self-consistent loop's delivered state (`_deliver_request_split`).
+
+This is wrong, and it is kept only so that legacy ψ_N results and their goldens stay bit-identical with main. On the D3D-like g-file it costs q95 −0.48% against the g-file's own q; with the readbacks moved to the nodes, the same run is −0.036% off, and l_i(3) moves from 0.65594 to 0.65397. The unified engine, swb, Φ_N runs and the archived achieved current all sample at, or interpolate onto, the nodes, and are not affected.
 
 A separate known issue — the small constant boundary offset from `jphi-linterp`
 edge/separatrix handling that sets the ~0.5 mm σ=0 floor — is written up in

@@ -155,6 +155,28 @@ evaluator's surfaces (`sauter_fc`), `<R>`, `<1/R>`, `<1/R^2>`, `V'`, `p'` from
 innermost-surface repair (`smooth_jbs_transition`) every SWB-derived profile
 receives.
 
+**The archived split** puts the pressure-driven term
+`p'(<R> - F^2<1/R>/<B^2>)` on `j_BS`, as IMAS `j_bootstrap`, the IMAS reader
+and `evaluate_jBS` do; `j_inductive` is the residual.
+
+**Toroidal-flux runs (`coord="phi_n"`).** The contract's grid is the run grid
+(Φ_N). The backend tags every solve with it and samples each measurement's
+geometry at the nodes' ψ_N on that solve's own toroidal-flux map, so
+`geom["psi_N"]` is ψ_N and every integral, interpolation and residual uses it.
+The structured basis stays on the run grid (`close_ip_structured(...,
+basis_x=)`). In a ψ_N run all of this is the identity, bit for bit. See
+docs/workflows.md for the source side.
+
+**Edge taper (off by default).** With `bootstrap_kwargs={"taper_edge_jBS":
+True}`, as `solve_with_bootstrap(taper_edge_jBS=True)` does for the swb
+method, every term above is multiplied by OFT's edge taper
+(`physics.edge_taper_weight`, a port of `apply_edge_taper`): 1 below
+`taper_edge_psi0` (default 0.999), falling to 0 at the LCFS (`taper_edge_shape`
+2, quintic smoothstep).  The backend puts the factor on every geometry it
+measures, so the closure rows, the draws and the archived split all see the
+tapered composition.  Off, no weight is built and `composed_factor` is
+`conversion_factor`.
+
 ## A pass
 
 1. Compose on `G_k` with the bootstrap iterate `lambda_BS,k`.
@@ -397,7 +419,8 @@ instruction, because the frozen bootstrap exists on the legacy paths only.
 | `anchor_pressure_to_equilibrium` | nothing: no `p_diff` in the engine's pressure |
 | `imas_corrective_jphi` | `engine_delivery_correction` |
 | `jbs_loop_q0_corrector` | `engine_rows` with `"q0"` (`engine_draw_q0_row` for the draws) |
-| `floor_j_BS`, `swb_iterations`, `accept_anchor_inband`, `diagnostic_plots` | nothing: legacy draw / SWB mechanics |
+| `floor_j_BS`, `accept_anchor_inband`, `diagnostic_plots` | nothing: legacy draw / SWB mechanics |
+| `bootstrap_kwargs` keys other than `taper_edge_jBS` / `taper_edge_psi0` / `taper_edge_shape` and `use_sauter_eps=True` | nothing: the engine never runs `solve_with_bootstrap` |
 | `homotopy_passes` with `engine_draw_homotopy=False` | no homotopy runs |
 | `isolate_edge_jBS` (default `None`: resolved per engine; `True` under the engine) | nothing: the engine never isolates the edge bootstrap (Redl on the whole profile) |
 | `perturb_jind_in_anchor` (default `None`: resolved per engine; `False` under the engine) | nothing: one engine draw route replaces Fix C and the standard l_i loop |
@@ -564,7 +587,8 @@ the auxiliary channels, the parallel inductive. The random stream is the
 legacy one through the first inductive candidate (`engine_draws.RNG_STREAM`):
 the kinetic channels `ne, Te, (Zeff -> ni | ni), Ti` redrawn together until
 the flux-integrated thermal pressure matches within `p_thresh`, the
-auxiliary channels in their order, then one inductive candidate drawn IN
+auxiliary channels in their order (both by `bouquet.kinetic_sampler`, shared
+with the legacy and swb draws), then one inductive candidate drawn IN
 TOROIDAL UNITS with the legacy call on `s_ind(x*) kappa* lambda_ind` (so its
 toroidal perturbation is the legacy draw's for the same normals: today's
 `sigma_jphi` and `j_ls`) and mapped back to `lambda_ind`; it is redrawn only

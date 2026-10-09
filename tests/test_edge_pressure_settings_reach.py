@@ -158,7 +158,9 @@ def test_every_helper_call_is_handed_the_functions_one_settings_object():
     bad = []
     for where, fn, ch in calls:
         i = HELPERS[fn]
-        ok = (len(ch.args) == i + 1 and not ch.keywords
+        # coord=: the run coordinate a Phi_N run tags the profile with
+        ok = (len(ch.args) == i + 1
+              and all(k.arg == "coord" for k in ch.keywords)
               and ast.unparse(ch.args[i]) in SETTINGS_NAMES)
         if not ok:
             bad.append((where, ast.unparse(ch)))

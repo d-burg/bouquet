@@ -386,4 +386,10 @@ class TestOverlaysHonourTheOverride:
         ref = self._overlay(h5r, skr, _write(tmp_path, _example(), "r.json"))
         p = _write(tmp_path, _currents_stored_reversed(), "cur_rev.json")
         h5, sk = self._archive(tmp_path, "a.h5")
-        assert np.array_equal(self._overlay(h5, sk, p), -ref)
+        # the factor is sign(ip) = +1: the stored (reversed) currents are
+        # drawn as they are -- upside down; not exactly -ref, since the exact
+        # j_tor -> jphi conversion (A5) carries p' and is odd only in a
+        # whole-dd reversal
+        got = self._overlay(h5, sk, p)
+        assert trapezoid(got, np.linspace(0.0, 1.0, got.size)) < 0.0
+        assert np.max(np.abs(got + ref)) < 0.1 * np.max(np.abs(ref))   # p' at the edge

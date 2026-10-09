@@ -654,11 +654,12 @@ def test_q_sources_are_named_draw_by_draw_and_a_mismatch_marked(tmp_path):
     p = str(tmp_path / "g.h5")
     shutil.copy(_GOLDEN, p)
     with h5py.File(p, "a") as hf:
-        del hf["scan/0/3/eq_fsa"]                  # one draw falls back to its g-file
+        k = sorted(int(n) for n in hf["scan/0"] if n.isdigit())[1]
+        del hf[f"scan/0/{k}/eq_fsa"]               # one draw falls back to its g-file
     s = bq.draw_scalars(p, "0", rational=((2, 1),), require_filter=False)
     r = s["q0"]
     by = r.provenance["q_source_by_draw"]
-    assert by[3] == "geqdsk" and sum(v == "eq_fsa" for v in by.values()) == len(by) - 1
+    assert by[k] == "geqdsk" and sum(v == "eq_fsa" for v in by.values()) == len(by) - 1
     assert set(by) == set(r.values)
     assert any("MIXES sources" in l and "1 draws from geqdsk" in l
                for l in r.provenance["limitations"])

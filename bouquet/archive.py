@@ -45,7 +45,7 @@ import numpy as np
 from .schema import (EQDSK_DS, PFILE_DS, JBS_CONVERGED_ATTR,
                      JBS_LOOP_JSON_ATTR, find_bytes_dataset)
 from .utils import (
-    _resolve_h5, _scan_key, _group_path,
+    _resolve_h5, _scan_key, _group_path, profile_coord,
     discover_scan_keys, list_equilibrium_indices, load_baseline_profiles,
     read_eqdsk_from_bytes,
 )
@@ -258,6 +258,9 @@ class DrawView:
         doc = {
             "scan_key": _scan_key(self.scan_key),
             "count": self.count,
+            # coordinate of psi_N / psi_N_kinetic; eq_fsa/psi_N is always ψ_N
+            "profile_coord": (self.attrs.get("profile_coord")
+                              or profile_coord(self._ar.path, self.scan_key)),
             "profiles": {k: np.asarray(v).tolist() for k, v in prof.items()},
             "units": {k: PROFILE_UNITS.get(k, "") for k in prof},
             "scalars": self.attrs,          # li, Ip, drifts, in_spec, ... (JSON-safe)

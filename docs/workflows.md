@@ -129,9 +129,57 @@ is a navigational summary of the defaults.
 | `jphi_scalar_sigma` | `0.10` | Inductive-current envelope. **Must be > 0** — setting it to 0 freezes `j_inductive` and trips the workflow guard |
 | `zeff_scalar_sigma` | `0.05` | One Z_eff perturbation per draw; n_i / n_z follow from quasi-neutrality. Also the width of the bottom tier below |
 | `zeff_sigma_source` | `"auto"` | Which tier supplies the Z_eff envelope's **magnitude**: `"auto"` / `"carbon"` / `"measured"` / `"scalar"` — see the ladder below |
-| `sigma_profiles` | `{}` | Explicit `{name: sigma(psi_N)}` envelopes, highest precedence |
-| `n_ls` / `t_ls` / `j_ls` | `0.5` / `0.4` / `0.25` | GPR correlation lengths for density / temperature / current |
-| `aux_sigmas`, `aux_baselines`, `aux_length_scales` | `{}` | The passive switchboard: any extra channel gets perturbed and archived alongside the physics |
+| `sigma_profiles` | `{}` | Explicit `{name: sigma(psi_N)}` envelopes on the kinetic run grid (`psi_N_kinetic`; Φ_N in a `"phi_n"` run), highest precedence |
+| `n_ls` / `t_ls` / `j_ls` | `0.5` / `0.4` / `0.25` | GPR correlation lengths for density / temperature / current, in units of the run coordinate (Φ_N lengths in a `"phi_n"` run; the defaults are not converted) |
+| `aux_sigmas`, `aux_baselines`, `aux_length_scales` | `{}` | The passive switchboard: any extra channel gets perturbed and archived alongside the physics. Arrays on the kinetic run grid; length scales in the run coordinate |
+
+### Radial coordinate (`b.source.coord`)
+
+`"psi_n"` (default) keeps every profile on normalised poloidal flux.
+`"phi_n"` puts the whole run on normalised toroidal flux: the reader relabels
+the source's nodes with their Φ_N (the IMAS `core_profiles` `grid.rho_tor_norm²`;
+the g-file's own q-integral `rhovn²`, with the p-file/IDA nodes inside the LCFS
+mapped through it), and every profile, envelope and GPR draw then stays on that
+grid. TokaMaker receives the profiles as-is, tagged `phi_n`, and remaps them to
+ψ each nonlinear step with the equilibrium's own q; bouquet samples readbacks at
+the ψ_N the solver's map gives for each node. `"rho_tor"` is accepted as an
+input spelling and runs as `"phi_n"` on ρ². A `"phi_n"` run needs an
+OpenFUSIONToolkit with toroidal-flux profiles (`TokaMaker.get_torflux_map`) and
+the internal bootstrap solve; both are checked in `prepare()`. The archive's
+baseline group records the coordinate as the `profile_coord` attr. Fields and
+datasets named `psi_N` / `psi_N_kinetic` keep that name but hold the run grid:
+Φ_N in a `"phi_n"` run.
+
+The self-consistent bootstrap loop (`jbs_self_consistent=True`) and the unified
+engine run Φ_N as well.
+- Every solve tags its profiles with the run coordinate.
+- After each solve the run nodes are mapped to ψ_N on that equilibrium's own
+  toroidal-flux map (`get_torflux_map`, inverse), and the Redl evaluation
+  (`physics.evaluate_jBS(..., coord=)`), the loop's residual weights and the
+  FSA current integrals work on those ψ_N. This is what OFT's Fortran bootstrap
+  does: kinetic values at the mapped nodes, gradients numerical in ψ.
+- The engine's structured basis lives on the run grid, so the closure
+  coefficients describe the same profile on every pass and draw; its integrals
+  are over each geometry's own ψ_N.
+- The g-file engine labels the g-file's nodes with `rhovn²` and the kinetic
+  nodes by their own map, as the legacy reconstruction does. Its inductive
+  basis and q-row radius stay in ψ_N.
+
+With IDA-hybrid kinetics (`kinetic_source="ida_hybrid"`) the IDA fits, their
+sigmas and ω_tor are placed on the run nodes by their own Φ_N, integrated from
+the IDA file's `q`, not by the dd's map; a `"phi_n"` run refuses an IDA file
+without `q`. The g-file path does the same for an IDA `.cdf` (a p-file, which
+carries no q, goes through the g-file's map; an IDA `.cdf` without q is
+refused). An `UncertaintyConfig.ida_path` other than the source's IDA file is
+placed by its own q when it has one. q95 stays in ψ_N.
+Window-type helpers (`sampling.sigmoid_length_scale`,
+`uncertainties.new_uncertainty_profiles`, `synthetic_ida_sigma`) take the grid
+they are given: pass the run grid and their widths/positions are Φ_N in a
+`"phi_n"` run. Fixed radial windows (edge > 0.9, pedestal 0.85) and the SWB
+inductive seed shape are in ψ_N in either run. `source.coord` is checked when
+the config is built; the toolkit is checked before the baseline and the draws. If the
+solver's toroidal-flux map cannot be built (surfaces fail to trace), the solve
+fails like any other and the draw is rejected.
 
 **Precedence, per kinetic channel:** `sigma_profiles[chan]` > an IDA `.cdf` >
 `<chan>_scalar_sigma`. A `.cdf` handed to `ReconstructionSource.profiles_path`
@@ -221,7 +269,7 @@ as an enormous sigma.
 | `anchor_pressure_to_equilibrium` | `False` | IMAS path: add the fixed `p_diff = equilibrium.pressure − p_reconstructed` offset |
 | `imas_corrective_jphi` | `False` | Opt-in corrective j_phi iteration on the IMAS baseline solve (still being validated) |
 | `floor_j_BS` | `False` | Clip negative bootstrap excursions; only needed with `isolate_edge_jBS=False` on sources that carry an inner negative lobe |
-| `swb_iterations` | `3` | **Deprecated; legacy only** (`jbs_self_consistent=False`): `solve_with_bootstrap`'s fixed Picard pass count per draw. The IMAS baseline's own SWB call never read it (OFT's default 3). Ignored under the self-consistent loop; a non-default value with the loop on raises a `DeprecationWarning` at config validation |
+| `bootstrap_kwargs` | `{}` | Keyword options passed through to `solve_with_bootstrap` (e.g. `{"iterations": 2}`; replaces `swb_iterations`). Checked at config time: a key the call sites already set, or one the installed toolkit does not accept, is refused. Under the self-consistent loop SWB runs only for `jbs_init="swb"` and the jBS-delta / `DIFF_BS` caches (a non-empty dict is warned). With `reconstruction_engine="unified"` only the edge-taper keys (`taper_edge_jBS`, `taper_edge_psi0`, `taper_edge_shape`; on by default, 0.999, quintic) and `use_sauter_eps=True` are read; any other key is refused. |
 | `draw_solve_maxits` | `None` | Grad-Shafranov iteration cap for the solves inside `generate()`'s draw loop. `None` keeps the solver's own setup cap, so nothing changes unless it is set. A solve that hits the cap fails its draw exactly as before (no re-solve at another tolerance). Every draw solve that raises is recorded, whatever the cap: per draw in `diagnostics['solve_failures']` (site, seconds, error, `exceeded_maxits`), on `Bouquet.solve_failures`, and in one printed `[draw-solves]` line (with the largest iteration count seen when a cap is set) The legacy draws' cap: with `reconstruction_engine="unified"` it is refused, and the engine draws use `engine_draw_solve_maxits` (default 100; see docs/engine.md "The solve cap") |
 | `jbs_self_consistent` | `True` | Iterate the bootstrap to self-consistency with the delivered equilibrium (Redl on the caller's own ψ_N grid, re-evaluated after every solve; joint under-relaxation of the bootstrap and the solved current) in the baseline, every closure channel, the MSE stage, every draw and the reconstruction -- see [physics-notes.md](physics-notes.md#self-consistent-bootstrap-jbs_self_consistent). `False` = the **legacy** frozen-SWB bootstrap (legacy engine only; the unified engine refuses it); required with `single_profile_jphi=True` or `recalculate_j_BS=False` (refused otherwise). Not by itself a pre-release reproduction: that needs `reconstruction_engine="legacy"` + `separatrix_pressure="legacy"` too, and the coil-solve mode and the current conversion still differ (CHANGES_SUMMARY, "Reproducing a run made before this release"). A stored config without the field (pre-loop archive) loads as `False` |
 | `jbs_init` | `"anchor"` | The loop's initial guess: Redl on the anchor equilibrium, or `"swb"` (legacy result; A/B only). The fixed point does not depend on it |
@@ -282,7 +330,9 @@ as an enormous sigma.
 ### `FixedComponentsConfig` (`b.fixed_components`)
 
 `p_fast`, `j_NBI`, `j_RF` on their own `psi_N` grid — additive components that
-are never perturbed. `j_NBI` / `j_RF` are given in bouquet's **positive-Ip
+are never perturbed. `coord` (default `"run"`) is the coordinate of that grid:
+`"run"` (Φ_N in a `"phi_n"` run) or `"psi_n"`, mapped to the run coordinate
+through the source equilibrium's ψ_N → Φ_N map. `j_NBI` / `j_RF` are given in bouquet's **positive-Ip
 frame** — co-current drive positive — on both source paths and for either
 orientation of the source; unlike the dd's own currents they are *not*
 multiplied by `sign(ip)` on the IMAS path (see
@@ -553,22 +603,22 @@ geometry (`eq_fsa`).
 
 ### IDS current-split fidelity
 
-The toroidal current `j_tor` in the IDS is always exact. The *parallel* split
-IMAS stores (`j_total` / `j_ohmic` / `j_bootstrap` = ⟨**j**·**B**⟩/B₀) needs a
-flux-surface geometry factor to convert from bouquet's toroidal components, and
-`fidelity` picks where that factor comes from:
+bouquet's currents are TokaMaker `jphi`; the IDS `j_tor` (IMAS convention) and
+the parallel split (`j_total` / `j_ohmic` / `j_bootstrap` = ⟨**j**·**B**⟩/B₀)
+are converted with flux-surface geometry ([current-conventions.md](current-conventions.md)),
+and `fidelity` picks where that geometry comes from:
 
-| `fidelity` | Parallel split uses | When |
+| `fidelity` | Geometry | When |
 |---|---|---|
-| `"exact"` | an engine draw's stored `<j.B>` parts (`jB_parallel/`, no conversion); otherwise the draw's **own** captured `eq_fsa` geometry (`toroidal_to_parallel`) | draws deviate from the baseline; the split must track each perturbed equilibrium |
-| `"reconstruct"` | the baseline template ratio `c = j_tor/j_total` | exact only when a draw's flux geometry matches the baseline's |
-| `"auto"` *(default)* | stored parts, else exact when the `eq_fsa` block is present, else reconstruct | — |
+| `"exact"` | an engine draw's stored `<j.B>` parts (`jB_parallel/`, no conversion); otherwise the draw's **own** captured `eq_fsa` geometry (needs `avg_R`, `avg_inv_R2`, `pprime`) | draws deviate from the baseline; the split must track each perturbed equilibrium |
+| `"reconstruct"` | the template's baseline equilibrium (`gm1/gm5/gm8/gm9/f/dpressure_dpsi`) | exact only when a draw's flux geometry matches the baseline's |
+| `"auto"` *(default)* | stored parts, else exact when a complete `eq_fsa` block is present, else reconstruct | — |
 
 No exported parallel current carries the pressure-driven term
 `P = p'(<R> - F^2<1/R>/<B^2>)` (its `<j.B>` is zero; a reader recovers it from
 the pressure): `j_ohmic` is the field-aligned inductive only and `j_total =
-j_ohmic + j_bootstrap + driven`. The archived toroidal `j_inductive` is the
-residual `j_phi - j_BS - fixed` and carries `P`; when the draw has no stored
+j_ohmic + j_bootstrap + driven`. The archived toroidal `j_BS` carries `P`
+(FUSE's convention); when the draw has no stored
 `<j.B>` parts the exporter subtracts `P` (from the archived eqdsk's own flux
 surfaces) before converting. Export -> `IdsAdapter.read` returns the archived
 `<j.B>` parts and `<j_phi>` (2026-10-06; before, `P/kappa` sat inside the

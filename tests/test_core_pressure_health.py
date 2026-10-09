@@ -541,7 +541,9 @@ def test_reconstruction_pressure_composition_is_bit_identical():
               "ti": ti.copy(), "p_fast": p_fast.copy(), "Z_imp": 6.0,
               "eqdsk": SimpleNamespace(psi_N=psi_N.copy()),
               "mygs": SimpleNamespace(psi_bounds=(-0.4, 0.15)),
-              **_composition_names()}
+              **_composition_names(),
+              "_x": psi_N.copy(), "coord": "psi_n",
+              "coords": __import__("bouquet.coords", fromlist=["x"])}
         removed = _run(region, ns, strip)
         if strip:
             assert removed >= 3, "the _pc statements were not found"

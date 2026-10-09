@@ -966,9 +966,9 @@ def test_the_archive_carries_the_parallel_parts_of_the_split(
         tmp_path, monkeypatch):
     """Every engine draw group carries ``jB_parallel/`` (schema): the
     <j.B> parts of its archived split, with j_phi = kappa (jB_inductive +
-    jB_BS + jB_NBI + jB_RF) + j_pressure to round-off, jB_BS = j_BS /
-    kappa and jB_inductive = (j_inductive - j_pressure) / kappa -- the
-    field-aligned inductive only (the IDS exporter writes these, so no
+    jB_BS + jB_NBI + jB_RF) + j_pressure to round-off, jB_BS = (j_BS -
+    j_pressure) / kappa and jB_inductive = j_inductive / kappa -- the
+    field-aligned parts only (the IDS exporter writes these, so no
     exported parallel current carries the pressure-driven term).  The
     archived state's <B^2> is moved by 3 % so kappa(archived) differs from
     the reconstruction's."""
@@ -989,11 +989,10 @@ def test_the_archive_carries_the_parallel_parts_of_the_split(
     assert np.max(np.abs(P)) > 0.0
     np.testing.assert_allclose(par["kappa"], kap, rtol=1e-15, atol=0.0)
     np.testing.assert_allclose(par["j_pressure"], P, rtol=1e-15, atol=0.0)
-    np.testing.assert_allclose(par["jB_BS"] * kap, st["j_BS"], rtol=1e-12,
-                               atol=0.0)
+    np.testing.assert_allclose(par["jB_BS"] * kap + P, st["j_BS"],
+                               rtol=1e-12, atol=0.0)
     np.testing.assert_allclose(
-        par["jB_inductive"], (st["j_inductive"] - P) / kap, rtol=1e-12,
-        atol=0.0)
+        par["jB_inductive"], st["j_inductive"] / kap, rtol=1e-12, atol=0.0)
     comp = kap * (par["jB_inductive"] + par["jB_BS"] + par["jB_NBI"]
                   + par["jB_RF"]) + P
     np.testing.assert_allclose(comp, st["j_phi"], rtol=1e-12,
@@ -1048,7 +1047,10 @@ def test_the_archived_split_uses_the_archived_states_kappa_and_redl(
     assert np.min(np.abs(kap / kap_recon - 1.0)) > 0.02
     dpl = cur["draw"].get("passes_post_homotopy") or cur["draw"]["passes"]
     amp = (1.0 + float(dpl.last["amp"].get("d_bs", 0.0))) * G.ctx.s_bs         * float(cur["draw"]["inputs"].scale)
-    want_bs = amp * kap * np.asarray(fin["redl"], dtype=float)
+    # plus the pressure-driven p'G
+    from bouquet.engine import split_pressure_term
+    want_bs = (amp * kap * np.asarray(fin["redl"], dtype=float)
+               + split_pressure_term(fin["geom"]))
     np.testing.assert_allclose(st["j_BS"], want_bs, rtol=1e-12, atol=0.0)
     fx = G.ctx.c.jB_fix_parts
     sp = diags[0]["engine"]["archived"]["split"]
@@ -1062,6 +1064,7 @@ def test_the_archived_split_uses_the_archived_states_kappa_and_redl(
     assert np.max(np.abs(1.01 * want_bs - st["j_BS"])) \
         > 1e-3 * np.max(np.abs(want_bs))
     assert np.max(np.abs(amp * kap_recon * np.asarray(fin["redl"])
+                         + split_pressure_term(fin["geom"])
                          - st["j_BS"])) > 1e-2 * np.max(np.abs(want_bs))
 
 

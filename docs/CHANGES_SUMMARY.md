@@ -1,5 +1,46 @@
 # Bouquet — change summaries
 
+## Unreleased — PR #76: one reusable solver per process; every baseline at its own F0 (numbers move on multi-slice runs)
+
+**What moves.** The solver's vacuum field F0, its LCFS isoflux targets and its
+saddle constraints now belong to the baseline, not to the solver
+(`bouquet.solver_geometry.CaseGeometry`, installed after every
+`_reset_solver_state`). Before, F0 was fixed at `setup_solver()` and every
+reset restored it, so on a reused solver every later baseline ran at the FIRST
+baseline's F0:
+
+- `run_slices` / `set_slice` IMAS sweeps: slice k now solves at its own
+  F0 = |r0·b0(t_k)|. Before, slices 2..N ran at slice 1's F0 (silently below a
+  0.1 % difference, with a printed warning above it). q and every F-dependent
+  quantity of slices 2..N move by about ΔF0/F0 relative to slice 1.
+- Every swb per-solve reset of such a sweep is fixed the same way.
+- The unified engine's g-file branch now resets to the baseline geometry too;
+  this matters only for a reused solver (`set_case`).
+
+**What does not move.** A single baseline on a fresh solver is expected to be
+bit-identical on every engine and source (`setup(order)` then
+`set_profiles(foffset=F0)` installs the same F0 the old `setup(order, F0=F0)`
+did; the same isoflux, saddles and coil reg are re-applied). This is to be
+confirmed on the cluster (`test_legacy_path_stage0_bitwise`,
+`test_seeded_reproducibility`, the engine golden, before vs after).
+
+**Stamped.** Every baseline carries `Baseline.solver_geometry` (engine record
+`solver_geometry`), archived as the `_baseline` attr `solver_geometry_json` on
+every path and solve method: `solver_F0`, `F0_source` (the source's own
+vacuum F0), `F0_origin` (`"source: g-file |R_center*B_center|"`,
+`"source: IDS |r0*b0(t)|"` or `"SolverConfig.F0"`), `F0_rule`, the boundary and
+isoflux origin, count and weight range, the saddle constraints, the coil reg
+the reset applied (`coil_reg.source` `"configured"`/`"default"` and the terms)
+and `solver_use` (1 = a fresh solver). An archive without the attr predates the
+rule. Read it with `bouquet.utils.load_solver_geometry`.
+
+**Parallel paths.** `parallel_generate(threads_per_worker>1)` and
+`emit_slurm_script(threads_per_worker>1)` now raise instead of warning (one
+thread per process, `bouquet.threads`, `threadpoolctl` is a dependency).
+`parallel_cases` (one node) and `bouquet.units` (a shared-filesystem queue)
+run many bouquets, one standing single-threaded solver per worker; see
+docs/workflows.md, "Many bouquets on one node".
+
 ## Unreleased — the PR #56 kinetic combination is EXPERIMENTAL and opt-in (owner decision 2026-10-09)
 
 **What and why.** PR #56's IDA/FUSE ion coupling is not the default for 1.4.0.

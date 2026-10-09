@@ -129,6 +129,9 @@ class Bouquet(SwbBaseline):
         self._selection = None                    # filter() result
         self._engine_run = None
         self._geom = None                         # point_solver(): this baseline's solver geometry
+        # prepare_baseline(): how many baselines this solver has been pointed at (1 = fresh); a
+        # property of the SOLVER, so set_case does not clear it (_install_solver does)
+        self._solver_use = 0
 
     # ── constructors ----------------------------------------------------
     @classmethod
@@ -504,6 +507,7 @@ class Bouquet(SwbBaseline):
         from .config import resolve_solve_method
         sc = self.config.solver
         self.mygs = mygs
+        self._solver_use = 0
         self._solver_key = (sc.mesh_path, resolve_solve_method(self.config.generation), sc.nthreads)
         self._clean_eq = mygs.copy_eq()
         return self
@@ -829,6 +833,7 @@ class Bouquet(SwbBaseline):
         self._revalidate_generation_settings()
         if self.mygs is not None:      # settings checked first: pointing reads the source
             self.point_solver()
+            self._solver_use = int(getattr(self, "_solver_use", 0)) + 1
 
         # GenerationConfig.reconstruction_engine="unified": the ONE
         # reconstruction engine (bouquet.engine) builds the baseline for
@@ -842,6 +847,7 @@ class Bouquet(SwbBaseline):
             self._record_experimental_features(_bl)
             self._record_coil_solve_mode(_bl)
             self._record_bootstrap_eps(_bl)
+            self._record_solver_geometry(_bl)
             self._report_sigma_exceeds_profile(_bl)
             self._remember_baseline_state()
             return _bl
@@ -942,6 +948,7 @@ class Bouquet(SwbBaseline):
         self._record_experimental_features(self.baseline)
         self._record_coil_solve_mode(self.baseline)
         self._record_bootstrap_eps(self.baseline)
+        self._record_solver_geometry(self.baseline)
         self._report_sigma_exceeds_profile(self.baseline)
         self._remember_baseline_state()
         return self.baseline
@@ -1017,6 +1024,37 @@ class Bouquet(SwbBaseline):
         bl.experimental_features = list(on)
         if isinstance(getattr(bl, "engine", None), dict):
             bl.engine["experimental_features"] = list(on)
+
+    def solver_geometry_record(self) -> Optional[dict]:
+        """The solver geometry this baseline's resets install
+        (:meth:`bouquet.solver_geometry.CaseGeometry.record`: ``solver_F0``,
+        ``F0_source``, ``F0_origin``, ``F0_rule``, isoflux and saddles), the
+        coil regularisation the reset applied (``coil_reg``: ``source``
+        ``"configured"``/``"default"`` and the terms) and ``solver_use``
+        (how many baselines this solver has been pointed at, 1 = fresh), or
+        ``None`` before :meth:`point_solver`."""
+        geom = getattr(self, "_geom", None)
+        if geom is None:
+            return None
+        rec = geom.record()
+        cr = getattr(self.mygs, "_recon_coil_reg_record", None)
+        rec["coil_reg"] = None if cr is None else {
+            "source": cr.get("source"), "n_terms": len(cr.get("terms") or ()),
+            "terms": list(cr.get("terms") or ())}
+        rec["solver_use"] = int(getattr(self, "_solver_use", 0))
+        return rec
+
+    def _record_solver_geometry(self, bl) -> None:
+        """Put :meth:`solver_geometry_record` on *bl*
+        (``Baseline.solver_geometry``, archived as the ``_baseline`` attr
+        ``solver_geometry_json``) and, under the unified engine, in its
+        record -- every path, every solve method."""
+        if bl is None or not hasattr(bl, "solver_geometry"):
+            return
+        rec = self.solver_geometry_record()
+        bl.solver_geometry = rec
+        if rec is not None and isinstance(getattr(bl, "engine", None), dict):
+            bl.engine["solver_geometry"] = dict(rec)
 
     def _record_bootstrap_eps(self, bl) -> None:
         """Record the Redl epsilon (``GenerationConfig.eps_definition``:
@@ -8136,6 +8174,12 @@ class Bouquet(SwbBaseline):
             header, scan_key=gc.scan_key,
             features=(experimental_features_enabled(self.config)
                       if _xf is None else _xf))
+        # the solver geometry every reset of this baseline installed (F0 and
+        # its origin -- each baseline at its own F0 since #76 --, isoflux,
+        # saddles, the coil reg, solver_use): every path, every solve method
+        from .utils import stamp_solver_geometry
+        stamp_solver_geometry(header, scan_key=gc.scan_key,
+                              record=getattr(bl, "solver_geometry", None))
         # IMAS path: the source's current orientation (what the reader
         # multiplied every dd current by to reach bouquet's positive frame).
         from .config import ImasSource

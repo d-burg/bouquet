@@ -4434,6 +4434,39 @@ def stamp_experimental_features(h5path_or_header, scan_key=None,
                 [str(f) for f in (features or ())])
 
 
+def stamp_solver_geometry(h5path_or_header, scan_key=None, record=None):
+    """Record the solver geometry the baseline's resets installed
+    (``Baseline.solver_geometry``: ``solver_F0``, ``F0_source``,
+    ``F0_origin``, ``F0_rule``, the isoflux / saddle provenance, the coil
+    reg and ``solver_use``) as the JSON attr ``solver_geometry_json`` of the
+    ``_baseline`` group.  No-op without a record or a ``_baseline`` group."""
+    if not record:
+        return
+    import json
+    path = _resolve_h5(h5path_or_header)
+    gp = _baseline_group_path(scan_key)
+    with h5py.File(path, "a") as hf:
+        if gp in hf:
+            hf[gp].attrs["solver_geometry_json"] = json.dumps(
+                record, sort_keys=True)
+
+
+def load_solver_geometry(h5path_or_header, scan_key=None):
+    """The record :func:`stamp_solver_geometry` wrote, or ``None`` for an
+    archive that predates it (before #76 a reused solver ran every later
+    baseline at the first one's F0; such an archive cannot say which)."""
+    import json
+    path = _resolve_h5(h5path_or_header)
+    gp = _baseline_group_path(scan_key)
+    with h5py.File(path, "r") as hf:
+        if gp not in hf:
+            return None
+        v = hf[gp].attrs.get("solver_geometry_json")
+    if v is None:
+        return None
+    return json.loads(v.decode() if isinstance(v, bytes) else str(v))
+
+
 def load_experimental_features(h5path_or_header, scan_key=None):
     """The list :func:`stamp_experimental_features` wrote (``[]``: none
     enabled), or ``None`` for an archive that predates the record."""

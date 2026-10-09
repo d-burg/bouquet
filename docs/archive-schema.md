@@ -81,6 +81,12 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │              resolved: field -> {value, origin "resolved from
     │              engine=<x>" | "explicit"[, engine_validated]} (since
     │              2026-10-07; utils.load_engine_resolved_defaults),
+    │              [solver_geometry_json]   the solver geometry every reset of
+    │              this baseline installed: solver_F0, F0_source, F0_origin,
+    │              F0_rule (each baseline at its own F0 since #76), boundary /
+    │              isoflux origin, count and weight range, saddles, the coil
+    │              reg applied, solver_use (1 = a fresh solver)
+    │              (utils.load_solver_geometry),
     │              [li_metrics_json, closure_limited]   baseline provenance (absent
     │              from older archives):
     │              Baseline.li_metrics as JSON, incl. the ip_closure health

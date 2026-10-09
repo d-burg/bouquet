@@ -321,6 +321,14 @@ class Baseline:
     # Set by Bouquet.prepare_baseline on every path; archived as the
     # _baseline attr bootstrap_eps_json (and in the engine record).
     bootstrap_eps: Optional[dict] = None
+    # The solver geometry every reset of this baseline installs
+    # (bouquet.solver_geometry.CaseGeometry.record: solver_F0 and its origin,
+    # the isoflux targets, the saddle constraints) plus the coil
+    # regularisation applied at the reset and how many baselines the solver
+    # had prepared (solver_use, 1 = a fresh solver).  Set by
+    # Bouquet.prepare_baseline on every path; archived as the _baseline attr
+    # solver_geometry_json (and in the engine record).
+    solver_geometry: Optional[dict] = None
 
     def __repr__(self):
         # concise summary -- the default dataclass repr dumps every numpy array,

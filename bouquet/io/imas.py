@@ -88,17 +88,42 @@ if TYPE_CHECKING:
 
 
 @functools.lru_cache(maxsize=2)
-def _cached_dd(ids_path: str, _mtime_ns: int, _size: int) -> dict:
-    """Parsed ``dd_sim.json`` (up to ~1 GB), cached per (path, mtime, size):
-    a slice sweep reads one file once.  Shared: callers must not mutate it."""
+def _cached_dd(ids_path: str, _mtime_ns: int, _size: int,
+               _ino: int = 0) -> dict:
+    """Parsed ``dd_sim.json`` (up to ~1 GB), cached per (real path, mtime,
+    size, inode): a slice sweep reads one file once.
+
+    READ-ONLY CONTRACT: the cache hands out the SAME parsed object to every
+    caller (the legacy reader, the unified engine's ``IdsAdapter.read``,
+    ``read_imas_geometry`` and the plotting readers).  No caller may write
+    into it; anything that slices or edits a dd (``_slice_in_time`` in
+    ``write_imas_draw``) must work on its own fresh ``json.load`` or a deep
+    copy.  ``tests/test_imas_dd_cache.py`` pins this by digest.
+
+    MEMORY: up to two parsed files (about 2x the file size each, so ~2 GB
+    for a 1 GB dd) stay resident for the life of the process -- in a
+    ``run_parallel`` pool, in every worker for the whole of ``generate()``.
+    :func:`clear_dd_cache` releases them."""
     with open(ids_path, "rb") as fh:
         return json.loads(fh.read())
 
 
-def _load_dd(ids_path: str) -> dict:
-    """``dd_sim.json`` at ``ids_path``, via :func:`_cached_dd`."""
-    st = os.stat(ids_path)
-    return _cached_dd(ids_path, st.st_mtime_ns, st.st_size)
+def _load_dd(ids_path) -> dict:
+    """``dd_sim.json`` at ``ids_path``, via :func:`_cached_dd` (shared,
+    read-only).  Keyed on the real path (``"dd.json"``, its absolute path
+    and a ``Path`` share one entry), mtime_ns, size and inode (a file
+    replaced by rename is re-read).  Limitation: a same-size rewrite within
+    the filesystem's mtime granule, or one seen through a stale NFS
+    attribute cache, is served from the cache -- call
+    :func:`clear_dd_cache` after rewriting a dd in place."""
+    path = os.path.realpath(os.fspath(ids_path))
+    st = os.stat(path)
+    return _cached_dd(path, st.st_mtime_ns, st.st_size, st.st_ino)
+
+
+def clear_dd_cache() -> None:
+    """Release every cached parsed dd (see :func:`_cached_dd`)."""
+    _cached_dd.cache_clear()
 
 # Core-source identifier index for neutral-beam current drive.
 NBI_SOURCE_INDEX = 2          # neutral beam injection -> summed into j_NBI
@@ -1801,7 +1826,8 @@ def read_imas_baseline(
     j_sawteeth = s_ip * to_jphi(_m * _saw)
 
     # --- sawtooth model presence/amplitude at this slice (gate input only) ----
-    # Read here because the dd (100s of MB) is not retained past this function.
+    # Read here, from the same parsed dd as the currents above (the cached,
+    # read-only _load_dd object), so no second pass over the file is needed.
     # "active" means the source EXISTS and carries a non-zero j_parallel at this
     # SLICE TIME: a declared-but-idle sawtooth source (all zeros before onset)
     # must NOT admit a ramp slice to the q0 pin.  The entry is read at the

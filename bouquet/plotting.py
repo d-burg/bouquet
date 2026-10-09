@@ -1677,8 +1677,8 @@ def _imas_input_profiles(source):
     orientation factor -- ``source.current_orientation`` when set to ``+1`` /
     ``-1``, else ``sign(equilibrium ip)`` -- so it is in the frame of the solved
     profile it is overlaid on."""
-    import json
-    d = json.load(open(source.ids_path))
+    from .io.imas import _load_dd
+    d = _load_dd(source.ids_path)       # cached, shared: read-only
     eq = d["equilibrium"]
     t = np.asarray(eq["time"], float)
     tt = getattr(source, "time", None)
@@ -3837,9 +3837,10 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
                 from .physics import (jpar_to_jphi_tokamaker,
                                       jphi_tokamaker_pressure_term,
                                       jtor_imas_to_jphi_tokamaker)
-                from .io.imas import (current_frame, orientation_ip,
+                from .io.imas import (_load_dd, current_frame,
+                                      orientation_ip,
                                       parse_current_orientation)
-                _dd = json.load(open(source))
+                _dd = _load_dd(source)      # cached, shared: read-only
                 cp = _dd["core_profiles"]
                 ic = int(np.argmin(np.abs(np.asarray(cp["time"], float) - float(int(sk)) / 1000.0)))
                 c = cp["profiles_1d"][ic]

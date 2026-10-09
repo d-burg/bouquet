@@ -660,6 +660,17 @@ refusal the same way before re-raising. A later baseline or draw written into
 the same scan supersedes the refusal (kept as `refused_reason_superseded`).
 Parallel shards do not write refused records (a refused worker raises).
 
+The parsed dd is **cached per file** (`bouquet.io.imas._load_dd`, keyed on the
+real path, mtime, size and inode) and shared by the legacy reader, the unified
+engine's IDS adapter, the geometry reader and the plotting readers, so a sweep
+(or a `plot_jphi` loop over its scan keys) parses the file once. The cost is
+memory: up to two parsed files, about twice the file size each, stay resident
+for the life of the process — in a `parallel_generate` pool, in every worker
+for its whole `generate()`. `bouquet.io.imas.clear_dd_cache()` releases them;
+call it too after rewriting a dd in place with the same size within the
+filesystem's mtime granule, or across hosts on NFS within its attribute-cache
+window, where the stat key cannot see the change.
+
 ## Process-parallel generation
 
 Draws are embarrassingly parallel, and `OFT_env` is a per-process singleton —

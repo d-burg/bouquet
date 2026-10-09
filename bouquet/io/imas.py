@@ -1711,8 +1711,8 @@ def read_imas_baseline(
         return jpar_to_jphi_tokamaker(j_par, cur_geom)
     j_BS = to_jphi(j_boot) + p_term
 
-    # --- NBI: sum beam-source parallel currents, then convert ---
-    # Each beam entry is read at the core_sources slice TIME, not at its list
+    # --- driven currents: every core_sources entry, then convert ---
+    # Each driven entry is read at the core_sources slice TIME, not at its list
     # index (owner-approved 2026-10-05, the sawteeth entry's rule below and
     # the engine IDS adapter's): an entry carrying its own per-slice times is
     # matched to its NEAREST own slice -- one that starts later than the IDS
@@ -1742,62 +1742,49 @@ def read_imas_baseline(
     _cp_half = (None if (_t_cp is None or _src_t is None) else
                 _cp_window(cp_ids.get("time"), _src_tb, _t_cp, _src_t)[0])
     source_time_match = dict(core_sources=_slice_rec, entries=[])
-    jnbi_par = np.zeros(n)
-    for s in src_ids.get("source", []):
-        if s.get("identifier", {}).get("index") == NBI_SOURCE_INDEX:
-            pr = s.get("profiles_1d", [])
-            if pr:
-                _erec = {}
-                source_time_match["entries"].append(_erec)
-                q_nbi, how = _source_slice_at(s, isrc, _src_t, _src_nt,
-                                              cp_ids.get("time"), t_cp=_t_cp,
-                                              cp_half=_cp_half, rec=_erec)
-                if q_nbi is None:
-                    _erec["reason"] = how
-                    if not any(_carries_current(qq) for qq in pr):
-                        _erec["status"] = "zero"
-                        continue
-                    # idle on the own slices bracketing this time: off
-                    # here, nothing to drop (refinement of 2026-10-06)
-                    if _entry_off_near(s, _src_t) is not None:
-                        _erec["status"] = "off_idle"
-                        continue
-                    # before its first own time (which carries current):
-                    # OFF (owner decision 2026-10-06), stamped and
-                    # announced once
-                    _first = _entry_off_before_record(s, _src_t)
-                    if _first is not None:
-                        _erec.update(status="off_before_record",
-                                     first_own_time=_first)
-                        _announce_off_before("IMAS reader",
-                                             s.get("identifier") or {},
-                                             _first, _src_t,
-                                             key=str(source.ids_path))
-                        continue
-                    raise ValueError(_entry_time_refusal(
-                        "IMAS reader", s.get("identifier") or {}, how))
-                jnbi_par = jnbi_par + np.asarray(q_nbi["j_parallel"], dtype=float)
-    j_NBI = s_ip * to_jphi(_m * jnbi_par)
-    # every other driven entry by the engine IDS adapter's classification
-    # (the beams are j_NBI above); the sawteeth entry by the gate's rule below (no slice within half a step:
-    # not active here, zero)
-    from ..adapters import _ids_driven_currents
+    # Every driven entry -- beams, EC/LH/IC, fusion, runaways, sawteeth,
+    # unknown indices -- through the ONE source-time rule of the engine's IDS
+    # adapter, with the arguments the engine passes (adapters.IdsAdapter.
+    # read): the core_profiles slice time and half-step window, the off list,
+    # the match records and the announcement key.  Refusals, off_idle /
+    # off_before_record stamps and announcements are therefore identical on
+    # the legacy reader and the engine (which runs this reader first).
+    from ..adapters import EngineInputRefused, _ids_driven_currents
     _cpt = cp_ids.get("time")
 
     def _is_saw(s):
         return (s.get("identifier") or {}).get("index") == SAWTOOTH_SOURCE_INDEX
-    _parts = _ids_driven_currents(dict(src_ids, source=[
-        s for s in src_ids.get("source", []) if not _is_saw(s) and
-        (s.get("identifier") or {}).get("index") != NBI_SOURCE_INDEX]),
-        isrc, n, 1.0, _cpt)[0]
-    _saw = np.zeros(n)
-    for s in src_ids.get("source", []):
-        if _is_saw(s) and s.get("profiles_1d"):
-            q_saw, _ = _source_slice_at(s, isrc, _src_t, _src_nt, _cpt)
-            if q_saw is not None and q_saw.get("j_parallel") is not None:
-                _saw = _saw + np.asarray(q_saw["j_parallel"], dtype=float)
+    hold_saw = bool(getattr(source, "hold_sawteeth", True))
+    _held = (src_ids if hold_saw else dict(src_ids, source=[
+        s for s in src_ids.get("source", []) if not _is_saw(s)]))
+    _off = []
+    _rule_kw = dict(t_cp=_t_cp, cp_half=_cp_half,
+                    announce_key=str(source.ids_path))
+    try:
+        _parts, _used, _ignored = _ids_driven_currents(
+            _held, isrc, n, 1.0, _cpt, off=_off,
+            matches=source_time_match["entries"], **_rule_kw)
+        # the sawteeth share of j_other (already matched, refused or
+        # stamped above: no records, no second announcement)
+        _saw = (_ids_driven_currents(dict(src_ids, source=[
+            s for s in src_ids.get("source", []) if _is_saw(s)]),
+            isrc, n, 1.0, _cpt, **_rule_kw)[0]["other"]
+            if hold_saw else np.zeros(n))
+    except EngineInputRefused as exc:
+        raise EngineInputRefused(
+            str(exc).replace("IDS adapter:", "IMAS reader:", 1)) from None
+    source_time_match.update(driven_sources=_used, ignored_sources=_ignored,
+                             off_sources=_off)
+    source_time_match["sawteeth_hold"] = dict(
+        held=hold_saw, setting="ImasSource.hold_sawteeth",
+        how=("the sawteeth entry's j_parallel is held fixed in j_other "
+             "(its share in j_sawteeth): FUSE's j_ohmic excludes it"
+             if hold_saw else
+             "opted out: the sawteeth entry is not held; its current stays "
+             "in the residual j_inductive (the pre-#70 legacy split)"))
+    j_NBI = s_ip * to_jphi(_m * _parts["nbi"])
     j_RF = s_ip * to_jphi(_m * _parts["rf"])
-    j_other = s_ip * to_jphi(_m * (_parts["other"] + _saw))
+    j_other = s_ip * to_jphi(_m * _parts["other"])
     j_sawteeth = s_ip * to_jphi(_m * _saw)
 
     # --- sawtooth model presence/amplitude at this slice (gate input only) ----
@@ -1816,8 +1803,10 @@ def read_imas_baseline(
             sawtooth["present"] = True
             pr = s.get("profiles_1d", [])
             if pr:
+                # held (the default): its match is already recorded above
                 _erec = {}
-                source_time_match["entries"].append(_erec)
+                if not hold_saw:
+                    source_time_match["entries"].append(_erec)
                 q_saw, how = _source_slice_at(s, isrc, _src_t, _src_nt,
                                               cp_ids.get("time"), t_cp=_t_cp,
                                               cp_half=_cp_half, rec=_erec)

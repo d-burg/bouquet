@@ -268,10 +268,25 @@ class ImasSource:
     # Radial coordinate of the run (bouquet.coords): "psi_n", "phi_n" (the
     # dd's core_profiles grid.rho_tor_norm**2), or "rho_tor" (same run).
     coord: str = "psi_n"
+    # Hold the dd's sawteeth core_sources entry (IMAS identifier 701) fixed
+    # as a driven current (True, the default): its j_parallel goes to j_other
+    # (its share also to j_sawteeth), like every other driven entry and as
+    # the unified engine does.  FUSE's j_ohmic EXCLUDES that source
+    # (j_total - j_bootstrap - beams - sawteeth = j_ohmic to rounding on the
+    # synthetic FUSE fixture), so without the hold the legacy inductive
+    # carries it.  False opts out: the entry is not held, its current stays
+    # in the residual j_inductive (the legacy split before the hold) and it
+    # is read only as the sawtooth gate's flag.  Legacy reader only: the
+    # unified engine always holds it and refuses False.  Stamped in
+    # Baseline.source_time_match["sawteeth_hold"] (archived with li_metrics).
+    hold_sawteeth: bool = True
 
     def __post_init__(self):
         from .coords import run_coord
         run_coord(self.coord)
+        if not isinstance(self.hold_sawteeth, bool):
+            raise ValueError(f"hold_sawteeth={self.hold_sawteeth!r}: must be "
+                             "True or False")
 
 
 BaselineSource = Union[ReconstructionSource, ImasSource]

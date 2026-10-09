@@ -4174,6 +4174,26 @@ def _group_path(scan_key, count):
     return str(int(count))
 
 
+#: The held-fixed driven currents a draw / baseline group archives (review
+#: PR70 B10): the closure j_phi = j_inductive + j_BS + j_NBI + j_RF +
+#: j_other (+ j_pressure); j_sawteeth is the sawteeth share OF j_other.
+FIXED_CURRENT_DATASETS = ("j_NBI", "j_RF", "j_other", "j_sawteeth")
+
+
+def _write_fixed_currents(grp, fixed_currents):
+    """Write the non-None entries of *fixed_currents* (names from
+    :data:`FIXED_CURRENT_DATASETS`) as profiles on *grp*."""
+    for name, arr in (fixed_currents or {}).items():
+        if name not in FIXED_CURRENT_DATASETS:
+            raise ValueError(f"fixed_currents: unknown channel {name!r} "
+                             f"(one of {FIXED_CURRENT_DATASETS})")
+        if arr is None:
+            continue
+        if name in grp:
+            del grp[name]
+        write_profile(grp, name, np.asarray(arr, dtype=float))
+
+
 def write_group_current_split(header, scan_key, count, j_pressure):
     """The third current bucket on one archived group (a draw, or
     ``_baseline`` for ``count`` None): the ``j_pressure`` dataset and
@@ -4659,6 +4679,7 @@ def store_equilibrium(
     jbs_loop=None,
     profile_coord="psi_n",
     ifile_filepath=None,
+    fixed_currents=None,
 ):
     """
     Write one perturbed equilibrium into the HDF5 database.
@@ -4690,6 +4711,12 @@ def store_equilibrium(
         Raw p-file content to store alongside the g-file bytes.
     ifile_filepath : str or None
         OFT i-file (``save_ifile``) to store as the ``ifile`` blob.
+    fixed_currents : dict or None
+        The draw's held-fixed driven currents on ``psi_N``
+        (:data:`FIXED_CURRENT_DATASETS`: ``j_NBI``, ``j_RF``, ``j_other`` and
+        ``j_sawteeth``, the sawteeth share of ``j_other``), each written as a
+        dataset when not None, so the archived split closes: ``j_phi =
+        j_inductive + j_BS + j_NBI + j_RF + j_other (+ j_pressure)``.
     Zeff : array_like or None
         1-D effective charge profile (dimensionless).
     coil_currents : dict or None
@@ -4739,6 +4766,7 @@ def store_equilibrium(
 
         if j_BS_edge is not None:
             write_profile(grp, "j_BS,edge", j_BS_edge)
+        _write_fixed_currents(grp, fixed_currents)
         write_profile(grp, "n_e", n_e)
         write_profile(grp, "T_e", T_e)
         write_profile(grp, "n_i", n_i)
@@ -5186,6 +5214,7 @@ def store_baseline_profiles(
     baseline_meta=None,
     profile_coord="psi_n",
     ifile_bytes=None,
+    fixed_currents=None,
 ):
     """
     Store the input (baseline) profiles and their uncertainties.
@@ -5204,6 +5233,9 @@ def store_baseline_profiles(
         Raw baseline p-file content.
     ifile_bytes : bytes or None
         Raw baseline OFT i-file content (``write_ifile`` runs).
+    fixed_currents : dict or None
+        The baseline's held-fixed driven currents
+        (:data:`FIXED_CURRENT_DATASETS`), as :func:`store_equilibrium`.
     mse_record : dict or None
         ``Baseline.mse_record`` (structured closure with MSE data): per-chord
         arrays and the Jacobian, written as DATASETS in the subgroup
@@ -5261,6 +5293,7 @@ def store_baseline_profiles(
             write_profile(grp, "j_BS", j_BS)
         if j_inductive is not None:
             write_profile(grp, "j_inductive", j_inductive)
+        _write_fixed_currents(grp, fixed_currents)
         write_profile(grp, "sigma_ne", sigma_ne)
         write_profile(grp, "sigma_te", sigma_te)
         write_profile(grp, "sigma_ni", sigma_ni)

@@ -5416,6 +5416,7 @@ def generate_bouquet(
     j_NBI=None,
     j_RF=None,
     j_other=None,
+    j_sawteeth=None,
     aux_sigmas=None,
     aux_baselines=None,
     aux_length_scales=None,
@@ -5658,6 +5659,10 @@ def generate_bouquet(
     draw_method : bouquet.draw_methods.DrawMethod, optional
         How each draw is made where the solve methods differ
         (docs/draw-methods.md); None: the legacy draws.
+    j_sawteeth : ndarray, optional
+        The sawteeth share OF ``j_other`` (``Baseline.j_sawteeth``),
+        archived beside the other held-fixed channels (review PR70 B10);
+        informational, never added to the current.
     baseline_split : dict, optional
         The archive's current-split convention (owner decision D2: the
         pressure-driven ``p'G`` is its own bucket ``j_pressure``, archived
@@ -6714,6 +6719,11 @@ def generate_bouquet(
             print(f"  WARN: achieved-jphi baseline archival failed ({_aexc}); "
                   f"storing the anchored target instead")
 
+    # the held-fixed driven channels every draw adds (j_NBI + j_RF +
+    # j_other; j_sawteeth is the sawteeth share of j_other), archived with
+    # the baseline and each draw (review PR70 B10)
+    _fixed_channels = dict(j_NBI=j_NBI, j_RF=j_RF, j_other=j_other,
+                           j_sawteeth=j_sawteeth)
     # the third bucket (owner decision D2): p'G archived as j_pressure, and
     # taken off the inductive wherever that carries it
     _bl_jp = None
@@ -6768,6 +6778,9 @@ def generate_bouquet(
         mse_record=baseline_mse_record,
         baseline_meta=baseline_meta,
         profile_coord=coord,
+        # the held-fixed driven channels, so the archived split closes
+        # (review PR70 B10)
+        fixed_currents=_fixed_channels,
     )
     write_group_current_split(header, scan_key, None, _bl_jp)
     if write_ifile and _bl_ifile_rec is not None:
@@ -8539,6 +8552,10 @@ def generate_bouquet(
                               if jbs_delta_mode else None),
             profile_coord=coord,
             ifile_filepath=ifile_path,
+            # the held-fixed driven channels of this draw (the method's own
+            # on its archived state -- engine -- else the baseline's)
+            fixed_currents=(diagnostics.get("fixed_currents")
+                            or _fixed_channels),
         )
         if _ifile_rec is not None:
             stamp_group_attrs(header, scan_key, count, _ifile_rec)

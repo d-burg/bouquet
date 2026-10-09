@@ -52,6 +52,8 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │   ├── n_e, T_e, n_i, T_i         kinetic profiles
     │   ├── pressure[, pressure_thermal]
     │   ├── j_phi[, j_BS, j_inductive] separated toroidal currents
+    │   ├── [j_NBI, j_RF, j_other, j_sawteeth]  held-fixed driven channels
+    │   │                              (2026-10-09; as on each draw)
     │   ├── [j_pressure]               the pressure-driven p'G, its own bucket
     │   │                              (owner decision D2, 2026-10-09; with the
     │   │                              attr current_split_convention -- see
@@ -120,6 +122,13 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
         ├── j_phi, j_BS, j_inductive[, j_BS,edge]
         ├── [j_pressure]               p'G, its own bucket (owner decision D2;
         │                              with current_split_convention)
+        ├── [j_NBI, j_RF, j_other, j_sawteeth]  the held-fixed driven channels
+        │                              (2026-10-09; engine: its own on the
+        │                              archived state, j_RF = rf + other;
+        │                              legacy / swb: the baseline's) -- so
+        │                              j_phi = j_inductive + j_BS + j_NBI +
+        │                              j_RF + j_other (+ j_pressure); j_sawteeth
+        │                              is the sawteeth share OF j_other
         ├── n_e, T_e, n_i, T_i, w_ExB[, Zeff]
         ├── [pressure, pressure_thermal]
         ├── [aux_<name>]               perturbed switchboard channels

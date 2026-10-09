@@ -1595,6 +1595,10 @@ class GenerateEngineDraws(DrawMethod):
         diagnostics["j_BS"] = np.asarray(sp["j_BS"], dtype=float).copy()
         diagnostics["j_inductive"] = j_ind.copy()
         diagnostics["j_pressure"] = P.copy()
+        # the fixed parts on the archived state (j_RF: rf + other driven)
+        diagnostics["fixed_currents"] = dict(
+            j_NBI=np.asarray(sp["j_NBI"], dtype=float).copy(),
+            j_RF=np.asarray(sp["j_RF"], dtype=float).copy())
         return np.asarray(sp["j_BS"], dtype=float).copy(), j_ind
 
     def mark(self, stage):

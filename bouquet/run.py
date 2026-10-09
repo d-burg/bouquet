@@ -7952,6 +7952,7 @@ class Bouquet(SwbBaseline):
                 j_NBI=bl.j_NBI,
                 j_RF=bl.j_RF,
                 j_other=getattr(bl, "j_other", None),
+                j_sawteeth=getattr(bl, "j_sawteeth", None),
                 # Switchboard: auxiliary perturbed profiles -- rotation /
                 # transport channels (passive) + Zeff (active).
                 aux_sigmas=env.get("aux_sigmas"),

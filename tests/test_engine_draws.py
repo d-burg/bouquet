@@ -977,6 +977,14 @@ def test_the_archived_split_is_on_the_archived_state_and_never_clipped(
             np.testing.assert_array_equal(g["j_pressure"][()], jp)
             assert g.attrs[CURRENT_SPLIT_CONVENTION_ATTR] == \
                 SPLIT_PRESSURE_SEPARATE
+            # the held-fixed channels are archived (review PR70 B10), so
+            # the archived split closes from the group alone
+            np.testing.assert_array_equal(g["j_NBI"][()], jn)
+            np.testing.assert_array_equal(g["j_RF"][()], jr)
+            np.testing.assert_allclose(
+                g["j_inductive"][()] + g["j_BS"][()] + g["j_NBI"][()]
+                + g["j_RF"][()] + g["j_pressure"][()], g["j_phi"][()],
+                rtol=0, atol=1e-12 * np.max(np.abs(g["j_phi"][()])))
         assert sp["n_negative_inductive"] == int(np.sum(
             st["j_inductive"] < 0.0))
         assert sp["min_inductive"] == float(np.min(st["j_inductive"]))
@@ -1479,16 +1487,19 @@ def test_a_legacy_split_is_archived_with_p_g_as_j_pressure(tmp_path,
 
     def legacy_like(self, diagnostics, j_phi, default=None):
         j_bs, j_ind = real(self, diagnostics, j_phi, default)
+        diagnostics.pop("fixed_currents")     # the legacy draws hand none
         P = diagnostics.pop("j_pressure")
         legacy_ind.append(j_ind + P)          # p'G in the inductive
         return j_bs, legacy_ind[-1]
     monkeypatch.setattr(ED.GenerateEngineDraws, "archived_split",
                         legacy_like)
     stored = _spy_store(monkeypatch)
+    j_oth = 2.0e3 * np.exp(-0.5 * ((PSI - 0.2) / 0.1) ** 2)
     diags, rej, h, G = _generate(
         tmp_path, monkeypatch, n=1,
         baseline_split=dict(j_pressure=None,
-                            inductive_includes_pressure=True))
+                            inductive_includes_pressure=True),
+        j_other=j_oth, j_sawteeth=0.5 * j_oth)
     assert len(diags) == 1 and rej == [] and len(stored) == 1
     assert calls == ["baseline archive", "draw 0 archive"]
     st = stored[0]
@@ -1497,6 +1508,9 @@ def test_a_legacy_split_is_archived_with_p_g_as_j_pressure(tmp_path,
         for path in (_group_path(None, st["count"]), "_baseline"):
             g = hf[path]
             np.testing.assert_array_equal(g["j_pressure"][()], Pk)
+            # the baseline's held-fixed channels on both (review PR70 B10)
+            np.testing.assert_array_equal(g["j_other"][()], j_oth)
+            np.testing.assert_array_equal(g["j_sawteeth"][()], 0.5 * j_oth)
             assert g.attrs[CURRENT_SPLIT_CONVENTION_ATTR] == \
                 SPLIT_PRESSURE_SEPARATE
         # the baseline's inductive (this stand-in archives the target split:

@@ -49,6 +49,18 @@ a PARTIAL merge (root attrs `merge_partial`, `merge_expected_cases`,
 A complete merge carries `merge_partial=False`. `merge_cases` no longer
 replaces an existing merged archive unless `overwrite=True`.
 
+**A reused solver starts every case clean.** `Bouquet.set_case` (and so
+`set_slice`, `run_slices`, `parallel_cases`, units) resets every per-case
+attribute of the Bouquet, not a hand-kept list: whatever `prepare_baseline`,
+`generate` or `filter` set (e.g. `_swb_seed_record`, whose stale
+`source_unavailable` used to refuse the next g-file case) goes back to its
+constructor value; only `Bouquet.SOLVER_ATTRS` survive. It also restores the
+solver device as `setup_solver` left it (the `update_settings` values such as
+`maxits`, an instance-level `solve` wrapper, VSC gains, Vcoils), recorded as
+`device_restored` in `solver_geometry_json`. `run_case_on` releases the dd
+cache after `prepare_baseline`, as `run_shard` does. A single case without
+`set_case` is untouched by either.
+
 ## Unreleased — the PR #56 kinetic combination is EXPERIMENTAL and opt-in (owner decision 2026-10-09)
 
 **What and why.** PR #56's IDA/FUSE ion coupling is not the default for 1.4.0.

@@ -1086,10 +1086,15 @@ def run_case_on(bouquet, case, header, hooks=None) -> dict:
     bouquet.generate()
     bouquet.filter()
     bl = bouquet.baseline
-    return dict(path=os.path.abspath(f"{header}.h5"), group=case.group, scan_key=case.scan_key,
+    geom = bouquet.solver_geometry_record() if hasattr(bouquet, "solver_geometry_record") else None
+    rec = dict(path=os.path.abspath(f"{header}.h5"), group=case.group, scan_key=case.scan_key,
                 n_all=len(bouquet.selected_indices("all")), n_sel=len(bouquet.selected_indices("selected")),
                 l_i_target=float(bl.l_i_target), Ip_target=float(bl.Ip_target), F0=float(bouquet._geom.F0),
-                threads=thread_report(), threads_pinned=pinned())
+                threads=thread_report(), threads_pinned=pinned(),
+               solver_use=None if geom is None else geom.get("solver_use"))
+    if rec["solver_use"] is not None:
+        rec["solver_reused"] = rec["solver_use"] > 1
+    return rec
 
 
 def _init_case_worker(worker_id_queue, master_working_dir, config_dict, init_status_queue, hooks=None,

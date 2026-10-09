@@ -23,6 +23,7 @@ GS-solve compute), plus a thin :meth:`run` convenience for scripts/CI::
 
 from __future__ import annotations
 
+import copy
 from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -132,6 +133,11 @@ class Bouquet(SwbBaseline):
         # prepare_baseline(): how many baselines this solver has been pointed at (1 = fresh); a
         # property of the SOLVER, so set_case does not clear it (_install_solver does)
         self._solver_use = 0
+        # set_case(): what the device restore put back (None: no case swap yet)
+        self._device_restored: Optional[dict] = None
+        # every per-case attribute's constructor value, which set_case() restores (SOLVER_ATTRS excepted)
+        self._init_state = {k: copy.deepcopy(v) for k, v in vars(self).items()
+                            if k not in self.SOLVER_ATTRS}
 
     # ── constructors ----------------------------------------------------
     @classmethod
@@ -379,10 +385,12 @@ class Bouquet(SwbBaseline):
         # still write to the old header.
         self.config.output_header = value
 
-    #: Per-baseline state: cleared by :meth:`set_case`, so a reused solver starts each baseline clean.
-    _CASE_ATTRS = ("baseline", "_failed_baseline", "_resolved_uncertainty", "diagnostics",
-                   "solve_failures", "_selection", "_engine_run", "_geom", "_experimental_features",
-                   "_swb_seed_record", "_swb_conversion_record")
+    #: Solver-level state, kept by :meth:`set_case`.  EVERY other instance attribute is per case: set_case
+    #: puts the constructor's value back and removes what prepare_baseline / generate / filter added
+    #: (records such as ``_swb_seed_record``, ``_draw_bootstrap_scaling_record``,
+    #: ``_experimental_features``, ``draw_rejections`` ...), so a new per-case record needs no list entry.
+    SOLVER_ATTRS = frozenset({"config", "mygs", "_myOFT", "_clean_eq", "_solver_key", "_solver_use",
+                              "_device_snapshot", "_init_state"})
 
     def set_slice(self, *, time=None, ida_time=_UNSET, header=None) -> "Bouquet":
         """Point at another time slice of the same IDS, reusing the solver; see :meth:`set_case`.
@@ -441,9 +449,57 @@ class Bouquet(SwbBaseline):
             self.config.output_header = header
         if scan_key is not None:
             self.config.generation.scan_key = scan_key
-        for a in self._CASE_ATTRS:
-            setattr(self, a, None)
+        self._reset_case_state()
+        if self.mygs is not None:
+            self._device_restored = self._restore_device()
         return self
+
+    def _reset_case_state(self) -> None:
+        """Every per-case attribute back to its constructor value; the ones prepare_baseline / generate /
+        filter created are removed (getattr(..., None) then reads None).  :data:`SOLVER_ATTRS` stay."""
+        init = getattr(self, "_init_state", {})
+        for k in list(vars(self)):
+            if k in self.SOLVER_ATTRS:
+                continue
+            if k in init:
+                setattr(self, k, copy.deepcopy(init[k]))
+            else:
+                delattr(self, k)
+
+    def _restore_device(self) -> dict:
+        """Put the solver DEVICE back as :meth:`_install_solver` left it (``replace_eq`` restores only the
+        equilibrium): the settings pushed with ``update_settings`` (a case that died inside a capped draw
+        solve leaves ``maxits=100``), an instance-level ``solve`` wrapper (the draw-solve timing / rescue
+        guard), the VSC gains and the Vcoils.  Only what differs is touched.  Returns what was restored
+        (stamped in the solver-geometry record as ``device_restored``)."""
+        from .solver_state import _settings_values, _vsc_facs
+        snap = getattr(self, "_device_snapshot", None)
+        mygs = self.mygs
+        out = dict(settings=[], solve_wrapper_removed=False, vsc=False, vcoils=False)
+        if snap is None:
+            return out
+        if snap["settings"] is not None:
+            s = mygs.settings
+            changed = sorted(k for k, v in snap["settings"].items() if getattr(s, k, None) != v)
+            for k in changed:
+                setattr(s, k, copy.deepcopy(snap["settings"][k]))
+            if changed and hasattr(mygs, "update_settings"):
+                mygs.update_settings()
+            out["settings"] = changed
+        d = getattr(mygs, "__dict__", {})
+        if "solve" in d and d["solve"] is not snap["solve"]:
+            if snap["solve"] is None:
+                del d["solve"]
+            else:
+                d["solve"] = snap["solve"]
+            out["solve_wrapper_removed"] = True
+        if snap["vsc"] is not None and _vsc_facs(mygs) != snap["vsc"] and hasattr(mygs, "set_coil_vsc"):
+            mygs.set_coil_vsc(copy.deepcopy(snap["vsc"]))
+            out["vsc"] = True
+        if getattr(mygs, "_vcoils", None) != snap["vcoils"] and hasattr(mygs, "set_vcoils"):
+            mygs.set_vcoils(copy.deepcopy(snap["vcoils"] or {}))
+            out["vcoils"] = True
+        return out
 
     # ── stage 1: solver -------------------------------------------------
     def setup_solver(self) -> "Bouquet":
@@ -506,10 +562,15 @@ class Bouquet(SwbBaseline):
         equilibrium (zero coils, no plasma, no geometry) every baseline resets to."""
         from .config import resolve_solve_method
         sc = self.config.solver
+        from .solver_state import _settings_values, _vsc_facs
         self.mygs = mygs
         self._solver_use = 0
         self._solver_key = (sc.mesh_path, resolve_solve_method(self.config.generation), sc.nthreads)
         self._clean_eq = mygs.copy_eq()
+        # the device as set up, which every case swap restores (set_case -> _restore_device)
+        self._device_snapshot = dict(
+            settings=_settings_values(mygs), solve=getattr(mygs, "__dict__", {}).get("solve"),
+            vsc=_vsc_facs(mygs), vcoils=copy.deepcopy(getattr(mygs, "_vcoils", None)))
         return self
 
     def _apply_coil_reg(self, mygs):
@@ -1042,6 +1103,7 @@ class Bouquet(SwbBaseline):
             "source": cr.get("source"), "n_terms": len(cr.get("terms") or ()),
             "terms": list(cr.get("terms") or ())}
         rec["solver_use"] = int(getattr(self, "_solver_use", 0))
+        rec["device_restored"] = getattr(self, "_device_restored", None)
         return rec
 
     def _record_solver_geometry(self, bl) -> None:

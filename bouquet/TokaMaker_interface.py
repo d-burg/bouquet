@@ -2548,6 +2548,32 @@ def swb_result_toroidal(mygs, results, psi_N, coord="psi_n", scale_jBS=1.0,
     return out
 
 
+def archived_pressure_term(mygs, psi_N, psi_pad=1e-3, coord="psi_n",
+                           what="archive"):
+    """The pressure-driven ``p'(<R> - F^2<1/R>/<B^2>)`` (A7) of the state
+    ``mygs`` holds, on ``psi_N`` (positive-current frame,
+    :func:`bouquet.physics.swb_pressure_term`): the third current bucket
+    ``j_pressure`` of a LEGACY archived split (owner decision D2), whose
+    in-memory ``j_inductive`` carries it.  Evaluated on the state the group
+    archives.  None, with a warning, where the solver cannot evaluate it:
+    that group then keeps the pre-#64 convention (``p'G`` in
+    ``j_inductive``, no ``current_split_convention`` attr), which every
+    reader infers from the absent attr."""
+    from .physics import swb_pressure_term
+    try:
+        x = np.asarray(psi_N, dtype=float)
+        return np.asarray(swb_pressure_term(
+            mygs, x.size, psi_pad, psi=coords.psi_at(mygs, x, coord)),
+            dtype=float)
+    except Exception as exc:
+        warnings.warn(
+            f"{what}: the pressure-driven p'G could not be evaluated on the "
+            f"archived state ({type(exc).__name__}: {exc}); archived in the "
+            "pre-#64 convention (p'G inside j_inductive, no "
+            "current_split_convention attr)", RuntimeWarning, stacklevel=2)
+        return None
+
+
 def strong_coil_reg(mygs, targets, soft_reg_weight=1.0e4,
                     vsc_soft_reg_weight=1.0):
     """The draw-phase coil reg terms: every coil set pulled toward
@@ -6686,6 +6712,11 @@ def generate_bouquet(
     _bl_jp = None
     if baseline_split is not None:
         _bl_jp = baseline_split.get("j_pressure")
+        if _bl_jp is None:
+            # a legacy reconstruction baseline: p'G of the baseline-converged
+            # state mygs holds here (the state the baseline eqdsk is)
+            _bl_jp = archived_pressure_term(mygs, psi_N, psi_pad, coord,
+                                            "baseline archive")
         if _bl_jp is not None:
             _bl_jp = np.asarray(_bl_jp, dtype=float)
             if _bl_jind_store is not None and (_bl_resid or bool(
@@ -8450,6 +8481,15 @@ def generate_bouquet(
         _dr_jBS_store, _dr_jind_store = _m.archived_split(
             diagnostics, _dr_jphi_store,
             default=(_dr_jBS_store, _dr_jind_store))
+        # owner decision D2 on the legacy draws: their split keeps p'G in the
+        # inductive; the archive takes it off and stores it as j_pressure,
+        # evaluated on the archived state (mygs holds it here)
+        if baseline_split is not None and "j_pressure" not in diagnostics:
+            _dr_jp = archived_pressure_term(mygs, psi_N, psi_pad, coord,
+                                            f"draw {count} archive")
+            if _dr_jp is not None:
+                _dr_jind_store = np.asarray(_dr_jind_store, dtype=float) - _dr_jp
+                diagnostics["j_pressure"] = _dr_jp
 
         store_equilibrium(
             header, count, full_path,

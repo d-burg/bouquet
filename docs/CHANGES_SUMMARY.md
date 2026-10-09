@@ -35,6 +35,17 @@
   unchanged (it already excluded it); the `jB_parallel/` block is unchanged.
   `Baseline.j_pressure` / `Baseline.current_split_convention` carry it in
   memory.
+- **Legacy (and the IMAS legacy reader's) archives.** The legacy in-memory
+  split keeps `p′G` in `j_inductive` (the solver needs the total); the
+  archive writer (`generate_bouquet`, with the run's `baseline_split`) now
+  takes it off and stores it as `j_pressure` with the same attr — per draw
+  evaluated on the archived state (`TokaMaker_interface.
+  archived_pressure_term`), for the baseline the reader's `j_pressure`
+  (IMAS) or the baseline-converged state's (reconstruction). The archived
+  legacy `j_inductive` therefore moves by `−p′G`; `j_BS`, `j_phi` and every
+  solve are unchanged. Where the solver cannot evaluate `p′G` the group
+  keeps the old convention, with a warning. A direct `generate_bouquet`
+  call without `baseline_split` archives as before.
 - **Readers** (`schema.read_current_split_convention`, the IDS exporter)
   read the attr; an archive without it keeps its old meaning.
 

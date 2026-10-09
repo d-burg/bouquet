@@ -557,7 +557,7 @@ def test_selected_ands_the_band_flag_only_where_present(tmp_path):
 #  end to end: generate_bouquet on a TokaMaker stand-in
 # ---------------------------------------------------------------------------
 def _generate(tmp_path, monkeypatch, *, n=3, l_i_tolerance=0.05,
-              n_inspec_target=None, homotopy=True, seed=12345):
+              n_inspec_target=None, homotopy=True, seed=12345, **extra):
     from _engine_fake_gs import FakeTokaMaker
     from bouquet.TokaMaker_interface import generate_bouquet
     from bouquet.utils import initialize_equilibrium_database
@@ -587,7 +587,7 @@ def _generate(tmp_path, monkeypatch, *, n=3, l_i_tolerance=0.05,
         homotopy_passes=[(0.05, 0.1), (0.01, 0.01)], seed=seed,
         capture_live_eq=False, store_achieved_jphi=True,
         jbs_loop=G.loop_settings, rejection_log=rej, draw_method=G,
-        coil_filter="legacy", n_inspec_target=n_inspec_target)
+        coil_filter="legacy", n_inspec_target=n_inspec_target, **extra)
     return diags, rej, h, G
 
 
@@ -1450,3 +1450,78 @@ def test_an_archived_stage_miss_fails_the_sigma0_check(tmp_path,
     # the control: unmodified, the same check passes
     monkeypatch.setattr(ED, "zero_perturbation_archived_verdict", real)
     assert _quiet(b.verify_sigma0_consistency)["passed"] is True
+
+
+def test_a_legacy_split_is_archived_with_p_g_as_j_pressure(tmp_path,
+                                                          monkeypatch):
+    """Owner decision D2 on the LEGACY archive writers (integration hook,
+    B.md item 3): a draw whose method keeps p'G inside its in-memory
+    inductive (the legacy convention: no diagnostics["j_pressure"]) is
+    archived with p'G -- evaluated on the archived state
+    (TokaMaker_interface.archived_pressure_term) -- taken off j_inductive
+    and stored as j_pressure + current_split_convention; the _baseline the
+    same way.  The engine method stands in for the legacy one (its split
+    handed back in the legacy form); the evaluation is a known profile."""
+    import h5py
+    import bouquet.TokaMaker_interface as TI
+    from bouquet.schema import (CURRENT_SPLIT_CONVENTION_ATTR,
+                                SPLIT_PRESSURE_SEPARATE)
+    from bouquet.utils import _group_path, _resolve_h5
+    Pk = 1.0e4 * (1.0 - PSI ** 2)
+    calls = []
+
+    def fake_term(mygs, psi_N, psi_pad=1e-3, coord="psi_n", what=""):
+        calls.append(what)
+        return Pk.copy()
+    monkeypatch.setattr(TI, "archived_pressure_term", fake_term)
+    real = ED.GenerateEngineDraws.archived_split
+    legacy_ind = []
+
+    def legacy_like(self, diagnostics, j_phi, default=None):
+        j_bs, j_ind = real(self, diagnostics, j_phi, default)
+        P = diagnostics.pop("j_pressure")
+        legacy_ind.append(j_ind + P)          # p'G in the inductive
+        return j_bs, legacy_ind[-1]
+    monkeypatch.setattr(ED.GenerateEngineDraws, "archived_split",
+                        legacy_like)
+    stored = _spy_store(monkeypatch)
+    diags, rej, h, G = _generate(
+        tmp_path, monkeypatch, n=1,
+        baseline_split=dict(j_pressure=None,
+                            inductive_includes_pressure=True))
+    assert len(diags) == 1 and rej == [] and len(stored) == 1
+    assert calls == ["baseline archive", "draw 0 archive"]
+    st = stored[0]
+    np.testing.assert_array_equal(st["j_inductive"], legacy_ind[0] - Pk)
+    with h5py.File(_resolve_h5(h), "r") as hf:
+        for path in (_group_path(None, st["count"]), "_baseline"):
+            g = hf[path]
+            np.testing.assert_array_equal(g["j_pressure"][()], Pk)
+            assert g.attrs[CURRENT_SPLIT_CONVENTION_ATTR] == \
+                SPLIT_PRESSURE_SEPARATE
+        # the baseline's inductive (this stand-in archives the target split:
+        # input_jinductive = 0.5 x the request, which carries p'G by
+        # inductive_includes_pressure=True), minus p'G
+        np.testing.assert_array_equal(hf["_baseline"]["j_inductive"][()],
+                                      0.5 * G.ctx.request - Pk)
+
+
+def test_without_the_run_convention_a_direct_call_archives_as_before(
+        tmp_path, monkeypatch):
+    """A direct generate_bouquet call without baseline_split never
+    evaluates p'G for a legacy split (its archive keeps the pre-#64
+    convention, which readers infer from the absent attr)."""
+    import bouquet.TokaMaker_interface as TI
+    calls = []
+    monkeypatch.setattr(TI, "archived_pressure_term",
+                        lambda *a, **k: calls.append(1))
+    real = ED.GenerateEngineDraws.archived_split
+
+    def legacy_like(self, diagnostics, j_phi, default=None):
+        out = real(self, diagnostics, j_phi, default)
+        diagnostics.pop("j_pressure")
+        return out
+    monkeypatch.setattr(ED.GenerateEngineDraws, "archived_split",
+                        legacy_like)
+    _generate(tmp_path, monkeypatch, n=1)
+    assert calls == []

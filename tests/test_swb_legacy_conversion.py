@@ -100,3 +100,31 @@ def test_an_unknown_toolkit_is_refused_not_guessed(uniform, monkeypatch):
     monkeypatch.setattr(P, "swb_jbs_convention", _unknown)
     with pytest.raises(P.SwbConventionUnknown):
         TI.swb_result_toroidal(_Geo(), _raw(), X)
+
+
+def test_the_archived_pressure_term_is_p_g_of_the_held_state():
+    """B.md item 3: the legacy archive's j_pressure is p'(<R> -
+    F^2<1/R>/<B^2>) of the state the group archives, positive frame."""
+    g = _Geo()
+    got = TI.archived_pressure_term(g, X, 1e-3, "psi_n")
+    want = P.swb_pressure_term(g, N, 1e-3, X)
+    np.testing.assert_array_equal(got, want)
+    assert np.max(np.abs(want)) > 0.0
+    # positive frame: the state's own jphi <R>p' + <1/R>FF'/mu0 is > 0 here
+    # with p' < 0, so p' is flipped -- p'G has the sign of (<R> - ...)
+    Xc = np.clip(X, 1e-3, 1.0 - 1e-3)     # SWB's padded surfaces
+    _, F, Fp, _, pp = g.get_profiles(psi=Xc)
+    rav = g.get_q(psi=Xc)[2]
+    jeq = rav["<R>"] * pp + rav["<1/R>"] * F * Fp / (4e-7 * np.pi)
+    s = 1.0 if np.sum(jeq) >= 0 else -1.0
+    B2 = g.sauter_fc(psi=Xc)[-1]["<|B|^2>"]
+    np.testing.assert_allclose(
+        got, s * pp * (rav["<R>"] - F ** 2 * rav["<1/R>"] / B2),
+        rtol=1e-12, atol=0.0)
+
+
+def test_an_unevaluable_state_keeps_the_old_convention_loudly():
+    class _NoGeo:
+        pass
+    with pytest.warns(RuntimeWarning, match="pre-#64 convention"):
+        assert TI.archived_pressure_term(_NoGeo(), X, what="draw 3") is None

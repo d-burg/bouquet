@@ -15,7 +15,7 @@ below) on the synthetic mock equilibrium of ``test_jbs_loop`` over several
 grids and options: for every accepted input the output is identical to the
 last bit.  The reference uses the ``<a>/<R>`` epsilon of that time, so the
 comparison runs with the explicit opt-in ``eps_definition="a_over_R"``; the
-default geometric epsilon (``evaluate_jBS/4``) is tested in
+default epsilon and the other opt-in (``evaluate_jBS/4``) are tested in
 ``test_evaluate_jbs_eps.py``.
 
 Synthetic inputs only; no device data.  Needs OFT's pure-Python ``bootstrap``

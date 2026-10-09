@@ -58,7 +58,7 @@ def test_the_registered_features():
         "ida_ion_route", "fuse_zeff_fast_ions", "ida_ni_beam_subtraction",
         "kinetic_sampler_clips", "swb_solve_method",
         "bootstrap_convergence_override"]
-    # the geometric eps default (PR #60 E4) is a declared physics change,
+    # the eps default (PR #60 E4/E7, r_over_R_geo) is a declared physics change,
     # not an experimental feature
     assert not [k for k in X.REGISTRY if "eps" in k]
 

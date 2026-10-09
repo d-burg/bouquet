@@ -167,11 +167,15 @@ class _ExampleEq:
         return (p, self._at("f_trap", p), r, modb)
 
     def get_fsa(self, psi=None, npsi=None, psi_pad=None):
-        # OpenFUSIONToolkit main's route to the geometric eps (the default):
-        # a half-width 0.85 <a>, distinct from the opt-in <a>/<R>
+        # R_min / R_max for the default eps (r_over_R_geo) and the
+        # half_width_over_fsa_R opt-in: a half-width 0.85 <a> (distinct
+        # from the opt-in <a>/<R>) around a geometric centre outside <R>
+        # (distinct from <R>, so R_geo and <R> are distinguishable too)
         p = self._grid(psi, npsi, psi_pad)
         R, hw = self._R(p), 0.85 * (0.6 * np.sqrt(p) + 1e-3)
-        return {"psi_norm": p, "<R>": R, "R_min": R - hw, "R_max": R + hw}
+        R_geo = R * (1.0 + 0.05 * p)
+        return {"psi_norm": p, "<R>": R, "R_min": R_geo - hw,
+                "R_max": R_geo + hw}
 
     def get_q(self, psi=None, npsi=None, psi_pad=None, compute_geo=False):
         p = self._grid(psi, npsi, psi_pad)

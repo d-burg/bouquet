@@ -54,12 +54,13 @@ def test_old_archives_are_read_by_what_they_carry(tmp_path):
             sc.read_current_split_convention(d)
 
 
-@pytest.mark.parametrize("eps", ["geometric", "a_over_R"])
+@pytest.mark.parametrize(
+    "eps", ["r_over_R_geo", "half_width_over_fsa_R", "a_over_R"])
 def test_a_v4_record_of_either_eps_is_never_read_as_pressure_in_bootstrap(
         tmp_path, eps):
     """``evaluate_jBS/4`` is ONE convention (p'G separate as j_pressure, D2)
-    whatever its eps (E4): the opt-in ``a_over_R`` tag must classify exactly
-    like the default -- separate where the archive carries ``j_pressure``,
+    whatever its eps (E4/E7): each opt-in tag must classify exactly like
+    the default -- separate where the archive carries ``j_pressure``,
     never as PR #64's in-bootstrap ``/3``."""
     from bouquet.physics import evaluate_jbs_version
     v = evaluate_jbs_version(eps)

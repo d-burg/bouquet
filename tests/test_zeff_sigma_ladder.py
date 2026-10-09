@@ -139,7 +139,28 @@ class TestReaderTiers:
         psi, zeff, spread = _write_ensemble(p)
         r = read_ida(p, sigma_method="std")
         assert r.sigma_Zeff_source == "VB+CER"
+        # 6116d5f pinned the VB sample spread at rel=0.25 (64 samples).  The
+        # resolved envelope is now the VB+CER mean's, so the same strictness
+        # is kept on the quantity the reader now returns:
+        # (1) exactly the closed form, recomputed from the file's own samples
+        #     -- 1/2 sqrt(s_VB^2 + s_C^2) plus the one-sided route term;
+        with h5py.File(p, "r") as f:
+            zf_s = np.asarray(f["Zeff"][0], dtype=float)
+            ne_s = np.asarray(f["n_e"][0], dtype=float)
+            nc_s = np.asarray(f["n_12C6"][0], dtype=float)
+        zc_s = 1.0 + 30.0 * nc_s / ne_s
+        s_vb, s_c = np.std(zf_s, axis=0), np.std(zc_s, axis=0)
+        d_z = np.mean(zf_s, axis=0) - np.mean(zc_s, axis=0)
+        var_dz = s_vb ** 2 + s_c ** 2
+        expect = np.sqrt(var_dz / 4.0 + np.maximum(d_z ** 2 - var_dz, 0.0) / 4.0)
+        np.testing.assert_allclose(r.sigma_Zeff, expect, rtol=1e-10)
+        # (2) at the 6116d5f Monte-Carlo tolerance, against the fixture's
+        #     generating spreads: 8 % on Z_eff(VB), 5 % on n_C and 4 % on n_e
+        #     for Z_eff(CER) = 1 + 30 n_C/n_e (the route term is noise here).
         frac = np.median(r.sigma_Zeff / r.Zeff)
+        s_c_model = (zeff - 1.0) * np.hypot(0.05, 0.04)
+        frac_model = np.median(0.5 * np.hypot(spread * zeff, s_c_model) / zeff)
+        assert frac == pytest.approx(frac_model, rel=0.25)   # 64 samples
         # the combined envelope is TIGHTER than either route alone
         assert frac < spread
 

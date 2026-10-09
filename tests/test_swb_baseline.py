@@ -220,7 +220,7 @@ def test_edge_taper_keeps_the_channel_split(monkeypatch, swb_oft, taper, saw):
                             lambda: frozenset({"x", "jphi_fixed", "p_fixed", "jphi_saw"}))
     fac = np.clip((1.0 - x) / 0.05, 0.0, 1.0) if taper else np.ones_like(x)
     bl = types.SimpleNamespace(psi_N=x, j_inductive=j_ind, j_BS=j_bs, j_NBI=j_nbi, j_RF=j_rf,
-                               j_other=j_oth, j_sawteeth=j_st,
+                               j_other=j_oth, j_sawteeth=j_st, j_pressure=0 * x,
                                j_phi=j_ind + j_bs + j_nbi + j_rf + j_oth, li_metrics={})
     gen = types.SimpleNamespace(bootstrap_kwargs={}, swb_saw_q=1.1 if saw else None,
                                 swb_edge_taper_psi0=0.999 if taper else None)
@@ -262,13 +262,22 @@ def test_edge_taper_keeps_the_channel_split(monkeypatch, swb_oft, taper, saw):
     assert np.array_equal(bl.j_other[fac == 1.0], j_oth[fac == 1.0])   # untapered: untouched
 
 
-def test_edge_taper_is_the_swb_default(swb_oft):
+def test_edge_taper_is_opt_in(swb_oft):
+    """D4 (owner decision 2026-10-09): the swb edge taper is opt-in.  Off
+    (None, the default) is sent EXPLICITLY as taper_edge_jBS=False to a
+    toolkit that has the option -- its own default may be taper-on and a
+    solver keeps its last set_boot_ops state (review PR69 B2) -- and to a
+    toolkit without it, no key at all."""
     from bouquet.config import swb_bootstrap_kwargs
     gc = _cfg().generation
-    assert gc.swb_edge_taper_psi0 == 0.999
+    assert gc.swb_edge_taper_psi0 is None
     gc.bootstrap_kwargs = {"diagnose_bs": True}
-    assert swb_bootstrap_kwargs(gc) == {"diagnose_bs": True, "taper_edge_jBS": True,
-                                        "taper_edge_psi0": 0.999}
+    with_taper = frozenset({"diagnose_bs", "taper_edge_jBS", "taper_edge_psi0"})
+    assert swb_bootstrap_kwargs(gc, known=with_taper) == {
+        "diagnose_bs": True, "taper_edge_jBS": False}
+    assert swb_bootstrap_kwargs(gc, known=frozenset({"diagnose_bs"})) == {
+        "diagnose_bs": True}
+    gc.swb_edge_taper_psi0 = 0.999
+    assert swb_bootstrap_kwargs(gc, known=with_taper) == {
+        "diagnose_bs": True, "taper_edge_jBS": True, "taper_edge_psi0": 0.999}
     assert gc.bootstrap_kwargs == {"diagnose_bs": True}          # not mutated
-    gc.swb_edge_taper_psi0 = None
-    assert swb_bootstrap_kwargs(gc) == {"diagnose_bs": True}

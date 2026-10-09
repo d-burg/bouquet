@@ -18,15 +18,28 @@ and 405–1407 s on the legacy path with the bootstrap loop on.
 
 **Solve methods.** `GenerationConfig.solve_method` is the one switch:
 `"legacy"`, `"swb"` (OFT `solve_with_bootstrap` is the baseline and every
-draw; IMAS only) or `"engine"` (this page). It sets `imas_baseline` /
-`reconstruction_engine`, which remain as its older spellings; a
-contradicting pair is refused. `"swb"` and `"engine"` share the kinetic
-sampler (`bouquet.kinetic_sampler`), the P' edge pin and the
-separatrix-pressure offset (swb refuses `edge_pprime_pin=False` and
-`separatrix_pressure="legacy"`, which OFT's SWB cannot honour). The SWB edge
-taper is on for swb (`swb_edge_taper_psi0`, default 0.999) and off by default
-for the engine (`bootstrap_kwargs`). Known
-asymmetry: the SWB sawtooth reset (`swb_saw_*`) has no engine counterpart.
+draw; IMAS only) or `"engine"` (this page). `imas_baseline` /
+`reconstruction_engine` remain as its older spellings: with
+`solve_method=None` the method is derived from them. Nothing is rewritten at
+construction; `Bouquet.prepare_baseline()` (like the engine-dependent
+defaults) sets both fields to the method's effective values and remembers
+the user's own, so switching back (e.g. `imas_baseline` from `"swb"` to
+`"closure"`) restores the engine. A contradicting pair is refused:
+`imas_baseline="swb"` with another `solve_method`, and
+`reconstruction_engine="legacy"` with `solve_method="engine"`. `"swb"` and
+`"engine"` share the kinetic sampler (`bouquet.kinetic_sampler`), the P' edge
+pin and the separatrix-pressure offset (swb refuses `edge_pprime_pin=False`
+and `separatrix_pressure="legacy"`, which OFT's SWB cannot honour). The SWB
+edge taper is opt-in for both: swb's `swb_edge_taper_psi0` (default `None`,
+off; sent as `taper_edge_jBS=False` to a toolkit that has the option, since
+its own default may be on), the engine's `bootstrap_kwargs`. swb-only
+settings (`swb_*`, including the Ip acceptance `swb_ip_tol`, default 5e-3,
+with a warning for any solve accepted above 1e-4) never reach the engine.
+swb's bootstrap is the toolkit's SWB output converted to the field-aligned
+`kappa <j.B>` for the installed toolkit's own output convention
+(`physics._swb_jbs_to_toroidal`); its pressure-driven `p'G` is the third
+bucket `j_pressure`, archived as such. Known asymmetry: the SWB sawtooth
+reset (`swb_saw_*`) has no engine counterpart.
 The three methods share one draw loop and differ only through a draw-method
 object (`bouquet.draw_methods`); docs/draw-methods.md has the hook-by-hook
 comparison and how the legacy path is kept bit for bit.

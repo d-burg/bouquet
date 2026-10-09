@@ -19,6 +19,19 @@ from .utils import pchip_interp
 #: GS iteration cap of every swb draw solve (Bouquet.generate's DrawSolveGuard
 #: takes the larger of this and draw_solve_maxits)
 SWB_DRAW_MAXITS = 100
+#: GPR redraws of the inductive seed a draw may take to find a non-negative
+#: one; past it the draw is REFUSED (:class:`SwbSeedRedrawRefused`), never
+#: run on the unperturbed seed (review PR69 B3).
+SWB_JIND_MAX_RESAMPLES = 20
+#: The draw-rejection code of that refusal (generate_bouquet's record).
+SWB_JIND_REJECTION = "swb_jind_redraw_refused"
+
+
+class SwbSeedRedrawRefused(RuntimeError):
+    """No non-negative GPR redraw of the swb inductive seed within
+    :data:`SWB_JIND_MAX_RESAMPLES` tries: the draw is refused (and recorded
+    as :data:`SWB_JIND_REJECTION`) instead of silently keeping the
+    unperturbed seed, which would drop its j_inductive perturbation."""
 
 
 def swb_fixed_pressure(ne_eq, ni_eq, ti_eq, p_fast_eq=None, z_fast_eq=None,
@@ -95,9 +108,14 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
     jind_seed = np.asarray(jind_seed, dtype=float)
     j_seed, n_tries = jind_seed, 0
     if not _zero(sigma_jind):
-        # resample until non-negative (20 tries), else keep the seed
+        # resample until non-negative, at most SWB_JIND_MAX_RESAMPLES tries;
+        # then the draw is REFUSED, never run on the unperturbed seed
         _j0 = jind_seed[0]
-        for n_tries in range(1, 21):
+        if not (np.isfinite(_j0) and _j0 > 0.0):
+            raise SwbSeedRedrawRefused(
+                f"swb inductive seed has seed[0] = {_j0!r}: its GPR redraw "
+                "is normalised by it and cannot be drawn")
+        for n_tries in range(1, SWB_JIND_MAX_RESAMPLES + 1):
             _c = generate_perturbed_GPR(
                 psi_N, jind_seed / _j0,
                 sigma_profile=np.asarray(sigma_jind, dtype=float) / _j0,
@@ -105,6 +123,15 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
             if np.all(_c >= 0.0):
                 j_seed = _c
                 break
+        else:
+            _neg = int(np.sum(jind_seed < 0.0))
+            raise SwbSeedRedrawRefused(
+                f"no non-negative GPR redraw of the swb inductive seed in "
+                f"{SWB_JIND_MAX_RESAMPLES} tries"
+                + (f" (the seed itself is negative on {_neg} node(s))"
+                   if _neg else "")
+                + "; the draw is refused rather than run on the unperturbed "
+                "seed")
 
     kin = dict(ne=ne_eq, te=te_eq, ni=ni_eq, ti=ti_eq, Zeff=Zeff,
                p_fixed=swb_fixed_pressure(
@@ -113,9 +140,13 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
                    None if z_fast is None else _kin_to_eq(np.asarray(z_fast, dtype=float)),
                    Z_imp))
     res = swb_recipe(kin, j_seed)
+    # the recipe returns bouquet's split (Bouquet._swb_split): j_BS the
+    # field-aligned bootstrap, j_pressure the third bucket, SWB's own
+    # inductive (alpha's) as swb_raw_j_inductive
     j_ind = np.asarray(res["j_inductive"], dtype=float)
     j_bs = np.asarray(res["isolated_j_BS"], dtype=float)
-    alpha = float(np.dot(j_ind, j_seed) / np.dot(j_seed, j_seed))
+    j_raw = np.asarray(res.get("swb_raw_j_inductive", j_ind), dtype=float)
+    alpha = float(np.dot(j_raw, j_seed) / np.dot(j_seed, j_seed))
     print(f"  [swb-draw] alpha={alpha:.5f}"
           + ("" if j_seed is jind_seed else f" (j_ind GPR, {n_tries} tries)")
           + (" [sigma=0 kinetics]" if _kin_sigma0 else ""))
@@ -131,6 +162,9 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
         "aux": aux_out,
         "swb_alpha": alpha,
         "jind_resamples": int(n_tries),
+        "j_pressure": (None if res.get("j_pressure") is None
+                       else np.asarray(res["j_pressure"], dtype=float)),
+        "swb_ip_rel_err": res.get("ip_rel_err"),
         # OFT's SWB solves with pax = p[0] - p[-1]: the separatrix pressure
         # the written g-file adds back (generate_bouquet's p_sep_applied)
         "edge_pressure": {"p_sep_applied": float(
@@ -149,6 +183,24 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
             np.asarray(res["total_j_phi"], dtype=float), diagnostics)
 
 
+def _write_current_split(header, scan_key, count, j_pressure):
+    """The swb split's third bucket on one archived group (a draw, or
+    ``_baseline`` for ``count`` None): ``j_pressure`` and
+    ``current_split_convention = "pressure_separate"`` (schema; owner
+    decision D2).  Nothing when the draw carried none (a recipe that did not
+    split)."""
+    if j_pressure is None:
+        return
+    import h5py
+    from .schema import write_current_split
+    from .utils import _group_path, _scan_key
+    bkey = _scan_key(scan_key)
+    path = (_group_path(scan_key, count) if count is not None
+            else (f"scan/{bkey}/_baseline" if bkey is not None else "_baseline"))
+    with h5py.File(f"{header}.h5", "a") as hf:
+        write_current_split(hf[path], j_pressure)
+
+
 class SwbDraws(DrawMethod):
     """``solve_method="swb"``: every draw one SWB solve (:func:`swb_draw`),
     the baseline's solve B with resampled kinetics and a GPR redraw of the
@@ -163,12 +215,20 @@ class SwbDraws(DrawMethod):
     iso_update = False
     homotopy = False
 
-    def __init__(self, recipe, jind_seed, sigma_jind, *, stamp=None):
+    def __init__(self, recipe, jind_seed, sigma_jind, *, stamp=None,
+                 j_pressure=None):
         #: the per-draw solve ``recipe(kin, j_seed)``: solve B's recipe
         self.recipe = recipe
         self.jind_seed = np.asarray(jind_seed, dtype=float)
         #: GPR sigma of the inductive seed, in seed units
         self.sigma_jind = np.asarray(sigma_jind, dtype=float)
+        if np.any(self.sigma_jind) and not self.jind_seed[0] > 0.0:
+            raise ValueError(
+                f"swb: the inductive seed has seed[0] = {self.jind_seed[0]!r} "
+                "with a non-zero sigma_jphi: its GPR redraw is normalised by "
+                "it -- every draw would be refused")
+        #: the baseline's (solve B's) j_pressure, archived on _baseline
+        self.j_pressure = j_pressure
         #: the attrs stamped on _baseline (bouquet.swb.build_swb_context)
         self.stamp = dict(stamp or {})
 
@@ -204,10 +264,18 @@ class SwbDraws(DrawMethod):
         return (_coil_drift_pct(cur, baseline_coils), -1, float("nan"),
                 float("nan"))
 
+    def rejection_reason(self, exc, stage):
+        if isinstance(exc, SwbSeedRedrawRefused):
+            return SWB_JIND_REJECTION
+        return super().rejection_reason(exc, stage)
+
     def store_draw(self, header, count, scan_key, diagnostics):
         from .utils import stamp_group_attrs
+        _write_current_split(header, scan_key, count,
+                             diagnostics.get("j_pressure"))
         stamp_group_attrs(header, scan_key, count, {
             "swb_alpha": diagnostics.get("swb_alpha"),
+            "swb_ip_rel_err": diagnostics.get("swb_ip_rel_err"),
             "swb_jind_resamples": diagnostics.get("jind_resamples"),
             "swb_j_saw": diagnostics.get("j_saw"),
             "swb_saw_rho_m": diagnostics.get("saw_rho_m"),
@@ -233,6 +301,7 @@ class SwbDraws(DrawMethod):
 
     def store_baseline(self, header, scan_key, baseline):
         from .utils import stamp_group_attrs
+        _write_current_split(header, scan_key, None, self.j_pressure)
         stamp_group_attrs(header, scan_key, None, self.stamp)
 
     @classmethod

@@ -133,6 +133,29 @@ class _GS:
     def get_stats(self, **k): return {"l_i": 0.72}
     def coil_reg_term(self, coils, target=0.0, weight=1.0): return (coils, target, weight)
 
+    # flux-surface primitives the swb split reads (physics._swb_jbs_to_toroidal
+    # / swb_pressure_term): a zero p', so the pressure-driven bucket is zero
+    # and the toolkit's (TokaMaker-jphi) bootstrap passes through unchanged
+    @staticmethod
+    def _p(psi=None, npsi=None, psi_pad=None):
+        return (np.asarray(psi, float) if psi is not None
+                else np.linspace(psi_pad, 1.0 - psi_pad, npsi))
+
+    def get_profiles(self, psi=None, npsi=None, psi_pad=None):
+        p = self._p(psi, npsi, psi_pad)
+        return p, 3.4 + 0 * p, 0 * p, 0 * p, 0 * p
+
+    def get_q(self, psi=None, npsi=None, psi_pad=None, **k):
+        p = self._p(psi, npsi, psi_pad)
+        return p, 1.0 + p, {"<R>": 1.7 + 0 * p, "<1/R>": 0.6 + 0 * p}, None, None, None
+
+    def sauter_fc(self, psi=None, npsi=None, psi_pad=None, **k):
+        p = self._p(psi, npsi, psi_pad)
+        return p, 0.5 + 0 * p, {}, {"<|B|>": 2.0 + 0 * p, "<|B|^2>": 4.1 + 0 * p}
+
+    def get_torflux_map(self, x, inverse=False):
+        return (np.asarray(x, float),)
+
 
 def _dj(x):
     """An Ip-neutral-looking reset current (shape only matters here)."""
@@ -170,7 +193,7 @@ def fake_swb(monkeypatch, saw_oft):
     return calls
 
 
-_METHODS = ("_swb_source_split", "_swb_saw_kwargs", "_swb_solve", "_swb_state",
+_METHODS = ("_swb_source_split", "_swb_saw_kwargs", "_swb_solve", "_swb_split", "_swb_state",
             "_swb_imas_baseline", "_verify_sigma0_swb", "_zeff_eq")
 
 
@@ -183,6 +206,7 @@ def _run(**gen):
     bl = types.SimpleNamespace(
         psi_N=x, j_inductive=j_ind, j_BS=j_bs, j_NBI=j_nbi, j_RF=j_rf,
         j_other=j_fus + j_saw, j_sawteeth=j_saw, Ip_target=1.0e6, li_metrics={},
+        j_pressure=0 * x,
         j_phi=j_ind + j_bs + j_nbi + j_rf + j_fus + j_saw, coord="psi_n",
         psi_N_kinetic=x, ne=1e19 + 0 * x, te=1e3 + 0 * x, ni=1e19 + 0 * x,
         ti=1e3 + 0 * x, Zeff=1.5 + 0 * x, p_fast=None)
@@ -394,3 +418,115 @@ def test_saw_map_check_taper():
     res["j_saw"] = jsaw_in
     assert swb_mod._swb_saw_map_check(res, jsaw_in, jf_in)[1]
     assert swb_mod._swb_saw_map_check(dict(res, saw_n_dips=2), jsaw_in, jf_in) == (None, False)
+
+
+# ---- review PR69 B1/B3 and the swb split's third bucket (D2) ----------------
+def test_ip_acceptance_is_the_config_field_and_warns_above_1e4(fake_swb):
+    """swb_ip_tol (default 5e-3, owner decision E6 pending) accepts; a solve
+    accepted above SWB_IP_WARN = 1e-4 warns; beyond the tol it raises; each
+    solve's own error is recorded."""
+    ns = _run()
+    ns._swb_imas_baseline()
+    assert ns.baseline.ip_closure["ip_rel_err"] == 0.0
+    assert ns.baseline.ip_closure["swb_ip_tol"] == 5e-3
+    ns.mygs.ip = 1.0e6 * (1.0 + 3e-3)
+    with pytest.warns(RuntimeWarning, match="above 0.0001"):
+        res = ns._swb_solve(ns._swb_baseline_kinetics(),
+                            ns.baseline.swb_seed_profile)
+    assert res["ip_rel_err"] == pytest.approx(3e-3, rel=1e-9)
+    ns.mygs.ip = 1.0e6 * (1.0 + 6e-3)
+    with pytest.raises(RuntimeError, match="swb_ip_tol"):
+        ns._swb_solve(ns._swb_baseline_kinetics(), ns.baseline.swb_seed_profile)
+    ns2 = _run(swb_ip_tol=1e-2)
+    ns2._swb_imas_baseline()
+    ns2.mygs.ip = 1.0e6 * (1.0 + 6e-3)
+    with pytest.warns(RuntimeWarning):
+        ns2._swb_solve(ns2._swb_baseline_kinetics(),
+                       ns2.baseline.swb_seed_profile)
+    with pytest.raises(ValueError, match="swb_ip_tol"):
+        GenerationConfig(imas_baseline="swb", swb_ip_tol=0.0)
+
+
+class _PGS(_GS):
+    """_GS with a non-zero p' (positive jphi), so p'G is in play."""
+
+    def get_profiles(self, psi=None, npsi=None, psi_pad=None):
+        p = self._p(psi, npsi, psi_pad)
+        return p, 3.4 + 0 * p, 0.02 + 0 * p, 0 * p, 2.0e5 * (1.0 - p)
+
+
+def test_the_split_takes_the_pressure_term_off_a_toroidal_swb(fake_swb):
+    """A toolkit whose SWB takes x (TokaMaker-jphi output, kappa<j.B> + p'G):
+    the archived j_BS is SWB's minus p'G, j_pressure is p'G, and the split
+    still sums to SWB's total exactly (D2)."""
+    from bouquet.physics import swb_pressure_term
+    ns = _run()
+    ns.mygs = _PGS()
+    ns._swb_imas_baseline()
+    bl = ns.baseline
+    x = bl.psi_N
+    P = swb_pressure_term(ns.mygs, x.size, 1e-3, x)
+    assert np.max(np.abs(P)) > 1e3
+    np.testing.assert_allclose(bl.j_pressure, P, rtol=1e-14)
+    raw_bs = 1e5 * (1.0 - x) ** 2                      # the fake's isolated_j_BS
+    np.testing.assert_allclose(bl.j_BS, raw_bs - P, rtol=1e-12, atol=1e-9)
+    pk = np.max(np.abs(bl.j_phi))
+    np.testing.assert_allclose(
+        bl.j_inductive + bl.j_BS + bl.j_pressure + bl.j_NBI + bl.j_RF
+        + bl.j_other, bl.j_phi, rtol=0, atol=1e-12 * pk)
+    assert bl.swb_baseline["j_pressure"] is not None
+    # the sigma=0 draw repeats it, j_pressure included
+    out = ns._verify_sigma0_swb()
+    assert out["passed"] and out["swb_dev"]["j_pressure"] == 0.0
+
+
+def test_isolate_edge_is_refused_with_a_toroidal_swb(fake_swb):
+    ns = _run(isolate_edge_jBS=True)
+    with pytest.raises(RuntimeError, match="isolate_edge_jBS"):
+        ns._swb_imas_baseline()
+
+
+def test_a_negative_seed_redraw_refuses_the_draw():
+    """Review PR69 B3: after SWB_JIND_MAX_RESAMPLES non-positive GPR redraws
+    the draw is REFUSED (rejection code swb_jind_redraw_refused), never run
+    on the unperturbed seed."""
+    x = np.linspace(0.0, 1.0, 17)
+    prof = 1.0 - x ** 2 + 0.1
+    seed = np.linspace(1.0e6, -1.0e4, x.size)          # negative at the edge
+    calls = []
+
+    def recipe(kin, j_seed):
+        calls.append(j_seed)
+        return {"j_inductive": j_seed, "isolated_j_BS": 0 * x,
+                "total_j_phi": j_seed}
+    with pytest.raises(SD.SwbSeedRedrawRefused, match="refused") as ei:
+        SD.swb_draw(None, x, None, prof, prof, prof, prof, None, None, None,
+                    None, 1e-3 * seed, 0.5, 0.4, 0.25, 1.5 + 0 * x, seed,
+                    recipe, coord="psi_n", rng=0, p_thresh=0.05)
+    assert not calls                                   # never solved
+    assert "negative on" in str(ei.value)
+    m = SD.SwbDraws(recipe, np.abs(seed) + 1.0, 1e-3 * np.abs(seed))
+    assert m.rejection_reason(ei.value, "perturb") == SD.SWB_JIND_REJECTION
+    assert m.rejection_reason(RuntimeError("x"), "perturb") == "perturb_failed"
+    with pytest.raises(ValueError, match="seed\\[0\\]"):
+        SD.SwbDraws(recipe, np.r_[0.0, seed[1:]], 1e-3 * np.abs(seed))
+
+
+def test_the_swb_split_is_archived_as_the_third_bucket(tmp_path):
+    h5py = pytest.importorskip("h5py")
+    from bouquet.schema import (CURRENT_SPLIT_CONVENTION_ATTR,
+                                SPLIT_PRESSURE_SEPARATE)
+    hdr = str(tmp_path / "a")
+    with h5py.File(hdr + ".h5", "w") as hf:
+        hf.create_group("scan/k/_baseline")
+        hf.create_group("scan/k/3")
+    P = np.linspace(1.0, 2.0, 5)
+    m = SD.SwbDraws(lambda k, s: None, np.ones(5), np.zeros(5), j_pressure=P)
+    m.store_baseline(hdr, "k", None)
+    m.store_draw(hdr, 3, "k", {"j_pressure": 2 * P, "swb_ip_rel_err": 1e-5})
+    with h5py.File(hdr + ".h5", "r") as hf:
+        for path, exp in (("scan/k/_baseline", P), ("scan/k/3", 2 * P)):
+            g = hf[path]
+            assert g.attrs[CURRENT_SPLIT_CONVENTION_ATTR] == SPLIT_PRESSURE_SEPARATE
+            np.testing.assert_array_equal(g["j_pressure"][()], exp)
+        assert hf["scan/k/3"].attrs["swb_ip_rel_err"] == 1e-5

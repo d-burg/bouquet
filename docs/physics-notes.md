@@ -276,6 +276,19 @@ geometric ε by ×1.18 at ψ_N 0.1, ×1.20 at 0.5, ×1.32 at 0.9, ×1.38 at 0.95
 −0.46 %. (`get_fsa`'s own `⟨R⟩` differs from `sauter_fc`'s by 2.9e-6 relative
 on that equilibrium -- two traces -- which is why the `sauter_fc` `⟨R⟩` is the
 denominator.)
+*On real data the change is about ten times larger in I_BS.* On real H-mode
+pedestals (strongly shaped surfaces) I_BS moves about −4 to −5 % and pedestal
+j_BS about −20 % at ψ_N ≈ 0.98 (about −8 to −11 % at 0.95), with l_i(3) about
++0.5 % and q0 about +0.8 % (unified-engine reconstructions, kinetics otherwise
+unchanged; with `eps_definition="a_over_R"` the same runs reproduce the
+previous results to ≤ 0.1 % in I_BS); on the synthetic D3D-like case −0.5 %
+and −8 %. The reason is the shaping: the geometric ε uses the surface's
+horizontal half-width, `⟨a⟩` the averaged distance from the axis, which on an
+elongated surface includes its longer vertical extent. `⟨a⟩/⟨R⟩` therefore
+exceeds the geometric ε, increasingly toward the edge where elongation and
+triangularity are largest, so ν* rises most in the pedestal; how far j_BS
+then falls depends on how strongly shaped the surfaces are and how
+collisional the pedestal is.
 
 On a uniform grid it reproduces SWB's first-pass `⟨j·B⟩` **bit for bit** (on a
 build whose SWB accepts `psi_N=`, with the ε that build's SWB uses). Grids whose first intervals are finer than

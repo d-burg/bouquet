@@ -70,11 +70,23 @@
   `evaluate_jbs_version("a_over_R")`, which names `OPT-IN eps = <a>/<R>` and
   is otherwise the same `/4` convention (p′G separate).
   `diag["eps_definition"]`/`["eps_route"]` per evaluation.
-- **What moves** (synthetic D3D-like, same equilibrium and kinetics): ν* ×1.27
-  at ψ_N 0.1 rising to ×1.72 at 0.98 (`ν* ∝ ε^-3/2`); j_BS +0.2 % core, +2.1 %
-  at 0.9, −1.0 % at 0.95, −8.2 % at 0.98; peak −2.0 %; I_BS −0.46 %. Every
-  default-path bootstrap (unified engine and legacy loop) changes accordingly;
-  goldens that pin `evaluate_jBS` output need regeneration.
+- **What moves.** On real H-mode pedestals (strongly shaped surfaces) I_BS
+  moves about −4 to −5 % and pedestal j_BS about −20 % at ψ_N ≈ 0.98 (about
+  −8 to −11 % at 0.95), with l_i(3) about +0.5 % and q0 about +0.8 %, on
+  unified-engine reconstructions whose kinetics are otherwise unchanged; on
+  the synthetic D3D-like case −0.5 % and −8 %.  The reason is the shaping:
+  the geometric ε uses the surface's HORIZONTAL half-width, `⟨a⟩` the
+  averaged distance from the axis, which on an elongated surface includes
+  its longer vertical extent; so `⟨a⟩/⟨R⟩` exceeds the geometric ε, by more
+  toward the edge where elongation and triangularity are largest, and
+  `ν* ∝ ε^-3/2` rises most in the pedestal.  How far j_BS moves depends on
+  how strongly shaped the surfaces are and how collisional the pedestal is,
+  which is why the synthetic case understates it about tenfold in I_BS.
+  Synthetic D3D-like detail (same equilibrium and kinetics): ν* ×1.27 at
+  ψ_N 0.1 rising to ×1.72 at 0.98; j_BS +0.2 % core, +2.1 % at 0.9, −1.0 %
+  at 0.95, −8.2 % at 0.98; peak −2.0 %; I_BS −0.46 %. Every default-path
+  bootstrap (unified engine and legacy loop) changes accordingly; goldens
+  that pin `evaluate_jBS` output need regeneration.
   [physics-notes.md](physics-notes.md#the-evaluator-physicsevaluate_jbs).
 
 ### `bootstrap_kwargs` (PR #60), hardened

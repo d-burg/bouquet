@@ -702,12 +702,15 @@ class TestConfigSurface:
         old test passed against a file with the guard deleted and a comment
         left behind.
         """
-        from bouquet.config import BouquetConfig, ImasSource, SolverConfig
+        from bouquet.config import (BouquetConfig, GenerationConfig,
+                                    ImasSource, SolverConfig)
         from bouquet.run import Bouquet
 
         cfg = BouquetConfig(source=ImasSource(ids_path="unused.json"),
                             solver=SolverConfig(mesh_path="unused.h5"),
-                            output_header="t")
+                            output_header="t",
+                            generation=GenerationConfig(
+                                reconstruction_engine="legacy"))
         cfg.generation.jBS_baseline_mode = "ohmic"
         cfg.generation.perturb_jind_in_anchor = True
         cfg.generation.closure_channel = "structured"
@@ -738,7 +741,8 @@ def _probe(outdir):
                                li_closure_geometry, li_value)
 
     b = bq.Bouquet.from_geqdsk(_GEQ, profiles=_PF, mesh=_MESH, nthreads=1,
-                               header=os.path.join(outdir, "li"), n_draws=1)
+                               header=os.path.join(outdir, "li"), n_draws=1,
+                               reconstruction_engine="legacy")
     b.setup_solver()
     bl = b.prepare_baseline()
     mygs = b.mygs

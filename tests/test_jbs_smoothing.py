@@ -64,8 +64,8 @@ def test_classifier_insensitive_to_axis_treatment():
     numerically fragile axis point -- raw and axis-smoothed profiles must
     classify IDENTICALLY.  (Before the hardening, spike[0] was the height
     bar: the smoothed profile's lifted axis hid comparable-height edge peaks
-    -- the 153072@3415 L_mode flip -- and raw-axis jitter flipped
-    weak-pedestal shots like 204441@5307.)"""
+    -- an L_mode flip on a real discharge -- and raw-axis jitter flipped
+    weak-pedestal discharges.)"""
     from bouquet.TokaMaker_interface import classify_jphi_profile
 
     psi = np.linspace(0.0, 1.0, 129)
@@ -86,7 +86,7 @@ def test_classifier_insensitive_to_axis_treatment():
 
 
 def test_weak_pedestal_peak_detected_via_valley():
-    """The 204441@5307 geometry: pedestal peak (~0.108 MA/m^2) comparable to
+    """A weak-pedestal geometry: pedestal peak (~0.108 MA/m^2) comparable to
     the collapsed axis point (~0.110), but prominent above the pedestal-foot
     VALLEY (~0.05).  The valley reference must detect it as a real Sauter
     edge spike (metrics carry its position) instead of falling through to
@@ -110,7 +110,7 @@ def test_core_hump_only_profile_is_not_L_mode():
     """A Sauter profile with real bootstrap current but no DETECTED edge peak
     must NOT classify as L_mode: that zeroes the whole split and
     double-counts the bootstrap when the per-draw SWB recompute adds the
-    profile back. (Observed on 204441@5307, whose weak pedestal peak sits
+    profile back. (Observed on a weak-pedestal discharge, whose peak sits
     within ~2 permille of the height threshold -- the fragile collapsed axis
     point -- so detection flips on run-to-run jitter.) It should fall through
     to Lmode_like_jphi (full profile kept in the split). A truly negligible
@@ -136,7 +136,7 @@ def test_pchip_regrid_removes_staircase():
     (2) clamps to endpoint values outside the source range,
     (3) its derivative is dramatically smoother than the linear regrid's --
     the linear version's slope kinks at every kinetic knot are what Sauter
-    inherited as the stepped j_BS on 204441@5307."""
+    inherited as the stepped j_BS on a real weak-pedestal discharge."""
     from bouquet.utils import pchip_interp
     from scipy.interpolate import PchipInterpolator
 

@@ -103,7 +103,7 @@ def test_apply_true_without_a_prior_chi2_verdict_is_silent(tmp_path):
 # ---------------------------------------------------------------------------
 
 def _cfg(source_kind):
-    from bouquet.config import (BouquetConfig, ImasSource,
+    from bouquet.config import (BouquetConfig, GenerationConfig, ImasSource,
                                 ReconstructionSource, SolverConfig)
     if source_kind == "imas":
         src = ImasSource(ids_path="unused.json")
@@ -111,7 +111,9 @@ def _cfg(source_kind):
         src = ReconstructionSource(geqdsk_path="unused.geqdsk",
                                    profiles_path="unused.cdf")
     cfg = BouquetConfig(source=src, solver=SolverConfig(mesh_path="unused.h5"),
-                        output_header="t")
+                        output_header="t",
+                        generation=GenerationConfig(
+                            reconstruction_engine="legacy"))
     if source_kind == "imas":
         cfg.generation.perturb_jind_in_anchor = True   # the IMAS workflow lock
     return cfg
@@ -140,6 +142,11 @@ def test_channel_without_recalculate_jbs_is_refused():
     cfg = _cfg("imas")
     cfg.generation.jBS_baseline_mode = "ohmic"
     cfg.generation.recalculate_j_BS = False
+    # recalculate_j_BS=False is only a valid setting with the self-consistent
+    # bootstrap loop off (the loop's own guard refuses the pair outright,
+    # before the workflow problems are collected); the subject here is the
+    # closure_channel refusal, so construct an otherwise-valid config.
+    cfg.generation.jbs_self_consistent = False
     cfg.generation.closure_channel = "structured"
     with pytest.raises(ValueError, match="recalculate_j_BS=True"):
         Bouquet(cfg)._validate_workflow()
@@ -184,7 +191,8 @@ def test_baseline_meta_is_the_last_generate_bouquet_parameter():
     callers; a new optional parameter must be appended, never inserted."""
     import inspect
     from bouquet.TokaMaker_interface import generate_bouquet
-    params = list(inspect.signature(generate_bouquet).parameters)
+    params = [n for n, p in inspect.signature(generate_bouquet).parameters.items()
+              if p.kind is not inspect.Parameter.VAR_KEYWORD]   # **kwargs is last by syntax
     # every parameter added since 1.3.1 sits after the positional-capable
     # options, in the order it was added
     assert params[-3:] == ["baseline_meta", "on_inspec", "stop_check"]

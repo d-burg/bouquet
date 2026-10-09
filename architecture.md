@@ -72,21 +72,17 @@ depends on where the baseline came from:
 `io/imas.py` docstrings, summarized here because this document is the
 assumption catalogue):
 
-* **Toroidal-current authority**: the IDS `j_tor` is taken as the total
-  `j_phi`; the inductive component is the residual
-  `j_tor − j_BS − j_NBI − j_RF`, so the decomposition sums exactly and Ip
-  is preserved.
-* **Parallel→toroidal conversion**: IMAS/neoclassical currents are FSA
-  *parallel* densities `<j·B>/B0`. Components are converted to bouquet's
-  toroidal convention `<j_phi/R>/<1/R>` by the per-surface ratio
-  `c = j_tor_total / j_parallel_total` when the source carries both totals
-  (FUSE does), or by the field-aligned analytic projection
-  `j_tor = <j·B> F <1/R²> / (<B²> <1/R>)` otherwise. The same analytic
-  projection corrects the per-draw `solve_with_bootstrap` output (which is
-  `<j_BS·B>` crudely divided by `B_phi(<R>)`); the net factor
-  `1/(<R><1/R>)` is a ~5% reduction at a DIII-D-like pedestal.
-  References: Redl et al., Phys. Plasmas 28, 022502 (2021), Eq. (2);
-  Wesson, *Tokamaks*, eqn 3.3.6.
+* **Toroidal-current authority**: the IDS `j_tor` (converted to TokaMaker
+  `jphi`) is taken as the total `j_phi`; the inductive component is the
+  residual `j_phi − j_BS − j_NBI − j_RF`, so the decomposition sums exactly.
+* **Current conventions** (`docs/current-conventions.md`): bouquet arrays are
+  TokaMaker `jphi = ⟨j_φ⟩`; IMAS `j_tor = ⟨j_φ/R⟩/⟨1/R⟩` and its parallel
+  currents are `⟨J·B⟩/B0`. The reader converts exactly with the FUSE
+  equilibrium's own `gm1/gm5/gm8/gm9/f/dpressure_dpsi` (averages a producer
+  omits are traced from `profiles_2d.psi`): the total via (A5),
+  each component's field-aligned part `F⟨1/R⟩⟨J·B⟩/⟨B²⟩`, with the pressure
+  term `p′(⟨R⟩ − F²⟨1/R⟩/⟨B²⟩)` assigned to the bootstrap (as IMAS.jl does).
+  `solve_with_bootstrap` output is already TokaMaker `jphi`.
 * **Fast-pressure isotropization**: anisotropic fast-ion pressure
   (`pressure_fast_perpendicular` / `_parallel`) is reduced to the scalar
   GS pressure via `tr(P)/3 = (2 p_perp + p_par)/3` by default ("trace";
@@ -451,6 +447,22 @@ It can be less accurate for:
 - Strong rotation
 - Non-Maxwellian distributions
 - Very steep edge pedestals
+
+**Implementation note.** bouquet evaluates the bootstrap with the Redl et al.
+(2021) fit (OFT's `redl_bootstrap`, `formula_form='jboot1'`), the successor of
+the Sauter fit with the same inputs. Default
+(`GenerationConfig.jbs_self_consistent=True`): `physics.evaluate_jBS` on the
+delivered equilibrium and the caller's own ψ_N grid, iterated to
+self-consistency with the closure and the GS solve (`bouquet/jbs_loop.py`;
+joint under-relaxation of the bootstrap and the solved current, convergence on
+two consecutive passes, hard failure or a flagged slice). Legacy
+(`jbs_self_consistent=False`): once per baseline and per draw through OFT's
+`solve_with_bootstrap` on its own auxiliary equilibrium, then frozen. The
+archive records which one ran (the schema-v3 `jbs_loop` block); see
+[physics-notes.md](docs/physics-notes.md#self-consistent-bootstrap-jbs_self_consistent).
+
+**Assumption (both paths):** the kinetic profiles are held at their ψ_N labels
+while the current redistributes; the Redl drive is main-ion + electron only.
 
 ### 5.2 Inductive Current
 

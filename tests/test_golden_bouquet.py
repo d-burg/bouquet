@@ -26,6 +26,8 @@ import pytest
 
 import h5py
 
+import _harness
+
 import bouquet
 from bouquet import (filter_coil_currents, filter_boundaries,
                      select_indices, read_filter_flags, export_filtered)
@@ -101,22 +103,94 @@ def test_geqdsks_retained_per_manifest(manifest):
 #  per-draw scalar golden values
 # ---------------------------------------------------------------------------
 def test_draw_scalars_match_manifest(manifest, tol):
+    prov = _harness.golden_provenance_banner(_SLIM)
     with h5py.File(_SLIM, "r") as hf:
         for bkey, sv, entry in _iter_scans(manifest):
             prefix = f"scan/{bkey}/" if sv is not None else ""
             for sidx, exp in entry["draws"].items():
                 a = hf[f"{prefix}{sidx}"].attrs
+                where = f"draw {sidx}\n{prov}"
                 assert a["l_i(1)"] == pytest.approx(
-                    exp["l_i(1)"], abs=tol["l_i_atol"])
+                    exp["l_i(1)"], abs=tol["l_i_atol"]), where
                 assert a["l_i(3)"] == pytest.approx(
-                    exp["l_i(3)"], abs=tol["l_i_atol"])
+                    exp["l_i(3)"], abs=tol["l_i_atol"]), where
                 assert a["Ip"] == pytest.approx(
-                    exp["Ip"], rel=tol["Ip_rtol"])
+                    exp["Ip"], rel=tol["Ip_rtol"]), where
                 assert a["max_F_drift_pct"] == pytest.approx(
-                    exp["max_F_drift_pct"], abs=tol["drift_atol"])
+                    exp["max_F_drift_pct"], abs=tol["drift_atol"]), where
                 assert a["max_VSC_drift_pct"] == pytest.approx(
-                    exp["max_VSC_drift_pct"], abs=tol["drift_atol"])
-                assert bool(a["in_spec"]) == exp["in_spec"]
+                    exp["max_VSC_drift_pct"], abs=tol["drift_atol"]), where
+                assert bool(a["in_spec"]) == exp["in_spec"], where
+
+
+def test_the_fixture_says_what_built_it(manifest):
+    """A golden with no provenance cannot be told apart from a current one.
+
+    That is not a hypothetical: the 2026-08 fixture recorded its bouquet
+    version and nothing about the solver, and when an OFT bootstrap change
+    moved l_i(1) by 3.7 % the failure was indistinguishable from a bouquet
+    regression until the two were bisected by hand.  The generator now stamps
+    the OFT build (stated commit/branch where given, content digests always,
+    plus the feature probes that separate the OFT lines) into both the fixture
+    and the manifest; this asserts it survived.
+    """
+    prov = _harness.golden_provenance(_SLIM)
+    assert prov, (
+        "the slim fixture carries no prov_* attrs -- regenerate it with "
+        "tests/golden/make_golden_fixture.py so the next staleness is "
+        "diagnosable")
+    for key in ("prov_created", "prov_bouquet_version", "prov_oft_available"):
+        assert key in prov, f"missing {key}; have {sorted(prov)}"
+    assert "provenance" in manifest, "the manifest lost its provenance block"
+    oft = manifest["provenance"]["oft"]
+    assert oft.get("available"), \
+        "the fixture was built without OFT importable -- it cannot be a " \
+        "record of a solver run"
+    assert oft.get("sources_sha256") or oft.get("library_sha256"), \
+        "no measured OFT identity was recorded (a stated commit alone can " \
+        "be wrong about the build that actually ran)"
+
+
+def test_the_fixture_is_a_self_consistent_bootstrap_run():
+    """The golden records the DEFAULT pipeline: the self-consistent bootstrap
+    loop (jbs_self_consistent=True).  Its stored config says so, the baseline
+    and every draw carry a converged schema-v3 jbs_loop block, and no loop
+    record names a filesystem path (a public fixture)."""
+    from bouquet.utils import load_config
+    from bouquet.schema import read_jbs_loop
+    import sys
+    sys.path.insert(0, _GOLDEN_DIR)
+    import make_golden_fixture as mgf
+    cfg = load_config(_SLIM, scan_key=0)
+    assert cfg.generation.jbs_self_consistent is True
+    with h5py.File(_SLIM, "r") as hf:
+        g = hf["scan/0"]
+        bl = read_jbs_loop(g["_baseline"])
+        assert bl is not None and bl["converged"], bl
+        draws = [k for k in g if k.isdigit()]
+        assert draws
+        for k in draws:
+            rec = read_jbs_loop(g[k])
+            assert rec is not None, f"draw {k} carries no jbs_loop block"
+            assert bool(g[k].attrs["jbs_converged"]), f"draw {k}: {rec}"
+    mgf.assert_no_filesystem_paths(_SLIM)
+
+
+def test_the_fixture_archives_the_input_current(manifest):
+    """The systematics replay feeds ``_baseline/j_phi`` back as the input of
+    its baseline solve, so the fixture must archive the INPUT current
+    (``regenerate_golden_run.py``, ``store_achieved_jphi=False``).  A fixture
+    regenerated through plain ``Bouquet.generate()`` archives the ACHIEVED
+    current instead and fails mode 1 on the coils (tests/golden/README.md,
+    "mode-1 coil drift").  The archive stamp, the fixture's provenance and the
+    manifest must all say "input"."""
+    with h5py.File(_SLIM, "r") as hf:
+        assert hf.attrs.get("golden_jphi_archival") == "input", \
+            dict(hf.attrs).get("golden_jphi_archival")
+    prov = _harness.golden_provenance(_SLIM)
+    assert prov.get("prov_generator_args_jphi_archival") == "input", prov
+    assert manifest["provenance"]["generator_args"].get(
+        "jphi_archival") == "input", manifest["provenance"]["generator_args"]
 
 
 def test_coil_currents_match_manifest(manifest, tol):
@@ -247,18 +321,32 @@ def test_geqdsk_separatrix_is_coarse(manifest):
 #  filtering behaviour on golden data
 # ---------------------------------------------------------------------------
 def test_coil_filter_reproduces_in_spec(tmp_path, manifest):
-    """The postprocess coil filter (stored thresholds) == stored in_spec."""
+    """The postprocess coil filter (stored thresholds) AND the engine's
+    post-hoc draw band == stored in_spec.
+
+    Since 2026-10 the fixture is a unified-engine run, whose archived
+    ``in_spec`` is the coil verdict AND the post-hoc l_i band
+    (``passes_draw_band``, ``bouquet.engine_draws``; one of
+    ``filtering._FILTER_FLAGS``).  A legacy draw carries no band flag, for
+    which this is the coil verdict alone, as before."""
     work = str(tmp_path / "work.h5")
     shutil.copy(_SLIM, work)
     summ, _ = filter_coil_currents(work, apply=True, plot=False)
     flags = read_filter_flags(work)
+    n_spec = {}
     for sv, drect in flags.items():
+        n_coil = 0
         for i, rec in drect.items():
+            n_coil += bool(rec["passes_coil_filter"])
             if "in_spec" in rec:
-                assert rec["passes_coil_filter"] == rec["in_spec"]
+                assert rec["in_spec"] == (
+                    rec["passes_coil_filter"]
+                    and rec.get("passes_draw_band", True)), (sv, i, rec)
+        assert summ[sv]["n_pass"] == n_coil
+        n_spec[sv] = sum(bool(r.get("in_spec")) for r in drect.values())
     # counts line up with the manifest
     for bkey, sv, entry in _iter_scans(manifest):
-        assert summ[sv]["n_pass"] == entry["n_in_spec"]
+        assert n_spec[sv] == entry["n_in_spec"]
 
 
 def test_selection_partition(tmp_path, manifest):
@@ -356,7 +444,12 @@ def test_chi2_filter_is_the_default_and_needs_no_dd(tmp_path):
         assert summ[sv]["n_total"] == len(drect)
         for i, rec in drect.items():
             assert "passes_coil_filter" in rec
-            assert rec["selected"] == (rec["passes_coil_filter"] and rec.get("passes_boundary_filter", True))
+            # every flag of filtering._FILTER_FLAGS present is ANDed in; the
+            # engine's post-hoc band rides along on a unified-engine draw
+            assert rec["selected"] == (
+                rec["passes_coil_filter"]
+                and rec.get("passes_boundary_filter", True)
+                and rec.get("passes_draw_band", True))
 
 
 

@@ -380,14 +380,79 @@ def test_run_slices_records_a_refused_slice_and_carries_on(tmp_path, monkeypatch
     assert bq.BouquetArchive(h5)["2000"].refused_reason.startswith("prepare_baseline raised")
 
 
-def test_run_slices_default_still_raises_but_the_refusal_is_on_disk(tmp_path, monkeypatch):
+def test_run_slices_raise_still_raises_but_the_refusal_is_on_disk(tmp_path, monkeypatch):
+    """on_refusal="raise" (the default until 2026-10-06; now opt-in) re-raises
+    at the first refused slice, the refusal written first."""
     b = _slice_bouquet(tmp_path, monkeypatch, refuse_at={2.0})
     with pytest.raises(RuntimeError, match="closure gate"):
-        b.run_slices([1.0, 2.0])
+        b.run_slices([1.0, 2.0], on_refusal="raise")
     with h5py.File(b.config.output_header + ".h5", "r") as hf:
         assert "closure gate" in hf["scan/2000"].attrs["refused_reason"]
     with pytest.raises(ValueError, match="on_refusal"):
         b.run_slices([1.0], on_refusal="skip")
+
+
+def test_run_slices_records_by_default_and_summarises(tmp_path, monkeypatch,
+                                                     capsys):
+    """Owner decision 2026-10-06: run_slices defaults to on_refusal="record"
+    -- one refused baseline no longer ends a series.  The refused slice is
+    in the summary (reason + time) and in the archive (refused_reason,
+    refused_time), the run carries on, and the count and reasons are printed
+    and warned once at the end.  Mutant: the old default raises here."""
+    import bouquet as bq
+    b = _slice_bouquet(tmp_path, monkeypatch, refuse_at={2.0, 4.0})
+    with pytest.warns(UserWarning, match=r"run_slices: 2 of 4 slices REFUSED"):
+        res = b.run_slices([1.0, 2.0, 3.0, 4.0])
+    assert [res[k]["n_all"] for k in (1000, 2000, 3000, 4000)] == [5, 0, 5, 0]
+    for k, t in ((2000, 2.0), (4000, 4.0)):
+        assert "closure gate" in res[k]["refused"] and res[k]["time"] == t
+    out = capsys.readouterr().out
+    assert "[run_slices] run_slices: 2 of 4 slices REFUSED" in out
+    assert "scan 2000 (t = 2 s): prepare_baseline raised RuntimeError: " \
+        "closure gate" in out
+    h5 = b.config.output_header + ".h5"
+    with h5py.File(h5, "r") as hf:
+        assert hf["scan/2000"].attrs["refused_time"] == 2.0
+        assert "closure gate" in hf["scan/4000"].attrs["refused_reason"]
+        assert "refused_reason" not in hf["scan/3000"].attrs
+    t = bq.draw_bands([(h5, k) for k in (1000, 2000, 3000, 4000)],
+                      lambda v: {"x": float(v.attrs.get("val", 0.0))})
+    assert [r.status for r in t] == ["ok", "refused", "ok", "refused"]
+
+
+def test_a_series_config_stored_by_run_slices_loads_unchanged(tmp_path,
+                                                              monkeypatch):
+    """The default change is a run_slices argument, not a config field: the
+    config each slice stores loads back unchanged (and without a warning),
+    the refused slices in between notwithstanding."""
+    import warnings
+    from bouquet.utils import (load_config, stamp_coil_solve_mode,
+                               write_provenance)
+    b = _slice_bouquet(tmp_path, monkeypatch, refuse_at={2.0})
+    gen = b.generate
+
+    def gen_and_stamp(*a, **k):
+        # what Bouquet.generate stamps: the config and the coil-solve mode
+        gen()
+        write_provenance(b.config.output_header, config=b.config,
+                         scan_key=b.config.generation.scan_key)
+        stamp_coil_solve_mode(b.config.output_header,
+                              scan_key=b.config.generation.scan_key,
+                              mode="bounded")
+    monkeypatch.setattr(b, "generate", gen_and_stamp)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        b.run_slices([1.0, 2.0, 3.0])
+    want = b.config.to_dict()
+    for k in (1000, 3000):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            got = load_config(b.config.output_header, scan_key=k)
+        d = got.to_dict()
+        assert d["generation"].pop("scan_key") == k
+        w = dict(want, generation=dict(want["generation"]))
+        w["generation"].pop("scan_key")
+        assert d == w
 
 
 def test_run_records_the_refusal_then_reraises(tmp_path, monkeypatch):

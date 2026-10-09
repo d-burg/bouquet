@@ -28,7 +28,9 @@ The ``--eqdsk`` flag controls geqdsk retention:
 
 Updating the golden set
 -----------------------
-Re-run the bouquet notebook to produce a fresh full ``.h5``, then::
+Regenerate the full run with ``regenerate_golden_run.py`` (the recipe: the
+fixture's own stored config, class API, INPUT-current archival -- NOT a plain
+notebook ``generate()``, which archives the achieved current), then::
 
     python tests/golden/make_golden_fixture.py \
         --source /path/to/D3Dlike_Hmode_golden.h5
@@ -55,6 +57,22 @@ _DEFAULT_SOURCE = os.path.abspath(os.path.join(
 SLIM_NAME = "D3Dlike_Hmode_golden_slim.h5"
 MANIFEST_NAME = "golden_manifest.json"
 RNG_MANIFEST_NAME = "rng_stream_manifest.json"
+#: the slim LEGACY golden (``--legacy-json``): the same recipe run with
+#: ``reconstruction_engine="legacy"``, kept as a small JSON instead of a
+#: second h5 blob, so the legacy path keeps a numeric regression record
+LEGACY_JSON_NAME = "D3Dlike_Hmode_legacy_golden.json"
+#: draws whose profiles the legacy JSON carries: the first N in-spec draws
+#: (what ``tests/test_systematics.py`` replays, ``_N_REPLAY``)
+LEGACY_REPLAY_DRAWS = 2
+#: the reconstruction's LCFS reference is kept at every LEGACY_LCFS_STRIDE-th
+#: point (a uniform subsample of the traced contour, ~4 mm apart), rounded
+#: to 1 um -- the full trace is ~9200 points, ~0.4 MB of JSON on its own.
+#: Used only as the REFERENCE side of a nearest-point boundary RMS (the
+#: other side is a full trace), whose value it changes by <~0.01 mm
+#: (measured on the 2026-10-05 fixture: 2.1724 vs 2.1661 mm, 1.3262 vs
+#: 1.3240 mm); both values are stored per replay draw
+LEGACY_LCFS_STRIDE = 8
+LEGACY_LCFS_DECIMALS = 6
 
 # Seed for the pinned draw stream.  Changing it re-pins every value in
 # rng_stream_manifest.json, so don't, unless that is the intent.
@@ -144,6 +162,198 @@ def _digest(arr):
     """SHA-256 over the raw float64 bytes -- a bitwise fingerprint."""
     return hashlib.sha256(
         np.ascontiguousarray(arr, dtype=np.float64).tobytes()).hexdigest()
+
+
+#: Environment variables an operator sets to name the OFT build being used.
+#: Nothing here is auto-scraped from a filesystem path: the fixture must not
+#: carry hostnames, user names or directory layouts, and a path would tell a
+#: later reader nothing a content digest does not tell them better.
+_OFT_ENV = {"commit": "BOUQUET_OFT_COMMIT",
+            "branch": "BOUQUET_OFT_BRANCH",
+            "build_id": "BOUQUET_OFT_BUILD_ID"}
+
+
+def _sha256_file(path, chunk=1 << 20):
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(chunk), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def _sha256_tree(root, suffixes=(".py",)):
+    """Digest of a package's sources: sorted RELATIVE paths + contents.
+
+    Relative, so two installs of the same revision in different directories
+    (or on different machines) hash identically and no absolute path is
+    embedded in the result.
+    """
+    h = hashlib.sha256()
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if d != "__pycache__")
+        for name in sorted(filenames):
+            if not name.endswith(suffixes):
+                continue
+            full = os.path.join(dirpath, name)
+            h.update(os.path.relpath(full, root).encode())
+            h.update(_sha256_file(full).encode())
+    return h.hexdigest()
+
+
+def oft_provenance():
+    """Which OpenFUSIONToolkit produced this fixture.
+
+    The fixture's physics values are a function of the OFT build as much as of
+    bouquet: an edge-localised change to the bootstrap module moves l_i(1) by
+    several percent while leaving l_i(3) and the boundary untouched, which is
+    exactly the failure signature a fixture with no OFT provenance cannot be
+    diagnosed from.  So record it.
+
+    Three kinds of field, deliberately:
+
+    * **stated** -- ``commit`` / ``branch`` / ``build_id``, from the
+      environment (:data:`_OFT_ENV`).  OFT embeds its revision in the compiled
+      library but does not expose it to Python, so this is operator-supplied
+      and may be absent.
+    * **measured** -- ``sources_sha256`` (the Python package) and
+      ``library_sha256`` (the compiled object).  Always available, immune to a
+      mis-stated commit, and the only fields that identify the *build* rather
+      than the source revision.
+    * **behavioural** -- the two feature probes that actually separate the
+      OFT lines bouquet has met.  A reader who has neither commit nor digest
+      to compare against can still tell which line a fixture came from.
+    """
+    out = {k: os.environ.get(v) for k, v in _OFT_ENV.items()}
+    try:
+        import OpenFUSIONToolkit as _oft
+    except Exception as exc:                    # pragma: no cover - no OFT
+        out["available"] = False
+        out["import_error"] = str(exc)
+        return out
+    out["available"] = True
+    out["version"] = getattr(_oft, "__version__", None)
+    pkg = os.path.dirname(os.path.abspath(_oft.__file__))
+    try:
+        out["sources_sha256"] = _sha256_tree(pkg)
+    except Exception:
+        out["sources_sha256"] = None
+    lib = None
+    for cand in ("liboftpy.so", "liboftpy.dylib"):
+        for base in (os.path.join(pkg, "..", "..", "bin"),
+                     os.path.join(pkg, "..", "..", "lib"), pkg):
+            p = os.path.abspath(os.path.join(base, cand))
+            if os.path.isfile(p):
+                lib = p
+                break
+        if lib:
+            break
+    out["library_sha256"] = _sha256_file(lib) if lib else None
+    try:
+        import inspect
+        from OpenFUSIONToolkit.TokaMaker._core import TokaMaker_equilibrium
+        import OpenFUSIONToolkit.TokaMaker.bootstrap as _bs
+        out["get_q_named_ravgs"] = \
+            "'<1/R^2>'" in inspect.getsource(TokaMaker_equilibrium.get_q)
+        out["has_get_fsa"] = hasattr(TokaMaker_equilibrium, "get_fsa")
+        out["bootstrap_second_order_stencils"] = \
+            "edge_order=2" in inspect.getsource(_bs)
+    except Exception:
+        pass
+    return out
+
+
+def bouquet_provenance():
+    """Which bouquet produced it: version, and the commit if this is a checkout."""
+    import subprocess
+    import sys
+    sys.path.insert(0, os.path.abspath(os.path.join(_HERE, "..", "..")))
+    out = {}
+    try:
+        import bouquet as _bq
+        out["version"] = getattr(_bq, "__version__", None)
+    except Exception:
+        out["version"] = None
+    repo = os.path.abspath(os.path.join(_HERE, "..", ".."))
+    for key, args in (("commit", ["rev-parse", "HEAD"]),
+                      ("branch", ["rev-parse", "--abbrev-ref", "HEAD"])):
+        try:
+            out[key] = subprocess.run(
+                ["git", "-C", repo] + args, capture_output=True, text=True,
+                check=True).stdout.strip()
+        except Exception:
+            out[key] = None
+    try:
+        dirty = subprocess.run(["git", "-C", repo, "status", "--porcelain"],
+                               capture_output=True, text=True, check=True)
+        out["dirty"] = bool(dirty.stdout.strip())
+    except Exception:
+        out["dirty"] = None
+    return out
+
+
+def source_jphi_archival(source):
+    """The run's j_phi archival convention, as ``regenerate_golden_run.py``
+    stamps it on the archive root (``"input"``), or ``None`` when the source
+    does not say (a run not made by that recipe)."""
+    if not source or not os.path.isfile(source):
+        return None
+    with h5py.File(source, "r") as hf:
+        v = hf.attrs.get("golden_jphi_archival")
+    if isinstance(v, bytes):
+        v = v.decode()
+    return None if v is None else str(v)
+
+
+def fixture_provenance(source=None, eqdsk="all", seed=RNG_STREAM_SEED):
+    """Everything needed to reproduce -- or to diagnose -- this fixture.
+
+    Deliberately carries no hostname, user name or filesystem path: the source
+    is recorded by BASENAME only, and the environment by content digests.
+    """
+    import datetime
+    return {
+        "created": datetime.datetime.now().isoformat(timespec="seconds"),
+        "generator": os.path.basename(__file__),
+        "generator_args": {
+            "source_basename": os.path.basename(source) if source else None,
+            "eqdsk": eqdsk,
+            "rng_stream_seed": int(seed),
+            # input (the systematics replay premise) vs achieved current;
+            # see regenerate_golden_run.py
+            "jphi_archival": source_jphi_archival(source),
+        },
+        "bouquet": bouquet_provenance(),
+        "oft": oft_provenance(),
+        "numerics": blas_provenance(),
+    }
+
+
+#: Provenance keys mirrored onto the slim .h5 root attrs, flattened, so a
+#: reader with only the fixture in hand (no manifest) still knows what made it.
+def _flat_provenance(prov, prefix="prov"):
+    flat = {}
+
+    def _walk(node, path):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                _walk(v, f"{path}_{k}")
+        elif node is not None:
+            flat[path] = node if isinstance(node, (str, int, float, bool)) \
+                else str(node)
+    _walk(prov, prefix)
+    return flat
+
+
+def _fixture_stamp(slim_path):
+    """Read back the provenance attrs a built fixture carries (or ``{}``)."""
+    try:
+        with h5py.File(slim_path, "r") as hf:
+            return {k: (v.decode() if isinstance(v, bytes) else
+                        (v.item() if hasattr(v, "item") else v))
+                    for k, v in hf.attrs.items()
+                    if str(k).startswith("prov")}
+    except Exception:
+        return {}
 
 
 def blas_provenance():
@@ -246,6 +456,10 @@ def build_rng_stream(source_slim=None, out_dir=_HERE, seed=RNG_STREAM_SEED):
                   "psi_N": int(psi_N.size)},
         # which machine pinned it -- the SHA-256s are only meaningful there
         "pinned_on": blas_provenance(),
+        # ... and what produced the fixture the stream was drawn FROM.  The
+        # stream is pure NumPy (no solver, no OFT), but its inputs are the
+        # fixture's baseline profiles, so it moves when the fixture does.
+        "source_provenance": _fixture_stamp(slim),
         "channels": {},
     }
     for ch, arr in drawn.items():
@@ -266,15 +480,146 @@ def build_rng_stream(source_slim=None, out_dir=_HERE, seed=RNG_STREAM_SEED):
     return path
 
 
+# A committed fixture must not name a host, a user or a filesystem location.
+# The self-consistent bootstrap record (the jbs_loop_json attrs) of an older
+# build carried the OFT build's package PATH (current builds record a
+# path-free build identifier instead, jbs_loop.oft_build_info), which is right
+# for nobody's public fixture: keep its basename (the build identity is
+# stamped separately, by content digest).  The guard below then refuses a
+# fixture in which any filesystem path survived, wherever it came from.
+#
+# What counts as a path (each alternative is anchored so that it cannot start
+# in the middle of a word, a number or a unit such as "A/m^2" or "1/R"):
+#   * an absolute path under a well-known root (/Users, /home, /usr,
+#     /Volumes, /opt, /mnt, /tmp, /private, /var, ...);
+#   * ANY absolute path of two or more components ("/a/b") that starts at the
+#     beginning of a string or after whitespace, a quote, "=", ":", "," or an
+#     opening bracket;
+#   * a home-relative path: "~/..." or "~user/...";
+#   * a parent-relative path: "../...";
+#   * a Windows drive path: "C:\..." or "C:/...".
+_ABS_PATH_RE = None
+
+_PATH_ROOTS = ("Users|home|usr|Volumes|mnt|tmp|private|var|scratch|cscratch|"
+               "opt|srv|data|work|global|gpfs|lustre|net|nfs|afs|root|media|"
+               "Library|Applications|System|etc|run|proj|project|projects|"
+               "space|storage|nobackup")
+
+
+def _abs_path_re():
+    global _ABS_PATH_RE
+    if _ABS_PATH_RE is None:
+        import re
+        _ABS_PATH_RE = re.compile(
+            # a well-known root, wherever it is not glued to a word
+            r"(?<![A-Za-z0-9_.])/(?:" + _PATH_ROOTS + r")(?:/[^\s\"',;]*|\b)"
+            # any /a/b[/...] at a token boundary
+            r"|(?:^|(?<=[\s\"'=:,(\[{]))/[A-Za-z0-9_.-]+/[^\s\"',;]*"
+            # home-relative
+            r"|(?<![A-Za-z0-9_.~])~(?:[A-Za-z_][A-Za-z0-9_.-]*)?/[^\s\"',;]*"
+            # parent-relative
+            r"|(?<![A-Za-z0-9_])\.\./[^\s\"',;]*"
+            # a Windows drive
+            r"|(?<![A-Za-z0-9_])[A-Za-z]:[\\/][^\s\"',;]*")
+    return _ABS_PATH_RE
+
+
+def _scrub_paths(node):
+    """Recursively replace filesystem paths in a JSON-like record by their
+    basename."""
+    if isinstance(node, dict):
+        return {k: _scrub_paths(v) for k, v in node.items()}
+    if isinstance(node, (list, tuple)):
+        return [_scrub_paths(v) for v in node]
+    if isinstance(node, str) and _abs_path_re().search(node):
+        return _abs_path_re().sub(
+            lambda m: (os.path.basename(
+                m.group(0).replace("\\", "/").rstrip("/")) or "<path>"),
+            node)
+    return node
+
+
+def find_filesystem_paths(value):
+    """Every path-like substring in *value*: a str, bytes, a JSON document, or
+    any (nested) list / tuple / dict / numpy array of them -- string ARRAYS
+    included, element by element.  Returns a list of the matches."""
+    rx = _abs_path_re()
+    out = []
+
+    def _walk(v):
+        if isinstance(v, np.ndarray):
+            if v.dtype.kind in ("S", "O", "U"):
+                for el in v.ravel().tolist():
+                    _walk(el)
+            return
+        if isinstance(v, (bytes, np.bytes_)):
+            v = bytes(v).decode(errors="replace")
+        if isinstance(v, (str, np.str_)):
+            out.extend(m.group(0) for m in rx.finditer(str(v)))
+            return
+        if isinstance(v, dict):
+            for k, x in v.items():
+                _walk(k)
+                _walk(x)
+            return
+        if isinstance(v, (list, tuple)):
+            for x in v:
+                _walk(x)
+
+    _walk(value)
+    return out
+
+
+def _scrub_attr(key, value):
+    """The attr value to store in the fixture (loop records path-scrubbed)."""
+    if key == "jbs_loop_json":
+        raw = value.decode() if isinstance(value, bytes) else str(value)
+        return json.dumps(_scrub_paths(json.loads(raw)))
+    return value
+
+
+def assert_no_filesystem_paths(slim_path):
+    """Refuse a fixture that names an absolute filesystem path anywhere a
+    reader would see text: string attrs, string datasets (config_json) and
+    the geqdsk header lines."""
+    import gzip  # noqa: F401  (geqdsks are stored gzip-filtered by h5py)
+    hits = []
+    with h5py.File(slim_path, "r") as hf:
+        def _check(where, val):
+            # str, bytes, and string ARRAYS (attrs or datasets), element by
+            # element -- an array used to be skipped silently
+            for m in find_filesystem_paths(val):
+                hits.append(f"{where}: {m[:80]}")
+
+        for k, v in hf.attrs.items():
+            _check(f"/@{k}", v)
+
+        def _v(name, obj):
+            for k, v in obj.attrs.items():
+                _check(f"{name}@{k}", v)
+            if isinstance(obj, h5py.Dataset):
+                if _is_eqdsk_name(name.rsplit("/", 1)[-1]):
+                    head = bytes(obj[()])[:4096]
+                    _check(name + " (geqdsk head)", head)
+                elif obj.dtype.kind in ("S", "O", "U"):
+                    _check(name, obj[()])
+        hf.visititems(_v)
+    if hits:
+        raise SystemExit("REFUSING: the fixture names filesystem paths "
+                         "(public repo):\n  " + "\n  ".join(hits[:20]))
+
+
 def build(source, out_dir=_HERE, eqdsk="all"):
     if eqdsk not in ("all", "subset", "none"):
         raise ValueError("eqdsk must be 'all', 'subset', or 'none'")
     slim_path = os.path.join(out_dir, SLIM_NAME)
     manifest_path = os.path.join(out_dir, MANIFEST_NAME)
 
+    prov = fixture_provenance(source=source, eqdsk=eqdsk)
     manifest = {
         "source_basename": os.path.basename(source),
         "eqdsk_retention": eqdsk,
+        "provenance": prov,
         "tolerances": TOLERANCES,
         "scans": {},
     }
@@ -392,7 +737,7 @@ def build(source, out_dir=_HERE, eqdsk="all"):
                 for ak in obj.attrs:
                     if ak in _filter_attrs:
                         continue
-                    g.attrs[ak] = obj.attrs[ak]
+                    g.attrs[ak] = _scrub_attr(ak, obj.attrs[ak])
                 return
             # dataset
             if _is_pfile_name(name.rsplit("/", 1)[-1]):
@@ -418,18 +763,173 @@ def build(source, out_dir=_HERE, eqdsk="all"):
             if gpath in dst:
                 dst[gpath].attrs["Ip"] = ip
 
+        # ... and stamp the provenance onto the fixture itself, not just the
+        # manifest: a stale fixture is diagnosed from the file someone has in
+        # front of them, and the manifest can go missing or be regenerated
+        # separately.  Flattened because HDF5 attrs are scalars.
+        for k, v in _flat_provenance(prov).items():
+            dst.attrs[k] = v
+        dst.attrs["prov_schema"] = 1
+
+    assert_no_filesystem_paths(slim_path)
     with open(manifest_path, "w") as fh:
         json.dump(manifest, fh, indent=2, sort_keys=True)
 
     size_mb = os.path.getsize(slim_path) / 1e6
     print(f"[golden] wrote {slim_path}  ({size_mb:.2f} MB, eqdsk={eqdsk})")
     print(f"[golden] wrote {manifest_path}")
+    print(f"[golden] j_phi archival: "
+          f"{prov['generator_args']['jphi_archival'] or 'NOT STATED by the source'}")
     for sk, se in manifest["scans"].items():
         print(f"[golden]   scan {sk}: {se['n_draws']} draws, "
               f"{se['n_in_spec']} in-spec, "
               f"{len(se['eqdsk_indices'])} geqdsks kept, "
               f"indices {se['draw_indices']}")
     return slim_path, manifest_path
+
+
+#: significant digits of the legacy JSON's float arrays (12: a relative
+#: rounding of <= 5e-13, far below every comparison made against them, at
+#: ~25 % fewer bytes than the exact 17-digit repr)
+LEGACY_SIG_DIGITS = 12
+
+
+def _f(a):
+    """A float array as a JSON list, rounded to :data:`LEGACY_SIG_DIGITS`."""
+    return [float(f"{v:.{LEGACY_SIG_DIGITS}g}")
+            for v in np.asarray(a, dtype=float).ravel()]
+
+
+def _attr_scalar(v):
+    if isinstance(v, bytes):
+        return v.decode()
+    if hasattr(v, "item"):
+        return v.item()
+    return v
+
+
+def build_legacy_json(source, out_dir=_HERE):
+    """The slim LEGACY golden: a small JSON of a full legacy-path run.
+
+    ``source`` is the archive of ``regenerate_golden_run.py
+    --reconstruction-engine legacy``.  Kept: the stored config (verbatim, so
+    the run can be regenerated from this file alone:
+    ``regenerate_golden_run.py --config-from <this json>``), the
+    reconstruction's scalars, coil currents, X-points, its profiles and a
+    uniform subsample of its LCFS reference, every draw's scalars, and for
+    the first :data:`LEGACY_REPLAY_DRAWS` in-spec draws their profiles, coil
+    currents and their boundary RMS to the (subsampled) reconstruction LCFS
+    -- what the legacy systematics replay (``tests/test_systematics.py``)
+    needs.  No geqdsk, no p-file, no LCFS trace of a draw."""
+    import sys
+    sys.path.insert(0, os.path.abspath(os.path.join(_HERE, "..", "..")))
+    from bouquet.schema import read_jbs_loop
+    from bouquet.utils import _read_coil_names
+    from scipy.spatial import cKDTree
+    out_path = os.path.join(out_dir, LEGACY_JSON_NAME)
+    prov = fixture_provenance(source=source, eqdsk="none")
+    with h5py.File(source, "r") as hf:
+        g = hf["scan/0"]
+        cj = g["config_json"][()]
+        cj = cj.decode() if isinstance(cj, bytes) else str(cj)
+        # re-serialised compactly: the same values (floats round-trip
+        # exactly), without the stored text's indentation
+        cj = json.dumps(json.loads(cj), separators=(",", ":"))
+        eng = json.loads(cj)["generation"].get("reconstruction_engine")
+        if eng != "legacy":
+            raise SystemExit(f"REFUSING: {os.path.basename(source)} was run "
+                             f"with reconstruction_engine={eng!r}; the "
+                             "legacy golden is a legacy-path run")
+        bl = g["_baseline"]
+        eqk = [k for k in bl.keys() if _is_eqdsk_name(k)]
+        lcfs = np.asarray(bl["recon_lcfs_ref"][()], dtype=float)
+        lcfs_sub = np.round(lcfs[::LEGACY_LCFS_STRIDE], LEGACY_LCFS_DECIMALS)
+        loop = read_jbs_loop(bl)
+        base = dict(
+            attrs={k: _attr_scalar(bl.attrs[k]) for k in
+                   ("Ip_target", "l_i_target", "l_i_scale", "diverted",
+                    "source_kind", "jbs_converged", "jbs_n_passes")
+                   if k in bl.attrs},
+            Ip_eqdsk=(_ip_from_eqdsk_bytes(bytes(bl[eqk[0]][()]))
+                      if eqk else None),
+            edge_pressure=(json.loads(_attr_scalar(
+                bl.attrs["edge_pressure_json"]))
+                if "edge_pressure_json" in bl.attrs else None),
+            jbs_loop=(None if loop is None else _scrub_paths(dict(
+                converged=loop.get("converged"),
+                n_passes=loop.get("n_passes"),
+                post_corrective=loop.get("post_corrective")))),
+            coil_names=list(_read_coil_names(bl)),
+            coil_currents=_f(bl["coil_currents"][()]),
+            x_points=np.asarray(bl["x_points"][()], dtype=float).tolist()
+            if "x_points" in bl else None,
+            profiles={k: _f(bl[k][()]) for k in
+                      ("psi_N", "psi_N_kinetic", "n_e", "T_e", "n_i", "T_i",
+                       "aux_zeff", "j_phi", "j_BS", "j_inductive",
+                       "pressure") if k in bl},
+            recon_lcfs_ref=dict(stride=LEGACY_LCFS_STRIDE,
+                                decimals=LEGACY_LCFS_DECIMALS,
+                                n_full=int(lcfs.shape[0]),
+                                points=lcfs_sub.tolist()))
+        idxs = sorted(int(k) for k in g if k.lstrip("-").isdigit())
+        summary, in_spec = {}, []
+        for i in idxs:
+            gi = g[str(i)]
+            a = gi.attrs
+            eqk = [k for k in gi.keys() if _is_eqdsk_name(k)]
+            summary[str(i)] = dict(
+                {k: _attr_scalar(a[k]) for k in
+                 ("count", "in_spec", "l_i(1)", "l_i(3)", "l_i_target_used",
+                  "max_F_drift_pct", "max_VSC_drift_pct", "homotopy_pass",
+                  "jbs_converged", "jbs_n_passes") if k in a},
+                Ip_eqdsk=(_ip_from_eqdsk_bytes(bytes(gi[eqk[0]][()]))
+                          if eqk else None))
+            if bool(a.get("in_spec")):
+                in_spec.append(i)
+        tree_sub = lcfs_sub
+        replay = {}
+        for i in in_spec[:LEGACY_REPLAY_DRAWS]:
+            gi = g[str(i)]
+            pert = np.asarray(gi["perturbed_lcfs_ref"][()], dtype=float)
+            d_sub, _ = cKDTree(pert).query(tree_sub)
+            d_full, _ = cKDTree(pert).query(lcfs)
+            replay[str(i)] = dict(
+                summary[str(i)],
+                coil_names=list(_read_coil_names(gi)),
+                coil_currents=_f(gi["coil_currents"][()]),
+                profiles={k: _f(gi[k][()]) for k in
+                          ("n_e", "T_e", "n_i", "T_i", "aux_zeff", "j_phi",
+                           "j_inductive") if k in gi},
+                bnd_rms_to_recon_mm=float(np.sqrt(np.mean(d_sub ** 2)) * 1e3),
+                bnd_rms_to_recon_mm_full_trace=float(
+                    np.sqrt(np.mean(d_full ** 2)) * 1e3))
+        root = {k: _attr_scalar(hf.attrs[k]) for k in
+                ("bouquet_version", "schema_version", "golden_jphi_archival")
+                if k in hf.attrs}
+    doc = dict(
+        what=("slim LEGACY golden: the golden recipe "
+              "(regenerate_golden_run.py) on reconstruction_engine='legacy'"
+              "; see tests/golden/README.md"),
+        source_basename=os.path.basename(source),
+        provenance=prov,
+        root_attrs=root,
+        config_json=cj,
+        baseline=base,
+        n_draws=len(idxs),
+        n_in_spec=len(in_spec),
+        draws=summary,
+        replay_draws=replay)
+    hits = find_filesystem_paths(doc)
+    if hits:
+        raise SystemExit("REFUSING: the legacy golden names filesystem "
+                         "paths (public repo):\n  " + "\n  ".join(hits[:20]))
+    with open(out_path, "w") as fh:
+        json.dump(doc, fh, separators=(",", ":"), sort_keys=True)
+        fh.write("\n")
+    kb = os.path.getsize(out_path) / 1e3
+    print(f"[golden] wrote {out_path}  ({kb:.0f} kB; {len(idxs)} draws, "
+          f"{len(in_spec)} in spec, replay draws {sorted(replay, key=int)})")
+    return out_path
 
 
 if __name__ == "__main__":
@@ -444,7 +944,17 @@ if __name__ == "__main__":
     ap.add_argument("--rng-stream-only", action="store_true",
                     help="re-pin rng_stream_manifest.json from the EXISTING "
                          "slim fixture and stop (no --source needed)")
+    ap.add_argument("--legacy-json", action="store_true",
+                    help="write the slim LEGACY golden JSON "
+                         f"({LEGACY_JSON_NAME}) from --source (a run of "
+                         "regenerate_golden_run.py --reconstruction-engine "
+                         "legacy) and stop; the h5 fixture is untouched")
     args = ap.parse_args()
+    if args.legacy_json:
+        if not os.path.isfile(args.source):
+            raise SystemExit(f"source not found: {args.source}")
+        build_legacy_json(args.source)
+        raise SystemExit(0)
     if args.rng_stream_only:
         build_rng_stream()
         raise SystemExit(0)

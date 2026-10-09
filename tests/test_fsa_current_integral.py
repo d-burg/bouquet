@@ -26,11 +26,14 @@ The same run pins the three properties the implementation depends on:
     the build does not reproduce it.  The clipping stays either way;
   * ``dV/dPsi`` is per DIMENSIONAL psi (``int dV/dPsi dpsi`` recovers the
     volume to -0.25 %; the ``dpsi_N`` reading is out by +291 %);
-  * ``compute_flux_integral`` is ``int_plasma f dA``: ``FI(1)`` is the plasma
-    cross-section.  An OFT build whose ``gs_flux_int`` covers the whole
-    limiter region with the profile pinned at its LCFS value outside the
-    plasma (``FI(1) = 2.8385 m^2`` against ``1.7901 m^2``, where 7dc254b's
-    "+12.9 % convention bias" came from) fails this.
+  * ``compute_flux_integral`` is ``int_plasma f dA`` for a profile that
+    vanishes at the LCFS, on every build.  ``FI(1)`` depends on the build:
+    the plasma cross-section where ``gs_flux_int`` is plasma-masked, the
+    whole region-1 (limiter) area where it covers every ``reg == 1`` cell with
+    the profile pinned at its LCFS value outside the plasma (``FI(1) =
+    2.8385 m^2`` against ``1.7901 m^2``, where 7dc254b's "+12.9 % convention
+    bias" came from).  Each is pinned against an independent measurement of
+    its domain at 1 %.
 
 Runs on the synthetic D3D-like example (no proprietary data).
 """
@@ -212,7 +215,15 @@ def _probe(outdir):
 
     out = {"Ip_true": Ip_true, "vol_true": vol_true,
            "flux_integral_of_one": float(
-               mygs.compute_flux_integral(psi_N, np.ones_like(psi_N)))}
+               mygs.compute_flux_integral(psi_N, np.ones_like(psi_N))),
+           # a profile that VANISHES at the LCFS: whatever a build does
+           # off-plasma (nothing, or the LCFS value held), it adds zero there
+           "flux_integral_of_1_minus_psiN": float(
+               mygs.compute_flux_integral(psi_N, 1.0 - psi_N)),
+           # the mesh area of the plasma region (reg 1: plasma + vacuum
+           # inside the limiter), measured independently of gs_flux_int
+           "region1_area": float(mygs.compute_area_integral(
+               np.ones(int(mygs.np)), reg_mask=1))}
 
     snap = mygs.copy_eq()
     for tag, obj in (("live", mygs), ("snapshot", snap)):
@@ -221,6 +232,8 @@ def _probe(outdir):
             eq_jphi_profile(geom, "jphi-linterp", eq=obj), J)) > 0 else -1.0
         out[tag] = {"pprime_sign": sgn,
                     "plasma_area": float(np.trapezoid(geom["dA_dpsiN"], psi_N)),
+                    "plasma_integral_of_1_minus_psiN": float(np.trapezoid(
+                        (1.0 - psi_N) * geom["dA_dpsiN"], psi_N)),
                     "vol_dpsi": float(np.trapezoid(
                         geom["dV_dpsi"], psi_N) * geom["dpsi_dpsiN"]),
                     "vol_dpsiN": float(np.trapezoid(geom["dV_dpsi"], psi_N))}
@@ -475,17 +488,56 @@ def test_a_genuinely_sheared_geometry_does_not_trip_the_guard():
     assert geom["psi_N"][0] == 0.0 and geom["psi_N"][-1] == 1.0
 
 
+#: Agreement demanded of the mesh flux integral against an independently
+#: measured area / plasma integral (the bar PR #56 set for FI(1)).
+_FLUX_INT_RTOL = 1.0e-2
+
+
 @pytest.mark.solver
 @solver_only
-def test_compute_flux_integral_is_the_plasma_area(measured):
-    """The mesh flux integral covers the plasma only.  A limiter-wide
-    ``gs_flux_int`` gives FI(1) = 1.59x the plasma area (defect 3 of
-    ``_AnchorIpRenorm``) and fails."""
+def test_compute_flux_integral_is_the_plasma_integral(measured):
+    """``compute_flux_integral`` is ``int_plasma f dA`` for a profile that
+    vanishes at the LCFS -- on EVERY build: a limiter-wide ``gs_flux_int``
+    holds the profile at its LCFS value off-plasma, which is zero here.
+    Compared with the plasma integral bouquet computes itself from the
+    traced geometry, ``int (1 - psi_N) dA/dpsi_N dpsi_N``."""
+    fi = float(measured["flux_integral_of_1_minus_psiN"])
+    ref = float(measured["live"]["plasma_integral_of_1_minus_psiN"])
+    assert abs(fi / ref - 1.0) <= _FLUX_INT_RTOL, (
+        f"compute_flux_integral(1 - psi_N) = {fi:.5f} m^2 vs the plasma "
+        f"integral {ref:.5f} m^2")
+
+
+@pytest.mark.solver
+@solver_only
+def test_compute_flux_integral_of_one_is_the_area_its_build_integrates(
+        measured):
+    """FI(1) is the area of the domain this build's ``gs_flux_int`` covers,
+    to the same bar, against an INDEPENDENT measurement of that domain:
+
+    * a plasma-masked build (OpenFUSIONToolkit with the plasma-only
+      ``gs_flux_int``): the plasma cross-section from the traced geometry;
+    * a limiter-wide build (OpenFUSIONToolkit main at the time of writing:
+      every ``reg == 1`` cell, the profile held at its LCFS value outside the
+      plasma -- defect 3 of ``_AnchorIpRenorm``, FI(1) = 1.59x the plasma
+      area on this example): the region-1 mesh area,
+      ``compute_area_integral(1, reg_mask=1)``.
+
+    Matching neither fails.  bouquet's own measures do not depend on which
+    build it is (the pressure match is a ratio of one integral, and the I_p
+    measure is ``Ip_fsa_integral``); this pins the property both ways."""
     fi_one = float(measured["flux_integral_of_one"])
-    area = float(measured["live"]["plasma_area"])
-    assert abs(fi_one / area - 1.0) <= 1e-2, (
-        f"compute_flux_integral(1) = {fi_one:.5f} m^2 vs plasma cross-section "
-        f"{area:.5f} m^2 -- is this OFT build's gs_flux_int limiter-wide?")
+    plasma = float(measured["live"]["plasma_area"])
+    region = float(measured["region1_area"])
+    # the two candidate domains are far apart on this example, so the
+    # classification cannot be ambiguous at the bar
+    assert abs(region / plasma - 1.0) > 10 * _FLUX_INT_RTOL
+    d_plasma = abs(fi_one / plasma - 1.0)
+    d_region = abs(fi_one / region - 1.0)
+    assert min(d_plasma, d_region) <= _FLUX_INT_RTOL, (
+        f"compute_flux_integral(1) = {fi_one:.5f} m^2 matches neither the "
+        f"plasma cross-section {plasma:.5f} m^2 ({100 * d_plasma:.2f} %) nor "
+        f"the region-1 mesh area {region:.5f} m^2 ({100 * d_region:.2f} %)")
 
 
 if __name__ == "__main__":

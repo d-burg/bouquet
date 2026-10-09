@@ -100,6 +100,17 @@ class IDAProfiles:
     #: fit's equilibrium, from which :func:`bouquet.coords.phi_n_from_q`
     #: places the profiles in Φ_N.
     q: Optional[np.ndarray] = None
+    #: Provenance of the VALUE of ``Zeff`` (and so of ``ni``), for the
+    #: baseline record: ``{"convention", "source", "ni_source", "weights",
+    #: "window", "n_clipped_vb", "n_clipped_cer", "n_nodes", "impurity_Z"}``.
+    #: ``convention`` names the Z_eff convention (for IDA the measured Z_eff,
+    #: whose numerator counts every charge the measurement sees); ``source`` names the
+    #: rung that set the value ("VB+CER mean", "CER", "VB"); the
+    #: ``n_clipped_*`` count the radial nodes each route was clamped to the
+    #: single-impurity window ``[1, Z]`` at, before the mean -- the clip is
+    #: physical (``ni >= 0``, ``ni <= ne``) and unchanged, it is only made
+    #: visible.  See docs/physics-notes.md, "Kinetic assumptions".
+    zeff_provenance: Optional[dict] = None
 
 
 @dataclass
@@ -192,6 +203,7 @@ def read_ida(
     ensemble_median: bool = False,      # ensemble-layout central estimator
     ni_source: str = "all",
     impurity_Z: float = 6.0,
+    sigma_ni_from_ne: Optional[bool] = None,
 ) -> IDAProfiles:
     """Read an IDA ``.cdf`` and return profiles + sigmas at ``time``.
 
@@ -221,6 +233,12 @@ def read_ida(
         whichever routes the file supports.
     impurity_Z : float
         Impurity charge Z (carbon Z=6).
+    sigma_ni_from_ne : bool, optional
+        **Deprecated, no effect.**  Accepted so existing callers keep
+        working; it was already a no-op before the ``ni_source`` ladder
+        (``sigma_ni`` has always been propagated, never chosen by this
+        flag).  Passing it emits a ``DeprecationWarning``; it will be
+        removed in a future release.
 
     Notes
     -----
@@ -235,6 +253,13 @@ def read_ida(
     """
     import h5py
 
+    if sigma_ni_from_ne is not None:
+        import warnings
+        warnings.warn(
+            "read_ida(sigma_ni_from_ne=...) is deprecated and has no effect: "
+            "sigma_ni is propagated from the ni_source ladder (ne, Z_eff and "
+            "n_12C6 envelopes).  Drop the argument.",
+            DeprecationWarning, stacklevel=2)
     if sigma_mode not in ("direct", "ensemble", "auto"):
         raise ValueError(
             f"unknown sigma_mode {sigma_mode!r}; expected 'direct', 'ensemble', or 'auto'")
@@ -454,6 +479,24 @@ def read_ida(
         Zeff = np.clip(zeff_res, 1.0, impurity_Z)
         ni = main_ion_density_from_zeff(ne, Zeff, impurity_Z)
 
+        def _n_out(z):          # nodes a route is clamped at (NaN: not counted)
+            z = np.asarray(z, dtype=float)
+            return int(np.count_nonzero((z < 1.0) | (z > impurity_Z)))
+        zeff_provenance = dict(
+            convention=("thermal+impurity (measured: VB bremsstrahlung and/or "
+                        "CER carbon; includes any fast ions the measurement "
+                        "sees)"),
+            source=("VB+CER mean" if (w_v and w_c) else
+                    "CER" if w_c else "VB"),
+            ni_source=str(ni_source),
+            weights=dict(VB=float(w_v), CER=float(w_c)),
+            window=[1.0, float(impurity_Z)],
+            n_clipped_vb=_n_out(zeff_vb) if w_v else 0,
+            n_clipped_cer=_n_out(zeff_cer) if w_c else 0,
+            n_nodes=int(np.size(ne)),
+            impurity_Z=float(impurity_Z),
+        )
+
         _inv = 1.0 / (impurity_Z - 1.0)
         # dZeff_res/dne comes from the CER route alone (VB's Z_eff has no ne
         # dependence); dni/dne then sums the explicit factor with it.
@@ -530,6 +573,7 @@ def read_ida(
         zeff_route_chi=zeff_route_chi,
         zeff_dne=zeff_dne,
         q=q_ida,
+        zeff_provenance=zeff_provenance,
     )
 
 

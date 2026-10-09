@@ -289,3 +289,59 @@ def test_read_ida_omega_both_layouts(tmp_path, layout):
             ipsi, om = f["psi_n"][0][0], f["omega_tor_12C6"][0].mean(axis=0)
         t = 3.0
     np.testing.assert_allclose(_read_ida_omega(p, t, psi_N), np.interp(psi_N, ipsi, om))
+
+
+# ---------------------------------------------------------------------------
+#  PR #56 follow-ups: the deprecated keyword and the Z_eff provenance stamp
+# ---------------------------------------------------------------------------
+def test_sigma_ni_from_ne_is_a_deprecated_no_op(tmp_path):
+    """External notebooks still pass ``sigma_ni_from_ne``; it must be
+    accepted, warn, and change nothing."""
+    p = str(tmp_path / "ida_direct.cdf")
+    _write_direct(p)
+    ref = read_ida(p, time=3.0)
+    for flag in (True, False):
+        with pytest.warns(DeprecationWarning, match="sigma_ni_from_ne"):
+            r = read_ida(p, time=3.0, sigma_ni_from_ne=flag)
+        for k in ("ne", "ni", "Zeff", "sigma_ne", "sigma_ni", "sigma_Zeff"):
+            np.testing.assert_array_equal(getattr(r, k), getattr(ref, k))
+
+
+def test_no_warning_without_the_deprecated_keyword(tmp_path, recwarn):
+    p = str(tmp_path / "ida_direct.cdf")
+    _write_direct(p)
+    read_ida(p, time=3.0)
+    assert not [w for w in recwarn.list
+                if issubclass(w.category, DeprecationWarning)
+                and "sigma_ni_from_ne" in str(w.message)]
+
+
+@pytest.mark.parametrize("ni_source, source, weights", [
+    ("all", "VB+CER mean", {"VB": 0.5, "CER": 0.5}),
+    ("Zeff", "VB", {"VB": 1.0, "CER": 0.0}),
+    ("CER", "CER", {"VB": 0.0, "CER": 1.0}),
+])
+def test_the_zeff_value_states_its_convention_and_source(tmp_path, ni_source,
+                                                         source, weights):
+    p = str(tmp_path / "ida_direct.cdf")
+    _write_direct(p)
+    r = read_ida(p, time=3.0, ni_source=ni_source)
+    prov = r.zeff_provenance
+    assert prov["source"] == source and prov["weights"] == weights
+    assert prov["ni_source"] == ni_source
+    assert prov["convention"].startswith("thermal+impurity (measured")
+    assert prov["window"] == [1.0, 6.0] and prov["n_nodes"] == r.ne.size
+
+
+def test_the_route_clip_is_counted_not_changed(tmp_path):
+    """The per-route clamp to [1, Z] is unchanged; it is only counted."""
+    p = str(tmp_path / "ida_direct.cdf")
+    _write_direct(p)
+    with h5py.File(p, "a") as f:
+        z = np.array(f["Zeff"][...])
+        z[:, :3] = 0.95                     # three nodes below 1 (VB route)
+        f["Zeff"][...] = z
+    r = read_ida(p, time=3.0, ni_source="Zeff")
+    assert r.zeff_provenance["n_clipped_vb"] == 3
+    assert r.zeff_provenance["n_clipped_cer"] == 0
+    np.testing.assert_array_equal(r.Zeff[:3], 1.0)

@@ -2515,6 +2515,8 @@ class Bouquet(SwbBaseline):
         s_bs = np.asarray(out["s_bs"], dtype=float)
         bl.ohm_scale = float(out["ohm_scale_eff"])
         bl.bs_scale = float(out["bs_scale_eff"])
+        # the multiplier the draws apply (PR #70 review B5: stale here)
+        bl.bs_scale_profile = s_bs.copy()
         bl.j_inductive = s_ind * j_ind
         bl.j_BS = s_bs * j_bs
         bl.j_phi = bl.j_inductive + bl.j_BS + j_fix
@@ -3341,6 +3343,8 @@ class Bouquet(SwbBaseline):
         s_bs = np.asarray(out["s_bs"], dtype=float)
         bl.ohm_scale = float(out["ohm_scale_eff"])
         bl.bs_scale = float(out["bs_scale_eff"])
+        # the multiplier the draws apply (PR #70 review B5: stale here)
+        bl.bs_scale_profile = s_bs.copy()
         bl.j_inductive = s_ind * np.asarray(cur["j_ind"], dtype=float)
         # the bootstrap the delivered equilibrium was SOLVED with
         _jbs_del = np.asarray(cur["j_BS_swb"], dtype=float)
@@ -6119,10 +6123,10 @@ class Bouquet(SwbBaseline):
                 bool(gc.floor_j_BS), jdiff, None, None, coord=coord)
             j_bs0 = np.asarray(comp(mygs.copy_eq())[0], dtype=float)
             bl.j_BS = j_bs0 - (0.0 if jdiff is None else jdiff)
-        fixed = np.zeros_like(psi_N)
-        for _nm in ("j_NBI", "j_RF"):
-            if getattr(bl, _nm, None) is not None:
-                fixed = fixed + np.asarray(getattr(bl, _nm), dtype=float)
+        # every channel the draws hold fixed, once each (the draws' _jfix =
+        # j_NBI + j_RF + j_other): j_other left out landed in the inductive
+        # residual and every draw added it again (PR #70 review B1)
+        fixed = self._draw_fixed_current(psi_N)
         jd = (np.zeros_like(psi_N) if getattr(bl, "jphi_diff", None) is None
               else np.asarray(k2e(bl.jphi_diff), dtype=float))
         dv = _deliver_request_split(mygs, psi_N, psi_pad, bl.Ip_target,
@@ -6246,6 +6250,99 @@ class Bouquet(SwbBaseline):
         bs = float(getattr(bl, "bs_scale", 1.0))
         return None if bs == 1.0 else bs * np.ones_like(
             np.asarray(bl.psi_N, dtype=float))
+
+    #: The fixed (held, never perturbed) current channels every draw adds:
+    #: ``perturb_kinetic_equilibrium``'s ``_jfix``.  The delivered state and
+    #: both sigma=0 guards hold exactly these.
+    DRAW_FIXED_CHANNELS = ("j_NBI", "j_RF", "j_other")
+
+    def _draw_fixed_current(self, psi_N):
+        """``j_NBI + j_RF + j_other`` of the baseline on ``psi_N`` (None ->
+        zero): the fixed current a draw holds (``_jfix``)."""
+        import numpy as np
+        bl = self.baseline
+        fixed = np.zeros_like(np.asarray(psi_N, dtype=float))
+        for _nm in self.DRAW_FIXED_CHANNELS:
+            if getattr(bl, _nm, None) is not None:
+                fixed = fixed + np.asarray(getattr(bl, _nm), dtype=float)
+        return fixed
+
+    def _draws_run_jbs_loop(self, method=None):
+        """Whether ``generate()``'s draws compose their bootstrap with the
+        self-consistent loop (``_DrawJBSComposer``) rather than SWB: the
+        loop settings ``generate()`` hands the draws are enabled (after the
+        draw method's own say), ``recalculate_j_BS`` is on, and neither
+        PIN_JPHI nor DIFF_BS (which take precedence over the loop in
+        ``perturb_kinetic_equilibrium``) is set."""
+        import os
+        from .jbs_loop import jbs_settings as _jbs_settings
+        gc = self.config.generation
+        if not bool(gc.recalculate_j_BS):
+            return False
+        st = _jbs_settings(gc, draw=True)
+        if method is not None:
+            st = method.loop_settings_for(st)
+            st = method.draw_jbs_loop(st if st["enabled"] else None)
+        if not (st and st.get("enabled")):
+            return False
+        return not (bool(getattr(gc, "pin_jphi", False))
+                    or os.environ.get("PIN_JPHI", "0") == "1"
+                    or os.environ.get("DIFF_BS", "0") == "1")
+
+    def _draw_bootstrap_scaling(self, method=None):
+        """``(jBS_scale_range, jBS_scale_profile, record)``: how the draws
+        carry the baseline's bootstrap multiplier ``m`` (``bs_scale``, or
+        the structured ``s_bs(psi)``; :meth:`_bootstrap_multiplier`).  The
+        ONE rule ``generate()`` and both sigma=0 guards use, so a guard
+        replays exactly the draws' scale and never compensates for them.
+
+        * SWB draws: ``m`` after SWB (``jBS_scale_profile``), the configured
+          ``jBS_scale_range`` the per-draw jitter inside SWB -- the baseline
+          built ``j_BS = m * SWB(scale 1)``, and OFT applies a scale inside
+          SWB's own iteration, so ``SWB(m) != m * SWB(1)``.
+        * Loop draws: the composer is linear in its scale (``spike =
+          scale * Redl``) and takes no profile, so ``m`` rides in the scale:
+          the range re-centred on ``m`` (``(m, m)`` when no range is set),
+          no profile.  The baseline composed ``j_BS`` at that scale, so a
+          sigma=0 draw reproduces it (PR #70 review B2: the loop draws had
+          lost ``m``, off by ``1/m`` in rescale mode).  A non-uniform
+          ``s_bs(psi)`` cannot reach the loop composer and is REFUSED.
+        """
+        import numpy as np
+        gc = self.config.generation
+        mult = self._bootstrap_multiplier()
+        rng = (None if gc.jBS_scale_range is None
+               else tuple(gc.jBS_scale_range))
+        loop = self._draws_run_jbs_loop(method)
+        rec = dict(draws=("self-consistent loop" if loop else "SWB"),
+                   multiplier=(None if mult is None else dict(
+                       min=float(np.min(mult)), max=float(np.max(mult)),
+                       source=("Baseline.bs_scale_profile" if getattr(
+                           self.baseline, "bs_scale_profile", None)
+                           is not None else "Baseline.bs_scale"))))
+        if loop and mult is not None:
+            u = np.unique(np.asarray(mult, dtype=float))
+            if u.size != 1:
+                raise ValueError(
+                    "the baseline carries a non-uniform bootstrap multiplier "
+                    "s_bs(psi) (Baseline.bs_scale_profile, from the structured "
+                    "closure) but the draws run the self-consistent j_BS loop, "
+                    "whose composer takes a scalar scale only: the draws "
+                    "cannot reproduce the baseline bootstrap.  Run the draws "
+                    "with jbs_self_consistent=False (SWB draws apply s_bs(psi) "
+                    "after SWB), or a closure that delivers a scalar bs_scale")
+            m = float(u[0])
+            rng = (m, m) if rng is None else (rng[0] * m, rng[1] * m)
+            mult = None
+            rec["applied_as"] = ("scale_jBS: jBS_scale_range re-centred on "
+                                 f"bs_scale {m:.9g}")
+        else:
+            rec["applied_as"] = ("jBS_scale_profile after SWB"
+                                 if mult is not None else "none (1.0)")
+        if method is not None:
+            rng, mult = method.scale_settings(rng, mult)
+        rec["jBS_scale_range"] = None if rng is None else [float(v) for v in rng]
+        return rng, mult, rec
 
     def _swb_inputs(self, mygs, psi_N, coord):
         """``(inductive seed, extra SWB kwargs)``: the baseline's source seed
@@ -6464,13 +6561,15 @@ class Bouquet(SwbBaseline):
                 draw_route=draw_route, draw_routes=draw_routes)
 
         seed, swb_fix = self._swb_inputs(mygs, psi_N, coord)
-        # As the draw does: SWB at the jitter's centre (1.0), then the
-        # baseline's multiplier (bs_scale or s_bs(psi)) after SWB.
-        _mult = self._bootstrap_multiplier()
+        # As the draw does (the same helper generate() uses): SWB at the
+        # jitter's centre, then the baseline's multiplier (bs_scale or
+        # s_bs(psi)) after SWB.
+        from .TokaMaker_interface import sigma0_reference_scale
+        _rng0, _mult, _ = self._draw_bootstrap_scaling()
         res = solve_with_bootstrap(
             mygs, ne_eq, te_eq, ni_eq, ti_eq, Zeff_eq,
             float(bl.Ip_target), seed,
-            scale_jBS=1.0,
+            scale_jBS=float(sigma0_reference_scale(_rng0)),
             isolate_edge_jBS=bool(gc.isolate_edge_jBS),
             **coords.swb_grid_kwargs(psi_N, coord),
             diagnostic_plots=False, **swb_fix, **gc.bootstrap_kwargs)
@@ -6829,10 +6928,23 @@ class Bouquet(SwbBaseline):
             bool(gc.isolate_edge_jBS), float(getattr(bl, "bs_scale", 1.0)),
             bool(gc.floor_j_BS), jdiff, None, None, coord=coord)
         j_ind = np.asarray(bl.j_inductive, dtype=float)
-        j_fix = np.asarray(bl.j_phi, dtype=float) - j_ind - np.asarray(
-            bl.j_BS, dtype=float)
-        if jdiff is not None:
-            j_fix = j_fix - jdiff
+        # the fixed current the draws hold (j_NBI + j_RF + j_other), not the
+        # stored split's residual: a residual is self-consistent with a
+        # wrong split and hid j_other counted twice (PR #70 review B1).  How
+        # far the stored split is from closing on it is recorded.
+        j_fix = self._draw_fixed_current(psi_N)
+        _resid = (np.asarray(bl.j_phi, dtype=float) - j_ind
+                  - np.asarray(bl.j_BS, dtype=float)
+                  - (0.0 if jdiff is None else jdiff))
+        _peak_phi = float(np.max(np.abs(np.asarray(bl.j_phi, dtype=float))))
+        split_closure = dict(
+            channels=list(self.DRAW_FIXED_CHANNELS),
+            max_abs_frac=float(np.max(np.abs(_resid - j_fix))
+                               / (_peak_phi or 1.0)),
+            definition=("max |j_phi - j_inductive - j_BS (- jBS_diff) - "
+                        "(j_NBI + j_RF + j_other)| / max |j_phi| of the "
+                        "stored split: 0 to rounding when the stored "
+                        "inductive excludes exactly what the draws hold"))
         if getattr(bl, "jphi_diff", None) is not None:
             # same kinetic -> equilibrium regrid the baseline solve applies
             from .utils import pchip_interp
@@ -6922,6 +7034,7 @@ class Bouquet(SwbBaseline):
                    li_baseline_reference=li_ref_name,
                    dl_i_vs_baseline=float(dli),
                    reference=reference,
+                   split_closure=split_closure,
                    record=jsonable(res["record"]))
         # leave mygs re-anchored on the baseline equilibrium
         mygs.set_targets(Ip=Ip, pax=solver_pax(pressure, _edge))
@@ -7029,9 +7142,13 @@ class Bouquet(SwbBaseline):
         _ds = getattr(bl, "delivered_state", None) or {}
         _ja_ref = _ds.get("j_phi_achieved")
         _bs = float(getattr(bl, "bs_scale", 1.0))
-        _rng_range = (None if gc.jBS_scale_range is None
-                      else (gc.jBS_scale_range[0] * _bs,
-                            gc.jBS_scale_range[1] * _bs))
+        # exactly the draws' bootstrap scaling (generate() uses the same
+        # helper): the range's centre and the after-SWB profile
+        try:
+            _rng_range, _prof, _scaling = self._draw_bootstrap_scaling()
+        except ValueError as _se:
+            return dict(error=f"bootstrap scaling: {str(_se)[:400]}",
+                        passed_draw_route=False, routes={})
         scale0 = float(sigma0_reference_scale(_rng_range))
         # generate_bouquet hands every draw the THERMAL pressure on the
         # equilibrium grid; the draw adds impurity/fast/diff itself
@@ -7047,6 +7164,8 @@ class Bouquet(SwbBaseline):
                   "generate()'s coil regularisation, hard bounds and "
                   "homotopy are not part of the replay"),
             scale_jBS=scale0, scale_jBS_reconstruction=_bs,
+            bootstrap_scaling=_scaling,
+            fixed_channels=list(self.DRAW_FIXED_CHANNELS),
             l_i_target=float(bl.l_i_target),
             li_delivered=float(li_delivered),
             li_delivered_reference=str(li_delivered_name),
@@ -7124,14 +7243,17 @@ class Bouquet(SwbBaseline):
                     floor_j_BS=gc.floor_j_BS, jBS_diff=jdiff,
                     accept_anchor_inband=gc.accept_anchor_inband,
                     perturb_jind_in_anchor=(route == "ip_renorm"),
-                    scale_jBS=scale0, **gc.bootstrap_kwargs,
+                    scale_jBS=scale0, jBS_scale_profile=_prof,
+                    **gc.bootstrap_kwargs,
                     edge_pressure=_edge,
                     diagnostic_plots=False, psi_N_kinetic=psi_kin,
                     p_fast=bl.p_fast, z_fast=getattr(bl, "z_fast", None),
                     z2_fast=getattr(bl, "z2_fast", None),
                     zeff_includes_fast=bool(getattr(
                         bl, "zeff_includes_fast", False)),
-                    j_NBI=bl.j_NBI, j_RF=bl.j_RF, aux_sigmas=aux_zero,
+                    j_NBI=bl.j_NBI, j_RF=bl.j_RF,
+                    j_other=getattr(bl, "j_other", None),
+                    aux_sigmas=aux_zero,
                     aux_baselines=env.get("aux_baselines"),
                     aux_length_scales=env.get("aux_length_scales"),
                     ni_from_zeff=env.get("ni_from_zeff", True),
@@ -7577,12 +7699,13 @@ class Bouquet(SwbBaseline):
         # jBS_scale_range as the per-draw jitter inside it.  Passing the
         # multiplier INTO SWB as scale_jBS instead is not the same thing:
         # OFT applies it inside SWB's self-consistent iteration.
-        _bs_mult = self._bootstrap_multiplier()
-        _jbs_range = (None if gc.jBS_scale_range is None
-                      else tuple(gc.jBS_scale_range))
-        # the method's scale range and profile (swb: neither, SWB re-solves
-        # j_BS at scale 1; engine: the range on top of s_bs(x*))
-        _jbs_range, _bs_mult = _m.scale_settings(_jbs_range, _bs_mult)
+        # Under the self-consistent loop the composer takes the multiplier
+        # as its (linear) scale instead: the range re-centred on bs_scale
+        # (_draw_bootstrap_scaling, shared with both sigma=0 guards).
+        # The method's scale range and profile (swb: neither, SWB re-solves
+        # j_BS at scale 1; engine: the range on top of s_bs(x*)).
+        _jbs_range, _bs_mult, _bs_scaling = self._draw_bootstrap_scaling(_m)
+        self._draw_bootstrap_scaling_record = _bs_scaling
 
         # The LCFS boundary cut, resolved ONCE and OUTSIDE the output capture:
         # the announcement must reach the user (inside the capture it went to

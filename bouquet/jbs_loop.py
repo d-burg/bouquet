@@ -533,7 +533,15 @@ def weighted_norm(f, w, x) -> float:
 
 def profile_residuals(J, jbs, w, x, Ip) -> dict:
     """``r_j`` and ``r_I`` of a Redl profile ``J`` against the profile ``jbs``
-    the equilibrium was solved with, plus the logged pedestal diagnostics."""
+    the equilibrium was solved with, plus the logged pedestal diagnostics.
+
+    ``J`` and ``jbs`` are the field-aligned bootstrap ``kappa <j.B>`` only
+    (:func:`bouquet.physics.evaluate_jBS` since ``/4``): the pressure-driven
+    ``p'G`` is its own bucket (owner decision D2), so it neither enters the
+    normaliser ``||J||_w`` nor the ``I_BS`` / ``jBS_peak`` diagnostics -- the
+    definition of the base commit (PR #64's ``/3`` evaluator put ``p'G``
+    into ``J``, which shrank ``r_j`` by ``||kappa lambda|| / ||kappa lambda +
+    P||`` for the same mismatch: a silently looser ``rtol_j``)."""
     J = np.asarray(J, dtype=float)
     jbs = np.asarray(jbs, dtype=float)
     x = np.asarray(x, dtype=float)

@@ -93,7 +93,11 @@ def test_a_gfile_engine_baseline_is_a_complete_baseline(toy_solver):
     assert b.mygs.calls[0][2] == 200.0
     # the split sums to the delivered request, which one solve reproduces
     st = bl.engine["state"]
-    np.testing.assert_allclose(bl.j_inductive + bl.j_BS + bl.j_NBI + bl.j_RF,
+    # ... with the pressure-driven p'G as its own bucket (owner decision D2)
+    from bouquet.schema import SPLIT_PRESSURE_SEPARATE
+    assert bl.current_split_convention == SPLIT_PRESSURE_SEPARATE
+    np.testing.assert_allclose(bl.j_inductive + bl.j_BS + bl.j_NBI + bl.j_RF
+                               + bl.j_pressure,
                                bl.j_phi, rtol=0, atol=1e-9 * np.max(bl.j_phi))
     np.testing.assert_array_equal(bl.j_phi, np.asarray(st["request"]))
     np.testing.assert_array_equal(toy_solver["backend"].state["R"], bl.j_phi)
@@ -135,7 +139,11 @@ def test_an_ids_engine_baseline_is_a_complete_baseline(toy_solver,
     assert icl["engine"] is True and icl["jbs_converged"] is True
     assert not icl["closure_limited"]
     assert bl.li_metrics["tokamaker_li_3"] == bl.l_i_target
-    np.testing.assert_allclose(bl.j_inductive + bl.j_BS + bl.j_NBI + bl.j_RF,
+    # ... with the pressure-driven p'G as its own bucket (owner decision D2)
+    from bouquet.schema import SPLIT_PRESSURE_SEPARATE
+    assert bl.current_split_convention == SPLIT_PRESSURE_SEPARATE
+    np.testing.assert_allclose(bl.j_inductive + bl.j_BS + bl.j_NBI + bl.j_RF
+                               + bl.j_pressure,
                                bl.j_phi, rtol=0, atol=1e-9 * np.max(bl.j_phi))
     assert bl.engine["contract"]["kind"] == "ids"
 

@@ -54,6 +54,7 @@ from .utils import (
     SnapshotRestoreError,
     stamp_group_attrs,
     store_baseline_state,
+    write_group_current_split,
     _scan_key,
     _shape_from_boundary,
     read_eqdsk_from_bytes,
@@ -5453,6 +5454,7 @@ def generate_bouquet(
     # Appended after baseline_meta for the same positional-compatibility reason.
     on_inspec=None,
     stop_check=None,
+    baseline_split=None,
     bootstrap_kwargs=None,
 ):
     r"""Generate a batch of perturbed equilibria and archive to HDF5.
@@ -5623,6 +5625,17 @@ def generate_bouquet(
     draw_method : bouquet.draw_methods.DrawMethod, optional
         How each draw is made where the solve methods differ
         (docs/draw-methods.md); None: the legacy draws.
+    baseline_split : dict, optional
+        The archive's current-split convention (owner decision D2: the
+        pressure-driven ``p'G`` is its own bucket ``j_pressure``, archived
+        beside ``j_BS`` and a ``j_inductive`` that does NOT carry it, with
+        ``current_split_convention = "pressure_separate"``).  Keys:
+        ``j_pressure`` (the baseline's ``p'G`` on ``psi_N``, or None) and
+        ``inductive_includes_pressure`` (whether ``input_jinductive``
+        carries it -- the legacy in-memory convention).  A draw whose
+        method returns its own ``diagnostics["j_pressure"]`` (engine, swb)
+        is archived with it; ``None`` (default, direct callers) archives as
+        before this convention (``p'G`` in ``j_inductive``, no attr).
     bootstrap_kwargs : dict, optional
         Keyword options passed through to :func:`solve_with_bootstrap` in
         OpenFUSIONToolkit (``GenerationConfig.bootstrap_kwargs``, validated
@@ -6640,6 +6653,10 @@ def generate_bouquet(
                       if jphi_diff is not None else input_j_phi)
     _bl_jBS_store = baseline_j_BS
     _bl_jind_store = input_jinductive
+    # whether the archived baseline inductive is a residual against the
+    # achieved j_phi (it then carries the pressure-driven p'G, j_BS never
+    # does)
+    _bl_resid = False
     if store_achieved_jphi:
         try:
             _bl_jphi_store = _achieved_jphi_fsa(
@@ -6654,6 +6671,7 @@ def generate_bouquet(
                     _fx = _fx + np.asarray(j_other, dtype=float)
                 _bl_jind_store = (_bl_jphi_store
                                   - np.asarray(baseline_j_BS, dtype=float) - _fx)
+                _bl_resid = True
                 if np.any(_bl_jind_store < 0.0):
                     _bl_jind_store = np.maximum(_bl_jind_store, 0.0)
                     _bl_jBS_store = _bl_jphi_store - _bl_jind_store - _fx
@@ -6662,6 +6680,17 @@ def generate_bouquet(
         except Exception as _aexc:
             print(f"  WARN: achieved-jphi baseline archival failed ({_aexc}); "
                   f"storing the anchored target instead")
+
+    # the third bucket (owner decision D2): p'G archived as j_pressure, and
+    # taken off the inductive wherever that carries it
+    _bl_jp = None
+    if baseline_split is not None:
+        _bl_jp = baseline_split.get("j_pressure")
+        if _bl_jp is not None:
+            _bl_jp = np.asarray(_bl_jp, dtype=float)
+            if _bl_jind_store is not None and (_bl_resid or bool(
+                    baseline_split.get("inductive_includes_pressure", True))):
+                _bl_jind_store = np.asarray(_bl_jind_store, dtype=float) - _bl_jp
 
     store_baseline_profiles(
         header, psi_N,
@@ -6702,6 +6731,7 @@ def generate_bouquet(
         baseline_meta=baseline_meta,
         profile_coord=coord,
     )
+    write_group_current_split(header, scan_key, None, _bl_jp)
     if write_ifile and _bl_ifile_rec is not None:
         stamp_group_attrs(header, scan_key, None, _bl_ifile_rec)
 
@@ -8465,6 +8495,12 @@ def generate_bouquet(
         )
         if _ifile_rec is not None:
             stamp_group_attrs(header, scan_key, count, _ifile_rec)
+        # the third bucket (owner decision D2): a method that splits p'G off
+        # (engine, swb) hands it in diagnostics["j_pressure"]; its archived
+        # inductive already excludes it, so the stamp is written whenever
+        # the method returns it (whoever called generate_bouquet)
+        write_group_current_split(header, scan_key, count,
+                                  diagnostics.get("j_pressure"))
         # the kinetic sampler's version + clip counters (legacy and swb
         # draws; the engine archives its own in its draw record)
         if diagnostics.get("swb_conversion"):

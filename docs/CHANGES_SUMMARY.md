@@ -1,5 +1,43 @@
 # Bouquet — change summaries
 
+## Unreleased — cross-file hooks of the integrated #56–#75 chain (2026-10-09)
+
+### Legacy `solve_with_bootstrap` results converted to the field-aligned bootstrap (PR #64 B1; legacy numbers move)
+
+- **Every legacy SWB call site** (the draw and DIFF_BS draw calls, the
+  σ=0 / DIFF_BS cache, `reconstruct_equilibrium`, `jbs_init="swb"`, the
+  IMAS frozen-SWB baseline and the SWB σ=0 reference) now converts SWB's
+  `j_BS` / `isolated_j_BS` right after the call with
+  `TokaMaker_interface.swb_result_toroidal` (`physics._swb_jbs_to_toroidal`
+  for the installed toolkit's output convention). On upstream
+  OpenFUSIONToolkit this is the 6116d5f conversion bit for bit (undo SWB's
+  `R_avg/F` projection, apply κ = F⟨1/R⟩/⟨B²⟩); #64 had dropped it on the
+  premise that SWB returns TokaMaker jphi, which only the fork's SWB does
+  (left unconverted: +7 % at ψ_N 0.5, +12–13 % at the pedestal on the
+  synthetic D3D-like example). A toolkit returning TokaMaker jphi loses
+  `p′G` instead; an unknown one is refused.
+- **What moves:** the LEGACY reconstruction / IMAS baseline and every legacy
+  draw that runs SWB, on upstream OFT, back to their 6116d5f values. The
+  unified engine runs no SWB: no default-engine number changes.
+- **Stamped:** per draw `swb_jbs_convention` / `swb_jbs_conversion` group
+  attrs; on the baseline `li_metrics["swb_conversion"]`; on the σ=0 SWB
+  check's record.
+
+### Archived split: `p′G` is its own `j_pressure` on every path (owner decision D2; archive convention)
+
+- **Engine (default path) — archive only, the solve is untouched.** The
+  engine baseline's and every engine draw's archived `j_BS` no longer carry
+  the pressure-driven `p′(⟨R⟩ − F²⟨1/R⟩/⟨B²⟩)`: it is archived as the
+  `j_pressure` dataset with `current_split_convention = "pressure_separate"`
+  on the group, and the residual `j_inductive` excludes it, so `j_phi =
+  j_inductive + j_BS + j_NBI + j_RF + j_pressure` exactly. Against
+  `e16d541` the archived engine `j_BS` moves by `−p′G` and `j_inductive` is
+  unchanged (it already excluded it); the `jB_parallel/` block is unchanged.
+  `Baseline.j_pressure` / `Baseline.current_split_convention` carry it in
+  memory.
+- **Readers** (`schema.read_current_split_convention`, the IDS exporter)
+  read the attr; an archive without it keeps its old meaning.
+
 ## Unreleased — PR #56 (IDA/FUSE ion coupling) and PR #60 (bootstrap options), integrated
 
 ### Redl ε: the geometric `(R_max − R_min)/(2⟨R⟩)` by default (`evaluate_jBS/4`, PR #60, owner decision E4)

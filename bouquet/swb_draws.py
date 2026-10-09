@@ -193,16 +193,8 @@ def _write_current_split(header, scan_key, count, j_pressure):
     ``current_split_convention = "pressure_separate"`` (schema; owner
     decision D2).  Nothing when the draw carried none (a recipe that did not
     split)."""
-    if j_pressure is None:
-        return
-    import h5py
-    from .schema import write_current_split
-    from .utils import _group_path, _scan_key
-    bkey = _scan_key(scan_key)
-    path = (_group_path(scan_key, count) if count is not None
-            else (f"scan/{bkey}/_baseline" if bkey is not None else "_baseline"))
-    with h5py.File(f"{header}.h5", "a") as hf:
-        write_current_split(hf[path], j_pressure)
+    from .utils import write_group_current_split
+    write_group_current_split(header, scan_key, count, j_pressure)
 
 
 class SwbDraws(DrawMethod):

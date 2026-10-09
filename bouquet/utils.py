@@ -4174,6 +4174,24 @@ def _group_path(scan_key, count):
     return str(int(count))
 
 
+def write_group_current_split(header, scan_key, count, j_pressure):
+    """The third current bucket on one archived group (a draw, or
+    ``_baseline`` for ``count`` None): the ``j_pressure`` dataset and
+    ``current_split_convention = "pressure_separate"``
+    (:func:`bouquet.schema.write_current_split`; owner decision D2).  The
+    caller has already written ``j_inductive`` WITHOUT ``p'G``.  Nothing for
+    ``j_pressure`` None (the group keeps the pre-#64 convention, p'G in
+    ``j_inductive``, which readers infer from the absent attr)."""
+    if j_pressure is None:
+        return
+    from .schema import write_current_split
+    bkey = _scan_key(scan_key)
+    path = (_group_path(scan_key, count) if count is not None
+            else (f"scan/{bkey}/_baseline" if bkey is not None else "_baseline"))
+    with h5py.File(f"{header}.h5", "a") as hf:
+        write_current_split(hf[path], np.asarray(j_pressure, dtype=float))
+
+
 def stamp_group_attrs(header, scan_key, count, attrs):
     """Set ``attrs`` on one archived draw group, or on ``_baseline`` when
     ``count`` is None. A dict value ``{name: x}`` is stored as two attrs,

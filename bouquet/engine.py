@@ -2537,17 +2537,18 @@ def engine_record(eng, res, wall_s=None) -> dict:
 ENGINE_SPLIT_CONVENTION = (
     "unified engine: jphi-linterp REQUEST of the delivery solve (one "
     "jphi-linterp solve of j_phi reproduces the delivered equilibrium); "
-    "j_BS = s_bs F<1/R>/<B^2> <j.B>_BS* + p'(<R> - F^2<1/R>/<B^2>) (the "
-    "pressure-driven term on the bootstrap, as IMAS j_bootstrap), "
-    "j_NBI/j_RF = F<1/R>/<B^2> <j.B>_fix (j_RF: the rf part plus any other "
-    "driven source entry) on the delivery composition's geometry, all times "
-    "its edge taper; j_inductive the residual (it carries s_ind "
-    "F<1/R>/<B^2> <j.B>_ind and any delivery correction)")
+    "j_BS = s_bs F<1/R>/<B^2> <j.B>_BS*, j_pressure = p'(<R> - "
+    "F^2<1/R>/<B^2>) (the pressure-driven current, its own bucket: owner "
+    "decision D2), j_NBI/j_RF = F<1/R>/<B^2> <j.B>_fix (j_RF: the rf part "
+    "plus any other driven source entry) on the delivery composition's "
+    "geometry, all times its edge taper; j_inductive the residual (it "
+    "carries s_ind F<1/R>/<B^2> <j.B>_ind and any delivery correction)")
 
 
 def split_pressure_term(geom):
-    """The pressure-driven current the archived j_BS carries: p'G times the
-    geometry's edge taper."""
+    """The pressure-driven current of the archived split, its own bucket
+    ``j_pressure`` (owner decision D2; never part of ``j_BS``): p'G times
+    the geometry's edge taper."""
     P = pressure_term(geom)
     w = geom.get("edge_taper")
     return P if w is None else P * np.asarray(w, dtype=float)
@@ -2581,23 +2582,27 @@ def _lcfs_deviation_mm(mygs, pts):
 
 
 def _split(eng, res):
-    """The Baseline's toroidal split of the delivered request."""
+    """The Baseline's toroidal split of the delivered request:
+    ``(R, j_inductive, j_BS, j_NBI, j_RF, j_pressure)`` with ``R = j_inductive
+    + j_BS + j_NBI + j_RF + j_pressure`` exactly."""
     st, c = res["state"], eng.c
     g = st.geom
     kap = composed_factor(g)
     out = eng.delivered_closure["out"]
     R = np.asarray(st.request, dtype=float)
-    # the bootstrap carries the pressure-driven p'G (docs/current-
-    # conventions.md, A7), as the IMAS reader's and evaluate_jBS's do
-    j_BS = (np.asarray(out["s_bs"], float) * kap * np.asarray(st.lambda_bs)
-            + split_pressure_term(g))
+    # the pressure-driven p'G (docs/current-conventions.md, A7) is its own
+    # bucket, j_pressure (owner decision D2): never part of j_BS, so the
+    # bootstrap is the field-aligned s_bs kappa lambda alone (as
+    # evaluate_jBS/4's toroidal output and the IMAS reader's j_BS)
+    j_BS = np.asarray(out["s_bs"], float) * kap * np.asarray(st.lambda_bs)
+    P = np.asarray(split_pressure_term(g), dtype=float)
     j_NBI = kap * np.asarray(c.jB_fix_parts["nbi"], float)
     # j_RF carries the RF part AND any other driven core_sources entry (the
     # IDS adapter's "other" part; absent on the g-file path), so the split
     # sums exactly to the request
     j_RF = kap * (np.asarray(c.jB_fix_parts["rf"], float)
                   + np.asarray(c.jB_fix_parts.get("other", 0.0), float))
-    return R, R - j_BS - j_NBI - j_RF, j_BS, j_NBI, j_RF
+    return R, R - j_BS - j_NBI - j_RF - P, j_BS, j_NBI, j_RF, P
 
 
 def _delivered_state(eng, res, rec, path):
@@ -2686,7 +2691,7 @@ def _gfile_baseline(bq, eng, res, rec, ad, iso_pts, iso_w):
     from .baseline import Baseline, _reconstruction_metrics
     mygs, src, c = bq.mygs, bq.config.source, eng.c
     eqdsk = ad.eqdsk
-    R, j_ind, j_BS, j_NBI, j_RF = _split(eng, res)
+    R, j_ind, j_BS, j_NBI, j_RF, P = _split(eng, res)
     ds, offset = _delivered_state(eng, res, rec, "reconstruction")
     m = eng.delivered_meas
     A = np.asarray(m["achieved"], dtype=float)
@@ -2756,7 +2761,7 @@ def _gfile_baseline(bq, eng, res, rec, ad, iso_pts, iso_w):
     with open(src.geqdsk_path, "rb") as fh:
         eqdsk_bytes = fh.read()
     kn = c.kinetics_native
-    return Baseline(
+    bl = Baseline(
         # the run grid (the g-file's psi_N, or its Phi_N in a toroidal-flux
         # run); recon keeps the g-file's own psi_N
         psi_N=np.asarray(c.psi_N, dtype=float), coord=ad.coord,
@@ -2776,13 +2781,18 @@ def _gfile_baseline(bq, eng, res, rec, ad, iso_pts, iso_w):
         # reconstruction route)
         li_metrics=({"zeff_provenance": dict(kn["zeff_provenance"])}
                     if kn.get("zeff_provenance") else None))
+    # the third bucket (owner decision D2), archived beside the split
+    from .schema import SPLIT_PRESSURE_SEPARATE
+    bl.j_pressure = P
+    bl.current_split_convention = SPLIT_PRESSURE_SEPARATE
+    return bl
 
 
 def _ids_baseline(bq, eng, res, rec, bl_src):
     import copy
     c = eng.c
     bl = copy.copy(bl_src)
-    R, j_ind, j_BS, j_NBI, j_RF = _split(eng, res)
+    R, j_ind, j_BS, j_NBI, j_RF, P = _split(eng, res)
     ds, offset = _delivered_state(eng, res, rec, "imas")
     out = eng.delivered_closure["out"]
     cl = eng.delivered_closure
@@ -2812,6 +2822,11 @@ def _ids_baseline(bq, eng, res, rec, bl_src):
                        for r in ch["closure_limited_reasons"])))
     bl.j_phi, bl.j_inductive, bl.j_BS = R, j_ind, j_BS
     bl.j_NBI, bl.j_RF = j_NBI, j_RF
+    # the third bucket (owner decision D2) on the engine's own delivery
+    # geometry, replacing the reader's (whose inductive carried it)
+    from .schema import SPLIT_PRESSURE_SEPARATE
+    bl.j_pressure = P
+    bl.current_split_convention = SPLIT_PRESSURE_SEPARATE
     # the engine's j_RF carries every other driven entry (sawteeth included):
     # the reader's j_other / j_sawteeth are not separate channels here
     bl.j_other, bl.j_sawteeth = None, None

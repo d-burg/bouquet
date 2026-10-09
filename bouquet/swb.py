@@ -310,6 +310,9 @@ class SwbBaseline:
         # the third bucket (D2): j_phi = j_inductive + j_BS + j_pressure +
         # fixed; archived as such (SwbDraws.store_baseline)
         bl.j_pressure = st_b.get("j_pressure")
+        if bl.j_pressure is not None:
+            from .schema import SPLIT_PRESSURE_SEPARATE
+            bl.current_split_convention = SPLIT_PRESSURE_SEPARATE
         bl.j_saw = st_b.get("j_saw")
         # taper_edge_jBS also tapers the fixed current: carry the same factor onto the
         # channels so j_phi = j_inductive + j_BS + j_NBI + j_RF + j_other still holds.

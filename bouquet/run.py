@@ -7750,6 +7750,7 @@ class Bouquet(SwbBaseline):
         """
         import numpy as np
         from .baseline import resolve_uncertainty
+        from .schema import SPLIT_PRESSURE_IN_INDUCTIVE
         from .TokaMaker_interface import DrawSolveGuard, generate_bouquet
         from .utils import initialize_equilibrium_database
 
@@ -7999,6 +8000,13 @@ class Bouquet(SwbBaseline):
                 coord=getattr(bl, "coord", coords.PSI),
                 source_seed_profile=getattr(bl, "swb_seed_profile", None),
                 source_jphi_fixed=getattr(bl, "swb_jphi_fixed", None),
+                # owner decision D2: p'G archived as its own j_pressure
+                baseline_split=dict(
+                    j_pressure=getattr(bl, "j_pressure", None),
+                    inductive_includes_pressure=(
+                        getattr(bl, "current_split_convention",
+                                SPLIT_PRESSURE_IN_INDUCTIVE)
+                        == SPLIT_PRESSURE_IN_INDUCTIVE)),
                 bootstrap_kwargs=gc.bootstrap_kwargs,
             )
         self.generation_log = _cap["text"] or None

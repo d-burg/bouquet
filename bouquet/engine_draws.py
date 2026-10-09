@@ -1548,17 +1548,19 @@ class GenerateEngineDraws(DrawMethod):
         clipped; a negative inductive is recorded, not altered."""
         sp = self._cur["final_split"]
         j_phi = np.asarray(j_phi, dtype=float)
-        j_ind = j_phi - sp["j_BS"] - sp["j_NBI"] - sp["j_RF"]
+        P = np.asarray(sp["j_pressure"], dtype=float)
+        # the pressure-driven P = p'(<R> - F^2<1/R>/<B^2>) is its own
+        # bucket, j_pressure (owner decision D2): neither j_BS nor the
+        # residual inductive carries it
+        j_ind = j_phi - sp["j_BS"] - sp["j_NBI"] - sp["j_RF"] - P
         # the PARALLEL parts of the archived split (schema: the draw's
         # ``jB_parallel/`` subgroup; docs/archive-schema.md): the bootstrap
         # and fixed <j.B> the toroidal parts were converted from, and the
-        # field-aligned inductive <j.B> = j_inductive / kappa (the toroidal
-        # j_BS carries the pressure-driven P = p'(<R> - F^2<1/R>/<B^2>)) --
-        # so j_phi = kappa (jB_inductive + jB_BS + jB_NBI + jB_RF) + P
-        # exactly, and an IDS export carries no pressure-driven current in
-        # any parallel field (io.imas.write_imas_draw)
+        # field-aligned inductive <j.B> = j_inductive / kappa -- so j_phi =
+        # kappa (jB_inductive + jB_BS + jB_NBI + jB_RF) + P exactly, and an
+        # IDS export carries no pressure-driven current in any parallel
+        # field (io.imas.write_imas_draw)
         kap = np.asarray(sp["kappa"], dtype=float)
-        P = np.asarray(sp["j_pressure"], dtype=float)
         self._cur["parallel"] = dict(
             psi_N=np.asarray(self.ctx.psi, dtype=float).copy(),
             jB_inductive=j_ind / kap,
@@ -1570,10 +1572,11 @@ class GenerateEngineDraws(DrawMethod):
         diagnostics["engine"]["archived"]["split"] = dict(
             convention=("j_phi: the archived equilibrium's achieved FSA "
                         "current; j_BS: s_bs (1 + d_bs) scale Redl times "
-                        "F<1/R>/<B^2> plus the pressure-driven p'G, and "
-                        "j_NBI/j_RF: the fixed <j.B> times F<1/R>/<B^2>, of "
-                        "the archived equilibrium; j_inductive: the "
-                        "residual, never clipped"),
+                        "F<1/R>/<B^2>; j_pressure: the pressure-driven p'G "
+                        "(its own bucket, owner decision D2); j_NBI/j_RF: "
+                        "the fixed <j.B> times F<1/R>/<B^2>, of the archived "
+                        "equilibrium; j_inductive: the residual, never "
+                        "clipped"),
             j_NBI=sp["j_NBI"].tolist(), j_RF=sp["j_RF"].tolist(),
             n_negative_inductive=int(np.sum(neg)),
             min_inductive=float(np.min(j_ind)),
@@ -1586,10 +1589,12 @@ class GenerateEngineDraws(DrawMethod):
                   f"negative on {int(np.sum(neg))} nodes (min "
                   f"{float(np.min(j_ind)):.3e} A/m^2); recorded, not "
                   "clipped", flush=True)
-        # the draw's returned diagnostics carry the archived split too (with
-        # p'G on j_BS, as the baseline's)
+        # the draw's returned diagnostics carry the archived split too, with
+        # p'G as j_pressure (as the baseline's); generate_bouquet archives
+        # it (schema.write_current_split)
         diagnostics["j_BS"] = np.asarray(sp["j_BS"], dtype=float).copy()
         diagnostics["j_inductive"] = j_ind.copy()
+        diagnostics["j_pressure"] = P.copy()
         return np.asarray(sp["j_BS"], dtype=float).copy(), j_ind
 
     def mark(self, stage):
@@ -1650,7 +1655,7 @@ class GenerateEngineDraws(DrawMethod):
                  + np.asarray(fx.get("other", 0.0), dtype=float))
         cur["final_split"] = dict(
             j_BS=(_amp * self.ctx.s_bs * kap * _scale
-                  * np.asarray(fin["redl"], dtype=float)) + P,
+                  * np.asarray(fin["redl"], dtype=float)),
             j_NBI=kap * jB_NBI, j_RF=kap * jB_RF,
             jB_BS=jB_BS, jB_NBI=jB_NBI * np.ones_like(kap),
             jB_RF=jB_RF * np.ones_like(kap), kappa=kap,

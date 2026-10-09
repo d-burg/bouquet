@@ -99,3 +99,22 @@ def test_construction_checks_judge_the_effective_method():
             source=ImasSource(ids_path="dd.json", time=1.0),
             solver=SolverConfig(mesh_path="m.h5"), output_header="x",
             generation=GenerationConfig(jbs_self_consistent=False))
+
+
+def test_the_default_engine_path_is_untouched_when_swb_is_not_selected():
+    """With every swb option at its default the engine path is the base
+    commit's: the default config resolves to the engine with both fields as
+    they were, its draw method is the engine's, and the swb-only fields stay
+    out of it (the engine reads bootstrap_kwargs alone)."""
+    import dataclasses
+    from bouquet.config import solve_method_of
+    from bouquet.draw_methods import method_hooks
+    from bouquet.engine_draws import GenerateEngineDraws
+    g = GenerationConfig()
+    before = dataclasses.asdict(g)
+    assert solve_method_of(g) == "engine"
+    assert resolve_solve_method(g) == "engine"
+    assert dataclasses.asdict(g) == before          # nothing rewritten
+    assert method_hooks(g) is GenerateEngineDraws
+    assert g.swb_edge_taper_psi0 is None and g.swb_ip_tol == 5e-3
+    assert g.bootstrap_kwargs == {}

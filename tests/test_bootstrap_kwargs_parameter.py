@@ -41,15 +41,19 @@ def test_the_options_reach_every_solve_with_bootstrap_call(toy, monkeypatch):
     req, _jbs, _fx = _reconstruct(toy)
     z = np.zeros(_N)
     bk = {"iterations": 3}
-    TI.perturb_kinetic_equilibrium(
+    d = TI.perturb_kinetic_equilibrium(
         toy, _X, _EC * (_NE * _TE + _NI * _TI), _NE, _TE, _NI, _TI,
         req, z, z, z, z, z, 0.5, 0.4, 0.25, _IP, _li(toy.achieved), _ZEFF,
         _N, input_jinductive=0.6 * req, l_i_tolerance=0.05, psi_pad=_PAD,
         constrain_sawteeth=False, recalculate_j_BS=True,
         isolate_edge_jBS=False, scale_jBS=1.0, floor_j_BS=False,
         max_proxy_draws=5, p_thresh=0.05, rng=make_rng(7),
-        bootstrap_kwargs=bk)
+        bootstrap_kwargs=bk)[6]
     assert seen and all(k.get("iterations") == 3 for k in seen)
+    # review PR64 B1 (integration hook): the draw says how SWB's bootstrap
+    # was converted (this fake toolkit takes the grid "x": TokaMaker jphi)
+    from bouquet.physics import SWB_JBS_TOROIDAL
+    assert d["swb_conversion"]["swb_jbs_convention"] == SWB_JBS_TOROIDAL
     assert bk == {"iterations": 3}
 
 

@@ -2486,6 +2486,67 @@ def smooth_jbs_transition(j_BS):
 # ====================================================================
 #  Core perturbation routine
 # ====================================================================
+def swb_result_toroidal(mygs, results, psi_N, coord="psi_n", scale_jBS=1.0,
+                        isolate_edge_jBS=False, grid_passed=None):
+    """``solve_with_bootstrap``'s result with its ``j_BS`` / ``isolated_j_BS``
+    as the field-aligned toroidal bootstrap ``kappa <j.B>`` bouquet stores
+    (:func:`bouquet.physics._swb_jbs_to_toroidal`, for the INSTALLED
+    toolkit's output convention -- :func:`bouquet.physics.
+    swb_jbs_convention`; an unknown one is refused, never guessed).
+
+    Review PR64 B1 (the legacy SWB call sites): upstream OpenFUSIONToolkit
+    projects the Redl ``<j.B>`` by ``R_avg/F`` (+7 % at psi_N 0.5, +12-13 %
+    at the pedestal unconverted on the synthetic D3D-like example) -- undone
+    and converted with kappa, bit for bit the 6116d5f conversion; a toolkit
+    returning TokaMaker jphi gets ``p'G`` taken off (the third bucket
+    ``j_pressure``, owner decision D2).  Call it IMMEDIATELY after the SWB
+    call, on the equilibrium the call left in ``mygs``.  ``scale_jBS``: the
+    scale SWB applied; on the TokaMaker-jphi toolkit the raw output is
+    ``scale (kappa<j.B> + p'G)``, so it is converted at scale 1 and scaled
+    back (the R_avg/F conversion is linear: applied directly).  SWB's own
+    arrays are kept as ``swb_raw_j_BS`` / ``swb_raw_isolated_j_BS`` and the
+    stamp (:func:`bouquet.physics.swb_conversion_record`) as
+    ``swb_conversion``.  ``grid_passed``: whether the call was given its grid
+    (default: whenever the toolkit takes one, as
+    :func:`bouquet.coords.swb_grid_kwargs` passes it); False for a call made
+    on OFT's own uniform grid."""
+    from .physics import (SWB_JBS_TOROIDAL, _swb_jbs_to_toroidal,
+                          swb_conversion_record, swb_jbs_convention)
+    conv = swb_jbs_convention()
+    if conv == SWB_JBS_TOROIDAL and bool(isolate_edge_jBS):
+        raise RuntimeError(
+            "isolate_edge_jBS with a toolkit whose solve_with_bootstrap "
+            "returns TokaMaker jphi (kappa<j.B> + p'G): where p'G sits in "
+            "its isolated spike is not defined, so the field-aligned "
+            "bootstrap cannot be recovered; use isolate_edge_jBS=False")
+    x = np.asarray(psi_N, dtype=float)
+    if grid_passed is None:
+        grid_passed = bool(coords._swb_grid_arg())
+    grid = (np.asarray(coords.psi_at(mygs, x, coord), dtype=float)
+            if grid_passed else None)
+    s = float(scale_jBS)
+
+    def _conv(raw):
+        raw = np.asarray(raw, dtype=float)
+        if conv != SWB_JBS_TOROIDAL or s == 1.0:
+            return _swb_jbs_to_toroidal(mygs, raw, 1e-3, psi=grid,
+                                        convention=conv)
+        if s == 0.0:
+            return np.zeros_like(raw)
+        return s * _swb_jbs_to_toroidal(mygs, raw / s, 1e-3, psi=grid,
+                                        convention=conv)
+
+    raw_iso = np.asarray(results["isolated_j_BS"], dtype=float)
+    raw_bs = np.asarray(results.get("j_BS", raw_iso), dtype=float)
+    fa_bs = _conv(raw_bs)
+    fa_iso = fa_bs if np.array_equal(raw_iso, raw_bs) else _conv(raw_iso)
+    out = dict(results)
+    out.update(swb_raw_j_BS=raw_bs, swb_raw_isolated_j_BS=raw_iso,
+               j_BS=fa_bs, isolated_j_BS=fa_iso,
+               swb_conversion=swb_conversion_record(conv))
+    return out
+
+
 def strong_coil_reg(mygs, targets, soft_reg_weight=1.0e4,
                     vsc_soft_reg_weight=1.0):
     """The draw-phase coil reg terms: every coil set pulled toward
@@ -3220,6 +3281,9 @@ def perturb_kinetic_equilibrium(
     # solve_with_bootstrap options: an explicit parameter (review PR60 B5);
     # a private copy, so the caller's dict is never mutated
     kwargs = dict(bootstrap_kwargs or {})
+    # how this draw's SWB bootstrap was converted (review PR64 B1; None: no
+    # solve_with_bootstrap call -- the self-consistent loop's evaluate_jBS)
+    _swb_conv_rec = None
 
     _edge = resolve_edge_pressure(edge_pressure)
     # ----------------------------------------------------------------
@@ -3586,9 +3650,14 @@ def perturb_kinetic_equilibrium(
         finally:
             if _stashed_bounds is not None:
                 mygs.set_coil_bounds(_stashed_bounds)
-        # SWB's j_BS is already TokaMaker jphi (physics module docstring);
-        # take it BEFORE the snapshot restore below. The cached recon spike
-        # was axis-smoothed the same way at cache time.
+        # SWB's j_BS -> the field-aligned toroidal bootstrap (review PR64
+        # B1), on the SWB-landed equilibrium -- BEFORE the snapshot restore
+        # below changes mygs.  The cached recon spike was converted (and
+        # axis-smoothed) the same way at cache time.
+        _results_diff = swb_result_toroidal(
+            mygs, _results_diff, psi_N, coord, scale_jBS=scale_jBS,
+            isolate_edge_jBS=isolate_edge_jBS)
+        _swb_conv_rec = _results_diff["swb_conversion"]
         _spike_perturbed = smooth_jbs_transition(
             np.asarray(_results_diff["isolated_j_BS"], dtype=float))
         _full_j_BS_tor = smooth_jbs_transition(
@@ -4150,6 +4219,12 @@ def perturb_kinetic_equilibrium(
         finally:
             if _stashed_bounds is not None:
                 mygs.set_coil_bounds(_stashed_bounds)
+        # SWB's j_BS -> the field-aligned toroidal bootstrap (review PR64
+        # B1), on the equilibrium the call left in mygs, before any solve
+        results = swb_result_toroidal(mygs, results, psi_N, coord,
+                                      scale_jBS=scale_jBS,
+                                      isolate_edge_jBS=isolate_edge_jBS)
+        _swb_conv_rec = results["swb_conversion"]
         # NOTE: the weak reg installed for SWB is intentionally LEFT ACTIVE
         # through the rest of perturb_kinetic_equilibrium -- the recon-anchor
         # solve and the l_i band loop are ALSO exploratory inverse solves
@@ -4182,8 +4257,8 @@ def perturb_kinetic_equilibrium(
         # unchanged so j_BS recompute ≈ recon's stored j_BS, and
         # combined with input_jinductive the total j_phi recovers
         # recon's exactly -> l_i = recon's l_i, bnd_RMS ≈ 0.
-        # SWB's j_BS is already TokaMaker jphi = <j_phi> (field-aligned part
-        # plus the p'G pressure term), bouquet's own convention: no conversion.
+        # (results' j_BS / isolated_j_BS were converted to the field-aligned
+        # kappa <j.B> right after the call: swb_result_toroidal)
         _use_spike_delta = (spike_delta_ref is not None
                             and spike_delta_baseline is not None)
         if _use_spike_delta:
@@ -5058,6 +5133,8 @@ def perturb_kinetic_equilibrium(
         # the shared sampler's version (kinetic_sampler/2) and this draw's
         # clip counters (PR #56 B3/B4/B7), archived by generate_bouquet
         "kinetic_sampler": _kd.record(),
+        # the SWB output convention and the conversion applied (PR64 B1)
+        "swb_conversion": _swb_conv_rec,
     }
     if _jbs_bypass is not None:
         diagnostics["jbs_loop"] = dict(
@@ -6830,7 +6907,13 @@ def generate_bouquet(
                         **coords.swb_grid_kwargs(psi_N, coord),
                         **kwargs,
                     )
-                    # SWB j_BS is TokaMaker jphi already (no conversion).
+                    # SWB's j_BS -> the field-aligned toroidal bootstrap
+                    # (review PR64 B1), on the equilibrium the call left
+                    # in mygs, before the snapshot below.
+                    _cache_results = swb_result_toroidal(
+                        mygs, _cache_results, psi_N, coord,
+                        scale_jBS=_scale_ref,
+                        isolate_edge_jBS=isolate_edge_jBS)
                     # RAW profile for delta mode (artifacts cancel in the delta);
                     # smoothed version for DIFF_BS (whose per-draw spikes are also
                     # smoothed).
@@ -8384,6 +8467,9 @@ def generate_bouquet(
             stamp_group_attrs(header, scan_key, count, _ifile_rec)
         # the kinetic sampler's version + clip counters (legacy and swb
         # draws; the engine archives its own in its draw record)
+        if diagnostics.get("swb_conversion"):
+            stamp_group_attrs(header, scan_key, count,
+                              dict(diagnostics["swb_conversion"]))
         if diagnostics.get("kinetic_sampler") is not None:
             import json
             from .schema import KINETIC_SAMPLER_JSON_ATTR
@@ -8713,6 +8799,7 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
 
     from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
 
+    _recon_swb_conv = None      # set where SWB runs (stamped on the result)
     _edge = resolve_edge_pressure(edge_pressure)
     # Run grid: the g-file's own nodes, labelled in ``coord`` (``x`` = their
     # Φ_N in a toroidal-flux run).  Shape windows read the nodes' g-file ψ_N.
@@ -8781,9 +8868,13 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
             **coords.swb_grid_kwargs(_x, coord),
             **kwargs
         )
+        # SWB's j_BS -> the field-aligned toroidal bootstrap kappa <j.B>
+        # (review PR64 B1), on the equilibrium the call left in mygs, before
+        # any further solve; the stamp goes with the result
+        results = swb_result_toroidal(mygs, results, _x, coord,
+                                      isolate_edge_jBS=isolate_edge_jBS)
+        _recon_swb_conv = results["swb_conversion"]
 
-        # SWB's bootstrap is already TokaMaker jphi, the convention of
-        # eqdsk_jtor and the fitted inductive profile (no conversion needed).
         # Smooth the fragile near-axis / shelf-transition zone IMMEDIATELY
         # (shared helper, also applied to every per-draw spike) so the
         # inductive fit below sees the artifact-free profile rather than the raw
@@ -9683,6 +9774,9 @@ def reconstruct_equilibrium(mygs, eqdsk, ne, te, ni, ti, Zeff,
         'li_corrective_drift_pct': float(_li_corr_drift_pct),
         'quality': quality,
     }
+    if _recon_swb_conv is not None:
+        # how SWB's bootstrap was converted (review PR64 B1)
+        _recon_out['swb_conversion'] = dict(_recon_swb_conv)
     if _jbs_record is not None:
         _recon_out['jbs_loop'] = _jbs_record
         # the ONE reconstruction state (self-consistent loop): the request one

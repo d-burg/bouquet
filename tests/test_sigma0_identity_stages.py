@@ -149,6 +149,15 @@ class ToyGS:
                  "dV/dPsi": 1.0 + x}
         return (x, 1.0 + 3.0 * x, ravgs, None, None, None)
 
+    def sauter_fc(self, psi=None, npsi=None, psi_pad=None):
+        """The flux-surface averages the SWB conversion reads
+        (physics._swb_geometry): a flat <|B|^2>.  The toy's p' is zero, so
+        the pressure-driven p'G the conversion takes off a TokaMaker-jphi
+        toolkit's SWB output is exactly zero here."""
+        x = self._grid(psi, npsi)
+        one = np.ones_like(x)
+        return (None, None, {"<|B|>": one, "<|B|^2>": one})
+
     def flux_integral(self, psi_N, prof):
         return _trap(prof, psi_N)
 

@@ -5302,7 +5302,13 @@ class Bouquet(SwbBaseline):
                             coords.swb_seed(np.linspace(0.0, 1.0,
                                                         psi_N.size)),
                             **_kw)
-                    # SWB's j_BS is TokaMaker jphi already, on its grid
+                    # SWB's j_BS -> the field-aligned toroidal bootstrap
+                    # (review PR64 B1), on the equilibrium the call left in
+                    # mygs and on the grid it was given
+                    from .TokaMaker_interface import swb_result_toroidal
+                    _swb = swb_result_toroidal(
+                        mygs, _swb, psi_N, coord, isolate_edge_jBS=iso,
+                        grid_passed=_passed)
                     _j = smooth_jbs_transition(np.asarray(
                         _swb["isolated_j_BS"], dtype=float))
                     if gc.floor_j_BS:
@@ -5314,7 +5320,8 @@ class Bouquet(SwbBaseline):
                           + "; the fixed point does not depend on the init",
                           flush=True)
                     return _j, dict(swb_psi_N_passed=bool(_passed),
-                                    swb_psi_N_reason=_why)
+                                    swb_psi_N_reason=_why,
+                                    **_swb["swb_conversion"])
 
                 def _finish(rec, nl):
                     rec = jsonable(rec)
@@ -5886,6 +5893,7 @@ class Bouquet(SwbBaseline):
                 return _finish(rec, nl)
 
 
+            self._swb_conversion_record = None   # set where SWB runs
             if _loop_on:
                 nl_its = _imas_jbs_loop()
             else:
@@ -5898,6 +5906,13 @@ class Bouquet(SwbBaseline):
                     **coords.swb_grid_kwargs(psi_N, coord),
                     **gc.bootstrap_kwargs,
                 )
+                # SWB's j_BS -> the field-aligned toroidal bootstrap (review
+                # PR64 B1), on the equilibrium the call left in mygs; the
+                # stamp is archived with the baseline (li_metrics)
+                from .TokaMaker_interface import swb_result_toroidal
+                swb = swb_result_toroidal(mygs, swb, psi_N, coord,
+                                          isolate_edge_jBS=iso)
+                self._swb_conversion_record = dict(swb["swb_conversion"])
                 # Same axis-transition smoothing every per-draw spike receives, so
                 # the sigma=0 draw reproduces this baseline split exactly.
                 j_BS_swb = smooth_jbs_transition(
@@ -6120,6 +6135,9 @@ class Bouquet(SwbBaseline):
             metrics["source_time_match"] = bl.source_time_match
         if getattr(self, "_swb_seed_record", None):
             metrics["swb_seed"] = dict(self._swb_seed_record)
+        # how the frozen-SWB baseline's bootstrap was converted (PR64 B1)
+        if getattr(self, "_swb_conversion_record", None):
+            metrics["swb_conversion"] = dict(self._swb_conversion_record)
         bl.li_metrics = metrics
         # Target TokaMaker li_3 ('iter').  The IMAS path is not itself affected
         # by the geqdsk estimator mismatch (both sides come from TokaMaker),
@@ -6680,6 +6698,13 @@ class Bouquet(SwbBaseline):
             isolate_edge_jBS=bool(gc.isolate_edge_jBS),
             **coords.swb_grid_kwargs(psi_N, coord),
             diagnostic_plots=False, **swb_fix, **gc.bootstrap_kwargs)
+        # SWB's j_BS -> the field-aligned toroidal bootstrap (review PR64
+        # B1), as the draws convert theirs, before anything else solves
+        from .TokaMaker_interface import swb_result_toroidal
+        res = swb_result_toroidal(
+            mygs, res, psi_N, coord,
+            scale_jBS=float(sigma0_reference_scale(_rng0)),
+            isolate_edge_jBS=bool(gc.isolate_edge_jBS))
         spike0 = (1.0 if _mult is None else _mult) * smooth_jbs_transition(
             np.asarray(res["isolated_j_BS"], dtype=float))
         if gc.floor_j_BS:
@@ -6698,6 +6723,7 @@ class Bouquet(SwbBaseline):
         dev_eval = np.where(floored, 0.0, dev)
         iworst = int(np.argmax(np.abs(dev_eval)))
         out = dict(spike0=spike0,
+                   swb_conversion=dict(res["swb_conversion"]),
                    max_dev=float(np.max(np.abs(dev_eval))),
                    rms_dev=float(np.sqrt(np.mean(dev_eval ** 2))),
                    max_dev_frac=float(np.max(np.abs(dev_eval)) / peak),

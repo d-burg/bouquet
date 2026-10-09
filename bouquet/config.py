@@ -597,7 +597,8 @@ class GenerationConfig:
     l_i_tolerance: float = 0.05            # l_i acceptance band (fraction of target)
     constrain_sawteeth: bool = False
     # When True, recompute bootstrap each draw via TokaMaker solve_with_bootstrap
-    # (whose output is already TokaMaker jphi; physics module docstring),
+    # (its j_BS converted to the field-aligned kappa <j.B> for the installed
+    # toolkit's output convention: TokaMaker_interface.swb_result_toroidal),
     # overriding the baseline/FUSE j_BS. When False, keep the baseline j_BS.
     recalculate_j_BS: bool = True
     # Treat j_phi as ONE profile: no inductive/bootstrap decomposition anywhere.

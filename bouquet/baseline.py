@@ -1406,7 +1406,10 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
             ("core_pressure_hollow", _cph_recon),
             # PR #56 (owner item E2 stamp): how the IDA Z_eff / n_i were
             # resolved; archived as _baseline li_metrics_json
-            ("zeff_provenance", kin.get("zeff_provenance"))) if v}
+            ("zeff_provenance", kin.get("zeff_provenance")),
+            # review PR64 B1: how SWB's bootstrap was converted (absent on
+            # the self-consistent loop, which runs no SWB)
+            ("swb_conversion", result.get("swb_conversion"))) if v}
             or None),
         jphi_request_offset=_request_offset,
         delivered_state=_delivered,

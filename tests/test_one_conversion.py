@@ -291,8 +291,8 @@ def test_a_toroidal_swb_output_has_the_pressure_term_taken_off(fsa):
 
 def test_the_swb_output_convention_is_identified_not_guessed():
     """The capability check: the upstream projection line -> R_avg/F; a
-    toolkit with ``solve_with_bootstrap(x, coord)`` -> toroidal; anything
-    else (a Fortran-routed call, another projection) is refused."""
+    toolkit whose ``solve_with_bootstrap`` takes the grid ``x`` -> toroidal;
+    anything else (a Fortran-routed call, another projection) is refused."""
     def upstream(mygs, ne, Te, ni, Ti, Zeff, Ip_target, psi_N=None):
         j_BS_neo = R_avg = f = 1.0
         j_BS_final = j_BS_neo * (R_avg / f)
@@ -315,6 +315,11 @@ def test_the_swb_output_convention_is_identified_not_guessed():
     for fn in (routed, other):
         with pytest.raises(physics.SwbConventionUnknown):
             physics.swb_jbs_convention(fn)
+    # the toolkit probe bouquet uses everywhere (coords._swb_params)
+    assert physics.swb_jbs_convention(params=frozenset({"x"})) == \
+        physics.SWB_JBS_TOROIDAL
+    assert physics.swb_jbs_convention(upstream, params=frozenset(
+        {"psi_N"})) == physics.SWB_JBS_RAVG_OVER_F
     rec = physics.swb_conversion_record(physics.SWB_JBS_RAVG_OVER_F)
     assert rec["swb_jbs_convention"] == physics.SWB_JBS_RAVG_OVER_F
     assert "kappa" in rec["swb_jbs_conversion"]

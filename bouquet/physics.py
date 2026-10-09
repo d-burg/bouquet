@@ -423,17 +423,19 @@ class SwbConventionUnknown(RuntimeError):
     rather than one converted on a guess."""
 
 
-def swb_jbs_convention(solve_with_bootstrap=None) -> str:
+def swb_jbs_convention(solve_with_bootstrap=None, params=None) -> str:
     """The convention of ``solve_with_bootstrap``'s ``j_BS`` / ``isolated_j_BS``
     on the INSTALLED toolkit (one of :data:`SWB_JBS_CONVENTIONS`); raises
     :class:`SwbConventionUnknown` otherwise.
 
-    A capability check, decided once per function object:
+    A capability check, from the function's arguments (``params``; default:
+    :func:`bouquet.coords._swb_params`, the one probe of the toolkit's SWB
+    signature, or the signature of the ``solve_with_bootstrap`` given):
 
-    * :data:`SWB_JBS_TOROIDAL` when the function takes the grid ``x`` and
-      ``coord`` -- the toolkit generation whose ``solve_with_bootstrap``
-      returns TokaMaker jphi (``docs/current-conventions.md``, "Where these
-      are used");
+    * :data:`SWB_JBS_TOROIDAL` when it takes the grid ``x`` -- the toolkit
+      generation whose ``solve_with_bootstrap`` returns TokaMaker jphi
+      (``docs/current-conventions.md``, "Where these are used"); upstream
+      OFT's grid argument is ``psi_N``;
     * otherwise :data:`SWB_JBS_RAVG_OVER_F` when the Python implementation
       the call runs carries the upstream projection ``j_BS_neo * (R_avg / f)``
       and has no ``use_python_solve`` switch routing the call elsewhere;
@@ -443,37 +445,44 @@ def swb_jbs_convention(solve_with_bootstrap=None) -> str:
     ``solve_with_bootstrap`` defaults to the installed toolkit's.
     """
     import inspect
-    if solve_with_bootstrap is None:
-        from OpenFUSIONToolkit.TokaMaker.bootstrap import (
-            solve_with_bootstrap)
-    hit = _SWB_CONVENTION_CACHE.get(id(solve_with_bootstrap))
-    if hit is not None and hit[0] is solve_with_bootstrap:
-        return hit[1]
-    try:
-        params = frozenset(inspect.signature(solve_with_bootstrap).parameters)
-    except (TypeError, ValueError):
-        params = frozenset()
-    conv = None
-    if "x" in params and "coord" in params:
-        conv = SWB_JBS_TOROIDAL
-    elif "use_python_solve" not in params:
-        try:
-            src = inspect.getsource(solve_with_bootstrap)
-        except (OSError, TypeError):
-            src = ""
+    if params is None:
+        if solve_with_bootstrap is None:
+            from . import coords as _c
+            params = _c._swb_params()
+        else:
+            try:
+                params = frozenset(
+                    inspect.signature(solve_with_bootstrap).parameters)
+            except (TypeError, ValueError):
+                params = frozenset()
+    if "x" in params:
+        return SWB_JBS_TOROIDAL
+    if "use_python_solve" not in params:
+        if solve_with_bootstrap is None:
+            try:
+                from OpenFUSIONToolkit.TokaMaker.bootstrap import (
+                    solve_with_bootstrap)
+            except Exception:
+                solve_with_bootstrap = None
+        hit = _SWB_CONVENTION_CACHE.get(id(solve_with_bootstrap))
+        if hit is not None and hit[0] is solve_with_bootstrap:
+            src = hit[1]
+        else:
+            try:
+                src = inspect.getsource(solve_with_bootstrap)
+            except (OSError, TypeError):
+                src = ""
+            _SWB_CONVENTION_CACHE[id(solve_with_bootstrap)] = (
+                solve_with_bootstrap, src)
         if _SWB_RAVG_OVER_F_MARKER in src:
-            conv = SWB_JBS_RAVG_OVER_F
-    if conv is None:
-        raise SwbConventionUnknown(
-            "the installed OpenFUSIONToolkit's solve_with_bootstrap returns "
-            "its bootstrap in a convention bouquet does not recognise (neither "
-            "the upstream <j.B> R_avg/F projection nor the TokaMaker-jphi "
-            "output of the toolkit with solve_with_bootstrap(x, coord)); "
-            "bouquet will not convert it on a guess.  Install one of those "
-            "toolkits, or use a path that does not run solve_with_bootstrap.")
-    _SWB_CONVENTION_CACHE[id(solve_with_bootstrap)] = (solve_with_bootstrap,
-                                                       conv)
-    return conv
+            return SWB_JBS_RAVG_OVER_F
+    raise SwbConventionUnknown(
+        "the installed OpenFUSIONToolkit's solve_with_bootstrap returns its "
+        "bootstrap in a convention bouquet does not recognise (neither the "
+        "upstream <j.B> R_avg/F projection nor the TokaMaker-jphi output of "
+        "the toolkit with solve_with_bootstrap(x=...)); bouquet will not "
+        "convert it on a guess.  Install one of those toolkits, or use a path "
+        "that does not run solve_with_bootstrap.")
 
 
 def _swb_surfaces(n, psi_pad, psi):

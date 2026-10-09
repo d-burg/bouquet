@@ -570,6 +570,18 @@ and the DRAWS, perturbations of the reconstruction. With the loop on:
   bootstrap already self-consistent. Every sampled perturbation (kinetics,
   inductive GPR, bootstrap scale, l_i target) enters as a departure from the
   reconstruction's value.
+- **The bootstrap multiplier** (`bs_scale`, or the structured closure's
+  `s_bs(ψ)`, `Baseline.bs_scale_profile`) reaches every legacy draw through
+  one rule (`Bouquet._draw_bootstrap_scaling`, shared by `generate()` and
+  both σ=0 guards): SWB draws apply it after SWB (`jBS_scale_profile`), with
+  `jBS_scale_range` the jitter inside SWB; loop draws -- whose composer is
+  linear in its scale and takes no profile -- carry it in the scale, the
+  range re-centred on `bs_scale` (`(bs_scale, bs_scale)` with no range).  A
+  non-uniform `s_bs(ψ)` with loop draws is refused (the composer cannot take
+  it).  The fixed current a draw holds is `j_NBI + j_RF + j_other`; the
+  delivered state and both σ=0 guards hold exactly that, and the baseline-way
+  check records how far the stored split is from closing on it
+  (`split_closure`).
 - **What is left non-identity by construction:** for an asymmetric
   `jBS_scale_range` the draws' centre scale is not the reconstruction's;
   `jBS_baseline_mode="ohmic"` (baseline-only; the draws refuse it) keeps its
@@ -847,11 +859,25 @@ multiplies every current it reads by `sign(equilibrium ip)`:
 | multiplied by `sign(ip)` | read unchanged |
 |---|---|
 | `core_profiles` `j_total`, `j_tor`, `j_ohmic`, `j_bootstrap` | kinetics (`n`, `T`, `Z_eff`), fast and equilibrium pressure |
-| every beam-source `j_parallel` (→ `j_NBI`) | rotation (`omega_tor`), `E_r`, transport coefficients |
+| every driven core_sources `j_parallel`: beams (→ `j_NBI`), EC/LH/IC (→ `j_RF`), fusion, runaways, sawteeth and unknown indices (→ `j_other`; the sawteeth share also → `j_sawteeth`) | rotation (`omega_tor`), `E_r`, transport coefficients |
 | `equilibrium.profiles_1d.j_tor` (→ `jphi_diff`) | the dd's own `q` (`q0_dd`, recorded raw; the sawtooth gate reads `|q0_dd|`) |
 | `pf_active` coil currents read as coil-regularisation targets (`coil_targets.measured_from_pf_active`) | `pf_active` per-coil sigma (`data_error_upper`, used through `abs()` by the χ² coil filter) |
-| | a user-supplied `FixedComponentsConfig.j_NBI` / `j_RF` — defined in bouquet's positive-Ip frame (co-current positive), exactly as on the g-file path |
+| | a user-supplied `FixedComponentsConfig.j_NBI` / `j_RF` / `j_other` — defined in bouquet's positive-Ip frame (co-current positive), exactly as on the g-file path |
 | | the boundary outline, `F0 = |r0·b0|` |
+
+The driven entries are read through ONE call with the engine's IDS adapter
+(`adapters._ids_driven_currents`, with the core_profiles slice time and
+window, the off list, the match records and the announcement key the engine
+passes), so the source-time rule -- refusal, `off_idle`, `off_before_record`,
+the announcement -- is the same on the legacy reader and the engine for every
+channel, the sawteeth entry included (a current-carrying sawteeth entry past
+its last own time is refused, not zeroed).  The sawteeth entry (701) is held
+in `j_other` by default: FUSE's `j_ohmic` excludes it (`j_total - j_bootstrap
+- beams - sawteeth = j_ohmic` to rounding on the synthetic FUSE fixture).
+`ImasSource.hold_sawteeth=False` opts out -- its current stays in the
+residual `j_inductive`, the legacy split before the hold -- and is stamped in
+`Baseline.source_time_match["sawteeth_hold"]`; the unified engine always
+holds it and refuses the opt-out.
 
 The factor is recorded as `Baseline.source_current_sign` (with where it came
 from as `Baseline.source_current_sign_origin`, and the source's B0 sign as

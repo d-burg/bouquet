@@ -91,7 +91,7 @@ non-default knobs), `archive` (its `BouquetArchive`), `selected_indices()`,
 | Inductive current (j_ind) | ✓ | GPR-perturbed, then scaled to match l_i |
 | Coil currents | ✓ | Adjusted by TokaMaker within the homotopy bounds |
 | Aux channels (ω_tor, E_r, χ_e, χ_i) | optional | Switchboard: perturbed + stored when sigmas are supplied (passive) |
-| p_fast, j_NBI, j_RF | ✗ | Fixed additive components, never perturbed |
+| p_fast, j_NBI, j_RF, j_other | ✗ | Fixed additive components, never perturbed (`j_other`: fusion, runaways, sawteeth and unknown-index core_sources entries on the IMAS path) |
 | Equilibrium anchors (p_diff, jphi_diff, jBS_diff) | ✗ | Fixed offsets applied to the baseline **and** every draw |
 
 ## Configuration reference
@@ -258,7 +258,8 @@ as an enormous sigma.
 | `constrain_sawteeth` | `False` | Gate draws on q0 |
 | `recalculate_j_BS` | `True` | Recompute the Sauter bootstrap per draw (vs. reusing the baseline's) |
 | `single_profile_jphi` | `False` | Legacy path: perturb the TOTAL `j_phi` as one profile (no inductive / bootstrap split; no per-draw Sauter call). `jphi_scalar_sigma` then applies to the total, a larger absolute perturbation -- re-tune it. Needs `jbs_self_consistent=False` (refused otherwise); the unified engine refuses it |
-| `jBS_scale_range` | `(0.99, 1.01)` | Legacy draws: the per-draw multiplicative spread of the bootstrap (uniform in the range; default `None` -> `(0.99, 1.01)` on 2026-06-04) |
+| `jBS_scale_range` | `(0.99, 1.01)` | Legacy draws: the per-draw multiplicative spread of the bootstrap (uniform in the range; default `None` -> `(0.99, 1.01)` on 2026-06-04). The baseline's multiplier (`bs_scale` / `s_bs(ψ)`) is applied after SWB on SWB draws and re-centres this range on loop draws -- see [physics-notes.md](physics-notes.md) ("The bootstrap multiplier") |
+| `swb_seed` | `None` | IMAS path, every legacy SWB call (baseline split, draws, σ=0 check): `"source"` seeds SWB with the source's `j_inductive` and holds its NBI + RF + other current fixed (`jphi_fixed`); `"generic"` the `(1 - s^1.5)^1.5` seed. `None` resolves at `prepare_baseline()` to `"source"` when the installed OFT's `solve_with_bootstrap` takes `jphi_fixed`, else `"generic"` -- never an error; an explicit `"source"` on a toolkit without `jphi_fixed` is refused at the first SWB call only. Stamped in `li_metrics["swb_seed"]` |
 | `jbs_delta_mode` | `False` | Opt-in differential bootstrap composition — see [physics-notes.md](physics-notes.md#differential-bootstrap-jbs_delta_mode) |
 | `isolate_edge_jBS` | `None` | Legacy path only. `None` is resolved per engine at `prepare_baseline()`: **`False`** under `reconstruction_engine="legacy"` (both input types; the unified forward decomposition -- pure-ohmic `j_inductive`, full bootstrap in `j_BS` -- closes exactly and yields better), `True` under `"unified"` (never read; the engine refuses `False`). Set `True` explicitly only for dedicated edge-spike studies (kept, with a warning). Recorded in the archive ([engine.md](engine.md)) |
 | `jBS_baseline_mode` | `"diff"` | IMAS path: how the SWB bootstrap is reconciled with the source (`"diff"` / `"rescale"`) |
@@ -346,8 +347,10 @@ as an enormous sigma.
 
 ### `FixedComponentsConfig` (`b.fixed_components`)
 
-`p_fast`, `j_NBI`, `j_RF` on their own `psi_N` grid — additive components that
-are never perturbed. `coord` (default `"run"`) is the coordinate of that grid:
+`p_fast`, `j_NBI`, `j_RF`, `j_other` on their own `psi_N` grid — additive
+components that are never perturbed (an explicit `j_other` replaces every
+fusion / runaways / sawteeth / unknown-index entry the IMAS reader would hold,
+and zeroes `j_sawteeth`). `coord` (default `"run"`) is the coordinate of that grid:
 `"run"` (Φ_N in a `"phi_n"` run) or `"psi_n"`, mapped to the run coordinate
 through the source equilibrium's ψ_N → Φ_N map. `j_NBI` / `j_RF` are given in bouquet's **positive-Ip
 frame** — co-current drive positive — on both source paths and for either

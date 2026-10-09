@@ -124,6 +124,26 @@ the exported time slice of the template; `fidelity` selects
 where the parallel current split's geometry factor comes from (see
 [workflows.md](workflows.md#ids-current-split-fidelity)).
 
+The exported slice is the one the reader reads: every IDS is cut at the
+`core_profiles` slice nearest the requested time (not at the requested time
+itself), keyed on the IMAS structure -- the IDS `time`, time-tagged arrays of
+structures (`time_slice`, `profiles_1d`), signals (`data` on their own `time`,
+or on the IDS time when homogeneous), `vacuum_toroidal_field.b0`,
+`code.output_flag` and the IDS-level `global_quantities`.  Lists of entries
+(`core_sources.source`, `pf_active.coil`, `nbi.unit`), coil and limiter
+outlines and radial profiles are never cut.  `core_sources` is cut with the
+reader's own time rule: each entry keeps its own slices bracketing the slice
+time and its first and last, and the windows of that read (the core_sources
+slice window, each entry's own and core_profiles windows) are written under
+`bouquet_time_window` (`bouquet.io.imas.IMAS_EXPORT_TIME_WINDOW_KEY`) on
+`core_sources` and on each entry.  The reader honours a block only when its
+times are the slice it reads, so an export re-reads with the same
+`source_time_match` record and the same driven currents as the source it
+came from; without it the windows of a one-time file would collapse to the
+10 µs single-time floor (an entry matched at an offset own time would re-read
+as off, an offset `core_sources` base as a refusal).  Strict IMAS validators
+that reject unknown keys will flag `bouquet_time_window`.
+
 Current-convention conversions are in `bouquet.physics`
 ([current-conventions.md](current-conventions.md)):
 `jtor_imas_to_jphi_tokamaker()` / `jphi_tokamaker_to_jtor_imas()`,

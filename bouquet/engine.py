@@ -2907,6 +2907,14 @@ def prepare_engine_baseline(bq):
             "g-file source: it configures the IDS l_i row only and would "
             "have no effect; leave it at its default "
             f"{ENGINE_FIELD_DEFAULTS['imas_li3_radius']!r}")
+    if (isinstance(src, ImasSource)
+            and not bool(getattr(src, "hold_sawteeth", True))):
+        raise ValueError(
+            "source.hold_sawteeth=False is a legacy-reader setting: the "
+            "unified engine's IDS adapter always holds the sawteeth "
+            "core_sources entry fixed as a driven current (identifier 701 "
+            "-> 'other'), so it would be silently ignored here; leave it "
+            "True, or run the legacy reader (solve_method='legacy')")
     bq.baseline = None
     bq._failed_baseline = None
     bq._engine_run = None

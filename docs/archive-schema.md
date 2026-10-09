@@ -81,7 +81,11 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │              record on hybrid baselines and the report-only
     │              core_pressure_hollow record; load_baseline_profiles()
     │              decodes it to li_metrics / ip_closure / closure_limited /
-    │              core_pressure_hollow (each only when present)
+    │              core_pressure_hollow (each only when present).  IMAS
+    │              legacy path: source_time_match (the core_sources slice,
+    │              every entry's match, driven_sources / ignored_sources /
+    │              off_sources, sawteeth_hold) and swb_seed (requested /
+    │              resolved / oft_jphi_fixed)
     │              [jbs_converged, jbs_n_passes, jbs_loop_json]
     │                                  ← the baseline's jbs_loop block (v3)
     │              [delivered_state_json]

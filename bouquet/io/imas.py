@@ -1613,6 +1613,54 @@ IDA_TIME_RULE = (
     "recorded")
 
 
+def match_ida_slice(ida_times, t_req, *, what="IDA file"):
+    """The IDA slice a SEPARATE IDA file (``UncertaintyConfig.ida_path``) is
+    read at, by the IDA time rule of #73 (:data:`IDA_TIME_RULE`): the nearest
+    own slice to *t_req* [s], never interpolated, accepted within half the
+    file's local time-step (a single-slice file: the
+    :data:`IMAS_SINGLE_TIME_WINDOW_S` floor -- there is no dd step to pair
+    with), else REFUSED (``ValueError``).  Returns the match record
+    (``rule``, requested / used time, ``dt``, the window and its basis, the
+    number of slices).  *t_req* None: only a single-slice file is
+    accepted (its one slice, ``dt`` None)."""
+    tt = np.asarray(ida_times, dtype=float).ravel()
+    if tt.size == 0:
+        raise ValueError(f"{what}: the IDA file has an empty time base")
+    rec = dict(rule=IDA_TIME_RULE, what=what, ida_time_requested=t_req,
+               ida_n_times=int(tt.size))
+    if t_req is None:
+        if tt.size > 1:
+            raise ValueError(
+                f"{what}: the IDA file holds {tt.size} slices and no time was "
+                "given (ImasSource.ida_time / the source's time)")
+        rec.update(ida_time_used=float(tt[0]), dt=None, half_window=None,
+                   window_basis="single-slice IDA file, no time requested")
+        return rec
+    t_req = float(t_req)
+    k = int(np.argmin(np.abs(tt - t_req)))
+    t_used = float(tt[k])
+    dt = t_used - t_req
+    grid = np.unique(tt)
+    if grid.size >= 2:
+        kg = int(np.argmin(np.abs(grid - t_used)))
+        half = 0.5 * _local_step(grid, kg, t_req)
+        basis = "half the IDA file's local time-step"
+    else:
+        half = IMAS_SINGLE_TIME_WINDOW_S
+        basis = "single-slice IDA file: the floor IMAS_SINGLE_TIME_WINDOW_S"
+    rec.update(ida_time_used=t_used, dt=dt, half_window=float(half),
+               window_basis=basis)
+    if abs(dt) > half:
+        span = (f"{tt.min():.9g}-{tt.max():.9g} s" if tt.size > 1
+                else f"{tt[0]:.9g} s")
+        raise ValueError(
+            f"{what}: no IDA slice within {basis} ({half:.3g} s) of the "
+            f"requested time {t_req:.9g} s (nearest {t_used:.9g} s, |dt| = "
+            f"{abs(dt):.3g} s; the file holds {span}).  Refusing rather than "
+            "reading the sigmas at another time (never interpolated)")
+    return rec
+
+
 def _hybrid_timing(source, T, t_eq, t_cp, aux, tol=1e-6, *, cp_times=None,
                    ida_times=None):
     """ida_hybrid: the IDA slice time to read, matched by :data:`IDA_TIME_RULE`.

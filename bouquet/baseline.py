@@ -765,6 +765,7 @@ def resolve_uncertainty(config, baseline) -> dict:
 
     # IDA arrays (read once) available as a fallback below
     ida_sig = None
+    _sig_match = None       # a separate sigma file's IDA slice match (#73)
     _ida_zeff_sigma, _ida_zeff_source = None, "none"
     _ida_zeff_carbon, _ida_zeff_carbon_source = None, "none"
     if ida_path is not None:
@@ -775,8 +776,24 @@ def resolve_uncertainty(config, baseline) -> dict:
                and _same_path(_shared[0], ida_path) else None)
         if ida is None:
             _t = getattr(src, "ida_time", None)
+            _t_req = getattr(src, "time", None) if _t is None else _t
+            # the source's OWN kinetics file is read at the slice its
+            # kinetics were (the reconstruction loader's nearest slice); a
+            # SEPARATE sigma file (UncertaintyConfig.ida_path) by the IDA
+            # time rule of #73 -- half-step window, dt recorded, refused
+            # outside (review #73 B2/B6 residual)
+            _own = (src.profiles_path
+                    if isinstance(src, ReconstructionSource) else
+                    getattr(src, "ida_path", None))
+            if not (_own and _same_path(_own, ida_path)):
+                from .io.ida import ida_time_base
+                from .io.imas import match_ida_slice
+                _sig_match = match_ida_slice(
+                    ida_time_base(ida_path), _t_req,
+                    what="uncertainty.ida_path")
+                _t_req = _sig_match["ida_time_used"]
             ida = read_ida(
-                ida_path, time=getattr(src, "time", None) if _t is None else _t,
+                ida_path, time=_t_req,
                 sigma_mode=unc.sigma_mode, sigma_method=unc.sigma_method,
                 ni_source=getattr(src, "ni_source", "all"),
                 # the carbon tier's Z(Z-1) propagation is quadratically
@@ -784,6 +801,12 @@ def resolve_uncertainty(config, baseline) -> dict:
                 # omitting it here silently pinned the sigma math to carbon
                 impurity_Z=float(getattr(src, "impurity_Z", 6.0)),
             )
+            if _sig_match is not None and abs(
+                    float(ida.time) - _sig_match["ida_time_used"]) > 1e-9:
+                raise RuntimeError(
+                    f"uncertainty.ida_path: read_ida returned the slice at "
+                    f"{float(ida.time)!r} s, not the matched "
+                    f"{_sig_match['ida_time_used']!r} s")
 
         _ida_x, _ida_in = np.asarray(ida.psi_N, dtype=float), slice(None)
         if baseline.psi_map is not None:
@@ -826,6 +849,13 @@ def resolve_uncertainty(config, baseline) -> dict:
     _baseprof = {"ne": baseline.ne, "te": baseline.te,
                  "ni": baseline.ni, "ti": baseline.ti}
     out = {}
+    # a separate sigma file's IDA slice and how it was matched (#73 rule):
+    # on the envelope and in the baseline record (archived as li_metrics)
+    if _sig_match is not None:
+        out["ida_sigma_time_match"] = dict(_sig_match)
+        baseline.li_metrics = dict(getattr(baseline, "li_metrics", None)
+                                   or {}, ida_sigma_time_match=dict(
+                                       _sig_match))
     _won = {}       # channel -> human-readable winning source (for the log)
     _shadowed = []  # channels whose deliberately-set scalar lost to the IDA
     for _ch in ("ne", "te", "ni", "ti"):

@@ -300,6 +300,58 @@ def test_other_ida_envelope_by_its_own_q(recon, tmp_path):
     assert np.max(np.abs(moved - 100.0 * bl.psi_N_kinetic)) > 2.0
 
 
+def _multi_cdf(path, times_ms):
+    """A multi-slice copy of _cdf's file (the same profiles at each time)."""
+    import h5py
+    one = _cdf(path + ".one", q=1.0 + 3.0 * PSI_IDA ** 2)
+    with h5py.File(one, "r") as f1, h5py.File(path, "w") as f:
+        f["time"] = np.asarray(times_ms, dtype=float)
+        for k in f1:
+            if k == "time":
+                continue
+            v = np.asarray(f1[k][()])
+            f[k] = (np.repeat(v, len(times_ms), axis=0) if v.ndim == 2
+                    else v)
+    return path
+
+
+def test_a_separate_sigma_file_is_read_by_the_ida_time_rule(recon,
+                                                            tmp_path):
+    """#73 B2/B6 residual (D.md item): UncertaintyConfig.ida_path, a file
+    other than the source's, is read at its nearest slice to the source's
+    time WITHIN half its local time-step (never interpolated), the match
+    recorded on the envelope and in the baseline record; outside the window
+    it is refused."""
+    from bouquet.baseline import resolve_uncertainty
+    src = _cdf(str(tmp_path / "src.cdf"), q=Q_SRC)
+    other = _multi_cdf(str(tmp_path / "other.cdf"), [990.0, 1002.0, 1010.0])
+    bl, _, cfg = recon(src)
+    cfg.uncertainty.ida_path = other
+    cfg.uncertainty.log_sigma_sources = False
+    env = resolve_uncertainty(cfg, bl)      # 1.000 s -> 1.002 s (|dt| 2 ms)
+    m = env["ida_sigma_time_match"]
+    assert m["ida_time_used"] == pytest.approx(1.002)
+    # the window: half the local step on the requested time's side (12 ms)
+    assert m["dt"] == pytest.approx(0.002) and m["half_window"] == \
+        pytest.approx(0.006)
+    assert bl.li_metrics["ida_sigma_time_match"] == m
+    far = _multi_cdf(str(tmp_path / "far.cdf"), [1020.0, 1030.0, 1040.0])
+    cfg.uncertainty.ida_path = far          # nearest 1.020 s, window 5 ms
+    with pytest.raises(ValueError, match="no IDA slice within"):
+        resolve_uncertainty(cfg, bl)
+
+
+def test_the_sources_own_file_is_read_at_its_kinetics_slice(recon,
+                                                           tmp_path):
+    """... while the source's own kinetics file keeps the slice its
+    kinetics were read at (no separate match recorded)."""
+    from bouquet.baseline import resolve_uncertainty
+    src = _cdf(str(tmp_path / "src.cdf"), q=Q_SRC)
+    bl, _, cfg = recon(src)
+    cfg.uncertainty.log_sigma_sources = False
+    assert "ida_sigma_time_match" not in resolve_uncertainty(cfg, bl)
+
+
 def test_source_ida_envelope_keeps_the_source_map(recon, tmp_path):
     from bouquet.baseline import resolve_uncertainty
     src = _cdf(str(tmp_path / "src.cdf"), q=Q_SRC)

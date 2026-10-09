@@ -164,4 +164,5 @@ def test_generate_archives_stamped_ifiles_in_the_gfile_frame(probed):
 
 
 if __name__ == "__main__":
+    _harness.assert_bouquet_is_repo_local()
     _probe(sys.argv[1])

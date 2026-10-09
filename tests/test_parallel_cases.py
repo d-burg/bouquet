@@ -619,7 +619,10 @@ class TestGetNumCpus:
     def test_counts_the_affinity_mask(self, monkeypatch):
         for v in _SCHED:
             monkeypatch.delenv(v, raising=False)
-        assert _get_num_cpus() == len(os.sched_getaffinity(0))
+        if hasattr(os, "sched_getaffinity"):
+            assert _get_num_cpus() == len(os.sched_getaffinity(0))
+        else:                       # macOS / Windows: no affinity mask, the logical count
+            assert _get_num_cpus() == (os.cpu_count() or 1)
 
     def test_physical_cores_never_exceed_logical(self, monkeypatch):
         for v in _SCHED:
@@ -704,12 +707,47 @@ class TestSingleThread:
         assert all(env[v] == "1" for v in THREAD_VARS) and env["HDF5_USE_FILE_LOCKING"] == "FALSE"
 
     def test_a_pinned_process_runs_every_loaded_pool_at_one_thread(self):
+        """A fresh interpreter (this module as a script, importing THIS tree), with no thread variables
+        set, loads its pools and pins: every pool threadpoolctl can see runs at one thread."""
         import json
         import subprocess
         import sys
-        code = ("import numpy, scipy.linalg; from bouquet.threads import pin_threads, thread_report; "
-                "pin_threads(); import json; print(json.dumps(thread_report()))")
-        env = {k: v for k, v in os.environ.items() if not k.endswith("_NUM_THREADS")}
-        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, check=True)
+
+        import _harness
+        env = _harness.subprocess_env()
+        for k in [k for k in env if k.endswith("_NUM_THREADS")]:
+            del env[k]
+        out = subprocess.run([sys.executable, os.path.abspath(__file__), "--thread-probe"],
+                             capture_output=True, text=True, env=env, check=True)
         pools = json.loads(out.stdout.strip().splitlines()[-1])
-        assert pools and all(p["num_threads"] == 1 for p in pools)
+        if not pools:
+            pytest.skip("no thread pool threadpoolctl can see in this interpreter (e.g. Apple Accelerate "
+                        "BLAS and no OpenFUSIONToolkit): nothing to observe")
+        assert all(p["num_threads"] == 1 for p in pools)
+
+
+def _thread_probe():
+    """Child of test_a_pinned_process_runs_every_loaded_pool_at_one_thread: load the numeric stack (and
+    OpenFUSIONToolkit's OpenMP runtime when it is importable), pin, print the pools."""
+    import json
+
+    import numpy  # noqa: F401
+    import scipy.linalg  # noqa: F401
+    try:
+        from bouquet.paths import add_oft_to_path
+        add_oft_to_path()
+        import OpenFUSIONToolkit.TokaMaker  # noqa: F401
+    except Exception:
+        pass
+    from bouquet.threads import pin_threads, thread_report
+    pin_threads()
+    print(json.dumps(thread_report()))
+
+
+if __name__ == "__main__":
+    import sys
+
+    import _harness
+    _harness.assert_bouquet_is_repo_local()
+    if "--thread-probe" in sys.argv:
+        _thread_probe()

@@ -57,6 +57,34 @@ class _FakeGS:
                     beta_pol=64.0, kappa=1.7, delta=0.3, W_MHD=5.9e5)
 
 
+class _ResettableFakeGS(_FakeGS):
+    """_FakeGS plus the surface the REAL reset uses (Bouquet._install_solver /
+    _reset_solver_state / CaseGeometry.apply), recording the reset steps."""
+
+    coil_sets = {"F1A": 0, "F2A": 1}
+
+    def copy_eq(self):
+        return "clean"
+
+    def replace_eq(self, source_eq=None):
+        self.calls.append(("replace_eq", source_eq))
+
+    def coil_reg_term(self, coffs, target=0.0, weight=1.0):
+        return (tuple(coffs), float(target), float(weight))
+
+    def set_coil_reg(self, reg_terms=None, **kw):
+        self.calls.append(("set_coil_reg",))
+
+    def set_coil_bounds(self, b):
+        self.calls.append(("set_coil_bounds",))
+
+    def set_profiles(self, **kw):
+        self.calls.append(("foffset", kw["foffset"]) if "foffset" in kw else ("set_profiles",))
+
+    def set_saddle_constraints(self, pts, weights=None):
+        self.calls.append(("set_saddle_constraints", len(pts)))
+
+
 @pytest.fixture
 def toy_solver(monkeypatch):
     import bouquet.engine as be
@@ -124,11 +152,19 @@ def test_an_ids_engine_baseline_is_a_complete_baseline(toy_solver,
                              reconstruction_engine="unified")
     g = b.config.generation
     g.engine_rows = ["Ip"]
-    b.mygs = _FakeGS()
-    point_without_solver(monkeypatch)
+    b._install_solver(_ResettableFakeGS())        # the real point_solver / reset
     bl = _quiet(b.prepare_baseline)
     assert bl.provenance == "imas"
-    assert [c[0] for c in b.mygs.calls][:1] == ["init_psi"]
+    # the solver was reset to the clean state and pointed at THIS slice's
+    # geometry (F0, LCFS isoflux) before the engine's init_psi
+    kinds = [c[0] for c in b.mygs.calls]
+    assert kinds[:5] == ["replace_eq", "set_coil_reg", "foffset", "set_isoflux",
+                         "init_psi"]
+    assert b.mygs.calls[0] == ("replace_eq", "clean")
+    from bouquet.io.imas import read_imas_geometry
+    F0, lcfs = read_imas_geometry(b.config.source)
+    assert b.mygs.calls[2] == ("foffset", F0)
+    assert b.mygs.calls[3][1:] == (len(lcfs), 500.0)
     # the legacy anchors are not carried into the engine's baseline
     assert bl.jBS_diff is None and bl.jphi_diff is None and bl.p_diff is None
     icl = bl.ip_closure

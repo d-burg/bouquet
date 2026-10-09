@@ -99,9 +99,24 @@ def _test_modules_launching_subprocesses():
         if not name.startswith("test_") or not name.endswith(".py"):
             continue
         src = open(os.path.join(_HERE, name)).read()
-        if "sys.executable, os.path.abspath(__file__)" in src:
+        if "sys.executable" in src:
             out.append((name, src))
     return out
+
+
+def _test_modules_launching_themselves():
+    """The launchers that run their OWN module as a script (and so need a ``__main__`` probe entry
+    point); a module that only launches ``-c`` code importing no bouquet (test_workqueue) has none."""
+    return [(name, src) for name, src in _test_modules_launching_subprocesses()
+            if "os.path.abspath(__file__)" in src]
+
+
+def test_the_parallel_test_modules_are_covered():
+    """#76's subprocess-launching tests are under the guard (review B9: the matcher had been narrowed to
+    let them through)."""
+    names = {n for n, _ in _test_modules_launching_subprocesses()}
+    assert {"test_parallel_cases.py", "test_workqueue.py"} <= names
+    assert "test_parallel_cases.py" in {n for n, _ in _test_modules_launching_themselves()}
 
 
 def test_there_is_at_least_one_subprocess_launcher_to_check():
@@ -161,7 +176,7 @@ def test_every_probe_launch_uses_subprocess_env():
 
 def test_every_probe_entry_point_self_checks():
     """The ``__main__`` block must verify its own import before solving."""
-    for name, src in _test_modules_launching_subprocesses():
+    for name, src in _test_modules_launching_themselves():
         main = re.search(r'if __name__ == "__main__":(.*)\Z', src, re.S)
         assert main, f"{name} launches itself as a script but has no __main__"
         body = main.group(1)

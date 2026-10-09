@@ -48,7 +48,8 @@ def _inputs(d):
 
 def _sweep(inp, header):
     import bouquet as bq
-    cfg = bq.Bouquet.from_imas(inp["dd"], mesh=inp["mesh"], time=_TIME, n_draws=1, ida_path=inp["ida"],
+    cfg = bq.Bouquet.from_imas(inp["dd"], mesh=inp["mesh"], time=_TIME, ida_time=_IDA_TIME, n_draws=1,
+                               ida_path=inp["ida"],
                                impurity_Z=6.0, header=header, solve_method="swb").config
     cfg.generation.seed = 7
     src = cfg.source
@@ -70,7 +71,9 @@ def _serial(inp, work, i):
     cfg.generation.seed = case_seed(cfg.generation.seed, cases[i])
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        run_case_on(Bouquet(cfg).setup_solver(), cases[i], os.path.join(work, f"serial{i}"))
+        # the per-case seed parallel_cases derives (case_seed(seed, "<group>/<scan_key>"))
+        run_case_on(Bouquet(cfg).setup_solver(), cases[i], os.path.join(work, f"serial{i}"),
+                    seed_base=cfg.generation.seed)
 
 
 def _draw(h5, key):

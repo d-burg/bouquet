@@ -109,6 +109,7 @@ def test_two_units_end_to_end(tmp_path):
     import bouquet as bq
     run = bq.Bouquet.from_imas(dd, mesh=_MESH, time=1.2, n_draws=1, ida_path=_IDA, LCFS_geqdsk=_GEQ,
                                impurity_Z=6.0, solve_method="swb")
+    run.config.generation.seed = 7              # unseeded units stay unseeded
     q, out = str(tmp_path / "q"), str(tmp_path / "out")
     units.add_units(q, units.make_units(run.config, [{"generation.scan_key": 1200}] * 2, ["s_a", "s_b"]))
     units.work(q, out, workers=2, idle_exit=0)

@@ -337,3 +337,27 @@ def test_apply_filters_travels_through_the_slurm_bundle(fake_bouquet, tmp_path, 
     from bouquet.filtering import read_filter_flags
     flags = read_filter_flags(str(tmp_path / "run.h5"), scan_key=0)
     assert all("passes_coil_filter" not in f for f in flags.values())
+
+
+def test_a_worker_releases_the_dd_cache_after_its_baseline(fake_bouquet,
+                                                           tmp_path,
+                                                           monkeypatch):
+    """#72 B3 (D.md item): after prepare_baseline() the worker clears the
+    shared parsed-dd cache, before it draws."""
+    import bouquet.io.imas as IM
+    order = []
+    monkeypatch.setattr(IM, "clear_dd_cache", lambda: order.append("clear"))
+    real_prep, real_gen = (_FakeBouquet.prepare_baseline,
+                           _FakeBouquet.generate)
+    monkeypatch.setattr(_FakeBouquet, "prepare_baseline",
+                        lambda self: (order.append("prepare"),
+                                      real_prep(self))[1])
+
+    def gen(self, *a, **k):
+        order.append("generate")
+        return real_gen(self, *a, **k)
+    monkeypatch.setattr(_FakeBouquet, "generate", gen)
+    led = FileYieldLedger(tmp_path / "l")
+    _shard(_cfg(tmp_path, n_inspec_target=1, max_total_draws=2), 0, 1, led,
+           tmp_path)
+    assert order == ["prepare", "clear", "generate"]

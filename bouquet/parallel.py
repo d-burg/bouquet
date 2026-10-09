@@ -379,6 +379,11 @@ def run_shard(config, worker_id, n_workers, *, n_equils_total, seed_base,
         b = bq.Bouquet(cfg)
         b.setup_solver()
         b.prepare_baseline()
+        # the baseline holds what it needs: release the parsed dd(s) the
+        # read cached (#72 B3), so a pool worker's resident memory is what
+        # it was before the shared cache (a later read re-parses)
+        from .io.imas import clear_dd_cache
+        clear_dd_cache()
         b.generate(progress_callback=cb, on_inspec=on_inspec,
                    stop_check=stop_check)
         rec = dict(worker_id=int(worker_id), path=f"{cfg.output_header}.h5",

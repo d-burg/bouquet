@@ -763,7 +763,7 @@ IDS_AGGREGATE_SOURCE_INDICES = (1, 100, 101, 102, 103, 104, 105, 106, 107,
 #: (stamped and warned when non-zero).
 IDS_BOOTSTRAP_LIKE_SOURCE_INDICES = (401,)
 def _ids_source_slice(s, isrc, t_slice, n_time, base_times=None, *,
-                      t_cp=None, cp_half=None, rec=None):
+                      t_cp=None, cp_half=None, rec=None, who="IDS adapter"):
     """``(profile, how)``: the entry's ``profiles_1d`` at the core_sources
     slice *isrc* (time *t_slice*), or ``(None, why)`` when the entry has no
     slice within HALF a local time-step of that time -- the rule of
@@ -776,19 +776,37 @@ def _ids_source_slice(s, isrc, t_slice, n_time, base_times=None, *,
     must have exactly the IDS's number of slices, or it cannot be aligned
     and is refused -- never the first slice taken in place of a missing
     one.  *rec* receives the match record (dt, windows, bracketing own
-    times, status)."""
+    times, status).  A refusal names *who* called."""
     from .io.imas import _source_slice_at
     try:
         return _source_slice_at(s, isrc, t_slice, n_time, base_times,
                                 t_cp=t_cp, cp_half=cp_half, rec=rec)
     except ValueError as exc:
         raise EngineInputRefused(
-            str(exc).replace("IMAS reader:", "IDS adapter:", 1)) from None
+            str(exc).replace("IMAS reader:", f"{who}:", 1)) from None
+
+
+#: (announce_key, kind, name, index) of every unknown / aggregate-entry
+#: warning already issued: once per source file (review PR70 B8 -- the
+#: legacy reader and the engine adapter run the same rule on the same file)
+_DRIVEN_WARNED = set()
+
+
+def _warn_driven_once(announce_key, tag, msg, stacklevel=4):
+    """Warn *msg* once per *announce_key* and *tag* (every call when the
+    key is None)."""
+    import warnings
+    if announce_key is not None:
+        key = (announce_key,) + tuple(tag)
+        if key in _DRIVEN_WARNED:
+            return
+        _DRIVEN_WARNED.add(key)
+    warnings.warn(msg, UserWarning, stacklevel=stacklevel)
 
 
 def _ids_driven_currents(srcs, isrc, n, sgn, base_times=None, off=None, *,
                          t_cp=None, cp_half=None, matches=None,
-                         announce_key=None):
+                         announce_key=None, who="IDS adapter"):
     """The driven ``j_parallel`` of the ``core_sources`` slice *isrc*, by
     the explicit identifier classification above, split into ``nbi`` /
     ``rf`` / ``other`` (positive frame).  Returns ``(parts, used, ignored)``:
@@ -822,8 +840,10 @@ def _ids_driven_currents(srcs, isrc, n, sgn, base_times=None, off=None, *,
     announced (print + warning) once per *announce_key* and entry; past its
     last own time it is still refused when that slice carries current.
     *matches*, a list, receives every entry's match record (dt, windows,
-    bracketing own times, status)."""
-    import warnings
+    bracketing own times, status).  *who* names the caller in every
+    announcement and refusal ("IDS adapter", "IMAS reader"); the
+    unknown-index and not-added warnings are issued once per *announce_key*
+    (the source file) and entry, whichever caller reads it first."""
     from .io.imas import (_announce_off_before, _entry_off_before_record,
                           _half_local_step)
     parts = {k: np.zeros(n) for k in ("nbi", "rf", "other")}
@@ -844,7 +864,8 @@ def _ids_driven_currents(srcs, isrc, n, sgn, base_times=None, off=None, *,
         if matches is not None:
             matches.append(erec)
         q, how = _ids_source_slice(s, isrc, t_slice, n_time, base_times,
-                                   t_cp=t_cp, cp_half=cp_half, rec=erec)
+                                   t_cp=t_cp, cp_half=cp_half, rec=erec,
+                                   who=who)
         if q is None:
             from .io.imas import (_carries_current, _entry_off_near,
                                   _entry_time_refusal)
@@ -877,11 +898,10 @@ def _ids_driven_currents(srcs, isrc, n, sgn, base_times=None, off=None, *,
                         off.append(dict(name=idn.get("name"), index=idx,
                                         reason="off_before_record",
                                         first_own_time=first))
-                    _announce_off_before("IDS adapter", idn, first, t_slice,
+                    _announce_off_before(who, idn, first, t_slice,
                                          key=announce_key)
                     continue
-                raise EngineInputRefused(_entry_time_refusal(
-                    "IDS adapter", idn, how))
+                raise EngineInputRefused(_entry_time_refusal(who, idn, how))
             erec["status"] = "zero"
             continue
         if q.get("j_parallel") is None:
@@ -889,7 +909,7 @@ def _ids_driven_currents(srcs, isrc, n, sgn, base_times=None, off=None, *,
         jp = np.asarray(q["j_parallel"], dtype=float)
         if jp.shape != (n,) or not np.all(np.isfinite(jp)):
             raise EngineInputRefused(
-                f"IDS adapter: core_sources {idn.get('name')!r} (index "
+                f"{who}: core_sources {idn.get('name')!r} (index "
                 f"{idx}) j_parallel is malformed or not finite")
         if not np.any(jp != 0.0):
             continue
@@ -911,22 +931,25 @@ def _ids_driven_currents(srcs, isrc, n, sgn, base_times=None, off=None, *,
         if kind is None:
             kind = "other"
             rec["unclassified"] = True
-            warnings.warn(
-                f"IDS adapter: core_sources {idn.get('name')!r} carries a "
+            _warn_driven_once(
+                announce_key, ("unknown", idn.get("name"), idx),
+                f"{who}: core_sources {idn.get('name')!r} carries a "
                 f"non-zero j_parallel under identifier index {idx!r}, which "
                 "is not a known driven source (nbi, ec, lh, ic, fusion, "
                 "runaways, sawteeth) nor a known aggregate: it is held FIXED "
                 "as a driven current under 'other' -- check that it is not a "
-                "sum of other entries", stacklevel=3)
+                "sum of other entries")
         parts[kind] = parts[kind] + sgn * jp
         rec["part"] = kind
         used.append(rec)
     if ignored:
-        warnings.warn(
-            "IDS adapter: core_sources entries carrying a non-zero j_parallel "
+        _warn_driven_once(
+            announce_key, ("not_added",) + tuple(
+                (d["name"], d["index"]) for d in ignored),
+            f"{who}: core_sources entries carrying a non-zero j_parallel "
             "were NOT added to the driven current: "
             + "; ".join(f"{d['name']!r} (index {d['index']}): {d['reason']}"
-                        for d in ignored), stacklevel=3)
+                        for d in ignored))
     return parts, used, ignored
 
 

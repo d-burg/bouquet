@@ -2069,20 +2069,16 @@ def read_imas_baseline(
         s for s in src_ids.get("source", []) if not _is_saw(s)]))
     _off = []
     _rule_kw = dict(t_cp=_t_cp, cp_half=_cp_half,
-                    announce_key=str(source.ids_path))
-    try:
-        _parts, _used, _ignored = _ids_driven_currents(
-            _held, isrc, n, 1.0, _cpt, off=_off,
-            matches=source_time_match["entries"], **_rule_kw)
-        # the sawteeth share of j_other (already matched, refused or
-        # stamped above: no records, no second announcement)
-        _saw = (_ids_driven_currents(dict(src_ids, source=[
-            s for s in src_ids.get("source", []) if _is_saw(s)]),
-            isrc, n, 1.0, _cpt, **_rule_kw)[0]["other"]
-            if hold_saw else np.zeros(n))
-    except EngineInputRefused as exc:
-        raise EngineInputRefused(
-            str(exc).replace("IDS adapter:", "IMAS reader:", 1)) from None
+                    announce_key=str(source.ids_path), who="IMAS reader")
+    _parts, _used, _ignored = _ids_driven_currents(
+        _held, isrc, n, 1.0, _cpt, off=_off,
+        matches=source_time_match["entries"], **_rule_kw)
+    # the sawteeth share of j_other (already matched, refused or stamped
+    # above: no records, no second announcement)
+    _saw = (_ids_driven_currents(dict(src_ids, source=[
+        s for s in src_ids.get("source", []) if _is_saw(s)]),
+        isrc, n, 1.0, _cpt, **_rule_kw)[0]["other"]
+        if hold_saw else np.zeros(n))
     source_time_match.update(driven_sources=_used, ignored_sources=_ignored,
                              off_sources=_off)
     source_time_match["sawteeth_hold"] = dict(

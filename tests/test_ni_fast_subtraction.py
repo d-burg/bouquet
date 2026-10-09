@@ -333,6 +333,24 @@ class TestDdZeffConvention:
         # the baseline Z_eff is the dd's own, whichever numerator it carries
         np.testing.assert_allclose(bl.Zeff, bl.aux["zeff"], rtol=1e-12)
 
+    @pytest.mark.parametrize("kind, conv, source", [
+        (None, "thermal+fast", "no stored zeff"),
+        ("thermal", "thermal-only", "stored cp.zeff"),
+        ("all", "thermal+fast", "stored cp.zeff")])
+    def test_the_decision_is_stamped_in_the_baseline_record(
+            self, tmp_path, kind, conv, source):
+        """Owner item E1: how the convention was decided is archived
+        (li_metrics -> _baseline li_metrics_json), not only its verdict."""
+        bl = self._fuse(tmp_path, kind)
+        rec = bl.li_metrics["zeff_dd_provenance"]
+        assert rec["convention"] == conv and rec["source"] == source
+        assert rec["baseline_zeff_includes_fast"] is bl.zeff_includes_fast
+        assert rec["baseline_zeff_from"] == "dd"
+        if kind is not None:     # both numerators compared on the core
+            assert min(rec["d_th"], rec["d_all"]) <= rec["rtol"]
+            assert rec["matches_neither"] is False
+        json.dumps(rec)          # archivable
+
     def test_the_two_numerators_differ_by_z2_fast_over_ne(self, tmp_path):
         th, al = self._fuse(tmp_path, "thermal"), self._fuse(tmp_path, "all")
         np.testing.assert_allclose(al.Zeff - th.Zeff,

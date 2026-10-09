@@ -1502,18 +1502,35 @@ def _psi_rho_drift(psi_N, rho, gfile):
 ZEFF_CONVENTION_RTOL = 1e-2
 
 
-def _dd_zeff(cp, zeff_th, z2_fast, ne, psi_N):
+def _dd_zeff(cp, zeff_th, z2_fast, ne, psi_N, record=None):
     """``(zeff, includes_fast)``: the Z_eff the dd's own bootstrap consumed.
 
     A stored ``cp1d.zeff`` may or may not include the fast ions in its
     numerator (IMAS's expression does; FUSE may have stored it before the
     beam), so it is classified against both on the core (``psi_N <= 0.8``).
+
+    *record* (a dict, optional) is filled with how the convention was
+    decided (owner item E1, archived as ``li_metrics["zeff_dd_provenance"]``):
+    ``convention`` ("thermal+fast" / "thermal-only"), ``source`` ("stored
+    cp.zeff" / "no stored zeff"), ``basis`` and, where both numerators were
+    compared, the core misfits ``d_th`` / ``d_all`` and ``rtol``.
     """
+    rec = {} if record is None else record
     if "zeff" not in cp:
         zeff_all = zeff_th + z2_fast / np.clip(ne, 1e-30, None)
-        return zeff_all, bool(np.any(z2_fast))
+        inc = bool(np.any(z2_fast))
+        rec.update(convention="thermal+fast" if inc else "thermal-only",
+                   source="no stored zeff",
+                   basis=("recomputed from the dd's densities, fast ions "
+                          "included in the numerator" if inc else
+                          "recomputed from the dd's densities (no fast ions)"),
+                   d_th=None, d_all=None)
+        return zeff_all, inc
     stored = np.asarray(cp["zeff"], dtype=float)
     if not np.any(z2_fast):
+        rec.update(convention="thermal-only", source="stored cp.zeff",
+                   basis="no fast-ion population: the numerators coincide",
+                   d_th=None, d_all=None)
         return stored, False
     zeff_all = zeff_th + z2_fast / np.clip(ne, 1e-30, None)
     core = np.asarray(psi_N, dtype=float) <= NI_FAST_GATE_PSI_N[-1]
@@ -1521,6 +1538,12 @@ def _dd_zeff(cp, zeff_th, z2_fast, ne, psi_N):
     d_th = float(np.max(np.abs(stored - zeff_th)[core] / _s))
     d_all = float(np.max(np.abs(stored - zeff_all)[core] / _s))
     includes = d_all < d_th
+    rec.update(convention="thermal+fast" if includes else "thermal-only",
+               source="stored cp.zeff",
+               basis=("the closer of the two numerators on the core psi_N <= "
+                      f"{NI_FAST_GATE_PSI_N[-1]:g}"),
+               d_th=d_th, d_all=d_all, rtol=float(ZEFF_CONVENTION_RTOL),
+               matches_neither=bool(min(d_th, d_all) > ZEFF_CONVENTION_RTOL))
     if min(d_th, d_all) > ZEFF_CONVENTION_RTOL:
         import warnings
         warnings.warn(
@@ -2173,7 +2196,9 @@ def read_imas_baseline(
     # The dd's bootstrap Z_eff and its convention (see _dd_zeff).  Zeff is its
     # recomputation from the densities -- bit-identical to Zeff_th without a
     # beam -- and is what the baseline solve and the draws are handed.
-    zeff_dd, dd_zeff_includes_fast = _dd_zeff(cp, Zeff_th, z2_fast, ne, psi_N)
+    _zeff_dd_rec = {}
+    zeff_dd, dd_zeff_includes_fast = _dd_zeff(cp, Zeff_th, z2_fast, ne, psi_N,
+                                              record=_zeff_dd_rec)
     Zeff = (Zeff_th + z2_fast / np.clip(ne, 1e-30, None)
             if dd_zeff_includes_fast else Zeff_th)
 
@@ -2510,7 +2535,19 @@ def read_imas_baseline(
                     # slice and how (archived with li_metrics on every
                     # route, like source_time_match)
                     **({"ida_time_match": dict(aux["ida_time_match"])}
-                       if "ida_time_match" in aux else {})},
+                       if "ida_time_match" in aux else {}),
+                    # owner item E1: how the dd's own Z_eff numerator
+                    # convention was decided (_dd_zeff), and whether the
+                    # baseline's zeff_includes_fast follows it or the
+                    # measured IDA Z_eff
+                    "zeff_dd_provenance": dict(
+                        _zeff_dd_rec,
+                        baseline_zeff_includes_fast=bool(zeff_includes_fast),
+                        baseline_zeff_from=(
+                            "dd" if (not use_ida or getattr(
+                                source, "zeff_from_fuse", False))
+                            else "IDA (measured; numerator counts the fast "
+                                 "ions)"))},
         aux=aux,
         p_fast_meta=p_fast_meta,
         sawtooth=sawtooth,

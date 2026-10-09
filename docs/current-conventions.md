@@ -52,8 +52,12 @@ the derivation. Substituting into (A3) instead:
 (A6) and (A7) are exact for the total current with the equilibrium's own F and averages, and at
 fixed geometry they are linear in ⟨J·B⟩. So for a split ⟨J·B⟩ = Σ_k⟨J·B⟩_k (ohmic, bootstrap,
 current drive, …) each component converts with the first term alone, and the single pressure term
-is assigned to one component; following IMAS.jl (`includes_bootstrap=true`), to the bootstrap.
-Building J_TM this way guarantees
+p′G is a component of its own. IMAS.jl assigns it to the bootstrap (`includes_bootstrap=true`);
+bouquet keeps it as a third bucket, `j_pressure` (owner decision, 2026-10-09): the bootstrap
+`j_BS` is the field-aligned κ⟨J·B⟩_BS only, so the bootstrap multiplier, the per-draw jitter,
+`floor_j_BS`, `DIFF_BS` and the loop's residual norm never act on p′G, and an IDS export groups
+`j_pressure` with the non-inductive currents (in `j_tor`; it has no ⟨J·B⟩, so no parallel field
+carries it), never with the ohmic one. Building J_TM this way guarantees
 
     (A8)  the equilibrium's own ⟨J·B⟩ (= F p′ + F′⟨B²⟩/μ0) = Σ_k ⟨J·B⟩_k
 
@@ -88,10 +92,18 @@ J_IMAS(J_TM) instead (A9c) makes the measure itself exact, so that correction fa
 discretisation) and the first iterate already carries the right current.
 
 ## Where these are used
-- TokaMaker `jphi_bs_update` / `calculate_bootstrap` (Fortran) and `solve_with_bootstrap(use_python_solve=True)`:
-  the bootstrap enters `jphi_total` by (A7) with p′G; `boot_profs['jdotb_bs_raw']` holds the Redl ⟨J·B⟩.
-- TokaMaker `jphi_update` / `jphi_bs_update` I_p normalisation: (A9c).
-- bouquet: currents are stored as J_TM; FUSE/IMAS currents are read and written through (A5)–(A7).
+- `solve_with_bootstrap`'s returned `j_BS` depends on the OpenFUSIONToolkit build, and bouquet
+  identifies it (`physics.swb_jbs_convention`) instead of assuming it:
+  - upstream OFT (grid argument `psi_N`): the Redl ⟨J·B⟩ projected as ⟨J·B⟩⟨R⟩/F
+    (`j_BS_neo * (R_avg / f)`); `physics._swb_jbs_to_toroidal` undoes it and applies κ;
+  - the toolkit generation with `solve_with_bootstrap(x=...)` (the toroidal-flux / fixed-current
+    branch, not yet upstream): the bootstrap enters `jphi_total` by (A7) with p′G (its Fortran
+    `jphi_bs_update` / `calculate_bootstrap` keep the Redl ⟨J·B⟩ in `boot_profs['jdotb_bs_raw']`);
+    bouquet takes p′G off it;
+  - any other build is refused rather than converted on a guess.
+- The same branch normalises I_p in `jphi_update` / `jphi_bs_update` with (A9c).
+- bouquet: currents are stored as J_TM, the bootstrap as κ⟨J·B⟩ and p′G as `j_pressure`; FUSE/IMAS
+  currents are read and written through (A5)–(A7), the exported equilibrium in COCOS 11.
 
 ## References
 - J. P. Freidberg, *Ideal MHD* (Cambridge University Press, 2014): Grad–Shafranov equilibrium; (A1), (A2).

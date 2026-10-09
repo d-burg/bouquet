@@ -51,9 +51,17 @@ def _probe(out):
     from bouquet.io.geqdsk import _read_geqdsk
     from bouquet.utils import read_ifile, safe_save_eqdsk, save_state_ifile
     header = os.path.join(out, "ifile_frame")
-    b = bq.Bouquet.from_geqdsk(ME._GEQ, profiles=ME._PF, mesh=ME._MESH,
-                               nthreads=1, n_draws=1, header=header)
+    # BQ_IFILE_PROBE_LEGACY=1: the legacy engine with the frozen SWB
+    # bootstrap (an OFT build without sauter_fc(return_eps) cannot run the
+    # default engine before the #60 integration fix)
+    legacy = os.environ.get("BQ_IFILE_PROBE_LEGACY") == "1"
+    b = bq.Bouquet.from_geqdsk(
+        ME._GEQ, profiles=ME._PF, mesh=ME._MESH, nthreads=1, n_draws=1,
+        header=header,
+        **(dict(reconstruction_engine="legacy") if legacy else {}))
     g = b.config.generation
+    if legacy:
+        g.jbs_self_consistent = False
     g.write_ifile = True
     b.setup_solver()
     bl = b.prepare_baseline()

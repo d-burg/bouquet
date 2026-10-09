@@ -93,13 +93,15 @@ class _FakeBouquet:
     every attempt, one archived draw per attempt, on_inspec on the passing
     ones, local break at the (local) target."""
     inspec_pattern = None            # per test: list of bools, cycled
+    fail_setup = False
 
     def __init__(self, cfg):
         self.config = cfg
         self.baseline = _FakeBaseline()
 
     def setup_solver(self):
-        pass
+        if self.fail_setup:
+            raise RuntimeError("synthetic setup failure")
 
     def prepare_baseline(self):
         pass
@@ -161,6 +163,26 @@ def _shard(cfg, w, nw, ledger, tmp_path):
                      seed_base=1, out_header=str(tmp_path / "run"),
                      scan_key=0, threads_per_worker=1, verbose=True,
                      ledger=ledger)
+
+
+def test_an_in_process_shard_leaves_the_process_unpinned(fake_bouquet, tmp_path):
+    """run_shard pins for the shard and restores on return (and on failure):
+    a test calling it in-process must not leave the session pinned (#76 B5)."""
+    import os
+    from bouquet.threads import THREAD_VARS, pinned
+    keys = THREAD_VARS + ("HDF5_USE_FILE_LOCKING",)
+    before = {k: os.environ.get(k) for k in keys}
+    cfg = _cfg(tmp_path, n_inspec_target=2, max_total_draws=4)
+    rec = _shard(cfg, 0, 1, FileYieldLedger(tmp_path / "l"), tmp_path)
+    assert {k: os.environ.get(k) for k in keys} == before and not pinned()
+    assert all(p["num_threads"] == 1 for p in rec["threads"])
+    fake_bouquet.fail_setup = True
+    try:
+        with pytest.raises(RuntimeError, match="synthetic setup failure"):
+            _shard(cfg, 0, 1, FileYieldLedger(tmp_path / "l2"), tmp_path)
+    finally:
+        fake_bouquet.fail_setup = False
+    assert {k: os.environ.get(k) for k in keys} == before and not pinned()
 
 
 def test_worker_stops_at_the_shared_target_and_records_it(fake_bouquet, tmp_path):

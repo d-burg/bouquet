@@ -330,8 +330,10 @@ class TestRunCase:
             header="sweep_A", scan_key=2500, group="A")
 
     def test_runs_the_stages_and_reports_the_case(self, stub_worker, tmp_path):
+        from bouquet.threads import pin_threads
         stub = stub_worker()
-        idx, ok, err, out = run_case((7, self._case(), str(tmp_path), 11))
+        with pin_threads():          # what _init_case_worker does in a worker
+            idx, ok, err, out = run_case((7, self._case(), str(tmp_path), 11))
 
         assert ok and err is None
         # no export(): the merge produces the deliverable, so a per-case
@@ -345,7 +347,9 @@ class TestRunCase:
         assert (out["n_all"], out["n_sel"]) == (3, 2)
         assert out["l_i_target"] == 1.25 and out["Ip_target"] == 1.1e6 and out["F0"] == 1.7
         assert stub.config.generation.seed == 11        # the case's own seed, set before the case runs
-        assert all(p["num_threads"] == 1 for p in out["threads"]) or out["threads"] == []
+        # the pinned thread counts travel with the case record
+        assert out["threads_pinned"] is True
+        assert all(p["num_threads"] == 1 for p in out["threads"])
 
     def test_failure_comes_back_as_data_not_an_exception(self, stub_worker, tmp_path):
         # one bad slice must not take down a sweep of hundreds
@@ -612,6 +616,39 @@ class TestSingleThread:
         with pytest.raises(ValueError, match="IDS sources only"):
             check_cases([g], cfg)
         check_cases([CaseSpec(source=cfg.source, header="h")], cfg)
+
+    def test_a_pin_is_scoped_and_restores_the_process(self, monkeypatch):
+        """pin_threads() is reversible: the environment variables (set ones to
+        their value, unset ones unset) and every loaded pool's thread count
+        come back, so an in-process caller does not leave the session pinned."""
+        from threadpoolctl import threadpool_info
+        from bouquet.threads import THREAD_VARS, pin_threads, pinned, thread_report
+        monkeypatch.setenv("OMP_NUM_THREADS", "3")
+        for v in THREAD_VARS[1:] + ("HDF5_USE_FILE_LOCKING",):
+            monkeypatch.delenv(v, raising=False)
+        before_env = {k: os.environ.get(k) for k in THREAD_VARS + ("HDF5_USE_FILE_LOCKING",)}
+        before_pools = [(p["filepath"], p["num_threads"]) for p in threadpool_info()]
+        assert not pinned()
+        with pin_threads() as pin:
+            assert pinned()
+            assert all(os.environ[v] == "1" for v in THREAD_VARS)
+            assert os.environ["HDF5_USE_FILE_LOCKING"] == "FALSE"
+            assert all(p["num_threads"] == 1 for p in thread_report())
+            assert pin.report == thread_report()
+        assert not pinned()
+        assert {k: os.environ.get(k) for k in before_env} == before_env
+        assert [(p["filepath"], p["num_threads"]) for p in threadpool_info()] == before_pools
+
+    def test_unpin_threads_undoes_the_most_recent_pin(self, monkeypatch):
+        from bouquet.threads import pin_threads, pinned, unpin_threads
+        monkeypatch.delenv("OPENBLAS_NUM_THREADS", raising=False)
+        outer = pin_threads()
+        inner = pin_threads()
+        assert unpin_threads() and not inner.pinned and outer.pinned and pinned()
+        outer.unpin()
+        outer.unpin()                 # idempotent
+        assert not pinned() and not unpin_threads()
+        assert "OPENBLAS_NUM_THREADS" not in os.environ
 
     def test_the_worker_environment(self):
         from bouquet.threads import THREAD_VARS, worker_env

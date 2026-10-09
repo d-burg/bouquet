@@ -123,13 +123,17 @@ def write_record(out_dir, uid, status, **info):
 def run_unit(queue, uid, out_dir, work_root=None, keep_work=False, mesh=None):
     """Run one unit in this process (one thread, see :mod:`bouquet.threads`); returns its record.  ``mesh``:
     a worker-local copy of the mesh to use.  Raises on failure (no record written)."""
+    from .threads import pin_threads
+    with pin_threads():          # undone on return: an in-process caller is not left pinned
+        return _run_unit_pinned(queue, uid, out_dir, work_root=work_root, keep_work=keep_work, mesh=mesh)
+
+
+def _run_unit_pinned(queue, uid, out_dir, work_root=None, keep_work=False, mesh=None):
     from . import __version__
     from .config import BouquetConfig, CaseSpec
     from .parallel import check_cases, release_dd_cache, run_case_on
     from .paths import add_oft_to_path
     from .run import Bouquet
-    from .threads import pin_threads
-    pin_threads()
     add_oft_to_path()
     unit = wq.Queue(queue).units()[uid]
     d = unit["config"]

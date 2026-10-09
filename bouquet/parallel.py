@@ -302,6 +302,7 @@ def run_shard(config, worker_id, n_workers, *, n_equils_total, seed_base,
     # returns through the pool and exceptions propagate as pickled objects, so
     # nothing needed for results or debugging is lost. verbose=True streams it.
     _saved = None
+    _pin = None
     if not verbose:
         _dn = os.open(os.devnull, os.O_WRONLY)
         _saved = (os.dup(1), os.dup(2))
@@ -309,7 +310,9 @@ def run_shard(config, worker_id, n_workers, *, n_equils_total, seed_base,
         os.dup2(_dn, 2)
         os.close(_dn)
     try:
-        pin_threads()
+        # one thread for the shard, undone on return: a spawned worker loses
+        # nothing, and an in-process caller (tests) is not left pinned
+        _pin = pin_threads()
         import bouquet as bq
         cfg = copy.deepcopy(config)
         cfg.solver.nthreads = 1
@@ -380,7 +383,8 @@ def run_shard(config, worker_id, n_workers, *, n_equils_total, seed_base,
                    n_inspec=int(_inspec[0]),
                    seed=int(cfg.generation.seed),
                    li_target=float(b.baseline.l_i_target),
-                   Ip_target=float(b.baseline.Ip_target))
+                   Ip_target=float(b.baseline.Ip_target),
+                   threads=list(_pin.report))
         if budget is not None:
             rec.update(shared_target=int(tgt), local_target=budget["local_target"],
                        attempt_cap=budget["cap"], total_cap=budget["total_cap"])
@@ -397,6 +401,8 @@ def run_shard(config, worker_id, n_workers, *, n_equils_total, seed_base,
         _write_worker_record(rec["path"], scan_key, rec)
         return rec
     finally:
+        if _pin is not None:
+            _pin.unpin()
         if _saved is not None:
             os.dup2(_saved[0], 1)
             os.dup2(_saved[1], 2)
@@ -1068,7 +1074,7 @@ def run_case_on(bouquet, case, header, hooks=None) -> dict:
     """One case on a standing solver: ``set_case`` -> ``before_baseline`` -> ``prepare_baseline`` ->
     ``after_baseline`` -> ``generate`` -> ``filter``.  Not ``Bouquet.run()``: its export would write a
     second archive per case.  Returns the case record."""
-    from .threads import thread_report
+    from .threads import pinned, thread_report
     hooks = hooks or {}
     bouquet.set_case(case)
     bouquet.output_header = header
@@ -1083,7 +1089,7 @@ def run_case_on(bouquet, case, header, hooks=None) -> dict:
     return dict(path=os.path.abspath(f"{header}.h5"), group=case.group, scan_key=case.scan_key,
                 n_all=len(bouquet.selected_indices("all")), n_sel=len(bouquet.selected_indices("selected")),
                 l_i_target=float(bl.l_i_target), Ip_target=float(bl.Ip_target), F0=float(bouquet._geom.F0),
-                threads=thread_report())
+                threads=thread_report(), threads_pinned=pinned())
 
 
 def _init_case_worker(worker_id_queue, master_working_dir, config_dict, init_status_queue, hooks=None,

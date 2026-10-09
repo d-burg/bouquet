@@ -97,61 +97,58 @@ validation status".
 
 ## Unreleased — PR #56 (IDA/FUSE ion coupling) and PR #60 (bootstrap options), integrated
 
-### Redl ε: the geometric `(R_max − R_min)/(2⟨R⟩)` by default (`evaluate_jBS/4`, PR #60, owner decision E4)
+### Redl ε: `(R_max − R_min)/(R_max + R_min)` with `R_geo` in ν\* by default (`evaluate_jBS/4`, PR #60, owner decisions E4/E7)
 
 - **Default physics change, declared.** `evaluate_jBS`'s inverse aspect ratio
-  is now `ε = (R_max − R_min)/(2⟨R⟩)` on every OpenFUSIONToolkit build (from
-  `sauter_fc(return_eps=True)` where the build has it, else from `get_fsa`'s
-  `R_min`/`R_max` over the `sauter_fc` `⟨R⟩`). PR #60 as submitted required
-  the fork-only `return_eps` and raised `RuntimeError` on every other build
-  (the default engine and the legacy loop could not prepare a baseline); it
-  never raises for that now. `ε = ⟨a⟩/⟨R⟩` (versions `/1`-`/3`) is the opt-in
-  `eps_definition="a_over_R"`.
-- **Version.** `EVALUATE_JBS_VERSION` is `evaluate_jBS/4 (..., geometric eps =
-  (R_max-R_min)/(2<R>), ...; p'G separate as j_pressure)`. `/4` is ONE new
-  convention carrying two owner decisions: this ε (E4) and p′G returned
-  beside the bootstrap as `diag["j_pressure"]`, never inside `j_BS` (D2,
-  PR #64; see `docs/current-conventions.md`). `/3` keeps its meaning (p′G
-  with the bootstrap, PR #64, never on main), and an opt-in run records
-  `evaluate_jbs_version("a_over_R")`, which names `OPT-IN eps = <a>/<R>` and
-  is otherwise the same `/4` convention (p′G separate).
-  `diag["eps_definition"]`/`["eps_route"]` per evaluation.
-- **What moves.** On real H-mode pedestals (strongly shaped surfaces) I_BS
-  moves about −4 to −5 % and pedestal j_BS about −20 % at ψ_N ≈ 0.98 (about
-  −8 to −11 % at 0.95), with l_i(3) about +0.5 % and q0 about +0.8 %, on
-  unified-engine reconstructions whose kinetics are otherwise unchanged; on
-  the synthetic D3D-like case −0.5 % and −8 %.  The reason is the shaping:
-  the geometric ε uses the surface's HORIZONTAL half-width, `⟨a⟩` the
-  averaged distance from the axis, which on an elongated surface includes
-  its longer vertical extent; so `⟨a⟩/⟨R⟩` exceeds the geometric ε, by more
-  toward the edge where elongation and triangularity are largest, and
-  `ν* ∝ ε^-3/2` rises most in the pedestal.  How far j_BS moves depends on
-  how strongly shaped the surfaces are and how collisional the pedestal is,
-  which is why the synthetic case understates it about tenfold in I_BS.
-  Synthetic D3D-like detail (same equilibrium and kinetics): ν* ×1.27 at
-  ψ_N 0.1 rising to ×1.72 at 0.98; j_BS +0.2 % core, +2.1 % at 0.9, −1.0 %
-  at 0.95, −8.2 % at 0.98; peak −2.0 %; I_BS −0.46 %. Every default-path
-  bootstrap (unified engine and legacy loop) changes accordingly; goldens
-  that pin `evaluate_jBS` output need regeneration.
-  [physics-notes.md](physics-notes.md#the-evaluator-physicsevaluate_jbs).
-
-### `bootstrap_kwargs` (PR #60), hardened
-
-- **Validated against an explicit allow-list** (`config.BOOTSTRAP_KWARGS_ALLOWED`)
-  at construction and on every reassignment of the attribute (the notebook
-  idiom), so a mistyped option is refused with or without the toolkit.
-  `None` / non-dict values are refused by name; `jphi_fixed_prof`,
-  `p_fixed_prof`, `jphi_saw_prof`, `pres_prof`, `F0` are reserved.
-- **Toolkit capability** is checked only where the option reaches the
-  toolkit: on the legacy paths a key the installed OFT lacks is refused for a
-  new config and warned about while a stored config loads (archives stay
-  reloadable across OFT builds). Under the unified engine its own edge-taper
-  keys need no capability (bouquet implements the taper); the three tests that
-  failed on OFT main for this reason pass. A failed introspection is no longer
-  cached for the process.
-- **Convergence keys** (`djBS_tol`, `saw_relax`) need
-  `generation.bootstrap_convergence_override=True` (new field, recorded in
-  `config_json`); refused otherwise.
+  is now `ε = (R_max − R_min)/(R_max + R_min)` per flux surface -- the
+  surface's half-width over its geometric major radius `R_geo = (R_max +
+  R_min)/2`, the "ε = r/R0" of Sauter (1999) / Redl (2021), as OMFIT's
+  `sauter_bootstrap` and FUSE use it -- and the R in ν\*_e, ν\*_i (Sauter
+  Eqs. 18b/18c) is the SAME `R_geo` (was `⟨R⟩` from `get_q`). New field
+  `GenerationConfig.eps_definition` (default `"r_over_R_geo"`), passed to
+  every bouquet Redl evaluation on every path; the two older forms are named
+  opt-ins, each with its own ν\* R (`⟨R⟩`): `"half_width_over_fsa_R"`,
+  `(R_max − R_min)/(2⟨R⟩)` (PR #60's form, briefly the default of this
+  integration), and `"a_over_R"`, `⟨a⟩/⟨R⟩` (versions `/1`-`/3`, bit for
+  bit). Toolkit-internal `solve_with_bootstrap` calls (frozen legacy path,
+  swb method) form their own ν\* and do not read the field.
+- **Build-independent.** Both half-width forms read `R_min`, `R_max` and
+  `⟨R⟩` from `get_fsa` (OFT ≥ v26.6) on every build; nothing raises for the
+  missing fork option. The internal-solve toolkit's
+  `sauter_fc(return_eps=True)` (cut-cell `⟨R⟩`, ~1.4e-4 off) is only recorded
+  beside ours (`diag["eps_fork_diagnostic"]`), with a documented cross-build
+  sanity bar of 1e-3 (`physics.EPS_ROUTE_SANITY_RTOL`; a diagnostic, not a
+  physics criterion). A build without `get_fsa` is refused by name for the
+  half-width forms.
+- **Version and records.** `EVALUATE_JBS_VERSION` is `evaluate_jBS/4 (...,
+  eps = (R_max-R_min)/(R_max+R_min), nu* R = R_geo = (R_max + R_min)/2, ...;
+  p'G separate as j_pressure)`. `/4` is ONE convention carrying the owner
+  decisions on ε (E4/E7) and on p′G returned beside the bootstrap as
+  `diag["j_pressure"]`, never inside `j_BS` (D2, PR #64; see
+  `docs/current-conventions.md`). `/3` keeps its meaning (p′G with the
+  bootstrap, PR #64, never on main). The opt-ins' tags name their ε and ν\* R
+  and say `OPT-IN`, so the three are distinguishable; every loop record
+  carries its definition's tag, the baseline carries `bootstrap_eps`
+  (archived as the `_baseline` attr `bootstrap_eps_json`), and `diag` carries
+  `eps_definition`, `eps_route`, `nu_star_R`, `R_nu_star`. A stored config
+  without the field replays with the new default (warned once); one that
+  names a definition keeps it.
+- **What moves** (synthetic D3D-like g-file case, one equilibrium, same
+  kinetics). Against `"half_width_over_fsa_R"`: j_BS −4.9 % at ψ_N 0.98,
+  −10 % at 0.99, peak −1.2 %, I_BS −0.5 % (ε alone −3 % / −6 % / I_BS −0.3 %;
+  the ν\* R, ×1.07–1.08 there, the rest). Against `"a_over_R"`: j_BS −16 % at
+  0.98, −31 % at 0.99, peak −4.3 %, I_BS −1.6 % (ε alone −12 % / −23 % /
+  −1.0 %). On real H-mode pedestals the `⟨a⟩/⟨R⟩` → `(R_max − R_min)/(2⟨R⟩)`
+  step alone measured I_BS about −4 to −5 % and pedestal j_BS about −20 % at
+  ψ_N ≈ 0.98 (−8 to −11 % at 0.95), l_i(3) about +0.5 %, q0 about +0.8 %; the
+  default moves further by the `R_geo` steps (not yet measured on real data).
+  The reason is the shaping: `⟨a⟩` includes the vertical extent of an
+  elongated surface, and the dl/B_p-weighted `⟨R⟩` is pulled toward the
+  X-point near the separatrix (−7 % below `R_geo` at ψ_N 0.99), so both
+  older forms exceed `r/R_geo` most in the pedestal, where ν\* ∝ R ε^-3/2
+  then rises most. Every default-path bootstrap (unified engine and legacy
+  loop) changes accordingly; the goldens that pin `evaluate_jBS` output must
+  be regenerated (`tests/golden/README.md`).
 - **Stored configs:** a unified config carrying solve_with_bootstrap keys (the
   D3D-like notebooks' `{"iterations": 3}`, 2026-10-04..09) loads with them
   dropped and a warning; a stored `swb_iterations=n` loads as
@@ -161,7 +158,7 @@ validation status".
 - `tools/install_oft.py` builds upstream OpenFUSIONToolkit `main` by default,
   a fork only by explicit `--repo`/`--ref`, refuses (instead of repointing) an
   existing clone of another repository, and checks the build has a route to
-  the geometric ε.
+  the default ε (`get_fsa`).
 
 ### Kinetic draws: `kinetic_sampler/2` (PR #56)
 

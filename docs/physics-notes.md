@@ -251,47 +251,83 @@ bit-identical to the evaluator before the refusals (a fast test compares it
 against a verbatim copy). The production callers clip `Z_eff` at 1 before
 calling, as they always did.
 
-**The inverse aspect ratio ε (`evaluate_jBS/4`, owner decision E4,
-2026-10-09).** ε enters the Redl collisionalities, `ν*_e, ν*_i ∝ ε^-3/2`
+**The inverse aspect ratio ε and the R in ν\* (`evaluate_jBS/4`, owner
+decisions E4 and E7, 2026-10-09).** ε enters the Redl collisionalities
+through Sauter's Eqs. (18b)/(18c), `ν*_e, ν*_i ∝ q R n lnΛ / (ε^{3/2} T²)`
 (Sauter, Angioni & Lin-Liu, Phys. Plasmas 6, 2834 (1999); Redl et al., Phys.
-Plasmas 28, 022502 (2021)); the trapped fraction `f_T` comes from the field
-and does not depend on it. The default is now the **geometric**
-`ε = (R_max − R_min)/(2⟨R⟩)` per flux surface -- the half-width of the surface
-over its flux-surface-averaged major radius, the definition the Sauter
-formula requires (owner). It is computed on every OpenFUSIONToolkit build:
-from `sauter_fc(return_eps=True)` where the installed build has it (the fork's
-Fortran, `(rmax_surf − rmin_surf)/(2⟨R⟩)`), else from `get_fsa`'s per-surface
-`R_min`/`R_max` over the `sauter_fc` `⟨R⟩` (OFT ≥ v26.6, `physics.geometric_eps`);
-it never raises for the missing fork option. The previous `ε = ⟨a⟩/⟨R⟩`
-(`⟨a⟩` the dl/B_p-weighted mean distance from the magnetic axis; OFT main's own
-SWB still uses it) is the explicit opt-in `evaluate_jBS(...,
-eps_definition="a_over_R")`, for A/B. Every result names the definition, the
-route and the version (`diag["eps_definition"]`, `["eps_route"]`,
-`["version"]`; the opt-in's version string says `OPT-IN eps = <a>/<R>`).
-*Consequence (measured on the synthetic D3D-like IMAS baseline, same
-equilibrium and kinetics, our OFT via `get_fsa`):* `⟨a⟩/⟨R⟩` exceeds the
-geometric ε by ×1.18 at ψ_N 0.1, ×1.20 at 0.5, ×1.32 at 0.9, ×1.38 at 0.95 and
-×1.43 at 0.98, so ν* rises ×1.27 / 1.31 / 1.52 / 1.62 / 1.72 there; j_BS moves
-+0.2 % / +0.4 % / +2.1 % / −1.0 % / −8.2 %, its peak −2.0 % and its integral
-−0.46 %. (`get_fsa`'s own `⟨R⟩` differs from `sauter_fc`'s by 2.9e-6 relative
-on that equilibrium -- two traces -- which is why the `sauter_fc` `⟨R⟩` is the
-denominator.)
-*On real data the change is about ten times larger in I_BS.* On real H-mode
-pedestals (strongly shaped surfaces) I_BS moves about −4 to −5 % and pedestal
-j_BS about −20 % at ψ_N ≈ 0.98 (about −8 to −11 % at 0.95), with l_i(3) about
-+0.5 % and q0 about +0.8 % (unified-engine reconstructions, kinetics otherwise
-unchanged; with `eps_definition="a_over_R"` the same runs reproduce the
-previous results to ≤ 0.1 % in I_BS); on the synthetic D3D-like case −0.5 %
-and −8 %. The reason is the shaping: the geometric ε uses the surface's
-horizontal half-width, `⟨a⟩` the averaged distance from the axis, which on an
-elongated surface includes its longer vertical extent. `⟨a⟩/⟨R⟩` therefore
-exceeds the geometric ε, increasingly toward the edge where elongation and
-triangularity are largest, so ν* rises most in the pedestal; how far j_BS
-then falls depends on how strongly shaped the surfaces are and how
-collisional the pedestal is.
+Plasmas 28, 022502 (2021), which uses Sauter's ν\* and f_trap and writes
+"ε = r/R0", the inverse aspect ratio); the trapped fraction `f_T` comes from
+the field and does not depend on it. `GenerationConfig.eps_definition`
+(`evaluate_jBS(..., eps_definition=)`) names the definition, and each comes
+with the major radius `R` its own convention puts into ν\*:
+
+| `eps_definition` | ε | R in ν\* |
+|---|---|---|
+| `"r_over_R_geo"` (**default**) | `(R_max − R_min)/(R_max + R_min)` | `R_geo = (R_max + R_min)/2` |
+| `"half_width_over_fsa_R"` | `(R_max − R_min)/(2⟨R⟩)` | `⟨R⟩` (`get_q`) |
+| `"a_over_R"` | `⟨a⟩/⟨R⟩` (the `/1`–`/3` evaluator, bit for bit) | `⟨R⟩` (`get_q`) |
+
+*Why the default.* For a shaped surface the literal reading of "r/R0" is the
+surface's half-width over its own geometric centre, `R_geo`; OMFIT's
+`sauter_bootstrap` (`a/R` of the flux-surface geometry, `R = (R_max +
+R_min)/2`) and IMAS.jl/FUSE (`nuestar`/`nuistar`, `a/R` of the outboard and
+inboard radii) use exactly that, and both put the same `R_geo` into ν\*, so
+bouquet's bootstrap now agrees in convention with the codes its IMAS inputs
+come from. The flux-surface average `⟨R⟩` is weighted by dl/B_p; near the
+separatrix that weight piles up at the X-point, so `⟨R⟩` falls below `R_geo`
+(−0.4 % at ψ_N 0.5, −3.7 % at 0.9, −7.4 % at 0.99, −10 % at 0.999 on the
+synthetic D3D-like case) and both `⟨R⟩`-denominator forms turn up sharply in
+the last percent of flux, while `(R_max − R_min)/(R_max + R_min)` stays smooth
+and reaches the boundary's `a/R_geo` at the LCFS. `⟨a⟩` (the dl/B_p-weighted
+mean distance from the axis) also carries the vertical extent of an elongated
+surface, so `⟨a⟩/⟨R⟩` is the largest of the three everywhere (×1.17 the
+default at the axis, ×1.72 at ψ_N 0.999 there) and does not converge to the others at the
+axis; the two half-width forms do (`⟨R⟩ → R_geo`). `R_avg` (`get_q`'s `⟨R⟩`)
+still enters the pressure-driven term and the SWB projection under every
+definition: only ν\* changes.
+
+*Where the numbers come from.* `R_min`, `R_max` and `⟨R⟩` are read from OFT's
+`get_fsa` (v26.6+) on the evaluator's own surfaces, on **every** build, so the
+result does not depend on the build: the internal-solve toolkit's
+`sauter_fc(return_eps=True)` computes `⟨R⟩` by cut-cell quadrature and agrees
+with `get_fsa` only to ~1.4e-4, so its value is only recorded beside ours
+(`diag["eps_fork_diagnostic"]`), with a documented cross-build sanity bar
+`physics.EPS_ROUTE_SANITY_RTOL = 1e-3` -- a diagnostic, not a physics
+criterion. `⟨a⟩` exists only in `sauter_fc`, so `"a_over_R"` reads it there,
+as it always did. A build without `get_fsa` is refused by name for the two
+half-width forms (pointing at `"a_over_R"`). Every result names the
+definition, its route, the R in ν\* and the version (`diag["eps_definition"]`,
+`["eps_route"]`, `["nu_star_R"]`, `["R_nu_star"]`, `["version"]`); the
+version string names the ε and the ν\* R (`OPT-IN` for the two opt-ins), so
+records of the three are distinguishable; the run's choice is archived
+(`_baseline` attr `bootstrap_eps_json`, the engine record's
+`bootstrap_eps`, every loop record's `evaluate_jBS_version`).
+
+*Magnitude* (synthetic D3D-like g-file case, one equilibrium and the same
+kinetics, unified engine, OFT main). The full default (R_geo in ε **and** in
+ν\*) against
+
+* `"half_width_over_fsa_R"`: j_BS −0.8 % at ψ_N 0.95, −4.9 % at 0.98,
+  −10 % at 0.99, peak −1.2 %, I_BS −0.5 %. Of that, the ε denominator alone
+  gives −3 % at 0.98, −6 % at 0.99 and −0.3 % in I_BS; the ν\* R (×1.04 at
+  0.9, ×1.07 at 0.98, ×1.08 at 0.99, ×1.11 at 0.999) the rest
+  (−2 % / −4 % / −0.2 %);
+* `"a_over_R"`: j_BS +2.0 % at 0.9, −2.8 % at 0.95, −16 % at 0.98, −31 % at
+  0.99, peak −4.3 %, I_BS −1.6 % (the ε alone: −12 % at 0.98, −23 % at 0.99,
+  I_BS −1.0 %).
+
+On real H-mode pedestals (strongly shaped surfaces) the change from `⟨a⟩/⟨R⟩`
+to `(R_max − R_min)/(2⟨R⟩)` measured about −4 to −5 % in I_BS and about
+−20 % in pedestal j_BS at ψ_N ≈ 0.98 (−8 to −11 % at 0.95), with l_i(3) about
++0.5 % and q0 about +0.8 %; the default moves further than that by the
+`R_geo` steps above (not yet measured on real data). How far j_BS falls
+depends on how strongly shaped the surfaces are and how collisional the
+pedestal is: ν\* rises most in the pedestal, where the definitions differ
+most.
 
 On a uniform grid it reproduces SWB's first-pass `⟨j·B⟩` **bit for bit** (on a
-build whose SWB accepts `psi_N=`, with the ε that build's SWB uses). Grids whose first intervals are finer than
+build whose SWB accepts `psi_N=`, with `eps_definition="a_over_R"`, the ε and
+ν\* R of SWB; on a build with `use_sauter_eps` SWB is asked for it). Grids whose first intervals are finer than
 `psi_pad` (a ρ-uniform grid near the axis) are handled without changing
 `psi_pad` and without merging surfaces: every point keeps its own profile value
 and gradient; only the geometry of the points inside the pad is looked up at

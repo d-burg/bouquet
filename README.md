@@ -59,15 +59,17 @@ pip install -e ".[dev]"
 v26.6 or newer** for equilibrium generation (v26.6 introduced the dict-form
 flux-surface-average returns that the exact-fidelity per-draw geometry capture
 depends on, and `get_fsa`, whose per-surface `R_min`/`R_max` give the Redl
-bootstrap its geometric ε; legacy positional layouts are still supported). An
+bootstrap its ε = (R_max − R_min)/(R_max + R_min) and the `R_geo` of its ν\*;
+legacy positional layouts are still supported). An
 upstream build is enough for the default paths (the unified engine and the
 legacy loop). Only two opt-ins need a toolkit with the internal Fortran
 bootstrap solve (OpenFUSIONToolkit PR #271, or a fork carrying it):
 `imas_baseline="swb"` / `solve_method="swb"`, and the `bootstrap_kwargs` keys
 that configure that solve on the legacy path (`use_python_solve`, `djBS_tol`,
 `taper_edge_*`, ...; refused by name on a toolkit without them). Where that
-toolkit's `sauter_fc(return_eps=True)` exists, bouquet takes ε from it; the
-two routes agree. OFT is installed separately, following its own
+toolkit's `sauter_fc(return_eps=True)` exists, bouquet records its ε beside
+its own `get_fsa` value as a cross-build diagnostic (they agree to ~1e-4) but
+never uses it, so results do not depend on the build. OFT is installed separately, following its own
 instructions; `tools/install_oft.py` builds upstream `main` by default, any
 other repository or branch only when named (`--repo`, `--ref`), reusing
 already built external libraries (`--libs`), and never repoints an existing

@@ -157,6 +157,20 @@ engine never reads back to their defaults (printed and recorded in the run's
   `1a15685`) is in the history of this file.
 * The legacy record `D3Dlike_Hmode_legacy_golden.json` is regenerated
   separately (see its own stamp).
+* **STALE since owner decision E7 (2026-10-09): must be regenerated.** The
+  default Redl epsilon became `eps_definition = "r_over_R_geo"`, `eps =
+  (R_max - R_min)/(R_max + R_min)` with `R_geo = (R_max + R_min)/2` also as
+  the R of `nu*` (was `(R_max - R_min)/(2<R>)` with `<R>` in `nu*`, the
+  fixture above). Both the h5 fixture (and its `golden_manifest.json`,
+  `rng_stream_manifest.json`) and the legacy record were made under the old
+  definition; the solver replays that compare against them
+  (`tests/test_systematics.py` modes 1-3, the legacy replay) are expected to
+  move until they are rebuilt, with the same recipe and seed, on the shared
+  cluster -- not on a laptop. The fixture's stored config carries no
+  `eps_definition`, so the recipe replays it with the new default (warned
+  once at load); do not add the field to it. Also re-check
+  `structured_closure_pre_mse.json` (`tests/test_structured_mse_optin.py
+  --write`).
 
 ## Why input-current archival: the mode-1 coil drift
 

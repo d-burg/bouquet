@@ -135,8 +135,12 @@ def configure_script(cfg, src, build, install):
 
 def check(install):
     """Import OFT from ``install`` and refuse a build bouquet's Redl
-    evaluator cannot run on: its geometric epsilon needs ``get_fsa`` (OFT
-    v26.6+) or the fork's ``sauter_fc(return_eps=True)``.  Says which."""
+    evaluator cannot run its default on: every half-width epsilon
+    (``eps_definition`` ``"r_over_R_geo"``, the default, and
+    ``"half_width_over_fsa_R"``) reads ``R_min``/``R_max``/``<R>`` from
+    ``get_fsa`` (OFT v26.6+) on every build.  The fork's
+    ``sauter_fc(return_eps=True)``, where present, is only recorded as a
+    cross-build diagnostic.  Says which."""
     code = ("import inspect; from OpenFUSIONToolkit.TokaMaker import TokaMaker; "
             "print(hasattr(TokaMaker, 'get_fsa'), "
             "'return_eps' in inspect.signature(TokaMaker.sauter_fc).parameters)")
@@ -145,12 +149,14 @@ def check(install):
     if r.returncode:
         sys.exit(f"OFT import failed from {install}:\n{r.stderr[-2000:]}")
     has_fsa, has_eps = (w == "True" for w in r.stdout.split()[:2])
-    if not (has_fsa or has_eps):
-        sys.exit("this OFT build has neither TokaMaker.get_fsa (v26.6+) nor "
-                 "sauter_fc(return_eps=True): bouquet's evaluate_jBS cannot "
-                 "compute its default (geometric) epsilon on it")
-    print("geometric epsilon route: "
-          + ("sauter_fc(return_eps=True)" if has_eps else "get_fsa"))
+    if not has_fsa:
+        sys.exit("this OFT build has no TokaMaker.get_fsa (v26.6+): bouquet's "
+                 "evaluate_jBS cannot compute its default epsilon "
+                 "(R_max - R_min)/(R_max + R_min) on it (only "
+                 "eps_definition='a_over_R' would run)")
+    print("epsilon route: get_fsa"
+          + (" (sauter_fc(return_eps=True) present: recorded as a "
+             "cross-build diagnostic only)" if has_eps else ""))
 
 
 def install_oft(prefix, ref=REF, repo=REPO, libs=None, jobs=2, libs_args=LIBS_ARGS, rebuild=False):

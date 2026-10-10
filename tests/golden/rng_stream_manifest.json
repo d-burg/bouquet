@@ -1,8 +1,8 @@
 {
   "channels": {
     "jphi": {
-      "max": 1526280.7683439662,
-      "min": 87992.7723542806,
+      "max": 1526244.4104673315,
+      "min": 95182.55408610811,
       "n": 257,
       "sample_indices": [
         0,
@@ -12,13 +12,13 @@
         256
       ],
       "sample_values": [
-        1526280.7683439662,
-        1305633.8378280906,
-        786372.1245953563,
-        444561.14191254624,
-        87992.7723542806
+        1526244.4104673315,
+        1305394.7673460585,
+        786870.2662939553,
+        443890.5201389524,
+        95182.55408610811
       ],
-      "sha256": "19e99c8ba7b8251ea5b1e28f46cc628792cdb94d79a567d8f41fc9bb7a6ca8cc"
+      "sha256": "478075b8a7cb8aea7cd72b42a1c669d1f58892b70ba64a82d2e66e44acfd8ab0"
     },
     "ne": {
       "max": 5.425099337283019e+19,
@@ -114,11 +114,11 @@
   "seed": 20260804,
   "source_fixture": "D3Dlike_Hmode_golden_slim.h5",
   "source_provenance": {
-    "prov_bouquet_branch": "integrate/stuart-chain",
-    "prov_bouquet_commit": "e838f124dfd21a9f6597602740e437cbbc4f4f0f",
-    "prov_bouquet_dirty": true,
+    "prov_bouquet_branch": "int-67aba59",
+    "prov_bouquet_commit": "67aba59e1daa2afb467ee2a2f26423e034affd51",
+    "prov_bouquet_dirty": false,
     "prov_bouquet_version": "1.3.1",
-    "prov_created": "2026-10-09T16:25:43",
+    "prov_created": "2026-10-09T18:25:31",
     "prov_generator": "make_golden_fixture.py",
     "prov_generator_args_eqdsk": "all",
     "prov_generator_args_jphi_archival": "input",

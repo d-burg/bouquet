@@ -711,16 +711,9 @@ def _pressure_components(bl, psi_eq=None):
     regridded onto the total's grid before differencing. Single-grid archives
     (OMAS) skip this since the shapes already match.
 
-    KNOWN LIMITATION with fast ions.  The solve path derives ``Z_imp`` and
-    ``p_imp`` on the THERMAL electron density ``ne - z_fast``; this display
-    path cannot, because ``z_fast`` is not written to the archive (only
-    ``p_fast`` rides in the total).  So on a fast-ion source the impurity
-    term recomputed here is the uncorrected, inflated one, and the
-    impurity/fast split shown is NOT the split the GS solve used -- the
-    plotted impurity is too large and the fast remainder correspondingly too
-    small.  Thermal and total are unaffected, as is every solve-path
-    consumer.  Archiving ``z_fast`` is what would close this; until then the
-    decomposition is diagnostic only.
+    Fast ions: an archived ``z_fast`` marks a thermal ``n_i``, so it is
+    subtracted from ``n_e`` and the archived ``Z_imp`` is used; an archive
+    without them carries a total ``n_i``, paired with the full ``n_e``.
     """
     if "pressure" not in bl or "pressure_thermal" not in bl:
         return None
@@ -733,7 +726,14 @@ def _pressure_components(bl, psi_eq=None):
         ti = np.asarray(bl["T_i"], float)
         zeff = np.asarray(bl["aux_zeff"] if "aux_zeff" in bl else bl["Zeff"], float)
         from .physics import effective_impurity_charge, impurity_pressure
-        imp = impurity_pressure(ne, ni, ti, effective_impurity_charge(ne, ni, zeff))
+        if "z_fast" in bl:
+            zf = np.asarray(bl["z_fast"], float)   # same grid as n_e / n_i
+            if zf.shape == ne.shape:
+                ne = np.maximum(ne - zf, 0.0)
+        Z_imp = bl.get("Z_imp")
+        if not Z_imp:
+            Z_imp = effective_impurity_charge(ne, ni, zeff)
+        imp = impurity_pressure(ne, ni, ti, Z_imp)
     except Exception:
         imp = np.zeros_like(total)
     # Align kinetics-derived terms (imp; thermal defensively) onto the total's

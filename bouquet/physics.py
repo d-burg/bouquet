@@ -557,12 +557,45 @@ def capture_equilibrium_fsa(mygs, npsi: int = 257, psi_pad: float = 1e-3,
     return out
 
 
+#: OpenFUSIONToolkit's ``taper_edge_shape`` codes (bootstrap ``boot_ops``)
+EDGE_TAPER_SHAPES = {1: "cos^2 (Hann)", 2: "quintic smoothstep",
+                     3: "cubic power"}
+
+
+def edge_taper_weight(psi_N, psi0=0.999, shape=2):
+    """The factor SWB's edge taper (``taper_edge_jBS``) multiplies every
+    toroidal current component by: 1 for ``psi_N < psi0``, falling to 0 at
+    ``psi_N = 1`` with *shape* (1 cos^2, 2 quintic smoothstep, 3 cubic).
+    A port of OFT ``grad_shaf_bootstrap.F90:apply_edge_taper`` (standard
+    convention); no taper when ``1 - psi0 < 1e-6``."""
+    psi = np.asarray(psi_N, dtype=float)
+    w = np.ones_like(psi)
+    psi0 = float(psi0)
+    span = 1.0 - psi0
+    if span < 1.0e-6:
+        return w
+    m = psi >= psi0
+    t = np.clip((psi[m] - psi0) / span, 0.0, 1.0)
+    shape = int(shape)
+    if shape == 1:
+        w[m] = np.cos(0.5 * np.pi * t) ** 2
+    elif shape == 2:
+        w[m] = 1.0 - t ** 3 * (6.0 * t ** 2 - 15.0 * t + 10.0)
+    elif shape == 3:
+        w[m] = (1.0 - t) ** 3
+    else:
+        raise ValueError(f"edge_taper_weight: unknown shape {shape!r} "
+                         f"(one of {sorted(EDGE_TAPER_SHAPES)})")
+    return w
+
+
 #: Version tag of :func:`evaluate_jBS`, recorded with every loop record so an
 #: archive states which evaluator produced its bootstrap.
 #: ``/2`` (2026-10-06): the toroidal output is ``kappa <j.B>``, ``kappa =
 #: F<1/R>/<B^2>`` (was ``<j.B>/(F<1/R>)`` in ``/1``).
 EVALUATE_JBS_VERSION = ("evaluate_jBS/2 (Redl 2021 jboot1, NRL/Zavg lnLambda, "
-                        "Koh nu_i*, psi_N-native, kappa = F<1/R>/<B^2> "
+                        "Koh nu_i*, geometric eps, psi_N-native, "
+                        "kappa = F<1/R>/<B^2> "
                         "toroidal conversion)")
 
 #: Positional layout of ``sauter_fc``'s geometry block on OFT builds that
@@ -636,7 +669,7 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
     which is the reason it exists:
 
     1. **Geometry on the caller's grid.**  ``F``, ``f_T = 1 - f_c``,
-       ``eps = <a>/<R>``, ``q`` and ``<R>`` are sampled at
+       ``eps = (R_max - R_min)/(2<R>)``, ``q`` and ``<R>`` are sampled at
        ``psi_eval = clip(psi_N, psi_pad, 1 - psi_pad)`` -- the caller's own
        surfaces -- not on a uniform grid of the same length.
     2. **Gradients on the true grid.**  ``d/dpsi = numpy.gradient(y, psi_N,
@@ -802,14 +835,19 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
     _sfc = getattr(mygs, "sauter_fc", None)
     if _sfc is None:
         _sfc = getattr(mygs, "calc_sauter_fc")
-    fc_u, r_sau, modb = _sfc(psi=psi_u.copy())[-3:]
+    try:   # the geometric eps, as OpenFUSIONToolkit's SWB takes it
+        _s = _sfc(psi=psi_u.copy(), return_eps=True)
+    except TypeError:
+        _s = ()
+    if len(_s) != 5:
+        raise RuntimeError("evaluate_jBS needs sauter_fc(return_eps=True), the "
+                           "geometric eps = (R_max - R_min)/(2<R>); this "
+                           "OpenFUSIONToolkit build does not provide it")
+    fc_u, r_sau, modb, eps_u = _s[1:]
     _, q_u, ravgs_q, *_rest = mygs.get_q(psi=psi_u.copy())
     F = np.asarray(F_u, dtype=float)[inv]
     f_T = (1.0 - np.asarray(fc_u, dtype=float))[inv]
-    # (a failed trace's zero row makes this 0/0; it is refused just below)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        eps = (_sauter_avg(r_sau, "<a>", _SAUTER_RAVG_INDEX)
-               / _sauter_avg(r_sau, "<R>", _SAUTER_RAVG_INDEX))[inv]
+    eps = np.asarray(eps_u, dtype=float)[inv]
     avg_inv_R = _sauter_avg(r_sau, "<1/R>", _SAUTER_RAVG_INDEX)[inv]
     avg_B2 = _sauter_avg(modb, "<|B|^2>", _SAUTER_MODB_INDEX)[inv]
     q = np.asarray(q_u, dtype=float)[inv]
@@ -825,14 +863,16 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
     _a_sau = _sauter_avg(r_sau, "<a>", _SAUTER_RAVG_INDEX)[inv]
     _R_sau = _sauter_avg(r_sau, "<R>", _SAUTER_RAVG_INDEX)[inv]
     with np.errstate(invalid="ignore"):
-        for _nm, _a in (("F", F), ("f_T = 1 - f_c", f_T), ("<a>", _a_sau),
+        for _nm, _a in (("F", F), ("f_T = 1 - f_c", f_T), ("eps", eps),
+                        ("<a>", _a_sau),
                         ("<R> (sauter_fc)", _R_sau),
                         ("<1/R> (sauter_fc)", avg_inv_R), ("<B^2>", avg_B2),
                         ("q", q), ("<R> (get_q)", R_avg),
                         ("<1/R> (get_q)", inv_R_q), ("dV/dpsi", dV_dpsi)):
             _first_bad(~np.isfinite(_a), psi_N, _a, _nm, "finite",
                        what="flux-surface average")
-        for _nm, _a in (("<a>", _a_sau), ("<R> (sauter_fc)", _R_sau),
+        for _nm, _a in (("eps", eps), ("<a>", _a_sau),
+                        ("<R> (sauter_fc)", _R_sau),
                         ("<1/R> (sauter_fc)", avg_inv_R), ("<B^2>", avg_B2),
                         ("<R> (get_q)", R_avg), ("<1/R> (get_q)", inv_R_q),
                         ("dV/dpsi", dV_dpsi)):
@@ -992,16 +1032,12 @@ def impurity_charge_with_fast_ions(ne, ni, zeff, z_fast=None):
     ~1 ulp), which is far below any physics scale but enough to move an
     archive that the repo's regeneration contract says must be reproducible.
 
-    ASSUMPTION (load-bearing, not verified here): the source's ``zeff`` is
-    normalized to the FULL ``ne`` with only THERMAL species in its numerator
-    -- i.e. ``zeff = sum_thermal(n_s Z_s^2) / ne``.  That is what the
-    ``zeff * ne / ne_th`` renormalization assumes and what the local
-    fallback numerator in :mod:`bouquet.io.imas` builds.  If a producer's
-    ``zeff`` already carries the fast-ion contribution in its numerator, the
-    fast-ion charge is counted twice and ``Z_imp`` comes out too high.  The
-    convention of any given producer has not been confirmed against a real
-    data file; treat a source whose documented convention differs as out of
-    scope for this helper.
+    CONVENTION: ``zeff`` must have only THERMAL species in its numerator,
+    over the FULL ``ne`` (``sum_thermal(n_s Z_s^2) / ne``) -- what the
+    ``zeff * ne / ne_th`` renormalization assumes.  A thermal+fast numerator
+    (IMAS's own ``zeff`` expression, and a MEASURED Z_eff) counts the fast
+    charge twice and ``Z_imp`` comes out too high, so :mod:`bouquet.io.imas`
+    passes its own thermal-numerator recomputation, never the dd's ``zeff``.
     """
     ne = np.asarray(ne, dtype=float)
     if z_fast is None:
@@ -1017,7 +1053,39 @@ def impurity_charge_with_fast_ions(ne, ni, zeff, z_fast=None):
     return effective_impurity_charge(ne_th, ni, zeff_th), ne_th
 
 
-def main_ion_density_from_zeff(ne, zeff, Z_imp, z_fast=None):
+def fast_ion_density_equivalent(z_fast, z2_fast, Z_imp):
+    """The fast-ion part of a main-ion density derived from a MEASURED Z_eff [m^-3].
+
+    Each fast species enters quasineutrality with weight ``Z_s`` and the Z_eff
+    numerator with ``Z_s^2``, so::
+
+        sum_s n_s^fast Z_s (Z_imp - Z_s) / (Z_imp - 1)
+            == (Z_imp z_fast - z2_fast) / (Z_imp - 1)
+
+    with ``z_fast = sum_s Z_s n_s^fast`` and ``z2_fast = sum_s Z_s^2 n_s^fast``
+    (no beam charge assumed).  A hydrogenic beam gives the fast density; a
+    species at ``Z_imp`` gives zero.
+    """
+    Z_imp = float(Z_imp)
+    if not Z_imp > 1.0:
+        raise ValueError(f"Z_imp must exceed 1 (got {Z_imp})")
+    return (Z_imp * np.asarray(z_fast, dtype=float)
+            - np.asarray(z2_fast, dtype=float)) / (Z_imp - 1.0)
+
+
+def _require_z2(z2_fast, who):
+    if z2_fast is None:
+        raise ValueError(
+            f"{who}: zeff_includes_fast=True needs z2_fast (= sum_s Z_s^2 "
+            f"n_s^fast) as well as z_fast. A measured Z_eff weights each fast "
+            f"species by Z_s^2 while quasineutrality weights it by Z_s, so the "
+            f"two moments are independent and the beam charge cannot be "
+            f"inferred from z_fast alone. Pass Baseline.z2_fast.")
+    return z2_fast
+
+
+def main_ion_density_from_zeff(ne, zeff, Z_imp, z_fast=None, z2_fast=None,
+                               zeff_includes_fast=False):
     """Main-ion density from (ne, Zeff) under single-impurity quasineutrality.
 
     ::
@@ -1029,18 +1097,29 @@ def main_ion_density_from_zeff(ne, zeff, Z_imp, z_fast=None):
     ``nz >= 0`` -- the consistent (ne, ni, Zeff, nz) set that the independent
     per-channel draws cannot provide. Returns ``ni``.
 
-    With a fast-ion charge profile ``z_fast`` the thermal quasineutrality is
-    ``ni + Z_imp nz = ne - z_fast`` while ``zeff`` keeps the full-``ne``
-    normalization, giving
+    With a fast-ion population the result is the THERMAL main-ion density, and
+    which formula gives it depends on what is in ``zeff``'s numerator.  The
+    fast population enters through its charge moments ``z_fast`` (= sum_s Z_s
+    n_s^fast) and ``z2_fast`` (= sum_s Z_s^2 n_s^fast); see
+    :func:`fast_ion_density_equivalent`.  Both branches reduce to the plain
+    form when the fast population is absent.
 
-    ::
+    ``zeff_includes_fast=False`` -- THERMAL numerator over the full ``ne``
+    (``zeff = sum_thermal(n_s Z_s^2)/ne``).  Only the charge matters here::
 
         ni = (Z_imp (ne - z_fast) - Zeff ne) / (Z_imp - 1)
 
-    which reduces to the plain form at ``z_fast = 0``.  The corresponding
-    physical bounds on a full-``ne`` Zeff are
-    ``ne_th/ne <= Zeff <= Z_imp ne_th/ne`` (both reduce to the familiar
-    ``[1, Z_imp]`` without fast ions).
+    ``zeff_includes_fast=True`` -- ALL ions in the numerator, fast included.
+    This is IMAS's ``zeff`` expression (``ion.density`` = thermal + fast), and
+    what a MEASURED Z_eff is: VB bremsstrahlung counts a beam ion by
+    its own Z_s exactly like a thermal one, and a CER Z_eff built as
+    ``1 + Z(Z-1) nC/ne`` inherits the same normalisation.  Then ``z2_fast`` is
+    REQUIRED, because the numerator weights the beam by ``Z_s^2``::
+
+        ni = ne (Z_imp - Zeff)/(Z_imp - 1) - (Z_imp z_fast - z2_fast)/(Z_imp - 1)
+
+    The two conventions differ by ``z2_fast/(Z_imp - 1)``; :func:`zeff_bounds`
+    gives each one's validity window.
     """
     ne = np.asarray(ne, dtype=float)
     zeff = np.asarray(zeff, dtype=float)
@@ -1049,8 +1128,43 @@ def main_ion_density_from_zeff(ne, zeff, Z_imp, z_fast=None):
         raise ValueError(f"Z_imp must exceed 1 (got {Z_imp})")
     if z_fast is None:
         return ne * (Z_imp - zeff) / (Z_imp - 1.0)
+    if zeff_includes_fast:
+        _require_z2(z2_fast, "main_ion_density_from_zeff")
+        return (ne * (Z_imp - zeff) / (Z_imp - 1.0)
+                - fast_ion_density_equivalent(z_fast, z2_fast, Z_imp))
     ne_th = np.maximum(ne - np.asarray(z_fast, dtype=float), 0.0)
     return (Z_imp * ne_th - zeff * ne) / (Z_imp - 1.0)
+
+
+def zeff_bounds(ne, Z_imp, z_fast=None, z2_fast=None,
+                zeff_includes_fast=False):
+    """``(lo, hi)`` on Z_eff: the window where ni >= 0 and nz >= 0.
+
+    A Z_eff draw is clipped to it.  Without fast ions it is ``[1, Z_imp]``;
+    with them it follows the convention of :func:`main_ion_density_from_zeff`::
+
+        zeff_includes_fast=False
+            [ne_th/ne,                     Z_imp ne_th/ne]
+        zeff_includes_fast=True
+            [1 + (z2_fast - z_fast)/ne,    Z_imp - (Z_imp z_fast - z2_fast)/ne]
+
+    Both reduce to ``[1, Z_imp]`` when the fast population is absent, and the
+    ``True`` window reduces to ``[1, Z_imp - (Z_imp - 1) z_fast/ne]`` for a
+    hydrogenic beam.  Returns scalars when ``z_fast`` is None and arrays
+    otherwise; ``hi`` is not clamped above ``lo``, so a surface whose fast
+    population overwhelms ``ne`` yields an empty window the caller can detect.
+    """
+    Z_imp = float(Z_imp)
+    if z_fast is None:
+        return 1.0, Z_imp
+    ne = np.asarray(ne, dtype=float)
+    _ne = np.clip(ne, 1e-30, None)
+    zf = np.asarray(z_fast, dtype=float)
+    if zeff_includes_fast:
+        z2 = np.asarray(_require_z2(z2_fast, "zeff_bounds"), dtype=float)
+        return 1.0 + (z2 - zf) / _ne, Z_imp - (Z_imp * zf - z2) / _ne
+    f = np.clip(zf / _ne, 0.0, 1.0)
+    return 1.0 - f, Z_imp * (1.0 - f)
 
 
 # Elementary charge [C] -- thermal pressure p = e * sum_s(n_s * T_s) with n in

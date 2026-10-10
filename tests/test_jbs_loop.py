@@ -715,7 +715,7 @@ class _MockEq:
                           (self.B0 ** 2) * (1 + eps ** 2)])
         if self.legacy:
             rav = np.vstack([rav["<R>"], rav["<1/R>"], rav["<a>"]])
-        return psi, fc, rav, modb
+        return (psi, fc, rav, modb) + ((r / R,) if kw.get("return_eps") else ())
 
     def get_q(self, psi=None, **kw):
         self.calls.append(("get_q", np.array(psi)))

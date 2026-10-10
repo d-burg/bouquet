@@ -170,13 +170,13 @@ def _load_golden():
 
 #: What mode 3 takes from ``Bouquet.generate()``'s own ``generate_bouquet``
 #: call rather than from the function defaults: the bootstrap model
-#: (baseline split, edge isolation, floor, diff offset, delta mode, SWB
-#: iterations, the anchor routes) and the fixed additive components
+#: (baseline split, edge isolation, floor, diff offset, delta mode, the
+#: anchor routes) and the fixed additive components
 #: (impurity / fast pressure, diff anchors, NBI / RF current).  Per-draw
 #: quantities (Z_eff, the bootstrap scale) are the draw's own, below.
 _GENERATOR_MODEL_KWARGS = (
     "baseline_j_BS", "isolate_edge_jBS", "floor_j_BS",
-    "jBS_diff", "jbs_delta_mode", "swb_iterations", "accept_anchor_inband",
+    "jBS_diff", "jbs_delta_mode", "accept_anchor_inband",
     "perturb_jind_in_anchor", "p_fast", "z_fast", "Z_imp", "p_diff",
     "jphi_diff", "j_NBI", "j_RF",
 )

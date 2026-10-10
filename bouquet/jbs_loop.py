@@ -294,33 +294,35 @@ def validate_jbs_settings(gc) -> None:
                          f"omega; 1 = halve on every growth), got {h!r}")
 
 
-#: ``GenerationConfig.swb_iterations`` default: the legacy
-#: ``solve_with_bootstrap`` Picard pass count.
+#: The retired ``GenerationConfig.swb_iterations`` default (OFT's own
+#: ``solve_with_bootstrap(iterations=3)``); a stored config's other value is
+#: loaded as ``bootstrap_kwargs={"iterations": n}``.
 SWB_ITERATIONS_DEFAULT = 3
 
 
 def deprecated_jbs_settings_warning(gc, stacklevel: int = 2) -> Optional[str]:
     """Warn (``DeprecationWarning``) about settings the loop IGNORES.
 
-    ``swb_iterations`` is the legacy frozen path's Picard pass count.  With
-    ``jbs_self_consistent=True`` it is not used (the loop has its own
-    convergence test); a value other than the default is therefore a setting
-    the user expects to act and that silently would not.  Returns the message
-    (``None`` when nothing is ignored).
+    ``bootstrap_kwargs`` configures ``solve_with_bootstrap``.  Under the
+    legacy engine with ``jbs_self_consistent=True`` the loop's bootstrap is
+    Redl (:func:`bouquet.physics.evaluate_jBS`) and SWB runs only for
+    ``jbs_init="swb"`` and the jBS-delta / ``DIFF_BS`` caches, so a non-empty
+    dict acts there alone.  (The unified engine refuses SWB-only keys
+    itself.)  Returns the message (``None`` when nothing is ignored).
     """
     import warnings
     if not bool(getattr(gc, "jbs_self_consistent", False)):
         return None
-    v = getattr(gc, "swb_iterations", SWB_ITERATIONS_DEFAULT)
-    if v == SWB_ITERATIONS_DEFAULT and not isinstance(v, bool):
+    if str(getattr(gc, "reconstruction_engine", "legacy")) != "legacy":
         return None
-    msg = (f"generation.swb_iterations={v!r} is IGNORED under the "
-           "self-consistent bootstrap loop (jbs_self_consistent=True): the "
-           "loop iterates to its own convergence test (jbs_rtol_j, "
-           "jbs_rtol_Ip, jbs_tol_li, jbs_tol_q0) within jbs_max_passes / "
-           "jbs_max_passes_draw.  swb_iterations is deprecated and honoured "
-           "only with jbs_self_consistent=False (the legacy frozen-bootstrap "
-           "path).")
+    bk = dict(getattr(gc, "bootstrap_kwargs", None) or {})
+    if not bk:
+        return None
+    msg = (f"generation.bootstrap_kwargs={bk!r} configures "
+           "solve_with_bootstrap, which the self-consistent bootstrap loop "
+           "(jbs_self_consistent=True) runs only for jbs_init='swb' and the "
+           "jBS-delta / DIFF_BS caches; the loop's own bootstrap "
+           "(evaluate_jBS) does not read it.")
     warnings.warn(msg, DeprecationWarning, stacklevel=stacklevel + 1)
     return msg
 

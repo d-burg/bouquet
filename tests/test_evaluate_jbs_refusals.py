@@ -251,10 +251,10 @@ class _AxisLimitEq(_MockEq):
     construction, which the historical code zeroed."""
 
     def sauter_fc(self, psi=None, **kw):
-        psi_, fc, rav, modb = super().sauter_fc(psi=psi, **kw)
+        psi_, fc, rav, modb, *eps = super().sauter_fc(psi=psi, **kw)
         fc = np.array(fc, dtype=float)
         fc[np.asarray(psi, dtype=float) <= 1e-3] = 1.0 + 1e-9
-        return psi_, fc, rav, modb
+        return (psi_, fc, rav, modb, *eps)
 
 
 @pytest.mark.parametrize("grid", ["uniform-151", "imas-77"])
@@ -349,9 +349,10 @@ class _FailedTraceEq(_MockEq):
         return arr
 
     def sauter_fc(self, psi=None, **kw):
-        psi_, fc, rav, modb = super().sauter_fc(psi=psi, **kw)
+        psi_, fc, rav, modb, *eps = super().sauter_fc(psi=psi, **kw)
         rav = {k: self._zero(psi, v) for k, v in rav.items()}
-        return psi_, self._zero(psi, fc), rav, self._zero(psi, modb)
+        return (psi_, self._zero(psi, fc), rav, self._zero(psi, modb),
+                *(self._zero(psi, e) for e in eps))
 
     def get_q(self, psi=None, **kw):
         psi_, q, rav, *rest = super().get_q(psi=psi, **kw)
@@ -378,10 +379,10 @@ def test_a_failed_trace_zero_row_is_refused_everywhere(bad_psi):
 def test_a_negative_trapped_fraction_inside_the_plasma_is_refused():
     class _Bad(_MockEq):
         def sauter_fc(self, psi=None, **kw):
-            psi_, fc, rav, modb = super().sauter_fc(psi=psi, **kw)
+            psi_, fc, rav, modb, *eps = super().sauter_fc(psi=psi, **kw)
             fc = np.array(fc, dtype=float)
             fc[np.isclose(np.asarray(psi), 0.3)] = 1.0 + 1e-9
-            return psi_, fc, rav, modb
+            return (psi_, fc, rav, modb, *eps)
     x = np.linspace(0.0, 1.0, 101)
     with pytest.raises(JBSEvaluationError, match="f_T") as ei:
         evaluate_jBS(_Bad(), x, *_kin(x))

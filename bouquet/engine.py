@@ -119,6 +119,39 @@ def mse_scheme_text(scheme) -> str:
         "step exceeds the stage's criterion")
 
 
+#: The engine's SWB edge taper (OFT's ``taper_edge_*`` of
+#: ``solve_with_bootstrap``), off by default as in OFT; read from
+#: ``GenerationConfig.bootstrap_kwargs`` and overridden there.
+ENGINE_EDGE_TAPER_DEFAULT = {"taper_edge_jBS": False, "taper_edge_psi0": 0.999,
+                             "taper_edge_shape": 2}
+#: The ``bootstrap_kwargs`` keys the engine honours (the edge taper; and
+#: ``use_sauter_eps`` at True, which evaluate_jBS always is).  Any other key
+#: configures solve_with_bootstrap, which the engine never runs: refused.
+ENGINE_BOOTSTRAP_KWARGS = frozenset(ENGINE_EDGE_TAPER_DEFAULT) | {
+    "use_sauter_eps"}
+
+
+def engine_edge_taper(gc) -> dict:
+    """``dict(on, psi0, shape)``: the engine's edge taper from
+    ``bootstrap_kwargs`` (:data:`ENGINE_EDGE_TAPER_DEFAULT` where unset)."""
+    from .physics import EDGE_TAPER_SHAPES
+    bk = dict(ENGINE_EDGE_TAPER_DEFAULT)
+    bk.update({k: v for k, v in (getattr(gc, "bootstrap_kwargs", None)
+                                 or {}).items() if k in bk})
+    on, psi0, shape = (bk["taper_edge_jBS"], bk["taper_edge_psi0"],
+                       bk["taper_edge_shape"])
+    if not isinstance(on, (bool, np.bool_)):
+        raise ValueError(f"bootstrap_kwargs['taper_edge_jBS'] must be a "
+                         f"bool, got {on!r}")
+    if not (np.isfinite(float(psi0)) and 0.0 < float(psi0) < 1.0):
+        raise ValueError(f"bootstrap_kwargs['taper_edge_psi0'] must be in "
+                         f"(0, 1), got {psi0!r}")
+    if int(shape) not in EDGE_TAPER_SHAPES or int(shape) != shape:
+        raise ValueError(f"bootstrap_kwargs['taper_edge_shape'] must be one "
+                         f"of {sorted(EDGE_TAPER_SHAPES)}, got {shape!r}")
+    return dict(on=bool(on), psi0=float(psi0), shape=int(shape))
+
+
 #: Rows each preset admits (``Ip`` is mandatory for every preset).
 PRESET_ROWS = {
     "structured": frozenset(("Ip", "l_i", "q0", "mse")),
@@ -314,6 +347,28 @@ def validate_engine_settings(gc) -> None:
                          "generation.mse_data is None")
     _mse_knobs_unread(gc, rows)
     _legacy_knobs_unread(gc, vals)
+    bk = dict(getattr(gc, "bootstrap_kwargs", None) or {})
+    swb_only = sorted(set(bk) - ENGINE_BOOTSTRAP_KWARGS)
+    if swb_only:
+        raise ValueError(
+            f"generation.bootstrap_kwargs keys {swb_only} configure "
+            "solve_with_bootstrap, which reconstruction_engine='unified' "
+            "never runs (they would be silently ignored); the engine reads "
+            f"only {sorted(ENGINE_BOOTSTRAP_KWARGS)}")
+    if not bool(bk.get("use_sauter_eps", True)):
+        raise ValueError(
+            "generation.bootstrap_kwargs['use_sauter_eps']=False: the "
+            "engine's Redl evaluation (physics.evaluate_jBS) always takes "
+            "eps from sauter_fc")
+    if engine_edge_taper(gc)["on"] and not resolve_edge_pressure(
+            gc).edge_pprime_pin:
+        raise ValueError(
+            "the engine's edge taper (bootstrap_kwargs['taper_edge_jBS']=True) "
+            "refuses edge_pprime_pin=False: the taper takes the "
+            "request to zero at the LCFS while the unpinned P' stays finite "
+            "there, and the solve does not converge.  Either turn the taper "
+            "off (bootstrap_kwargs={'taper_edge_jBS': False}) or zero the "
+            "edge pressure gradient (edge_pprime_pin=True)")
     for name, want in (("jbs_self_consistent", True),
                        ("recalculate_j_BS", True),
                        ("single_profile_jphi", False)):
@@ -416,7 +471,6 @@ ENGINE_UNREAD_LEGACY_FIELDS = {
     "jbs_loop_q0_corrector": "engine_rows with 'q0' (engine_draw_q0_row "
                              "keeps it in the draws)",
     "floor_j_BS": "nothing: the engine never floors the bootstrap",
-    "swb_iterations": "nothing: the engine never runs SWB",
     "accept_anchor_inband": "nothing: the engine draws have no legacy "
                             "anchor in-band shortcut",
     "diagnostic_plots": "nothing: the engine draws make no per-draw SWB "
@@ -651,6 +705,7 @@ def engine_settings(gc) -> dict:
             gc, "engine_draw_bootstrap_refresh", False)),
         draw_solve_maxits=engine_draw_maxits(gc),
         edge_pressure=resolve_edge_pressure(gc).record(),
+        edge_taper=engine_edge_taper(gc),
         loop=loop,
         q0_tol=float(gc.q0_tol),
         structured_li_tol=float(gc.structured_li_tol),
@@ -711,6 +766,15 @@ def conversion_factor(geom) -> np.ndarray:
     return field_aligned_conversion(geom["F"], geom["inv_R"], geom["B2"])
 
 
+def composed_factor(geom) -> np.ndarray:
+    """:func:`conversion_factor` times the edge taper the geometry carries:
+    the factor :func:`compose` turns a parallel component into its share of
+    the request with."""
+    kap = conversion_factor(geom)
+    w = geom.get("edge_taper")
+    return kap if w is None else kap * np.asarray(w, dtype=float)
+
+
 def pressure_term(geom) -> np.ndarray:
     """``p'(<R> - F^2<1/R>/<B^2>)``: the pressure-driven (diamagnetic +
     Pfirsch-Schlueter) part of ``<j_phi>``, whose ``<j.B>`` is zero."""
@@ -730,6 +794,12 @@ def compose(geom, jB_ind, jB_bs, jB_fix, s_ind=1.0, s_bs=1.0):
     ind = np.asarray(s_ind) * kap * np.asarray(jB_ind, dtype=float)
     bs = np.asarray(s_bs) * kap * np.asarray(jB_bs, dtype=float)
     fix = kap * np.asarray(jB_fix, dtype=float)
+    # the SWB edge taper (geom["edge_taper"], set by the backend that
+    # measured the geometry): every component goes to zero at the LCFS
+    w = geom.get("edge_taper")
+    if w is not None:
+        w = np.asarray(w, dtype=float)
+        ind, bs, fix, P = ind * w, bs * w, fix * w, P * w
     return ind + bs + fix + P, dict(ind=ind, bs=bs, fix=fix, pressure=P,
                                     kappa=kap)
 
@@ -815,7 +885,8 @@ class EngineState:
         from .jbs_loop import jsonable
         g = self.geom or {}
         keep = ("psi_N", "psi_q", "F", "R_avg", "inv_R", "inv_R2", "B2",
-                "pprime", "dV_dpsi", "dpsi_dpsiN", "w_lin", "c_affine")
+                "pprime", "dV_dpsi", "dpsi_dpsiN", "w_lin", "c_affine",
+                "edge_taper")
         return jsonable(dict(
             x=self.x, lambda_bs=self.lambda_bs,
             li_discrepancy=self.li_discrepancy, q0_row=self.q0_row,
@@ -2067,10 +2138,18 @@ class TokaMakerBackend:
     measurement carries both pressure frames (``pressure_frames``)."""
 
     def __init__(self, mygs, contract, *, psi_pad=1e-3, li_kind="li_3",
-                 q_psi=None, chords=None, maxits=None, edge_pressure=None):
+                 q_psi=None, chords=None, maxits=None, edge_pressure=None,
+                 edge_taper=None):
         self.mygs = mygs
         self.c = contract
         self.psi = np.asarray(contract.psi_N, dtype=float)
+        #: the SWB edge taper's factor on psi (engine_edge_taper(); None:
+        #: off), carried on every measured geometry so compose() applies it
+        self.edge_taper = None
+        if edge_taper and edge_taper.get("on"):
+            from .physics import edge_taper_weight
+            self.edge_taper = edge_taper_weight(
+                self.psi, edge_taper["psi0"], edge_taper["shape"])
         self.psi_pad = float(psi_pad)
         self.li_kind = str(li_kind)
         self.q_psi = (float(np.clip(self.psi[0], psi_pad, 1 - psi_pad))
@@ -2192,6 +2271,7 @@ class TokaMakerBackend:
         geom["F"] = np.asarray(d["F"], dtype=float)
         geom["B2"] = np.asarray(d["avg_B2"], dtype=float)
         geom["li_geom"] = li_closure_geometry(eq, geom, psi_pad=pad)
+        geom["edge_taper"] = self.edge_taper
         li = float(li_achieved(eq, li_kind=self.li_kind, psi_pad=pad)[0])
         # q on the geometry's own surfaces (the legacy _q0_of reads index 0
         # of the same call), at the row radius
@@ -2360,6 +2440,7 @@ def engine_record(eng, res, wall_s=None) -> dict:
                       li_row_relaxation=eng.s.get("li_row_relaxation", 1.0),
                       ids_inductive=eng.s.get("ids_inductive", "auto"),
                       edge_pressure=eng.s.get("edge_pressure"),
+                      edge_taper=eng.s.get("edge_taper"),
                       loop=eng.s["loop"]),
         convergence=convergence_table(eng.s),
         composition=("J = F<1/R>/<B^2> [s_ind <j.B>_ind + s_bs <j.B>_BS + "
@@ -2432,7 +2513,7 @@ def _split(eng, res):
     """The Baseline's toroidal split of the delivered request."""
     st, c = res["state"], eng.c
     g = st.geom
-    kap = conversion_factor(g)
+    kap = composed_factor(g)
     out = eng.delivered_closure["out"]
     R = np.asarray(st.request, dtype=float)
     j_BS = np.asarray(out["s_bs"], float) * kap * np.asarray(st.lambda_bs)
@@ -2821,6 +2902,7 @@ def prepare_engine_baseline(bq):
                 mygs, c0, psi_pad=psi_pad, li_kind="li_3",
                 chords=(None if mse is None else mse["chords"]),
                 edge_pressure=s["edge_pressure"],
+                edge_taper=s["edge_taper"],
                 # the reconstruction runs under the solver's own cap
                 # (engine_draw_solve_maxits caps the DRAWS only)
                 maxits=None)

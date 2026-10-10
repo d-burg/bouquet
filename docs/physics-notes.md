@@ -173,8 +173,10 @@ Two consequences of the default:
   `generation` section). A current config always carries the field. An
   unknown (e.g. misspelt) `generation` key is refused, naming the nearest
   valid key, so a typo can no longer land on this legacy default.
-- `swb_iterations` is the legacy path's Picard count; under the loop it is
-  ignored, and a non-default value raises a `DeprecationWarning` saying so.
+- `bootstrap_kwargs` configures `solve_with_bootstrap`; under the loop SWB
+  runs only for `jbs_init="swb"` and the jBS-delta / `DIFF_BS` caches, so a
+  non-empty dict raises a `DeprecationWarning` saying where it acts.  (It
+  replaced `swb_iterations`; a stored value loads as `{"iterations": n}`.)
 
 The archive says which model a group carries: the schema-v3 `jbs_loop` block
 (below) is present exactly where the loop ran; plots label the bootstrap

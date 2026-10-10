@@ -37,6 +37,11 @@ def _stored(sha, eng):
         return json.load(fh)[eng]
 
 
+#: stored keys translated on load (checked by their own tests): swb_iterations
+#: is retired for bootstrap_kwargs["iterations"]
+_TRANSLATED = ("swb_iterations", "bootstrap_kwargs")
+
+
 def _load(d):
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
@@ -58,7 +63,8 @@ def test_every_stored_legacy_config_loads(sha):
             assert any(name in m and "no effect" in m for m in msgs)
     # every legacy-path setting it ran with is as stored
     for k, v in stored.items():
-        if k.startswith("engine_") or k in ("separatrix_pressure",):
+        if k.startswith("engine_") or k in ("separatrix_pressure",) \
+                or k in _TRANSLATED:
             continue
         if isinstance(v, list):
             continue
@@ -85,6 +91,16 @@ def test_every_stored_unified_config_loads_with_what_it_ran_with(sha):
         assert any("engine_draw_solve_maxits" in m for m in msgs)
     if sha == "d874822":
         assert msgs == []                     # a current config: silent
+
+
+def test_a_unified_config_drops_a_non_default_swb_iterations():
+    """The unified engine never read it: dropped, said so, not translated
+    into an SWB-only key the engine would refuse."""
+    d = _stored(SHAS[-1], "unified")
+    d["generation"]["swb_iterations"] = 2
+    g, msgs = _load(d)
+    assert "iterations" not in g.bootstrap_kwargs
+    assert any("swb_iterations=2" in m and "dropped" in m for m in msgs)
 
 
 def test_a_unified_config_that_capped_its_draws_the_old_way():
@@ -165,7 +181,7 @@ _UNREAD_SET = dict(
     structured_ip_sigma_frac=0.005, structured_soft=True,
     structured_li_max_corrector_steps=3,
     anchor_pressure_to_equilibrium=True, imas_corrective_jphi=True,
-    jbs_loop_q0_corrector=True, floor_j_BS=True, swb_iterations=2,
+    jbs_loop_q0_corrector=True, floor_j_BS=True,
     accept_anchor_inband=True, diagnostic_plots=True,
     isolate_edge_jBS=False, perturb_jind_in_anchor=True)
 
@@ -200,7 +216,7 @@ def test_a_stored_unified_config_with_any_unread_field_loads_at_default(
                and "never read by the unified engine" in m for m in msgs)
     # every other field is as stored
     for k, v in _stored(SHAS[-1], "unified")["generation"].items():
-        if k == name or isinstance(v, list):
+        if k == name or isinstance(v, list) or k in _TRANSLATED:
             continue
         assert getattr(g, k) == v, k
     # a NEW unified config with the same value is still refused
@@ -261,7 +277,7 @@ def test_a_stored_config_without_the_engine_field_replays_as_legacy(sha):
                and "reconstruction_engine='legacy'" in m for m in msgs)
     # every legacy-path setting it ran with is as stored
     for k, v in d["generation"].items():
-        if k in ("jbs_max_passes_post_homotopy",):
+        if k in ("jbs_max_passes_post_homotopy",) + _TRANSLATED:
             continue
         got = getattr(g, k)
         if isinstance(v, (list, tuple)) or isinstance(got, (list, tuple)):

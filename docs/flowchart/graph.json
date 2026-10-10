@@ -779,12 +779,12 @@
    "subsystem": "Configuration"
   },
   {
-   "id": "cfg.generationconfig.swb_iterations",
+   "id": "cfg.generationconfig.bootstrap_kwargs",
    "type": "knob",
-   "label": "swb_iterations: int = 3",
+   "label": "bootstrap_kwargs: dict = {}",
    "file": "bouquet/config.py",
-   "line": 385,
-   "desc": "solve_with_bootstrap self-consistency iterations",
+   "line": 936,
+   "desc": "Keyword options passed through to solve_with_bootstrap",
    "subsystem": "Configuration"
   },
   {
@@ -1244,10 +1244,10 @@
    "file": ""
   },
   {
-   "id": "cfg.swb_iterations",
+   "id": "cfg.bootstrap_kwargs",
    "type": "knob",
-   "label": "swb_iterations (SWB self-consistency)",
-   "desc": "H-mode bootstrap-iteration count inside SWB",
+   "label": "bootstrap_kwargs (SWB backend options)",
+   "desc": "Keyword options passed through to solve_with_bootstrap",
    "subsystem": "Per-draw solve (SWB / l_i / homotopy)",
    "file": ""
   },
@@ -1694,7 +1694,7 @@
    "label": "solve_with_bootstrap",
    "file": "bouquet/TokaMaker_interface.py",
    "line": 1627,
-   "desc": "solve_with_bootstrap(..., n_iterations=config.generation.swb",
+   "desc": "solve_with_bootstrap(..., **config.generation.bootstrap_kwargs)",
    "subsystem": "Configuration"
   },
   {
@@ -5938,10 +5938,10 @@
    "subsystem": "Configuration"
   },
   {
-   "src": "cfg.generationconfig.swb_iterations",
+   "src": "cfg.generationconfig.bootstrap_kwargs",
    "dst": "fn.TokaMaker_interface.solve_with_bootstrap",
    "kind": "data",
-   "desc": "Controls swb_iterations",
+   "desc": "Passes solve_with_bootstrap keyword options",
    "subsystem": "Configuration"
   },
   {
@@ -6302,10 +6302,10 @@
    "subsystem": "Per-draw solve (SWB / l_i / homotopy)"
   },
   {
-   "src": "cfg.swb_iterations",
+   "src": "cfg.bootstrap_kwargs",
    "dst": "ext.solve_with_bootstrap",
    "kind": "data",
-   "desc": "H-mode bootstrap-iteration count",
+   "desc": "solve_with_bootstrap keyword options",
    "subsystem": "Per-draw solve (SWB / l_i / homotopy)"
   },
   {

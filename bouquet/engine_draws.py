@@ -239,7 +239,8 @@ class EngineDrawContext:
     :class:`EngineDrawRefused`."""
 
     def __init__(self, eng, res, *, loop, native, q0_row=False,
-                 label="engine draw", bootstrap_refresh=False):
+                 label="engine draw", bootstrap_refresh=False, Z_imp=None,
+                 zeff_includes_fast=False):
         from .engine import _lin, complete_geometry  # noqa: F401
         from .edge_pressure import pressure_gradient, resolve_edge_pressure
         from .utils import closure_sign_convention, structured_basis_eval
@@ -324,6 +325,10 @@ class EngineDrawContext:
         self.native = {k: np.asarray(v, dtype=float)
                        for k, v in nat.items() if v is not None}
         self.psi_kin = self.native["psi_N"]
+        #: the baseline's impurity charge and Z_eff convention (the sampler's
+        #: Z_eff window and ni derivation; bouquet.kinetic_sampler)
+        self.Z_imp = None if not Z_imp else float(Z_imp)
+        self.zeff_includes_fast = bool(zeff_includes_fast)
         self._kin_eq_native = {k: _pchip(self.psi_kin, self.native[k],
                                          self.psi)
                                for k in ("ne", "te", "ni", "ti")}
@@ -488,125 +493,54 @@ def sample_draw_inputs(ctx, rng, unc, flux_integral, *, scale=1.0,
 def sample_kinetics(ctx, rng, unc, flux_integral, *, p_thresh=0.05,
                     max_pressure_iter=None):
     """The kinetic half of a draw (``jB_ind`` left at the reconstruction's):
+    :func:`bouquet.kinetic_sampler.sample_kinetics` -- the sampler every
+    solve path shares -- matched on the engine grid's thermal pressure
+    (``<.>`` the solver's flux integral), then put on the engine grid in
+    increment form (exactly the base at zero perturbation).
 
-    * ne, Te, (Zeff -> ni via quasineutrality | ni), Ti on the kinetic grid,
-      redrawn together until ``mean |<p>_th - <p>_th,draw| / <p>_th`` is
-      within *p_thresh* (a FRACTION), ``<.>`` the solver's flux integral;
-    * the auxiliary channels (``unc["aux_sigmas"]``) in their dict order.
-
-    Every drawn profile is formed as ``base + (sample - mean) * norm`` so a
-    zero sigma is exactly the base.  *unc*: ``sigma_ne, sigma_te,
-    sigma_ni, sigma_ti`` (kinetic grid), ``n_ls, t_ls``, optional
-    ``aux_sigmas, aux_baselines, aux_length_scales``."""
-    from .sampling import _draw_monotonic_perturbation, generate_perturbed_GPR
-    from .TokaMaker_interface import _MAX_PRESSURE_ITER
-    if max_pressure_iter is None:
-        max_pressure_iter = _MAX_PRESSURE_ITER
-    psi_kin, psi = ctx.psi_kin, ctx.psi
+    *unc*: ``sigma_ne, sigma_te, sigma_ni, sigma_ti`` (kinetic grid),
+    ``n_ls, t_ls``, optional ``aux_sigmas, aux_baselines,
+    aux_length_scales, ni_from_zeff, zeff_dne``."""
+    from .kinetic_sampler import KineticBase, sample_kinetics as _sample
     nat = ctx.native
-    ne, te, ni, ti = (nat[k] for k in ("ne", "te", "ni", "ti"))
-    z_fast = nat.get("z_fast")
-    s_ne, s_te, s_ni, s_ti = (np.asarray(unc[k], dtype=float) for k in
-                              ("sigma_ne", "sigma_te", "sigma_ni",
-                               "sigma_ti"))
-    n_ls, t_ls, j_ls = unc["n_ls"], unc["t_ls"], unc["j_ls"]
-    aux_sigmas = unc.get("aux_sigmas") or None
-    aux_baselines = unc.get("aux_baselines") or {}
-    aux_ls = unc.get("aux_length_scales") or {}
-
-    def _mono(base, sig, ls):
-        mn = base / base[0]
-        smp = _draw_monotonic_perturbation(psi_kin, mn, sig / base[0], ls,
-                                           rng=rng)
-        return base + (smp - mn) * base[0]
-
-    zeff_active = bool(aux_sigmas) and ("zeff" in aux_sigmas) \
-        and aux_baselines.get("zeff") is not None
-    Z_imp = None
-    if zeff_active:
-        from .physics import impurity_charge_with_fast_ions
-        Z_imp, _ = impurity_charge_with_fast_ions(
-            ne, ni, np.asarray(aux_baselines["zeff"], dtype=float),
-            np.zeros_like(ne) if z_fast is None else z_fast)
-
-    def _zclip(z, ne_):
-        if z_fast is None:
-            return np.clip(z, 1.0, Z_imp * (1.0 - 1e-9))
-        fth = np.clip((ne_ - np.asarray(z_fast, dtype=float))
-                      / np.clip(ne_, 1e10, None), 0.0, 1.0)
-        return np.clip(z, np.maximum(fth, 1e-9), Z_imp * fth * (1.0 - 1e-9))
-
+    base = KineticBase(
+        psi_kin=ctx.psi_kin, ne=nat["ne"], te=nat["te"], ni=nat["ni"],
+        ti=nat["ti"], sigma_ne=unc["sigma_ne"], sigma_te=unc["sigma_te"],
+        sigma_ni=unc["sigma_ni"], sigma_ti=unc["sigma_ti"],
+        n_ls=unc["n_ls"], t_ls=unc["t_ls"],
+        aux_sigmas=unc.get("aux_sigmas") or None,
+        aux_baselines=unc.get("aux_baselines") or None,
+        aux_length_scales=unc.get("aux_length_scales") or None,
+        Z_imp=ctx.Z_imp, z_fast=nat.get("z_fast"), z2_fast=nat.get("z2_fast"),
+        zeff_includes_fast=ctx.zeff_includes_fast,
+        ni_from_zeff=bool(unc.get("ni_from_zeff", True)),
+        zeff_dne=unc.get("zeff_dne"))
+    psi = ctx.psi
     inp = float(flux_integral(psi, ctx.pressure_thermal_base))
-    thr = float(p_thresh) * 100.0
-    p_err, n_iter = np.inf, 0
-    zeff_draw = None
-    while p_err > thr:
-        n_iter += 1
-        if n_iter > max_pressure_iter:
-            raise RuntimeError(
-                f"Pressure match not found within {max_pressure_iter} "
-                f"iterations (last error {p_err:.2f}% vs threshold "
-                f"{thr:.2f}%)")
-        ne_d = _mono(ne, s_ne, n_ls)
-        te_d = _mono(te, s_te, t_ls)
-        if zeff_active and Z_imp is not None:
-            from .physics import main_ion_density_from_zeff
-            zb = np.asarray(aux_baselines["zeff"], dtype=float)
-            zs = np.asarray(aux_sigmas["zeff"], dtype=float)
-            z0 = float(np.max(np.abs(zb))) or 1.0
-            zmn = zb / z0
-            smp = np.atleast_1d(np.asarray(np.squeeze(generate_perturbed_GPR(
-                psi_kin, zmn, zs / z0, length_scale=aux_ls.get("zeff", 0.4),
-                n_samples=1, rng=rng)), dtype=float))
-            zeff_draw = _zclip(zb + (smp - zmn) * z0, ne_d)
-            ni_d = ni + (main_ion_density_from_zeff(ne_d, zeff_draw, Z_imp,
-                                                    z_fast=z_fast)
-                         - main_ion_density_from_zeff(ne, _zclip(zb, ne),
-                                                      Z_imp, z_fast=z_fast))
-        else:
-            ni_d = _mono(ni, s_ni, n_ls)
-        ti_d = _mono(ti, s_ti, t_ls)
-        nat_d = dict(ne=ne_d, te=te_d, ni=ni_d, ti=ti_d)
-        kin = ctx.eq_kinetics(nat_d)
-        _p, th = ctx.pressures(kin)
-        tmp = float(flux_integral(psi, th))
-        p_err = float(np.mean(np.abs(inp - tmp) / inp) * 100.0)
-    # ---- the auxiliary channels (the switchboard), in dict order
-    aux_out = {}
-    if aux_sigmas:
-        for name, es in aux_sigmas.items():
-            if name == "zeff" and zeff_draw is not None:
-                continue
-            eb = aux_baselines.get(name)
-            if eb is None:
-                continue
-            eb = np.asarray(eb, dtype=float)
-            es = np.asarray(es, dtype=float)
-            e0 = float(np.max(np.abs(eb)))
-            if not (e0 > 0):
-                e0 = 1.0
-            emn = eb / e0
-            smp = np.squeeze(generate_perturbed_GPR(
-                psi_kin, emn, es / e0, length_scale=aux_ls.get(name, 0.4),
-                n_samples=1, rng=rng))
-            aux_out[name] = np.atleast_1d(np.asarray(eb + (smp - emn) * e0,
-                                                     dtype=float))
-        if zeff_draw is not None:
-            aux_out["zeff"] = zeff_draw
+
+    def _thermal(d):
+        return float(flux_integral(psi, ctx.pressures(ctx.eq_kinetics(
+            d.native))[1]))
+
+    kd = _sample(base, rng, _thermal, inp, p_thresh=p_thresh,
+                 max_pressure_iter=max_pressure_iter)
+    aux_out = kd.aux
     dz = None
-    if "zeff" in aux_out and aux_baselines.get("zeff") is not None:
-        zb = np.asarray(aux_baselines["zeff"], dtype=float)
-        dz = (np.clip(_pchip(psi_kin, aux_out["zeff"], psi), 1.0, None)
-              - np.clip(_pchip(psi_kin, zb, psi), 1.0, None))
-    kin = ctx.eq_kinetics(nat_d, zeff_eq_delta=dz)
+    zb = (unc.get("aux_baselines") or {}).get("zeff")
+    if "zeff" in aux_out and zb is not None:
+        zb = np.asarray(zb, dtype=float)
+        dz = (np.clip(_pchip(ctx.psi_kin, aux_out["zeff"], psi), 1.0, None)
+              - np.clip(_pchip(ctx.psi_kin, zb, psi), 1.0, None))
+    kin = ctx.eq_kinetics(kd.native, zeff_eq_delta=dz)
     p, th = ctx.pressures(kin)
     return EngineDrawInputs(
-        kinetics=kin, kinetics_native=nat_d, pressure=p, pressure_thermal=th,
+        kinetics=kin, kinetics_native=kd.native, pressure=p,
+        pressure_thermal=th,
         jB_ind=np.asarray(ctx.c.jB_ind, dtype=float).copy(), aux=aux_out,
-        sampler=dict(pressure_match_iterations=int(n_iter),
-                     pressure_match_err_pct=float(p_err),
+        sampler=dict(pressure_match_iterations=kd.iterations,
+                     pressure_match_err_pct=kd.p_err_pct,
                      p_thresh=float(p_thresh),
-                     zeff_primary=bool(zeff_draw is not None),
+                     zeff_primary=kd.zeff_primary,
                      rng_stream=RNG_STREAM))
 
 
@@ -1187,14 +1121,16 @@ def engine_rejection_reason(exc, stage):
 #  generate(): the hook generate_bouquet calls
 # ---------------------------------------------------------------------------
 def tokamaker_backend(mygs, contract, *, psi_pad, q_psi, maxits,
-                      edge_pressure=None):
+                      edge_pressure=None, edge_taper=None):
     """The draw's backend on a live solver (monkeypatched by the fast
-    tests).  ``edge_pressure``: the reconstruction's settings
-    (:mod:`bouquet.edge_pressure`)."""
+    tests).  ``edge_pressure`` / ``edge_taper``: the reconstruction's
+    settings (:mod:`bouquet.edge_pressure`, :func:`bouquet.engine.
+    engine_edge_taper`)."""
     from .engine import TokaMakerBackend
     return TokaMakerBackend(mygs, contract, psi_pad=psi_pad, li_kind="li_3",
                             q_psi=q_psi, maxits=maxits,
-                            edge_pressure=edge_pressure)
+                            edge_pressure=edge_pressure,
+                            edge_taper=edge_taper)
 
 
 class GenerateEngineDraws:
@@ -1247,7 +1183,8 @@ class GenerateEngineDraws:
                              kinetics=c.kinetics)
         return tokamaker_backend(mygs, dc, psi_pad=self.psi_pad,
                                  q_psi=self.q_psi, maxits=self.maxits,
-                                 edge_pressure=self.ctx.edge)
+                                 edge_pressure=self.ctx.edge,
+                                 edge_taper=self.ctx.eng.s.get("edge_taper"))
 
     def lcfs_pressure(self):
         """The separatrix pressure a written g-file of the CURRENT draw
@@ -1644,8 +1581,9 @@ class GenerateEngineDraws:
         # bootstrap model (x* held: s_bs (1 + d_bs) x scale x Redl) and its
         # fixed parts, both converted with THIS state's F<1/R>/<B^2>; the
         # residual against the archived j_phi is :meth:`archived_split`'s
-        from .engine import conversion_factor, pressure_term
-        kap = conversion_factor(fin["geom"])
+        from .engine import composed_factor, pressure_term
+        kap = composed_factor(fin["geom"])
+        _w = fin["geom"].get("edge_taper")
         dpl = cur["draw"].get("passes_post_homotopy") or cur["draw"]["passes"]
         fx = self.ctx.c.jB_fix_parts
         _amp = 1.0 + float(dpl.last["amp"].get("d_bs", 0.0))
@@ -1661,7 +1599,8 @@ class GenerateEngineDraws:
             j_NBI=kap * jB_NBI, j_RF=kap * jB_RF,
             jB_BS=jB_BS, jB_NBI=jB_NBI * np.ones_like(kap),
             jB_RF=jB_RF * np.ones_like(kap), kappa=kap,
-            j_pressure=pressure_term(fin["geom"]))
+            j_pressure=pressure_term(fin["geom"])
+            * (1.0 if _w is None else np.asarray(_w, dtype=float)))
         rec["archived"]["deltas"] = dict(
             l_i_3=float(fin["li"]) - float(self.ctx.ref["l_i"]),
             l_i_1=(None if (rec["archived"]["l_i_1"] is None
@@ -1827,10 +1766,13 @@ def context_from_run(run, gc, bl):
     """The :class:`EngineDrawContext` of a live reconstruction and its
     Baseline (the kinetic-grid base the sampler perturbs)."""
     native = dict(psi_N=bl.psi_N_kinetic, ne=bl.ne, te=bl.te, ni=bl.ni,
-                  ti=bl.ti, z_fast=getattr(bl, "z_fast", None))
+                  ti=bl.ti, z_fast=getattr(bl, "z_fast", None),
+                  z2_fast=getattr(bl, "z2_fast", None))
     return EngineDrawContext(
         run["engine"], run["result"], loop=draw_loop_settings(gc),
-        native=native, q0_row=bool(getattr(gc, "engine_draw_q0_row", False)),
+        native=native, Z_imp=getattr(bl, "Z_imp", None),
+        zeff_includes_fast=bool(getattr(bl, "zeff_includes_fast", False)),
+        q0_row=bool(getattr(gc, "engine_draw_q0_row", False)),
         bootstrap_refresh=bool(getattr(gc, "engine_draw_bootstrap_refresh",
                                        False)))
 

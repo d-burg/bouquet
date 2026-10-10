@@ -564,7 +564,8 @@ the auxiliary channels, the parallel inductive. The random stream is the
 legacy one through the first inductive candidate (`engine_draws.RNG_STREAM`):
 the kinetic channels `ne, Te, (Zeff -> ni | ni), Ti` redrawn together until
 the flux-integrated thermal pressure matches within `p_thresh`, the
-auxiliary channels in their order, then one inductive candidate drawn IN
+auxiliary channels in their order (both by `bouquet.kinetic_sampler`, shared
+with the legacy and swb draws), then one inductive candidate drawn IN
 TOROIDAL UNITS with the legacy call on `s_ind(x*) kappa* lambda_ind` (so its
 toroidal perturbation is the legacy draw's for the same normals: today's
 `sigma_jphi` and `j_ls`) and mapped back to `lambda_ind`; it is redrawn only

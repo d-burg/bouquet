@@ -144,9 +144,13 @@ def _imas_probe(outdir, part):
 
         B.redl_bootstrap = _spy
         try:
+            # SWB's Python solve on evaluate_jBS's eps (<a>/<R>)
+            py = ({"use_python_solve": True, "use_sauter_eps": False}
+                  if "use_python_solve" in
+                  inspect.signature(B.solve_with_bootstrap).parameters else {})
             B.solve_with_bootstrap(mygs, *kin[:4], kin[4], bl.Ip_target,
                                    np.ones_like(psi), psi_N=psi,
-                                   verbose=False)
+                                   verbose=False, **py)   # the spy is on the Python Redl
         except _Stop:
             pass
         finally:

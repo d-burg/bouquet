@@ -58,8 +58,23 @@ pip install -e ".[dev]"
 **Requires [OpenFUSIONToolkit](https://github.com/hansec/OpenFUSIONToolkit)
 v26.6 or newer** for equilibrium generation (v26.6 introduced the dict-form
 flux-surface-average returns that the exact-fidelity per-draw geometry capture
-depends on; legacy positional layouts are still supported). OFT is installed
-separately, following its own instructions. Everything else — the GEQDSK/p-file/
+depends on, and `get_fsa`, whose per-surface `R_min`/`R_max` give the Redl
+bootstrap its ε = (R_max − R_min)/(R_max + R_min) and the `R_geo` of its ν\*;
+legacy positional layouts are still supported). An
+upstream build is enough for the default paths (the unified engine and the
+legacy loop). Only two opt-ins need a toolkit with the internal Fortran
+bootstrap solve (OpenFUSIONToolkit PR #271, or a fork carrying it):
+`imas_baseline="swb"` / `solve_method="swb"`, and the `bootstrap_kwargs` keys
+that configure that solve on the legacy path (`use_python_solve`, `djBS_tol`,
+`taper_edge_*`, ...; refused by name on a toolkit without them). Where that
+toolkit's `sauter_fc(return_eps=True)` exists, bouquet records its ε beside
+its own `get_fsa` value as a cross-build diagnostic (they agree to ~1e-4) but
+never uses it, so results do not depend on the build. OFT is installed separately, following its own
+instructions; `tools/install_oft.py` builds upstream `main` by default, any
+other repository or branch only when named (`--repo`, `--ref`), reusing
+already built external libraries (`--libs`), and never repoints an existing
+clone's remote.
+Everything else — the GEQDSK/p-file/
 IDA/IMAS readers, COCOS conversion, archive reading, and all plotting — works
 without it. Python dependencies (`numpy`, `scipy`, `matplotlib`, `h5py`) are
 handled by pip.
@@ -285,7 +300,7 @@ b.generation.seed = 1234
 | `uncertainty.ne_scalar_sigma` / `te_` / `ni_` / `ti_` | `0.05` / `0.05` / `0.10` / `0.10` | Flat fractional envelopes, used when no IDA sigmas are supplied |
 | `uncertainty.jphi_scalar_sigma` | `0.10` | Inductive-current envelope; must be > 0 |
 | `uncertainty.zeff_scalar_sigma` | `0.05` | One Z_eff per draw; n_i / n_z follow from quasi-neutrality |
-| `uncertainty.zeff_sigma_source` | `"auto"` | Tier supplying the Z_eff envelope's magnitude — carbon-propagated > VB-measured > scalar. `"carbon"` / `"measured"` / `"scalar"` force one; every step down warns. See [workflows.md](docs/workflows.md#uncertaintyconfig-buncertainty) |
+| `uncertainty.zeff_sigma_source` | `"auto"` | Tier supplying the Z_eff envelope's magnitude — carbon-propagated > VB-measured > scalar. `"carbon"` / `"measured"` / `"scalar"` force one; every step down warns. With an experimental `ni_source` (PR #56, opt-in) the measured tier is the IDA-resolved envelope instead. See [workflows.md](docs/workflows.md#uncertaintyconfig-buncertainty) |
 | `uncertainty.ida_path` | `None` | IDA `.cdf` supplying measured sigma envelopes instead of the scalars. **Wins over the scalars above** — see the precedence note below |
 | `uncertainty.log_sigma_sources` | `True` | Log which source each kinetic sigma actually resolved from |
 | `generation.n_equils` | `20` | Draws to attempt |

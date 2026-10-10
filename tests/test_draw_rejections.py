@@ -216,15 +216,28 @@ def test_a_masked_resample_loop_failure_has_its_own_counter():
 
 
 def test_every_rejection_path_of_the_draw_loop_records_a_reason():
-    """Both `continue` exits of generate_bouquet's draw loop record a
-    rejection first -- there is no silent rejection path."""
+    """Every `continue` exit of generate_bouquet's draw loop (the draw, the
+    post-align checks, a failed g-file save, a failed state restore after
+    the i-file save) records a rejection first --
+    there is no silent rejection path."""
+    import ast
     import inspect
+    import textwrap
     from bouquet.TokaMaker_interface import generate_bouquet
-    src = inspect.getsource(generate_bouquet)
-    body = src.split("    for count in eq_iter:", 1)[1]
-    parts = body.split("\n                continue\n")
-    parts2 = body.split("\n            continue\n")
-    n_cont = body.count("continue\n")
-    assert n_cont == 2, n_cont
-    for seg in (parts[0], parts2[0]):
+    src = textwrap.dedent(inspect.getsource(generate_bouquet))
+    loop = next(n for n in ast.walk(ast.parse(src))
+                if isinstance(n, ast.For)
+                and ast.unparse(n.target) == "count")
+
+    def exits(node):        # continues of THIS loop, not of nested loops
+        for c in ast.iter_child_nodes(node):
+            if isinstance(c, ast.Continue):
+                yield c
+            elif not isinstance(c, (ast.For, ast.While, ast.FunctionDef,
+                                    ast.AsyncFunctionDef, ast.Lambda)):
+                yield from exits(c)
+    lines = src.splitlines(keepends=True)
+    segs = ["".join(lines[:c.lineno - 1]) for c in exits(loop)]
+    assert len(segs) == 4, len(segs)
+    for seg in segs:
         assert "_reject(" in seg[-3000:]

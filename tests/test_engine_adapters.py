@@ -170,7 +170,7 @@ def test_the_inductive_basis_is_the_legacy_basis_without_the_amplitude(
     resid = jB - 0.3 * jB * np.exp(-0.5 * ((psi - 0.95) / 0.03) ** 2)
     # the amplitude search's proxy, replaced by a linear stand-in
     monkeypatch.setattr(ti, "calc_cylindrical_li_proxy",
-                        lambda mygs, j, pad: float(np.sum(j)) * 1e-9)
+                        lambda mygs, j, pad, *a: float(np.sum(j)) * 1e-9)
     fit = ti.fit_inductive_profile(None, resid, np.zeros_like(psi), psi,
                                    1e-3, float(np.sum(resid)) * 0.9e-9,
                                    k=5, psi_bridge=0.99)
@@ -640,7 +640,8 @@ def _driven_dd():
     (1, "total"), (100, "auxiliary"), (101, "ic_nbi"), (104, "ec_lh"),
     (107, "ec_lh_ic"), (203, "impurity_radiation"), (401, "neoclassical")])
 def test_an_aggregate_or_bootstrap_like_entry_is_never_added(tmp_path,
-                                                             index, name):
+                                                             index, name,
+                                                             monkeypatch):
     """A "total" entry (the sum of every source -- here nbi + ec + sawteeth
     + ohmic + bootstrap, as an aggregate carries) or a combination entry,
     or a bootstrap published as "neoclassical": NOT added to the driven
@@ -654,8 +655,18 @@ def test_an_aggregate_or_bootstrap_like_entry_is_never_added(tmp_path,
         c0 = _ids_from(tmp_path, dd0, "base.json").read()
     dd = _driven_dd()
     _add_source(dd, name, index, lambda q: np.asarray(q["j_total"]))
-    with pytest.warns(UserWarning, match="NOT added to the driven current"):
-        c = _ids_from(tmp_path, dd, f"agg{index}.json").read()
+    ad = _ids_from(tmp_path, dd, f"agg{index}.json")
+    # the warning is issued ONCE per file, by whichever reader reads it
+    # first (review PR70 B8); _ids_from's baseline read (warnings ignored)
+    # was first here, so the adapter is made the first reader of the file
+    import bouquet.adapters as A
+    monkeypatch.setattr(A, "_DRIVEN_WARNED", set())
+    with pytest.warns(UserWarning, match="IDS adapter: .*NOT added to the "
+                                         "driven current"):
+        c = ad.read()
+    with warnings.catch_warnings():          # ... and never again
+        warnings.simplefilter("error")
+        ad.read()
     np.testing.assert_array_equal(c.jB_fix, c0.jB_fix)
     np.testing.assert_array_equal(c.jB_ind, c0.jB_ind)
     for k in ("nbi", "rf", "other"):
@@ -683,7 +694,8 @@ def test_the_pre_fix_rule_would_have_double_counted_a_total(tmp_path):
     assert np.median(resid_old) < 0.0
 
 
-def test_an_unknown_index_is_held_fixed_as_other_with_a_warning(tmp_path):
+def test_an_unknown_index_is_held_fixed_as_other_with_a_warning(tmp_path,
+                                                               monkeypatch):
     import warnings
     dd0 = _driven_dd()
     with warnings.catch_warnings():
@@ -692,8 +704,16 @@ def test_an_unknown_index_is_held_fixed_as_other_with_a_warning(tmp_path):
     dd = _driven_dd()
     extra = lambda q: 0.004 * np.asarray(q["j_total"])      # noqa: E731
     _add_source(dd, "custom_1", 901, extra)
-    with pytest.warns(UserWarning, match="not a known driven source"):
-        c = _ids_from(tmp_path, dd, "unknown.json").read()
+    ad = _ids_from(tmp_path, dd, "unknown.json")
+    # once per file, by the first reader (review PR70 B8): made the adapter
+    import bouquet.adapters as A
+    monkeypatch.setattr(A, "_DRIVEN_WARNED", set())
+    with pytest.warns(UserWarning, match="IDS adapter: .*not a known driven "
+                                         "source"):
+        c = ad.read()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        ad.read()
     cp = dd["core_profiles"]["profiles_1d"][2]
     B0 = abs(float(dd["equilibrium"]["vacuum_toroidal_field"]["b0"][2]))
     np.testing.assert_allclose(c.jB_fix_parts["other"] - c0.jB_fix_parts[
@@ -1158,3 +1178,28 @@ def test_explicit_auto_and_j_ohmic_keep_their_semantics_on_a_split_miss(
     assert cj.provenance["inductive"].startswith("j_ohmic")
     np.testing.assert_allclose(cj.jB_ind, B0 * np.asarray(cp["j_ohmic"]),
                                rtol=1e-15)
+
+
+def test_the_reader_names_itself_and_the_adapter_does_not_repeat_it(
+        tmp_path, monkeypatch):
+    """Review PR70 B8 (integration hook): the legacy reader's announcements
+    name the IMAS reader, and on the default engine path (reader first,
+    then the adapter on the same file) an unknown entry is warned about
+    ONCE."""
+    import warnings
+    import bouquet.adapters as A
+    from bouquet.config import ImasSource
+    from bouquet.io.imas import read_imas_baseline
+    monkeypatch.setattr(A, "_DRIVEN_WARNED", set())
+    dd = _driven_dd()
+    _add_source(dd, "custom_1", 901, lambda q: 0.004 * np.asarray(
+        q["j_total"]))
+    p = _write_dd(tmp_path, dd, "once.json")
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        read_imas_baseline(ImasSource(ids_path=str(p), time=_TIME))
+        ad = _ids_from(tmp_path, dd, "once.json")
+        ad.read()
+    hits = [str(x.message) for x in w
+            if "not a known driven source" in str(x.message)]
+    assert len(hits) == 1 and hits[0].startswith("IMAS reader:")

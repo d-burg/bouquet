@@ -330,6 +330,13 @@ def test_the_sampler_draws_the_legacy_kinetic_stream(recon, zeff_primary,
     assert np.max(np.abs(leg - mine)) <= 1e-12 * np.max(np.abs(leg))
     assert set(inp.aux) == set(unc["aux_sigmas"])
     assert inp.sampler["zeff_primary"] is zeff_primary
+    # the sampler version and its clip counters ride with every engine draw
+    # (PR #56 B3/B4/B7)
+    from bouquet.kinetic_sampler import CLIP_COUNTERS, KINETIC_SAMPLER_VERSION
+    ks = inp.sampler["kinetic_sampler"]
+    assert ks["version"] == KINETIC_SAMPLER_VERSION
+    assert ks["zeff_primary"] is zeff_primary
+    assert set(ks["clips"]) == set(CLIP_COUNTERS)
 
 
 @pytest.mark.parametrize("j_ls, bar", [(0.05, 1e-8), (0.25, 1e-3)])
@@ -550,7 +557,7 @@ def test_selected_ands_the_band_flag_only_where_present(tmp_path):
 #  end to end: generate_bouquet on a TokaMaker stand-in
 # ---------------------------------------------------------------------------
 def _generate(tmp_path, monkeypatch, *, n=3, l_i_tolerance=0.05,
-              n_inspec_target=None, homotopy=True, seed=12345):
+              n_inspec_target=None, homotopy=True, seed=12345, **extra):
     from _engine_fake_gs import FakeTokaMaker
     from bouquet.TokaMaker_interface import generate_bouquet
     from bouquet.utils import initialize_equilibrium_database
@@ -579,8 +586,8 @@ def _generate(tmp_path, monkeypatch, *, n=3, l_i_tolerance=0.05,
         jBS_scale_range=(0.99, 1.01), coil_drift=0.01,
         homotopy_passes=[(0.05, 0.1), (0.01, 0.01)], seed=seed,
         capture_live_eq=False, store_achieved_jphi=True,
-        jbs_loop=G.loop_settings, rejection_log=rej, engine_draw=G,
-        coil_filter="legacy", n_inspec_target=n_inspec_target)
+        jbs_loop=G.loop_settings, rejection_log=rej, draw_method=G,
+        coil_filter="legacy", n_inspec_target=n_inspec_target, **extra)
     return diags, rej, h, G
 
 
@@ -605,6 +612,9 @@ def test_generate_bouquet_runs_engine_draws_end_to_end(tmp_path,
         assert c["total"]["wall_s"] > 0.0
         back = ED.read_draw_engine(h, i)
         assert back["deltas"] == e["deltas"]
+        # the kinetic sampler's version + clip counters are archived
+        assert back["inputs"]["kinetic_sampler"]["version"].startswith(
+            "kinetic_sampler/")
         assert "cost" in back
     with h5py.File(h + ".h5", "r") as hf:
         g0 = hf["scan/0/0"] if "scan" in hf else hf["0"]
@@ -951,11 +961,30 @@ def test_the_archived_split_is_on_the_archived_state_and_never_clipped(
     stored = _spy_store(monkeypatch)
     diags, rej, h, G = _generate(tmp_path, monkeypatch, n=2)
     assert len(diags) == 2 and rej == [] and len(stored) == 2
+    import h5py
+    from bouquet.schema import (CURRENT_SPLIT_CONVENTION_ATTR,
+                                SPLIT_PRESSURE_SEPARATE)
+    from bouquet.utils import _group_path, _resolve_h5
     for d, st in zip(diags, stored):
         sp = d["engine"]["archived"]["split"]
         jn, jr = np.asarray(sp["j_NBI"]), np.asarray(sp["j_RF"])
+        # p'G is its own bucket (owner decision D2), archived as j_pressure
+        jp = np.asarray(d["j_pressure"], dtype=float)
         np.testing.assert_array_equal(
-            st["j_inductive"], st["j_phi"] - st["j_BS"] - jn - jr)
+            st["j_inductive"], st["j_phi"] - st["j_BS"] - jn - jr - jp)
+        with h5py.File(_resolve_h5(h), "r") as hf:
+            g = hf[_group_path(None, st["count"])]
+            np.testing.assert_array_equal(g["j_pressure"][()], jp)
+            assert g.attrs[CURRENT_SPLIT_CONVENTION_ATTR] == \
+                SPLIT_PRESSURE_SEPARATE
+            # the held-fixed channels are archived (review PR70 B10), so
+            # the archived split closes from the group alone
+            np.testing.assert_array_equal(g["j_NBI"][()], jn)
+            np.testing.assert_array_equal(g["j_RF"][()], jr)
+            np.testing.assert_allclose(
+                g["j_inductive"][()] + g["j_BS"][()] + g["j_NBI"][()]
+                + g["j_RF"][()] + g["j_pressure"][()], g["j_phi"][()],
+                rtol=0, atol=1e-12 * np.max(np.abs(g["j_phi"][()])))
         assert sp["n_negative_inductive"] == int(np.sum(
             st["j_inductive"] < 0.0))
         assert sp["min_inductive"] == float(np.min(st["j_inductive"]))
@@ -967,8 +996,9 @@ def test_the_archive_carries_the_parallel_parts_of_the_split(
     """Every engine draw group carries ``jB_parallel/`` (schema): the
     <j.B> parts of its archived split, with j_phi = kappa (jB_inductive +
     jB_BS + jB_NBI + jB_RF) + j_pressure to round-off, jB_BS = j_BS /
-    kappa and jB_inductive = (j_inductive - j_pressure) / kappa -- the
-    field-aligned inductive only (the IDS exporter writes these, so no
+    kappa (p'G is the archived j_pressure, owner decision D2) and
+    jB_inductive = j_inductive / kappa -- the
+    field-aligned parts only (the IDS exporter writes these, so no
     exported parallel current carries the pressure-driven term).  The
     archived state's <B^2> is moved by 3 % so kappa(archived) differs from
     the reconstruction's."""
@@ -989,11 +1019,16 @@ def test_the_archive_carries_the_parallel_parts_of_the_split(
     assert np.max(np.abs(P)) > 0.0
     np.testing.assert_allclose(par["kappa"], kap, rtol=1e-15, atol=0.0)
     np.testing.assert_allclose(par["j_pressure"], P, rtol=1e-15, atol=0.0)
-    np.testing.assert_allclose(par["jB_BS"] * kap, st["j_BS"], rtol=1e-12,
-                               atol=0.0)
+    # j_BS is the field-aligned part alone; p'G is the archived j_pressure
+    # (owner decision D2)
+    np.testing.assert_allclose(par["jB_BS"] * kap, st["j_BS"],
+                               rtol=1e-12, atol=0.0)
+    with h5py.File(_resolve_h5(h), "r") as hf:
+        np.testing.assert_allclose(
+            hf[_group_path(None, st["count"])]["j_pressure"][()], P,
+            rtol=1e-15, atol=0.0)
     np.testing.assert_allclose(
-        par["jB_inductive"], (st["j_inductive"] - P) / kap, rtol=1e-12,
-        atol=0.0)
+        par["jB_inductive"], st["j_inductive"] / kap, rtol=1e-12, atol=0.0)
     comp = kap * (par["jB_inductive"] + par["jB_BS"] + par["jB_NBI"]
                   + par["jB_RF"]) + P
     np.testing.assert_allclose(comp, st["j_phi"], rtol=1e-12,
@@ -1048,6 +1083,7 @@ def test_the_archived_split_uses_the_archived_states_kappa_and_redl(
     assert np.min(np.abs(kap / kap_recon - 1.0)) > 0.02
     dpl = cur["draw"].get("passes_post_homotopy") or cur["draw"]["passes"]
     amp = (1.0 + float(dpl.last["amp"].get("d_bs", 0.0))) * G.ctx.s_bs         * float(cur["draw"]["inputs"].scale)
+    # (the pressure-driven p'G is its own bucket, j_pressure: D2)
     want_bs = amp * kap * np.asarray(fin["redl"], dtype=float)
     np.testing.assert_allclose(st["j_BS"], want_bs, rtol=1e-12, atol=0.0)
     fx = G.ctx.c.jB_fix_parts
@@ -1092,7 +1128,8 @@ def test_a_negative_residual_inductive_is_recorded_not_clipped(
     assert lo <= float(PSI[-3]) and hi == pytest.approx(float(PSI[-1]))
     np.testing.assert_array_equal(
         st["j_inductive"], st["j_phi"] - st["j_BS"]
-        - np.asarray(sp["j_NBI"]) - np.asarray(sp["j_RF"]))
+        - np.asarray(sp["j_NBI"]) - np.asarray(sp["j_RF"])
+        - np.asarray(diags[0]["j_pressure"]))
 
 
 def test_the_post_homotopy_resplit_branch_uses_the_draws_own_fixed_parts(
@@ -1153,7 +1190,8 @@ def test_the_post_homotopy_resplit_branch_uses_the_draws_own_fixed_parts(
     st, sp = stored[0], diags[0]["engine"]["archived"]["split"]
     np.testing.assert_array_equal(
         st["j_inductive"], st["j_phi"] - st["j_BS"]
-        - np.asarray(sp["j_NBI"]) - np.asarray(sp["j_RF"]))
+        - np.asarray(sp["j_NBI"]) - np.asarray(sp["j_RF"])
+        - np.asarray(diags[0]["j_pressure"]))
 
 
 def test_generate_records_the_quantity_and_psi_n(tmp_path, monkeypatch,
@@ -1214,7 +1252,7 @@ def test_the_sigma0_check_runs_the_generate_route(tmp_path,
     def spy(mygs, psi_N, n_equils, header, *a, **k):
         calls.append(dict(n=n_equils, header=header,
                           scale=k.get("jBS_scale_range"),
-                          engine=k.get("engine_draw")))
+                          engine=k.get("draw_method")))
         return real(mygs, psi_N, n_equils, header, *a, **k)
 
     monkeypatch.setattr(TI, "generate_bouquet", spy)
@@ -1420,3 +1458,84 @@ def test_an_archived_stage_miss_fails_the_sigma0_check(tmp_path,
     # the control: unmodified, the same check passes
     monkeypatch.setattr(ED, "zero_perturbation_archived_verdict", real)
     assert _quiet(b.verify_sigma0_consistency)["passed"] is True
+
+
+def test_a_legacy_split_is_archived_with_p_g_as_j_pressure(tmp_path,
+                                                          monkeypatch):
+    """Owner decision D2 on the LEGACY archive writers (integration hook,
+    B.md item 3): a draw whose method keeps p'G inside its in-memory
+    inductive (the legacy convention: no diagnostics["j_pressure"]) is
+    archived with p'G -- evaluated on the archived state
+    (TokaMaker_interface.archived_pressure_term) -- taken off j_inductive
+    and stored as j_pressure + current_split_convention; the _baseline the
+    same way.  The engine method stands in for the legacy one (its split
+    handed back in the legacy form); the evaluation is a known profile."""
+    import h5py
+    import bouquet.TokaMaker_interface as TI
+    from bouquet.schema import (CURRENT_SPLIT_CONVENTION_ATTR,
+                                SPLIT_PRESSURE_SEPARATE)
+    from bouquet.utils import _group_path, _resolve_h5
+    Pk = 1.0e4 * (1.0 - PSI ** 2)
+    calls = []
+
+    def fake_term(mygs, psi_N, psi_pad=1e-3, coord="psi_n", what=""):
+        calls.append(what)
+        return Pk.copy()
+    monkeypatch.setattr(TI, "archived_pressure_term", fake_term)
+    real = ED.GenerateEngineDraws.archived_split
+    legacy_ind = []
+
+    def legacy_like(self, diagnostics, j_phi, default=None):
+        j_bs, j_ind = real(self, diagnostics, j_phi, default)
+        diagnostics.pop("fixed_currents")     # the legacy draws hand none
+        P = diagnostics.pop("j_pressure")
+        legacy_ind.append(j_ind + P)          # p'G in the inductive
+        return j_bs, legacy_ind[-1]
+    monkeypatch.setattr(ED.GenerateEngineDraws, "archived_split",
+                        legacy_like)
+    stored = _spy_store(monkeypatch)
+    j_oth = 2.0e3 * np.exp(-0.5 * ((PSI - 0.2) / 0.1) ** 2)
+    diags, rej, h, G = _generate(
+        tmp_path, monkeypatch, n=1,
+        baseline_split=dict(j_pressure=None,
+                            inductive_includes_pressure=True),
+        j_other=j_oth, j_sawteeth=0.5 * j_oth)
+    assert len(diags) == 1 and rej == [] and len(stored) == 1
+    assert calls == ["baseline archive", "draw 0 archive"]
+    st = stored[0]
+    np.testing.assert_array_equal(st["j_inductive"], legacy_ind[0] - Pk)
+    with h5py.File(_resolve_h5(h), "r") as hf:
+        for path in (_group_path(None, st["count"]), "_baseline"):
+            g = hf[path]
+            np.testing.assert_array_equal(g["j_pressure"][()], Pk)
+            # the baseline's held-fixed channels on both (review PR70 B10)
+            np.testing.assert_array_equal(g["j_other"][()], j_oth)
+            np.testing.assert_array_equal(g["j_sawteeth"][()], 0.5 * j_oth)
+            assert g.attrs[CURRENT_SPLIT_CONVENTION_ATTR] == \
+                SPLIT_PRESSURE_SEPARATE
+        # the baseline's inductive (this stand-in archives the target split:
+        # input_jinductive = 0.5 x the request, which carries p'G by
+        # inductive_includes_pressure=True), minus p'G
+        np.testing.assert_array_equal(hf["_baseline"]["j_inductive"][()],
+                                      0.5 * G.ctx.request - Pk)
+
+
+def test_without_the_run_convention_a_direct_call_archives_as_before(
+        tmp_path, monkeypatch):
+    """A direct generate_bouquet call without baseline_split never
+    evaluates p'G for a legacy split (its archive keeps the pre-#64
+    convention, which readers infer from the absent attr)."""
+    import bouquet.TokaMaker_interface as TI
+    calls = []
+    monkeypatch.setattr(TI, "archived_pressure_term",
+                        lambda *a, **k: calls.append(1))
+    real = ED.GenerateEngineDraws.archived_split
+
+    def legacy_like(self, diagnostics, j_phi, default=None):
+        out = real(self, diagnostics, j_phi, default)
+        diagnostics.pop("j_pressure")
+        return out
+    monkeypatch.setattr(ED.GenerateEngineDraws, "archived_split",
+                        legacy_like)
+    _generate(tmp_path, monkeypatch, n=1)
+    assert calls == []

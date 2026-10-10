@@ -25,18 +25,17 @@ class Baseline:
     reconstruction source *produces* the split, the IMAS source *reads* it
     pre-separated.
 
-    CURRENT CONVENTION: every current component here is a flux-surface-averaged
-    *toroidal* current density <j_phi> [A/m^2] (the plain FSA the solver's
-    jphi-linterp consumes). IMAS/neoclassical inputs are
-    parallel (<j.B>/B0) and are converted on read via
-    :func:`bouquet.physics.parallel_to_toroidal`, so downstream code never mixes
+    CURRENT CONVENTION: every current component here is TokaMaker ``jphi`` =
+    <j_phi> [A/m^2] (``docs/current-conventions.md``). IMAS inputs (``j_tor``
+    and parallel <j.B>/B0) are converted exactly on read
+    (:mod:`bouquet.physics` docstring), so downstream code never mixes
     conventions.
     """
 
     # --- required fields (no defaults) ---------------------------------
     # current-density grid + separated currents
     psi_N: "np.ndarray"
-    j_phi: "np.ndarray"            # total [A/m^2] = j_inductive + j_BS + j_NBI + j_RF
+    j_phi: "np.ndarray"            # total [A/m^2] = j_inductive + j_BS + j_NBI + j_RF + j_other
     j_inductive: "np.ndarray"     # ohmic part [A/m^2]   (perturbed via l_i matching)
     j_BS: "np.ndarray"            # bootstrap part [A/m^2] (recomputed per draw)
 
@@ -130,7 +129,7 @@ class Baseline:
     # thermal impurity math (Z_imp above, nz, p_imp, the Zeff-primary ni
     # derivation) must run on ne - z_fast, while the Zeff consumed by the
     # bootstrap stays on the full ne.
-    z_fast: Optional[np.ndarray] = None
+    z_fast: Optional[np.ndarray] = None       # sum_s Z_s   n_s^fast
 
     # IMAS total-current anchor: jphi_diff = equilibrium.profiles_1d.j_tor
     # (the GS-consistent current GPEC reads, with the pedestal current) minus the
@@ -271,6 +270,58 @@ class Baseline:
     # time, "off_idle", "zero").  None on the g-file paths.
     source_time_match: Optional[dict] = None
 
+    # Appended to keep the positional slots above.
+    z2_fast: Optional[np.ndarray] = None      # sum_s Z_s^2 n_s^fast (kinetic grid)
+    # Z_eff's numerator counts the fast ions: True for a measured Z_eff
+    # (ida_hybrid); read off the dd otherwise (io.imas._dd_zeff).  Only
+    # matters with z_fast; see physics.zeff_bounds.
+    zeff_includes_fast: bool = False
+    # Coordinate of psi_N / psi_N_kinetic (bouquet.coords): "psi_n" or
+    # "phi_n".  Every profile and envelope of the run is on it.
+    coord: str = "psi_n"
+    # (psi_N, x) at the source's nodes: the io-time map from a psi_N-tabulated
+    # input (an IDA sigma) to the run grid.  None in a psi_n run.
+    psi_map: Optional[tuple] = None
+    # Fields appended so every earlier field keeps its positional slot.
+    # Other fixed driven current [A/m^2] (IMAS: fusion, runaways, sawteeth,
+    # unknown core_sources indices); j_phi carries it.
+    j_other: Optional["np.ndarray"] = None
+    # The sawteeth share of j_other [A/m^2] (core_sources 701; IMAS path only).
+    # With GenerationConfig.swb_saw_q it is SWB's jphi_saw input, and
+    # j_phi = j_inductive + j_BS + j_NBI + j_RF + (j_other - j_sawteeth) + j_saw.
+    j_sawteeth: Optional["np.ndarray"] = None
+    # The structured closure's bootstrap multiplier PROFILE s_bs(psi) on psi_N
+    # (bl.j_BS = s_bs * SWB(scale 1)); None when the multiplier is the scalar
+    # bs_scale.  generate() hands it to the draws, which apply it after SWB.
+    bs_scale_profile: Optional["np.ndarray"] = None
+    # swb_seed="source": the SWB inputs of the baseline split (inductive seed,
+    # jphi_fixed) on SWB's grid, reused unchanged by the draws and the sigma=0
+    # check.  None => generic seed.
+    swb_seed_profile: Optional["np.ndarray"] = None
+    swb_jphi_fixed: Optional["np.ndarray"] = None
+    # swb_saw_q set: SWB's jphi_saw input (j_sawteeth on SWB's grid), which
+    # swb_jphi_fixed then excludes.  None => saw off.
+    swb_jphi_saw: Optional["np.ndarray"] = None
+    # swb_saw_q set: solve B's j_saw output (jphi_saw + the q reset current),
+    # in place of j_sawteeth in j_phi.  None => saw off.
+    j_saw: Optional["np.ndarray"] = None
+    # imas_baseline="swb": solve A's coil currents {name: A-t}, the target of the
+    # strong reg of solve B, the sigma=0 check and every draw.
+    coil_reg_target: Optional[dict] = None
+    # imas_baseline="swb": solve B's record (alpha, coils, lcfs, li_3, Ip, split),
+    # the reference the sigma=0 check compares against.
+    swb_baseline: Optional[dict] = None
+    # The EXPERIMENTAL features the run enables (bouquet.experimental.
+    # REGISTRY keys, Bouquet.prepare_baseline); [] when none.  Archived as
+    # the _baseline attr experimental_features_json on every solve method.
+    experimental_features: Optional[list] = None
+    # The Redl epsilon every bootstrap evaluation of the run uses
+    # (GenerationConfig.eps_definition; bouquet.engine.eps_record):
+    # {"eps_definition", "eps_formula", "nu_star_R", "evaluate_jBS_version"}.
+    # Set by Bouquet.prepare_baseline on every path; archived as the
+    # _baseline attr bootstrap_eps_json (and in the engine record).
+    bootstrap_eps: Optional[dict] = None
+
     def __repr__(self):
         # concise summary -- the default dataclass repr dumps every numpy array,
         # which floods a notebook when `reconstruct()`/`prepare_baseline()` is the
@@ -282,7 +333,9 @@ class Baseline:
         return (f"Baseline(provenance={self.provenance!r}, "
                 f"Ip={self.Ip_target/1e6:.3f} MA, l_i={self.l_i_target:.3f}, "
                 f"grids: {ng} eq / {nk} kinetic"
-                + (f", aux={aux}" if aux else "") + ")")
+                + (f", aux={aux}" if aux else "")
+                + (f", EXPERIMENTAL={list(self.experimental_features)}"
+                   if self.experimental_features else "") + ")")
 
 
 def resolve_baseline(config: "BouquetConfig", mygs=None) -> Baseline:
@@ -381,44 +434,52 @@ def zeff_sigma_eligibility(source, ida_path):
     human-readable explanation otherwise, so a refusal can be WARNED about
     and RECORDED instead of silently costing the run its measured tiers.
 
-    The measured tiers are ABSOLUTE sigma profiles read out of one IDA
-    ``.cdf``; they may only be paired with a Z_eff baseline that came from
-    that same file.  Three refusals:
-
-    * no IDA sigma file is configured at all -- there is no ladder;
-    * the baseline is the IMAS/FUSE one (``ImasSource``, including the
-      ``ida_hybrid`` path, whose Z_eff deliberately stays FUSE's);
-    * a reconstruction source whose own profiles file is not that ``.cdf``
-      -- a p-file Z_eff baseline, or ``unc.ida_path`` naming a different
-      file or vintage.
-
-    The file-identity test compares RESOLVED paths (:func:`_same_path`),
-    never raw strings.
+    The measured tiers are absolute sigmas from one IDA ``.cdf`` and pair
+    only with a Z_eff baseline from that same file: the source's own
+    ``profiles_path`` (:class:`ReconstructionSource`) or, on the
+    EXPERIMENTAL ``ni_source`` routes only, ``ida_path``
+    (:class:`ImasSource`; ``zeff_from_fuse=True`` stays eligible, the
+    envelope carried absolute).  Refusals: no IDA file configured; an
+    :class:`ImasSource` with ``ni_source="standard"`` (its Z_eff is the
+    dd's); the source declares no ``.cdf``; different files (compared
+    resolved, by :func:`_same_path`).
     """
     import os
 
-    from .config import ReconstructionSource
+    from .config import ImasSource, ReconstructionSource
 
     if ida_path is None:
         return False, "no IDA sigma file is configured (no ladder applies)"
     ida_name = os.path.basename(_norm_path(ida_path)) or str(ida_path)
-    if not isinstance(source, ReconstructionSource):
+
+    from .experimental import IDA_ION_ROUTES
+    if isinstance(source, ReconstructionSource):
+        own, own_kind = str(getattr(source, "profiles_path", "") or ""), "profiles file"
+    elif (isinstance(source, ImasSource)
+          and getattr(source, "ni_source", "standard") not in IDA_ION_ROUTES):
+        # ni_source="standard" (as before PR #56): the IMAS/ida_hybrid Z_eff
+        # is the dd's, never the IDA one
         return False, (
             "the Z_eff baseline comes from the IMAS/FUSE source rather than "
             f"from {ida_name}; pairing a FUSE Z_eff with an IDA-measured "
             "envelope would mix channels")
-    src_profiles = str(getattr(source, "profiles_path", "") or "")
-    src_norm = _norm_path(src_profiles)
-    if not src_norm.endswith(".cdf"):
+    elif isinstance(source, ImasSource):
+        own, own_kind = str(getattr(source, "ida_path", "") or ""), "ida_path"
+    else:
         return False, (
-            f"the source's own profiles file is not an IDA .cdf "
-            f"({os.path.basename(src_norm) or '<unset>'}), so its Z_eff "
+            f"source type {type(source).__name__} declares no IDA file, so "
+            f"its Z_eff baseline did not come from {ida_name}")
+    own_norm = _norm_path(own)
+    if not own_norm.endswith(".cdf"):
+        return False, (
+            f"the source's own {own_kind} is not an IDA .cdf "
+            f"({os.path.basename(own_norm) or '<unset>'}), so its Z_eff "
             f"baseline did not come from {ida_name}")
-    if not _same_path(ida_path, src_profiles):
+    if not _same_path(ida_path, own):
         return False, (
             f"the sigma file ({ida_name}) is a genuinely different file "
-            f"from the source's own profiles file "
-            f"({os.path.basename(src_norm)}) -- compared after expanduser + "
+            f"from the source's own {own_kind} "
+            f"({os.path.basename(own_norm)}) -- compared after expanduser + "
             f"realpath, so this is a real mismatch, not a path spelling")
     return True, ""
 
@@ -426,31 +487,54 @@ def zeff_sigma_eligibility(source, ida_path):
 def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
                           zeff_is_ida, measured_sigma, measured_source,
                           carbon_sigma=None, carbon_source="none",
-                          ineligible_reason="", ida_in_play=False):
+                          ineligible_reason="", ida_in_play=False,
+                          ladder="standard"):
     """The Z_eff envelope ladder: highest-fidelity tier available per file.
 
-    Returns ``(sigma_array, label, meta)``.  Tiers, in fidelity order:
+    Returns ``(sigma_array, label, meta)``.
+
+    ``ladder="standard"`` (the default; the source's ``ni_source`` is
+    ``"standard"``) -- tiers, in fidelity order:
 
     1. **carbon-propagated** (``sigma_Zeff_carbon``: n_12C6_err on the direct
        layout, the dilution's own posterior on the ensemble layout).  The
        Zeff-primary scheme perturbs Zeff precisely to move the DILUTION
        ``ni = ne - Z nC``, and CER carbon density is that dilution's direct
        measurement; drawing Zeff with this sigma IS error propagation
-       through ``ni = ne - Z nC``.  Measured on the demo shots it is 1.9-5.8
-       % of Zeff in-core and stays sane in the SOL (4-19 %).
+       through ``ni = ne - Z nC``.
     2. **VB-measured** (``sigma_Zeff``: the file's Zeff_err / Zeff sample
        spread).  Conservative -- the visible-bremsstrahlung inversion's own
        error, which carries n_e^2 sqrt(T_e) propagation, calibration and
-       mantle-subtraction systematics: 8-9 % core but 44-130 % in the SOL
-       on the demo direct files, and grand means up to ~90 % on some shots.
-    3. the flat ``zeff_scalar_sigma`` fraction of ``|Z_eff|`` -- the
+       mantle-subtraction systematics.
+    3. the flat ``zeff_scalar_sigma`` fraction of ``|Z_eff|``.
+
+    ``zeff_sigma_source`` picks "auto" (carbon > VB > scalar), "carbon",
+    "measured" (VB), "scalar".
+
+    ``ladder="resolved"`` (EXPERIMENTAL, an experimental ``ni_source``;
+    ``bouquet.experimental.REGISTRY["ida_ion_route"]``) -- tiers:
+
+    1. **IDA-resolved** (``sigma_Zeff``): the envelope
+       :func:`bouquet.io.ida.read_ida` resolved by walking
+       ``VB+CER > CER > VB`` over what the file supports, with the route
+       disagreement folded in.  ``measured_source`` names the rung it landed
+       on, so the label reads e.g. "measured IDA (VB+CER)".  It is the same
+       resolution ``ni`` came from, so the sampler cannot get an ``ni`` its
+       own ``Z_eff`` fails to reproduce.
+    2. the flat ``zeff_scalar_sigma`` fraction of ``|Z_eff|`` -- the
        pre-1.3.2 behaviour, the "scalar" setting, and the loud fallback.
+
+    ``zeff_sigma_source="carbon"`` overrides the resolution with the bare
+    carbon-propagated array (``sigma_Zeff_carbon``) for an A/B against the
+    combined envelope; it is a single-route override, so the ``ni`` in play
+    was NOT necessarily derived from it.
 
     Both measured tiers are eligible only when the Z_eff baseline itself is
     the IDA one (``zeff_is_ida``, decided by
-    :func:`zeff_sigma_eligibility`); a FUSE baseline (IMAS/ida_hybrid path)
+    :func:`zeff_sigma_eligibility`); a baseline not built from that IDA file
     must not be paired with an IDA envelope.  ``zeff_sigma_source`` picks:
-    "auto" (carbon > VB > scalar), "carbon", "measured" (VB), "scalar".
+    "auto" (IDA-resolved > scalar), "carbon" (single-route override),
+    "measured" (IDA-resolved, warns on fallback), "scalar".
 
     **No fallback down this ladder is silent.**  Every skipped tier is
     recorded in ``meta["skipped"]`` as ``{"tier", "reason"}`` -- and the
@@ -474,6 +558,10 @@ def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
         raise ValueError(
             f"zeff_sigma_source={zeff_sigma_source!r} is not one of "
             "'auto', 'carbon', 'measured', 'scalar'")
+    if ladder not in ("standard", "resolved"):
+        raise ValueError(f"ladder={ladder!r} is not 'standard' or 'resolved'")
+    _resolved = ladder == "resolved"
+    _measured_tier = "IDA-resolved" if _resolved else "VB-measured"
     base = np.abs(np.asarray(base_zeff, dtype=float))
     scalar_env = float(zeff_scalar_sigma) * base
     scalar_label = f"scalar zeff_scalar_sigma={float(zeff_scalar_sigma):g}"
@@ -513,14 +601,21 @@ def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
         _why = ineligible_reason or (
             "the Z_eff baseline does not come from the IDA file supplying "
             "the sigmas")
-        _attempted = {"auto": ("carbon-propagated", "VB-measured"),
-                      "carbon": ("carbon-propagated", "VB-measured"),
-                      "measured": ("VB-measured",),
+        _attempted = {"auto": (("IDA-resolved",) if _resolved else
+                               ("carbon-propagated", "VB-measured")),
+                      "carbon": ("carbon-propagated", _measured_tier),
+                      "measured": (_measured_tier,),
                       "scalar": ()}[zeff_sigma_source]
         for _t in _attempted:
             skipped.append((_t, f"source ineligible: {_why}"))
     else:
-        if zeff_sigma_source in ("auto", "carbon"):
+        # standard: carbon > VB > scalar.  resolved (experimental): "auto"
+        # takes the reader's resolved envelope -- read_ida has already
+        # walked VB+CER > CER > VB (see bouquet.io.ida), and it is the route
+        # ni was derived from -- and "carbon" stays as an explicit
+        # single-route override.
+        if (zeff_sigma_source == "carbon"
+                or (zeff_sigma_source == "auto" and not _resolved)):
             c = _usable(carbon_sigma, "carbon-propagated")
             if c is not None:
                 env, tier = c, "carbon-propagated"
@@ -531,13 +626,24 @@ def resolve_zeff_envelope(zeff_sigma_source, zeff_scalar_sigma, base_zeff,
                                 "missing dataset: this file provides no "
                                 "n_12C6 uncertainty"))
         if env is None and zeff_sigma_source in ("auto", "carbon", "measured"):
-            m = _usable(measured_sigma, "VB-measured")
+            m = _usable(measured_sigma, _measured_tier)
             if m is not None:
-                env, tier = m, "VB-measured"
+                env, tier = m, _measured_tier
                 provenance = str(measured_source)
                 label = f"measured IDA ({measured_source})"
+                # A rung the reader could not reach is still a fallback, and
+                # no fallback down this ladder is silent: read_ida only
+                # prints its notice, which a batch run loses.
+                if _resolved and str(measured_source) != "VB+CER":
+                    skipped.append(
+                        ("VB+CER", "missing dataset: this file supports only "
+                                   f"the {measured_source} route, so the "
+                                   "envelope carries no cross-route check"))
             elif measured_sigma is None:
-                skipped.append(("VB-measured",
+                skipped.append((_measured_tier,
+                                "missing dataset: this IDA file carries no "
+                                "usable Z_eff envelope on either route"
+                                if _resolved else
                                 "missing dataset: this IDA file carries no "
                                 "Zeff uncertainty (older direct vintage)"))
 
@@ -690,7 +796,7 @@ def resolve_uncertainty(config, baseline) -> dict:
     import warnings
 
     import numpy as np
-    from .config import ReconstructionSource, UncertaintyConfig
+    from .config import ImasSource, ReconstructionSource, UncertaintyConfig
 
     # Read the defaults off the dataclass so "the user changed this" can never
     # drift from the declared defaults.
@@ -703,32 +809,94 @@ def resolve_uncertainty(config, baseline) -> dict:
     src = config.source
     psi_kin = np.asarray(baseline.psi_N_kinetic, dtype=float)
 
+    # The PR #56 Z_eff / n_i route (EXPERIMENTAL; bouquet.experimental.
+    # REGISTRY["ida_ion_route"]) or the standard one.
+    from .experimental import STANDARD_NI_SOURCE, ida_ion_route_on
+    _ion_route = ida_ion_route_on(src, unc)
+    # IDA file for the sigmas: unc.ida_path, else the source's own .cdf.
     ida_path = unc.ida_path
-    if ida_path is None and isinstance(src, ReconstructionSource) \
-            and src.profiles_path.endswith(".cdf"):
-        ida_path = src.profiles_path
+    if ida_path is None:
+        if isinstance(src, ReconstructionSource) \
+                and src.profiles_path.endswith(".cdf"):
+            ida_path = src.profiles_path
+        elif isinstance(src, ImasSource) and _ion_route:
+            # EXPERIMENTAL route only: the IMAS source's own IDA file; under
+            # ni_source="standard" only unc.ida_path supplies IDA sigmas
+            # (from_imas sets it), as before PR #56
+            ida_path = getattr(src, "ida_path", None)
 
     # IDA arrays (read once) available as a fallback below
     ida_sig = None
+    _sig_match = None       # a separate sigma file's IDA slice match (#73)
     _ida_zeff_sigma, _ida_zeff_source = None, "none"
     _ida_zeff_carbon, _ida_zeff_carbon_source = None, "none"
     if ida_path is not None:
         from .io.ida import read_ida
-        ida = read_ida(
-            ida_path, time=getattr(src, "time", None),
-            sigma_mode=unc.sigma_mode, sigma_method=unc.sigma_method,
-            sigma_ni_from_ne=unc.sigma_ni_from_ne,
-            # the carbon tier's Z(Z-1) propagation is quadratically
-            # Z-sensitive; the kinetics loader already passes this, and
-            # omitting it here silently pinned the sigma math to carbon
-            impurity_Z=float(getattr(src, "impurity_Z", 6.0)),
-        )
+        # Reuse the ida_hybrid read (the slice the kinetics came from).
+        _shared = (baseline.aux or {}).get("ida_profiles")
+        ida = (_shared[1] if _shared is not None
+               and _same_path(_shared[0], ida_path) else None)
+        if ida is None:
+            _t = getattr(src, "ida_time", None)
+            _t_req = getattr(src, "time", None) if _t is None else _t
+            # the source's OWN kinetics file is read at the slice its
+            # kinetics were (the reconstruction loader's nearest slice); a
+            # SEPARATE sigma file (UncertaintyConfig.ida_path) by the IDA
+            # time rule of #73 -- half-step window, dt recorded, refused
+            # outside (review #73 B2/B6 residual)
+            _own = (src.profiles_path
+                    if isinstance(src, ReconstructionSource) else
+                    getattr(src, "ida_path", None))
+            if not (_own and _same_path(_own, ida_path)):
+                from .io.ida import ida_time_base
+                from .io.imas import match_ida_slice
+                _sig_match = match_ida_slice(
+                    ida_time_base(ida_path), _t_req,
+                    what="uncertainty.ida_path")
+                _t_req = _sig_match["ida_time_used"]
+            ida = read_ida(
+                ida_path, time=_t_req,
+                sigma_mode=unc.sigma_mode, sigma_method=unc.sigma_method,
+                ni_source=(getattr(src, "ni_source", STANDARD_NI_SOURCE)
+                           if _ion_route else STANDARD_NI_SOURCE),
+                # the carbon tier's Z(Z-1) propagation is quadratically
+                # Z-sensitive; the kinetics loader already passes this, and
+                # omitting it here silently pinned the sigma math to carbon
+                impurity_Z=float(getattr(src, "impurity_Z", 6.0)),
+            )
+            if _sig_match is not None and abs(
+                    float(ida.time) - _sig_match["ida_time_used"]) > 1e-9:
+                raise RuntimeError(
+                    f"uncertainty.ida_path: read_ida returned the slice at "
+                    f"{float(ida.time)!r} s, not the matched "
+                    f"{_sig_match['ida_time_used']!r} s")
+
+        _ida_x, _ida_in = np.asarray(ida.psi_N, dtype=float), slice(None)
+        if baseline.psi_map is not None:
+            # psi_N -> run coordinate (inside the LCFS): through the source's
+            # own map, or a file other than the source's by its own q.
+            _map_src = (src.profiles_path if isinstance(src, ReconstructionSource)
+                        and src.profiles_path.endswith(".cdf") else
+                        _shared[0] if _shared is not None else None)
+            if (getattr(ida, "q", None) is not None
+                    and not (_map_src and _same_path(_map_src, ida_path))):
+                from .coords import phi_n_from_q
+                _ida_in, _ida_x = phi_n_from_q(_ida_x, ida.q, bracket=True)
+            else:
+                _ida_in = _ida_x <= 1.0
+                _ida_x = np.interp(_ida_x[_ida_in], *baseline.psi_map)
 
         def _to_kin(arr):
-            return np.interp(psi_kin, ida.psi_N, np.asarray(arr, dtype=float))
+            return np.interp(psi_kin, _ida_x, np.asarray(arr, dtype=float)[_ida_in])
 
         ida_sig = {"ne": _to_kin(ida.sigma_ne), "te": _to_kin(ida.sigma_te),
                    "ni": _to_kin(ida.sigma_ni), "ti": _to_kin(ida.sigma_ti)}
+        # The ida_hybrid read's sigma_ni, placed on the baseline grid with
+        # the baseline ni itself.
+        _sni = (baseline.aux or {}).get("sigma_ni_ida")
+        if (_ion_route and _shared is not None and ida is _shared[1]
+                and _sni is not None and np.shape(_sni) == psi_kin.shape):
+            ida_sig["ni"] = np.asarray(_sni, dtype=float)
         if getattr(ida, "sigma_Zeff", None) is not None:
             _ida_zeff_sigma = _to_kin(ida.sigma_Zeff)
             _ida_zeff_source = str(getattr(ida, "sigma_Zeff_source", "?"))
@@ -744,6 +912,13 @@ def resolve_uncertainty(config, baseline) -> dict:
     _baseprof = {"ne": baseline.ne, "te": baseline.te,
                  "ni": baseline.ni, "ti": baseline.ti}
     out = {}
+    # a separate sigma file's IDA slice and how it was matched (#73 rule):
+    # on the envelope and in the baseline record (archived as li_metrics)
+    if _sig_match is not None:
+        out["ida_sigma_time_match"] = dict(_sig_match)
+        baseline.li_metrics = dict(getattr(baseline, "li_metrics", None)
+                                   or {}, ida_sigma_time_match=dict(
+                                       _sig_match))
     _won = {}       # channel -> human-readable winning source (for the log)
     _shadowed = []  # channels whose deliberately-set scalar lost to the IDA
     for _ch in ("ne", "te", "ni", "ti"):
@@ -822,10 +997,11 @@ def resolve_uncertainty(config, baseline) -> dict:
     man_base = dict(unc.aux_baselines or {})
 
     # Z_eff channel is enabled by default for EVERY source (the consistent
-    # density scheme): unless the user set an explicit aux_sigmas['zeff'], a
-    # flat fractional envelope zeff_scalar_sigma * Z_eff_baseline is injected.
-    # The baseline Z_eff is source-provided (baseline.aux['zeff'] for IMAS,
-    # else baseline.Zeff for the reconstruction path), on the kinetic grid.
+    # density scheme): unless the user set an explicit aux_sigmas['zeff'], the
+    # envelope is the IDA Zeff_err when an IDA is in play, else a flat fractional
+    # zeff_scalar_sigma * Z_eff_baseline. zeff_scalar_sigma still GATES the
+    # channel either way (0.0 -> disabled). The baseline Z_eff is source-provided
+    # (baseline.aux['zeff'] for IMAS, else baseline.Zeff), on the kinetic grid.
     user_sigmas = dict(unc.aux_sigmas or {})
     # Provenance of the Z_eff envelope, always present: None when the ladder
     # never ran (an explicit aux_sigmas['zeff'], or the channel disabled),
@@ -862,6 +1038,7 @@ def resolve_uncertainty(config, baseline) -> dict:
             carbon_source=_ida_zeff_carbon_source,
             ineligible_reason=_zeff_inelig,
             ida_in_play=ida_path is not None,
+            ladder="resolved" if _ion_route else "standard",
         )
         user_sigmas["zeff"] = _z_env
         out["zeff_sigma_tier"] = _z_meta
@@ -870,6 +1047,37 @@ def resolve_uncertainty(config, baseline) -> dict:
             for _sk in _z_meta["skipped"]:
                 print(f"[sigma]   {_sk['tier']} tier skipped: "
                       f"{_sk['reason']}")
+
+    # --- who draws ni when the zeff channel is active ------------------------
+    # Standard route: always derived (as before PR #56).  EXPERIMENTAL route
+    # (PR #56 rule): derived per draw from the drawn (ne, Zeff) when ni and
+    # Z_eff are one IDA resolution (zeff_dne keeps sigma_ni) or ni has only
+    # the scalar fallback; any other real ni envelope stays its own channel.
+    # unc.ni_from_zeff wins either way.
+    _ida_pair = bool(
+        _ion_route and ida_sig is not None and _won["ni"].startswith("IDA")
+        and (out["zeff_sigma_tier"] or {}).get("tier") == "IDA-resolved"
+        and "zeff" not in (unc.aux_baselines or {})
+        and not getattr(src, "zeff_from_fuse", False)
+        and (isinstance(src, ReconstructionSource)
+             or "ida_profiles" in (baseline.aux or {}))
+        and getattr(ida, "zeff_dne", None) is not None)
+    _nfz = getattr(unc, "ni_from_zeff", None)
+    out["ni_from_zeff"] = (
+        bool(_nfz) if _nfz is not None else
+        bool(_won["ni"].startswith("scalar") or _ida_pair) if _ion_route
+        else True)
+    # the PR #56 sampler clips (EXPERIMENTAL; kinetic_sampler_clips): the
+    # explicit setting, else on only with a PR #56 kinetic feature
+    from .experimental import kinetic_clips_on
+    out["kinetic_clips"] = bool(kinetic_clips_on(config))
+    out["zeff_dne"] = (_to_kin(ida.zeff_dne)
+                       if _ida_pair and out["ni_from_zeff"] else None)
+    if bool(getattr(unc, "log_sigma_sources", True)) and "zeff" in user_sigmas:
+        print("  [sigma-source] ni per draw   <- "
+              + ("derived from the drawn (ne, Z_eff)"
+                 + (" (one IDA resolution)" if out["zeff_dne"] is not None else "")
+                 if out["ni_from_zeff"] else "its own sigma_ni (independent of Z_eff)"))
 
     resolved_sigma, resolved_base = {}, {}
     for name, sig in user_sigmas.items():
@@ -890,7 +1098,8 @@ def resolve_uncertainty(config, baseline) -> dict:
     return out
 
 
-def floor_inductive_split(j_inductive, j_BS, psi_N=None, warn_frac=1e-4):
+def floor_inductive_split(j_inductive, j_BS, psi_N=None, warn_frac=1e-4,
+                          coord="psi_n"):
     """Enforce the ``j_inductive >= 0`` component convention on a (j_ind, j_BS)
     split, absorbing any negative sliver into ``j_BS`` so the pair still sums
     exactly to the same total.
@@ -900,7 +1109,8 @@ def floor_inductive_split(j_inductive, j_BS, psi_N=None, warn_frac=1e-4):
     unphysical in this convention and -- fed to the GPR sampler as its mean --
     makes essentially every current draw go negative and be rejected. Returns
     ``(j_inductive_floored, j_BS_adjusted)`` (copies; inputs untouched) and
-    prints a one-line note when the correction is non-trivial.
+    prints a one-line note when the correction is non-trivial.  ``psi_N`` is
+    the grid, in ``coord`` (labels the note).
     """
     import numpy as np
 
@@ -919,7 +1129,8 @@ def floor_inductive_split(j_inductive, j_BS, psi_N=None, warn_frac=1e-4):
         if psi_N is not None:
             pn = np.asarray(psi_N, dtype=float)
             sel = pn[deficit < 0.0]
-            where = f" over psi_N [{sel.min():.3f}, {sel.max():.3f}]"
+            lab = "Phi_N" if coord == "phi_n" else "psi_N"
+            where = f" over {lab} [{sel.min():.3f}, {sel.max():.3f}]"
         print(f"  [baseline] floored negative j_inductive ({n} pts{where}, "
               f"worst {worst/1e6:.4f} MA/m^2, {100*worst/scale:.2f}% of peak) "
               f"-- deficit absorbed into j_BS (split still sums to j_phi)")
@@ -956,7 +1167,8 @@ def _load_kinetic_profiles(source) -> dict:
     path = source.profiles_path
     if path.endswith(".cdf"):
         from .io.ida import read_ida
-        ida = read_ida(path, time=source.time, impurity_Z=source.impurity_Z)
+        ida = read_ida(path, time=source.time, impurity_Z=source.impurity_Z,
+                       ni_source=getattr(source, "ni_source", "standard"))
         return dict(
             psi_N=np.asarray(ida.psi_N, dtype=float),
             ne=np.asarray(ida.ne, dtype=float),
@@ -965,6 +1177,10 @@ def _load_kinetic_profiles(source) -> dict:
             ti=np.asarray(ida.ti, dtype=float),
             Zeff=np.clip(np.asarray(ida.Zeff, dtype=float), 1.0, None),
             raw_bytes=ida.raw_bytes,
+            q=None if ida.q is None else np.asarray(ida.q, dtype=float),
+            # how IDA's Z_eff / n_i were resolved (rung, weights, window,
+            # clamps; PR #56) -- archived with the baseline record
+            zeff_provenance=getattr(ida, "zeff_provenance", None),
         )
 
     # Osborne p-file: ne/ni in 1e20 m^-3, Te/Ti in keV -> SI.
@@ -994,14 +1210,13 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     """Reconstruction-source baseline: GS reconstruct on a live ``mygs``.
 
     Mirrors the operational notebook: read g-file + IDA profiles, interpolate
-    onto the g-file psi_N grid, run :func:`reconstruct_equilibrium`, and package
+    onto the g-file's nodes (in the run coordinate), run :func:`reconstruct_equilibrium`, and package
     the (toroidal) fitted currents. The reconstructed total ``j_phi_fit`` already
     contains all driven current, so fixed components (j_NBI / j_RF) default to
     zero and only re-partition the inductive part if the user supplies them;
     ``p_fast`` (absent from thermal IDA profiles) likewise defaults to zero.
     """
     import numpy as np
-    from OpenFUSIONToolkit.TokaMaker.util import create_power_flux_fun
 
     from .io.geqdsk import read_geqdsk
     from .TokaMaker_interface import reconstruct_equilibrium
@@ -1022,14 +1237,23 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     kin = _load_kinetic_profiles(source)
     psi_N_kin = kin["psi_N"]
 
-    # kinetic profiles (native SI) regridded onto the equilibrium psi_N grid.
+    # Run grids (x_run: the g-file's nodes; x_kin: the kinetic nodes) in the
+    # run coordinate (coords.gfile_run_grids); psi_N / psi_N_kin stay the
+    # sources' ψ_N.
+    from . import coords
+    coord = coords.run_coord(getattr(source, "coord", coords.PSI))
+    x_run, x_kin, _in, kin = coords.gfile_run_grids(
+        eqdsk, kin, source.profiles_path, coord)
+    psi_map = None if _in is None else (np.asarray(psi_N_kin)[_in], x_kin)
+
+    # kinetic profiles (native SI) regridded onto the equilibrium nodes.
     # Shape-preserving PCHIP (single shared helper): a linear regrid leaves a
     # slope kink at every kinetic knot, which the Sauter bootstrap inherits
     # as a stepped j_BS (see utils.pchip_interp).
     from .utils import pchip_interp
 
     def to_eq(arr):
-        return pchip_interp(psi_N_kin, arr, psi_N)
+        return pchip_interp(x_kin, arr, x_run)
 
     ne_eq, te_eq, ni_eq, ti_eq = to_eq(kin["ne"]), to_eq(kin["te"]), to_eq(kin["ni"]), to_eq(kin["ti"])
     Zeff_eq = np.clip(to_eq(kin["Zeff"]), 1.0, None)
@@ -1039,7 +1263,10 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     iso_w = np.ones(len(iso_pts)) * 200.0
     mygs.set_isoflux(iso_pts, weights=iso_w)
 
-    guess_jinductive = create_power_flux_fun(len(psi_N), 1.5, 1.5)["y"]
+    # Seed shape in ψ_N (the g-file's nodes).
+    guess_jinductive = coords.swb_seed(x_run, psi_N)
+    _recon_coord = ({} if coord == coords.PSI else
+                    dict(coord=coord, x=x_run))
 
     # Fixed (non-perturbed) pressure components must be resolved BEFORE the
     # reconstruction, not after it: the reconstruction's GS pressure has to be
@@ -1049,9 +1276,9 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     #
     # Grid: p_fast is resolved onto the KINETIC grid first and then mapped to
     # the equilibrium grid with `to_eq` -- deliberately the same two-step path
-    # the draws take (baseline resolves onto psi_N_kin, then
+    # the draws take (baseline resolves onto x_kin, then
     # perturb_kinetic_equilibrium applies `_kin_to_eq`, which is the identical
-    # pchip_interp).  Resolving fc.psi_N -> psi_N in one hop would be a
+    # pchip_interp).  Resolving fc.psi_N -> x_run in one hop would be a
     # slightly different array and would reintroduce the very inconsistency
     # this is fixing.  `p_fast_kin` is also what the returned Baseline.p_fast
     # field carries (kinetic grid), which downstream depends on -- unchanged.
@@ -1060,7 +1287,10 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     # returns, so the default-off path does not even enter the new branch and
     # is provably a no-op (not merely "adds 0.0").
     fc = config.fixed_components
-    p_fast_kin = _resolve_fixed(fc.p_fast, fc.psi_N, psi_N_kin)
+    # fc.psi_N in the run coordinate (a psi_n input via the g-file's map).
+    fc_x = coords.to_run_grid(fc.psi_N, getattr(fc, "coord", coords.RUN),
+                              None if coord == coords.PSI else (psi_N, x_run))
+    p_fast_kin = _resolve_fixed(fc.p_fast, fc_x, x_kin)
     p_fast_eq = to_eq(p_fast_kin) if fc.p_fast is not None else None
     # Z_imp is plumbed for symmetry with the draw path, but is INERT here today:
     # FixedComponentsConfig (config.py) carries no Z_imp field at all -- Z_imp is
@@ -1094,8 +1324,10 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
             p_fast=p_fast_eq,
             Z_imp=Z_imp_recon,
             l_i_tolerance=float(config.generation.l_i_tolerance),
+            **_recon_coord,
             edge_pressure=_edge,
             **_jbs_kw,
+            bootstrap_kwargs=config.generation.bootstrap_kwargs,
         )
         # get_stats traces the q-profile and can emit gs_get_qprof warnings, so
         # keep these inside the capture too.
@@ -1178,8 +1410,9 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     j_phi = np.asarray(result["j_phi_fit"], dtype=float)
     j_BS = np.asarray(result["j_BS_used"], dtype=float)
 
-    j_NBI = _resolve_fixed(fc.j_NBI, fc.psi_N, psi_N)
-    j_RF = _resolve_fixed(fc.j_RF, fc.psi_N, psi_N)
+    j_NBI = _resolve_fixed(fc.j_NBI, fc_x, x_run)
+    j_RF = _resolve_fixed(fc.j_RF, fc_x, x_run)
+    j_other = _resolve_fixed(getattr(fc, "j_other", None), fc_x, x_run)
     _request_offset = None
     _delivered = None
     if _jbs["enabled"] and result.get("request_jphi") is not None:
@@ -1189,9 +1422,10 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
         with capture_native_output(enabled=not verbose) as _cap2:
             j_phi, j_inductive, j_BS, _request_offset, _delivered = \
                 _deliver_reconstruction_state(
-                    mygs, config, source, result, psi_N, ne_eq, te_eq, ni_eq,
-                    ti_eq, Zeff_eq, Ip_target, l_i_target, j_NBI, j_RF,
-                    recon_metrics)
+                    mygs, config, source, result, x_run, ne_eq, te_eq, ni_eq,
+                    ti_eq, Zeff_eq, Ip_target, l_i_target, j_NBI,
+                    j_RF + j_other,     # every fixed part (j_other: unified)
+                    recon_metrics, coord=coord)
         _log2 = _cap2["text"] or None
         if _log2:
             _cap["text"] = (_cap["text"] or "") + _log2
@@ -1204,7 +1438,7 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
                   "reconstruction there (it composes the Redl bootstrap, not "
                   "the floored remainder)", flush=True)
     else:
-        j_inductive = j_phi - j_BS - j_NBI - j_RF   # == j_inductive_fit when NBI=RF=0
+        j_inductive = j_phi - j_BS - j_NBI - j_RF - j_other   # == j_inductive_fit when all 0
         # Physical component convention: the inductive current is >= 0. On shots
         # with a strong pedestal the achieved total can dip BELOW the full-Sauter
         # bootstrap there, leaving a small negative residual (~1% of the core) --
@@ -1213,7 +1447,8 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
         # 0/500 candidates survived).
         # Floor the inductive at zero and absorb the deficit into j_BS so the
         # split still sums exactly to j_phi.
-        j_inductive, j_BS = floor_inductive_split(j_inductive, j_BS, psi_N)
+        j_inductive, j_BS = floor_inductive_split(j_inductive, j_BS, x_run,
+                                                  coord=coord)
 
     # Resolved above (before the reconstruction, which now consumes it).
     # Unchanged contract: the returned field is on the KINETIC grid.
@@ -1224,11 +1459,13 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     _cph_recon = (result.get("quality") or {}).get("core_pressure_hollow")
 
     return Baseline(
-        psi_N=psi_N,
+        psi_N=x_run,
         j_phi=j_phi,
         j_inductive=j_inductive,
         j_BS=j_BS,
-        psi_N_kinetic=psi_N_kin,
+        psi_N_kinetic=x_kin,
+        coord=coord,
+        psi_map=psi_map,
         ne=kin["ne"],
         te=kin["te"],
         ni=kin["ni"],
@@ -1239,6 +1476,7 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
         provenance="reconstruction",
         j_NBI=j_NBI,
         j_RF=j_RF,
+        j_other=j_other,
         p_fast=p_fast,
         # SAME source as the value handed to the reconstruction above, so the
         # two paths activate together or not at all.  The draws read
@@ -1266,8 +1504,15 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
         # store_baseline_profiles archives it (report-only; see
         # physics.core_pressure_hollow_record).
         core_pressure_hollow=_cph_recon,
-        li_metrics=({"core_pressure_hollow": _cph_recon}
-                    if _cph_recon else None),
+        li_metrics=({k: v for k, v in (
+            ("core_pressure_hollow", _cph_recon),
+            # PR #56 (owner item E2 stamp): how the IDA Z_eff / n_i were
+            # resolved; archived as _baseline li_metrics_json
+            ("zeff_provenance", kin.get("zeff_provenance")),
+            # review PR64 B1: how SWB's bootstrap was converted (absent on
+            # the self-consistent loop, which runs no SWB)
+            ("swb_conversion", result.get("swb_conversion"))) if v}
+            or None),
         jphi_request_offset=_request_offset,
         delivered_state=_delivered,
         edge_pressure=(recon_metrics or {}).get("edge_pressure"),
@@ -1276,7 +1521,8 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
 
 def _deliver_reconstruction_state(mygs, config, source, result, psi_N, ne_eq,
                                   te_eq, ni_eq, ti_eq, Zeff_eq, Ip_target,
-                                  l_i_target, j_NBI, j_RF, recon_metrics):
+                                  l_i_target, j_NBI, j_RF, recon_metrics,
+                                  coord="psi_n"):
     """The reconstruction path's ONE state, stored in the draws' form
     (``jbs_self_consistent=True`` only).
 
@@ -1300,13 +1546,17 @@ def _deliver_reconstruction_state(mygs, config, source, result, psi_N, ne_eq,
     psi_pad = float(source.psi_pad)
     comp = _draw_jbs_composer(psi_N, ne_eq, te_eq, ni_eq, ti_eq, Zeff_eq,
                               psi_pad, bool(gc.isolate_edge_jBS), 1.0,
-                              bool(gc.floor_j_BS), None, None, None)
+                              bool(gc.floor_j_BS), None, None, None,
+                              coord=coord,
+                              eps_definition=getattr(gc, "eps_definition",
+                                                     None))
     j_bs0 = np.asarray(comp(mygs.copy_eq())[0], dtype=float)
     fixed = np.asarray(j_NBI, dtype=float) + np.asarray(j_RF, dtype=float)
     dv = _deliver_request_split(mygs, psi_N, psi_pad, Ip_target,
                                 result["request_jphi"], j_bs0, fixed,
-                                label="recon delivered state")
-    j_ind, j_BS = floor_inductive_split(dv["j_inductive"], j_bs0, psi_N)
+                                label="recon delivered state", coord=coord)
+    j_ind, j_BS = floor_inductive_split(dv["j_inductive"], j_bs0, psi_N,
+                                        coord=coord)
     n_floored = int(np.sum(np.asarray(dv["j_inductive"]) < 0.0))
     j_phi = j_ind + j_BS + fixed          # == dv["request"] (floor: sum kept)
     offset, n_fl_t = _request_offset(j_ind, dv["achieved"], j_bs0, fixed)
@@ -1330,7 +1580,7 @@ def _deliver_reconstruction_state(mygs, config, source, result, psi_N, ne_eq,
         li_input=float((result.get("eqdsk_li") or {}).get(
             "li(2)", float("nan"))),
         j_phi_achieved=_achieved_jphi_fsa(mygs, psi_N, psi_pad,
-                                          sign_ref=j_phi),
+                                          sign_ref=j_phi, coord=coord),
         how=("step-7 corrective iteration, then the l_i re-match of its "
              "landed request (every loop pass ends there); one jphi-linterp "
              "solve of j_phi reproduces it"))

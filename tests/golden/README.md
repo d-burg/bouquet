@@ -120,6 +120,51 @@ The committed fixture passes the extended guard as it stands (it predates the
 path-free record, so its loop records carry the scrubbed basename
 `oft_build.path = "OpenFUSIONToolkit"`).
 
+## Build-specific goldens
+
+The goldens record the OFT build they were generated with, and are valid
+for that build only. The record is `provenance.oft` of
+`golden_manifest.json` and of `D3Dlike_Hmode_legacy_golden.json`:
+`build_id` as stated through `BOUQUET_OFT_BUILD_ID` when slimming,
+`library_sha256` and `sources_sha256` as measured. The policy (owner
+decision, 2026-10-09):
+
+* Every golden comparison runs at its existing bar, on every build.
+  `tests/_harness.golden_build_check` compares the installed library's
+  SHA-256 (`bouquet.jbs_loop.oft_build_info()`) with the fixture's
+  `library_sha256`; the `build_id` comparison is informational. A fixture
+  with no `library_sha256` is "unstamped" and counts as a mismatch.
+* Same build: a pass is a pass, a failure is a regression.
+* Different build: a pass passes with a `GoldenBuildMismatchWarning` that
+  names both builds; a failure FAILS (never xfail, never skip), its message
+  starting with `OFT build mismatch: fixture generated with
+  <build_id>/<sha8>, installed <build_id>/<sha8>` and the commands below,
+  followed by the original failure.
+* No band and no tolerance depends on the build.
+
+Known cross-build deviation: the mode-1 replay of the legacy golden in
+`tests/test_systematics.py` (pinned baseline, bar 0.3 %) gives a maximum
+coil drift of 0.027 % on the build the golden was generated with, and
+1.45 % on OFT builds that evaluate the edge FF' from an exact per-node
+`<R>` at the diverted LCFS node: the lower coils move, the boundary stays
+within its bar. Which edge convention is right is an open physics
+question; until it is answered, regenerate on the build in use, never widen
+the bar.
+
+Regenerating on the installed build (the commands the mismatch message
+prints; steps as in "Updating the golden set" above):
+
+```bash
+# the h5 fixture + golden_manifest.json (+ rng_stream_manifest.json)
+OMP_NUM_THREADS=1 python tests/golden/regenerate_golden_run.py RUN_DIR --reconstruction-engine unified --verbose
+BOUQUET_OFT_BUILD_ID=<installed build> python tests/golden/make_golden_fixture.py --source RUN_DIR/D3Dlike_Hmode_golden.h5
+# the legacy JSON golden
+OMP_NUM_THREADS=1 python tests/golden/regenerate_golden_run.py RUN_DIR --reconstruction-engine legacy --verbose
+BOUQUET_OFT_BUILD_ID=<installed build> python tests/golden/make_golden_fixture.py --legacy-json --source RUN_DIR/D3Dlike_Hmode_golden.h5
+```
+
+and review the git diff of the manifest / JSON before committing.
+
 ## The current fixture (unified-engine default, 2026-10-07)
 
 The h5 fixture is a run of the unified engine, the default reconstruction
@@ -138,23 +183,36 @@ engine never reads back to their defaults (printed and recorded in the run's
   42.4 min (123.6 s per equilibrium).
 * The legacy path keeps its numeric record in
   `D3Dlike_Hmode_legacy_golden.json`, made from a legacy-engine run of the
-  same recipe at the same code: 20 archived, 12 in spec. Wall time:
-  reconstruction 217 s, draws 153.6 min (457.7 s per equilibrium).
+  same recipe at the same code (regenerated 2026-10-09: the run at `67aba59`,
+  the record built from its archive at `5c92249`, the builder that carries
+  `j_pressure`; see below): 20 archived, 11 in spec. Wall time: reconstruction 218 s, draws
+  184.2 min (552 s per equilibrium). The record archives the pressure-driven
+  current as its own `j_pressure` beside a `j_inductive` that does not carry
+  it, and says so (`current_split_convention = "pressure_separate"`); the
+  legacy replay composes the legacy path's carried (in-memory) inductive,
+  `j_inductive + j_pressure`, before handing it to `generate_bouquet` as
+  `input_jinductive` -- a record from before that convention replays as is.
   `tests/test_systematics.py` (legacy replay) reads it;
   `tests/test_legacy_golden.py` checks what it is.
 * `rng_stream_manifest.json` is pinned from this fixture's baseline.
 * Validation of the fixture and the suites at `1a15685`:
   [docs/validation-provenance.md](../../docs/validation-provenance.md).
-* **The bouquet stamp reads dirty.** The fixture and both manifests stamp
-  bouquet commit `7bd48fb` with `dirty: true`. The branch was re-ordered
-  after generation: `7bd48fb` is the pre-reorder name of the commit whose
-  tree is now `8285201` (the trees are identical). The generator edits the
-  run used (`--reconstruction-engine`, `--legacy-json`) were not yet
-  committed when the run was made, and were committed together with the
-  fixture in `1a15685`; the fixture is regenerable from `1a15685`'s tree.
-  (`3d974e6` later changes how the generator's engine switch records
-  `isolate_edge_jBS` -- that field now defaults to `None` and is resolved
-  per engine -- not what runs: it still records and applies False -> True.)
+* **Regenerated 2026-10-09 on the integration branch** (commit `67aba59`,
+  clean tree; OFT build `20260929_7da4f18`, lib `7885fedc1e62`, the same
+  fixed build as before) after the declared changes to the default
+  bootstrap evaluator: the pressure-driven current `p'G` is archived as its
+  own `j_pressure` bucket (owner decision D2) and the default Redl epsilon
+  is `eps_definition = "r_over_R_geo"`, `eps = (R_max - R_min)/(R_max +
+  R_min)` with `R_geo = (R_max + R_min)/2` also as the R of `nu*` (owner
+  decision E7; version tag `evaluate_jBS/4`). Same recipe, same seed, same
+  yield (20 attempts, 17 archived, 4 in spec); reconstruction 62 s, draws
+  43.8 min. The fixture's stored config carries no `eps_definition`, so a
+  replay takes the default (warned once at load); do not add the field to
+  it. The earlier fixtures (2026-10-07 at bouquet `7bd48fb`/`8285201`/
+  `1a15685`; the 2026-10-09 `e838f12` build under the interim
+  `(R_max - R_min)/(2<R>)` default) are in the history of this file.
+* The legacy record `D3Dlike_Hmode_legacy_golden.json` was regenerated in
+  the same session at the same commit and build (its stamp above).
 
 ## Why input-current archival: the mode-1 coil drift
 

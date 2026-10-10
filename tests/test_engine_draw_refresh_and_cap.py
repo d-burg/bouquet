@@ -382,7 +382,7 @@ def _generate_capped(tmp_path, monkeypatch, *, maxits, fail, n=1):
         jBS_scale_range=(0.99, 1.01), coil_drift=0.01,
         homotopy_passes=[(0.05, 0.1), (0.01, 0.01)], seed=12345,
         capture_live_eq=False, store_achieved_jphi=True,
-        jbs_loop=G.loop_settings, rejection_log=rej, engine_draw=G,
+        jbs_loop=G.loop_settings, rejection_log=rej, draw_method=G,
         coil_filter="legacy")
     return diags, rej, G, fake, seen
 
@@ -492,8 +492,9 @@ def test_the_engine_cap_setting_default_and_refusals():
     from bouquet.engine import (ENGINE_FIELD_DEFAULTS, engine_draw_maxits,
                                 validate_engine_settings)
     g = GenerationConfig(reconstruction_engine="legacy")
-    # the legacy draws' cap is unchanged; the engine's defaults to 100
-    assert g.draw_solve_maxits is None
+    # the legacy draws' cap resolves per engine at prepare_baseline() (100
+    # for the legacy draws; #75 review); the engine's defaults to 100
+    assert g.draw_solve_maxits == "auto"
     assert g.engine_draw_solve_maxits == 100
     assert ENGINE_FIELD_DEFAULTS["engine_draw_solve_maxits"] == 100
     validate_engine_settings(g)                 # legacy + defaults: fine

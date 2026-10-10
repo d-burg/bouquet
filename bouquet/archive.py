@@ -42,10 +42,10 @@ from typing import Optional
 
 import numpy as np
 
-from .schema import (EQDSK_DS, PFILE_DS, JBS_CONVERGED_ATTR,
+from .schema import (EQDSK_DS, IFILE_DS, PFILE_DS, JBS_CONVERGED_ATTR,
                      JBS_LOOP_JSON_ATTR, find_bytes_dataset)
 from .utils import (
-    _resolve_h5, _scan_key, _group_path,
+    _resolve_h5, _scan_key, _group_path, profile_coord,
     discover_scan_keys, list_equilibrium_indices, load_baseline_profiles,
     read_eqdsk_from_bytes,
 )
@@ -53,7 +53,7 @@ from .filtering import select_indices, _FILTER_FLAGS
 
 
 # Datasets that are not perturbed-profile arrays (excluded from DrawView.profiles).
-_NON_PROFILE = {"config_json", EQDSK_DS, PFILE_DS}
+_NON_PROFILE = {"config_json", EQDSK_DS, PFILE_DS, IFILE_DS}
 
 # Attr keys surfaced by DrawView.flags (same record shape as read_filter_flags).
 _FLAG_ATTRS = (*_FILTER_FLAGS, "selected")
@@ -112,8 +112,9 @@ class DrawView:
             import h5py
             with h5py.File(self._ar.path, "r") as hf:
                 a = hf[self._gp].attrs
+                # scalars as Python values; profiles (e.g. swb_j_saw) stay arrays
                 self._attrs_cache = {
-                    k: (a[k].item() if hasattr(a[k], "item") else a[k]) for k in a}
+                    k: (a[k].item() if getattr(a[k], "size", 0) == 1 else a[k]) for k in a}
         return dict(self._attrs_cache)
 
     @property
@@ -195,6 +196,11 @@ class DrawView:
         return self._read_bytes(".eqdsk")[".eqdsk"]
 
     @property
+    def ifile_bytes(self) -> Optional[bytes]:
+        """OFT i-file bytes (``write_ifile=True`` runs), else ``None``."""
+        return self._read_bytes(".ifile")[".ifile"]
+
+    @property
     def pfile_bytes(self) -> Optional[bytes]:
         """Profiles-source bytes for this draw.
 
@@ -255,12 +261,18 @@ class DrawView:
         from .schema import PROFILE_UNITS, EQ_FSA_UNITS
         from .utils import load_eq_fsa
         prof = self.profiles
+        attrs = self.attrs
+        # profile attrs (swb_j_saw) go with the profiles; scalars stay JSON-safe
+        prof.update({k: attrs.pop(k) for k in [k for k, v in attrs.items() if isinstance(v, np.ndarray)]})
         doc = {
             "scan_key": _scan_key(self.scan_key),
             "count": self.count,
+            # coordinate of psi_N / psi_N_kinetic; eq_fsa/psi_N is always ψ_N
+            "profile_coord": (self.attrs.get("profile_coord")
+                              or profile_coord(self._ar.path, self.scan_key)),
             "profiles": {k: np.asarray(v).tolist() for k, v in prof.items()},
             "units": {k: PROFILE_UNITS.get(k, "") for k in prof},
-            "scalars": self.attrs,          # li, Ip, drifts, in_spec, ... (JSON-safe)
+            "scalars": attrs,               # li, Ip, drifts, in_spec, ... (JSON-safe)
             "coil_currents_A": self.coil_currents(),
         }
         fsa = load_eq_fsa(self._ar.path, self.count, scan_key=self.scan_key)
@@ -272,10 +284,18 @@ class DrawView:
     def extract(self, out_dir: str, formats=("geqdsk",)) -> dict:
         """Write per-draw files to ``out_dir``; return ``{format: path}``.
 
-        Formats: ``"geqdsk"`` / ``"pfile"`` (raw stored bytes) and
+        Formats: ``"geqdsk"`` / ``"pfile"`` / ``"ifile"`` (raw stored bytes;
+        the OFT i-file of a ``write_ifile=True`` run, in bouquet's
+        positive-Ip frame -- see the group's ``ifile_*`` attrs) and
         ``"profiles"`` (a self-describing JSON of profiles + scalars + coils +
-        eq_fsa; see :meth:`profiles_doc`). Missing payloads are skipped.
+        eq_fsa; see :meth:`profiles_doc`). Missing payloads are skipped; an
+        unknown format is refused.
         """
+        unknown = set(formats) - {"geqdsk", "pfile", "ifile", "profiles"}
+        if unknown:
+            raise ValueError(f"extract: unknown format(s) {sorted(unknown)}; "
+                             "expected 'geqdsk', 'pfile', 'ifile' or "
+                             "'profiles'")
         os.makedirs(out_dir, exist_ok=True)
         stem = f"{self._ar.header_basename}_{_scan_key(self.scan_key)}_{self.count}"
         paths = {}
@@ -294,6 +314,13 @@ class DrawView:
                     with open(p, "wb") as fh:
                         fh.write(pf)
                     paths["pfile"] = os.path.abspath(p)
+        if "ifile" in formats:
+            ib = self.ifile_bytes
+            if ib is not None:
+                p = os.path.join(out_dir, stem + ".ifile")
+                with open(p, "wb") as fh:
+                    fh.write(ib)
+                paths["ifile"] = os.path.abspath(p)
         if "profiles" in formats:
             import json
             p = os.path.join(out_dir, stem + "_profiles.json")
@@ -350,7 +377,21 @@ class ScanView:
         self.scan_key = scan_key
 
     def __repr__(self):
-        return f"<ScanView scan={self.scan_key!r} ({len(self.indices)} draws)>"
+        xf = self.experimental_features
+        return (f"<ScanView scan={self.scan_key!r} ({len(self.indices)} draws)"
+                + (f" EXPERIMENTAL={xf}" if xf else "") + ">")
+
+    @property
+    def experimental_features(self):
+        """The EXPERIMENTAL features the run enabled
+        (:data:`bouquet.experimental.REGISTRY` keys; ``[]``: none), or
+        ``None`` for an archive that predates the record."""
+        from .utils import load_experimental_features
+        try:
+            return load_experimental_features(self._ar.path,
+                                              scan_key=self.scan_key)
+        except (KeyError, OSError):
+            return None
 
     @property
     def indices(self) -> list:
@@ -494,6 +535,14 @@ class ScanView:
         if print_table:
             print(f"Bouquet output spread -- scan {self.scan_key!r}, "
                   f"selection={selection!r} ({len(draws)} draws)")
+            xf = self.experimental_features
+            if xf:
+                print(f"  EXPERIMENTAL features enabled for this run: {xf} "
+                      "(not validated on real data; see "
+                      "bouquet.experimental.REGISTRY)")
+            elif xf is None:
+                print("  experimental features: not recorded (archive "
+                      "predates the record)")
             print(f"  {'quantity':<11}{'mean':>10}{'1sigma':>10}{'σ/mean':>8}   range")
             for name, st in out.items():
                 if st is None:
@@ -543,7 +592,16 @@ class BouquetArchive:
                     "with the current bouquet for full v2 support.")
 
     def __repr__(self):
-        return f"<BouquetArchive {self.path!r} scans={self.scan_keys}>"
+        xf = {}
+        for k in self.scan_keys:
+            try:
+                v = ScanView(self, k).experimental_features
+            except Exception:           # a repr never raises
+                v = None
+            if v:
+                xf[k] = v
+        return (f"<BouquetArchive {self.path!r} scans={self.scan_keys}"
+                + (f" EXPERIMENTAL={xf}" if xf else "") + ">")
 
     @property
     def scan_keys(self) -> list:

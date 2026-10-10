@@ -1,5 +1,275 @@
 # Bouquet — change summaries
 
+## Unreleased — the PR #56 kinetic combination is EXPERIMENTAL and opt-in (owner decision 2026-10-09)
+
+**What and why.** PR #56's IDA/FUSE ion coupling is not the default for 1.4.0.
+On real H-mode slices the combined route moved core n_i and Z_eff far outside
+the measurement uncertainties (and the IDA n_i disagreed with the dd's total
+n_i well beyond the 1 % gate), so it is opt-in pending validation. The
+defaults are the routes before PR #56 (main `afe1a99` / `6116d5f`):
+
+| Field | Default (pre-#56) | Opt-in (EXPERIMENTAL) |
+|---|---|---|
+| `ReconstructionSource.ni_source`, `ImasSource.ni_source`, `read_ida(ni_source=)`, `from_imas(ni_source=)` | `"standard"` (new value): Z_eff = the stored VB value, n_i from it by quasineutrality, σ_ni the n_e fraction; the Z_eff envelope from the carbon > VB > scalar ladder; on `ida_hybrid` Z_eff stays the dd's and n_i = n_e,IDA (Z − Z_eff,dd)/(Z − 1) | `"Zeff"` / `"CER"` / `"all"` (`ida_ion_route`) |
+| `ImasSource.zeff_fast_ions` (new) | `False`: the bootstrap gets the thermal-only Z_eff of the dd's densities | `True` (`fuse_zeff_fast_ions`): the `_dd_zeff` classification and the fast-ion term |
+| `ImasSource.ni_subtract_fast` (new) | `False`: no beam subtraction | `True` with an experimental `ni_source` (`ida_ni_beam_subtraction`) |
+| `UncertaintyConfig.kinetic_clips` (new) | `None` (auto: off unless a PR #56 kinetic feature is on): a Z_eff draw held in `physics.zeff_bounds` only, n_i not clipped | `True` (`kinetic_sampler_clips`): the floor at 1, the n_i floor / ceiling, the passive Z_eff aux clip |
+| `UncertaintyConfig.ni_from_zeff` | `None` (auto): always derived | auto follows the PR #56 rule only with an experimental `ni_source` |
+
+**Kept from PR #56 regardless of route:** the n_i-as-increment σ=0 fix and the
+shared sampler (`kinetic_sampler/3` = `/2` with the clips opt-in; the record
+carries `clips_enabled`), the per-draw clip counters, the new reader channels
+(`ensemble_median`, `q`, `zeff_provenance`, `read_ida_cer` fixes), and the
+`zeff_dd_provenance` record (`convention="thermal-only"`, `source="default"`
+unless opted in).
+
+**Verified:** with defaults, `read_ida` returns afe1a99's output bit for bit on
+the synthetic IDA fixture and on an ensemble file (every field the pre-#56
+reader returned; `tests/test_ida_standard_route.py`, against the afe1a99
+reader itself and an independent recomputation). `tests/test_zeff_sigma_ladder.py`
+is main's pre-#56 file again and passes unchanged; the PR #56 versions of the
+tests opt in explicitly (`test_zeff_sigma_ladder_experimental.py` and the
+others).
+
+**What moves against the integration chain's defaults:** every IDA run
+(reconstruction and `ida_hybrid`), every FUSE run on a dd with a beam (the
+bootstrap Z_eff), and draws where a PR #56 clip used to bind. Against main:
+nothing on these routes beyond the increment σ=0 fix (legacy draws with the
+Z_eff channel) and the other declared changes of this release.
+
+**Registry.** `bouquet.experimental.REGISTRY` lists every experimental feature
+(the four above, `solve_method="swb"` and `bootstrap_convergence_override`) with
+its validation TODO. `prepare_baseline()` warns once per enabled feature
+(`ExperimentalFeatureWarning`); the list is on `Baseline.experimental_features`,
+in the engine record, and on the archive's `_baseline` attr
+`experimental_features_json` on every solve method; `stats.draw_band` and the
+archive views print it. See docs/workflows.md, "Experimental features and their
+validation status".
+
+## Unreleased — IMAS ψ_N readbacks sample at the dd's own nodes (owner decision E5, 2026-10-09)
+
+The IMAS reader's ψ_N route (PR #64) samples every profile at the dd's own
+radial nodes instead of pairing indices onto a uniform ψ_N grid. On a dd whose
+grid is uniform in ρ rather than ψ_N the old index pairing misplaced nodes by
+up to Δψ_N ≈ 0.14, which shifted readbacks by up to 85 % of the bootstrap
+peak and 30 % of the pressure; on a ψ_N-uniform dd (the D3D-like example) the
+two agree exactly. The node-based sampling is the declared default; no option
+restores the index pairing.
+
+## Unreleased — cross-file hooks of the integrated #56–#75 chain (2026-10-09)
+
+### Legacy `solve_with_bootstrap` results converted to the field-aligned bootstrap (PR #64 B1; legacy numbers move)
+
+- **Every legacy SWB call site** (the draw and DIFF_BS draw calls, the
+  σ=0 / DIFF_BS cache, `reconstruct_equilibrium`, `jbs_init="swb"`, the
+  IMAS frozen-SWB baseline and the SWB σ=0 reference) now converts SWB's
+  `j_BS` / `isolated_j_BS` right after the call with
+  `TokaMaker_interface.swb_result_toroidal` (`physics._swb_jbs_to_toroidal`
+  for the installed toolkit's output convention). On upstream
+  OpenFUSIONToolkit this is the 6116d5f conversion bit for bit (undo SWB's
+  `R_avg/F` projection, apply κ = F⟨1/R⟩/⟨B²⟩); #64 had dropped it on the
+  premise that SWB returns TokaMaker jphi, which only the fork's SWB does
+  (left unconverted: +7 % at ψ_N 0.5, +12–13 % at the pedestal on the
+  synthetic D3D-like example). A toolkit returning TokaMaker jphi loses
+  `p′G` instead; an unknown one is refused.
+- **What moves:** the LEGACY reconstruction / IMAS baseline and every legacy
+  draw that runs SWB, on upstream OFT, back to their 6116d5f values. The
+  unified engine runs no SWB: no default-engine number changes.
+- **Stamped:** per draw `swb_jbs_convention` / `swb_jbs_conversion` group
+  attrs; on the baseline `li_metrics["swb_conversion"]`; on the σ=0 SWB
+  check's record.
+
+### Archived split: `p′G` is its own `j_pressure` on every path (owner decision D2; archive convention)
+
+- **Engine (default path) — archive only, the solve is untouched.** The
+  engine baseline's and every engine draw's archived `j_BS` no longer carry
+  the pressure-driven `p′(⟨R⟩ − F²⟨1/R⟩/⟨B²⟩)`: it is archived as the
+  `j_pressure` dataset with `current_split_convention = "pressure_separate"`
+  on the group, and the residual `j_inductive` excludes it, so `j_phi =
+  j_inductive + j_BS + j_NBI + j_RF + j_pressure` exactly. Against
+  `e16d541` the archived engine `j_BS` moves by `−p′G` and `j_inductive` is
+  unchanged (it already excluded it); the `jB_parallel/` block is unchanged.
+  `Baseline.j_pressure` / `Baseline.current_split_convention` carry it in
+  memory.
+- **Legacy (and the IMAS legacy reader's) archives.** The legacy in-memory
+  split keeps `p′G` in `j_inductive` (the solver needs the total); the
+  archive writer (`generate_bouquet`, with the run's `baseline_split`) now
+  takes it off and stores it as `j_pressure` with the same attr — per draw
+  evaluated on the archived state (`TokaMaker_interface.
+  archived_pressure_term`), for the baseline the reader's `j_pressure`
+  (IMAS) or the baseline-converged state's (reconstruction). The archived
+  legacy `j_inductive` therefore moves by `−p′G`; `j_BS`, `j_phi` and every
+  solve are unchanged. Where the solver cannot evaluate `p′G` the group
+  keeps the old convention, with a warning. A direct `generate_bouquet`
+  call without `baseline_split` archives as before.
+- **Readers** (`schema.read_current_split_convention`, the IDS exporter)
+  read the attr; an archive without it keeps its old meaning.
+
+## Unreleased — PR #56 (IDA/FUSE ion coupling) and PR #60 (bootstrap options), integrated
+
+### Redl ε: `(R_max − R_min)/(R_max + R_min)` with `R_geo` in ν\* by default (`evaluate_jBS/4`, PR #60, owner decisions E4/E7)
+
+- **Default physics change, declared.** `evaluate_jBS`'s inverse aspect ratio
+  is now `ε = (R_max − R_min)/(R_max + R_min)` per flux surface -- the
+  surface's half-width over its geometric major radius `R_geo = (R_max +
+  R_min)/2`, the "ε = r/R0" of Sauter (1999) / Redl (2021), as OMFIT's
+  `sauter_bootstrap` and FUSE use it -- and the R in ν\*_e, ν\*_i (Sauter
+  Eqs. 18b/18c) is the SAME `R_geo` (was `⟨R⟩` from `get_q`). New field
+  `GenerationConfig.eps_definition` (default `"r_over_R_geo"`), passed to
+  every bouquet Redl evaluation on every path; the two older forms are named
+  opt-ins, each with its own ν\* R (`⟨R⟩`): `"half_width_over_fsa_R"`,
+  `(R_max − R_min)/(2⟨R⟩)` (PR #60's form, briefly the default of this
+  integration), and `"a_over_R"`, `⟨a⟩/⟨R⟩` (versions `/1`-`/3`, bit for
+  bit). Toolkit-internal `solve_with_bootstrap` calls (frozen legacy path,
+  swb method) form their own ν\* and do not read the field.
+- **Build-independent.** Both half-width forms read `R_min`, `R_max` and
+  `⟨R⟩` from `get_fsa` (OFT ≥ v26.6) on every build; nothing raises for the
+  missing fork option. The internal-solve toolkit's
+  `sauter_fc(return_eps=True)` (cut-cell `⟨R⟩`, ~1.4e-4 off) is only recorded
+  beside ours (`diag["eps_fork_diagnostic"]`), with a documented cross-build
+  sanity bar of 1e-3 (`physics.EPS_ROUTE_SANITY_RTOL`; a diagnostic, not a
+  physics criterion). A build without `get_fsa` is refused by name for the
+  half-width forms.
+- **Version and records.** `EVALUATE_JBS_VERSION` is `evaluate_jBS/4 (...,
+  eps = (R_max-R_min)/(R_max+R_min), nu* R = R_geo = (R_max + R_min)/2, ...;
+  p'G separate as j_pressure)`. `/4` is ONE convention carrying the owner
+  decisions on ε (E4/E7) and on p′G returned beside the bootstrap as
+  `diag["j_pressure"]`, never inside `j_BS` (D2, PR #64; see
+  `docs/current-conventions.md`). `/3` keeps its meaning (p′G with the
+  bootstrap, PR #64, never on main). The opt-ins' tags name their ε and ν\* R
+  and say `OPT-IN`, so the three are distinguishable; every loop record
+  carries its definition's tag, the baseline carries `bootstrap_eps`
+  (archived as the `_baseline` attr `bootstrap_eps_json`), and `diag` carries
+  `eps_definition`, `eps_route`, `nu_star_R`, `R_nu_star`. A stored config
+  without the field replays with the new default (warned once); one that
+  names a definition keeps it.
+- **What moves** (synthetic D3D-like g-file case, one equilibrium, same
+  kinetics). Against `"half_width_over_fsa_R"`: j_BS −4.9 % at ψ_N 0.98,
+  −10 % at 0.99, peak −1.2 %, I_BS −0.5 % (ε alone −3 % / −6 % / I_BS −0.3 %;
+  the ν\* R, ×1.07–1.08 there, the rest). Against `"a_over_R"`: j_BS −16 % at
+  0.98, −31 % at 0.99, peak −4.3 %, I_BS −1.6 % (ε alone −12 % / −23 % /
+  −1.0 %). On real H-mode pedestals the `⟨a⟩/⟨R⟩` → `(R_max − R_min)/(2⟨R⟩)`
+  step alone measured I_BS −4 to −10 % and pedestal j_BS −16 to −32 % at
+  ψ_N ≈ 0.98 across eleven slices (dd-kinetics slices at the lower end,
+  IDA-kinetics slices with steeper pedestals at the upper end), l_i(3) +0.5
+  to +1.0 %, q0 about +0.8 %; the default moves further by the `R_geo` steps
+  (not yet measured on real data).
+  The reason is the shaping: `⟨a⟩` includes the vertical extent of an
+  elongated surface, and the dl/B_p-weighted `⟨R⟩` is pulled toward the
+  X-point near the separatrix (−7 % below `R_geo` at ψ_N 0.99), so both
+  older forms exceed `r/R_geo` most in the pedestal, where ν\* ∝ R ε^-3/2
+  then rises most. Every default-path bootstrap (unified engine and legacy
+  loop) changes accordingly; the goldens that pin `evaluate_jBS` output must
+  be regenerated (`tests/golden/README.md`).
+- **Stored configs:** a unified config carrying solve_with_bootstrap keys (the
+  D3D-like notebooks' `{"iterations": 3}`, 2026-10-04..09) loads with them
+  dropped and a warning; a stored `swb_iterations=n` loads as
+  `{"iterations": n}` with a warning that it now reaches the baseline SWB too
+  (it does not replay the stored baseline exactly). The two D3D-like notebooks
+  now set `bootstrap_kwargs = {}` (the key had no effect under the engine).
+- `tools/install_oft.py` builds upstream OpenFUSIONToolkit `main` by default,
+  a fork only by explicit `--repo`/`--ref`, refuses (instead of repointing) an
+  existing clone of another repository, and checks the build has a route to
+  the default ε (`get_fsa`).
+
+### Kinetic draws: `kinetic_sampler/2` (PR #56)
+
+- **One sampler for every path** (`bouquet.kinetic_sampler`, version
+  `KINETIC_SAMPLER_VERSION = "kinetic_sampler/2 ..."`). A main-ion density
+  derived from a Z_eff draw is now an **increment on the baseline**,
+  `ni = bl.ni + ni_of(ne_d, Zeff_d) - ni_of(ne, Zeff)`, instead of the
+  absolute `ni_of(ne_d, Zeff_d)`.
+- **Why:** the absolute form does not return `bl.ni` at sigma = 0 whenever the
+  baseline is not single-impurity quasineutral at the median `Z_imp`
+  (multi-species or beam p-files, IDA) -- a sigma = 0 violation of the legacy
+  path (pinned by
+  `tests/test_kinetic_sampler.py::test_sigma0_returns_the_baseline_ni_on_a_non_quasineutral_baseline`).
+- **What moves:** legacy draws with the Z_eff channel on (the default
+  channel) differ seed-for-seed from `/1`; each profile is now
+  `base + (sample - mean) b0` (ULP-level differences on ne, Te, Ti). Engine
+  draws are unchanged except where one of the clips below binds.
+- **Clips, unchanged in value, now counted per draw** (`KineticDraw.clips`,
+  `KineticDraw.record()`; a log line names every clip that fires):
+  `zeff_floor_1` (Z_eff lifted to 1 where `zeff_bounds` alone allowed less),
+  `zeff_window_lo/hi`, the same three for a passive Z_eff aux draw,
+  `ni_floor_0` (thermal n_i floored at 0) and `ni_ceiling` (n_i capped at
+  `ne - z_fast`). The assumptions and their literature basis:
+  [physics-notes.md, "Kinetic assumptions"](physics-notes.md#kinetic-assumptions-z_eff-n_i-and-the-clips-pr-56).
+- **Superseded in part (owner decision 2026-10-09, first entry above):**
+  `kinetic_sampler/3` keeps the increment form and the counters, but the floor
+  at 1, the n_i floor / ceiling and the aux clip are opt-in
+  (`UncertaintyConfig.kinetic_clips`).
+
+## Unreleased — the collaborator's #72–#75, integrated (2026-10-09)
+
+### Legacy draw-solve cap and the opt-in rescue (#75; owner decision D5)
+
+- **`draw_solve_maxits` default `"auto"`**, resolved per engine at
+  `prepare_baseline()` (`engine.ENGINE_DEPENDENT_DEFAULTS`, recorded in
+  `engine_resolved_defaults`): **100 for the legacy and swb draws** (was the
+  solver's setup cap, 800, before #75), nothing under the unified engine
+  (refused there with the standard unread-settings rule, as are the rescue
+  fields). `None` still means the setup cap; a stored config without the
+  field (before #66) or with `null` replays uncapped. `"auto"` rather than
+  `None` because `None` has meant the setup cap in every stored config.
+  **Legacy numbers can move** where a draw solve needed 101–800 iterations:
+  such a draw now fails its cap (it is rejected, not archived). The
+  legacy-engine `tests/test_systematics.py` run is affected the same way.
+- **Draws only.** The cap (and the rescue) are applied at the first draw
+  and lifted at the end: the cold jphi-linterp baseline re-solve and the
+  sigma=0 (jBS-delta / DIFF_BS) reference anchor solve before the draw loop
+  run under the setup cap and are never rescued (in #75 as merged they ran
+  at 100, and a loose-tolerance rescue could have reached them).
+- **The rescue is OPT-IN** (`draw_solve_retry_urf`, default `()`;
+  `draw_solve_loose_tol`, default `None`): a capped draw solve is re-solved
+  from where it stopped at each urf (the same criterion), then accepted at
+  `nl_tol = draw_solve_loose_tol` -- a looser acceptance than the solver's
+  own `nl_tol`. With it on, every stored draw is stamped `solve_recovered`
+  and a rescued one also `solve_recovered_by`, `solve_nl_tol_accepted`,
+  `solve_residual_upper` / `solve_residual_lower` (OFT reports no residual
+  value: the bounds are the tolerances the solve did and did not meet),
+  `solve_strict_nl_tol` and `solve_rescue_its`. Off, nothing is written.
+  The swb draws get the same rescue and stamps; the engine draws never.
+  Validated at config time. A different failure during a retry is raised
+  (chained from the cap failure), not hidden behind it.
+- **Readers:** `draw_band` / `draw_bands(rescued="include"|"exclude")` and
+  `merge_archives(rescued=...)`: by default rescued draws are kept, listed
+  (`provenance["rescued_draws"]`, `merge_rescued_json`) and warned with
+  their count; `"exclude"` drops them (`rescued:<recovered_by>`).
+
+### OFT i-file archive (#74)
+
+- The i-file (`write_ifile=True`, off by default) now carries the same
+  separatrix pressure (`lcfs_pressure`) and `lcfs_pad` as the g-file of the
+  same state: its `p` was `p_sep` lower under the default
+  `separatrix_pressure="offset"`. The baseline i-file is written on every
+  route (with `coil_drift=None` from the recon-converged state) and traced
+  from the state its g-file is written from. Each group is stamped
+  `ifile_written` / `ifile_error`, the grid, `ifile_lcfs_pressure` and
+  `ifile_frame` (the positive-Ip frame, issue #68) plus the source signs. A
+  solver without `save_ifile` is refused at `generate()`; a failed state
+  restore after the save rejects the draw (`ifile_restore_failed`).
+  `extract(formats=("ifile",))`; `utils.read_ifile`.
+
+### IDA slice timing (#73)
+
+- `ImasSource.ida_time` (ida_hybrid only; refused otherwise): the IDA slice
+  is matched on the IDA file's own time base -- nearest, never
+  interpolated, within half its local step (a single-slice file: half the
+  dd step when paired with `time`, the 10 µs floor for an explicit
+  `ida_time`); paired with `time` it must also sit within half the dd step
+  of the core_profiles slice. Else refused. The match and FUSE's replay
+  pairing verdict are archived in `li_metrics["ida_time_match"]`.
+  `set_slice(time=)` keeps a configured `ida_time`, `set_slice(ida_time=)`
+  applies it alone, `run_slices(ida_times=[...])` pairs a series.
+
+### dd cache (#72)
+
+- The parsed dd is cached per file (real path, mtime, size, inode) and now
+  shared by the unified engine's IDS adapter and the plotting readers too,
+  so a sweep parses each dd once. Up to two parsed files stay resident per
+  process (`bouquet.io.imas.clear_dd_cache()` releases them).
+
 ## Unreleased — the unified engine becomes the default; one current conversion (owner decisions, 2026-10-06)
 
 **Both change results by default.**
@@ -7,6 +277,59 @@
 Where each number below was measured, and how this branch's chapter commits
 map to the original history on the archival tag
 `archive/engine-unified-2116923`: [validation-provenance.md](validation-provenance.md).
+
+### PRs #70 / #71: review fixes (2026-10-09)
+
+- **IMAS delivered state holds `j_other` once** (#70, blocker): the legacy
+  diff/rescale loop draws counted `j_other` twice; both σ=0 guards now hold the
+  draws' own fixed channels (`j_NBI + j_RF + j_other`) and record
+  `split_closure`.
+- **Bootstrap multiplier on loop draws** (#70): `bs_scale` rides in the loop
+  composer's scale (range re-centred, as before #70); SWB draws keep it after
+  SWB; one helper for `generate()` and both guards; a non-uniform `s_bs(ψ)`
+  with loop draws is refused.  The two structured-MSE stages record
+  `bs_scale_profile`.
+- **One source-time rule for every driven channel** (#70): the legacy reader
+  reads beams, RF, other and sawteeth through the engine adapter's call with
+  the engine's arguments (refusals, off stamps and announcements identical;
+  `source_time_match` gains `driven_sources` / `ignored_sources` /
+  `off_sources` / `sawteeth_hold`).  `ImasSource.hold_sawteeth` (default True)
+  opts out of the sawteeth hold (legacy reader only; refused by the engine).
+- **`swb_seed` default `None`** (#70): resolved to the toolkit's `jphi_fixed`
+  capability; an explicit `"source"` is refused only at an SWB call.
+- **Single-slice IMAS export** (#71): the output holds ONE slice -- the
+  core_profiles slice the reader reads, not the requested time -- cut by the
+  IMAS structure (entry lists, outlines and radial profiles are never cut).
+  core_sources entries keep their bracketing / first / last own slices and the
+  read's windows are written under `bouquet_time_window`, so an export re-reads
+  with the same `source_time_match` and driven currents.  Scripts that indexed
+  the exported file by the template's slice index must use index 0.
+- **The cut keeps the paired equilibrium slices** (#71 follow-up): on a
+  time-dependent dd the reader converts the core_profiles currents on the
+  equilibrium slice FUSE paired them with -- the PREVIOUS slice -- and reads
+  its targets at the slice nearest the requested time.  A pure cut now keeps
+  each of these (`equilibrium_slices_read`; recorded in
+  `equilibrium.code.parameters`) and the core_profiles times next to its one
+  slice, so it re-reads bit-identically (keeping only the nearest slice
+  moved the re-read j_pressure by 3.9 % and j_phi by 0.18 % of peak on a
+  real time-dependent dd).  An exported draw still holds one equilibrium
+  slice, the draw's own; `fidelity="reconstruct"` now converts on the
+  template's PAIRED slice.  The reader stamps the pairing
+  (`li_metrics["imas_current_conversion"]`: `equilibrium_time`,
+  `core_profiles_time`, `jtor_mismatch`).
+- **An exported draw writes every thermal species its solve used**
+  (`write_imas_draw`): the main ion AND the one effective impurity of charge
+  `Z_imp` at the main-ion `T_i`, `n_z = (n_e - z_fast - n_i)/Z_imp` (the
+  archive's `Z_imp` / `z_fast`).  Before, only the main ion was written and
+  the template's impurity kept, so a draw whose `n_i` / `Z_eff` / `T_i`
+  differ from the template's -- every ida_hybrid draw -- was exported
+  non-quasineutral with a `Z_eff` that was not the drawn one, and the default
+  reader refused it ("thermal species gap 10.8 % > 2 %" on a real dd).
+  Thermal species the solve did not carry (further impurities, a second
+  hydrogenic species) are written with zero thermal density; an impurity of
+  another charge is relabelled to `Z_imp`.  Recorded under
+  `bouquet_species_model` in `core_profiles.code.parameters`.  An archive
+  without `Z_imp` keeps the template's impurity, as before.
 
 ### Reproducing a run made before this release; what moves on the default path
 
@@ -1023,8 +1346,10 @@ which applies to every path.*
   solve still rejects with its code. Every capped solve is recorded (stage,
   iterations, seconds, outcome) on `Bouquet.engine_draw_cap_events` and the
   draw's `homotopy.cap_events`. `draw_solve_maxits` is refused under the
-  engine; the legacy draws are unchanged (`draw_solve_maxits` default
-  `None`; frozen-code AST test passes). The fast test that asserted the old
+  engine; the legacy draws were unchanged at the time (`draw_solve_maxits`
+  default `None` then; since the #75 integration it is `"auto"`, resolved
+  to 100 for the legacy draws only -- see "Legacy draw-solve cap and the
+  opt-in rescue" above; frozen-code AST test passes). The fast test that asserted the old
   rule at homotopy pass 2 now asserts the rollback.
 - **Engine presets `two_scalar_li` and `structured_uniform` (not defaults).**
   `two_scalar_li`: one scalar on the inductive, one on the bootstrap
@@ -1429,11 +1754,14 @@ legacy corrector already takes its step.
   the q0 changes are labels (`tests/test_legacy_path_stage0_bitwise.py`, a
   fast form of the out-of-tree legacy A/B probe).
 - **Optional draw-loop iteration cap** (`draw_solve_maxits`, default `None` =
-  the solver's own cap, so nothing changes unless it is set), with a record
-  of every draw solve that raises (`diagnostics['solve_failures']`,
-  `Bouquet.solve_failures`, one `[draw-solves]` line). Ported from the
-  collaborator's pull request with the same field name; its re-solve of a
-  capped solve at a looser tolerance is NOT ported (not approved).
+  the solver's own cap at the time), with a record of every draw solve that
+  raises (`diagnostics['solve_failures']`, `Bouquet.solve_failures`, one
+  `[draw-solves]` line). Ported from the collaborator's pull request with
+  the same field name; its re-solve of a capped solve at a looser tolerance
+  was NOT ported then. Superseded by the #75 integration (owner decision D5,
+  2026-10-09): the default is now `"auto"` (100 for the legacy draws, draws
+  only) and the rescue exists as an OPT-IN, stamped per draw -- see "Legacy
+  draw-solve cap and the opt-in rescue" above.
 
 ## Unreleased — MSE pitch angles on the structured closure (opt-in)
 

@@ -21,6 +21,7 @@ and a documented home for every knob -- a typo fails immediately in
 
 from __future__ import annotations
 
+import contextvars
 from dataclasses import dataclass, field
 from typing import Any, Optional, Union, TYPE_CHECKING
 
@@ -176,6 +177,24 @@ class ReconstructionSource:
     e.g. tungsten ~ 74 (use the effective radiating charge if W is not fully
     stripped), beryllium 4, neon 10. For a p-file this is informational: the
     Osborne ``N Z A`` footer carries the species directly and is authoritative.
+
+    ``ni_source`` picks the IDA Z_eff / main-ion density route.
+    ``"standard"`` (the default): Z_eff is the file's visible-bremsstrahlung
+    value, n_i follows from it by single-impurity quasineutrality with the
+    n_e-fraction sigma, and the Z_eff envelope comes from the carbon > VB >
+    scalar ladder (``UncertaintyConfig.zeff_sigma_source``).
+    EXPERIMENTAL -- see ``bouquet.experimental.REGISTRY["ida_ion_route"]``:
+    ``"Zeff"`` (the VB Z_eff with a propagated sigma_ni), ``"CER"``
+    (``Z_eff = 1 + Z(Z-1) n_C/n_e`` from the measured ``n_12C6``, i.e.
+    ``ni = ne - Z_imp n_C``; needs ``impurity_Z=6``) or ``"all"``: the
+    equal-weight mean of the two, each clamped to ``[1, Z_imp]`` first, with
+    their disagreement beyond the combined sigma added to ``sigma_ni`` /
+    ``sigma_Zeff``; a file lacking one route's envelope falls to the other
+    route ALONE (an older vintage without ``Zeff_err`` gets the CER value).
+    ``IDAProfiles.zeff_provenance`` records the route.  The PR #56 routes are
+    opt-in pending validation: on real H-mode slices the combined route moved
+    core n_i and Z_eff far outside the measurement uncertainties.  Ignored
+    for p-files.
     """
 
     geqdsk_path: str
@@ -183,6 +202,8 @@ class ReconstructionSource:
     cocos: int = 1
     time: Optional[float] = None       # IDA time slice [s] (multi-time .cdf files)
     impurity_Z: float = 6.0            # effective impurity charge (carbon); set per machine
+    # IDA path: "standard" | EXPERIMENTAL "Zeff" | "CER" | "all" (see above)
+    ni_source: str = "standard"
     profile_overrides: dict = field(default_factory=dict)  # name -> array, manual override
     # reconstruction knobs
     psi_pad: float = 1e-3
@@ -190,7 +211,22 @@ class ReconstructionSource:
     psi_bridge: float = 0.99          # Hermite edge-bridge location
     rescale_j_BS: bool = False
     shelf_psi_N: float = 0.0
+    # Radial coordinate of the run (bouquet.coords): "psi_n", "phi_n" (profiles,
+    # envelopes and solver inputs on normalised toroidal flux, mapped at read
+    # with the g-file's own q), or "rho_tor" (read as phi_n = rho_tor**2).
+    coord: str = "psi_n"
     # guess_jinductive is derived from the g-file j_phi when None
+
+    def __post_init__(self):
+        from .coords import run_coord
+        run_coord(self.coord)
+        _check_ni_source(self.ni_source, "ReconstructionSource")
+
+
+def _check_ni_source(v, who):
+    from .experimental import NI_SOURCES
+    if v not in NI_SOURCES:
+        raise ValueError(f"{who}.ni_source={v!r} must be one of {NI_SOURCES}")
 
 
 @dataclass
@@ -205,23 +241,37 @@ class ImasSource:
 
     ids_path: str                      # IMAS/OMAS file (FUSE output)
     time: Optional[float] = None       # time slice [s]; None -> single/first slice
+    # IDA-lite slice [s] for ida_hybrid ONLY (refused otherwise); None -> `time`. `time`
+    # then picks only the dd slices (equilibrium, core_profiles, core_sources).  The IDA
+    # slice is the file's own nearest slice within half its local step, never
+    # interpolated, else refused (io.imas.IDA_TIME_RULE); the match is archived in
+    # li_metrics["ida_time_match"].  When the FUSE run computed dd j_bootstrap(t) on one
+    # IDA slice (its ida_provenance.json "replay_pairing"), pass that slice here and the
+    # macro step t as `time` to keep IDA kinetics and FUSE currents consistent; for a
+    # series, Bouquet.run_slices(ida_times=[...]).
+    ida_time: Optional[float] = None
     # --- IDA-hybrid kinetics (GenerationConfig.kinetic_source = "ida_hybrid") ---
-    # When set, the baseline ne/Te/Ti/omega_tor are taken from this IDA .cdf
-    # (externally fit, smoother across time than FUSE's per-slice profile fits),
-    # resampled onto the FUSE core_profiles psi_N grid. Z_eff / Z_imp / the ni
-    # dilution stay FUSE, for consistency with FUSE's own resistive diffusion
-    # (which consumed FUSE's Z_eff to produce j_ohmic).  NOTE the old blanket
-    # rationale "IDA's Z_eff is internally inconsistent with its own carbon
-    # density" is SHOT-DEPENDENT, not general: measured Zeff(VB) vs
-    # 1+Z(Z-1)nC/ne core-median deviations are -1.7 % / +4.7 % / +11.3 % on
-    # three DIII-D demo shots, i.e. mostly within the file's own measured
-    # sigma_Zeff (~8-9 %); read_ida now prints this cross-check per file
-    # (Callahan 2019 JINST 14 C10002 is the agreement pedigree when C6+
-    # dominates). Everything else (currents,
-    # equilibrium, p_fast, anchors) stays FUSE. Also wire it to
-    # UncertaintyConfig.ida_path so the sigma envelopes come from the same IDA.
+    # When set, the baseline ne/Te/Ti/ni/Z_eff/omega_tor come from this IDA
+    # .cdf (externally fit, smoother across time than FUSE's per-slice fits),
+    # resampled onto the FUSE core_profiles psi_N grid; currents, equilibrium,
+    # p_fast and anchors stay FUSE.  With ni_source="standard" (the default)
+    # Z_eff stays the dd's and n_i follows from it and the IDA n_e (as before
+    # PR #56); the EXPERIMENTAL ni_source routes take Z_eff / n_i from IDA.
+    # Pass the same file as UncertaintyConfig.ida_path (from_imas does) for
+    # the IDA sigma envelopes.
     ida_path: Optional[str] = None
     impurity_Z: float = 6.0            # machine impurity charge (carbon); ni dilution
+    # Z_eff / ni route for ida_hybrid (and for an IDA sigma file):
+    # "standard" (default) | EXPERIMENTAL "Zeff" | "CER" | "all" -- see
+    # ReconstructionSource.ni_source and
+    # bouquet.experimental.REGISTRY["ida_ion_route"].
+    ni_source: str = "standard"
+    # ida_hybrid with an EXPERIMENTAL ni_source only: True keeps the dd's
+    # Z_eff while ne/Te/Ti/ni come from IDA; False takes IDA's resolved Z_eff,
+    # which counts the fast ions in its numerator (a measured Z_eff), so
+    # Baseline.zeff_includes_fast is True.  Under ni_source="standard" the
+    # Z_eff is the dd's either way.
+    zeff_from_fuse: bool = False
     # OPTIONAL. A gEQDSK whose LCFS replaces the dd boundary outline as the
     # isoflux separatrix target. Leave None to use the source's own boundary.
     # Supply one when you have a more accurate separatrix for the slice than the
@@ -249,6 +299,51 @@ class ImasSource:
     # (source_current_sign / source_current_sign_origin), in li_metrics and
     # ip_closure, and on the archive's _baseline attrs.
     current_orientation: Union[str, float] = "auto"
+    # Radial coordinate of the run (bouquet.coords): "psi_n", "phi_n" (the
+    # dd's core_profiles grid.rho_tor_norm**2), or "rho_tor" (same run).
+    coord: str = "psi_n"
+    # Hold the dd's sawteeth core_sources entry (IMAS identifier 701) fixed
+    # as a driven current (True, the default): its j_parallel goes to j_other
+    # (its share also to j_sawteeth), like every other driven entry and as
+    # the unified engine does.  FUSE's j_ohmic EXCLUDES that source
+    # (j_total - j_bootstrap - beams - sawteeth = j_ohmic to rounding on the
+    # synthetic FUSE fixture), so without the hold the legacy inductive
+    # carries it.  False opts out: the entry is not held, its current stays
+    # in the residual j_inductive (the legacy split before the hold) and it
+    # is read only as the sawtooth gate's flag.  Legacy reader only: the
+    # unified engine always holds it and refuses False.  Stamped in
+    # Baseline.source_time_match["sawteeth_hold"] (archived with li_metrics).
+    hold_sawteeth: bool = True
+    # EXPERIMENTAL -- see bouquet.experimental.REGISTRY["fuse_zeff_fast_ions"].
+    # True classifies the dd's stored Z_eff against the thermal-only and the
+    # thermal+fast numerators (io.imas._dd_zeff) and hands the bootstrap the
+    # thermal+fast Z_eff where the dd's convention counts the fast ions.
+    # False (default, as before PR #56): the thermal-only Z_eff recomputed
+    # from the dd's thermal ion densities.
+    zeff_fast_ions: bool = False
+    # EXPERIMENTAL -- see
+    # bouquet.experimental.REGISTRY["ida_ni_beam_subtraction"].  ida_hybrid
+    # with an experimental ni_source: subtract the dd's fast-ion density
+    # equivalent from the IDA (total) n_i.  False (default): no subtraction.
+    ni_subtract_fast: bool = False
+
+    def __post_init__(self):
+        from .coords import run_coord
+        run_coord(self.coord)
+        if not isinstance(self.hold_sawteeth, bool):
+            raise ValueError(f"hold_sawteeth={self.hold_sawteeth!r}: must be "
+                             "True or False")
+        _check_ni_source(self.ni_source, "ImasSource")
+        for _n in ("zeff_fast_ions", "ni_subtract_fast"):
+            if not isinstance(getattr(self, _n), bool):
+                raise ValueError(f"ImasSource.{_n}={getattr(self, _n)!r}: "
+                                 "must be True or False")
+        if self.ni_subtract_fast and self.ni_source == "standard":
+            raise ValueError(
+                "ImasSource.ni_subtract_fast=True subtracts the beam density "
+                "from an IDA-derived n_i, but ni_source='standard' derives n_i "
+                "from the dd's own (thermal) Z_eff; set an experimental "
+                "ni_source ('Zeff' | 'CER' | 'all') or drop ni_subtract_fast")
 
 
 BaselineSource = Union[ReconstructionSource, ImasSource]
@@ -264,7 +359,7 @@ class FixedComponentsConfig:
     These are summed into the baseline *and* every perturbed equilibrium,
     untouched by the GPR perturbation::
 
-        j_phi_total = j_inductive + j_BS + j_NBI + j_RF
+        j_phi_total = j_inductive + j_BS + j_NBI + j_RF + j_other
         p_total     = p_thermal(perturbed) + p_fast
 
     Any component may simply be handed in as a 1-D array over ``psi_N`` -- this is
@@ -278,11 +373,14 @@ class FixedComponentsConfig:
         Either way an explicit array here wins (e.g. from TRANSP/ONETWO).
       * ``j_NBI`` -- :class:`ImasSource` sums beam-source ``j_parallel``;
         :class:`ReconstructionSource` defaults to zero. Explicit array wins.
-      * ``j_RF`` -- **never computed internally** (RF is the least-common input).
-        Always zeros unless the user supplies an array here.
+      * ``j_RF`` -- :class:`ImasSource` sums EC/LH/IC ``j_parallel``;
+        :class:`ReconstructionSource` defaults to zero. Explicit array wins.
+      * ``j_other`` -- :class:`ImasSource` sums fusion, runaways, sawteeth and
+        unknown-index ``j_parallel``; zero elsewhere. Explicit array wins.
 
-    All arrays are on ``psi_N`` (kinetic grid), SI units, toroidal current
-    convention for j_*. ``None`` -> zeros.
+    All arrays are on ``psi_N`` (kinetic grid, in the run coordinate --
+    Φ_N in a ``coord="phi_n"`` run, unless ``coord="psi_n"``), SI units,
+    toroidal current convention for j_*. ``None`` -> zeros.
 
     Current orientation: ``j_NBI`` / ``j_RF`` are given in bouquet's
     POSITIVE-Ip frame -- co-current drive is positive, counter-current drive
@@ -297,7 +395,11 @@ class FixedComponentsConfig:
     p_fast: Optional["np.ndarray"] = None   # fast/beam pressure
     j_NBI: Optional["np.ndarray"] = None    # beam-driven TOROIDAL current density [A/m^2], co-Ip > 0
     j_RF: Optional["np.ndarray"] = None     # RF-driven TOROIDAL current density [A/m^2], co-Ip > 0
+    j_other: Optional["np.ndarray"] = None  # other fixed driven TOROIDAL current [A/m^2]
     psi_N: Optional["np.ndarray"] = None    # grid for the above (if arrays given)
+    # Coordinate of ``psi_N``: "run" (the run's), or "psi_n" (mapped to the
+    # run coordinate through the source equilibrium's psi_N -> Phi_N map).
+    coord: str = "run"
 
     # How to collapse anisotropic fast-ion pressure (p_perp, p_par) to the scalar
     # p_fast that a scalar-pressure GS solver needs. See
@@ -319,6 +421,12 @@ class FixedComponentsConfig:
     #              is applied silently. The rule used and the grounds for it are
     #              recorded on Baseline.p_fast_meta.
     p_fast_reduction: str = "auto"
+
+    def __post_init__(self):
+        from .coords import INPUT_COORDS
+        if self.coord not in INPUT_COORDS:
+            raise ValueError(f"fixed_components.coord must be one of "
+                             f"{INPUT_COORDS}, got {self.coord!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -376,7 +484,6 @@ class UncertaintyConfig:
     ida_path: Optional[str] = None
     sigma_mode: str = "auto"               # "auto" (by dim) | "direct" (*_err) | "ensemble"
     sigma_method: str = "percentile"       # "percentile" | "std"  (ensemble only)
-    sigma_ni_from_ne: bool = True          # IDA path only: sigma_ni = sigma_ne
 
     # flat fractional kinetic sigma envelopes (per channel). ni/Ti default wider
     # than ne/Te -- ion density and temperature are harder to diagnose.
@@ -400,32 +507,31 @@ class UncertaintyConfig:
     # by default for every source (the physically-consistent density scheme --
     # see the aux block below). Each draw perturbs Z_eff within this band and
     # DERIVES the main-ion density ni from (ne, Z_eff) via quasineutrality, so
-    # ni/nz/Z_eff stay mutually consistent and ni_scalar_sigma is unused.
+    # ni/nz/Z_eff stay mutually consistent; ni_scalar_sigma is then unused
+    # (it IS used whenever ni_from_zeff resolves False -- see below).
     # Real Z_eff (visible bremsstrahlung / CER) is ~10-20% uncertain; the 0.05
     # default is deliberately conservative -- widen it for a realistic envelope.
     # Set 0.0 to disable (Z_eff held at baseline, ni drawn independently).
     # An explicit aux_sigmas['zeff'] always overrides this.
     zeff_scalar_sigma: float = 0.05
     # Where the Z_eff envelope's MAGNITUDE comes from (the channel is enabled
-    # by zeff_scalar_sigma > 0 either way):
-    #   "auto"     -- highest-fidelity tier the file supports:
-    #                 carbon-propagated dilution sigma (n_12C6_err / the
-    #                 dilution posterior; 1.9-5.8 % of Zeff in-core on the
-    #                 demo shots, sane in the SOL) > the file's VB-measured
-    #                 sigma_Zeff (Zeff_err / sample spread; 8-9 % core but
-    #                 44-130 % SOL, grand means to ~90 % on some shots) >
-    #                 the scalar.  The Zeff-primary scheme perturbs Zeff to
-    #                 move the dilution ni = ne - Z nC, and CER carbon IS
-    #                 that dilution's direct measurement, hence the order.
-    #   "carbon"   -- require the carbon-propagated tier; loud fallback.
-    #   "measured" -- require the VB-measured envelope; loud fallback.
-    #   "scalar"   -- always the flat zeff_scalar_sigma fraction (the only
-    #                 behaviour before 1.4.0).
-    # Only the reconstruction/IDA path is eligible for the measured tiers,
-    # and only when the sigma .cdf IS the source's own profiles file: on the
-    # IMAS/ida_hybrid path the Z_eff baseline is FUSE's, and pairing a FUSE
-    # baseline (or a p-file one, or a different .cdf vintage named via
-    # ida_path) with an IDA-measured envelope would mix channels.  That file
+    # by zeff_scalar_sigma > 0 either way).  With the source's
+    # ni_source="standard" (the default) the ladder is carbon > VB > scalar:
+    #   "auto"     -- carbon-propagated (n_12C6_err / the dilution
+    #                 posterior) > VB-measured (Zeff_err / the Z_eff sample
+    #                 spread) > the scalar.
+    #   "carbon"   -- the same order, warning on a fallback.
+    #   "measured" -- VB-measured, warning on a fallback.
+    #   "scalar"   -- always the flat zeff_scalar_sigma fraction.
+    # With an EXPERIMENTAL ni_source (bouquet.experimental.REGISTRY
+    # ["ida_ion_route"]) "auto"/"measured" take the IDA-resolved envelope
+    # (read_ida walks VB+CER > CER > VB, the route disagreement folded in)
+    # and "carbon" is a single-route override.
+    # The measured tiers are eligible only when the Z_eff baseline came from
+    # the sigma .cdf itself: the reconstruction source's own profiles file
+    # (or, on the experimental route only, ImasSource.ida_path).  A p-file
+    # or IMAS/FUSE Z_eff baseline, or a different .cdf vintage named via
+    # ida_path, is refused: it would mix channels.  That file
     # test compares RESOLVED paths (expanduser + realpath, samefile when both
     # exist), so a relative-vs-absolute, '~'-prefixed, trailing-slash or
     # symlinked spelling of the same file stays eligible.
@@ -434,6 +540,29 @@ class UncertaintyConfig:
     # missing dataset / invalid data), and the same record is returned as
     # resolve_uncertainty()'s "zeff_sigma_tier" metadata.
     zeff_sigma_source: str = "auto"
+
+    # With the zeff channel active: True derives ni per draw from the drawn
+    # (ne, Zeff) as an increment on the baseline ni (kinetic_sampler/3;
+    # sigma_ni unused); False draws ni from its own sigma_ni and Z_eff
+    # passively AFTER Ti (a different RNG order).
+    # None = auto: True (ni is always derived when the channel has dilution,
+    # as before PR #56) -- unless the source's ni_source is EXPERIMENTAL
+    # (bouquet.experimental.REGISTRY["ida_ion_route"]), where the PR #56 rule
+    # applies: True when ni's sigma is the flat ni_scalar_sigma fallback, or
+    # when ni AND the Z_eff envelope are the same IDA resolution (Z_eff tier
+    # "IDA-resolved"; sigma_ni kept via IDAProfiles.zeff_dne); False for any
+    # other real ni envelope.  That rule changes with the Z_eff tier; pin
+    # this field explicitly for an A/B of Z_eff envelopes.
+    ni_from_zeff: Optional[bool] = None
+    # EXPERIMENTAL -- see bouquet.experimental.REGISTRY["kinetic_sampler_clips"].
+    # The PR #56 clips of the kinetic sampler: a drawn Z_eff floored at 1
+    # where physics.zeff_bounds allows less, a derived n_i held in
+    # [0, ne - z_fast], an independent n_i capped at ne - z_fast when Z_imp is
+    # declared, a passive Z_eff aux draw clipped to the window.  None = auto:
+    # on only when an experimental PR #56 kinetic feature is (ida_ion_route,
+    # fuse_zeff_fast_ions, ida_ni_beam_subtraction); False: only the
+    # zeff_bounds window (the bound in place before PR #56); True: on.
+    kinetic_clips: Optional[bool] = None
 
     # GPR correlation length scales (psi_N units) -- define the perturbation
     n_ls: float = 0.5                      # density
@@ -454,6 +583,9 @@ class UncertaintyConfig:
     aux_baselines: dict = field(default_factory=dict)      # {name: baseline(psi_N)}
     aux_length_scales: dict = field(default_factory=dict)  # {name: GPR length} (default 0.4)
 
+
+#: GenerationConfig.swb_saw_rule -> OFT boot_ops saw_rule.
+SWB_SAW_RULES = {"fuse": 1, "local": 2}
 
 # ---------------------------------------------------------------------------
 # Generation + filtering
@@ -511,8 +643,8 @@ class GenerationConfig:
     l_i_tolerance: float = 0.05            # l_i acceptance band (fraction of target)
     constrain_sawteeth: bool = False
     # When True, recompute bootstrap each draw via TokaMaker solve_with_bootstrap
-    # and convert its parallel output to toroidal <j_phi> with the one
-    # field-aligned factor F<1/R>/<B^2> (physics.field_aligned_conversion),
+    # (its j_BS converted to the field-aligned kappa <j.B> for the installed
+    # toolkit's output convention: TokaMaker_interface.swb_result_toroidal),
     # overriding the baseline/FUSE j_BS. When False, keep the baseline j_BS.
     recalculate_j_BS: bool = True
     # Treat j_phi as ONE profile: no inductive/bootstrap decomposition anywhere.
@@ -1011,9 +1143,10 @@ class GenerationConfig:
     anchor_jtor_to_equilibrium: bool = True
     # Source of the baseline kinetic profiles on the IMAS path:
     #   "fuse"       -> FUSE core_profiles ne/Te/Ti (default; original behaviour)
-    #   "ida_hybrid" -> ne/Te/Ti/omega_tor from ImasSource.ida_path (resampled onto
-    #                   the FUSE psi_N grid); Z_eff/Z_imp/ni-dilution stay FUSE;
-    #                   currents/equilibrium/p_fast/anchors stay FUSE.
+    #   "ida_hybrid" -> ne/Te/Ti/ni/Z_eff/omega_tor from ImasSource.ida_path at
+    #                   ImasSource.ida_time (resampled onto the FUSE grid; Z_eff is
+    #                   IDA's unless ImasSource.zeff_from_fuse); currents/equilibrium/
+    #                   p_fast/anchors stay FUSE, at ImasSource.time.
     kinetic_source: str = "fuse"
     # Anchor the solve thermal pressure to equilibrium.pressure via the fixed
     # p_diff = equilibrium.pressure - p_reconstructed offset. With FUSE kinetics
@@ -1037,25 +1170,124 @@ class GenerationConfig:
     # already ~clean, so flooring is redundant -- and it REGRESSED a stiff
     # high-l_i case (clipping its isolate-edge spike drove yield to 0).
     floor_j_BS: bool = False
-    # DEPRECATED; LEGACY only (the frozen-bootstrap path,
-    # jbs_self_consistent=False).  solve_with_bootstrap's fixed Picard pass
-    # count per draw (default 3; there is no convergence test inside it);
-    # lowering to 2 trades a little accuracy for speed on large bouquets.
-    # NOTE: the IMAS baseline's own SWB call never passed this and always ran
-    # OFT's own default (iterations=3); only the draws, the delta-mode cache
-    # and verify_sigma0_consistency read it.  With jbs_self_consistent=True
-    # the bootstrap comes from the self-consistent loop and this is IGNORED:
-    # config validation (BouquetConfig) then emits a DeprecationWarning for
-    # any value other than the default.
-    swb_iterations: int = 3
-    # GS iteration cap for generate()'s draw loop (TokaMaker_interface.
-    # DrawSolveGuard).  None (default) keeps the solver's own setup cap, so
-    # nothing changes unless it is set; a solve that hits a cap still fails
-    # the draw exactly as before (no re-solve at another tolerance).  Every
-    # draw solve that raises is recorded either way: per draw in
+    # Keyword options forwarded to every solve_with_bootstrap call
+    # (validate_bootstrap_kwargs: an explicit allow-list,
+    # BOOTSTRAP_KWARGS_ALLOWED, so a typo is refused with or without
+    # OpenFUSIONToolkit; a key the call sites set is refused; on the legacy
+    # path a key the INSTALLED toolkit lacks is refused for a new config and
+    # warned about when a stored config is loaded).  Checked at construction
+    # AND whenever the attribute is reassigned.  The unified engine reads only
+    # its own edge-taper keys (taper off by default) and use_sauter_eps=True;
+    # it implements them itself, so they need no toolkit capability there.
+    # Replaces swb_iterations.
+    bootstrap_kwargs: dict = field(default_factory=dict)
+    # Opt-in for the bootstrap keys that change a CONVERGENCE criterion of the
+    # toolkit's internal bootstrap solve (BOOTSTRAP_CONVERGENCE_KWARGS:
+    # djBS_tol, the j_BS freeze threshold; saw_relax).  False: such a key in
+    # bootstrap_kwargs is refused.  True: accepted with a warning, and the
+    # config_json of every archive carries both this flag and the values.
+    # Legacy paths only (the unified engine never runs solve_with_bootstrap
+    # and refuses those keys).  EXPERIMENTAL -- see
+    # bouquet.experimental.REGISTRY["bootstrap_convergence_override"].
+    bootstrap_convergence_override: bool = False
+    # The inverse aspect ratio of the Redl collisionalities, and the major
+    # radius R that goes with it in nu_e* / nu_i* (Sauter 1999 Eqs. 18b/18c),
+    # at EVERY bouquet Redl evaluation (physics.evaluate_jBS: the unified
+    # engine's reconstruction and draws, the legacy self-consistent loop, the
+    # IMAS baseline loop, the delta-cache references); engine-independent.
+    # "r_over_R_geo" (default, owner decision E7 2026-10-09): eps = (R_max -
+    # R_min)/(R_max + R_min) with R_geo = (R_max + R_min)/2 in nu* -- the
+    # surface's r/R0 (Sauter 1999 / Redl 2021; OMFIT, FUSE).
+    # "half_width_over_fsa_R": (R_max - R_min)/(2<R>) with <R> in nu*;
+    # "a_over_R": <a>/<R> with <R> in nu* (the pre-2026-10-09 evaluator, bit
+    # for bit).  See physics.EPS_DEFINITIONS / NU_STAR_R and
+    # docs/physics-notes.md "Inverse aspect ratio".  A stored config without
+    # the field replays with this default (warned); one that names a
+    # definition keeps it.  Toolkit-internal solve_with_bootstrap calls (the
+    # legacy frozen bootstrap, the swb method) form their own nu* and do not
+    # read it.
+    eps_definition: str = "r_over_R_geo"
+    # GS iteration cap for the DRAW solves of generate()'s legacy / swb draw
+    # loop (TokaMaker_interface.DrawSolveGuard): applied from the first draw
+    # on, never to the cold baseline re-solve or the sigma=0 reference solve
+    # before it.  Draw solves converge in <= ~25 iterations; a failing one
+    # sits in a limit cycle and burns the whole cap.  "auto" (default) is
+    # resolved per engine at prepare_baseline() (engine.ENGINE_DEPENDENT_
+    # DEFAULTS; recorded in engine_resolved_defaults): 100 under "legacy";
+    # under "unified" the engine draws are capped by engine_draw_solve_maxits
+    # and any other value is refused.  None keeps the solver's setup cap
+    # (800) -- what a stored config with null, or without the field, ran.
+    # Every draw solve that raises is recorded: per draw in
     # diagnostics['solve_failures'], on Bouquet.solve_failures, and in one
     # printed "[draw-solves]" line.
-    draw_solve_maxits: Optional[int] = None
+    draw_solve_maxits: Union[int, str, None] = "auto"
+    # OPT-IN rescue of a capped DRAW solve (owner decision D5, 2026-10-09;
+    # both off by default; refused under the unified engine): retried from
+    # where it stopped at each of these GS under-relaxation factors (a
+    # solver-side remedy), then accepted at nl_tol = draw_solve_loose_tol --
+    # a LOOSER acceptance criterion than the solver's own nl_tol.  Every
+    # rescued draw is stamped in the archive (solve_recovered,
+    # solve_recovered_by, solve_nl_tol_accepted, solve_residual_upper/lower,
+    # solve_strict_nl_tol) and stats.draw_band / merge_archives can exclude
+    # rescued draws (rescued="exclude"; the default includes them with a
+    # warning count).  The swb draws get it too (stamped the same way).
+    draw_solve_retry_urf: tuple = ()
+    draw_solve_loose_tol: Optional[float] = None
+    # SWB inputs on the IMAS path (baseline split, draws, sigma=0 check):
+    # "source" seeds SWB with the source's j_inductive and holds the rest of
+    # its current (NBI + RF + other) fixed via jphi_fixed; "generic" uses the
+    # (1 - s^1.5)^1.5 seed and no fixed current.  None (the default) is
+    # resolved at prepare_baseline(): "source" when the installed
+    # OpenFUSIONToolkit's solve_with_bootstrap takes jphi_fixed, else
+    # "generic" -- never an error.  An explicit "source" on a toolkit
+    # without jphi_fixed is refused at the first SWB call (not when no SWB
+    # runs).  The resolution is stamped in li_metrics["swb_seed"].  g-file
+    # paths: "generic".  The swb solve method needs "source" (None resolves
+    # to it there; its toolkit check refuses one without jphi_fixed).
+    swb_seed: Optional[str] = None
+    # The solve method, one of SOLVE_METHODS: "legacy", "swb"
+    # (solve_with_bootstrap is the baseline and every draw; IMAS sources) or
+    # "engine" (the unified engine).  None: derived from imas_baseline /
+    # reconstruction_engine; set, it decides, and they are set to match where
+    # the run is resolved (resolve_solve_method, at prepare_baseline; never
+    # at construction).  A contradicting pair is refused.  "swb" is
+    # EXPERIMENTAL -- see bouquet.experimental.REGISTRY["swb_solve_method"].
+    solve_method: Optional[str] = None
+    # IMAS baseline + draws: "closure" (legacy) or "swb": solve A at the setup
+    # coil reg, solve B with the strong reg toward A's coils is the baseline,
+    # and every draw is solve B with resampled kinetics and inductive seed
+    # (bouquet.swb).  "swb" is EXPERIMENTAL -- see
+    # bouquet.experimental.REGISTRY["swb_solve_method"].
+    imas_baseline: str = "closure"
+    # imas_baseline="swb": weight of solve B's (and every draw's) coil reg toward
+    # solve A's coils (#VSC toward 0 at 1.0); 1e4 can send SWB to a wrong
+    # equilibrium.
+    swb_coil_reg_weight: float = 1.0e3
+    # swb only.  Taper j_phi to 0 from this psi_N to the LCFS in every SWB
+    # solve (OFT taper_edge_jBS): finite edge current next to a
+    # near-degenerate second null can leave the Picard on a 2-cycle.  OPT-IN
+    # (owner decision D4, 2026-10-09; was 0.999): None is off, and is sent to
+    # the toolkit as taper_edge_jBS=False where it has the option, because a
+    # toolkit whose own default is taper-on keeps it on otherwise
+    # (swb_bootstrap_kwargs).
+    swb_edge_taper_psi0: Optional[float] = None
+    # swb only.  Largest |Ip/Ip_target - 1| an swb solve (solve A, solve B,
+    # every draw) is accepted at; beyond it the solve raises.  Stamped on
+    # _baseline (swb_ip_tol) with each solve's own error (swb_ip_rel_err);
+    # a solve accepted above SWB_IP_WARN (1e-4, the engine's I_p acceptance)
+    # warns.  5e-3 pending owner decision E6 (review PR69 B1: the method's
+    # own solver test measures <= 8e-6).
+    swb_ip_tol: float = 5.0e-3
+    # imas_baseline="swb" sawtooth q reset inside SWB (OFT saw_q_s; None = off):
+    # Baseline.j_sawteeth becomes SWB's jphi_saw input.  swb_saw_dq / _tol /
+    # _ramp map onto OFT's saw_dq / saw_tol / saw_ramp, swb_saw_rule onto
+    # saw_rule ("local": each dip below swb_saw_q; "fuse": axis to the mixing
+    # radius).  saw_relax goes via bootstrap_kwargs.
+    swb_saw_q: Optional[float] = None
+    swb_saw_dq: float = 0.03
+    swb_saw_tol: float = 1.0e-4
+    swb_saw_ramp: float = 0.01
+    swb_saw_rule: str = "local"
     # --- self-consistent bootstrap loop (bouquet.jbs_loop) -------------------
     # True (default): j_BS is re-evaluated (physics.evaluate_jBS: Redl on the
     # caller's own psi_N grid and the CURRENT equilibrium's geometry) inside a
@@ -1078,7 +1310,7 @@ class GenerationConfig:
     # Initial guess of the loop: "anchor" = evaluate_jBS on the anchor
     # equilibrium (the source's own total current and full pressure); "swb" =
     # the legacy solve_with_bootstrap result (A/B only).  The fixed point does
-    # not depend on it.
+    # not depend on it.  (Only a seed of the Redl loop: not solve_method="swb".)
     jbs_init: str = "anchor"
     # Convergence tolerances (all active ones must hold on two consecutive
     # passes):
@@ -1370,22 +1602,67 @@ class GenerationConfig:
 
     # Live-equilibrium capture for exact IMAS/OMAS export. When True (default),
     # each draw's converged TokaMaker flux-surface-average metrics are snapshot
-    # into the archive (scan/<key>/<draw>/eq_fsa/), so IDS write-back does an
-    # exact per-draw toroidal->parallel current conversion instead of the
-    # interim baseline-ratio reconstruction. Cheap; set False to skip.
+    # into the archive (scan/<key>/<draw>/eq_fsa/), so IDS write-back converts
+    # currents exactly per draw instead of with the template (baseline)
+    # geometry. Cheap; set False to skip.
     capture_live_eq: bool = True
     # FSA grid for the captured block (matches the 257^2 eqdsk; >=129).
     capture_npsi: int = 257
     # Record <1/R^2> in the captured block (from get_q when the OFT build
-    # exposes it, else by flux-surface quadrature).  Archived geometry only:
-    # since 2026-10-06 the IDS export's conversion is the one field-aligned
-    # factor F<1/R>/<B^2> (physics.field_aligned_conversion), which does not
-    # read it.  The quadrature adds ~65 surface traces/draw; set False to skip
-    # that cost (self-validated + graceful fallback either way).
+    # exposes it, else by flux-surface quadrature): the exact IMAS j_tor
+    # conversion (A5) at IDS export needs it (a draw without it exports with
+    # the template geometry).  The quadrature adds ~65 surface traces/draw;
+    # set False to skip that cost.
     capture_exact_inv_R2: bool = True
+    # Also archive an OFT i-file (TokaMaker.save_ifile, OFT main since #151: psi, F, p,
+    # q per flux surface and R,Z on the surfaces) for GPEC eq_type='ldp_i', per stored
+    # draw and for the baseline, from the same state and with the same lcfs_pressure
+    # (p_sep) and lcfs_pad as that state's g-file.  Refused at generate() when the
+    # solver has no save_ifile.  Each group is stamped ifile_written / ifile_error /
+    # ifile_npsi / ifile_ntheta / ifile_lcfs_pressure / ifile_frame (positive-Ip frame,
+    # issue #68).  About 0.5 MB per draw at the default grid.
+    write_ifile: bool = False
+    ifile_npsi: int = 129
+    ifile_ntheta: int = 257
+
+    #: Set from the ``swb_saw_*`` fields, never from ``bootstrap_kwargs``.
+    _SAW_RESERVED = frozenset(
+        "jphi_saw saw_q_s saw_dq saw_tol saw_ramp saw_rule".split())
+
+    def _validate_bootstrap_kwargs(self, value):
+        """:func:`validate_bootstrap_kwargs` with this config's reserved
+        names, engine and convergence opt-in.
+
+        The ONE bootstrap_kwargs validation (construction and reassignment):
+        PR #60's allow-list / capability / convergence-flag checks with
+        PR #69's reserved sets, judged for the solve method the run will use
+        (:func:`solve_method_of` and its effective engine -- the config is
+        not rewritten at construction, review PR69 B4): ``p_fixed`` is
+        reserved for the swb method, and the toolkit capability is checked
+        wherever the keys reach ``solve_with_bootstrap`` (legacy and swb)."""
+        sm = solve_method_of(self)
+        engine = _effective_solve_fields(self, sm, _user_solve_fields(self))[1]
+        validate_bootstrap_kwargs(
+            value,
+            _BOOTSTRAP_RESERVED | self._SAW_RESERVED
+            | ({"jphi_fixed"} if self.swb_seed in (None, "source") else set())
+            | ({"p_fixed"} if sm == "swb" else set()),
+            engine=str(engine),
+            convergence_override=bool(getattr(
+                self, "bootstrap_convergence_override", False)))
+
+    def __setattr__(self, name, value):
+        # The notebook idiom sets ``bootstrap_kwargs`` AFTER construction;
+        # validate it there too (before assigning, so a refused value is
+        # never left in place).
+        if (name == "bootstrap_kwargs"
+                and self.__dict__.get("_bootstrap_kwargs_armed")):
+            self._validate_bootstrap_kwargs(value)
+        object.__setattr__(self, name, value)
 
     def __post_init__(self):
-        """Resolve ``structured_preset`` into the individual structured fields.
+        """Validate ``bootstrap_kwargs``, then resolve ``structured_preset``
+        into the individual structured fields.
 
         Thin wrapper over :func:`resolve_structured_preset`, which carries the
         rules (and is called again at the closure's own entry point, where it
@@ -1413,17 +1690,72 @@ class GenerationConfig:
         switches the channel on -- ``structured_preset=None`` resolves to the
         DEFAULT preset only when the channel is already ``"structured"``.
         """
+        if self.swb_seed not in (None, "source", "generic"):
+            raise ValueError(f"swb_seed={self.swb_seed!r} not in (None, 'source', 'generic')")
+        if self.imas_baseline not in ("closure", "swb"):
+            raise ValueError(
+                f"imas_baseline={self.imas_baseline!r} not in ('closure', 'swb')")
+        if self.swb_saw_q is not None and not float(self.swb_saw_q) > 0.0:
+            raise ValueError(f"swb_saw_q={self.swb_saw_q!r}: must be > 0 (None = off)")
+        for name in ("swb_saw_dq", "swb_saw_tol"):
+            if not float(getattr(self, name)) > 0.0:
+                raise ValueError(f"{name}={getattr(self, name)!r} must be > 0")
+        if not float(self.swb_saw_ramp) >= 0.0:
+            raise ValueError(f"swb_saw_ramp={self.swb_saw_ramp!r} must be >= 0")
+        if self.swb_saw_rule not in SWB_SAW_RULES:
+            raise ValueError(f"swb_saw_rule={self.swb_saw_rule!r} not in {tuple(SWB_SAW_RULES)}")
+        _t = self.swb_ip_tol
+        if isinstance(_t, bool) or not (float(_t) > 0.0 and float(_t) < 1.0):
+            raise ValueError(f"swb_ip_tol={_t!r} must be in (0, 1)")
+        from .physics import check_eps_definition
+        check_eps_definition(self.eps_definition)
+        solve_method_of(self)      # refuses a contradiction; writes nothing
+        self._validate_bootstrap_kwargs(self.bootstrap_kwargs)
+        object.__setattr__(self, "_bootstrap_kwargs_armed", True)
         resolve_structured_preset(self, stacklevel=4)
         validate_structured_mse_settings(self)
         from .edge_pressure import validate_edge_pressure_settings
         validate_edge_pressure_settings(self.edge_pprime_pin,
                                         self.separatrix_pressure)
-        _m = self.draw_solve_maxits
         import numbers
-        if _m is not None and (isinstance(_m, bool) or not isinstance(
-                _m, numbers.Integral) or _m < 1):
+        for _n in ("ifile_npsi", "ifile_ntheta"):
+            _v = getattr(self, _n)
+            # the OFT sampler divides by n - 1
+            if isinstance(_v, bool) or not isinstance(
+                    _v, numbers.Integral) or _v < 2:
+                raise ValueError(f"{_n}={_v!r} must be an integer >= 2")
+        _m = self.draw_solve_maxits
+        if _m is not None and _m != "auto" and (
+                isinstance(_m, bool) or not isinstance(_m, numbers.Integral)
+                or _m < 1):
             raise ValueError(f"draw_solve_maxits={_m!r} must be an integer "
-                             ">= 1, or None for the solver's own cap")
+                             ">= 1, 'auto' (resolved per engine at "
+                             "prepare_baseline()) or None for the solver's "
+                             "own cap")
+        validate_draw_solve_rescue(self.draw_solve_retry_urf,
+                                   self.draw_solve_loose_tol)
+
+
+def validate_draw_solve_rescue(retry_urf, loose_tol):
+    """Refuse a malformed rescue setting (``draw_solve_retry_urf`` each a
+    real number in (0, 1]; ``draw_solve_loose_tol`` None or a finite real
+    > 0) -- at config time and again at the guard."""
+    import math
+    import numbers
+    if isinstance(retry_urf, (str, bytes)) or not hasattr(
+            retry_urf if retry_urf is not None else (), "__iter__"):
+        raise ValueError(f"draw_solve_retry_urf={retry_urf!r} must be a "
+                         "sequence of under-relaxation factors in (0, 1]")
+    for u in (retry_urf or ()):
+        if isinstance(u, bool) or not isinstance(u, numbers.Real) \
+                or not 0.0 < float(u) <= 1.0:
+            raise ValueError(f"draw_solve_retry_urf={retry_urf!r}: each "
+                             "must be a number in (0, 1]")
+    if loose_tol is not None and (
+            isinstance(loose_tol, bool) or not isinstance(loose_tol, numbers.Real)
+            or not math.isfinite(float(loose_tol)) or not float(loose_tol) > 0.0):
+        raise ValueError(f"draw_solve_loose_tol={loose_tol!r} must be a "
+                         "finite number > 0, or None (the default: off)")
 
 
 def validate_structured_mse_settings(gc) -> None:
@@ -1496,6 +1828,396 @@ def validate_structured_mse_settings(gc) -> None:
             "generation.mse_data with imas_corrective_jphi=True is refused: "
             "the MSE Jacobian differences plain solves against a predictor "
             "solved WITH the corrective iteration, which biases every column")
+
+
+#: Arguments the call sites set themselves; ``bootstrap_kwargs`` may not
+#: shadow them (duplicate keyword, or a silent override of a per-draw value).
+#: ``*_prof`` / ``jphi_fixed_prof`` / ``p_fixed_prof`` / ``jphi_saw_prof``:
+#: the toolkit's ``solve_with_bootstrap`` passes them to ``solve_bootstrap``
+#: itself, so a user value would be a duplicate keyword in every call.
+_BOOTSTRAP_RESERVED = frozenset(
+    "mygs ne Te ni Ti Zeff Ip_target inductive_jphi scale_jBS "
+    "isolate_edge_jBS verbose diagnostic_plots psi_pad psi_N x coord "
+    "ffp_prof ne_prof te_prof ni_prof ti_prof "
+    "jphi_fixed_prof p_fixed_prof jphi_saw_prof pres_prof F0".split()
+)
+
+#: The explicit allow-list of OpenFUSIONToolkit bootstrap options
+#: ``bootstrap_kwargs`` may carry, with where each lives.  A key outside it is
+#: refused whether or not the toolkit is importable (a typo never survives to
+#: the draw loop).  Whether the INSTALLED toolkit has the option is checked
+#: separately (:func:`_bootstrap_kwarg_names`).
+BOOTSTRAP_KWARGS_ALLOWED = {
+    # solve_with_bootstrap, OpenFUSIONToolkit main and later
+    "Zis": "solve_with_bootstrap",
+    "iterations": "solve_with_bootstrap (Python solve passes)",
+    "parameterize_jBS": "solve_with_bootstrap",
+    "use_OMFIT_sauter": "solve_with_bootstrap",
+    # builds with the internal Fortran bootstrap solve (OpenFUSIONToolkit
+    # PR #271 / the bouquet_dev fork) only
+    "use_sauter_eps": "solve_with_bootstrap (internal-solve builds)",
+    "use_python_solve": "solve_with_bootstrap (internal-solve builds)",
+    "diagnose_bs": "set_boot_ops (internal-solve builds)",
+    "djBS_tol": "set_boot_ops (internal-solve builds; CONVERGENCE)",
+    "saw_relax": "set_boot_ops (internal-solve builds; CONVERGENCE)",
+    "taper_edge_jBS": "set_boot_ops (internal-solve builds); the unified "
+                      "engine implements it itself",
+    "taper_edge_psi0": "set_boot_ops (internal-solve builds); the unified "
+                       "engine implements it itself",
+    "taper_edge_shape": "set_boot_ops (internal-solve builds); the unified "
+                        "engine implements it itself",
+}
+
+#: Allow-listed keys that change a convergence criterion of the toolkit's
+#: internal bootstrap solve: refused unless
+#: ``GenerationConfig.bootstrap_convergence_override`` (``saw_tol`` is set from
+#: ``swb_saw_tol`` and reserved).
+BOOTSTRAP_CONVERGENCE_KWARGS = frozenset({"djBS_tol", "saw_relax"})
+
+#: True while :meth:`BouquetConfig.from_dict` rebuilds a STORED config: a
+#: bootstrap option the installed toolkit lacks is then warned about, not
+#: refused, so an archive written on another toolkit build stays loadable.
+_LOADING_STORED_CONFIG = contextvars.ContextVar(
+    "bouquet_loading_stored_config", default=False)
+
+_BOOTSTRAP_NAMES_CACHE: dict = {}
+
+
+def _bootstrap_kwarg_names():
+    """Every keyword the INSTALLED toolkit's bootstrap entry points accept
+    (introspected).  ``None`` when OpenFUSIONToolkit is not importable, which
+    skips the capability check (the allow-list still applies).  A successful
+    introspection is cached per process; a failed one is not, so a config
+    built before ``add_oft_to_path()`` does not switch the check off for the
+    whole process.
+    """
+    if "names" in _BOOTSTRAP_NAMES_CACHE:
+        return _BOOTSTRAP_NAMES_CACHE["names"]
+    try:
+        import inspect
+
+        from OpenFUSIONToolkit.TokaMaker._core import TokaMaker
+        from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
+
+        # Only the entry points this toolkit has: on one without the
+        # internal solve, the accepted set is solve_with_bootstrap's own
+        # arguments, which is what it accepts there.
+        names = set()
+        for fn in (solve_with_bootstrap,
+                   getattr(TokaMaker, "solve_bootstrap", None),
+                   getattr(TokaMaker, "set_boot_ops", None)):
+            if fn is None:
+                continue
+            names |= {prm.name for prm in inspect.signature(fn).parameters.values()
+                      if prm.kind in (prm.POSITIONAL_OR_KEYWORD, prm.KEYWORD_ONLY)}
+        _BOOTSTRAP_NAMES_CACHE["names"] = frozenset(names) - {"self"}
+        return _BOOTSTRAP_NAMES_CACHE["names"]
+    except Exception:
+        # No OFT (unit tests, a docs build): cannot introspect, so do not
+        # guess; a wrong key then surfaces at the call.
+        return None
+
+
+#: The internal solve methods (GenerationConfig.solve_method).
+SOLVE_METHODS = ("legacy", "swb", "engine")
+
+
+def _user_solve_fields(gc):
+    """``(imas_baseline, reconstruction_engine)`` as the USER set them.
+
+    :func:`resolve_solve_method` writes both fields to the method's effective
+    values and remembers what it found (``gc._solve_method_written``); a
+    field that still holds the value it wrote is read as the user's earlier
+    value, a field edited since as the edit.  So switching a run back to the
+    default restores the engine instead of leaving the written ``"legacy"``
+    (review PR69 B4)."""
+    cur = (str(getattr(gc, "imas_baseline", "closure")),
+           str(getattr(gc, "reconstruction_engine", "legacy")))
+    w = getattr(gc, "_solve_method_written", None)
+    if not isinstance(w, dict):
+        return cur
+    return tuple(u if c == wr else c
+                 for c, wr, u in zip(cur, w["wrote"], w["user"]))
+
+
+def solve_method_of(gc) -> str:
+    """The solve method of *gc* (one of :data:`SOLVE_METHODS`), WITHOUT
+    touching it: ``solve_method`` when set, else derived from the user's
+    ``imas_baseline`` / ``reconstruction_engine`` (:func:`_user_solve_fields`)
+    -- ``"swb"`` for ``imas_baseline="swb"``, else the engine for
+    ``reconstruction_engine="unified"``, else legacy.
+
+    A contradicting pair is REFUSED, symmetrically: ``imas_baseline="swb"``
+    with ``solve_method`` other than ``"swb"``, and
+    ``reconstruction_engine="legacy"`` (not the default) with
+    ``solve_method="engine"``."""
+    sm = getattr(gc, "solve_method", None)
+    if sm is not None and sm not in SOLVE_METHODS:
+        raise ValueError(f"generation.solve_method={sm!r} must be one of "
+                         f"{SOLVE_METHODS}")
+    ib, eng = _user_solve_fields(gc)
+    if sm is None:
+        return "swb" if ib == "swb" else (
+            "engine" if eng == "unified" else "legacy")
+    if ib == "swb" and sm != "swb":
+        raise ValueError(f"generation.solve_method={sm!r} contradicts "
+                         'imas_baseline="swb"; set solve_method alone')
+    if eng == "legacy" and sm == "engine":
+        raise ValueError('generation.solve_method="engine" contradicts '
+                         'reconstruction_engine="legacy"; set solve_method '
+                         "alone")
+    return sm
+
+
+def resolve_solve_method(gc) -> str:
+    """The solve method of *gc* (:func:`solve_method_of`), with
+    ``imas_baseline`` / ``reconstruction_engine`` set to its effective values
+    (in place): ``"swb"`` -> ``("swb", "legacy")``, ``"legacy"`` ->
+    ``(closure, "legacy")``, ``"engine"`` -> ``(closure, "unified")``.
+
+    Called where the run is resolved -- :meth:`bouquet.run.Bouquet.
+    prepare_baseline` (like the engine-dependent defaults), the draw method,
+    the solver setup -- never at construction (review PR69 B4: writing them
+    at construction sent a user who switched ``imas_baseline`` back to the
+    LEGACY engine).  What it found is remembered, so a later switch back
+    restores the user's own fields (:func:`_user_solve_fields`).
+    Idempotent."""
+    sm = solve_method_of(gc)
+    user = _user_solve_fields(gc)
+    ib, eng = _effective_solve_fields(gc, sm, user)
+    gc.imas_baseline, gc.reconstruction_engine = ib, eng
+    gc._solve_method_written = {"wrote": (ib, eng), "user": user}
+    return sm
+
+
+def _effective_solve_fields(gc, sm, user):
+    """``(imas_baseline, reconstruction_engine)`` the method runs with: the
+    user's own when ``solve_method`` is None and ``imas_baseline`` is not
+    ``"swb"`` (they ARE the selection, unchanged -- also a malformed engine
+    name, which validate_engine_settings then refuses by name), else the
+    method's."""
+    if getattr(gc, "solve_method", None) is None and user[0] != "swb":
+        return user
+    ib = "swb" if sm == "swb" else ("closure" if user[0] == "swb" else user[0])
+    return ib, ("unified" if sm == "engine" else "legacy")
+
+
+class _EffectiveSolveFields:
+    """A read-only view of a GenerationConfig whose ``imas_baseline`` /
+    ``reconstruction_engine`` are the solve method's effective values
+    (:func:`resolve_solve_method`'s), for the construction-time checks --
+    which must judge the method the run will use, without the config being
+    rewritten."""
+
+    def __init__(self, gc):
+        object.__setattr__(self, "_gc", gc)
+        ib, eng = _effective_solve_fields(gc, solve_method_of(gc),
+                                          _user_solve_fields(gc))
+        object.__setattr__(self, "imas_baseline", ib)
+        object.__setattr__(self, "reconstruction_engine", eng)
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_gc"), name)
+
+    def __setattr__(self, name, value):
+        raise AttributeError("read-only view")
+
+
+def swb_config_problems(config):
+    """Settings ``imas_baseline="swb"`` cannot honour, as messages (empty: OK).
+
+    The Fortran SWB's inductive scale alpha IS the Ip closure, so every
+    bouquet closure / anchor / delta mode is refused rather than combined.
+    """
+    import os
+    gc, sc = config.generation, config.solver
+    p = []
+    if not isinstance(config.source, ImasSource):
+        p.append("needs an ImasSource")
+    if gc.kinetic_source != "ida_hybrid":
+        p.append(f"kinetic_source={gc.kinetic_source!r} (only 'ida_hybrid' for now)")
+    if gc.swb_seed not in (None, "source"):
+        p.append("swb_seed must be 'source' or None (the source split is the SWB input)")
+    for name in ("single_profile_jphi", "imas_corrective_jphi", "jbs_delta_mode",
+                 "anchor_pressure_to_equilibrium"):
+        if getattr(gc, name, False):
+            p.append(f"{name}=True")
+    if not gc.recalculate_j_BS:
+        p.append("recalculate_j_BS=False (SWB re-solves j_BS by construction)")
+    if str(gc.closure_channel) != "bootstrap":
+        p.append(f"closure_channel={gc.closure_channel!r} is never read: SWB's alpha "
+                 "(ohmic channel) is the closure; leave it at 'bootstrap'")
+    if gc.coil_drift_hard_factor is not None:
+        p.append("coil_drift_hard_factor: drift is measured, not bounded")
+    if int(sc.nthreads) != 1:
+        p.append(f"nthreads={sc.nthreads} (sigma=0 exactness needs 1)")
+    if gc.bootstrap_kwargs.get("use_python_solve"):
+        p.append("bootstrap_kwargs use_python_solve (needs the Fortran SWB)")
+    # OFT solve_bootstrap pins P'(psi_N=1)=0 and targets pax=p[0]-p[-1]:
+    # the engine defaults; anything else would be silently ignored
+    if not getattr(gc, "edge_pprime_pin", True):
+        p.append("edge_pprime_pin=False (OFT's SWB always pins P' at the edge)")
+    if str(getattr(gc, "separatrix_pressure", "offset")) != "offset":
+        p.append(f"separatrix_pressure={gc.separatrix_pressure!r} (OFT's SWB "
+                 "always solves with pax = p_axis - p_sep)")
+    if {"taper_edge_jBS", "taper_edge_psi0"} & set(gc.bootstrap_kwargs):
+        p.append("bootstrap_kwargs taper_edge_*: set swb_edge_taper_psi0 instead")
+    t = gc.swb_edge_taper_psi0
+    if t is not None and not 0.0 < float(t) < 1.0:
+        p.append(f"swb_edge_taper_psi0={t!r} must be in (0, 1) or None")
+    for env in ("DIFF_BS", "PIN_JPHI"):
+        if os.environ.get(env, "0") == "1":
+            p.append(f"{env}=1")
+    from .coords import _swb_grid_arg, _swb_params
+    if not _swb_grid_arg() or not {"jphi_fixed", "p_fixed"} <= _swb_params():
+        p.append("this OpenFUSIONToolkit's solve_with_bootstrap lacks x/jphi_fixed/p_fixed")
+    if gc.swb_saw_q is not None and "jphi_saw" not in _swb_params():
+        p.append("swb_saw_q: this OpenFUSIONToolkit's solve_with_bootstrap lacks jphi_saw")
+    if (gc.swb_saw_q is not None and isinstance(config.source, ImasSource)
+            and not bool(getattr(config.source, "hold_sawteeth", True))):
+        # review PR70 (C.md item 4): the sawtooth reset reads the held
+        # sawteeth channel (j_sawteeth); with the hold off it is zero, so
+        # jphi_saw would be silently 0
+        p.append("swb_saw_q with ImasSource.hold_sawteeth=False: the reset "
+                 "needs the held sawteeth current (j_sawteeth), which the "
+                 "opt-out leaves at zero -- jphi_saw would silently be 0")
+    return p
+
+
+def swb_bootstrap_kwargs(gc, known=None):
+    """``bootstrap_kwargs`` for an ``imas_baseline="swb"`` solve: the user's,
+    plus the edge taper from ``swb_edge_taper_psi0``.
+
+    Off (``None``, the default) is sent EXPLICITLY as ``taper_edge_jBS=False``
+    to a toolkit that has the option (``known``: the accepted keyword names,
+    default :func:`_bootstrap_kwarg_names`): its own default may be taper-on,
+    and a solver keeps the last ``set_boot_ops`` state (review PR69 B2).  A
+    toolkit without the option has no taper, and gets no key."""
+    kw = dict(gc.bootstrap_kwargs)
+    if gc.swb_edge_taper_psi0 is not None:
+        kw.update(taper_edge_jBS=True, taper_edge_psi0=float(gc.swb_edge_taper_psi0))
+    else:
+        if known is None:
+            known = _bootstrap_kwarg_names()
+        if known is not None and "taper_edge_jBS" in known:
+            kw["taper_edge_jBS"] = False
+    return kw
+
+
+def validate_bootstrap_kwargs(bootstrap_kwargs, reserved=_BOOTSTRAP_RESERVED,
+                              known=None, *, engine="legacy",
+                              convergence_override=None):
+    """Refuse a ``bootstrap_kwargs`` key that would not survive the call chain.
+
+    Validated at config time (construction, and reassignment of
+    ``GenerationConfig.bootstrap_kwargs``): the call sites end in
+    ``**kwargs``, so a wrong key would otherwise fail every draw inside the
+    draw loop's ``except``.  In order:
+
+    1. a dict with string keys (``None`` is refused by name);
+    2. no key the call sites set themselves (*reserved*);
+    3. ``swb_iterations`` names its replacement, ``iterations``;
+    4. every key on the explicit allow-list :data:`BOOTSTRAP_KWARGS_ALLOWED`
+       -- whether or not OpenFUSIONToolkit is importable;
+    5. a convergence key (:data:`BOOTSTRAP_CONVERGENCE_KWARGS`) only with
+       ``convergence_override`` True (warned); ``None`` skips this step
+       (direct callers that are not a config);
+    6. the INSTALLED toolkit's capability, for the keys that will reach it:
+       every key on ``engine="legacy"``; on ``engine="unified"`` the engine's
+       own keys (``bouquet.engine.ENGINE_BOOTSTRAP_KWARGS``: the edge taper,
+       ``use_sauter_eps``) are implemented by bouquet and need no capability,
+       and every other key is refused by the engine's own unread-settings
+       check (``bouquet.engine.validate_engine_settings``).  A missing
+       capability is refused for a new config and WARNED about while a stored
+       config is being loaded (:data:`_LOADING_STORED_CONFIG`), so an archive
+       written on another toolkit build stays loadable.
+
+    Parameters
+    ----------
+    bootstrap_kwargs : dict
+        The options to check.
+    reserved : set of str
+        Names the call sites pass themselves.
+    known : set of str, optional
+        The keyword names the installed toolkit accepts; defaults to
+        :func:`_bootstrap_kwarg_names` (``None`` from it skips step 6 only).
+        Passed explicitly by the tests, which run without OpenFUSIONToolkit.
+    engine : {"legacy", "unified"}
+        The ``reconstruction_engine`` the options will run under.
+    convergence_override : bool or None
+        ``GenerationConfig.bootstrap_convergence_override``.
+    """
+    import warnings
+    if not isinstance(bootstrap_kwargs, dict):
+        raise ValueError(
+            f"bootstrap_kwargs must be a dict of solve_with_bootstrap "
+            f"options (use {{}} for none), got "
+            f"{type(bootstrap_kwargs).__name__}")
+    keys = set(bootstrap_kwargs)
+    if any(not isinstance(k, str) for k in keys):
+        raise ValueError("bootstrap_kwargs keys must be option names (str)")
+
+    bad = sorted(reserved & keys)
+    if bad:
+        raise ValueError(
+            f"bootstrap_kwargs may not set {bad}: passed explicitly at call sites.")
+
+    if "swb_iterations" in keys:
+        raise ValueError(
+            "bootstrap_kwargs: 'swb_iterations' is now 'iterations'.")
+
+    allowed = set(BOOTSTRAP_KWARGS_ALLOWED) - set(reserved)
+    unknown = sorted(keys - allowed)
+    if unknown:
+        raise ValueError(
+            f"bootstrap_kwargs has no such solve_with_bootstrap option(s): "
+            f"{unknown}. Accepted: {sorted(allowed)} "
+            "(bouquet.config.BOOTSTRAP_KWARGS_ALLOWED).")
+
+    conv = sorted(keys & BOOTSTRAP_CONVERGENCE_KWARGS)
+    if conv and convergence_override is not None:
+        if not convergence_override:
+            raise ValueError(
+                f"bootstrap_kwargs {conv} change a convergence criterion of "
+                "the toolkit's bootstrap solve (djBS_tol: the j_BS freeze "
+                "threshold; saw_relax: the sawtooth reset relaxation).  "
+                "Refused unless generation.bootstrap_convergence_override="
+                "True, which is recorded in the archive's config_json with "
+                "the values.")
+        warnings.warn(
+            f"bootstrap_kwargs {conv} = "
+            f"{ {k: bootstrap_kwargs[k] for k in conv} } override a "
+            "CONVERGENCE criterion of the toolkit's bootstrap solve "
+            "(generation.bootstrap_convergence_override=True); every "
+            "solve_with_bootstrap call uses them and the archive's "
+            "config_json records them.", UserWarning, stacklevel=4)
+
+    # unified: the engine's own keys are implemented by bouquet (no toolkit
+    # capability needed) and every other key is refused by
+    # engine.validate_engine_settings, which names the reason (the engine
+    # never runs solve_with_bootstrap) -- nothing reaches the toolkit
+    to_check = set() if str(engine) == "unified" else keys
+    if not to_check:
+        return
+    if known is None:
+        known = _bootstrap_kwarg_names()
+    if known is None:
+        return
+    missing = sorted(to_check - set(known))
+    if missing:
+        msg = (f"bootstrap_kwargs {missing}: the installed OpenFUSIONToolkit's "
+               "solve_with_bootstrap / set_boot_ops do not take "
+               f"{'this option' if len(missing) == 1 else 'these options'} "
+               f"({', '.join(BOOTSTRAP_KWARGS_ALLOWED[k] for k in missing)}). "
+               "Install a toolkit with the internal bootstrap solve, or drop "
+               "the key")
+        if _LOADING_STORED_CONFIG.get():
+            warnings.warn(
+                msg + ".  Loaded anyway (a stored config): a legacy run of it "
+                "on this toolkit fails at the first solve_with_bootstrap "
+                "call.", UserWarning, stacklevel=4)
+            return
+        raise ValueError(msg + ".")
 
 
 def resolve_structured_preset(gc, warn: bool = True, stacklevel: int = 3):
@@ -1764,6 +2486,12 @@ class BouquetConfig:
                 f"{type(src).__name__}"
             )
 
+        from .coords import PHI, run_coord
+        if (run_coord(src.coord) == PHI
+                and self.generation.bootstrap_kwargs.get("use_python_solve")):
+            raise ValueError("coord='phi_n' needs the internal bootstrap "
+                             "solve: drop use_python_solve from bootstrap_kwargs")
+
         if self.fixed_components.p_fast_reduction not in (
                 "auto", "trace", "mean", "perp", "sum"):
             raise ValueError(
@@ -1833,10 +2561,14 @@ class BouquetConfig:
         resolve_edge_pressure(self.generation)
         # the unified reconstruction engine's settings (refused by name;
         # engine_* fields changed under the legacy engine are refused too)
+        # (judged for the solve method the run will use; the config itself
+        # is not rewritten here -- resolve_solve_method does that at
+        # prepare_baseline)
         from .engine import validate_engine_settings
-        validate_engine_settings(self.generation)
-        # settings the loop ignores (swb_iterations): loud, not silent
-        deprecated_jbs_settings_warning(self.generation, stacklevel=3)
+        validate_engine_settings(_EffectiveSolveFields(self.generation))
+        # bootstrap_kwargs the loop's Redl does not read: loud, not silent
+        deprecated_jbs_settings_warning(
+            _EffectiveSolveFields(self.generation), stacklevel=3)
 
     # ── serialization (h5 provenance, per-shot templating, SLURM bundles) ──
     def to_dict(self) -> dict:
@@ -1935,16 +2667,36 @@ class BouquetConfig:
                 "unrescaled -- so it reproduces what it recorded; today's "
                 "default is 'auto'", UserWarning, stacklevel=2)
             gend["imas_li3_radius"] = "axis"
-        return cls(
-            source=_build(SrcCls, srcd),
-            solver=_build(SolverConfig, d["solver"]),
-            output_header=d["output_header"],
-            uncertainty=_build(UncertaintyConfig, d.get("uncertainty", {})),
-            generation=_build(GenerationConfig, gend),
-            filtering=_build(FilterConfig, d.get("filtering", {})),
-            fixed_components=_build(FixedComponentsConfig, d.get("fixed_components", {})),
-            verbose=bool(d.get("verbose", False)),
-        )
+        _stored_bootstrap_kwargs_compat(gend)
+        if "eps_definition" not in gend:
+            # A config stored before the field existed replays with the NEW
+            # default (owner decision E7: the goldens are regenerated under
+            # it); the run that wrote it used <a>/<R> or (R_max -
+            # R_min)/(2<R>) with <R> in nu*, so its bootstrap is not
+            # reproduced bit for bit -- said once, never silently.
+            import warnings
+            warnings.warn(
+                "stored config predates generation.eps_definition; it "
+                "replays with the default 'r_over_R_geo' (eps = (R_max - "
+                "R_min)/(R_max + R_min), R_geo in nu*).  Set "
+                "generation.eps_definition='a_over_R' (or "
+                "'half_width_over_fsa_R') to evaluate the bootstrap as that "
+                "run did.", UserWarning, stacklevel=2)
+        _tok = _LOADING_STORED_CONFIG.set(True)
+        try:
+            return cls(
+                source=_build(SrcCls, srcd),
+                solver=_build(SolverConfig, d["solver"]),
+                output_header=d["output_header"],
+                uncertainty=_build(UncertaintyConfig, d.get("uncertainty", {})),
+                generation=_build(GenerationConfig, gend),
+                filtering=_build(FilterConfig, d.get("filtering", {})),
+                fixed_components=_build(FixedComponentsConfig,
+                                        d.get("fixed_components", {})),
+                verbose=bool(d.get("verbose", False)),
+            )
+        finally:
+            _LOADING_STORED_CONFIG.reset(_tok)
 
     def to_json(self, indent: Optional[int] = 2) -> str:
         """The config as a JSON string (see :meth:`to_dict`)."""
@@ -1994,7 +2746,8 @@ def _decode(v):
 #: stored config may still carry them; they are dropped WITH a warning (they
 #: have no effect on the current code), never mistaken for a typo.
 _RETIRED_GENERATION_KEYS = ("coil_drift_threshold_A", "lock_coils",
-                            "lock_coils_weight")
+                            "lock_coils_weight", "window_coord", "seed_coord",
+                            "engine_split_pressure")
 
 
 #: Every earlier DEFAULT of an engine-only field, with the dates it was the
@@ -2088,6 +2841,51 @@ def _stored_unified_unread_fields():
     return tuple(ENGINE_UNREAD_LEGACY_FIELDS)
 
 
+def _stored_bootstrap_kwargs_compat(gend: dict) -> None:
+    """Load a stored ``bootstrap_kwargs`` as it ran (in place).
+
+    * A stored ``"unified"`` config carrying keys the engine never reads
+      (anything outside ``bouquet.engine.ENGINE_BOOTSTRAP_KWARGS``, e.g. the
+      ``{"iterations": 3}`` the D3D-like example notebooks set after
+      construction before 2026-10-09, which ``generate()`` ignored): the keys
+      are dropped with a warning -- the engine ignored them, so dropping them
+      reproduces what the stored run did, and the config loads instead of
+      being refused.
+    * A stored config carrying a convergence key
+      (:data:`BOOTSTRAP_CONVERGENCE_KWARGS`) without
+      ``bootstrap_convergence_override`` (it predates the flag): the stored
+      run used the value, so it is loaded with the flag set, warned.
+    """
+    import warnings
+    bk = gend.get("bootstrap_kwargs")
+    if not isinstance(bk, dict) or not bk:
+        return
+    eng = gend.get("reconstruction_engine", "legacy")
+    if gend.get("solve_method") == "engine":
+        eng = "unified"
+    if eng == "unified":
+        from .engine import ENGINE_BOOTSTRAP_KWARGS
+        unread = sorted(set(bk) - set(ENGINE_BOOTSTRAP_KWARGS))
+        if unread:
+            warnings.warn(
+                f"stored unified config: generation.bootstrap_kwargs keys "
+                f"{unread} configure solve_with_bootstrap, which the unified "
+                "engine never ran; they are dropped -- the stored run is "
+                "unchanged", UserWarning, stacklevel=3)
+            gend["bootstrap_kwargs"] = {k: v for k, v in bk.items()
+                                        if k not in unread}
+        return
+    conv = sorted(set(bk) & BOOTSTRAP_CONVERGENCE_KWARGS)
+    if conv and not gend.get("bootstrap_convergence_override", False):
+        warnings.warn(
+            f"stored config: generation.bootstrap_kwargs {conv} change a "
+            "convergence criterion of the bootstrap solve and the config "
+            "predates generation.bootstrap_convergence_override; loading it "
+            "with the override ON, as the stored run used the values",
+            UserWarning, stacklevel=3)
+        gend["bootstrap_convergence_override"] = True
+
+
 def _stored_config_compat(gend: dict) -> None:
     """Load a stored ``generation`` dict as it was produced (in place).
 
@@ -2108,7 +2906,7 @@ def _stored_config_compat(gend: dict) -> None:
 
     (c) A stored ``"unified"`` config carrying a non-default value of ANY
     legacy-path field the engine never reads
-    (:data:`bouquet.engine.ENGINE_UNREAD_LEGACY_FIELDS`, 22 fields; or
+    (:data:`bouquet.engine.ENGINE_UNREAD_LEGACY_FIELDS`; or
     ``homotopy_passes`` with ``engine_draw_homotopy=False``) is loaded at
     the default, with a warning naming the field: the engine ignored the
     value, so the default reproduces what the stored config actually ran.
@@ -2119,6 +2917,8 @@ def _stored_config_compat(gend: dict) -> None:
     import warnings
     from .engine import ENGINE_FIELD_DEFAULTS
     eng = gend.get("reconstruction_engine", "legacy")
+    if gend.get("solve_method") == "engine":
+        eng = "unified"
     if eng == "legacy":
         for name, hist in ENGINE_FIELD_HISTORICAL_DEFAULTS.items():
             if name not in gend:
@@ -2134,6 +2934,18 @@ def _stored_config_compat(gend: dict) -> None:
                         stacklevel=3)
                     gend[name] = ENGINE_FIELD_DEFAULTS[name]
                     break
+    if "draw_solve_maxits" not in gend:
+        # predates the field (#66, 2026-09-30): its draws ran under the
+        # solver's setup cap -- replayed so, not under today's resolved cap
+        # (#75 review B8); the unified engine never read it: set silently
+        if eng != "unified":
+            warnings.warn(
+                "stored config has no generation.draw_solve_maxits (it "
+                "predates the field): loading it with None, the solver's own "
+                "setup cap its draws ran under, so it reproduces what it "
+                "recorded; today's default is 'auto' (100 for the legacy "
+                "draws)", UserWarning, stacklevel=3)
+        gend["draw_solve_maxits"] = None
     if gend.get("jbs_self_consistent") and \
             "jbs_max_passes_post_homotopy" not in gend:
         val, why = FIELD_PRE_INTRODUCTION["jbs_max_passes_post_homotopy"]
@@ -2177,6 +2989,19 @@ def _stored_config_compat(gend: dict) -> None:
         "unified" if eng == "unified" else "")
     if eng != "unified":
         return
+    # (b') before (c): a cap the engine READ then moves to its own field
+    if "engine_draw_solve_maxits" not in gend:
+        cap = gend.get("draw_solve_maxits")
+        warnings.warn(
+            "stored unified config has no generation.engine_draw_solve_maxits "
+            "(it predates the field, 2026-09-30): the engine draws were then "
+            f"capped by draw_solve_maxits={cap!r}, so it is loaded as "
+            f"engine_draw_solve_maxits={cap!r} (draw_solve_maxits cleared: "
+            "the engine refuses it now); today's default is "
+            f"{ENGINE_FIELD_DEFAULTS['engine_draw_solve_maxits']}",
+            UserWarning, stacklevel=3)
+        gend["engine_draw_solve_maxits"] = cap
+        gend["draw_solve_maxits"] = None
     # (c) every legacy-path field the engine never reads: the engine
     # ignored a stored non-default value (the factories set
     # isolate_edge_jBS / perturb_jind_in_anchor for the legacy path
@@ -2193,8 +3018,11 @@ def _stored_config_compat(gend: dict) -> None:
         if name in ENGINE_DEPENDENT_DEFAULTS:
             # stored before 2026-10-07 as the engine's value (then the
             # dataclass default), or unset since: loaded unchanged
+            from .engine import engine_dependent_unset
             d = engine_validated_value(name, "unified", "reconstruction")
-            same = gend[name] is None or _same_value(gend[name], d)
+            same = (gend[name] is None
+                    or engine_dependent_unset(name, gend[name])
+                    or _same_value(gend[name], d))
         else:
             same = (gend[name] is None) if d is None else \
                 _same_value(gend[name], d)
@@ -2218,18 +3046,6 @@ def _stored_config_compat(gend: dict) -> None:
                 f"{d!r}, which the engine now requires -- the stored run "
                 "is unchanged", UserWarning, stacklevel=3)
             gend["homotopy_passes"] = d
-    if "engine_draw_solve_maxits" not in gend:
-        cap = gend.get("draw_solve_maxits")
-        warnings.warn(
-            "stored unified config has no generation.engine_draw_solve_maxits "
-            "(it predates the field, 2026-09-30): the engine draws were then "
-            f"capped by draw_solve_maxits={cap!r}, so it is loaded as "
-            f"engine_draw_solve_maxits={cap!r} (draw_solve_maxits cleared: "
-            "the engine refuses it now); today's default is "
-            f"{ENGINE_FIELD_DEFAULTS['engine_draw_solve_maxits']}",
-            UserWarning, stacklevel=3)
-        gend["engine_draw_solve_maxits"] = cap
-        gend["draw_solve_maxits"] = None
     _pre_introduction_backfill(gend, list(_ENGINE_ONLY_PRE_INTRODUCTION),
                                "unified")
 
@@ -2282,6 +3098,38 @@ def _checked_generation_keys(gend: dict) -> dict:
     import difflib
     import warnings
     names = {f.name for f in _dc.fields(GenerationConfig)}
+    if "swb_iterations" in gend:
+        # retired for bootstrap_kwargs; every stored config carries it (to_dict
+        # writes all fields), so the default is dropped silently and any
+        # other value is carried over as bootstrap_kwargs["iterations"] --
+        # except under the unified engine, which never read it (dropped)
+        from .jbs_loop import SWB_ITERATIONS_DEFAULT
+        gend = dict(gend)
+        v = gend.pop("swb_iterations")
+        unified = gend.get("reconstruction_engine") == "unified"
+        if v not in (None, SWB_ITERATIONS_DEFAULT) and unified:
+            warnings.warn(
+                f"stored unified config: generation.swb_iterations={v!r} "
+                "(a retired legacy-path setting) was never read by the "
+                "unified engine; it is dropped -- the stored run is "
+                "unchanged", UserWarning, stacklevel=3)
+        elif v not in (None, SWB_ITERATIONS_DEFAULT):
+            bk = dict(gend.get("bootstrap_kwargs") or {})
+            bk.setdefault("iterations", int(v))
+            gend["bootstrap_kwargs"] = bk
+            warnings.warn(
+                f"config generation.swb_iterations={v!r} (retired) loaded as "
+                f"bootstrap_kwargs={{'iterations': {bk['iterations']}}}.  "
+                "This does NOT replay the stored run exactly: swb_iterations "
+                "reached only the per-draw solve_with_bootstrap, while "
+                "bootstrap_kwargs reaches EVERY call -- the g-file "
+                "reconstruction and IMAS frozen-baseline SWB, the DIFF_BS / "
+                "jBS-delta caches, jbs_init='swb' and the sigma=0 check -- "
+                "which ran the toolkit's default iterations=3 before.  The "
+                "replay's BASELINE j_BS can therefore differ from the stored "
+                "run's (on toolkits with the internal Fortran bootstrap "
+                "solve, 'iterations' only acts with use_python_solve=True).",
+                UserWarning, stacklevel=3)
     retired = [k for k in gend if k in _RETIRED_GENERATION_KEYS]
     unknown = sorted(k for k in gend
                      if k not in names and k not in _RETIRED_GENERATION_KEYS)

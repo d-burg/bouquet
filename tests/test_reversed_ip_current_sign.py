@@ -336,31 +336,39 @@ class TestSignIsRecorded:
         assert source_current_sign(0.0) == 1.0
         assert source_current_sign(float("nan")) == 1.0
 
-    def test_positive_read_is_the_pre_fix_read(self, tmp_path):
+    def test_positive_read_is_the_exact_conversion_of_the_dd(self, tmp_path):
         """For ip > 0 the factor is exactly +1.0: the Baseline currents are the
-        dd's own arrays run through the same formulas as before, bit for bit."""
-        from bouquet.physics import parallel_to_toroidal
+        dd's own arrays through the exact conversions (A5 / A7 on the paired
+        equilibrium geometry), bit for bit."""
+        from bouquet.io.imas import _paired_current_geometry
+        from bouquet.physics import (jpar_to_jphi_tokamaker,
+                                     jphi_tokamaker_pressure_term,
+                                     jtor_imas_to_jphi_tokamaker)
 
         dd = _example()
         bl = _read(_write(tmp_path, dd, "ref.json"))
         eq = dd["equilibrium"]
-        ie = int(np.argmin(np.abs(np.asarray(eq["time"]) - mdd.EXAMPLE_TIME)))
-        cp = dd["core_profiles"]["profiles_1d"][ie]
+        cps = dd["core_profiles"]
+        ic = int(np.argmin(np.abs(np.asarray(cps["time"]) - mdd.EXAMPLE_TIME)))
+        cp = cps["profiles_1d"][ic]
         jtot = np.asarray(cp["j_total"], float)
         jtor = np.asarray(cp["j_tor"], float)
-        j_bs = parallel_to_toroidal(np.asarray(cp["j_bootstrap"], float),
-                                    j_parallel_total=jtot, j_tor_total=jtor)
+        geom, _ = _paired_current_geometry(eq, cp, float(cps["time"][ic]),
+                                           jtot, jtor)
+        j_phi = jtor_imas_to_jphi_tokamaker(jtor, geom)
+        # the bootstrap is field-aligned only; p'G is the third bucket (D2)
+        j_bs = jpar_to_jphi_tokamaker(np.asarray(cp["j_bootstrap"], float), geom)
+        assert np.array_equal(bl.j_pressure, jphi_tokamaker_pressure_term(geom))
         jnbi_par = np.zeros_like(jtor)
         for s in dd["core_sources"]["source"]:
             if s["identifier"]["index"] == 2:
-                jnbi_par = jnbi_par + np.asarray(s["profiles_1d"][ie]["j_parallel"], float)
-        j_nbi = parallel_to_toroidal(jnbi_par, j_parallel_total=jtot,
-                                     j_tor_total=jtor)
+                jnbi_par = jnbi_par + np.asarray(s["profiles_1d"][ic]["j_parallel"], float)
+        j_nbi = jpar_to_jphi_tokamaker(jnbi_par, geom)
         assert bl.source_current_sign == 1.0
-        assert np.array_equal(bl.j_phi, jtor)
+        assert np.array_equal(bl.j_phi, j_phi)
         assert np.array_equal(bl.j_BS, j_bs)
         assert np.array_equal(bl.j_NBI, j_nbi)
-        assert np.array_equal(bl.j_inductive, jtor - j_bs - j_nbi - np.zeros_like(jtor))
+        assert np.array_equal(bl.j_inductive, j_phi - j_bs - j_nbi - np.zeros_like(jtor))
 
     def test_dd_whose_currents_oppose_its_own_ip_is_refused(self, tmp_path):
         """No sign convention can repair a dd whose core_profiles total opposes

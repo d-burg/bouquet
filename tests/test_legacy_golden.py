@@ -15,6 +15,8 @@ import sys
 
 import pytest
 
+import _harness
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _GOLDEN_DIR = os.path.join(_HERE, "golden")
 _JSON = os.path.join(_GOLDEN_DIR, "D3Dlike_Hmode_legacy_golden.json")
@@ -48,6 +50,9 @@ def test_it_says_what_built_it(doc):
     assert prov["oft"].get("library_sha256") or \
         prov["oft"].get("sources_sha256"), prov["oft"]
     assert prov["generator_args"].get("jphi_archival") == "input"
+    # the replay (tests/test_systematics.py) keys its comparison on the
+    # compiled library's digest; without one the fixture reads "unstamped"
+    assert _harness.golden_build_check(doc, installed={}).stamped, prov["oft"]
 
 
 def test_the_draw_record_is_complete(doc):
@@ -66,12 +71,52 @@ def test_the_draw_record_is_complete(doc):
         p = d["profiles"]
         for ch in ("n_e", "T_e", "n_i", "T_i"):
             assert len(p[ch]) == n_kin, (k, ch)
-        for ch in ("j_phi", "j_inductive"):
+        chans = ["j_phi", "j_inductive"]
+        if d.get("current_split_convention") == "pressure_separate":
+            chans.append("j_pressure")
+        for ch in chans:
             assert len(p[ch]) == n_eq, (k, ch)
         assert len(d["coil_currents"]) == len(d["coil_names"])
     ref = doc["baseline"]["recon_lcfs_ref"]
     assert ref["stride"] == mgf.LEGACY_LCFS_STRIDE
     assert len(ref["points"]) == -(-ref["n_full"] // ref["stride"])
+
+
+def test_it_says_where_the_pressure_driven_current_is(doc):
+    """The record states its current-split convention (owner decision D2)
+    and, under the separate convention, its baseline's four buckets add up:
+    ``j_phi = j_inductive + j_BS + j_pressure`` (no driven channels on the
+    fixture).  The replay (``tests/test_systematics.py``) composes the legacy
+    path's carried inductive from this record, so a record that mis-states
+    its split would replay the wrong current."""
+    import numpy as np
+    from bouquet.schema import (CURRENT_SPLIT_CONVENTIONS,
+                                SPLIT_PRESSURE_IN_INDUCTIVE,
+                                SPLIT_PRESSURE_SEPARATE)
+
+    def _conv(rec):
+        # stated, else inferred as bouquet.schema.read_current_split_convention
+        # does for an archive group (a pre-#64 record states nothing)
+        v = rec.get("current_split_convention")
+        if v is None:
+            v = (SPLIT_PRESSURE_SEPARATE if "j_pressure" in rec["profiles"]
+                 else SPLIT_PRESSURE_IN_INDUCTIVE)
+        assert v in CURRENT_SPLIT_CONVENTIONS, v
+        return v
+    bl = doc["baseline"]
+    conv = _conv(bl)
+    for k, d in doc["replay_draws"].items():
+        assert _conv(d) == conv, (k, _conv(d), conv)
+    p = bl["profiles"]
+    if conv == SPLIT_PRESSURE_SEPARATE:
+        jphi, jind, jbs, jp = (np.asarray(p[c], dtype=float) for c in
+                               ("j_phi", "j_inductive", "j_BS", "j_pressure"))
+        resid = np.abs(jphi - jind - jbs - jp).max()
+        assert resid <= 1e-9 * np.abs(jphi).max(), resid
+        for k, d in doc["replay_draws"].items():
+            assert "j_pressure" in d["profiles"], k
+    else:
+        assert "j_pressure" not in p, conv
 
 
 def test_it_names_no_filesystem_path(doc):

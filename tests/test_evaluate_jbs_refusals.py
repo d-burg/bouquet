@@ -13,7 +13,10 @@ The bit-identity half compares the new function against a verbatim copy of
 the evaluator as it was before this change (:func:`_evaluate_jBS_reference`
 below) on the synthetic mock equilibrium of ``test_jbs_loop`` over several
 grids and options: for every accepted input the output is identical to the
-last bit.
+last bit.  The reference uses the ``<a>/<R>`` epsilon of that time, so the
+comparison runs with the explicit opt-in ``eps_definition="a_over_R"``; the
+default epsilon and the other opt-in (``evaluate_jBS/4``) are tested in
+``test_evaluate_jbs_eps.py``.
 
 Synthetic inputs only; no device data.  Needs OFT's pure-Python ``bootstrap``
 module (Redl); skipped with a reason when OFT is absent.
@@ -220,7 +223,8 @@ def test_every_accepted_input_is_bit_identical_to_the_historical_evaluator(
     kw = dict(isolate_edge=isolate_edge, smooth_axis=smooth_axis)
     j_ref, d_ref = _evaluate_jBS_reference(_MockEq(legacy=legacy), x, *k,
                                            **kw)
-    j_new, d_new = evaluate_jBS(_MockEq(legacy=legacy), x, *k, **kw)
+    j_new, d_new = evaluate_jBS(_MockEq(legacy=legacy), x, *k,
+                                eps_definition="a_over_R", **kw)
     np.testing.assert_array_equal(j_new, j_ref)
     for key in _DIAG_ARRAYS:
         np.testing.assert_array_equal(np.asarray(d_new[key]),
@@ -237,7 +241,7 @@ def test_bit_identity_holds_for_scalar_zeff_and_other_flux_ranges():
             j_ref, _ = _evaluate_jBS_reference(
                 _MockEq(psi_bounds=bounds), x, ne, te, ni, ti, zeff)
             j_new, _ = evaluate_jBS(_MockEq(psi_bounds=bounds), x, ne, te,
-                                    ni, ti, zeff)
+                                    ni, ti, zeff, eps_definition="a_over_R")
             np.testing.assert_array_equal(j_new, j_ref)
 
 
@@ -251,10 +255,10 @@ class _AxisLimitEq(_MockEq):
     construction, which the historical code zeroed."""
 
     def sauter_fc(self, psi=None, **kw):
-        psi_, fc, rav, modb = super().sauter_fc(psi=psi, **kw)
+        psi_, fc, rav, modb, *eps = super().sauter_fc(psi=psi, **kw)
         fc = np.array(fc, dtype=float)
         fc[np.asarray(psi, dtype=float) <= 1e-3] = 1.0 + 1e-9
-        return psi_, fc, rav, modb
+        return (psi_, fc, rav, modb, *eps)
 
 
 @pytest.mark.parametrize("grid", ["uniform-151", "imas-77"])
@@ -264,7 +268,8 @@ def test_the_clipped_axis_surface_keeps_the_historical_zeroing(grid):
     with np.errstate(invalid="ignore"):
         j_ref, d_ref = _evaluate_jBS_reference(_AxisLimitEq(), x, *k,
                                                smooth_axis=False)
-        j_new, d_new = evaluate_jBS(_AxisLimitEq(), x, *k, smooth_axis=False)
+        j_new, d_new = evaluate_jBS(_AxisLimitEq(), x, *k, smooth_axis=False,
+                                    eps_definition="a_over_R")
     np.testing.assert_array_equal(j_new, j_ref)
     n_end = int(np.count_nonzero(x <= 1e-3))
     assert np.all(j_new[:n_end] == 0.0)
@@ -349,14 +354,20 @@ class _FailedTraceEq(_MockEq):
         return arr
 
     def sauter_fc(self, psi=None, **kw):
-        psi_, fc, rav, modb = super().sauter_fc(psi=psi, **kw)
+        psi_, fc, rav, modb, *eps = super().sauter_fc(psi=psi, **kw)
         rav = {k: self._zero(psi, v) for k, v in rav.items()}
-        return psi_, self._zero(psi, fc), rav, self._zero(psi, modb)
+        return (psi_, self._zero(psi, fc), rav, self._zero(psi, modb),
+                *(self._zero(psi, e) for e in eps))
 
     def get_q(self, psi=None, **kw):
         psi_, q, rav, *rest = super().get_q(psi=psi, **kw)
         rav = {k: self._zero(psi, v) for k, v in rav.items()}
         return (psi_, self._zero(psi, q), rav, *rest)
+
+    def get_fsa(self, psi=None, **kw):
+        f = super().get_fsa(psi=psi, **kw)
+        return {k: (self._zero(psi, v) if k != "psi_norm" else v)
+                for k, v in f.items()}
 
 
 @pytest.mark.parametrize("bad_psi", [0.5, 1e-3, 1.0 - 1e-3])
@@ -378,10 +389,10 @@ def test_a_failed_trace_zero_row_is_refused_everywhere(bad_psi):
 def test_a_negative_trapped_fraction_inside_the_plasma_is_refused():
     class _Bad(_MockEq):
         def sauter_fc(self, psi=None, **kw):
-            psi_, fc, rav, modb = super().sauter_fc(psi=psi, **kw)
+            psi_, fc, rav, modb, *eps = super().sauter_fc(psi=psi, **kw)
             fc = np.array(fc, dtype=float)
             fc[np.isclose(np.asarray(psi), 0.3)] = 1.0 + 1e-9
-            return psi_, fc, rav, modb
+            return (psi_, fc, rav, modb, *eps)
     x = np.linspace(0.0, 1.0, 101)
     with pytest.raises(JBSEvaluationError, match="f_T") as ei:
         evaluate_jBS(_Bad(), x, *_kin(x))
@@ -398,9 +409,40 @@ def test_the_toroidal_conversion_is_the_one_field_aligned_factor():
     ``<j.B> / (F <1/R>)``; the owner-approved change (one conversion in the
     package) moved it -- by ``[<B^2>/<B_phi^2>] [<1/R^2>/<1/R>^2]``, ~6.8 %
     at the pedestal of the synthetic D3D-like example -- and it must not
-    move again by accident."""
+    move again by accident.  (PR #64 moved p'G into it; the owner decided
+    on 2026-10-09 that p'G is a separate bucket, D2: restored, and the
+    reference below is the physics module's own factor, not this
+    evaluator's.)"""
+    from bouquet.physics import field_aligned_conversion
     x = np.linspace(0.0, 1.0, 151)
     _j, d = evaluate_jBS(_MockEq(), x, *_kin(x), smooth_axis=False)
     np.testing.assert_array_equal(
         d["j_tor_full_raw"],
         d["j_dot_B"] * (d["F"] * d["avg_inv_R"] / d["avg_B2"]))
+    np.testing.assert_array_equal(
+        d["j_tor_full_raw"],
+        d["j_dot_B"] * field_aligned_conversion(d["F"], d["avg_inv_R"],
+                                                d["avg_B2"]))
+
+
+def test_the_pressure_driven_current_is_returned_beside_the_bootstrap():
+    """D2 (owner decision 2026-10-09): ``p'G`` is the third bucket.  The
+    evaluator returns it as ``diag["j_pressure"]`` -- ``p'(<R> -
+    F^2<1/R>/<B^2>)`` on the same nodes -- and the bootstrap profile it
+    returns carries none of it."""
+    class _PressureEq(_MockEq):
+        def get_profiles(self, psi=None, **kw):
+            psi_, F, *_rest = super().get_profiles(psi=psi, **kw)
+            p = np.asarray(psi, dtype=float)
+            return psi_, F, 0.01 * (1.0 - p) / F, 0 * F, 2.0e5 * (1.0 - p)
+
+    x = np.linspace(0.0, 1.0, 151)
+    j0, d0 = evaluate_jBS(_MockEq(), x, *_kin(x), smooth_axis=False)
+    j, d = evaluate_jBS(_PressureEq(), x, *_kin(x), smooth_axis=False)
+    G = d["R_avg"] - d["F"] ** 2 * d["avg_inv_R"] / d["avg_B2"]
+    np.testing.assert_array_equal(d["j_pressure"], d["pprime"] * G)
+    assert np.max(np.abs(d["j_pressure"])) > 1e3
+    # p' moves no bootstrap value: the profile is p'-free
+    np.testing.assert_array_equal(j, j0)
+    np.testing.assert_array_equal(j, d["j_tor_full_raw"])
+    assert "/4" in d["version"] and "j_pressure" in d["version"]

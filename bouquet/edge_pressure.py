@@ -197,12 +197,15 @@ def solver_pprime(psi_N, pressure, psi_range, edge=None):
     return y
 
 
-def solver_pp_profile(psi_N, pressure, psi_range, edge=None):
+def solver_pp_profile(psi_N, pressure, psi_range, edge=None, coord="psi_n"):
     """The ``pp_prof`` dict of :func:`solver_pprime` (``x`` is *psi_N*
-    itself, as every site passed it)."""
-    return {"type": "linterp",
-            "y": solver_pprime(psi_N, pressure, psi_range, edge),
-            "x": psi_N}
+    itself, as every site passed it), tagged for the run coordinate
+    (:func:`bouquet.coords.tag_prof`: in a Phi_N run *psi_N* is the Phi_N
+    grid and ``y`` is dp/dPhi_N over the flux range, which TokaMaker maps)."""
+    from .coords import tag_prof
+    return tag_prof({"type": "linterp",
+                     "y": solver_pprime(psi_N, pressure, psi_range, edge),
+                     "x": psi_N}, coord)
 
 
 def separatrix_pressure_of(pressure) -> float:

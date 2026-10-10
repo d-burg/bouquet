@@ -12,7 +12,15 @@ maps -- are in ``test_jbs_loop.py``; (d) and (e) also run live below):
 (a) ``evaluate_jBS`` on a uniform grid equals ``solve_with_bootstrap``'s own
     FIRST-pass Redl evaluation on the same equilibrium, bit for bit (needs an
     OFT build whose ``solve_with_bootstrap`` takes ``psi_N=``; skipped with the
-    reason otherwise);
+    reason otherwise), with ``<a>/<R>`` (``eps_definition="a_over_R"``) on
+    every build -- SWB is asked for it (``use_sauter_eps=False``) where the
+    build has that option;
+(a2) CROSS-BUILD SANITY CHECK (diagnostic, documented 1e-3 bar): the fork's
+    ``sauter_fc(return_eps=True)`` against bouquet's ``get_fsa`` value of the
+    same ``(R_max - R_min)/(2<R>)`` (skips on builds without the fork option;
+    bouquet never uses the fork's value);
+(a3) the default ``r_over_R_geo`` epsilon at psi_N 0.999 equals the solved
+    boundary's ``a/R_geo`` to 1e-3, its ``nu*`` R the boundary's ``R_geo``;
 (b) the same physical profiles on a uniform and on a strongly non-uniform
     (rho-like) psi_N grid give the same j_BS on a live equilibrium, while the
     legacy uniform reading of the non-uniform arrays does not (defect A);
@@ -100,7 +108,8 @@ def _imas_probe(outdir, part):
     from bouquet.baseline import resolve_baseline
     from bouquet.jbs_loop import (JBSNotConverged, profile_residuals,
                                   residual_weights, weighted_norm)
-    from bouquet.physics import evaluate_jBS
+    from bouquet.physics import (EPS_ROUTE_SANITY_RTOL, evaluate_jBS,
+                                 fork_eps_diagnostic, geometric_eps)
     from bouquet.TokaMaker_interface import _draw_jbs_composer
     from bouquet.utils import pchip_interp
     import OpenFUSIONToolkit.TokaMaker.bootstrap as B
@@ -128,9 +137,57 @@ def _imas_probe(outdir, part):
            np.clip(k2e(bl.Zeff), 1.0, None))
     out["grid_uniform"] = bool(np.allclose(np.diff(psi), psi[1] - psi[0]))
 
-    # (a) bit-level against SWB's first Redl evaluation on the same state
-    if "psi_N" in inspect.signature(B.solve_with_bootstrap).parameters:
-        j_new, d_new = evaluate_jBS(mygs, psi, *kin, smooth_axis=False)
+    # (a2) CROSS-BUILD SANITY CHECK (a diagnostic, not a physics bar): the
+    # fork's sauter_fc(return_eps=True) beside bouquet's get_fsa value of
+    # the same (R_max - R_min)/(2<R>) on the solved surfaces.  No evaluation
+    # uses the fork's value (every eps_definition is get_fsa-based on every
+    # build); the two agree to ~1.4e-4 (the fork's cut-cell <R>), so the bar
+    # is EPS_ROUTE_SANITY_RTOL = 1e-3, documented as a sanity bar.
+    pu = np.unique(np.clip(psi, 1e-3, 1.0 - 1e-3))
+    e_fsa, _r = geometric_eps(mygs, pu)
+    fd = fork_eps_diagnostic(mygs, pu)
+    out["a2"] = dict(route_fsa=_r, sanity_rtol=float(EPS_ROUTE_SANITY_RTOL))
+    if fd is not None:
+        out["a2"].update(max_rel=float(fd["max_rel_diff"]),
+                         sanity_ok=bool(fd["sanity_ok"]))
+    else:
+        out["a2"]["skip"] = ("this OFT build's sauter_fc has no return_eps "
+                             "(the fork-only option): nothing to cross-check")
+
+    # (a3) the default eps on the outermost evaluated surface (psi_N 0.999)
+    # equals the solved boundary's a/R_geo (traced by OFT itself)
+    _jd, _dd = evaluate_jBS(mygs, psi, *kin, smooth_axis=False)
+    _lcfs = None
+    for _x in (1.0, 0.9999):
+        try:
+            _lcfs = np.asarray(mygs.trace_surf(_x), dtype=float)
+            break
+        except Exception:
+            continue
+    if _lcfs is not None and _lcfs.ndim == 2 and _lcfs.shape[0] > 10:
+        _rb = _lcfs[:, 0]
+        out["a3"] = dict(
+            eps_last=float(_dd["eps"][-1]), psi_last=float(_dd["psi_eval"][-1]),
+            boundary_eps=float((_rb.max() - _rb.min())
+                               / (_rb.max() + _rb.min())),
+            R_nu_last=float(_dd["R_nu_star"][-1]),
+            R_geo_boundary=float(0.5 * (_rb.max() + _rb.min())),
+            definition=str(_dd["eps_definition"]))
+    else:
+        out["a3"] = dict(skip="trace_surf could not trace the boundary")
+
+    # (a) bit-level against SWB's first Redl evaluation on the same state,
+    # with the <a>/<R> epsilon on every build: SWB is asked for it explicitly
+    # (use_sauter_eps=False) where the build has the option, so the bit-level
+    # bar holds on the fork too (the fork's own eps is not bouquet's -- a2)
+    _swb_par = inspect.signature(B.solve_with_bootstrap).parameters
+    _use_sauter = _swb_par.get("use_sauter_eps")
+    swb_eps = "a_over_R"
+    _swb_eps_kw = ({} if _use_sauter is None else {"use_sauter_eps": False})
+    out["a_eps_definition"] = swb_eps
+    if "psi_N" in _swb_par:
+        j_new, d_new = evaluate_jBS(mygs, psi, *kin, smooth_axis=False,
+                                    eps_definition=swb_eps)
         cap = {}
         orig = B.redl_bootstrap
 
@@ -144,9 +201,12 @@ def _imas_probe(outdir, part):
 
         B.redl_bootstrap = _spy
         try:
+            py = ({"use_python_solve": True} if "use_python_solve" in
+                  inspect.signature(B.solve_with_bootstrap).parameters else {})
             B.solve_with_bootstrap(mygs, *kin[:4], kin[4], bl.Ip_target,
                                    np.ones_like(psi), psi_N=psi,
-                                   verbose=False)
+                                   verbose=False, **py,
+                                   **_swb_eps_kw)   # the spy is on the Python Redl
         except _Stop:
             pass
         finally:
@@ -514,6 +574,9 @@ def _legacy_probe(outdir, part):
     L.run_jbs_loop = _tripwire("run_jbs_loop")
     _swb = B.solve_with_bootstrap
 
+    import functools
+
+    @functools.wraps(_swb)        # keeps the signature bouquet inspects
     def _count_swb(*a, **k):
         calls["solve_with_bootstrap"] += 1
         return _swb(*a, **k)
@@ -653,6 +716,38 @@ def test_a_evaluator_equals_swbs_first_pass_bit_for_bit(imas):
     assert imas["grid_uniform"], "the synthetic dd grid should be uniform"
     assert all(a["inputs_bitwise"].values()), a["inputs_bitwise"]
     assert a["bitwise"], f"<j.B> differs from SWB's first pass by {a['max_abs']}"
+
+
+@pytest.mark.solver
+@solver_only
+def test_a2_cross_build_sanity_check_of_the_forks_eps(imas):
+    """CROSS-BUILD SANITY CHECK, not a physics bar: on a build with the
+    fork option, its ``(R_max - R_min)/(2<R>)`` and bouquet's ``get_fsa``
+    value agree within the documented ``EPS_ROUTE_SANITY_RTOL`` (1e-3; the
+    real fork differs by ~1.4e-4 through its cut-cell ``<R>``).  bouquet's
+    evaluation never uses the fork's value."""
+    a2 = imas["a2"]
+    assert a2["route_fsa"] == "get_fsa"
+    if "skip" in a2:
+        pytest.skip(a2["skip"])
+    assert a2["sanity_rtol"] == 1e-3
+    assert a2["max_rel"] <= a2["sanity_rtol"], a2
+    assert a2["sanity_ok"], a2
+
+
+@pytest.mark.solver
+@solver_only
+def test_a3_default_eps_at_the_lcfs_is_the_boundary_a_over_R_geo(imas):
+    """The default ``r_over_R_geo`` epsilon on the outermost evaluated
+    surface (psi_N 0.999) equals the solved boundary's ``a/R_geo`` to 1e-3,
+    and its ``nu*`` R is that surface's ``R_geo`` (the boundary's to 1e-3)."""
+    a3 = imas["a3"]
+    if "skip" in a3:
+        pytest.skip(a3["skip"])
+    assert a3["definition"] == "r_over_R_geo"
+    assert abs(a3["psi_last"] - 0.999) < 1e-12
+    assert abs(a3["eps_last"] / a3["boundary_eps"] - 1.0) <= 1e-3, a3
+    assert abs(a3["R_nu_last"] / a3["R_geo_boundary"] - 1.0) <= 1e-3, a3
 
 
 @pytest.mark.solver

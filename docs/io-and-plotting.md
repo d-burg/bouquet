@@ -119,14 +119,64 @@ them with propagated uncertainty.
 currents (`j_ohmic` / `j_bootstrap`), kinetic profiles, fast-ion pressure, and
 rotation — and `read_imas_geometry()` pulls the boundary and vacuum `R·B_t` for
 a given slice. `write_imas_draw()` / `export_imas_drawset()` go the other way,
-reconstructing one or all perturbed IDS from an archive; `fidelity` selects
+reconstructing one or all perturbed IDS from an archive, each holding only
+the exported time slice of the template; `fidelity` selects
 where the parallel current split's geometry factor comes from (see
 [workflows.md](workflows.md#ids-current-split-fidelity)).
 
-Current-convention conversions are in `bouquet.physics`:
-`parallel_to_toroidal()`, `toroidal_to_parallel()` (both FSA-geometry aware),
-`isotropize_fast_pressure()`, `fast_pressure_residual()`,
-`infer_fast_pressure()`.
+The exported slice is the one the reader reads: every IDS is cut at the
+`core_profiles` slice nearest the requested time (not at the requested time
+itself), keyed on the IMAS structure -- the IDS `time`, time-tagged arrays of
+structures (`time_slice`, `profiles_1d`), signals (`data` on their own `time`,
+or on the IDS time when homogeneous), `vacuum_toroidal_field.b0`,
+`code.output_flag` and the IDS-level `global_quantities`.  Lists of entries
+(`core_sources.source`, `pf_active.coil`, `nbi.unit`), coil and limiter
+outlines and radial profiles are never cut.  `core_sources` is cut with the
+reader's own time rule: each entry keeps its own slices bracketing the slice
+time and its first and last, and the windows of that read (the core_sources
+slice window, each entry's own and core_profiles windows) are recorded under
+the key `bouquet_time_window` (`bouquet.io.imas.IMAS_EXPORT_TIME_WINDOW_KEY`)
+inside the schema-legal `code.parameters` string (a JSON object) of
+`core_sources` and of each entry; a template's own `code.parameters` keeps
+its JSON keys, and any other text it held is kept under
+`template_parameters`.  The reader honours a block only when its
+times are the slice it reads, so an export re-reads with the same
+`source_time_match` record and the same driven currents as the source it
+came from; without it the windows of a one-time file would collapse to the
+10 µs single-time floor (an entry matched at an offset own time would re-read
+as off, an offset `core_sources` base as a refusal).  No non-schema key is
+written, so strict IMAS validators accept the export; the reader also honours
+the block as a direct key of the node (exports written before 2026-10-09).
+
+The equilibrium is the one IDS a cut keeps more than one slice of.  On a
+time-dependent run FUSE converts the `core_profiles` currents on the
+PREVIOUS equilibrium slice, and the reader pairs them with whichever of the
+slice nearest the `core_profiles` time and the last one before it reproduces
+`j_tor` from `j_total`; it reads `ip`, `l_i`, the pressure and the boundary
+at the slice nearest the requested time.  A pure cut (`_slice_in_time`)
+keeps every one of those slices, so it re-reads with the same currents bit
+for bit, and records them and their roles under `bouquet_time_window` in
+`equilibrium.code.parameters`; it also records the `core_profiles` times
+next to the kept slice (the ida_hybrid time rule's local step).  An exported
+DRAW holds one equilibrium slice -- the draw's own, whose geometry its
+currents are written on -- and records the template slice the template's
+currents were paired with (used by `fidelity="reconstruct"`).
+
+An exported draw writes the thermal species its solve used: electrons, the
+hydrogenic main ion, and one effective impurity of charge `Z_imp` at the
+main-ion temperature with `n_z = (n_e - z_fast - n_i)/Z_imp` (so the export
+is quasineutral, carries the drawn `Z_eff`, and passes the reader's
+species-completeness check).  Any other thermal species of the template is
+written with zero thermal density (an impurity of another charge is
+relabelled to `Z_imp`); the fast population is the template's.  The record
+sits under `bouquet_species_model` in `core_profiles.code.parameters`.
+
+Current-convention conversions are in `bouquet.physics`
+([current-conventions.md](current-conventions.md)):
+`jtor_imas_to_jphi_tokamaker()` / `jphi_tokamaker_to_jtor_imas()`,
+`jpar_to_jphi_tokamaker()` / `jphi_tokamaker_to_jpar()`,
+`jphi_tokamaker_pressure_term()`. Also `isotropize_fast_pressure()`,
+`fast_pressure_residual()`, `infer_fast_pressure()`.
 
 `read_imas_baseline()` also has to decide which **fast-pressure storage
 convention** a dd uses: IMAS.jl/FUSE write `pressure_fast_parallel` and

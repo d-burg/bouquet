@@ -684,12 +684,31 @@ class _MockEq:
     was asked for, so the tests can see exactly which surfaces the evaluator
     queried.  Dict layouts (current OFT); ``legacy=True`` returns the
     positional-array layout of older builds.
+
+    The surfaces are shaped: the mean distance from the axis ``<a> = r`` and
+    the half-width ``(R_max - R_min)/2 = HALF_WIDTH r`` differ, and the
+    geometric centre ``R_geo = (R_max + R_min)/2 = <R> (1 + RGEO_SHIFT
+    psi)`` lies outside the flux-surface average ``<R>`` (as on a real
+    diverted surface, where the dl/B_p weight pulls ``<R>`` inward), so the
+    three Redl epsilons (``(R_max - R_min)/(R_max + R_min)``, the default;
+    ``(R_max - R_min)/(2<R>)`` and ``<a>/<R>``, the opt-ins) and the two
+    ``nu*`` radii (``R_geo``; ``<R>``) are all distinguishable.
+    ``fork=False`` (default) is OpenFUSIONToolkit main: ``sauter_fc`` ignores
+    ``return_eps`` and ``R_min``/``R_max`` come from ``get_fsa``;
+    ``fork=True`` also returns ``(R_max - R_min)/(2<R>)`` from
+    ``sauter_fc(return_eps=True)`` (the fork's 5-tuple), off by
+    ``FORK_EPS_OFFSET`` relative -- as the real fork's cut-cell ``<R>`` is
+    (~1.4e-4) -- so a test sees that the evaluation never uses it.
     """
 
     R0, a, B0 = 1.7, 0.6, 2.0
+    HALF_WIDTH = 0.85
+    RGEO_SHIFT = 0.05
+    FORK_EPS_OFFSET = 1.4e-4
 
-    def __init__(self, legacy=False, psi_bounds=(-0.9, 0.1)):
+    def __init__(self, legacy=False, psi_bounds=(-0.9, 0.1), fork=False):
         self.legacy = legacy
+        self.fork = fork
         self.psi_bounds = np.asarray(psi_bounds, dtype=float)
         self.calls = []
 
@@ -715,7 +734,18 @@ class _MockEq:
                           (self.B0 ** 2) * (1 + eps ** 2)])
         if self.legacy:
             rav = np.vstack([rav["<R>"], rav["<1/R>"], rav["<a>"]])
-        return psi, fc, rav, modb
+        if self.fork and kw.get("return_eps"):
+            return (psi, fc, rav, modb, self.HALF_WIDTH * r / R
+                    * (1.0 + self.FORK_EPS_OFFSET))
+        return (psi, fc, rav, modb)
+
+    def get_fsa(self, psi=None, **kw):
+        self.calls.append(("get_fsa", np.array(psi)))
+        psi, r, eps, R = self._geo(psi)
+        hw = self.HALF_WIDTH * r
+        R_geo = R * (1.0 + self.RGEO_SHIFT * psi)
+        return {"psi_norm": psi, "<R>": R, "R_min": R_geo - hw,
+                "R_max": R_geo + hw}
 
     def get_q(self, psi=None, **kw):
         self.calls.append(("get_q", np.array(psi)))
@@ -902,7 +932,7 @@ def _ph_setup(monkeypatch, kind):
     Jstar = _shape(x)
     calls = {"corr": [], "renorm": 0}
     monkeypatch.setattr(L, "residual_weights",
-                        lambda eq, psi_N, psi_pad=1e-3: (np.ones_like(x), x,
+                        lambda eq, psi_N, psi_pad=1e-3, coord="psi_n": (np.ones_like(x), x,
                                                          "test"))
 
     def _renorm(mygs, psi_N, target, Ip, pad, label=""):
@@ -982,8 +1012,11 @@ def test_the_post_homotopy_ceiling_is_not_read_with_the_loop_off():
     g = GenerationConfig(jbs_self_consistent=False)
     assert jbs_settings(g, draw=True)["enabled"] is False
     src = inspect.getsource(Bouquet.generate)
-    assert re.search(r'jbs_loop=\(_jbs_draw if _jbs_draw\["enabled"\] '
-                     r'else None\)', src)
+    assert re.search(r'jbs_loop=_m\.draw_jbs_loop\(_jbs_draw if '
+                     r'_jbs_draw\["enabled"\]\s+else None\)', src)
+    # the draw method hands it on (swb: never the loop)
+    from bouquet.draw_methods import DrawMethod
+    assert DrawMethod().draw_jbs_loop(None) is None
     gen = inspect.getsource(TI.generate_bouquet)
     calls = [m.start() for m in re.finditer(r"_post_homotopy_jbs\(", gen)]
     assert len(calls) == 1

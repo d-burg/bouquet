@@ -78,11 +78,16 @@ def _what_the_baseline_builder_sees(b, monkeypatch):
 
 
 def test_every_engine_dependent_field_defaults_to_none():
+    """... or to its unset marker (draw_solve_maxits: "auto", since its None
+    has meant the solver's setup cap since the field existed)."""
+    from bouquet.engine import ENGINE_DEPENDENT_UNSET, engine_dependent_unset
     g = GenerationConfig()
     assert set(ENGINE_DEPENDENT_DEFAULTS) == {"isolate_edge_jBS",
-                                              "perturb_jind_in_anchor"}
+                                              "perturb_jind_in_anchor",
+                                              "draw_solve_maxits"}
+    assert ENGINE_DEPENDENT_UNSET == {"draw_solve_maxits": "auto"}
     for name in ENGINE_DEPENDENT_DEFAULTS:
-        assert getattr(g, name) is None
+        assert engine_dependent_unset(name, getattr(g, name)), name
 
 
 @pytest.mark.parametrize("kind", ["imas", "gfile"])
@@ -247,7 +252,10 @@ def test_the_archive_records_the_resolution(tmp_path, toy_bouquet_solver):
     want = {"isolate_edge_jBS": {"value": True,
                                  "origin": "resolved from engine=unified"},
             "perturb_jind_in_anchor": {
-                "value": False, "origin": "resolved from engine=unified"}}
+                "value": False, "origin": "resolved from engine=unified"},
+            # #75 review: the legacy draws' cap, which the engine never reads
+            "draw_solve_maxits": {
+                "value": None, "origin": "resolved from engine=unified"}}
     assert b.baseline.engine_resolved_defaults == want
     assert b.baseline.engine["engine_resolved_defaults"] == want
     _quiet(b.generate)

@@ -294,33 +294,37 @@ def validate_jbs_settings(gc) -> None:
                          f"omega; 1 = halve on every growth), got {h!r}")
 
 
-#: ``GenerationConfig.swb_iterations`` default: the legacy
-#: ``solve_with_bootstrap`` Picard pass count.
+#: The retired ``GenerationConfig.swb_iterations`` default (OFT's own
+#: ``solve_with_bootstrap(iterations=3)``); a stored config's other value is
+#: loaded as ``bootstrap_kwargs={"iterations": n}``.
 SWB_ITERATIONS_DEFAULT = 3
 
 
 def deprecated_jbs_settings_warning(gc, stacklevel: int = 2) -> Optional[str]:
     """Warn (``DeprecationWarning``) about settings the loop IGNORES.
 
-    ``swb_iterations`` is the legacy frozen path's Picard pass count.  With
-    ``jbs_self_consistent=True`` it is not used (the loop has its own
-    convergence test); a value other than the default is therefore a setting
-    the user expects to act and that silently would not.  Returns the message
-    (``None`` when nothing is ignored).
+    ``bootstrap_kwargs`` configures ``solve_with_bootstrap``.  Under the
+    legacy engine with ``jbs_self_consistent=True`` the loop's bootstrap is
+    Redl (:func:`bouquet.physics.evaluate_jBS`) and SWB runs only for
+    ``jbs_init="swb"`` and the jBS-delta / ``DIFF_BS`` caches, so a non-empty
+    dict acts there alone.  (The unified engine refuses SWB-only keys
+    itself.)  Returns the message (``None`` when nothing is ignored).
     """
     import warnings
     if not bool(getattr(gc, "jbs_self_consistent", False)):
         return None
-    v = getattr(gc, "swb_iterations", SWB_ITERATIONS_DEFAULT)
-    if v == SWB_ITERATIONS_DEFAULT and not isinstance(v, bool):
+    if str(getattr(gc, "reconstruction_engine", "legacy")) != "legacy":
         return None
-    msg = (f"generation.swb_iterations={v!r} is IGNORED under the "
-           "self-consistent bootstrap loop (jbs_self_consistent=True): the "
-           "loop iterates to its own convergence test (jbs_rtol_j, "
-           "jbs_rtol_Ip, jbs_tol_li, jbs_tol_q0) within jbs_max_passes / "
-           "jbs_max_passes_draw.  swb_iterations is deprecated and honoured "
-           "only with jbs_self_consistent=False (the legacy frozen-bootstrap "
-           "path).")
+    if str(getattr(gc, "imas_baseline", "")) == "swb":
+        return None     # every swb solve is solve_with_bootstrap
+    bk = dict(getattr(gc, "bootstrap_kwargs", None) or {})
+    if not bk:
+        return None
+    msg = (f"generation.bootstrap_kwargs={bk!r} configures "
+           "solve_with_bootstrap, which the self-consistent bootstrap loop "
+           "(jbs_self_consistent=True) runs only for jbs_init='swb' and the "
+           "jBS-delta / DIFF_BS caches; the loop's own bootstrap "
+           "(evaluate_jBS) does not read it.")
     warnings.warn(msg, DeprecationWarning, stacklevel=stacklevel + 1)
     return msg
 
@@ -357,6 +361,14 @@ def jbs_settings(gc, *, draw: bool = False) -> dict:
         # only present when ON, so the default settings dict (and every
         # record built from it) is exactly what it was before the flag
         out["gate_current_residual"] = True
+    from .physics import EPS_DEFINITION_DEFAULT, check_eps_definition
+    eps_def = check_eps_definition(getattr(gc, "eps_definition",
+                                           EPS_DEFINITION_DEFAULT))
+    if eps_def != EPS_DEFINITION_DEFAULT:
+        # the Redl eps / nu* R opt-in (GenerationConfig.eps_definition):
+        # carried to every loop evaluation and record; only present when
+        # not the default, so the default settings dict keeps its keys
+        out["eps_definition"] = eps_def
     return out
 
 
@@ -529,7 +541,15 @@ def weighted_norm(f, w, x) -> float:
 
 def profile_residuals(J, jbs, w, x, Ip) -> dict:
     """``r_j`` and ``r_I`` of a Redl profile ``J`` against the profile ``jbs``
-    the equilibrium was solved with, plus the logged pedestal diagnostics."""
+    the equilibrium was solved with, plus the logged pedestal diagnostics.
+
+    ``J`` and ``jbs`` are the field-aligned bootstrap ``kappa <j.B>`` only
+    (:func:`bouquet.physics.evaluate_jBS` since ``/4``): the pressure-driven
+    ``p'G`` is its own bucket (owner decision D2), so it neither enters the
+    normaliser ``||J||_w`` nor the ``I_BS`` / ``jBS_peak`` diagnostics -- the
+    definition of the base commit (PR #64's ``/3`` evaluator put ``p'G``
+    into ``J``, which shrank ``r_j`` by ``||kappa lambda|| / ||kappa lambda +
+    P||`` for the same mismatch: a silently looser ``rtol_j``)."""
     J = np.asarray(J, dtype=float)
     jbs = np.asarray(jbs, dtype=float)
     x = np.asarray(x, dtype=float)
@@ -548,9 +568,13 @@ def profile_residuals(J, jbs, w, x, Ip) -> dict:
                 jBS_peak_psiN=float(x[i_pk]) if J.size else float("nan"))
 
 
-def residual_weights(eq, psi_N, psi_pad=1e-3):
+def residual_weights(eq, psi_N, psi_pad=1e-3, coord="psi_n"):
     """``(w, x, kind)``: the per-surface Ip weights of equilibrium *eq* on
     ``psi_N``, for the residual norms.
+
+    ``psi_N`` is the run grid; in a Φ_N run (``coord="phi_n"``) it is mapped
+    to ψ_N on *eq*'s own toroidal-flux map, and ``x`` (the abscissa the
+    weights integrate over) is that ψ_N.
 
     The linear part of the closure's ``jphi-linterp`` measure,
     ``(V'/2pi) |dpsi/dpsi_N| <1/R^2>/<1/R>``, when ``get_q`` returns ``<1/R^2>``;
@@ -560,8 +584,10 @@ def residual_weights(eq, psi_N, psi_pad=1e-3):
     used to resolve.  ``kind`` names which one was used.  One ``get_q`` call,
     no trace.
     """
+    from . import coords
     from .utils import fsa_current_geometry
-    x = np.asarray(psi_N, dtype=float)
+    x = np.asarray(coords.psi_at(eq, np.asarray(psi_N, dtype=float), coord),
+                   dtype=float)
     g = fsa_current_geometry(eq, x, psi_pad=psi_pad, want_pprime=False)
     base = g["dV_dpsi"] / (2.0 * np.pi) * g["dpsi_dpsiN"]
     if g["inv_R2"] is not None:
@@ -1121,8 +1147,11 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
             requested=True, applied=False, after_pass=1,
             definition=START_REFRESH_DEFINITION)
     try:
-        from .physics import EVALUATE_JBS_VERSION
-        rec["evaluate_jBS_version"] = EVALUATE_JBS_VERSION
+        from .physics import evaluate_jbs_version, EPS_DEFINITION_DEFAULT
+        # the version of the definition the loop evaluates with (the
+        # settings carry a non-default GenerationConfig.eps_definition)
+        rec["evaluate_jBS_version"] = evaluate_jbs_version(
+            settings.get("eps_definition", EPS_DEFINITION_DEFAULT))
     except Exception:
         rec["evaluate_jBS_version"] = None
     rec["oft_build"] = oft_build_info()

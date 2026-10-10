@@ -16,6 +16,34 @@ says how to get the legacy paths back. Runtime on the shipped synthetic
 cases: engine reconstructions 38–76 s and draws 60–144 s, against 150–660 s
 and 405–1407 s on the legacy path with the bootstrap loop on.
 
+**Solve methods.** `GenerationConfig.solve_method` is the one switch:
+`"legacy"`, `"swb"` (OFT `solve_with_bootstrap` is the baseline and every
+draw; IMAS only) or `"engine"` (this page). `imas_baseline` /
+`reconstruction_engine` remain as its older spellings: with
+`solve_method=None` the method is derived from them. Nothing is rewritten at
+construction; `Bouquet.prepare_baseline()` (like the engine-dependent
+defaults) sets both fields to the method's effective values and remembers
+the user's own, so switching back (e.g. `imas_baseline` from `"swb"` to
+`"closure"`) restores the engine. A contradicting pair is refused:
+`imas_baseline="swb"` with another `solve_method`, and
+`reconstruction_engine="legacy"` with `solve_method="engine"`. `"swb"` and
+`"engine"` share the kinetic sampler (`bouquet.kinetic_sampler`), the P' edge
+pin and the separatrix-pressure offset (swb refuses `edge_pprime_pin=False`
+and `separatrix_pressure="legacy"`, which OFT's SWB cannot honour). The SWB
+edge taper is opt-in for both: swb's `swb_edge_taper_psi0` (default `None`,
+off; sent as `taper_edge_jBS=False` to a toolkit that has the option, since
+its own default may be on), the engine's `bootstrap_kwargs`. swb-only
+settings (`swb_*`, including the Ip acceptance `swb_ip_tol`, default 5e-3,
+with a warning for any solve accepted above 1e-4) never reach the engine.
+swb's bootstrap is the toolkit's SWB output converted to the field-aligned
+`kappa <j.B>` for the installed toolkit's own output convention
+(`physics._swb_jbs_to_toroidal`); its pressure-driven `p'G` is the third
+bucket `j_pressure`, archived as such. Known asymmetry: the SWB sawtooth
+reset (`swb_saw_*`) has no engine counterpart.
+The three methods share one draw loop and differ only through a draw-method
+object (`bouquet.draw_methods`); docs/draw-methods.md has the hook-by-hook
+comparison and how the legacy path is kept bit for bit.
+
 **Status (Stage 3).** The engine builds the baseline (`Bouquet.prepare_baseline()`
 returns the same `Baseline` the rest of the package consumes, plus
 `Baseline.engine`, the full record) and runs the draws: `generate()` and
@@ -78,7 +106,7 @@ the toy and a TokaMaker stand-in over it), `tests/test_one_conversion.py`
 | kinetics n_e, T_e, n_i, T_i, Z_eff | p-file / IDA, PCHIP onto the g-file ψ_N (as the legacy reconstruction) | core_profiles (or the IDA hybrid), as `read_imas_baseline` resolves them |
 | pressure | thermal + impurity + fast (fixed) | thermal + impurity + fast, **no `p_diff`** |
 | inductive (parallel) | `<j.B>_in = F p' + F'<B^2>/mu0` on the g-file's own traced surfaces (identity I0), minus Redl `<j.B>` on the anchor, minus the fixed parts; smoothed with a verbatim copy of `fit_inductive_profile`'s basis (spline + PCHIP, zero edge anchor, ≥ 0), **no amplitude search** | **the parallel residual by definition** (owner decision, 2026-10-02): `|B0| (j_total − j_bootstrap − Σ driven)` (IMAS `<j.B>/B0`), every driven entry the one held fixed below. The source's `j_ohmic` is a **cross-check**, not a choice: it is compared with the residual and the net (fraction of the total current) and rms (fraction of rms `j_total`) differences are stamped in `provenance["inductive_consistency"]` (action `"residual_by_definition"`; `"unchecked"` when the source has no `j_ohmic`), with no threshold and no warning. A source without `j_total` or `j_bootstrap` is refused (`inductive="j_ohmic"` uses its `j_ohmic` explicitly; there is no silent fallback). Evidence: on self-consistent sources the residual and `j_ohmic` are indistinguishable (`|Δl_i| ≤ 1.8e-3`); on sources whose own split is locally inconsistent the residual is closer to the source's `<j_phi>`. Explicit options (`IdsAdapter(inductive=...)`, passed by the engine from `GenerationConfig.engine_ids_inductive`, default `"residual"`): `"j_ohmic"` takes the source's, warning when the net mismatch exceeds `IdsAdapter(inductive_tol=0.02)` (2 % of the total current, owner-set); `"auto"` takes `j_ohmic` unless it is absent or misses by more than that tolerance, then the residual with a warning. Nothing in the source is altered |
-| fixed driven (parallel) | user `j_NBI` / `j_RF` (toroidal inputs), converted with the anchor's `F<1/R>/<B^2>` | the **driven** core_sources entries by their IMAS identifier (the data dictionary's `core_sources.source[:].identifier` enumeration; `adapters.IDS_DRIVEN_SOURCE_PARTS`), × `|B0|`, held fixed, by part: nbi (2) → `nbi`; ec / lh / ic (3, 4, 5) → `rf`; fusion (6), runaways (501), a model's sawteeth entry (701) → `other`. **Never added**: ohmic (7) and bootstrap (13) (the core_profiles `j_ohmic` / `j_bootstrap` stand for them), AGGREGATES -- total (1), auxiliary (100), the combinations 101-107, radiation (200), 202, 203 -- which would double-count their constituents, and a bootstrap-like `neoclassical` (401); each such entry carrying a non-zero `j_parallel` is listed in `provenance["ignored_sources"]` with its reason and warned about. An unknown index carrying a non-zero `j_parallel` is held fixed under `other` WITH a warning (`unclassified` in its `driven_sources` entry). The core_sources slice is the one nearest the core_profiles slice read and must lie within half the local core_profiles time-step of it, else the read is refused naming both times (`io.imas.core_sources_slice`, shared with the legacy reader; owner decision 2026-10-06). An entry carrying its own per-slice `time` is read at the core_sources slice time (a model's entry may start later than the IDS time base), not at the list index: its nearest own slice, accepted within half its own local time-step AND within half the local core_profiles step of the core_profiles slice time -- never interpolated; when neither time base has a local step (single-time bases, for the core_sources slice and for an entry alike) the window is 10 us (`io.imas.IMAS_SINGLE_TIME_WINDOW_S`, owner-approved 2026-10-07: a rounding-level mismatch of millisecond-stored times is a match, its dt recorded, and the rules below apply only beyond it); outside that window a driven entry carrying current on its own slices bracketing the time is refused, one carrying none there is off at that time (zero, listed in `provenance["off_sources"]`), and one whose own record begins AFTER the slice time is off before its record (zero, listed with `reason="off_before_record"` and its `first_own_time`, announced once per source file and entry); past its last own time an entry carrying current there is refused; one with a different slice count and no times is refused. Every match (both slice times, dt, the windows, the bracketing own times, the status) is in `provenance["source_time_match"]`. `provenance["driven_sources"]` lists what was added; a user override is converted as on the left. The delivered split reports `other` inside `j_RF` |
+| fixed driven (parallel) | user `j_NBI` / `j_RF` (toroidal inputs), converted with the anchor's `F<1/R>/<B^2>` | the **driven** core_sources entries by their IMAS identifier (the data dictionary's `core_sources.source[:].identifier` enumeration; `adapters.IDS_DRIVEN_SOURCE_PARTS`), × `|B0|`, held fixed, by part: nbi (2) → `nbi`; ec / lh / ic (3, 4, 5) → `rf`; fusion (6), runaways (501), a model's sawteeth entry (701) → `other`. **Never added**: ohmic (7) and bootstrap (13) (the core_profiles `j_ohmic` / `j_bootstrap` stand for them), AGGREGATES -- total (1), auxiliary (100), the combinations 101-107, radiation (200), 202, 203 -- which would double-count their constituents, and a bootstrap-like `neoclassical` (401); each such entry carrying a non-zero `j_parallel` is listed in `provenance["ignored_sources"]` with its reason and warned about. An unknown index carrying a non-zero `j_parallel` is held fixed under `other` WITH a warning (`unclassified` in its `driven_sources` entry). The core_sources slice is the one nearest the core_profiles slice read and must lie within half the local core_profiles time-step of it, else the read is refused naming both times (`io.imas.core_sources_slice`, shared with the legacy reader; owner decision 2026-10-06). An entry carrying its own per-slice `time` is read at the core_sources slice time (a model's entry may start later than the IDS time base), not at the list index: its nearest own slice, accepted within half its own local time-step AND within half the local core_profiles step of the core_profiles slice time -- never interpolated; when neither time base has a local step (single-time bases, for the core_sources slice and for an entry alike) the window is 10 us (`io.imas.IMAS_SINGLE_TIME_WINDOW_S`, owner-approved 2026-10-07: a rounding-level mismatch of millisecond-stored times is a match, its dt recorded, and the rules below apply only beyond it); outside that window a driven entry carrying current on its own slices bracketing the time is refused, one carrying none there is off at that time (zero, listed in `provenance["off_sources"]`), and one whose own record begins AFTER the slice time is off before its record (zero, listed with `reason="off_before_record"` and its `first_own_time`, announced once per source file and entry); past its last own time an entry carrying current there is refused; one with a different slice count and no times is refused. Every match (both slice times, dt, the windows, the bracketing own times, the status) is in `provenance["source_time_match"]`. `provenance["driven_sources"]` lists what was added; a user override is converted as on the left. The delivered split reports `other` inside `j_RF`. The legacy reader (`read_imas_baseline`, which the engine runs first) reads every driven entry through this same call with the same arguments, so its refusals, `off_sources` stamps and announcements are the engine's; it records `driven_sources` / `ignored_sources` / `off_sources` / `sawteeth_hold` in `Baseline.source_time_match`. `ImasSource.hold_sawteeth=False` (legacy reader only: the sawteeth entry left in the residual inductive) is refused here |
 | boundary | g-file LCFS | equilibrium boundary outline |
 | rows | Ip (exact); l_i(3) = the reader's `li(2)` key, **hard**, absolute tolerance 1e-3; q0 (optional) | Ip (soft, σ = 0.5 % of Ip); li_3 (soft, σ = 0.04); q0 (optional); MSE chords (optional) |
 | signs | positive frame: `sign(Ip)`, `|F|`; a file whose `<j_phi>` disagrees in sign with its Ip is refused (wrong COCOS) | `source_current_sign`, `|B0|`; `b0_sign` recorded |
@@ -154,6 +182,28 @@ evaluator's surfaces (`sauter_fc`), `<R>`, `<1/R>`, `<1/R^2>`, `V'`, `p'` from
 `utils.fsa_current_geometry`. The Redl `<j.B>` receives the shared
 innermost-surface repair (`smooth_jbs_transition`) every SWB-derived profile
 receives.
+
+**The archived split** puts the pressure-driven term
+`p'(<R> - F^2<1/R>/<B^2>)` on `j_BS`, as IMAS `j_bootstrap`, the IMAS reader
+and `evaluate_jBS` do; `j_inductive` is the residual.
+
+**Toroidal-flux runs (`coord="phi_n"`).** The contract's grid is the run grid
+(Φ_N). The backend tags every solve with it and samples each measurement's
+geometry at the nodes' ψ_N on that solve's own toroidal-flux map, so
+`geom["psi_N"]` is ψ_N and every integral, interpolation and residual uses it.
+The structured basis stays on the run grid (`close_ip_structured(...,
+basis_x=)`). In a ψ_N run all of this is the identity, bit for bit. See
+docs/workflows.md for the source side.
+
+**Edge taper (off by default).** With `bootstrap_kwargs={"taper_edge_jBS":
+True}`, as `solve_with_bootstrap(taper_edge_jBS=True)` does for the swb
+method, every term above is multiplied by OFT's edge taper
+(`physics.edge_taper_weight`, a port of `apply_edge_taper`): 1 below
+`taper_edge_psi0` (default 0.999), falling to 0 at the LCFS (`taper_edge_shape`
+2, quintic smoothstep).  The backend puts the factor on every geometry it
+measures, so the closure rows, the draws and the archived split all see the
+tapered composition.  Off, no weight is built and `composed_factor` is
+`conversion_factor`.
 
 ## A pass
 
@@ -397,7 +447,8 @@ instruction, because the frozen bootstrap exists on the legacy paths only.
 | `anchor_pressure_to_equilibrium` | nothing: no `p_diff` in the engine's pressure |
 | `imas_corrective_jphi` | `engine_delivery_correction` |
 | `jbs_loop_q0_corrector` | `engine_rows` with `"q0"` (`engine_draw_q0_row` for the draws) |
-| `floor_j_BS`, `swb_iterations`, `accept_anchor_inband`, `diagnostic_plots` | nothing: legacy draw / SWB mechanics |
+| `floor_j_BS`, `accept_anchor_inband`, `diagnostic_plots` | nothing: legacy draw / SWB mechanics |
+| `bootstrap_kwargs` keys other than `taper_edge_jBS` / `taper_edge_psi0` / `taper_edge_shape` and `use_sauter_eps=True` | nothing: the engine never runs `solve_with_bootstrap` |
 | `homotopy_passes` with `engine_draw_homotopy=False` | no homotopy runs |
 | `isolate_edge_jBS` (default `None`: resolved per engine; `True` under the engine) | nothing: the engine never isolates the edge bootstrap (Redl on the whole profile) |
 | `perturb_jind_in_anchor` (default `None`: resolved per engine; `False` under the engine) | nothing: one engine draw route replaces Fix C and the standard l_i loop |
@@ -504,7 +555,7 @@ the distance-to-input table (`tests/probes/measure_engine.py`, part
 
 `bouquet/engine_draws.py`; `Bouquet.generate()` builds a
 `GenerateEngineDraws` from the live reconstruction and hands it to
-`generate_bouquet(engine_draw=...)`, whose per-draw loop then calls it in
+`generate_bouquet(draw_method=...)`, whose per-draw loop then calls it in
 place of the legacy `perturb_kinetic_equilibrium` (everything else --
 the warm start, the strong coil regularisation of the post-loop phase, the
 homotopy, the archive, the until-N ledger -- is the same code). The parallel
@@ -564,7 +615,8 @@ the auxiliary channels, the parallel inductive. The random stream is the
 legacy one through the first inductive candidate (`engine_draws.RNG_STREAM`):
 the kinetic channels `ne, Te, (Zeff -> ni | ni), Ti` redrawn together until
 the flux-integrated thermal pressure matches within `p_thresh`, the
-auxiliary channels in their order, then one inductive candidate drawn IN
+auxiliary channels in their order (both by `bouquet.kinetic_sampler`, shared
+with the legacy and swb draws), then one inductive candidate drawn IN
 TOROIDAL UNITS with the legacy call on `s_ind(x*) kappa* lambda_ind` (so its
 toroidal perturbation is the legacy draw's for the same normals: today's
 `sigma_jphi` and `j_ls`) and mapped back to `lambda_ind`; it is redrawn only
@@ -718,9 +770,12 @@ every pass) and the post-homotopy passes through the engine's solve wrapper
 stage and rollback re-solve (installed on the solver for the homotopy stage
 and restored after it). The zero-perturbation draw of
 `verify_sigma0_consistency` runs under it too. The reconstruction runs
-under the solver's own cap. The legacy draws' `draw_solve_maxits` is
-REFUSED under the engine (it would be silently ignored); the legacy path
-never reads `engine_draw_solve_maxits`, so it stays bit-identical.
+under the solver's own cap. The legacy draws' `draw_solve_maxits` (any
+value but `"auto"` / `None`) and their opt-in rescue
+(`draw_solve_retry_urf`, `draw_solve_loose_tol`) are REFUSED under the
+engine by the unread-settings rule (they would be silently ignored); the
+engine draws are never rescued. The legacy path never reads
+`engine_draw_solve_maxits`.
 
 A solve that converges under the cap is untouched (measured on the
 synthetic g-file example, fixed build: loop ≤ 15, post-homotopy ≤ 18,

@@ -60,6 +60,8 @@ COIL_SOLVE_MODE_ATTR = "_bouquet_coil_solve_mode"
 
 #: The mode :func:`enter_bounded_coil_mode` puts the solver in.
 COIL_SOLVE_BOUNDED = "bounded"
+#: The mode :func:`keep_unbounded_coil_mode` records (the swb method).
+COIL_SOLVE_UNBOUNDED = "unbounded"
 
 
 def enter_bounded_coil_mode(mygs):
@@ -87,12 +89,22 @@ def enter_bounded_coil_mode(mygs):
     return COIL_SOLVE_BOUNDED
 
 
+def keep_unbounded_coil_mode(mygs):
+    """Record that *mygs* stays in the unbounded (normal-equations) coil
+    solve: a method that never installs coil bounds (swb) is set up so."""
+    if getattr(mygs, COIL_SOLVE_MODE_ATTR, None) != COIL_SOLVE_BOUNDED:
+        setattr(mygs, COIL_SOLVE_MODE_ATTR, COIL_SOLVE_UNBOUNDED)
+    return coil_solve_mode(mygs)
+
+
 def coil_solve_mode(mygs):
     """``"bounded"`` once :func:`enter_bounded_coil_mode` has run on *mygs*,
-    else ``"unknown"`` (OpenFUSIONToolkit does not report the mode: a solver
+    ``"unbounded"`` after :func:`keep_unbounded_coil_mode`, else
+    ``"unknown"`` (OpenFUSIONToolkit does not report the mode: a solver
     bouquet did not set up may be in either)."""
-    if getattr(mygs, COIL_SOLVE_MODE_ATTR, None) == COIL_SOLVE_BOUNDED:
-        return COIL_SOLVE_BOUNDED
+    mode = getattr(mygs, COIL_SOLVE_MODE_ATTR, None)
+    if mode in (COIL_SOLVE_BOUNDED, COIL_SOLVE_UNBOUNDED):
+        return mode
     return "unknown"
 
 

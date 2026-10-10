@@ -19,6 +19,7 @@ covers the guarantees a user should know about and the knobs that change them.
 - [Hybrid kinetics on the IMAS path](#hybrid-kinetics-on-the-imas-path)
 - [Current and field orientation](#current-and-field-orientation)
 - [Z_eff-primary density scheme](#z_eff-primary-density-scheme)
+- [Kinetic assumptions: Z_eff, n_i and the clips (PR #56)](#kinetic-assumptions-z_eff-n_i-and-the-clips-pr-56)
 - [Corrective j_phi iteration](#corrective-j_phi-iteration)
 - [The structured closure and its l_i constraint](#the-structured-closure-and-its-l_i-constraint)
 - [Core-pressure hollowness record](#core-pressure-hollowness-record)
@@ -100,11 +101,9 @@ is what keeps it from silently regressing.
 ## Bootstrap current treatment
 
 The per-draw bootstrap comes from TokaMaker's Sauter/Redl
-`solve_with_bootstrap`, whose parallel output is converted to toroidal with the
-package's one field-aligned factor `κ = F⟨1/R⟩/⟨B²⟩`
-(`bouquet.physics.field_aligned_conversion`, via `parallel_to_toroidal`; on
-SWB's `⟨R⟩/F`-projected output the net factor is `F²⟨1/R⟩/(⟨R⟩⟨B²⟩)`). See
-"The evaluator" below for the 2026-10-06 change of this conversion.
+`solve_with_bootstrap`, whose output is already TokaMaker `jphi` (field-aligned
+part plus the pressure term p′G; see [current-conventions.md](current-conventions.md))
+and is used as is.
 
 Two composition modes:
 
@@ -173,8 +172,10 @@ Two consequences of the default:
   `generation` section). A current config always carries the field. An
   unknown (e.g. misspelt) `generation` key is refused, naming the nearest
   valid key, so a typo can no longer land on this legacy default.
-- `swb_iterations` is the legacy path's Picard count; under the loop it is
-  ignored, and a non-default value raises a `DeprecationWarning` saying so.
+- `bootstrap_kwargs` configures `solve_with_bootstrap`; under the loop SWB
+  runs only for `jbs_init="swb"` and the jBS-delta / `DIFF_BS` caches, so a
+  non-empty dict raises a `DeprecationWarning` saying where it acts.  (It
+  replaced `swb_iterations`; a stored value loads as `{"iterations": n}`.)
 
 The archive says which model a group carries: the schema-v3 `jbs_loop` block
 (below) is present exactly where the loop ran; plots label the bootstrap
@@ -212,26 +213,16 @@ collisionality, `redl_bootstrap(formula_form='jboot1', use_sign_q=True)`) run
 **once on the equilibrium it is handed -- no solve inside** -- with three
 differences, each the point of the helper:
 
-1. geometry (`F`, `f_T = 1 − f_c`, `ε = ⟨a⟩/⟨R⟩`, `q`, `⟨R⟩`) is sampled on the
-   **caller's** surfaces, `clip(ψ_N, psi_pad, 1 − psi_pad)`;
+1. geometry (`F`, `f_T = 1 − f_c`, `ε` -- see below --, `q`, `⟨R⟩`) is sampled
+   on the **caller's** surfaces, `clip(ψ_N, psi_pad, 1 − psi_pad)`;
 2. gradients are taken on the **true** grid, `numpy.gradient(y, ψ_N,
    edge_order=2)`, divided by the **current** flux range;
-3. Redl's `⟨j·B⟩` is converted to the toroidal FSA density directly -- not
-   through SWB's `⟨R⟩/F` projection and its undo on a uniform grid -- with the
-   package's **one** field-aligned conversion (`physics.field_aligned_conversion`,
-   the unified engine's `engine.conversion_factor`; `F`, `⟨1/R⟩`, `⟨B²⟩` of the
-   same surfaces):
-
-   ```
-   ⟨j_φ⟩ = κ ⟨j·B⟩,   κ = F⟨1/R⟩/⟨B²⟩
-   ```
-
-   For a field-aligned component `j = λB` (`λ = ⟨j·B⟩/⟨B²⟩`, `B_φ = F/R`),
-   `⟨j_φ⟩ = λF⟨1/R⟩` exactly, and `⟨j_φ⟩` -- the plain flux-surface average --
-   is what OFT's `jphi-linterp` consumes, so with the pressure-driven part the
-   composition identity `⟨j_φ⟩ = κ⟨j·B⟩ + p′(⟨R⟩ − F²⟨1/R⟩/⟨B²⟩)` is exact.
-   `toroidal_to_parallel` (the IDS export) is its exact inverse, and the frozen
-   path's `_swb_jbs_to_toroidal` uses the same factor.
+3. Redl's `⟨j·B⟩` is converted to TokaMaker `jphi = ⟨j_φ⟩` exactly, by (A7) of
+   [current-conventions](current-conventions.md): the field-aligned
+   `F⟨1/R⟩⟨j·B⟩/⟨B²⟩` plus the pressure-driven `p′(⟨R⟩ − F²⟨1/R⟩/⟨B²⟩)`, all of
+   the same surfaces. The bootstrap component carries `p′G`, as IMAS
+   `j_bootstrap` and OFT's own SWB output do, and the IDS export inverts the
+   same relations.
 
    **Declared default physics change (2026-10-06, owner-approved).** Until then
    the legacy sites converted with `⟨j·B⟩/(F⟨1/R⟩)` (`⟨1/R²⟩` not passed) and
@@ -240,8 +231,8 @@ differences, each the point of the helper:
    content: ≈ 1.5 % at ψ_N ≈ 0.97 on the synthetic D3D-like example) × the
    Jensen ratio `⟨1/R²⟩/⟨1/R⟩²` (≈ 5 % there) -- **+6.8 %** at the pedestal
    (+1.0 % at ψ_N 0.1, +4.3 % at 0.5, +6.4 % at 0.9). The legacy bootstrap
-   drops by that fraction; the unified engine, which already used κ, is
-   unchanged (`tests/test_one_conversion.py`). (The bracket alone, ~1.4 % at
+   drops by that fraction (before `p′G` is added); the unified engine,
+   which already used κ, is unchanged (`tests/test_one_conversion.py`). (The bracket alone, ~1.4 % at
    the peak, is what this page used to quote; the Jensen term was missed.)
 
 **Refusals, never a silent zero.** The historical evaluation mapped every NaN
@@ -260,14 +251,91 @@ bit-identical to the evaluator before the refusals (a fast test compares it
 against a verbatim copy). The production callers clip `Z_eff` at 1 before
 calling, as they always did.
 
+**The inverse aspect ratio ε and the R in ν\* (`evaluate_jBS/4`, owner
+decisions E4 and E7, 2026-10-09).** ε enters the Redl collisionalities
+through Sauter's Eqs. (18b)/(18c), `ν*_e, ν*_i ∝ q R n lnΛ / (ε^{3/2} T²)`
+(Sauter, Angioni & Lin-Liu, Phys. Plasmas 6, 2834 (1999); Redl et al., Phys.
+Plasmas 28, 022502 (2021), which uses Sauter's ν\* and f_trap and writes
+"ε = r/R0", the inverse aspect ratio); the trapped fraction `f_T` comes from
+the field and does not depend on it. `GenerationConfig.eps_definition`
+(`evaluate_jBS(..., eps_definition=)`) names the definition, and each comes
+with the major radius `R` its own convention puts into ν\*:
+
+| `eps_definition` | ε | R in ν\* |
+|---|---|---|
+| `"r_over_R_geo"` (**default**) | `(R_max − R_min)/(R_max + R_min)` | `R_geo = (R_max + R_min)/2` |
+| `"half_width_over_fsa_R"` | `(R_max − R_min)/(2⟨R⟩)` | `⟨R⟩` (`get_q`) |
+| `"a_over_R"` | `⟨a⟩/⟨R⟩` (the `/1`–`/3` evaluator, bit for bit) | `⟨R⟩` (`get_q`) |
+
+*Why the default.* For a shaped surface the literal reading of "r/R0" is the
+surface's half-width over its own geometric centre, `R_geo`; OMFIT's
+`sauter_bootstrap` (`a/R` of the flux-surface geometry, `R = (R_max +
+R_min)/2`) and IMAS.jl/FUSE (`nuestar`/`nuistar`, `a/R` of the outboard and
+inboard radii) use exactly that, and both put the same `R_geo` into ν\*, so
+bouquet's bootstrap now agrees in convention with the codes its IMAS inputs
+come from. The flux-surface average `⟨R⟩` is weighted by dl/B_p; near the
+separatrix that weight piles up at the X-point, so `⟨R⟩` falls below `R_geo`
+(−0.4 % at ψ_N 0.5, −3.7 % at 0.9, −7.4 % at 0.99, −10 % at 0.999 on the
+synthetic D3D-like case) and both `⟨R⟩`-denominator forms turn up sharply in
+the last percent of flux, while `(R_max − R_min)/(R_max + R_min)` stays smooth
+and reaches the boundary's `a/R_geo` at the LCFS. `⟨a⟩` (the dl/B_p-weighted
+mean distance from the axis) also carries the vertical extent of an elongated
+surface, so `⟨a⟩/⟨R⟩` is the largest of the three everywhere (×1.17 the
+default at the axis, ×1.72 at ψ_N 0.999 there) and does not converge to the others at the
+axis; the two half-width forms do (`⟨R⟩ → R_geo`). `R_avg` (`get_q`'s `⟨R⟩`)
+still enters the pressure-driven term and the SWB projection under every
+definition: only ν\* changes.
+
+*Where the numbers come from.* `R_min`, `R_max` and `⟨R⟩` are read from OFT's
+`get_fsa` (v26.6+) on the evaluator's own surfaces, on **every** build, so the
+result does not depend on the build: the internal-solve toolkit's
+`sauter_fc(return_eps=True)` computes `⟨R⟩` by cut-cell quadrature and agrees
+with `get_fsa` only to ~1.4e-4, so its value is only recorded beside ours
+(`diag["eps_fork_diagnostic"]`), with a documented cross-build sanity bar
+`physics.EPS_ROUTE_SANITY_RTOL = 1e-3` -- a diagnostic, not a physics
+criterion. `⟨a⟩` exists only in `sauter_fc`, so `"a_over_R"` reads it there,
+as it always did. A build without `get_fsa` is refused by name for the two
+half-width forms (pointing at `"a_over_R"`). Every result names the
+definition, its route, the R in ν\* and the version (`diag["eps_definition"]`,
+`["eps_route"]`, `["nu_star_R"]`, `["R_nu_star"]`, `["version"]`); the
+version string names the ε and the ν\* R (`OPT-IN` for the two opt-ins), so
+records of the three are distinguishable; the run's choice is archived
+(`_baseline` attr `bootstrap_eps_json`, the engine record's
+`bootstrap_eps`, every loop record's `evaluate_jBS_version`).
+
+*Magnitude* (synthetic D3D-like g-file case, one equilibrium and the same
+kinetics, unified engine, OFT main). The full default (R_geo in ε **and** in
+ν\*) against
+
+* `"half_width_over_fsa_R"`: j_BS −0.8 % at ψ_N 0.95, −4.9 % at 0.98,
+  −10 % at 0.99, peak −1.2 %, I_BS −0.5 %. Of that, the ε denominator alone
+  gives −3 % at 0.98, −6 % at 0.99 and −0.3 % in I_BS; the ν\* R (×1.04 at
+  0.9, ×1.07 at 0.98, ×1.08 at 0.99, ×1.11 at 0.999) the rest
+  (−2 % / −4 % / −0.2 %);
+* `"a_over_R"`: j_BS +2.0 % at 0.9, −2.8 % at 0.95, −16 % at 0.98, −31 % at
+  0.99, peak −4.3 %, I_BS −1.6 % (the ε alone: −12 % at 0.98, −23 % at 0.99,
+  I_BS −1.0 %).
+
+On real H-mode pedestals (strongly shaped surfaces) the change from `⟨a⟩/⟨R⟩`
+to `(R_max − R_min)/(2⟨R⟩)` measured I_BS −4 to −10 % and pedestal j_BS −16
+to −32 % at ψ_N ≈ 0.98 across eleven slices (the lower end on slices whose
+kinetics come from the dd, the upper end on IDA-kinetics slices with steeper
+pedestals; −8 to −11 % at 0.95 on the former), with l_i(3) +0.5 to +1.0 % and
+q0 about +0.8 %; the default moves further than that by the `R_geo` steps
+above (not yet measured on real data). How far j_BS falls
+depends on how strongly shaped the surfaces are and how collisional the
+pedestal is: ν\* rises most in the pedestal, where the definitions differ
+most.
+
 On a uniform grid it reproduces SWB's first-pass `⟨j·B⟩` **bit for bit** (on a
-build whose SWB accepts `psi_N=`). Grids whose first intervals are finer than
+build whose SWB accepts `psi_N=`, with `eps_definition="a_over_R"`, the ε and
+ν\* R of SWB; on a build with `use_sauter_eps` SWB is asked for it). Grids whose first intervals are finer than
 `psi_pad` (a ρ-uniform grid near the axis) are handled without changing
 `psi_pad` and without merging surfaces: every point keeps its own profile value
 and gradient; only the geometry of the points inside the pad is looked up at
 `psi_pad`, once. It uses only primitives present on every supported OFT build
-(`get_profiles`, `sauter_fc`, `get_q`, `psi_bounds`, `redl_bootstrap`,
-`calculate_ln_lambda`), in either of their return layouts.
+(`get_profiles`, `sauter_fc`, `get_fsa`, `get_q`, `psi_bounds`,
+`redl_bootstrap`, `calculate_ln_lambda`), in either of their return layouts.
 
 ### The loop
 
@@ -553,6 +621,18 @@ and the DRAWS, perturbations of the reconstruction. With the loop on:
   bootstrap already self-consistent. Every sampled perturbation (kinetics,
   inductive GPR, bootstrap scale, l_i target) enters as a departure from the
   reconstruction's value.
+- **The bootstrap multiplier** (`bs_scale`, or the structured closure's
+  `s_bs(ψ)`, `Baseline.bs_scale_profile`) reaches every legacy draw through
+  one rule (`Bouquet._draw_bootstrap_scaling`, shared by `generate()` and
+  both σ=0 guards): SWB draws apply it after SWB (`jBS_scale_profile`), with
+  `jBS_scale_range` the jitter inside SWB; loop draws -- whose composer is
+  linear in its scale and takes no profile -- carry it in the scale, the
+  range re-centred on `bs_scale` (`(bs_scale, bs_scale)` with no range).  A
+  non-uniform `s_bs(ψ)` with loop draws is refused (the composer cannot take
+  it).  The fixed current a draw holds is `j_NBI + j_RF + j_other`; the
+  delivered state and both σ=0 guards hold exactly that, and the baseline-way
+  check records how far the stored split is from closing on it
+  (`split_closure`).
 - **What is left non-identity by construction:** for an asymmetric
   `jBS_scale_range` the draws' centre scale is not the reconstruction's;
   `jBS_baseline_mode="ohmic"` (baseline-only; the draws refuse it) keeps its
@@ -830,11 +910,25 @@ multiplies every current it reads by `sign(equilibrium ip)`:
 | multiplied by `sign(ip)` | read unchanged |
 |---|---|
 | `core_profiles` `j_total`, `j_tor`, `j_ohmic`, `j_bootstrap` | kinetics (`n`, `T`, `Z_eff`), fast and equilibrium pressure |
-| every beam-source `j_parallel` (→ `j_NBI`) | rotation (`omega_tor`), `E_r`, transport coefficients |
+| every driven core_sources `j_parallel`: beams (→ `j_NBI`), EC/LH/IC (→ `j_RF`), fusion, runaways, sawteeth and unknown indices (→ `j_other`; the sawteeth share also → `j_sawteeth`) | rotation (`omega_tor`), `E_r`, transport coefficients |
 | `equilibrium.profiles_1d.j_tor` (→ `jphi_diff`) | the dd's own `q` (`q0_dd`, recorded raw; the sawtooth gate reads `|q0_dd|`) |
 | `pf_active` coil currents read as coil-regularisation targets (`coil_targets.measured_from_pf_active`) | `pf_active` per-coil sigma (`data_error_upper`, used through `abs()` by the χ² coil filter) |
-| | a user-supplied `FixedComponentsConfig.j_NBI` / `j_RF` — defined in bouquet's positive-Ip frame (co-current positive), exactly as on the g-file path |
+| | a user-supplied `FixedComponentsConfig.j_NBI` / `j_RF` / `j_other` — defined in bouquet's positive-Ip frame (co-current positive), exactly as on the g-file path |
 | | the boundary outline, `F0 = |r0·b0|` |
+
+The driven entries are read through ONE call with the engine's IDS adapter
+(`adapters._ids_driven_currents`, with the core_profiles slice time and
+window, the off list, the match records and the announcement key the engine
+passes), so the source-time rule -- refusal, `off_idle`, `off_before_record`,
+the announcement -- is the same on the legacy reader and the engine for every
+channel, the sawteeth entry included (a current-carrying sawteeth entry past
+its last own time is refused, not zeroed).  The sawteeth entry (701) is held
+in `j_other` by default: FUSE's `j_ohmic` excludes it (`j_total - j_bootstrap
+- beams - sawteeth = j_ohmic` to rounding on the synthetic FUSE fixture).
+`ImasSource.hold_sawteeth=False` opts out -- its current stays in the
+residual `j_inductive`, the legacy split before the hold -- and is stamped in
+`Baseline.source_time_match["sawteeth_hold"]`; the unified engine always
+holds it and refuses the opt-out.
 
 The factor is recorded as `Baseline.source_current_sign` (with where it came
 from as `Baseline.source_current_sign_origin`, and the source's B0 sign as
@@ -979,6 +1073,93 @@ stay mutually consistent in every sample, which a naive independent-perturbation
 scheme cannot guarantee. One Z_eff value per draw. See
 [architecture.md §4](../architecture.md#4-quasi-neutrality-and-impurity-handling).
 
+## Kinetic assumptions: Z_eff, n_i and the clips (PR #56)
+
+These are the assumptions of the IDA / FUSE ion coupling (PR #56). **Since
+1.4.0 they are EXPERIMENTAL and opt-in, not defaults** (owner decision
+2026-10-09): on real H-mode slices the combined route moved core n_i and Z_eff
+far outside the measurement uncertainties, so it awaits validation. Each is
+listed in `bouquet.experimental.REGISTRY` with its open validation items (see
+[workflows.md, Experimental features](workflows.md#experimental-features-and-their-validation-status)):
+item 1 is `fuse_zeff_fast_ions` (`ImasSource.zeff_fast_ions=True`), item 2 is
+`ida_ion_route` (`ni_source="Zeff" | "CER" | "all"`; the beam subtraction
+on `ida_hybrid` is `ida_ni_beam_subtraction`, `ImasSource.ni_subtract_fast`),
+and the floor at 1 and the n_i floor / ceiling of item 3 are
+`kinetic_sampler_clips` (`UncertaintyConfig.kinetic_clips`). The defaults
+are the routes before PR #56: the thermal-only dd Z_eff, the IDA VB Z_eff
+with n_i from quasineutrality and the carbon > VB > scalar envelope ladder,
+and only the `zeff_bounds` window on a drawn Z_eff. Each assumption is stated,
+justified and cited here, and each is visible in the records (the stamps named
+below). None of them is a tunable tolerance.
+
+**1. The Z_eff the bootstrap sees counts every ion's charge, fast ions
+included, when the source's Z_eff does (FUSE beam shots).**
+Neoclassical theory enters Z_eff through the electron-ion collision frequency
+and the Sauter/Redl coefficients, with Z_eff = Σ_j n_j Z_j² / n_e summed over
+the ion species the electrons collide with (Sauter, Angioni & Lin-Liu, Phys.
+Plasmas 6, 2834 (1999); Redl et al., Phys. Plasmas 28, 022502 (2021)). Electrons scatter off fast ions exactly as off thermal
+ones (the e-i collision operator depends on the target's charge and density,
+not on its distribution while v_fast ≪ v_the; Helander & Sigmar, *Collisional
+Transport in Magnetized Plasmas*, CUP 2002), so a beam population
+belongs in the numerator. IMAS.jl's Z_eff expression for
+`core_profiles.profiles_1d.zeff` sums over all ions, fast ones included, and
+FUSE computes its own bootstrap from the stored Z_eff (Meneghini et al., FUSE,
+arXiv:2409.05894, 2024); a dd may however carry a Z_eff stored before the beam
+was added. bouquet therefore classifies
+a dd's stored Z_eff against both numerators on the core (`io.imas._dd_zeff`)
+and passes `Zeff_th + Σ Z_s² n_s^fast / n_e` to the bootstrap when the dd's
+Z_eff includes the fast ions (with no stored Z_eff and a beam present, always).
+*Caveat:* the ion-ion terms of the theory assume Maxwellian ions; the fast-ion
+contribution to the ion collisionality is an approximation, small where
+n_fast ≪ n_i. *Stamp:* `Baseline.zeff_includes_fast`.
+
+**2. IDA Z_eff and n_i: the mean of the bremsstrahlung (VB) and carbon-CER
+routes (`ni_source="all"`), each clamped to the single-impurity window first.**
+The two routes measure the same quantity independently: visible
+bremsstrahlung gives Z_eff from the continuum, CER gives n_C and so
+Z_eff = 1 + Z(Z-1) n_C/n_e under single-impurity quasineutrality (Wesson,
+*Tokamaks*, 4th ed., OUP 2011; the agreement of the two at DIII-D when
+C6+ dominates: Callahan et al., JINST 14 C10002, 2019). IDA itself fits both
+within one Bayesian model (Fischer et al., Fusion Sci. Technol. 58, 675,
+2010). The combination is an **equal-weight** mean, not the
+inverse-variance (minimum-variance) one. Justification: the file's VB
+`Zeff_err` (8-9 % core, 44-130 % SOL on the demo files, `io/ida.py`) is
+dominated by calibration and mantle-subtraction systematics rather than
+independent random error, so inverse-variance weights would mostly track
+those systematics; equal weights treat the two independent techniques
+symmetrically. (Inverse-variance weighting is the natural refinement if the
+VB σ is ever shown to be statistical.) Where the routes disagree beyond their combined σ, the excess
+is added to the envelope as a one-sided between-route variance,
+`max(Δ² - σ_Δ², 0)/4` -- the random-effects construction of DerSimonian &
+Laird (Control. Clin. Trials 7, 177, 1986) for two estimates of an equal-weight
+mean. Each route is clamped to `[1, Z]` before the mean (`Z_eff,CER ≤ Z ⇔
+n_C ≤ n_e/Z ⇔ n_i ≥ 0`), so `n_i(mean Z_eff)` equals the mean of the per-route
+n_i exactly. When a route has no usable envelope (old vintages without
+`Zeff_err`, or no `n_12C6_err`) the other route alone sets the value.
+*Stamp:* `IDAProfiles.zeff_provenance` (convention, rung, weights, window,
+number of nodes each route was clamped at).
+
+**3. The clips on a drawn Z_eff and n_i (`bouquet.kinetic_sampler`).**
+
+| Clip | Bound | Physical basis | Counter (`KineticDraw.clips`) |
+|---|---|---|---|
+| Z_eff window | `physics.zeff_bounds`: n_i ≥ 0 and n_z ≥ 0 | quasineutrality n_e = n_i + Z n_z + z_fast with non-negative densities | `zeff_window_lo`, `zeff_window_hi` |
+| Z_eff floor | Z_eff ≥ 1 | for a plasma of ions with Z_j ≥ 1 whose numerator and denominator count the same ions, Σ n_j Z_j² ≥ Σ n_j Z_j = n_e | `zeff_floor_1` |
+| thermal n_i floor | n_i ≥ 0 | a density is non-negative | `ni_floor_0` |
+| n_i ceiling | n_i ≤ n_e - z_fast | quasineutrality with non-negative impurity density: n_e = n_i + Z n_z + z_fast | `ni_ceiling` |
+
+*Caveat on the floor at 1:* with the **thermal-numerator** Z_eff convention
+and a fast population, Z_eff,th = (n_i + Z² n_z)/n_e can legitimately be
+below 1 (the fast ions carry part of n_e but none of the numerator), and
+`zeff_bounds` allows it; the floor then lifts such a draw (biasing Z_eff up and
+n_i down). This is the case `zeff_floor_1` counts separately from the
+physical window, so its frequency can be measured on a real run before the
+floor is revisited. Every clip changes values exactly as before; only the
+counting is new. Each draw's `record()` carries the sampler version
+(`kinetic_sampler/3`), whether the clips were on (`clips_enabled`) and the
+counters, and a log line names every clip that fires. Default (clips off):
+only the Z_eff window row applies.
+
 ## Corrective j_phi iteration
 
 TokaMaker's `jphi-linterp` mode imposes the requested `j_phi(psi_N)` using
@@ -997,6 +1178,15 @@ A related, accepted artifact: a localized ~8–10% dip in core j_phi relative to
 the input g-file, which is an l_i-versus-peakedness tradeoff intrinsic to
 matching both. Pinning the core has been tried and is unstable. See
 [architecture.md §16](../architecture.md#16-known-limitations-and-future-work).
+
+**Known error, kept for legacy bit-identity: index-for-index ψ_N readbacks.** On a uniform ψ_N grid (every g-file run), the legacy path samples the solver at its own padded points, `linspace(psi_pad, 1 - psi_pad, n)`, and pairs those samples index for index with profiles on the nodes, `linspace(0, 1, n)`. Each pairing is misplaced by up to `psi_pad`, most of all at the edge.
+
+Sites:
+- the corrective iteration's measurement (`_corrective_output_jphi`, `coords.readback_kw`'s uniform branch);
+- the cylindrical l_i proxy (`calc_cylindrical_li_proxy`);
+- the self-consistent loop's delivered state (`_deliver_request_split`).
+
+This is wrong, and it is kept only so that legacy ψ_N results and their goldens stay bit-identical with main. On the D3D-like g-file it costs q95 −0.48% against the g-file's own q; with the readbacks moved to the nodes, the same run is −0.036% off, and l_i(3) moves from 0.65594 to 0.65397. The unified engine, swb, Φ_N runs and the archived achieved current all sample at, or interpolate onto, the nodes, and are not affected.
 
 A separate known issue: in `jphi-linterp` mode the realized current near the
 separatrix overshoots the specified profile, which leaves a small constant

@@ -591,6 +591,11 @@ def _resample_contour(R, Z, npts=257, periodic=True):
     R = np.asarray(R, dtype=float).copy()
     Z = np.asarray(Z, dtype=float).copy()
     R[-1], Z[-1] = R[0], Z[0]
+    # Drop repeated vertices (contourpy emits them where a contour passes
+    # through a grid node): splrep needs strictly increasing arc length.
+    ds = np.hypot(np.diff(R), np.diff(Z))
+    keep = np.append(ds > 1e-12 * np.sum(ds), True)
+    R, Z = R[keep], Z[keep]
 
     # Cumulative arc-length parameter
     ds = np.sqrt(np.diff(R) ** 2 + np.diff(Z) ** 2)

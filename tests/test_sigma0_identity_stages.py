@@ -149,6 +149,15 @@ class ToyGS:
                  "dV/dPsi": 1.0 + x}
         return (x, 1.0 + 3.0 * x, ravgs, None, None, None)
 
+    def sauter_fc(self, psi=None, npsi=None, psi_pad=None):
+        """The flux-surface averages the SWB conversion reads
+        (physics._swb_geometry): a flat <|B|^2>.  The toy's p' is zero, so
+        the pressure-driven p'G the conversion takes off a TokaMaker-jphi
+        toolkit's SWB output is exactly zero here."""
+        x = self._grid(psi, npsi)
+        one = np.ones_like(x)
+        return (None, None, {"<|B|>": one, "<|B|^2>": one})
+
     def flux_integral(self, psi_N, prof):
         return _trap(prof, psi_N)
 
@@ -160,8 +169,15 @@ class ToyGS:
 
 
 def _toy_redl(eq, psi_N, ne, te, ni, ti, Zeff, psi_pad=1e-3,
-              isolate_edge=False, smooth_axis=True):
-    """Bootstrap that depends on the kinetics AND on the equilibrium."""
+              isolate_edge=False, smooth_axis=True, coord="psi_n",
+              eps_definition=None):
+    """Bootstrap that depends on the kinetics AND on the equilibrium.
+    ``eps_definition`` (GenerationConfig.eps_definition, passed at every
+    call site) is checked like the real evaluator does; the toy's bootstrap
+    does not depend on it."""
+    if eps_definition is not None:
+        from bouquet.physics import check_eps_definition
+        check_eps_definition(eps_definition)
     kin = (np.asarray(ne, float) * np.asarray(te, float)) / (
         np.asarray(ne, float)[0] * np.asarray(te, float)[0])
     base = (3.0e5 * np.exp(-0.5 * ((psi_N - 0.92) / 0.04) ** 2)
@@ -240,7 +256,7 @@ def toy(monkeypatch):
         monkeypatch.setattr(mod, "eq_jphi_profile", prof)
         monkeypatch.setattr(mod, "Ip_fsa_weights", wts)
     monkeypatch.setattr(L, "residual_weights",
-                        lambda eq, psi_N, psi_pad=1e-3: (_W.copy(), _X,
+                        lambda eq, psi_N, psi_pad=1e-3, coord="psi_n": (_W.copy(), _X,
                                                          "toy"))
     monkeypatch.setattr(P, "evaluate_jBS", _toy_redl)
     monkeypatch.delenv("BOUQUET_R2_IP_MODE", raising=False)

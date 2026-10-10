@@ -42,6 +42,11 @@ SCHEMA_VERSION = 3
 JBS_CONVERGED_ATTR = "jbs_converged"
 JBS_N_PASSES_ATTR = "jbs_n_passes"
 JBS_LOOP_JSON_ATTR = "jbs_loop_json"
+#: Draw-group attr (legacy and swb draws): the shared kinetic sampler's
+#: per-draw record as JSON (``bouquet.kinetic_sampler.KineticDraw.record``:
+#: version, pressure match, clip counters; PR #56).  Engine draws carry the
+#: same record in their engine block's ``inputs.kinetic_sampler``.
+KINETIC_SAMPLER_JSON_ATTR = "kinetic_sampler_json"
 JBS_LOOP_ATTRS = (JBS_CONVERGED_ATTR, JBS_N_PASSES_ATTR, JBS_LOOP_JSON_ATTR)
 #: Schema version that introduced the block (older archives never carry it).
 JBS_LOOP_SINCE_SCHEMA = 3
@@ -93,7 +98,9 @@ def read_jbs_loop(grp):
         raw = raw.decode()
     return json.loads(str(raw))
 
-# Bare dataset name -> unit string (empty = dimensionless).
+# Bare dataset name -> unit string (empty = dimensionless).  ``psi_N`` /
+# ``psi_N_kinetic`` hold the run grid in the group's ``profile_coord``
+# ("psi_n" or "phi_n"; absent = "psi_n").
 PROFILE_UNITS = {
     "psi_N": "",
     "psi_N_kinetic": "",
@@ -109,28 +116,38 @@ PROFILE_UNITS = {
     "pressure": "Pa",
     "pressure_thermal": "Pa",
     "Zeff": "",
+    "z_fast": "m^-3",
+    "z2_fast": "m^-3",
     "sigma_ne": "m^-3",
     "sigma_te": "eV",
     "sigma_ni": "m^-3",
     "sigma_ti": "eV",
     "sigma_jphi": "A m^-2",
+    "j_pressure": "A m^-2",
+    "swb_j_saw": "A m^-2",
     "coil_currents": "A",
 }
 
 # Fixed in-group dataset names for the opaque byte blobs (F11).
 EQDSK_DS = "eqdsk"
 PFILE_DS = "pfile"
+# OFT/TokaMaker i-file (inverse R,Z(psi,theta) for GPEC eq_type ldp_i); optional.
+IFILE_DS = "ifile"
 COIL_VALUES_DS = "coil_currents"
 COIL_NAMES_DS = "coil_names"
 
 # Live-equilibrium flux-surface-average block (optional per-draw subgroup),
 # captured from the converged TokaMaker equilibrium at generate time to enable
-# an exact toroidal<->parallel current conversion at IMAS export. All on the
-# eq_fsa psi_N grid. See physics.capture_equilibrium_fsa.
+# exact TokaMaker-jphi -> IMAS current conversions at export. All on the
+# eq_fsa psi_N grid, which is always ψ_N, even in a Φ_N (profile_coord="phi_n")
+# archive. See physics.capture_equilibrium_fsa.
 EQ_FSA_GROUP = "eq_fsa"
 EQ_FSA_UNITS = {
     "psi_N": "",
     "F": "T m",             # R*B_phi
+    "pprime": "Pa Wb^-1",   # p', signed so jphi_eq > 0
+    "jphi_eq": "A m^-2",    # own TokaMaker jphi <R>p' + <1/R>FF'/mu0
+    "avg_R": "m",           # <R>
     "avg_inv_R": "m^-1",    # <1/R>
     "avg_inv_R2": "m^-2",   # <1/R^2> (exact quadrature; may be absent)
     "avg_B2": "T^2",        # <B^2>
@@ -192,6 +209,74 @@ def read_jB_parallel(grp):
         return None
     sub = grp[JB_PARALLEL_GROUP]
     return {k: np.asarray(sub[k][()], dtype=float) for k in sub}
+
+
+# ---- where the pressure-driven current sits in the archived split ----------
+#: Group attr (draw and ``_baseline``) naming where the pressure-driven
+#: ``p'G = p'(<R> - F^2<1/R>/<B^2>)`` (A7 of docs/current-conventions.md) sits
+#: in the archived toroidal split ``j_phi = j_inductive + j_BS + fixed (+
+#: j_pressure)``.  Its <j.B> is zero, so the IDS exporter must take it off
+#: whichever bucket carries it before converting to parallel currents.
+CURRENT_SPLIT_CONVENTION_ATTR = "current_split_convention"
+#: Owner decision D2 (2026-10-09): ``p'G`` is its own ``j_pressure`` dataset;
+#: neither ``j_BS`` nor ``j_inductive`` carries it.
+SPLIT_PRESSURE_SEPARATE = "pressure_separate"
+#: Every archive before PR #64 (absent attr): the residual ``j_inductive``
+#: carries ``p'G``.
+SPLIT_PRESSURE_IN_INDUCTIVE = "pressure_in_inductive"
+#: PR #64's convention (evaluate_jBS/3; never on main): ``j_BS`` carries it.
+SPLIT_PRESSURE_IN_BOOTSTRAP = "pressure_in_bootstrap"
+CURRENT_SPLIT_CONVENTIONS = (SPLIT_PRESSURE_SEPARATE,
+                             SPLIT_PRESSURE_IN_INDUCTIVE,
+                             SPLIT_PRESSURE_IN_BOOTSTRAP)
+JPRESSURE_DS = "j_pressure"
+
+
+def write_current_split(grp, j_pressure, convention=SPLIT_PRESSURE_SEPARATE):
+    """Stamp *grp* (a draw group or ``_baseline``) with its split convention
+    and, for :data:`SPLIT_PRESSURE_SEPARATE`, write the ``j_pressure``
+    dataset (replacing an earlier one).  ``j_pressure`` may be None only for
+    the two carried conventions."""
+    import numpy as np
+    if convention not in CURRENT_SPLIT_CONVENTIONS:
+        raise ValueError(f"convention must be one of {CURRENT_SPLIT_CONVENTIONS},"
+                         f" got {convention!r}")
+    if convention == SPLIT_PRESSURE_SEPARATE:
+        if j_pressure is None:
+            raise ValueError("write_current_split: the separate convention "
+                             "needs the j_pressure profile")
+        if JPRESSURE_DS in grp:
+            del grp[JPRESSURE_DS]
+        write_profile(grp, JPRESSURE_DS, np.asarray(j_pressure, dtype=float))
+    grp.attrs[CURRENT_SPLIT_CONVENTION_ATTR] = convention
+
+
+def read_current_split_convention(grp, baseline_attrs=None) -> str:
+    """Where *grp*'s archived split keeps ``p'G`` (one of
+    :data:`CURRENT_SPLIT_CONVENTIONS`).
+
+    The group's own attr, else the ``_baseline`` attrs' (*baseline_attrs*);
+    without either: a ``j_pressure`` dataset means separate; a loop record
+    written by ``evaluate_jBS/3`` (PR #64's evaluator) means in the
+    bootstrap; anything else is an archive from before PR #64 -- in the
+    inductive."""
+    def _s(v):
+        return v.decode() if isinstance(v, bytes) else (None if v is None
+                                                         else str(v))
+    v = _s(grp.attrs.get(CURRENT_SPLIT_CONVENTION_ATTR))
+    if v is None and baseline_attrs is not None:
+        v = _s(dict(baseline_attrs).get(CURRENT_SPLIT_CONVENTION_ATTR))
+    if v is not None:
+        if v not in CURRENT_SPLIT_CONVENTIONS:
+            raise ValueError(f"unknown {CURRENT_SPLIT_CONVENTION_ATTR} {v!r}")
+        return v
+    if JPRESSURE_DS in grp:
+        return SPLIT_PRESSURE_SEPARATE
+    rec = read_jbs_loop(grp)
+    if rec is not None and str(rec.get("evaluate_jBS_version", "")).startswith(
+            "evaluate_jBS/3"):
+        return SPLIT_PRESSURE_IN_BOOTSTRAP
+    return SPLIT_PRESSURE_IN_INDUCTIVE
 
 
 def is_binary_profile_source(data: bytes) -> bool:

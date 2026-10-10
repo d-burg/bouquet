@@ -49,17 +49,36 @@ def _src(path, time=mdd.EXAMPLE_TIME, **kw):
 
 def _currents_stored_reversed():
     """The example dd with ip > 0 but every current profile stored reversed:
-    the file ``current_orientation = -1`` exists for."""
+    the file ``current_orientation = -1`` exists for.
+
+    A reversed current reverses psi (COCOS held fixed), so every psi-odd
+    quantity is reversed WITH the currents, as #67's mirror convention
+    (tests/_mirror_dd.py, the s_ip column) has it: psi and its axis /
+    boundary values, and the psi derivatives dpressure_dpsi and f_df_dpsi
+    (p and F do not flip).  Only ip keeps its sign.  Before the 2026-10-09
+    integration the fixture reversed the currents but not p', so the exact
+    j_tor -> jphi conversion (A5, which carries p') could not be odd under
+    it."""
     dd = _example()
     for c in dd["core_profiles"]["profiles_1d"]:
         for k in ("j_tor", "j_total", "j_ohmic", "j_bootstrap",
                   "j_non_inductive"):
             c[k] = [-v for v in c[k]]
+        mdd._scale(c.get("grid"), ("psi", "psi_magnetic_axis",
+                                   "psi_boundary"), -1.0)
     for s in dd["core_sources"]["source"]:
         for pr in s["profiles_1d"]:
             pr["j_parallel"] = [-v for v in pr["j_parallel"]]
     for ts in dd["equilibrium"]["time_slice"]:
         ts["profiles_1d"]["j_tor"] = [-v for v in ts["profiles_1d"]["j_tor"]]
+        mdd._scale(ts["profiles_1d"], ("psi", "dpressure_dpsi", "f_df_dpsi",
+                                       "j_parallel"), -1.0)
+        mdd._scale(ts.get("global_quantities"), ("psi_axis",
+                                                  "psi_boundary"), -1.0)
+        for p2 in ts.get("profiles_2d", []) or []:
+            mdd._scale(p2, ("psi", "j_tor", "j_parallel", "b_field_r",
+                            "b_field_z"), -1.0)
+        mdd._scale(ts.get("boundary"), ("psi",), -1.0)
     return dd
 
 
@@ -386,4 +405,7 @@ class TestOverlaysHonourTheOverride:
         ref = self._overlay(h5r, skr, _write(tmp_path, _example(), "r.json"))
         p = _write(tmp_path, _currents_stored_reversed(), "cur_rev.json")
         h5, sk = self._archive(tmp_path, "a.h5")
+        # the factor is sign(ip) = +1: the stored (reversed) currents are
+        # drawn as they are -- upside down.  The base commit's bar, restored
+        # (PR #64 loosened it to 10 % of peak; review PR64 B13).
         assert np.array_equal(self._overlay(h5, sk, p), -ref)

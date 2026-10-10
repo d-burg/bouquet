@@ -823,7 +823,7 @@ def build_legacy_json(source, out_dir=_HERE):
     needs.  No geqdsk, no p-file, no LCFS trace of a draw."""
     import sys
     sys.path.insert(0, os.path.abspath(os.path.join(_HERE, "..", "..")))
-    from bouquet.schema import read_jbs_loop
+    from bouquet.schema import read_jbs_loop, read_current_split_convention
     from bouquet.utils import _read_coil_names
     from scipy.spatial import cKDTree
     out_path = os.path.join(out_dir, LEGACY_JSON_NAME)
@@ -863,10 +863,16 @@ def build_legacy_json(source, out_dir=_HERE):
             coil_currents=_f(bl["coil_currents"][()]),
             x_points=np.asarray(bl["x_points"][()], dtype=float).tolist()
             if "x_points" in bl else None,
+            # where the archived split keeps the pressure-driven p'G (owner
+            # decision D2: its own j_pressure beside a j_inductive that does
+            # not carry it; a pre-#64 archive carried it in j_inductive).
+            # The replay composes the legacy path's carried inductive from
+            # these, so the record says which form it holds.
+            current_split_convention=read_current_split_convention(bl),
             profiles={k: _f(bl[k][()]) for k in
                       ("psi_N", "psi_N_kinetic", "n_e", "T_e", "n_i", "T_i",
                        "aux_zeff", "j_phi", "j_BS", "j_inductive",
-                       "pressure") if k in bl},
+                       "j_pressure", "pressure") if k in bl},
             recon_lcfs_ref=dict(stride=LEGACY_LCFS_STRIDE,
                                 decimals=LEGACY_LCFS_DECIMALS,
                                 n_full=int(lcfs.shape[0]),
@@ -897,9 +903,11 @@ def build_legacy_json(source, out_dir=_HERE):
                 summary[str(i)],
                 coil_names=list(_read_coil_names(gi)),
                 coil_currents=_f(gi["coil_currents"][()]),
+                current_split_convention=read_current_split_convention(
+                    gi, baseline_attrs=bl.attrs),
                 profiles={k: _f(gi[k][()]) for k in
                           ("n_e", "T_e", "n_i", "T_i", "aux_zeff", "j_phi",
-                           "j_inductive") if k in gi},
+                           "j_inductive", "j_pressure") if k in gi},
                 bnd_rms_to_recon_mm=float(np.sqrt(np.mean(d_sub ** 2)) * 1e3),
                 bnd_rms_to_recon_mm_full_trace=float(
                     np.sqrt(np.mean(d_full ** 2)) * 1e3))

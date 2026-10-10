@@ -107,6 +107,49 @@ def _golden_generation():
     return BouquetConfig.from_json(_legacy_golden()["config_json"]).generation
 
 
+def _record_split_convention(rec):
+    """Where a legacy-record group (baseline or replay draw) keeps the
+    pressure-driven ``p'G``: its stored ``current_split_convention``, else
+    inferred as :func:`bouquet.schema.read_current_split_convention` does
+    for an archive group -- a ``j_pressure`` profile means separate, nothing
+    means the pre-#64 record (``p'G`` inside ``j_inductive``)."""
+    from bouquet.schema import (CURRENT_SPLIT_CONVENTIONS,
+                                SPLIT_PRESSURE_IN_INDUCTIVE,
+                                SPLIT_PRESSURE_SEPARATE)
+    v = rec.get("current_split_convention")
+    if v is None:
+        v = (SPLIT_PRESSURE_SEPARATE if "j_pressure" in rec["profiles"]
+             else SPLIT_PRESSURE_IN_INDUCTIVE)
+    assert v in CURRENT_SPLIT_CONVENTIONS, v
+    return v
+
+
+def _legacy_input_inductive(rec):
+    """The ``input_jinductive`` the legacy functional path takes for an
+    archived draw: the legacy IN-MEMORY inductive, which carries the
+    pressure-driven ``p'G`` (``generate_bouquet``'s ``baseline_split``
+    ``inductive_includes_pressure``, the convention mode 3 replays under).
+    A record written under owner decision D2 (``current_split_convention =
+    "pressure_separate"``) archives that current as its own ``j_pressure``
+    beside a ``j_inductive`` that does NOT carry it, so the two are put back
+    together here; a pre-#64 record stored the carried form as is.  Without
+    this the replay is short the pedestal's ``p'G`` (~8 % of the peak
+    current on the D3D-like fixture) and lands ~6 % high in l_i, outside
+    every band -- a mismatch of conventions, not of physics."""
+    from bouquet.schema import (SPLIT_PRESSURE_IN_INDUCTIVE,
+                                SPLIT_PRESSURE_SEPARATE)
+    p = rec["profiles"]
+    jind = np.asarray(p["j_inductive"], dtype=float)
+    conv = _record_split_convention(rec)
+    if conv == SPLIT_PRESSURE_SEPARATE:
+        return jind + np.asarray(p["j_pressure"], dtype=float)
+    if conv == SPLIT_PRESSURE_IN_INDUCTIVE:
+        return jind
+    raise ValueError(
+        f"the legacy golden keeps p'G under {conv!r}; the legacy replay "
+        "takes the carried or the separate convention only")
+
+
 def _load_golden():
     """Pull baseline + a subset of draws (profiles, targets, references)."""
     doc = _legacy_golden()
@@ -142,7 +185,9 @@ def _load_golden():
             ni=np.asarray(p["n_i"], dtype=float),
             ti=np.asarray(p["T_i"], dtype=float),
             jphi=np.asarray(p["j_phi"], dtype=float),
-            jind=np.asarray(p["j_inductive"], dtype=float),
+            # the carried (in-memory legacy) inductive, whatever split the
+            # record archives
+            jind=_legacy_input_inductive(gi),
             # the draw's boundary RMS to the subsampled reconstruction LCFS,
             # measured by the generator on the draw's full trace
             bnd_rms_mm=float(gi["bnd_rms_to_recon_mm"]),

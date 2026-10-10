@@ -183,39 +183,36 @@ engine never reads back to their defaults (printed and recorded in the run's
   42.4 min (123.6 s per equilibrium).
 * The legacy path keeps its numeric record in
   `D3Dlike_Hmode_legacy_golden.json`, made from a legacy-engine run of the
-  same recipe at the same code: 20 archived, 12 in spec. Wall time:
-  reconstruction 217 s, draws 153.6 min (457.7 s per equilibrium).
+  same recipe at the same code (regenerated 2026-10-09: the run at `67aba59`,
+  the record built from its archive at `5c92249`, the builder that carries
+  `j_pressure`; see below): 20 archived, 11 in spec. Wall time: reconstruction 218 s, draws
+  184.2 min (552 s per equilibrium). The record archives the pressure-driven
+  current as its own `j_pressure` beside a `j_inductive` that does not carry
+  it, and says so (`current_split_convention = "pressure_separate"`); the
+  legacy replay composes the legacy path's carried (in-memory) inductive,
+  `j_inductive + j_pressure`, before handing it to `generate_bouquet` as
+  `input_jinductive` -- a record from before that convention replays as is.
   `tests/test_systematics.py` (legacy replay) reads it;
   `tests/test_legacy_golden.py` checks what it is.
 * `rng_stream_manifest.json` is pinned from this fixture's baseline.
 * Validation of the fixture and the suites at `1a15685`:
   [docs/validation-provenance.md](../../docs/validation-provenance.md).
-* **Regenerated 2026-10-09 on the integration branch** (commit `e838f12`,
-  clean tree) after two declared changes to the default bootstrap evaluator:
-  the geometric Redl `eps = (R_max - R_min)/(2<R>)` became the default and
-  the pressure-driven current `p'G` is archived as its own `j_pressure`
-  bucket (version tag `evaluate_jBS/4`). Same recipe, same seed, same yield
-  (20 attempts, 17 archived, 4 in spec); the in-spec draw set and the
-  reconstruction's coil currents moved with the bootstrap, l_i by 0.007 %.
-  The OFT stamp (`build_id`, `library_sha256`) is the same fixed build as
-  before. The earlier fixture (2026-10-07, bouquet `7bd48fb`/`8285201`,
-  `1a15685`) is in the history of this file.
-* The legacy record `D3Dlike_Hmode_legacy_golden.json` is regenerated
-  separately (see its own stamp).
-* **STALE since owner decision E7 (2026-10-09): must be regenerated.** The
-  default Redl epsilon became `eps_definition = "r_over_R_geo"`, `eps =
-  (R_max - R_min)/(R_max + R_min)` with `R_geo = (R_max + R_min)/2` also as
-  the R of `nu*` (was `(R_max - R_min)/(2<R>)` with `<R>` in `nu*`, the
-  fixture above). Both the h5 fixture (and its `golden_manifest.json`,
-  `rng_stream_manifest.json`) and the legacy record were made under the old
-  definition; the solver replays that compare against them
-  (`tests/test_systematics.py` modes 1-3, the legacy replay) are expected to
-  move until they are rebuilt, with the same recipe and seed, on the shared
-  cluster -- not on a laptop. The fixture's stored config carries no
-  `eps_definition`, so the recipe replays it with the new default (warned
-  once at load); do not add the field to it. Also re-check
-  `structured_closure_pre_mse.json` (`tests/test_structured_mse_optin.py
-  --write`).
+* **Regenerated 2026-10-09 on the integration branch** (commit `67aba59`,
+  clean tree; OFT build `20260929_7da4f18`, lib `7885fedc1e62`, the same
+  fixed build as before) after the declared changes to the default
+  bootstrap evaluator: the pressure-driven current `p'G` is archived as its
+  own `j_pressure` bucket (owner decision D2) and the default Redl epsilon
+  is `eps_definition = "r_over_R_geo"`, `eps = (R_max - R_min)/(R_max +
+  R_min)` with `R_geo = (R_max + R_min)/2` also as the R of `nu*` (owner
+  decision E7; version tag `evaluate_jBS/4`). Same recipe, same seed, same
+  yield (20 attempts, 17 archived, 4 in spec); reconstruction 62 s, draws
+  43.8 min. The fixture's stored config carries no `eps_definition`, so a
+  replay takes the default (warned once at load); do not add the field to
+  it. The earlier fixtures (2026-10-07 at bouquet `7bd48fb`/`8285201`/
+  `1a15685`; the 2026-10-09 `e838f12` build under the interim
+  `(R_max - R_min)/(2<R>)` default) are in the history of this file.
+* The legacy record `D3Dlike_Hmode_legacy_golden.json` was regenerated in
+  the same session at the same commit and build (its stamp above).
 
 ## Why input-current archival: the mode-1 coil drift
 

@@ -141,7 +141,7 @@ def test_run_unit_releases_the_dd_cache_after_the_baseline(tmp_path, monkeypatch
     monkeypatch.setattr(P, "run_case_on", fake_run_case_on)
     monkeypatch.setattr(Bouquet, "setup_solver", lambda self: self)
     # run_unit's process-wide setup (thread pins, OFT on sys.path) must not leak into this process
-    monkeypatch.setattr("bouquet.threads.pin_threads", lambda: None)
+    monkeypatch.setattr("bouquet.threads.pin_threads", lambda: __import__("contextlib").nullcontext())   # B5: pin_threads is a context
     monkeypatch.setattr("bouquet.paths.add_oft_to_path", lambda: None)
     with pytest.raises(RuntimeError, match="stop"):
         units.run_unit(q, "u", str(tmp_path / "out"))

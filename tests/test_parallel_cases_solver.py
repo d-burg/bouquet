@@ -72,8 +72,7 @@ def _serial(inp, work, i):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         # the per-case seed parallel_cases derives (case_seed(seed, "<group>/<scan_key>"))
-        run_case_on(Bouquet(cfg).setup_solver(), cases[i], os.path.join(work, f"serial{i}"),
-                    seed_base=cfg.generation.seed)
+        run_case_on(Bouquet(cfg).setup_solver(), cases[i], os.path.join(work, f"serial{i}"))
 
 
 def _draw(h5, key):

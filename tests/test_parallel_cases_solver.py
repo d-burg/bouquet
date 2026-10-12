@@ -78,6 +78,8 @@ def _serial(inp, work, i):
 def _draw(h5, key):
     import h5py
     with h5py.File(h5, "r") as f:
+        if "0" not in f[f"scan/{key}"]:
+            return None                                  # the one draw was rejected (not archived)
         g = f[f"scan/{key}/0"]
         return {k: np.asarray(g[k]) for k in g if isinstance(g[k], h5py.Dataset) and g[k].dtype.kind == "f"}
 
@@ -103,13 +105,20 @@ def test_parallel_cases_equals_one_fresh_process_per_case(tmp_path, monkeypatch)
     for w in (0, 1):
         assert os.path.isfile(tmp_path / "work" / f"worker_{w}" / os.path.basename(_MESH))
     assert out["cases"][0].source.ids_path == inp["dd"]
+    compared = 0
     for i, rec in out["results"].items():
         assert rec["threads"] and all(p["num_threads"] == 1 for p in rec["threads"])
         a, b = _draw(out["merged"]["g"], cases[i].scan_key), _draw(str(tmp_path / f"serial{i}.h5"),
                                                                    cases[i].scan_key)
+        # a draw the fresh process rejects, the reused solver rejects too (and vice versa)
+        assert (a is None) == (b is None), f"case {i}: reused-solver draw {a is not None}, fresh {b is not None}"
+        if a is None:
+            continue
+        compared += 1
         assert a.keys() == b.keys()
         for k in a:
             np.testing.assert_array_equal(a[k], b[k], err_msg=f"case {i}: {k}")
+    assert compared >= 1                                 # never vacuous: at least one archived draw compared
 
 
 def test_a_worker_death_ends_the_sweep_and_keeps_the_finished_cases(tmp_path):

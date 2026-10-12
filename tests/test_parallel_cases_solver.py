@@ -48,7 +48,7 @@ def _inputs(d):
 
 def _sweep(inp, header):
     import bouquet as bq
-    cfg = bq.Bouquet.from_imas(inp["dd"], mesh=inp["mesh"], time=_TIME, ida_time=_IDA_TIME, n_draws=1,
+    cfg = bq.Bouquet.from_imas(inp["dd"], mesh=inp["mesh"], time=_TIME, n_draws=1,
                                ida_path=inp["ida"],
                                impurity_Z=6.0, header=header, solve_method="swb").config
     cfg.generation.seed = 7

@@ -48,7 +48,7 @@ def _run_cases(work, method, labels):
     ddp = os.path.join(work, "dd.json")
     with gzip.open(_DD, "rb") as fi, open(ddp, "wb") as fo:
         shutil.copyfileobj(fi, fo)
-    b = bq.Bouquet.from_imas(ddp, mesh=_MESH, time=_TIME, ida_time=_IDA_TIME, n_draws=1, ida_path=_IDA, impurity_Z=6.0,
+    b = bq.Bouquet.from_imas(ddp, mesh=_MESH, time=_TIME, n_draws=1, ida_path=_IDA, impurity_Z=6.0,
                              header=os.path.join(work, "run"), solve_method=method)
     b.config.generation.seed = 42
     src_a = b.config.source

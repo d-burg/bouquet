@@ -1,7 +1,7 @@
 """Engine-dependent defaults resolve when the run starts, not at
 construction (2026-10-07).
 
-``isolate_edge_jBS`` and ``perturb_jind_in_anchor`` were validated with
+``isolate_edge_jbs`` and ``perturb_jind_in_anchor`` were validated with
 different values on the two reconstruction engines (legacy: the full-profile
 decomposition, and diff+C on an IDS source; unified: the former dataclass
 defaults, which the engine never reads).  Until 2026-10-07 the factories
@@ -66,7 +66,7 @@ def _what_the_baseline_builder_sees(b, monkeypatch):
 
     def _capture(*a, **k):
         g = b.config.generation
-        seen["vals"] = (g.isolate_edge_jBS, g.perturb_jind_in_anchor)
+        seen["vals"] = (g.isolate_edge_jbs, g.perturb_jind_in_anchor)
         raise _Stop
 
     monkeypatch.setattr(BL, "resolve_baseline", _capture)
@@ -82,7 +82,7 @@ def test_every_engine_dependent_field_defaults_to_none():
     has meant the solver's setup cap since the field existed)."""
     from bouquet.engine import ENGINE_DEPENDENT_UNSET, engine_dependent_unset
     g = GenerationConfig()
-    assert set(ENGINE_DEPENDENT_DEFAULTS) == {"isolate_edge_jBS",
+    assert set(ENGINE_DEPENDENT_DEFAULTS) == {"isolate_edge_jbs",
                                               "perturb_jind_in_anchor",
                                               "draw_solve_maxits",
                                               "check_bistability"}
@@ -105,7 +105,7 @@ def test_a_factory_config_switched_to_legacy_runs_the_legacy_values(
         assert _what_the_baseline_builder_sees(b, monkeypatch) == \
             _LEGACY[kind]
     rec = b._engine_resolved_defaults
-    for name, val in zip(("isolate_edge_jBS", "perturb_jind_in_anchor"),
+    for name, val in zip(("isolate_edge_jbs", "perturb_jind_in_anchor"),
                          _LEGACY[kind]):
         assert rec[name] == {"value": val,
                              "origin": "resolved from engine=legacy"}
@@ -150,18 +150,18 @@ def test_an_explicit_contradicting_value_is_kept_and_warned(kind,
     b = _factory(kind)
     g = b.config.generation
     g.reconstruction_engine = "legacy"
-    g.isolate_edge_jBS = True                 # an edge-spike study
+    g.isolate_edge_jbs = True                 # an edge-spike study
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         seen = _what_the_baseline_builder_sees(b, monkeypatch)
     assert seen == (True, _LEGACY[kind][1])
     msgs = [str(x.message) for x in w if issubclass(x.category, UserWarning)]
-    hits = [m for m in msgs if "isolate_edge_jBS=True" in m]
+    hits = [m for m in msgs if "isolate_edge_jbs=True" in m]
     assert len(hits) == 1
     assert "KEPT" in hits[0] and "reconstruction_engine='legacy'" in hits[0]
     assert not any("perturb_jind_in_anchor" in m for m in msgs)
     rec = b._engine_resolved_defaults
-    assert rec["isolate_edge_jBS"] == {"value": True, "origin": "explicit",
+    assert rec["isolate_edge_jbs"] == {"value": True, "origin": "explicit",
                                        "engine_validated": False}
     assert rec["perturb_jind_in_anchor"]["origin"] == \
         "resolved from engine=legacy"
@@ -188,7 +188,7 @@ def test_the_resolver_itself():
             cfg.generation.reconstruction_engine = eng
             rec = resolve_engine_defaults(cfg)
             g = cfg.generation
-            assert (g.isolate_edge_jBS, g.perturb_jind_in_anchor) == want
+            assert (g.isolate_edge_jbs, g.perturb_jind_in_anchor) == want
             assert {k: v["origin"] for k, v in rec.items()} == {
                 n: f"resolved from engine={eng}"
                 for n in ENGINE_DEPENDENT_DEFAULTS}
@@ -212,7 +212,7 @@ def test_stored_configs_round_trip_unchanged(kind):
     for eng in ("legacy", "unified"):
         cfg = _factory(kind, reconstruction_engine=eng).config
         back, msgs = _round_trip(cfg)
-        assert back.generation.isolate_edge_jBS is None
+        assert back.generation.isolate_edge_jbs is None
         assert back.generation.perturb_jind_in_anchor is None
         resolve_engine_defaults(cfg)
         back, msgs = _round_trip(cfg)
@@ -220,9 +220,9 @@ def test_stored_configs_round_trip_unchanged(kind):
             assert getattr(back.generation, n) == getattr(cfg.generation, n)
             assert not any(n in m for m in msgs)
     cfg = _factory(kind, reconstruction_engine="legacy").config
-    cfg.generation.isolate_edge_jBS = True            # explicit, legacy
+    cfg.generation.isolate_edge_jbs = True            # explicit, legacy
     back, _ = _round_trip(cfg)
-    assert back.generation.isolate_edge_jBS is True
+    assert back.generation.isolate_edge_jbs is True
 
 
 @pytest.mark.parametrize("fname", sorted(os.listdir(_STORED)))
@@ -247,10 +247,10 @@ def test_the_archive_records_the_resolution(tmp_path, toy_bouquet_solver):
     the archived config carries the resolved values."""
     from bouquet.utils import load_config, load_engine_resolved_defaults
     b = _bq(tmp_path)
-    assert b.config.generation.isolate_edge_jBS is None
+    assert b.config.generation.isolate_edge_jbs is None
     b.setup_solver()
     _quiet(b.prepare_baseline)
-    want = {"isolate_edge_jBS": {"value": True,
+    want = {"isolate_edge_jbs": {"value": True,
                                  "origin": "resolved from engine=unified"},
             "perturb_jind_in_anchor": {
                 "value": False, "origin": "resolved from engine=unified"},
@@ -268,7 +268,7 @@ def test_the_archive_records_the_resolution(tmp_path, toy_bouquet_solver):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         stored = load_config(hdr, scan_key=0).generation
-    assert stored.isolate_edge_jBS is True
+    assert stored.isolate_edge_jbs is True
     assert stored.perturb_jind_in_anchor is False
 
 

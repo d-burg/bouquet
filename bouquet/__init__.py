@@ -160,7 +160,7 @@ from .parallel import (parallel_generate, run_shard, merge_archives,
 # Curated public surface.  Everything imported above remains importable
 # (``bq.store_equilibrium`` etc. still work for advanced users), but ``import
 # *``, tab-completion, and the docs advertise only the supported API.  Low-level
-# archive writers and j_phi/Ip diagnostic helpers are intentionally omitted.
+# archive writers and jphi_total/Ip diagnostic helpers are intentionally omitted.
 __all__ = [
     "__version__",
     # ---- class-based orchestrator (the primary entry point) ----

@@ -22,6 +22,7 @@ import h5py
 import numpy as np
 import matplotlib.pyplot as plt
 
+from ._renamed import accepts_old_names
 from .schema import find_bytes_dataset
 from .utils import (
     load_equilibrium,
@@ -311,19 +312,19 @@ def plot_tokamaker_comparison(mygs, all_results, plot_idx=None):
             lbl = gkey.replace('.geqdsk', '')
             _short_labels.append(lbl)
 
-            # (0,0) total j_phi — dashed=TokaMaker, dotted=geqdsk
-            axes[0, 0].plot(psi_N, r['j_phi_fit'] / 1e6, color=color, lw=_LW, ls='--', label=lbl)
+            # (0,0) total jphi_total — dashed=TokaMaker, dotted=geqdsk
+            axes[0, 0].plot(psi_N, r['jphi_total_fit'] / 1e6, color=color, lw=_LW, ls='--', label=lbl)
             axes[0, 0].plot(psi_N, r['eqdsk_jtor'] / 1e6, color=color, lw=_LW, ls=':', alpha=0.75)
 
-            # (0,1) j_phi components (both TokaMaker — dashed=j_ind, dash-dot=j_BS)
-            axes[0, 1].plot(psi_N, r['j_inductive_fit'] / 1e6, color=color, lw=_LW, ls='--',
+            # (0,1) jphi_total components (both TokaMaker — dashed=j_ind, dash-dot=jphi_bs)
+            axes[0, 1].plot(psi_N, r['jphi_ind_fit'] / 1e6, color=color, lw=_LW, ls='--',
                             label=f'{lbl} $j_{{\\rm ind}}$')
-            axes[0, 1].plot(psi_N, r['j_BS_used'] / 1e6, color=color, lw=_LW, ls='-.',
+            axes[0, 1].plot(psi_N, r['jphi_bs_used'] / 1e6, color=color, lw=_LW, ls='-.',
                             label=f'{lbl} $j_{{BS}}$'
                             + _bootstrap_model_suffix(r.get('jbs_loop')))
 
             # (0,2) residuals
-            res = (r['j_phi_fit'] - r['eqdsk_jtor']) / 1e6
+            res = (r['jphi_total_fit'] - r['eqdsk_jtor']) / 1e6
             rms = np.sqrt(np.mean(res**2))
             axes[0, 2].plot(psi_N, res, color=color, lw=_LW,
                             label=f'{lbl}  RMS={rms:.4f}')
@@ -456,28 +457,28 @@ def plot_tokamaker_comparison(mygs, all_results, plot_idx=None):
         psi_N = r['psi_N_grid']
         R_bnd = r['eqdsk_boundary_R']
         Z_bnd = r['eqdsk_boundary_Z']
-        residual_jphi = r['j_phi_fit'] - r['eqdsk_jtor']
+        residual_jphi = r['jphi_total_fit'] - r['eqdsk_jtor']
         rms_jphi = np.sqrt(np.mean(residual_jphi**2))
 
         fig, axes = plt.subplots(3, 3, figsize=(18, 16))
         fig.suptitle(f'TokaMaker vs geqdsk comparison:  {geqdsk_key}', fontsize=13, y=0.98)
 
-        # (0,0) Total j_phi
+        # (0,0) Total jphi_total
         ax = axes[0, 0]
         ax.plot(psi_N, r['eqdsk_jtor'] / 1e6, 'k-', lw=_LW, label=r'geqdsk $j_\phi$')
-        ax.plot(psi_N, r['j_phi_fit'] / 1e6, color=_C2, ls='--', lw=_LW,
+        ax.plot(psi_N, r['jphi_total_fit'] / 1e6, color=_C2, ls='--', lw=_LW,
                 label=r'TokaMaker $j_\phi$')
         ax.set_xlabel(r'$\psi_N$'); ax.set_ylabel(r'$j_\phi$ [MA m$^{-2}$]')
         ax.set_title(r'Total $j_\phi$'); ax.legend(fontsize=8); ax.grid(ls=':')
 
-        # (0,1) j_phi components
+        # (0,1) jphi_total components
         ax = axes[0, 1]
-        ax.plot(psi_N, r['j_inductive_fit'] / 1e6, color=_C1, lw=_LW,
+        ax.plot(psi_N, r['jphi_ind_fit'] / 1e6, color=_C1, lw=_LW,
                 label=r'$j_\mathrm{inductive}$ (fit)')
-        ax.plot(psi_N, r['j_BS_used'] / 1e6, color=_C3, lw=_LW, ls='-.',
+        ax.plot(psi_N, r['jphi_bs_used'] / 1e6, color=_C3, lw=_LW, ls='-.',
                 label=f'$j_{{BS}}$ (\u00d7{r["bs_factor_final"]:.3f})'
                 + _bootstrap_model_suffix(r.get('jbs_loop')))
-        ax.plot(psi_N, r['j_phi_fit'] / 1e6, color=_C2, ls='--', lw=_LW,
+        ax.plot(psi_N, r['jphi_total_fit'] / 1e6, color=_C2, ls='--', lw=_LW,
                 label=r'$j_\mathrm{ind} + j_{BS}$')
         ax.plot(psi_N, r['eqdsk_jtor'] / 1e6, 'k-', lw=_LW,
                 label=r'geqdsk $j_\phi$')
@@ -580,7 +581,7 @@ def plot_tokamaker_comparison(mygs, all_results, plot_idx=None):
         print(f"\n--- Summary for {geqdsk_key} ---")
         print(f"  bs_factor_final : {r['bs_factor_final']:.6f}")
         print(f"  li(1) achieved  : {r['li_final']:.6f}")
-        print(f"  j_phi RMS error : {rms_jphi:.2f} A/m^2  ({rms_jphi/1e6:.4f} MA/m^2)")
+        print(f"  jphi_total RMS error : {rms_jphi:.2f} A/m^2  ({rms_jphi/1e6:.4f} MA/m^2)")
         print(f"  eqdsk Ip        : {r['eqdsk_Ip']:.0f} A")
         print(f"  TokaMaker Ip    : {Ip_tkmkr:.0f} A  ({Ip_pct:+.3f}%)")
         print(f"  Boundary dev.   : max={_dev_max_mm:.2f} mm  RMS={_dev_rms_mm:.2f} mm")
@@ -781,7 +782,10 @@ def _pressure_components(bl, psi_eq=None):
     return thermal, imp, fast
 
 
-def draw_jphi_total(ax, psi_N, j_phi, sigma_jphi,
+@accepts_old_names
+
+
+def draw_jphi_total(ax, psi_N, jphi_total, sigma_jphi,
                     perturbed_data_list=None):
     r"""Draw total :math:`j_\phi` with uncertainty bands on a single axes.
 
@@ -789,27 +793,27 @@ def draw_jphi_total(ax, psi_N, j_phi, sigma_jphi,
     ----------
     ax : Axes
     psi_N : 1-D array
-    j_phi : 1-D array
+    jphi_total : 1-D array
         Baseline total :math:`j_\phi` [A m^-2].
     sigma_jphi : 1-D array
     perturbed_data_list : list[dict] or None
-        Each dict must have ``'j_phi'``.
+        Each dict must have ``'jphi_total'``.
     """
     _MA = 1e-6  # A → MA
 
     ax.cla()
-    ax.plot(psi_N, j_phi * _MA, c="k", lw=2,
+    ax.plot(psi_N, jphi_total * _MA, c="k", lw=2,
             label=r"input $j_\phi$", zorder=1)
     ax.fill_between(
         psi_N,
-        (j_phi - sigma_jphi) * _MA,
-        (j_phi + sigma_jphi) * _MA,
+        (jphi_total - sigma_jphi) * _MA,
+        (jphi_total + sigma_jphi) * _MA,
         alpha=0.22, color="0.55",
         label=r"$\pm\,1\sigma_{\rm exp}$", zorder=1,
     )
-    ax.plot(psi_N, (j_phi + 2 * sigma_jphi) * _MA, c="k", ls=":", lw=1.5,
+    ax.plot(psi_N, (jphi_total + 2 * sigma_jphi) * _MA, c="k", ls=":", lw=1.5,
             alpha=0.5, label=r"$\pm\,2\sigma_{\rm exp}$", zorder=1)
-    ax.plot(psi_N, (j_phi - 2 * sigma_jphi) * _MA, c="k", ls=":", lw=1.5,
+    ax.plot(psi_N, (jphi_total - 2 * sigma_jphi) * _MA, c="k", ls=":", lw=1.5,
             alpha=0.5, zorder=1)
     ax.set_ylabel(r"$j_\phi$ [MA/m$^2$]")
     ax.set_xlabel(r"$\hat{\psi}$")
@@ -818,7 +822,7 @@ def draw_jphi_total(ax, psi_N, j_phi, sigma_jphi,
     if perturbed_data_list:
         n_equils = len(perturbed_data_list)
         for i, data in enumerate(perturbed_data_list):
-            ax.plot(psi_N, data["j_phi"] * _MA, c=_GOLD,
+            ax.plot(psi_N, data["jphi_total"] * _MA, c=_GOLD,
                     lw=1.0, alpha=0.55,
                     label=f"perturbed ({n_equils})" if i == 0 else None,
                     zorder=3)
@@ -830,12 +834,12 @@ def draw_jphi_components(axes, psi_N, perturbed_data_list=None):
     r"""Draw the :math:`j_\phi` component decomposition on a (2,) axes array.
 
     ``axes[0]`` = the bootstrap variant ACTUALLY summed into :math:`j_\phi` --
-    the isolated edge spike when the run used ``isolate_edge_jBS=True`` (archives
-    that carry ``j_BS,edge``), otherwise the full Sauter ``j_BS``. Only that one
+    the isolated edge spike when the run used ``isolate_edge_jbs=True`` (archives
+    that carry ``jphi_bs,edge``), otherwise the full Sauter ``jphi_bs``. Only that one
     variant is drawn -- never both the isolated edge and the full Sauter
     bootstrap. ``axes[1]`` = :math:`j_{\rm inductive}`, computed the FAITHFUL way
-    :func:`plot_jphi` uses -- ``j_phi - that_j_BS`` -- so it closes to the total
-    and never exceeds it, rather than the post-hoc stored ``j_inductive`` (which
+    :func:`plot_jphi` uses -- ``jphi_total - that_jphi_bs`` -- so it closes to the total
+    and never exceeds it, rather than the post-hoc stored ``jphi_ind`` (which
     can over-state the core). Total :math:`j_\phi` is the dashed reference.
 
     Parameters
@@ -843,8 +847,8 @@ def draw_jphi_components(axes, psi_N, perturbed_data_list=None):
     axes : array-like of 2 Axes
     psi_N : 1-D array
     perturbed_data_list : list[dict] or None
-        Each dict must have ``'j_phi'`` and the applied bootstrap
-        (``'j_BS,edge'`` if isolated, else ``'j_BS'``).
+        Each dict must have ``'jphi_total'`` and the applied bootstrap
+        (``'jphi_bs,edge'`` if isolated, else ``'jphi_bs'``).
     """
     _MA = 1e-6  # A → MA
     for ax in axes:
@@ -858,21 +862,21 @@ def draw_jphi_components(axes, psi_N, perturbed_data_list=None):
         return
 
     n_equils = len(perturbed_data_list)
-    # Which bootstrap variant was applied to j_phi? The isolated edge spike if
-    # the run stored one (isolate_edge_jBS=True), else the full Sauter j_BS.
-    has_spike = "j_BS,edge" in perturbed_data_list[0]
-    bs_key = "j_BS,edge" if has_spike else "j_BS"
+    # Which bootstrap variant was applied to jphi_total? The isolated edge spike if
+    # the run stored one (isolate_edge_jbs=True), else the full Sauter jphi_bs.
+    has_spike = "jphi_bs,edge" in perturbed_data_list[0]
+    bs_key = "jphi_bs,edge" if has_spike else "jphi_bs"
     bs_label = r"$j_{\rm BS,edge}$" if has_spike else r"$j_{\rm BS}$"
 
     for i, data in enumerate(perturbed_data_list):
-        if "j_phi" not in data or bs_key not in data:
+        if "jphi_total" not in data or bs_key not in data:
             continue
         lbl = f"perturbed ({n_equils})" if i == 0 else None
-        total = np.asarray(data["j_phi"], float)
+        total = np.asarray(data["jphi_total"], float)
         bs = np.asarray(data[bs_key], float)
         jind = total - bs   # faithful inductive: closes to total, <= total
 
-        # reference: total j_phi on both panels
+        # reference: total jphi_total on both panels
         for ax in axes:
             ax.plot(psi_N, total * _MA, c="k", ls="--", lw=1.2, alpha=0.4,
                     label=r"$j_\phi$ (total)" if i == 0 else None, zorder=1)
@@ -888,7 +892,10 @@ def draw_jphi_components(axes, psi_N, perturbed_data_list=None):
     axes[-1].set_xlabel(r"$\hat{\psi}$")
 
 
-def draw_jphi_profiles(axes, psi_N, j_phi, sigma_jphi,
+@accepts_old_names
+
+
+def draw_jphi_profiles(axes, psi_N, jphi_total, sigma_jphi,
                        perturbed_data_list=None):
     r"""**Deprecated** -- use :func:`draw_jphi_total` and
     :func:`draw_jphi_components` instead.
@@ -901,7 +908,7 @@ def draw_jphi_profiles(axes, psi_N, j_phi, sigma_jphi,
         DeprecationWarning,
         stacklevel=2,
     )
-    draw_jphi_total(axes[0], psi_N, j_phi, sigma_jphi,
+    draw_jphi_total(axes[0], psi_N, jphi_total, sigma_jphi,
                     perturbed_data_list=perturbed_data_list)
     draw_jphi_components(axes[1:], psi_N,
                          perturbed_data_list=perturbed_data_list)
@@ -935,9 +942,9 @@ def _draw_boundary_panels(ax_lcfs, ax_zoom, boundaries):
     ref_pts = np.column_stack([bR0, bZ0])
     dev_sum = np.zeros(len(ref_pts))
     n_dev = 0
+    from .filtering import contour_distance
     for bR, bZ in boundaries[1:]:
-        tree = _cKDTree(np.column_stack([bR, bZ]))
-        d, _ = tree.query(ref_pts)
+        d = contour_distance(ref_pts, np.column_stack([bR, bZ]))
         dev_sum += d
         n_dev += 1
     if n_dev == 0:
@@ -1027,7 +1034,7 @@ def _plot_bouquet_dashboard(psi_N, psi_N_kin, bl, perturbed,
                            perturbed_data_list=perturbed,
                            pressure_thermal=bl.get("pressure_thermal"),
                            bl=bl)
-    draw_jphi_total(axes[2, 1], psi_N, bl["j_phi"],
+    draw_jphi_total(axes[2, 1], psi_N, bl["jphi_total"],
                     bl["sigma_jphi"], perturbed_data_list=perturbed)
     draw_zeff(axes[3, 0], psi_N_kin, bl, perturbed_data_list=perturbed)
     draw_flux_function(axes[3, 1], "q", r"$q$", baseline_ff, perturbed_ff,
@@ -1360,7 +1367,7 @@ def plot_bouquet(h5path_or_header, scan_key=None, mode="kinetic",
     # Use psi_N_kinetic for kinetic profiles if available
     psi_N_kin = bl.get("psi_N_kinetic", psi_N)
 
-    # Flux functions (q, FF') from the stored eqdsk -- only the j_phi-bearing
+    # Flux functions (q, FF') from the stored eqdsk -- only the jphi_total-bearing
     # views need them; absent eqdsk leaves the panels blank rather than failing.
     baseline_ff = perturbed_ff = None
     if mode in ("all", "j-phi"):
@@ -1385,8 +1392,8 @@ def plot_bouquet(h5path_or_header, scan_key=None, mode="kinetic",
             fig_bd.tight_layout()
             figs.append(fig_bd)
 
-        # j_phi current decomposition (total / inductive / bootstrap) for a
-        # roomier zoom than the dashboard's single j_phi cell.
+        # jphi_total current decomposition (total / inductive / bootstrap) for a
+        # roomier zoom than the dashboard's single jphi_total cell.
         try:
             _jr = plot_jphi(h5path, scan_key=scan_key, selection=selection)
             figs.append(_jr[0] if isinstance(_jr, tuple) else _jr)
@@ -1442,7 +1449,7 @@ def plot_bouquet(h5path_or_header, scan_key=None, mode="kinetic",
         fig_jt, ax_jt = plt.subplots(figsize=(5.5, 4))
         draw_jphi_total(
             ax_jt, psi_N,
-            bl["j_phi"], bl["sigma_jphi"],
+            bl["jphi_total"], bl["sigma_jphi"],
             perturbed_data_list=perturbed,
         )
         fig_jt.tight_layout()
@@ -1458,7 +1465,7 @@ def plot_bouquet(h5path_or_header, scan_key=None, mode="kinetic",
         figs.append(fig_jc)
         axes_list.append(ax_jc)
 
-        # Flux-function pair (FF', q) -- the equilibrium analogue of the j_phi
+        # Flux-function pair (FF', q) -- the equilibrium analogue of the jphi_total
         # decomposition, on the geqdsk's own psi grid.
         fig_ff, ax_ff = plt.subplots(1, 2, figsize=(8.5, 3.6))
         draw_flux_function(ax_ff[0], "ffprime", r"$FF'$ [T$^2$ m$^2$/Wb]",
@@ -1526,7 +1533,10 @@ def plot_kinetic_profiles(header, n_equils, psi_N, ne, ni, te, ti,
     plt.show()
 
 
-def plot_jphi_profiles(psi_N, input_j_phi, sigma_jphi, header, n_equils):
+@accepts_old_names
+
+
+def plot_jphi_profiles(psi_N, jphi_total_input, sigma_jphi, header, n_equils):
     """**Deprecated** -- use :func:`plot_bouquet` instead."""
     warnings.warn(
         "plot_jphi_profiles() is deprecated.  Use plot_bouquet() instead.",
@@ -1536,7 +1546,7 @@ def plot_jphi_profiles(psi_N, input_j_phi, sigma_jphi, header, n_equils):
     fig, axes = plt.subplots(3, 1, figsize=(5.5, 7), sharex=True)
     perturbed = [load_equilibrium(header, count=i) for i in range(n_equils)]
     draw_jphi_profiles(
-        axes, psi_N, input_j_phi, sigma_jphi,
+        axes, psi_N, jphi_total_input, sigma_jphi,
         perturbed_data_list=perturbed,
     )
     plt.tight_layout()
@@ -1646,16 +1656,16 @@ def _imas_input_profiles(source):
 
 
 def _recon_fixed_channels(bl):
-    """The fixed currents in ``bl.j_phi``: j_NBI, j_RF, j_other; with the swb saw
-    on (``bl.j_saw``) j_other's sawteeth share is replaced by j_saw."""
-    j_other = getattr(bl, "j_other", None)
-    j_saw = getattr(bl, "j_saw", None)
-    if j_saw is not None:
-        j_st = getattr(bl, "j_sawteeth", None)
-        j_other = (np.asarray(0.0 if j_other is None else j_other, float)
+    """The fixed currents in ``bl.jphi_total``: jphi_nbi, jphi_rf, jphi_other; with the swb saw
+    on (``bl.jphi_saw_out``) jphi_other's sawteeth share is replaced by jphi_saw_out."""
+    jphi_other = getattr(bl, "jphi_other", None)
+    jphi_saw_out = getattr(bl, "jphi_saw_out", None)
+    if jphi_saw_out is not None:
+        j_st = getattr(bl, "jphi_saw", None)
+        jphi_other = (np.asarray(0.0 if jphi_other is None else jphi_other, float)
                    - np.asarray(0.0 if j_st is None else j_st, float)
-                   + np.asarray(j_saw, float))
-    return (getattr(bl, "j_NBI", None), getattr(bl, "j_RF", None), j_other)
+                   + np.asarray(jphi_saw_out, float))
+    return (getattr(bl, "jphi_nbi", None), getattr(bl, "jphi_rf", None), jphi_other)
 
 
 def _reported_pressure(bl, p_solver):
@@ -1727,7 +1737,7 @@ def plot_input_vs_recon(run, npsi=80, max_dev_mm=10.0):
     if _lcfs_raw is None:
         _lcfs_raw = safe_trace_surf(mygs, 1.0 - psi_pad)
     lcfs = np.asarray(_lcfs_raw, float)
-    # "Reconstructed" j_phi = the ACHIEVED flux-surface-averaged toroidal
+    # "Reconstructed" jphi_total = the ACHIEVED flux-surface-averaged toroidal
     # current of the CONVERGED solve (get_jphi_from_GS on the live equilibrium,
     # the same formula the recon corrective loop matches) -- NOT the prescribed
     # target profile. On the geqdsk path the per-solve corrective iteration
@@ -1750,15 +1760,15 @@ def plot_input_vs_recon(run, npsi=80, max_dev_mm=10.0):
             np.asarray(q_ravg(_ravgs, "<R>"), float),
             np.asarray(q_ravg(_ravgs, "<1/R>"), float)), float)
         # match the baseline current's sign convention for a direct overlay
-        if np.nanmedian(_j_ach) * np.nanmedian(np.asarray(bl.j_phi, float)) < 0:
+        if np.nanmedian(_j_ach) * np.nanmedian(np.asarray(bl.jphi_total, float)) < 0:
             _j_ach = -_j_ach
         j_sol_x, j_sol = _psj, _j_ach
     except Exception:
-        j_sol = np.asarray(bl.j_phi, float)
+        j_sol = np.asarray(bl.jphi_total, float)
 
-    # Anchors (IMAS diff workflow): jphi_diff / jBS_diff are FIXED offsets on
-    # the kinetic grid (bl.j_BS + jBS_diff is the effective/FUSE bootstrap in
-    # the solve; bl.j_BS itself is the model bootstrap -- the self-consistent
+    # Anchors (IMAS diff workflow): jphi_diff / jphi_bs_diff are FIXED offsets on
+    # the kinetic grid (bl.jphi_bs + jphi_bs_diff is the effective/FUSE bootstrap in
+    # the solve; bl.jphi_bs itself is the model bootstrap -- the self-consistent
     # Redl bootstrap by default, the frozen SWB one with
     # jbs_self_consistent=False). Used below so the
     # component overlay reflects the bootstrap actually in the solve. Both are
@@ -1817,26 +1827,26 @@ def plot_input_vs_recon(run, npsi=80, max_dev_mm=10.0):
         a.set_xlabel(r"$\hat{\psi}$"); a.set_ylabel(ylab)
         a.set_xlim(0, 1); a.legend(fontsize=8, loc="best")
 
-    # j_phi panel: overlay the EFFECTIVE inductive + bootstrap components of the
-    # solve -- reduced-opacity dashed (j_ind) and dash-dot (j_BS). "Effective" =
+    # jphi_total panel: overlay the EFFECTIVE inductive + bootstrap components of the
+    # solve -- reduced-opacity dashed (j_ind) and dash-dot (jphi_bs). "Effective" =
     # including the fixed anchors: on the IMAS diff path the bootstrap shown is
-    # bl.j_BS + jBS_diff (the FUSE bootstrap actually in the solve, pedestal at
+    # bl.jphi_bs + jphi_bs_diff (the FUSE bootstrap actually in the solve, pedestal at
     # the right psi_N); the inductive is the residual against the ACHIEVED
     # total, so the two curves sum to the plotted (solved) total on every path.
     # All baseline arrays are interpolated from their native grids onto the
     # solver's uniform psi_N grid (same length does NOT imply same grid).
-    if getattr(bl, "j_BS", None) is not None:
+    if getattr(bl, "jphi_bs", None) is not None:
         _blx = _to_psi(bl.psi_N)
 
         def _to_jx(a, native_x):
             a = np.asarray(a, float)
             return np.interp(j_sol_x, np.asarray(native_x, float), a)
 
-        _jBS_eff = _to_jx(bl.j_BS, _blx)
-        if getattr(bl, "jBS_diff", None) is not None:
-            _d = np.asarray(bl.jBS_diff, float)
-            _jBS_eff = _jBS_eff + _to_jx(_d, _kin_x if _d.shape == _kin_x.shape else _blx)
-        _j_ind_eff = j_sol - _jBS_eff
+        _jbs_eff = _to_jx(bl.jphi_bs, _blx)
+        if getattr(bl, "jphi_bs_diff", None) is not None:
+            _d = np.asarray(bl.jphi_bs_diff, float)
+            _jbs_eff = _jbs_eff + _to_jx(_d, _kin_x if _d.shape == _kin_x.shape else _blx)
+        _j_ind_eff = j_sol - _jbs_eff
         for _fx in _recon_fixed_channels(bl):
             if _fx is not None:
                 _fx = np.asarray(_fx, float)
@@ -1844,7 +1854,7 @@ def plot_input_vs_recon(run, npsi=80, max_dev_mm=10.0):
                     _fx, _kin_x if _fx.shape == _kin_x.shape else _blx)
         ax[0, 1].plot(j_sol_x, _j_ind_eff / 1e6, ls="--", c=C_SOL, lw=1.5,
                       alpha=0.45, label=r"recon $j_{ind}$", zorder=2)
-        ax[0, 1].plot(j_sol_x, _jBS_eff / 1e6, ls="-.", c=C_SOL, lw=1.5,
+        ax[0, 1].plot(j_sol_x, _jbs_eff / 1e6, ls="-.", c=C_SOL, lw=1.5,
                       alpha=0.45, label=r"recon $j_{BS}$"
                       + _bootstrap_model_suffix(bool(getattr(
                           run.config.generation, "jbs_self_consistent",
@@ -1896,7 +1906,7 @@ def plot_geqdsk_bouquet(geqdsk_path_or_eq=None, x_coord="psi_N",
     """Plot one or more geqdsk equilibria: LCFS contours + profile panels.
 
     Layout: narrow flux-surface panel on the left, 2x2 grid of profiles
-    on the right (pressure, q, |j_phi|, normalized P' and FF').
+    on the right (pressure, q, |jphi_total|, normalized P' and FF').
 
     Usage modes:
 
@@ -2071,7 +2081,7 @@ def plot_geqdsk_bouquet(geqdsk_path_or_eq=None, x_coord="psi_N",
         # q
         ax_q.plot(x, eq.qpsi, "-", color=c, lw=lw, alpha=alpha, label=lbl)
 
-        # |j_phi|
+        # |jphi_total|
         jt = eq.j_tor_averaged
         ax_j.plot(x, np.abs(jt) / 1e6, "-", color=c, lw=lw, alpha=alpha, label=lbl)
 
@@ -2844,10 +2854,10 @@ def plot_bouquet_timeseries(entries, scan_key=None, draws=True, envelopes=True,
                             selection="all", cmap="viridis", time_label="time [s]"):
     r"""Overlay bouquet profile families from MULTIPLE time slices, colored by time.
 
-    One 2x3 dashboard (n_e, T_e, n_i, T_i, pressure, j_phi) in which every slice
+    One 2x3 dashboard (n_e, T_e, n_i, T_i, pressure, jphi_total) in which every slice
     contributes its baseline and its perturbed draws (all one thin weight,
     since the per-slice cluster is too tight to separate), and -- for the
-    kinetic / j_phi panels -- its baseline +/-1 sigma envelope (light band). All
+    kinetic / jphi_total panels -- its baseline +/-1 sigma envelope (light band). All
     of a slice's curves share one colour, set by its time on a ``viridis``
     colour bar, so the bouquet's *evolution* and its per-slice spread read off a
     single figure.
@@ -2901,7 +2911,7 @@ def plot_bouquet_timeseries(entries, scan_key=None, draws=True, envelopes=True,
         (r"$n_i$ [$10^{19}$ m$^{-3}$]", "n_i", "psi_N_kinetic", 1e-19, "sigma_ni"),
         (r"$T_i$ [keV]",               "T_i",    "psi_N_kinetic", 1e-3,  "sigma_ti"),
         (r"$p$ [kPa]",                 "pressure", "psi_N",       1e-3,  None),
-        (r"$j_\phi$ [MA/m$^2$]",       "j_phi", "psi_N",      1e-6,  "sigma_jphi"),
+        (r"$j_\phi$ [MA/m$^2$]",       "jphi_total", "psi_N",      1e-6,  "sigma_jphi"),
     ]
     fig, axes = plt.subplots(2, 3, figsize=(11, 6), sharex=True)
     flat = axes.ravel()
@@ -3699,8 +3709,8 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
     SWB bootstrap (legacy)" (v2 archives, ``jbs_self_consistent=False``).
 
     Uses the FAITHFUL components actually summed into TokaMaker --
-    ``j_inductive = j_phi - j_BS,edge - j_fixed`` (which closes to the total
-    exactly) -- NOT the post-hoc shelf-blend ``j_inductive`` stored in the
+    ``jphi_ind = jphi_total - jphi_bs,edge - j_fixed`` (which closes to the total
+    exactly) -- NOT the post-hoc shelf-blend ``jphi_ind`` stored in the
     archive (that over-states the core and does not sum back to the total).
 
     Parameters
@@ -3715,7 +3725,7 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
         frame), multiplied by the orientation factor the archive's read
         applied (its stamped ``source_current_sign``, else the archived
         ``ImasSource.current_orientation``, else ``sign(equilibrium ip)``).
-        g-file -> its direct j_phi used as the input reference in all three
+        g-file -> its direct jphi_total used as the input reference in all three
         panels (no FUSE component split).
     source_kind : {'auto','imas','geqdsk'}
     selection : {'all','selected'}
@@ -3732,9 +3742,9 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
         sk = str(scan_key) if scan_key is not None else list(hf["scan"].keys())[0]
         g = hf[f"scan/{sk}"]
         psi = np.asarray(g["_baseline/psi_N"][:], float)   # run grid (ψ_N or Φ_N)
-        base_total = np.asarray(g["_baseline/j_phi"][:], float)
-        base_jBS = (np.asarray(g["_baseline/j_BS"][:], float)
-                    if "j_BS" in g["_baseline"] else None)
+        base_total = np.asarray(g["_baseline/jphi_total"][:], float)
+        base_jbs = (np.asarray(g["_baseline/jphi_bs"][:], float)
+                    if "jphi_bs" in g["_baseline"] else None)
         # the orientation factor the archive's IMAS read applied, for the raw
         # source overlay below: the stamped _baseline attr, else the archived
         # config's ImasSource.current_orientation (scan copy, else root)
@@ -3753,12 +3763,12 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
             except (ValueError, TypeError, AttributeError):
                 _cfg_orient = None
         ids = [k for k in g if k.isdigit()]
-        # IMAS / full-bootstrap archives (isolate_edge_jBS=False) store no edge
-        # spike -- fall back to the full j_BS, so j_ind = total - j_BS - fixed
+        # IMAS / full-bootstrap archives (isolate_edge_jbs=False) store no edge
+        # spike -- fall back to the full jphi_bs, so j_ind = total - jphi_bs - fixed
         # closes exactly there too.
-        has_spike = bool(ids) and "j_BS,edge" in g[ids[0]]
-        _bs_key = "j_BS,edge" if has_spike else "j_BS"
-        D = {d: dict(total=np.asarray(g[f"{d}/j_phi"][:], float),
+        has_spike = bool(ids) and "jphi_bs,edge" in g[ids[0]]
+        _bs_key = "jphi_bs,edge" if has_spike else "jphi_bs"
+        D = {d: dict(total=np.asarray(g[f"{d}/jphi_total"][:], float),
                      spike=(np.asarray(g[f"{d}/{_bs_key}"][:], float)
                             if _bs_key in g[d] else np.zeros_like(psi)))
              for d in ids}
@@ -3827,8 +3837,8 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
                 jtor = _m * np.asarray(c["j_tor"], float)
                 tt = lambda jp: _s * jpar_to_jphi_tokamaker(_m * jp, geo)
                 F = dict(total=np.interp(psi, pN, _s * jtor_imas_to_jphi_tokamaker(jtor, geo)),
-                         # D2: the archive's j_BS is the field-aligned bootstrap alone; p'G is its own
-                         # bucket (j_pressure), left here in the "fixed" remainder
+                         # D2: the archive's jphi_bs is the field-aligned bootstrap alone; p'G is its own
+                         # bucket (jphi_pd), left here in the "fixed" remainder
                          jBS=np.interp(psi, pN, tt(np.asarray(c["j_bootstrap"], float))),
                          jind=np.interp(psi, pN, tt(np.asarray(c["j_ohmic"], float))))
                 fixed = F["total"] - F["jBS"] - F["jind"]; Flabel = "FUSE"
@@ -3849,11 +3859,11 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
             print(f"plot_jphi: source not read ({e!r}); baseline + draws only")
             F = None
 
-    if base_jBS is None and D:
-        base_jBS = np.mean([D[d]["spike"] for d in D], axis=0)
-        base_jBS_label = r"baseline $j_{BS}$ (ens.-mean)" + _bs_model
+    if base_jbs is None and D:
+        base_jbs = np.mean([D[d]["spike"] for d in D], axis=0)
+        base_jbs_label = r"baseline $j_{BS}$ (ens.-mean)" + _bs_model
     else:
-        base_jBS_label = r"baseline $j_{BS}$" + _bs_model
+        base_jbs_label = r"baseline $j_{BS}$" + _bs_model
 
     OR, FU = _GOLD, "tab:blue"   # gold draws (matches the other plots)
     keep = [d for d in ids if (sel is None or d in sel)]
@@ -3869,7 +3879,7 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
     if F is not None:
         ax[1].plot(psi, (F["jind"] if F.get("jind") is not None else F["total"]) / 1e6,
                    "--", color=FU, lw=1.6, label=rf"{Flabel} $j_{{ind}}$" if F.get("jind") is not None else rf"{Flabel} $j_\phi$")
-    # total j_phi reference, so the component is read against the whole current
+    # total jphi_total reference, so the component is read against the whole current
     ax[1].plot(psi, base_total / 1e6, "k--", lw=1.4, alpha=0.6, zorder=4,
                label=r"baseline total $j_\phi$")
     for i, d in enumerate(keep):
@@ -3881,9 +3891,9 @@ def plot_jphi(h5path_or_header, scan_key=None, source=None, source_kind="auto",
     if F is not None:
         ax[2].plot(psi, (F["jBS"] if F.get("jBS") is not None else F["total"]) / 1e6,
                    "--", color=FU, lw=1.6, label=rf"{Flabel} $j_{{BS}}$" if F.get("jBS") is not None else rf"{Flabel} $j_\phi$")
-    if base_jBS is not None:
-        ax[2].plot(psi, base_jBS / 1e6, "k-", lw=2.0, zorder=5, label=base_jBS_label)
-    # total j_phi reference (dashed, to distinguish from the solid baseline j_BS)
+    if base_jbs is not None:
+        ax[2].plot(psi, base_jbs / 1e6, "k-", lw=2.0, zorder=5, label=base_jbs_label)
+    # total jphi_total reference (dashed, to distinguish from the solid baseline jphi_bs)
     ax[2].plot(psi, base_total / 1e6, "k--", lw=1.4, alpha=0.6, zorder=4,
                label=r"baseline total $j_\phi$")
     for i, d in enumerate(keep):

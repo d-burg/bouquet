@@ -237,13 +237,13 @@ def test_a_single_slice_cut_re_reads_identically(tmp_path):
     p1.write_text(json.dumps(cut))
     bl = _read(str(p1))
     _assert_same_match(bl.source_time_match, st)
-    for k in ("j_NBI", "j_RF", "j_other", "j_sawteeth", "j_BS",
-              "j_inductive", "j_phi", "j_pressure", "p_equilibrium", "ne",
+    for k in ("jphi_nbi", "jphi_rf", "jphi_other", "jphi_saw", "jphi_bs",
+              "jphi_ind", "jphi_total", "jphi_pd", "p_equilibrium", "ne",
               "te", "ni", "ti", "Zeff", "p_fast"):
         np.testing.assert_array_equal(getattr(bl, k), getattr(ref, k), k)
     assert bl.Ip_target == ref.Ip_target
     assert bl.source_current_sign == ref.source_current_sign
-    assert np.max(np.abs(ref.j_NBI)) > 0 and np.max(np.abs(ref.j_RF)) > 0
+    assert np.max(np.abs(ref.jphi_nbi)) > 0 and np.max(np.abs(ref.jphi_rf)) > 0
     # the pairing record: the same (previous) slice, the same mismatch
     for k in ("imas_current_conversion",):
         assert bl.li_metrics[k] == ref.li_metrics[k]
@@ -259,10 +259,10 @@ def test_a_single_slice_cut_re_reads_identically(tmp_path):
     assert bo.li_metrics["imas_current_conversion"][
         "equilibrium_time"] == 2.215
     _assert_same_match(bo.source_time_match, st)
-    pk = np.max(np.abs(ref.j_phi))
-    assert np.max(np.abs(bo.j_phi - ref.j_phi)) > 1e-4 * pk
-    assert np.max(np.abs(bo.j_pressure - ref.j_pressure)) > 1e-3 * np.max(
-        np.abs(ref.j_pressure))
+    pk = np.max(np.abs(ref.jphi_total))
+    assert np.max(np.abs(bo.jphi_total - ref.jphi_total)) > 1e-4 * pk
+    assert np.max(np.abs(bo.jphi_pd - ref.jphi_pd)) > 1e-3 * np.max(
+        np.abs(ref.jphi_pd))
     # without the recorded windows the same file re-reads differently: the
     # core_sources base 30 ms off the single core_profiles time is refused
     bare = copy.deepcopy(cut)
@@ -309,8 +309,8 @@ def test_a_cut_away_from_the_core_profiles_time_re_reads_identically(
     bl = _read(str(p1), time=t_req)
     _assert_same_match(bl.source_time_match, ref.source_time_match)
     assert bl.Ip_target == ref.Ip_target
-    for k in ("j_NBI", "j_RF", "j_other", "j_BS", "j_inductive", "j_phi",
-              "j_pressure", "p_equilibrium"):
+    for k in ("jphi_nbi", "jphi_rf", "jphi_other", "jphi_bs", "jphi_ind", "jphi_total",
+              "jphi_pd", "p_equilibrium"):
         np.testing.assert_array_equal(getattr(bl, k), getattr(ref, k), k)
 
 
@@ -368,10 +368,10 @@ def test_write_imas_draw_re_reads_as_the_archive_on_both_readers(tmp_path):
     bl0, c0 = contract(tmpl, True)
     psi = np.asarray(c0.psi_N, dtype=float)
     s = dict(bl=bl0, psi=psi, eqb=eqb, fsa=fsa)
-    j_phi = np.asarray(bl0.j_phi, dtype=float)
+    jphi_total = np.asarray(bl0.jphi_total, dtype=float)
     arc = str(tmp_path / "draw.h5")
-    rt._write_archive(arc, s, j_phi, np.asarray(bl0.j_inductive, float),
-                      np.asarray(bl0.j_BS, float))
+    rt._write_archive(arc, s, jphi_total, np.asarray(bl0.jphi_ind, float),
+                      np.asarray(bl0.jphi_bs, float))
     out = tmp_path / "draw0.json"
     write_imas_draw(arc, 0, str(tmpl), str(out), scan_key=0, time=T)
     from bouquet.io.imas import _get_export_window
@@ -489,7 +489,7 @@ def test_an_ida_hybrid_read_of_a_cut_keeps_the_core_profiles_window(
     p1.write_text(json.dumps(cut))
     bl = rd(p1)
     assert bl.li_metrics["ida_time_match"] == ref.li_metrics["ida_time_match"]
-    for k in ("ne", "te", "ni", "ti", "Zeff", "j_phi", "j_pressure"):
+    for k in ("ne", "te", "ni", "ti", "Zeff", "jphi_total", "jphi_pd"):
         np.testing.assert_array_equal(getattr(bl, k), getattr(ref, k), k)
     # without the record: the single-slice window, and the pairing refused
     _drop_export_window(cut["core_profiles"])

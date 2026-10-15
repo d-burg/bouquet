@@ -21,10 +21,10 @@ def test_each_bypassed_draw_prints_and_records_why():
     src = inspect.getsource(perturb_kinetic_equilibrium)
     # decided BEFORE the branch chain whose first two arms are the bypasses
     i_by = src.index("_jbs_bypass = None")
-    i_pin = src.index("if _pin_jphi and recalculate_j_BS:")
-    i_loop = src.index("elif recalculate_j_BS and _jbs_on:")
+    i_pin = src.index("if _pin_jphi and recalculate_jbs:")
+    i_loop = src.index("elif recalculate_jbs and _jbs_on:")
     assert i_by < i_pin < i_loop
-    assert "if _jbs_on and recalculate_j_BS and (_pin_jphi or _diff_bs):" \
+    assert "if _jbs_on and recalculate_jbs and (_pin_jphi or _diff_bs):" \
         in src
     assert "[jbs-loop] BYPASSED for this draw" in src
     rec = src.split("if _jbs_bypass is not None:\n", 1)[1][:400]
@@ -56,7 +56,7 @@ def test_generate_bouquet_announces_the_bypass(tmp_path, monkeypatch, capsys,
                 _FakeGS(), _X, 1, str(tmp_path / "byp"), jphi, ne, te,
                 0.9 * ne, te, 0.05 * ne, 0.05 * te, 0.05 * ne, 0.05 * te,
                 0.05 * jphi, 0.4, 0.4, 0.25, 1.0e6, 0.8, 1.5 * np.ones(_N),
-                input_jinductive=jphi - Jb, baseline_j_BS=Jb,
+                jphi_ind_input=jphi - Jb, baseline_jphi_bs=Jb,
                 diagnostic_plots=False, seed=3,
                 jbs_loop=jbs_settings(_GC(), draw=True))
         except Exception:

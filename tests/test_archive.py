@@ -43,21 +43,21 @@ class TestArchiveGolden:
         assert d.eqdsk_bytes is not None                  # suffix scan finds it
 
     def test_profile_attr_on_draw_group(self, tmp_path):
-        # swb_saw_q stamps the draw's j_saw profile as a group attr: attrs keep it as an
+        # swb_saw_q stamps the draw's jphi_saw_out profile as a group attr: attrs keep it as an
         # array and the scalar readers (spread) still work
         import shutil
         p = str(tmp_path / "saw.h5")
         shutil.copy(_GOLDEN, p)
         c = bq.BouquetArchive(p)["0"].indices[0]
         with h5py.File(p, "a") as hf:
-            hf[f"scan/0/{c}"].attrs["swb_j_saw"] = np.linspace(0.0, 1.0, 257)
+            hf[f"scan/0/{c}"].attrs["jphi_saw_out"] = np.linspace(0.0, 1.0, 257)
         sc = bq.BouquetArchive(p)["0"]
         d = sc[c]
-        assert d.attrs["swb_j_saw"].shape == (257,) and isinstance(d.li1, float)
+        assert d.attrs["jphi_saw_out"].shape == (257,) and isinstance(d.li1, float)
         assert sc.spread(selection="all")["l_i(1)"]["n"] == len(sc.all)
         import json
         doc = json.loads(json.dumps(d.profiles_doc()))          # profiles JSON export
-        assert len(doc["profiles"]["swb_j_saw"]) == 257 and "swb_j_saw" not in doc["scalars"]
+        assert len(doc["profiles"]["jphi_saw_out"]) == 257 and "jphi_saw_out" not in doc["scalars"]
         assert "profiles" in d.extract(str(tmp_path / "x"), formats=("profiles",))
 
     def test_equilibrium_parse(self):
@@ -104,7 +104,7 @@ class TestSuffixScan:
         with h5py.File(path, "w") as hf:
             g = hf.require_group("scan/4400/0")
             g["psi_N"] = np.linspace(0, 1, 5)
-            g["j_phi"] = np.ones(5)
+            g["jphi_total"] = np.ones(5)
             g.attrs["l_i(1)"] = 1.05
             g.attrs["l_i(3)"] = 0.85
             g.attrs["selected"] = True
@@ -145,7 +145,7 @@ class TestBinarySourceDedup:
         for c in range(2):
             store_equilibrium(
                 stem, c, eq_path, psi,
-                one, one, one,                                 # j_phi j_BS j_ind
+                one, one, one,                                 # jphi_total jphi_bs j_ind
                 one, one, one, one, one,                       # ne Te ni Ti wExB
                 1.0, 0.8, scan_key="900", pfile_bytes=pfile_bytes)
 
@@ -282,7 +282,7 @@ class TestJbsLoopBlockSchemaV3:
 
     def test_version_is_3_and_the_block_is_named_in_the_schema(self):
         from bouquet import schema
-        assert schema.SCHEMA_VERSION == 3
+        assert schema.SCHEMA_VERSION == 4
         assert schema.JBS_LOOP_ATTRS == ("jbs_converged", "jbs_n_passes",
                                          "jbs_loop_json")
         assert schema.JBS_LOOP_SINCE_SCHEMA == 3
@@ -292,7 +292,7 @@ class TestJbsLoopBlockSchemaV3:
         stem = self._store(str(tmp_path / "v3.h5"), self._REC, None,
                            dict(self._REC, n_passes_total=None))
         with h5py.File(stem + ".h5", "r") as hf:
-            assert hf.attrs["schema_version"] == 3
+            assert hf.attrs["schema_version"] == 4
             a0 = hf["scan/7/0"].attrs
             assert bool(a0["jbs_converged"]) is True
             assert int(a0["jbs_n_passes"]) == 5      # all loops of the draw

@@ -161,10 +161,10 @@ class EquilibriumBrowser:
         # Pressure: single axes
         self.pressure_ax = self.fig.add_axes([left, bot, w, h])
 
-        # j_phi total: single axes (like pressure)
+        # jphi_total total: single axes (like pressure)
         self.jphi_total_ax = self.fig.add_axes([left, bot, w, h])
 
-        # j_phi components: 2 vertically stacked
+        # jphi_total components: 2 vertically stacked
         jgap = 0.04
         jh = (h - jgap) / 2
         self.jphi_comp_axes = [
@@ -253,14 +253,14 @@ class EquilibriumBrowser:
                 perturbed_data_list=perturbed,
             )
 
-        elif tab == self.TABS[2]:  # j_phi (total)
+        elif tab == self.TABS[2]:  # jphi_total (total)
             draw_jphi_total(
                 self.jphi_total_ax, psi_N,
-                bl["j_phi"], bl["sigma_jphi"],
+                bl["jphi_total"], bl["sigma_jphi"],
                 perturbed_data_list=perturbed,
             )
 
-        elif tab == self.TABS[3]:  # j_phi components
+        elif tab == self.TABS[3]:  # jphi_total components
             draw_jphi_components(
                 self.jphi_comp_axes, psi_N,
                 perturbed_data_list=perturbed,

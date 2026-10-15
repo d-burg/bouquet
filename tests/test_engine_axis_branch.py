@@ -73,12 +73,12 @@ def test_the_count_and_summary_text():
     diags = [dict(engine=dict(axis=dict(axis_branch="same"))),
              dict(engine=dict(axis=dict(axis_branch="other"))),
              dict(engine=dict(axis=dict(axis_branch=None))),
-             dict(j_phi=None)]                       # a legacy draw
+             dict(jphi_total=None)]                       # a legacy draw
     c = axis_branch_counts(diags)
     assert c == dict(n_recorded=2, n_other=1, n_same=1, other_draws=[1])
     assert axis_branch_text(c).startswith(
         "axis branch: 1 of 2 archived engine draw(s) 'other'")
-    assert axis_branch_text(axis_branch_counts([dict(j_phi=None)])) == ""
+    assert axis_branch_text(axis_branch_counts([dict(jphi_total=None)])) == ""
     from bouquet.TokaMaker_interface import _rejection_summary
     assert "axis branch: 1 of 2" in _rejection_summary([], 4, 4,
                                                        diagnostics=diags)

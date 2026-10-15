@@ -7,7 +7,7 @@ test_psi_rho_drift.py; the per-draw ni/Z_eff pairing, up to the solve, in
 test_ida_ni_zeff_pair.py.  What only a live run can show is that those hold
 through prepare(), the draws and the archive:
 
-  * prepare() keeps the reader's IDA kinetics and splits j_phi exactly;
+  * prepare() keeps the reader's IDA kinetics and splits jphi_total exactly;
   * the sigma=0 draw reproduces the baseline bootstrap on this path;
   * every archived draw is one consistent (ne, ni, nz, Z_eff) set, stays in the
     single-impurity window, and its archived pressure is the solve pressure
@@ -149,13 +149,13 @@ def _probe(work, method):
     for f in ("ne", "te", "ni", "ti", "Zeff", "z_fast", "z2_fast", "p_fast"):
         arr[f"reader_{f}"] = getattr(bl_reader, f)
         arr[f"run_{f}"] = getattr(rb, f)
-    for f in ("j_phi", "j_inductive", "j_BS", "j_NBI", "j_RF", "psi_N", "psi_N_kinetic"):
+    for f in ("jphi_total", "jphi_ind", "jphi_bs", "jphi_nbi", "jphi_rf", "psi_N", "psi_N_kinetic"):
         arr[f"run_{f}"] = getattr(rb, f)
-    if getattr(rb, "jBS_diff", None) is not None:
-        arr["run_jBS_diff"] = rb.jBS_diff
-    # the third current bucket (p'G as its own j_pressure; legacy records it
-    # beside a j_inductive that carries it) and the held "other" channel
-    for f in ("j_pressure", "j_other"):
+    if getattr(rb, "jphi_bs_diff", None) is not None:
+        arr["run_jbs_diff"] = rb.jphi_bs_diff
+    # the third current bucket (p'G as its own jphi_pd; legacy records it
+    # beside a jphi_ind that carries it) and the held "other" channel
+    for f in ("jphi_pd", "jphi_other"):
         if getattr(rb, f, None) is not None:
             arr[f"run_{f}"] = getattr(rb, f)
     np.savez(os.path.join(work, "probe.npz"),
@@ -201,17 +201,17 @@ class TestPrepared:
         _, a = run
         np.testing.assert_array_equal(a[f"run_{f}"], a[f"reader_{f}"])
 
-    def test_the_split_sums_to_j_phi(self, run):
+    def test_the_split_sums_to_jphi_total(self, run):
         from bouquet.schema import SPLIT_PRESSURE_SEPARATE
         meta, a = run
-        tot = a["run_j_inductive"] + a["run_j_BS"] + a["run_j_NBI"] + a["run_j_RF"]
-        tot = tot + a.get("run_jBS_diff", 0.0) + a.get("run_j_other", 0.0)
-        # swb keeps p'G as its own bucket (j_pressure); legacy's in-memory
-        # j_inductive carries it, and its j_pressure is only the record
+        tot = a["run_jphi_ind"] + a["run_jphi_bs"] + a["run_jphi_nbi"] + a["run_jphi_rf"]
+        tot = tot + a.get("run_jbs_diff", 0.0) + a.get("run_jphi_other", 0.0)
+        # swb keeps p'G as its own bucket (jphi_pd); legacy's in-memory
+        # jphi_ind carries it, and its jphi_pd is only the record
         if meta["split_convention"] == SPLIT_PRESSURE_SEPARATE:
-            tot = tot + a["run_j_pressure"]
-        np.testing.assert_allclose(tot, a["run_j_phi"], rtol=0,
-                                   atol=1e-9 * np.max(np.abs(a["run_j_phi"])))
+            tot = tot + a["run_jphi_pd"]
+        np.testing.assert_allclose(tot, a["run_jphi_total"], rtol=0,
+                                   atol=1e-9 * np.max(np.abs(a["run_jphi_total"])))
 
     def test_the_draws_derive_ni_from_the_ida_pair(self, run):
         meta, _ = run

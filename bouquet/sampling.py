@@ -31,6 +31,7 @@ from scipy.spatial.distance import cdist
 from scipy import integrate
 from scipy.stats import norm
 
+from ._renamed import accepts_old_names
 from .physics import ELEMENTARY_CHARGE_LEGACY, q_ravg
 from typing import Optional
 
@@ -65,7 +66,7 @@ def make_rng(seed=None) -> np.random.Generator:
     This is the *only* place a seed is turned into randomness in bouquet.
     ``generate_bouquet`` calls it once and threads the returned Generator
     through every draw site (kinetic GPR channels, the aux channels, the
-    :math:`j_\\phi` GPR draws, the per-draw ``scale_jBS`` and ``l_i`` target
+    :math:`j_\\phi` GPR draws, the per-draw ``scale_jbs`` and ``l_i`` target
     samples), so one seed governs the whole ensemble and two runs with the
     same seed produce bitwise-identical archives.
 
@@ -635,7 +636,10 @@ def _proxy_readback(mygs, n_psi, psi_pad, x, coord):
     return np.asarray(psi_N, dtype=float), f, fp, p, pp, ravgs
 
 
-def calc_cylindrical_li_proxy(mygs, j_phi_profile, psi_pad, x=None, coord="psi_n"):
+@accepts_old_names
+
+
+def calc_cylindrical_li_proxy(mygs, jphi_total_profile, psi_pad, x=None, coord="psi_n"):
     """
     Calculates a proxy for internal inductance l_i(3) using 1D profiles.
 
@@ -643,12 +647,12 @@ def calc_cylindrical_li_proxy(mygs, j_phi_profile, psi_pad, x=None, coord="psi_n
     ----------
     mygs : TokaMaker
         TokaMaker Grad-Shafranov solver object (used for geometry queries).
-    j_phi_profile : array-like
+    jphi_total_profile : array-like
         The toroidal current density profile (perturbation target).
     psi_pad : float
         Padding inside the LCFS for profile queries.
     x : array-like, optional
-        Run grid of ``j_phi_profile`` (``None``: OFT's uniform padded grid).
+        Run grid of ``jphi_total_profile`` (``None``: OFT's uniform padded grid).
     coord : str
         Coordinate of ``x`` (see :mod:`bouquet.coords`).
 
@@ -657,7 +661,7 @@ def calc_cylindrical_li_proxy(mygs, j_phi_profile, psi_pad, x=None, coord="psi_n
     li_proxy : float
         The estimated internal inductance.
     """
-    psi_N, f, fp, p, pp, ravgs_q = _proxy_readback(mygs, len(j_phi_profile),
+    psi_N, f, fp, p, pp, ravgs_q = _proxy_readback(mygs, len(jphi_total_profile),
                                                    psi_pad, x, coord)
     psi_range = mygs.psi_bounds[1] - mygs.psi_bounds[0]
 
@@ -677,7 +681,7 @@ def calc_cylindrical_li_proxy(mygs, j_phi_profile, psi_pad, x=None, coord="psi_n
     dA = dV / (2 * np.pi * R_avg)
 
     # 4. Enclosed current I(rho)
-    dI = j_phi_profile * dA
+    dI = jphi_total_profile * dA
     I_enc = integrate.cumulative_trapezoid(dI, initial=0)
     I_tot = I_enc[-1]
 
@@ -736,13 +740,16 @@ def get_li_proxy_geometry(mygs, n_psi, psi_pad, x=None, coord="psi_n"):
     }
 
 
-def calc_cylindrical_li_proxy_fast(j_phi_profile, geo):
+@accepts_old_names
+
+
+def calc_cylindrical_li_proxy_fast(jphi_total_profile, geo):
     """Same calculation as :func:`calc_cylindrical_li_proxy` but using
     pre-computed geometry (no TokaMaker calls).
 
     Parameters
     ----------
-    j_phi_profile : array-like
+    jphi_total_profile : array-like
         Toroidal current density profile.
     geo : dict
         From :func:`get_li_proxy_geometry`.
@@ -756,7 +763,7 @@ def calc_cylindrical_li_proxy_fast(j_phi_profile, geo):
     dV = geo["dV"]
     V_tot = geo["V_tot"]
 
-    dI = j_phi_profile * dA
+    dI = jphi_total_profile * dA
     I_enc = integrate.cumulative_trapezoid(dI, initial=0)
     I_tot = I_enc[-1]
 
@@ -775,7 +782,10 @@ def calc_cylindrical_li_proxy_fast(j_phi_profile, geo):
     return W_pol_integral / (V_tot * B_p_edge_avg**2)
 
 
-def calc_realgeom_li_proxy_fast(j_phi_profile, geo):
+@accepts_old_names
+
+
+def calc_realgeom_li_proxy_fast(jphi_total_profile, geo):
     r"""Real-geometry l_i(1) proxy: identical 1D flux-surface reduction as
     :func:`calc_cylindrical_li_proxy_fast`, but the surface-averaged
     poloidal field uses the **actual** flux-surface perimeters
@@ -786,14 +796,14 @@ def calc_realgeom_li_proxy_fast(j_phi_profile, geo):
     cylindrical proxy's 0.90), i.e. ~unbiased for l_i(1) with no
     device-specific correction factor -- the snapshot geometry IS the
     per-run calibration.  Intended use is a cheap *pre-screen* of GPR
-    j_phi draws (skip a full solve when the estimate is well outside the
+    jphi_total draws (skip a full solve when the estimate is well outside the
     l_i band); the real solved l_i remains the authoritative acceptance.
 
     mu0 cancels in the l_i ratio, so it is dropped (B_p ~ I_enc / L_p).
 
     Parameters
     ----------
-    j_phi_profile : array-like
+    jphi_total_profile : array-like
         Toroidal current density profile [A/m^2].
     geo : dict
         From :func:`get_li_proxy_geometry`, additionally carrying ``L_p``
@@ -809,7 +819,7 @@ def calc_realgeom_li_proxy_fast(j_phi_profile, geo):
     V_tot = geo["V_tot"]
     L_p = geo["L_p"]
 
-    dI = j_phi_profile * dA
+    dI = jphi_total_profile * dA
     I_enc = integrate.cumulative_trapezoid(dI, initial=0)
     I_tot = I_enc[-1]
     if I_tot == 0:

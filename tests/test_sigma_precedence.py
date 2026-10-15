@@ -59,10 +59,10 @@ def _baseline(psi_kin, n_eq=41):
     psi_N = np.linspace(0.0, 1.0, n_eq)
     ne = 5e19 * (1 - 0.8 * psi_kin ** 2)
     te = 3000.0 * (1 - 0.9 * psi_kin ** 2) + 50.0
-    j_phi = 8.0e5 * (1.0 - psi_N ** 2)
+    jphi_total = 8.0e5 * (1.0 - psi_N ** 2)
     return Baseline(
-        psi_N=psi_N, j_phi=j_phi,
-        j_inductive=0.85 * j_phi, j_BS=0.15 * j_phi,
+        psi_N=psi_N, jphi_total=jphi_total,
+        jphi_ind=0.85 * jphi_total, jphi_bs=0.15 * jphi_total,
         psi_N_kinetic=psi_kin, ne=ne, te=te, ni=0.9 * ne, ti=0.9 * te,
         Zeff=np.full_like(psi_kin, 1.5),
         Ip_target=1.2e6, l_i_target=0.85, provenance="reconstruction",

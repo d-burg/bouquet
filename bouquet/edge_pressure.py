@@ -13,12 +13,12 @@ boundary starting at ZERO, then rescales ``P'`` so the axis value equals
     the plasma, which the solver's piecewise-linear flux function
     represents).  What changes with ``False``: the pressure-driven part of
     the edge current ``P' (<R> - F^2 <1/R>/<B^2>)`` is no longer forced to
-    zero at the boundary, so for the same requested total ``<j_phi>`` the
+    zero at the boundary, so for the same requested total ``<jphi_total>`` the
     split between the ``P'`` and ``FF'`` terms in the last interval moves
     (``FF'`` carries less there), and the edge current and ``q95`` follow.
     Measured on the synthetic g-file example (unified engine; see
     docs/CHANGES_SUMMARY.md): the pressure-driven current at the boundary
-    goes from 0.006 to 0.018 MA/m^2, ``<j_phi>`` at the last node from 0.076
+    goes from 0.006 to 0.018 MA/m^2, ``<jphi_total>`` at the last node from 0.076
     to 0.115 MA/m^2 with the ``FF'`` term changing sign there, and ``q95``
     rises by 0.002; ``l_i``, the core and the iteration counts do not move.
 

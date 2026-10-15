@@ -42,6 +42,7 @@ from .edge_pressure import (NegativeSeparatrixPressure,
                             resolve_edge_pressure, solver_pax,
                             solver_pp_profile, solver_pprime)
 from . import coords
+from ._renamed import accepts_old_names
 from .swb import SwbBaseline
 from .filtering import l_i_construction_tolerance
 
@@ -95,22 +96,22 @@ def _zero_perturbation_env(env):
 
 def _archive_baseline_split(bl, method_name):
     """The ``baseline_split`` ``generate()`` hands ``generate_bouquet``
-    (owner decision D2: ``p'G`` archived as its own ``j_pressure``).
+    (owner decision D2: ``p'G`` archived as its own ``jphi_pd``).
 
-    The schema's ``j_pressure`` is the ``p'G`` of the ARCHIVED state.  The
+    The schema's ``jphi_pd`` is the ``p'G`` of the ARCHIVED state.  The
     engine and swb baselines carry their solved state's own
-    (``Baseline.j_pressure``).  A legacy baseline does not: the IMAS reader's
-    ``Baseline.j_pressure`` is the dd source's ``p'G`` (its geometry and
+    (``Baseline.jphi_pd``).  A legacy baseline does not: the IMAS reader's
+    ``Baseline.jphi_pd`` is the dd source's ``p'G`` (its geometry and
     pressure), which the legacy forward solve then replaces with its own
-    state.  For the legacy method ``j_pressure`` is therefore None, so
+    state.  For the legacy method ``jphi_pd`` is therefore None, so
     ``generate_bouquet`` evaluates it on the archived baseline state
     (``archived_pressure_term``), exactly as for every legacy draw and the
     legacy g-file baseline; the dd's value stays on the in-memory baseline
-    as ``Baseline.j_pressure_source`` (review of #78, B2)."""
+    as ``Baseline.jphi_pd_source`` (review of #78, B2)."""
     from .schema import SPLIT_PRESSURE_IN_INDUCTIVE
-    jp = None if method_name == "legacy" else getattr(bl, "j_pressure", None)
+    jp = None if method_name == "legacy" else getattr(bl, "jphi_pd", None)
     return dict(
-        j_pressure=jp,
+        jphi_pd=jp,
         inductive_includes_pressure=(
             getattr(bl, "current_split_convention",
                     SPLIT_PRESSURE_IN_INDUCTIVE)
@@ -185,7 +186,7 @@ class Bouquet(SwbBaseline):
         engine; ``"legacy"`` runs the legacy reconstruction and draws.  It
         may equally be set afterwards (``bq.generation.
         reconstruction_engine = "legacy"``): the engine-dependent workflow
-        settings (``isolate_edge_jBS``, ``perturb_jind_in_anchor``;
+        settings (``isolate_edge_jbs``, ``perturb_jind_in_anchor``;
         :data:`bouquet.engine.ENGINE_DEPENDENT_DEFAULTS`) are left unset
         here and resolved to the validated values of the engine configured
         when :meth:`prepare_baseline` runs (legacy g-file: the full-profile
@@ -207,7 +208,7 @@ class Bouquet(SwbBaseline):
         # the engine-dependent workflow settings are resolved at
         # prepare_baseline(), for the engine configured THEN (legacy g-file:
         # the standard flagship l_i loop, perturb_jind_in_anchor=False, and
-        # the full-profile decomposition, isolate_edge_jBS=False)
+        # the full-profile decomposition, isolate_edge_jbs=False)
         return cls(cfg)
 
     @classmethod
@@ -265,7 +266,7 @@ class Bouquet(SwbBaseline):
         default, ``"unified"`` since 2026-10-06) selects the reconstruction
         engine; ``"legacy"`` runs the legacy IMAS baseline and draws.  It
         may equally be set afterwards: the engine-dependent workflow
-        settings (``isolate_edge_jBS``, ``perturb_jind_in_anchor``;
+        settings (``isolate_edge_jbs``, ``perturb_jind_in_anchor``;
         :data:`bouquet.engine.ENGINE_DEPENDENT_DEFAULTS`) are left unset
         here and resolved to the validated values of the engine configured
         when :meth:`prepare_baseline` runs (legacy IDS: diff+C and the
@@ -302,14 +303,14 @@ class Bouquet(SwbBaseline):
             cfg.uncertainty.ida_path = ida_path
         # The engine-dependent workflow settings are resolved at
         # prepare_baseline(), for the engine configured THEN.  Legacy IDS:
-        # diff+C (jBS_baseline_mode="diff", the dataclass default: anchor
-        # the bootstrap to the source via the fixed FUSE_jBS-SWB diff;
+        # diff+C (jbs_baseline_mode="diff", the dataclass default: anchor
+        # the bootstrap to the source via the fixed FUSE_jbs-SWB diff;
         # perturb_jind_in_anchor=True: perturb j_ind in the recon-anchor to
         # avoid the find_optimal_scale/corrector homogenization) and the
-        # full-profile decomposition (isolate_edge_jBS=False: FUSE/IMAS
+        # full-profile decomposition (isolate_edge_jbs=False: FUSE/IMAS
         # sources carry a FULL Sauter bootstrap, so the edge-spike isolation
-        # would mislabel a redundant j_BS,edge and mangle the per-draw
-        # j_inductive).
+        # would mislabel a redundant jphi_bs,edge and mangle the per-draw
+        # jphi_ind).
         return cls(cfg)
 
     # ── ergonomic config accessors (so `bq.uncertainty.ne_scalar_sigma = ...`,
@@ -916,7 +917,7 @@ class Bouquet(SwbBaseline):
         self._experimental_features = warn_experimental_features(
             self.config, stacklevel=3)
 
-        # The engine-dependent settings (isolate_edge_jBS,
+        # The engine-dependent settings (isolate_edge_jbs,
         # perturb_jind_in_anchor) are resolved HERE, once, for the engine
         # configured now -- whatever it was when the config was built -- and
         # the resolution goes on the baseline and into the archive.
@@ -948,7 +949,7 @@ class Bouquet(SwbBaseline):
 
         # the self-consistent bootstrap loop runs in the baseline too, so its
         # workflow refusals fire here (before single_profile_jphi rewrites
-        # recalculate_j_BS below), not only at generate()
+        # recalculate_jbs below), not only at generate()
         self._check_jbs_loop_workflow(self.config.generation)
 
         # the two edge-pressure settings do not reach the solver's own
@@ -968,11 +969,11 @@ class Bouquet(SwbBaseline):
 
         # single_profile_jphi: drop the per-draw Sauter recompute BEFORE the
         # baseline work, so the IMAS forward solve does not spend a bootstrap
-        # call either. The total j_phi is anchored to the source either way, so
+        # call either. The total jphi_total is anchored to the source either way, so
         # the baseline equilibrium is unchanged -- only the (about to be
         # collapsed) split differs.
         if self.config.generation.single_profile_jphi:
-            self.config.generation.recalculate_j_BS = False
+            self.config.generation.recalculate_jbs = False
         coords.check_run(self.config)
         self._check_structured_mse_reachable(self.config)
         if self.config.generation.imas_baseline == "swb":
@@ -1016,7 +1017,7 @@ class Bouquet(SwbBaseline):
             # single_profile_jphi: collapse the decomposition so the archive
             # matches what the draws actually perturb (the total). Done AFTER
             # the baseline solve so the equilibrium itself is unchanged --
-            # only the bookkeeping split is folded back into j_inductive.
+            # only the bookkeeping split is folded back into jphi_ind.
             if self.config.generation.single_profile_jphi:
                 self._collapse_jphi_split()
 
@@ -1270,7 +1271,7 @@ class Bouquet(SwbBaseline):
                   flush=True)
 
     def _flag_nonconverged_recon_loop(self) -> None:
-        """Mark a geqdsk baseline whose self-consistent j_BS loop did not
+        """Mark a geqdsk baseline whose self-consistent jphi_bs loop did not
         converge (only reachable with ``jbs_loop_on_fail="flag"``; "raise"
         raised inside the reconstruction) as ``closure_limited``.
 
@@ -1300,7 +1301,7 @@ class Bouquet(SwbBaseline):
             reasons.append(why)
         m["closure_limited_reasons"] = tuple(reasons)
         m["closure_limited"] = True
-        msg = ("reconstruction baseline: the self-consistent j_BS loop "
+        msg = ("reconstruction baseline: the self-consistent jphi_bs loop "
                "did NOT converge (jbs_loop_on_fail='flag') -- the slice "
                "is delivered flagged closure_limited: " + why)
         print("[recon jbs-loop] WARNING " + msg, flush=True)
@@ -1308,12 +1309,12 @@ class Bouquet(SwbBaseline):
         bl.reconstruction_metrics = m
 
     def _collapse_jphi_split(self) -> None:
-        """Fold every j_phi component back into j_inductive (single-profile mode).
+        """Fold every jphi_total component back into jphi_ind (single-profile mode).
 
-        Leaves ``baseline.j_phi`` untouched -- it is already the source total --
-        and sets ``j_inductive = j_phi`` with the bootstrap and driven components
+        Leaves ``baseline.jphi_total`` untouched -- it is already the source total --
+        and sets ``jphi_ind = jphi_total`` with the bootstrap and driven components
         zeroed, so nothing downstream can reintroduce a split. Also forces
-        ``recalculate_j_BS=False``: with no baseline bootstrap there is nothing
+        ``recalculate_jbs=False``: with no baseline bootstrap there is nothing
         for the per-draw Sauter call to anchor to, and the draw path then perturbs
         the total directly (see TokaMaker_interface ~line 2136).
         """
@@ -1321,22 +1322,22 @@ class Bouquet(SwbBaseline):
 
         bl = self.baseline
         gc = self.config.generation
-        j_phi = np.asarray(bl.j_phi, dtype=float)
+        jphi_total = np.asarray(bl.jphi_total, dtype=float)
         dropped = {
             name: float(np.max(np.abs(np.asarray(getattr(bl, name), dtype=float))))
-            for name in ("j_BS", "j_NBI", "j_RF", "j_other")
+            for name in ("jphi_bs", "jphi_nbi", "jphi_rf", "jphi_other")
             if getattr(bl, name, None) is not None
         }
-        bl.j_inductive = j_phi.copy()
-        bl.j_BS = np.zeros_like(j_phi)
-        for name in ("j_NBI", "j_RF", "j_other", "j_sawteeth"):
+        bl.jphi_ind = jphi_total.copy()
+        bl.jphi_bs = np.zeros_like(jphi_total)
+        for name in ("jphi_nbi", "jphi_rf", "jphi_other", "jphi_saw"):
             if getattr(bl, name, None) is not None:
-                setattr(bl, name, np.zeros_like(j_phi))
-        gc.recalculate_j_BS = False          # already forced in prepare_baseline
+                setattr(bl, name, np.zeros_like(jphi_total))
+        gc.recalculate_jbs = False          # already forced in prepare_baseline
         summary = ", ".join(f"{k} peak {v/1e6:.4f}" for k, v in dropped.items()) or "none"
-        print(f"[single-profile] j_phi kept as one profile (peak "
-              f"{np.max(np.abs(j_phi))/1e6:.4f} MA/m^2); folded in: {summary} "
-              f"[MA/m^2]; recalculate_j_BS forced False (no Sauter per draw)")
+        print(f"[single-profile] jphi_total kept as one profile (peak "
+              f"{np.max(np.abs(jphi_total))/1e6:.4f} MA/m^2); folded in: {summary} "
+              f"[MA/m^2]; recalculate_jbs forced False (no Sauter per draw)")
 
     def reconstruct(self) -> "Baseline":
         """Reconstruct the baseline equilibrium and print a quality summary.
@@ -1373,7 +1374,7 @@ class Bouquet(SwbBaseline):
 
         Global scalars are shown as ``value (input ref, +/-% err)`` against the
         input g-file's own values; geometric residuals that should be ~0
-        (boundary, axis offset, j_phi RMS) are shown absolute. See
+        (boundary, axis offset, jphi_total RMS) are shown absolute. See
         :func:`bouquet.baseline._reconstruction_metrics`.
         """
         import numpy as np
@@ -1461,7 +1462,7 @@ class Bouquet(SwbBaseline):
 
     @staticmethod
     def _close_ip_q0_predictor(gc, bl, eq_snap, geom, probe, psi_N,
-                               j_ind, j_BS_swb, j_fixed, FUSE_tot,
+                               j_ind, jphi_bs_swb, j_fixed, FUSE_tot,
                                sgn, Ip_t, c_signed, ip_ind, ip_bs, ip_fix,
                                close_ip, q0_ref=None):
         """Solve-free (s_ohm, s_bs) for ``closure_channel="sawtooth_bootstrap"``.
@@ -1480,7 +1481,7 @@ class Bouquet(SwbBaseline):
         REQUESTED profile, not the renormalised anchor.**  The anchor snapshot
         handed in here is, by construction, the converged forward solve of the
         source's own total (``_forward_solve_imas_baseline`` does
-        ``solve_jphi(bl.j_phi)`` and only then takes ``copy_eq()``, before
+        ``solve_jphi(bl.jphi_total)`` and only then takes ``copy_eq()``, before
         ``solve_with_bootstrap`` moves the equilibrium), so ``q0_anchor`` --
         TokaMaker's own q for that solve, never the dd's q estimator (issue
         #20) -- costs no dedicated solve.  But ``solve_jphi`` hands TokaMaker a
@@ -1494,7 +1495,7 @@ class Bouquet(SwbBaseline):
         split -- every other channel absorbs the Ip deficit into ONE scale and
         leaves the shape alone.  So the target is un-renormalised back to
         FUSE's own current, to the same first order the whole predictor uses
-        (``q0 ~ 1/j_phi(0)`` at frozen geometry):
+        (``q0 ~ 1/jphi_total(0)`` at frozen geometry):
 
         .. code-block:: text
 
@@ -1528,7 +1529,7 @@ class Bouquet(SwbBaseline):
         0.8 % model error, comparable to the ~0.9 % scale adjustment being
         made.  The Ip-closed hybrid reproduces its requested current as an
         INTEGRAL but not pointwise on axis: the single-pass jphi-linterp solve
-        lands the achieved j_phi a fraction of a percent off the request, and
+        lands the achieved jphi_total a fraction of a percent off the request, and
         the re-converged geometry is not quite the frozen anchor either.  So
         ``q0_tol`` is not a numerical nicety -- it is the band inside which
         this linearisation is trustworthy, and a slice whose residual exceeds
@@ -1571,7 +1572,7 @@ class Bouquet(SwbBaseline):
             # close_ip).
             q0_target = unrenormalise_q0(q0_anchor, j_achieved0, j_requested0)
         else:
-            # held reference from the ORIGINAL anchor (j_BS loop pass)
+            # held reference from the ORIGINAL anchor (jphi_bs loop pass)
             q0_anchor = float(q0_ref["q0_anchor"])
             j_achieved0 = float(q0_ref["j_achieved0"])
             j_requested0 = float(q0_ref["j_requested0"])
@@ -1584,7 +1585,7 @@ class Bouquet(SwbBaseline):
         _pin_row = (None if q0_ref is None else q0_ref.get("axis_row"))
         if _pin_row is not None:
             j_ref0 = float(_pin_row)
-        j_ind0, j_bs0, j_fix0 = _ax(j_ind), _ax(j_BS_swb), _ax(j_fixed)
+        j_ind0, j_bs0, j_fix0 = _ax(j_ind), _ax(jphi_bs_swb), _ax(j_fixed)
 
         saw = dict(getattr(bl, "sawtooth", None) or {})
         q0_dd = saw.get("q0_dd")
@@ -1623,7 +1624,7 @@ class Bouquet(SwbBaseline):
                 "snapshot is the converged forward solve of the source total, "
                 "but solve_jphi renormalises that SHAPE to Ip_target, so its "
                 "q0 belongs to a current FUSE never claimed; the ratio undoes "
-                "that to first order (q0 ~ 1/j_phi(0) at frozen geometry). "
+                "that to first order (q0 ~ 1/jphi_total(0) at frozen geometry). "
                 "get_q at the psi_pad-clipped axis; never the dd's own q "
                 "estimator (issue #20)"),
             q0_target_psi_N=float(psi_q[0]),
@@ -1681,7 +1682,7 @@ class Bouquet(SwbBaseline):
         state = dict(
             q0_target=q0_target, psi_q=psi_q,
             j_ind=np.asarray(j_ind, dtype=float),
-            j_BS_swb=np.asarray(j_BS_swb, dtype=float),
+            jphi_bs_swb=np.asarray(jphi_bs_swb, dtype=float),
             j_fixed=np.asarray(j_fixed, dtype=float),
             j_ind0=j_ind0, j_bs0=j_bs0, j_fix0=j_fix0,
             ip_ind=float(ip_ind), ip_bs=float(ip_bs),
@@ -1694,7 +1695,7 @@ class Bouquet(SwbBaseline):
 
     @staticmethod
     def _close_ip_structured_predictor(gc, bl, eq_snap, geom, probe, psi_N,
-                                       j_ind, j_BS_swb, j_fixed, FUSE_tot,
+                                       j_ind, jphi_bs_swb, j_fixed, FUSE_tot,
                                        sgn, Ip_t, w_lin, c_signed,
                                        ip_ind, ip_bs, ip_fix,
                                        psi_pad=1e-3, pprime_sign=1.0,
@@ -1786,7 +1787,7 @@ class Bouquet(SwbBaseline):
             j_requested0 = _ax(FUSE_tot)
             q0_target = unrenormalise_q0(q0_anchor, j_achieved0, j_requested0)
         else:
-            # held reference from the ORIGINAL anchor (j_BS loop pass)
+            # held reference from the ORIGINAL anchor (jphi_bs loop pass)
             q0_anchor = float(q0_ref["q0_anchor"])
             j_achieved0 = float(q0_ref["j_achieved0"])
             j_requested0 = float(q0_ref["j_requested0"])
@@ -1797,7 +1798,7 @@ class Bouquet(SwbBaseline):
         _pin_row = (None if q0_ref is None else q0_ref.get("axis_row"))
         if _pin_row is not None:
             j_ref0 = float(_pin_row)
-        j_ind0, j_bs0, j_fix0 = _ax(j_ind), _ax(j_BS_swb), _ax(j_fixed)
+        j_ind0, j_bs0, j_fix0 = _ax(j_ind), _ax(jphi_bs_swb), _ax(j_fixed)
 
         saw = dict(getattr(bl, "sawtooth", None) or {})
         q0_dd = saw.get("q0_dd")
@@ -1868,7 +1869,7 @@ class Bouquet(SwbBaseline):
                 lambda _x0: close_ip_structured_soft(
                     psi_geom, w_lin, c_signed, sgn * Ip_t,
                     (None if ip_sigma is None else float(ip_sigma)),
-                    j_ind, j_BS_swb, j_fixed,
+                    j_ind, jphi_bs_swb, j_fixed,
                     basis=basis_spec, sigma_ind=_sig["ind"],
                     sigma_bs=_sig["bs"],
                     sigma_ind_up=sig_ind_up,
@@ -1886,7 +1887,7 @@ class Bouquet(SwbBaseline):
         else:
             out = close_ip_structured(
                 psi_geom, w_lin, c_signed, sgn * Ip_t,
-                j_ind, j_BS_swb, j_fixed,
+                j_ind, jphi_bs_swb, j_fixed,
                 basis=basis_spec, weights=wspec, axis=axis,
                 li_target=li_target, li_kind=li_kind, li_geom=li_geom,
                 sigma_ind_up=sig_ind_up)
@@ -2082,7 +2083,7 @@ class Bouquet(SwbBaseline):
             state = dict(
                 q0_target=q0_target, psi_q=psi_q, psi_geom=psi_geom,
                 j_ind=np.asarray(j_ind, dtype=float),
-                j_BS_swb=np.asarray(j_BS_swb, dtype=float),
+                jphi_bs_swb=np.asarray(jphi_bs_swb, dtype=float),
                 j_fixed=np.asarray(j_fixed, dtype=float),
                 axis=(None if axis is None else dict(axis)),
                 w_lin=np.asarray(w_lin, dtype=float),
@@ -2150,7 +2151,7 @@ class Bouquet(SwbBaseline):
         """Refuse MSE settings on a path that never reads them.
 
         The MSE term exists only in the structured closure, which runs only on
-        the IMAS path with ``recalculate_j_BS``, ``jBS_baseline_mode="ohmic"``
+        the IMAS path with ``recalculate_jbs``, ``jbs_baseline_mode="ohmic"``
         and ``closure_channel="structured"``.  Anywhere else ``mse_data`` (or
         any non-default ``structured_mse_*`` knob) would be accepted and never
         used -- the class of silent no-op the ``closure_channel`` guard
@@ -2184,13 +2185,13 @@ class Bouquet(SwbBaseline):
         why = []
         if not isinstance(cfg.source, ImasSource):
             why.append("the source is not an IMAS source")
-        if not bool(getattr(gc, "recalculate_j_BS", False)):
-            why.append("recalculate_j_BS is off"
+        if not bool(getattr(gc, "recalculate_jbs", False)):
+            why.append("recalculate_jbs is off"
                        + (" (forced off by single_profile_jphi=True)"
                           if bool(getattr(gc, "single_profile_jphi", False))
                           else ""))
-        if str(getattr(gc, "jBS_baseline_mode", "")) != "ohmic":
-            why.append(f"jBS_baseline_mode={gc.jBS_baseline_mode!r} "
+        if str(getattr(gc, "jbs_baseline_mode", "")) != "ohmic":
+            why.append(f"jbs_baseline_mode={gc.jbs_baseline_mode!r} "
                        "(needs 'ohmic')")
         if str(getattr(gc, "closure_channel", "")) != "structured":
             why.append(f"closure_channel={gc.closure_channel!r} "
@@ -2205,7 +2206,7 @@ class Bouquet(SwbBaseline):
         msg = (", ".join(set_knobs) + " set, but the structured closure that "
                "reads mse_data will not run: " + "; ".join(why)
                + " -- it would otherwise be silently ignored.  Use "
-               "closure_channel='structured' with jBS_baseline_mode='ohmic' "
+               "closure_channel='structured' with jbs_baseline_mode='ohmic' "
                "on an IMAS source, or leave mse_data / structured_mse_* at "
                "their defaults.")
         if (str(getattr(gc, "workflow", "")) == "custom"
@@ -2473,7 +2474,7 @@ class Bouquet(SwbBaseline):
         Phi = structured_basis_eval(state["basis"], psi_g)
         K = Phi.shape[0]
         j_ind = np.asarray(state["j_ind"], dtype=float)
-        j_bs = np.asarray(state["j_BS_swb"], dtype=float)
+        j_bs = np.asarray(state["jphi_bs_swb"], dtype=float)
         j_fix = np.asarray(state["j_fixed"], dtype=float)
         last = {"nl": None, "n": 0}
         # the one-sided prior's up ladder, exactly as the predictor used it
@@ -2672,7 +2673,7 @@ class Bouquet(SwbBaseline):
                     "to the closure without MSE") from e
             # the finite-difference probes moved mygs: put the predictor's
             # equilibrium back before anything reads it
-            _solve(bl.j_phi)
+            _solve(bl.jphi_total)
             why = (MSE_FLAG_PREFIX + "stage refused, predictor kept "
                    f"({str(e)[:160]})")
             reasons = list(prev.get("closure_limited_reasons", ()) or ())
@@ -2698,9 +2699,9 @@ class Bouquet(SwbBaseline):
         bl.bs_scale = float(out["bs_scale_eff"])
         # the multiplier the draws apply (PR #70 review B5: stale here)
         bl.bs_scale_profile = s_bs.copy()
-        bl.j_inductive = s_ind * j_ind
-        bl.j_BS = s_bs * j_bs
-        bl.j_phi = bl.j_inductive + bl.j_BS + j_fix
+        bl.jphi_ind = s_ind * j_ind
+        bl.jphi_bs = s_bs * j_bs
+        bl.jphi_total = bl.jphi_ind + bl.jphi_bs + j_fix
         # re-centred on the DELIVERED equilibrium, for the corrector's re-solves
         state["mse_lin"] = structured_mse_linear_model(res["x"], res["tg"],
                                                        R["jacobian"], ch)
@@ -2844,17 +2845,17 @@ class Bouquet(SwbBaseline):
                                   q0_pin=None):
         """The MSE term under the self-consistent bootstrap loop.
 
-        Runs after the j_BS loop has converged WITHOUT the MSE term (``state``
+        Runs after the jphi_bs loop has converged WITHOUT the MSE term (``state``
         is the structured closure state of that converged pass and ``mygs``
         holds its equilibrium, solved with bootstrap ``jbs0``):
 
         1. the forward-difference Jacobian of tan(gamma) ONCE at that state,
-           with j_BS held fixed during the differences (an approximation of
+           with jphi_bs held fixed during the differences (an approximation of
            the loop map's true Jacobian, recorded as such);
         2. chord steps -- closure with the linearised MSE term on the CURRENT
            geometry and bootstrap -> GS solve -> ``evaluate`` (+relaxation) ->
            refresh the linearisation offset and the closure state -- until
-           the j_BS residuals hold on two consecutive steps AND the synthetic
+           the jphi_bs residuals hold on two consecutive steps AND the synthetic
            tan(gamma) moved by less than
            ``jbs_loop.MSE_CHORD_OFFSET_TOL_SIGMA`` sigma on every chord
            (at most ``jbs_max_passes`` steps: every chord step is also a
@@ -2873,14 +2874,14 @@ class Bouquet(SwbBaseline):
         ``structured_mse_required``.  Otherwise the PRE-MSE loop result is
         delivered, and verified, not assumed:
 
-        * the state the chord steps overwrite (``bl.j_phi / j_BS /
-          j_inductive / jBS_diff / jphi_diff / ohm_scale / bs_scale`` and
+        * the state the chord steps overwrite (``bl.jphi_total / jphi_bs /
+          jphi_ind / jphi_bs_diff / jphi_diff / ohm_scale / bs_scale`` and
           ``bl.ip_closure``) is snapshotted HERE, before the first chord step,
           and restored exactly (``pre_mse["restore"]`` restores the caller's
           own closure state the same way);
         * mygs is put back on the pre-MSE equilibrium (``replace_eq`` of the
           snapshot) and the current the loop's last pass actually SOLVED
-          (``pre_mse["j_solved"]``; the closure's ``bl.j_phi`` when not
+          (``pre_mse["j_solved"]``; the closure's ``bl.jphi_total`` when not
           given) is re-solved;
         * Redl on that re-solve is checked against the pre-MSE bootstrap
           ``jbs0`` at the loop's own ``rtol_j``/``rtol_Ip``, and its l_i (q0
@@ -2994,7 +2995,7 @@ class Bouquet(SwbBaseline):
                         st["Ip_signed"],
                         (None if st.get("ip_sigma") is None
                          else float(st["ip_sigma"])),
-                        st["j_ind"], st["j_BS_swb"], st["j_fixed"],
+                        st["j_ind"], st["jphi_bs_swb"], st["j_fixed"],
                         basis=st["basis"], sigma_ind=st["sigma_ind"],
                         sigma_bs=st["sigma_bs"],
                         sigma_ind_up=st.get("sigma_ind_up"),
@@ -3017,7 +3018,7 @@ class Bouquet(SwbBaseline):
                 return _o
             return close_ip_structured(
                 st["psi_geom"], st["w_lin"], st["c_signed"], st["Ip_signed"],
-                st["j_ind"], st["j_BS_swb"], st["j_fixed"],
+                st["j_ind"], st["jphi_bs_swb"], st["j_fixed"],
                 basis=st["basis"], weights=st["weights"],
                 axis=(None if st.get("axis") is None else dict(st["axis"])),
                 li_target=st.get("li_target"),
@@ -3029,11 +3030,11 @@ class Bouquet(SwbBaseline):
             return np.concatenate([np.asarray(out["a"], dtype=float),
                                    np.asarray(out["b"], dtype=float)])
 
-        srec = dict(stage=("structured MSE chord iteration with j_BS "
+        srec = dict(stage=("structured MSE chord iteration with jphi_bs "
                            "re-evaluated after every solve"),
                     chord_max_steps=int(settings["max_passes"]),
                     chord_offset_tol_sigma=float(MSE_CHORD_OFFSET_TOL_SIGMA),
-                    jacobian_note=("forward differences with j_BS held "
+                    jacobian_note=("forward differences with jphi_bs held "
                                    "fixed: an approximation of the loop "
                                    "map's Jacobian"),
                     r_j=[], r_I=[], dl_i=[], dq0=[], I_BS=[], omega=[],
@@ -3054,7 +3055,7 @@ class Bouquet(SwbBaseline):
         # this snapshot, not whatever the last refresh left ---------------
         import copy as _copy
         _pre_bl = {}
-        for _a in ("j_phi", "j_BS", "j_inductive", "jBS_diff", "jphi_diff",
+        for _a in ("jphi_total", "jphi_bs", "jphi_ind", "jphi_bs_diff", "jphi_diff",
                    "ohm_scale", "bs_scale"):
             if hasattr(bl, _a):
                 _v = getattr(bl, _a)
@@ -3293,7 +3294,7 @@ class Bouquet(SwbBaseline):
             if not converged:
                 srec["stop_reason"] = srec["stop_reason"] or (
                     f"no convergence within {n_chord} chord "
-                    "steps (j_BS residuals on two consecutive steps and "
+                    "steps (jphi_bs residuals on two consecutive steps and "
                     "tan(gamma) offset change)")
             else:
                 # ---- one Jacobian refresh at the converged state + a final
@@ -3379,14 +3380,14 @@ class Bouquet(SwbBaseline):
                 if not okf:
                     converged = False
                     srec["stop_reason"] = ("the final step after the "
-                                           "Jacobian refresh left the j_BS "
+                                           "Jacobian refresh left the jphi_bs "
                                            "residuals outside tolerance"
                                            + ("" if q0_pin is None else
                                               " (or q0 outside q0_tol: the "
                                               "q0 pin's criterion)"))
                 else:
                     srec["stop_reason"] = (
-                        "j_BS residuals on two consecutive chord steps, "
+                        "jphi_bs residuals on two consecutive chord steps, "
                         "tan(gamma) offset converged, final Jacobian "
                         "refresh step inside tolerance")
                 cur, jbs, J1, x_new, tg_new = cur_next, jbs_next, J2, x_f, tg_f
@@ -3417,7 +3418,7 @@ class Bouquet(SwbBaseline):
             if _pre_eq is not None and hasattr(mygs, "replace_eq"):
                 mygs.replace_eq(source_eq=_pre_eq)
             _j_pre = pre.get("j_solved")
-            _j_pre = (np.asarray(bl.j_phi, dtype=float) if _j_pre is None
+            _j_pre = (np.asarray(bl.jphi_total, dtype=float) if _j_pre is None
                       else np.asarray(_j_pre, dtype=float))
             _solve(_j_pre)
             # ---- verify the restored solve against the pre-MSE state ------
@@ -3476,7 +3477,7 @@ class Bouquet(SwbBaseline):
                             q0_tol=q0_pin.q0_tol)),
                         solved=("the pre-MSE loop's last solved current"
                                 if pre.get("j_solved") is not None else
-                                "bl.j_phi of the restored closure"))
+                                "bl.jphi_total of the restored closure"))
             if _ok:
                 _stop = ("MSE stage refused (not required): the pre-MSE loop "
                          "state was restored and re-solved, and the re-solve "
@@ -3512,7 +3513,7 @@ class Bouquet(SwbBaseline):
             if not _ok:
                 # the same failure policy as a chord stage that does not
                 # converge (below): "raise" raises, "flag" delivers flagged
-                msg = ("self-consistent j_BS loop [MSE chord stage] did not "
+                msg = ("self-consistent jphi_bs loop [MSE chord stage] did not "
                        f"converge: {_stop}")
                 srec["fail_message"] = msg
                 if settings.get("on_fail", "raise") == "raise":
@@ -3526,11 +3527,11 @@ class Bouquet(SwbBaseline):
         bl.bs_scale = float(out["bs_scale_eff"])
         # the multiplier the draws apply (PR #70 review B5: stale here)
         bl.bs_scale_profile = s_bs.copy()
-        bl.j_inductive = s_ind * np.asarray(cur["j_ind"], dtype=float)
+        bl.jphi_ind = s_ind * np.asarray(cur["j_ind"], dtype=float)
         # the bootstrap the delivered equilibrium was SOLVED with
-        _jbs_del = np.asarray(cur["j_BS_swb"], dtype=float)
-        bl.j_BS = s_bs * _jbs_del
-        bl.j_phi = bl.j_inductive + bl.j_BS + np.asarray(cur["j_fixed"],
+        _jbs_del = np.asarray(cur["jphi_bs_swb"], dtype=float)
+        bl.jphi_bs = s_bs * _jbs_del
+        bl.jphi_total = bl.jphi_ind + bl.jphi_bs + np.asarray(cur["j_fixed"],
                                                          dtype=float)
         cur["mse_lin"] = structured_mse_linear_model(x_new, tg_new, J1, ch)
         cur["mse_sign"] = (sp, st_sign)
@@ -3664,7 +3665,7 @@ class Bouquet(SwbBaseline):
         rec["closure_limited"] = bool(reasons)
         if getattr(bl, "ip_closure", None) is not None:
             bl.ip_closure.update(rec)
-        print("[imas SWB-split:ohmic structured] MSE (j_BS loop): "
+        print("[imas SWB-split:ohmic structured] MSE (jphi_bs loop): "
               f"{int(ch['n_active'])} chords, stated orientation (pol "
               f"{sp:+.0f}, tor {st_sign:+.0f}), {n_solves} solves "
               f"({srec['n_fd_solves']} finite-difference + "
@@ -3672,7 +3673,7 @@ class Bouquet(SwbBaseline):
               f"{chi2_0:.2f} -> {chi2_f:.2f}; objective {F_before:.4g} -> "
               f"{F_after:.4g}; {mse_er_terms(ch)}", flush=True)
         if not srec["converged"]:
-            msg = ("self-consistent j_BS loop [MSE chord stage] did not "
+            msg = ("self-consistent jphi_bs loop [MSE chord stage] did not "
                    f"converge: {srec['stop_reason']}"
                    + ("" if q0_pin is None else
                       "; q0-q0_target per step "
@@ -3838,7 +3839,7 @@ class Bouquet(SwbBaseline):
 
         .. code-block:: text
 
-            j_ref0' = j_ref0 * (q0_solved / q0_target)        (q0 ~ 1/j_phi(0))
+            j_ref0' = j_ref0 * (q0_solved / q0_target)        (q0 ~ 1/jphi_total(0))
             li_row' = li_row * (li_target / li_solved)**(1/p) (achieved ~ row**p)
 
         The first is the ``q0 ~ 1/j0`` frozen-geometry model (the scalar
@@ -4081,7 +4082,7 @@ class Bouquet(SwbBaseline):
                     state["Ip_signed"],
                     (None if state.get("ip_sigma") is None
                      else float(state["ip_sigma"])),
-                    state["j_ind"], state["j_BS_swb"], state["j_fixed"],
+                    state["j_ind"], state["jphi_bs_swb"], state["j_fixed"],
                     basis=state["basis"], sigma_ind=state["sigma_ind"],
                     sigma_bs=state["sigma_bs"],
                     sigma_ind_up=state.get("sigma_ind_up"),
@@ -4092,7 +4093,7 @@ class Bouquet(SwbBaseline):
                     mse_lin=state.get("mse_lin"))
             return close_ip_structured(
                 state["psi_geom"], state["w_lin"], state["c_signed"],
-                state["Ip_signed"], state["j_ind"], state["j_BS_swb"],
+                state["Ip_signed"], state["j_ind"], state["jphi_bs_swb"],
                 state["j_fixed"], basis=state["basis"],
                 weights=state["weights"], axis=axis_now,
                 li_target=li_row_now, li_kind=li_kind,
@@ -4185,10 +4186,10 @@ class Bouquet(SwbBaseline):
                 bl.ohm_scale = float(out["ohm_scale_eff"])
                 bl.bs_scale = float(out["bs_scale_eff"])
                 bl.bs_scale_profile = s_bs.copy()
-                bl.j_inductive = s_ind * state["j_ind"]
-                bl.j_BS = s_bs * state["j_BS_swb"]
-                bl.j_phi = bl.j_inductive + bl.j_BS + state["j_fixed"]
-                nl_out = solve_jphi(np.asarray(bl.j_phi, dtype=float))
+                bl.jphi_ind = s_ind * state["j_ind"]
+                bl.jphi_bs = s_bs * state["jphi_bs_swb"]
+                bl.jphi_total = bl.jphi_ind + bl.jphi_bs + state["j_fixed"]
+                nl_out = solve_jphi(np.asarray(bl.jphi_total, dtype=float))
                 snap2 = mygs.copy_eq()
                 n_solves += 1
                 if state.get("mse_applied"):
@@ -4312,7 +4313,7 @@ class Bouquet(SwbBaseline):
 
         # ---- the health record, re-derived from what was DELIVERED ---------
         # The predictor's block was computed from the PREDICTOR's effective
-        # scalars.  A corrector solve replaces both, so f_BS_closed and the
+        # scalars.  A corrector solve replaces both, so f_bs_closed and the
         # bs_scale reason describe a closure this run did not deliver -- and
         # `closure_limited` could not acquire a new reason at all, because the
         # soft-Ip branch rebuilt it from the predictor's reason tuple.  One
@@ -4411,13 +4412,13 @@ class Bouquet(SwbBaseline):
                 rec[_k] = _v
 
         # ---- the assembly gates, re-taken on the delivered profile ---------
-        # The corrector reassembles bl.j_phi and nothing re-checked it: the
+        # The corrector reassembles bl.jphi_total and nothing re-checked it: the
         # round-trip gate exists to catch an assembly, and this IS one.  Same
         # gate, same tolerance, same reference rule (the soft channel's
         # posterior moves with the re-solve, so the refreshed posterior is
         # what it is compared against -- see utils.ip_roundtrip_gate).
         if ip_of is not None:
-            rec["Ip_hybrid"] = float(ip_of(bl.j_phi))
+            rec["Ip_hybrid"] = float(ip_of(bl.jphi_total))
             if roundtrip_gate is not None:
                 # A REFUSED step delivers the last accepted solve, and ``rec``
                 # only carries a posterior once a corrector step has been
@@ -4474,7 +4475,7 @@ class Bouquet(SwbBaseline):
         method actually delivered.**  The predictor's block is computed before
         any of this runs; leaving it in place let a corrector that halved
         ``bs_scale`` be recorded as unflagged, with the predictor's
-        ``f_BS_closed``.  ``Ip_hybrid`` and the assembly round-trip are
+        ``f_bs_closed``.  ``Ip_hybrid`` and the assembly round-trip are
         likewise re-taken on the delivered profile when *ip_of* /
         *roundtrip_gate* are supplied (the corrector IS an assembly, and the
         gate exists to check assemblies).
@@ -4551,12 +4552,12 @@ class Bouquet(SwbBaseline):
                   flush=True)
         elif record_only:
             rec.update(n_extra_solves=0, q0_solved=q0_tok, q0_residual=res,
-                       sawtooth_verdict="j_BS loop delivered (record-only: "
+                       sawtooth_verdict="jphi_bs loop delivered (record-only: "
                                         "no Newton step under the loop; "
                                         "axis row held)")
             print(f"[imas SWB-split:ohmic q0] solved q0={q0_tok:.4f} vs "
                   f"q0_target={q0_target:.4f} (residual {res:+.4f}, tol "
-                  f"{state['q0_tol']:g}) -- record-only under the j_BS loop "
+                  f"{state['q0_tol']:g}) -- record-only under the jphi_bs loop "
                   "(axis row held, no Newton step); recorded and flagged "
                   "against q0_tol, not corrected", flush=True)
         elif abs(state["ip_bs"]) < 1e-6 * state["Ip_t"]:
@@ -4568,10 +4569,10 @@ class Bouquet(SwbBaseline):
             # determinant can clear its floor with ip_bs == 0 whenever j_bs0
             # has core content, so the predictor really can hand this over.)
             rec.update(n_extra_solves=0, q0_solved=q0_tok, q0_residual=res,
-                       sawtooth_verdict="predictor kept (j_BS integrates to "
+                       sawtooth_verdict="predictor kept (jphi_bs integrates to "
                                         "~0; no Ip-closed manifold to step "
                                         "along)")
-            print("[imas SWB-split:ohmic q0] j_BS integrates to "
+            print("[imas SWB-split:ohmic q0] jphi_bs integrates to "
                   f"{state['ip_bs']:.3e} A (< 1e-6 x Ip_target) -- the "
                   "Ip-closed manifold is degenerate in s_bs; keeping the "
                   f"predictor and recording the residual {res:+.4f}",
@@ -4613,10 +4614,10 @@ class Bouquet(SwbBaseline):
                     bl.ohm_scale = float(s_new)
                     bl.bs_scale = float(sbs_new)
                     bl.bs_scale_profile = None
-                    bl.j_inductive = s_new * state["j_ind"]
-                    bl.j_BS = sbs_new * state["j_BS_swb"]
-                    bl.j_phi = bl.j_inductive + bl.j_BS + state["j_fixed"]
-                    nl_out = solve_jphi(np.asarray(bl.j_phi, dtype=float))
+                    bl.jphi_ind = s_new * state["j_ind"]
+                    bl.jphi_bs = sbs_new * state["jphi_bs_swb"]
+                    bl.jphi_total = bl.jphi_ind + bl.jphi_bs + state["j_fixed"]
+                    nl_out = solve_jphi(np.asarray(bl.jphi_total, dtype=float))
                     q0_new = float(np.asarray(
                         mygs.copy_eq().get_q(psi=state["psi_q"].copy())[1],
                         dtype=float)[0])
@@ -4635,7 +4636,7 @@ class Bouquet(SwbBaseline):
         rec["bs_scale"] = float(getattr(bl, "bs_scale", 1.0))
         # ---- closure health, re-derived from the DELIVERED scales ----------
         # The predictor's block was computed from the predictor's scales; a
-        # corrector step replaces both, so f_BS_closed, closure_limited and
+        # corrector step replaces both, so f_bs_closed, closure_limited and
         # its reasons all have to be re-taken or they describe an equilibrium
         # this run did not deliver.  Same function, same thresholds.
         _health = closure_health(rec["ohm_scale"], rec["bs_scale"],
@@ -4666,7 +4667,7 @@ class Bouquet(SwbBaseline):
                     "built on it) as unvalidated", flush=True)
         # ---- the assembly gates, re-taken on the delivered profile ---------
         if ip_of is not None:
-            rec["Ip_hybrid"] = float(ip_of(bl.j_phi))
+            rec["Ip_hybrid"] = float(ip_of(bl.jphi_total))
             if roundtrip_gate is not None:
                 rec["fsa_roundtrip_post_corrector_err_pct"] = float(
                     roundtrip_gate(rec["Ip_hybrid"]))
@@ -4675,7 +4676,7 @@ class Bouquet(SwbBaseline):
         return nl_out
 
     def _forward_solve_imas_baseline(self):
-        """Forward GS solve of the IMAS baseline (j_phi + pressure) on mygs.
+        """Forward GS solve of the IMAS baseline (jphi_total + pressure) on mygs.
 
         Initialises psi from the IDS LCFS shape, then solves with the IMAS total
         toroidal current (jphi-linterp) and the thermal+fast pressure. Sets
@@ -4738,8 +4739,10 @@ class Bouquet(SwbBaseline):
             _pc["anchor_diff"] = k2e(bl.p_diff)
             p_total = p_total + k2e(bl.p_diff)
 
-        def solve_jphi(j_phi):
-            ffp = coords.oft_prof("jphi-linterp", psi_N, np.asarray(j_phi, dtype=float), coord)
+        @accepts_old_names
+
+        def solve_jphi(jphi_total):
+            ffp = coords.oft_prof("jphi-linterp", psi_N, np.asarray(jphi_total, dtype=float), coord)
             nl_its = -1
             for _pass in range(2):   # 2nd pass refines the jphi-linterp flux scaling
                 psi_range = mygs.psi_bounds[1] - mygs.psi_bounds[0]
@@ -4760,18 +4763,18 @@ class Bouquet(SwbBaseline):
 
         # First solve on the source total current to land a converged
         # equilibrium -- needed as the geometry for the SWB call below.
-        nl_its = solve_jphi(np.asarray(bl.j_phi, dtype=float))
+        nl_its = solve_jphi(np.asarray(bl.jphi_total, dtype=float))
 
         # ---- SWB-consistent bootstrap on FUSE's own ohmic current ------------
-        # The draw path (perturb_kinetic_equilibrium, recalculate_j_BS branch)
-        # reconstructs   new_jphi = j_inductive + scale_jBS * SWB_spike(kinetics)
-        # and ASSUMES bl.j_BS == the SWB spike at sigma=0. The IMAS reader takes
-        # j_BS from the source's OWN bootstrap model (FUSE/Sauter), which differs
-        # from OFT's SWB -- so a sigma=0 draw lands at j_inductive + SWB_spike !=
-        # bl.j_phi and every draw inherits a fixed (SWB - source_jBS) offset.
+        # The draw path (perturb_kinetic_equilibrium, recalculate_jbs branch)
+        # reconstructs   new_jphi = jphi_ind + scale_jbs * SWB_spike(kinetics)
+        # and ASSUMES bl.jphi_bs == the SWB spike at sigma=0. The IMAS reader takes
+        # jphi_bs from the source's OWN bootstrap model (FUSE/Sauter), which differs
+        # from OFT's SWB -- so a sigma=0 draw lands at jphi_ind + SWB_spike !=
+        # bl.jphi_total and every draw inherits a fixed (SWB - source_jbs) offset.
         #
-        # Fix: keep the inductive component as the reader's j_inductive.
-        # NOTE that is a RESIDUAL, j_tor - j_BS - j_NBI - j_RF - j_other
+        # Fix: keep the inductive component as the reader's jphi_ind.
+        # NOTE that is a RESIDUAL, j_tor - jphi_bs - jphi_nbi - jphi_rf - jphi_other
         # (imas.py), NOT to_toroidal(j_ohmic): every driven core_sources
         # current is held fixed in its own channel, but the dd's unattributed
         # current, j_total - (ohmic + bootstrap + sources), lands in this
@@ -4785,13 +4788,13 @@ class Bouquet(SwbBaseline):
         # sigma=0 draw reproduces ohmic + SWB exactly. The total l_i is whatever
         # this self-consistent (FUSE ohmic + OFT bootstrap) combination gives.
         #
-        # isolate_edge_jBS: FUSE work uses the FULL bootstrap profile (False), so
-        # the baseline and the draws (which read results["isolated_j_BS"] under
-        # the same flag) build j_phi from the same SWB current.
-        # Two reconciliation modes (GenerationConfig.jBS_baseline_mode), both
+        # isolate_edge_jbs: FUSE work uses the FULL bootstrap profile (False), so
+        # the baseline and the draws (which read results["jphi_bs"] under
+        # the same flag) build jphi_total from the same SWB current.
+        # Two reconciliation modes (GenerationConfig.jbs_baseline_mode), both
         # keeping FUSE's actual ohmic current as the perturbable inductive:
         #   "diff"    -> keep the FUSE total; store a fixed correction
-        #                jBS_diff = FUSE_jBS - SWB that is added to the baseline
+        #                jphi_bs_diff = FUSE_jbs - SWB that is added to the baseline
         #                AND every draw (anchors to FUSE; SWB delta tracks
         #                kinetics; risks edge misalignment if the pedestal moves).
         #   "rescale" -> rescale SWB by one factor so the proxy l_i matches the
@@ -4814,15 +4817,15 @@ class Bouquet(SwbBaseline):
         _gc0 = self.config.generation
         _chan0 = str(getattr(_gc0, "closure_channel", "bootstrap"))
         if _chan0 != "bootstrap" and (
-                str(_gc0.jBS_baseline_mode) != "ohmic"
-                or not bool(_gc0.recalculate_j_BS)):
+                str(_gc0.jbs_baseline_mode) != "ohmic"
+                or not bool(_gc0.recalculate_jbs)):
             _msg0 = (
                 f"closure_channel={_chan0!r} is only read when "
-                "jBS_baseline_mode='ohmic' and recalculate_j_BS=True "
-                f"(have jBS_baseline_mode={str(_gc0.jBS_baseline_mode)!r}, "
-                f"recalculate_j_BS={bool(_gc0.recalculate_j_BS)}); "
+                "jbs_baseline_mode='ohmic' and recalculate_jbs=True "
+                f"(have jbs_baseline_mode={str(_gc0.jbs_baseline_mode)!r}, "
+                f"recalculate_jbs={bool(_gc0.recalculate_jbs)}); "
                 "it would otherwise be silently ignored. Set "
-                "jBS_baseline_mode='ohmic' or leave closure_channel at "
+                "jbs_baseline_mode='ohmic' or leave closure_channel at "
                 "'bootstrap'.")
             if (str(getattr(_gc0, "workflow", "")) == "custom"
                     or bool(getattr(_gc0, "allow_unsafe_workflow", False))):
@@ -4833,25 +4836,25 @@ class Bouquet(SwbBaseline):
         # swb_seed="source": SWB inputs from the source split as read (before
         # any closure touches bl), shared by the baseline split, the draws and
         # the sigma=0 check.
-        bl.swb_seed_profile = bl.swb_jphi_fixed = bl.swb_jphi_saw = None
+        bl.swb_seed_profile = bl.jphi_fixed = bl.jphi_saw_input = None
         # resolved here, capability-checked at the SWB call (PR #70 review
         # B4: the "source" default raised on a toolkit without jphi_fixed
         # even when no SWB call ever runs)
         _seed_mode, self._swb_seed_record = self._resolve_swb_seed()
         if _seed_mode == "source":
             self._swb_source_split(psi_N)
-        if self.config.generation.recalculate_j_BS:
+        if self.config.generation.recalculate_jbs:
             from .TokaMaker_interface import smooth_jbs_transition
             from .sampling import calc_cylindrical_li_proxy
-            from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
+            from .oft_bootstrap import solve_with_bootstrap
             from scipy.optimize import brentq
 
             gc = self.config.generation
-            iso = bool(gc.isolate_edge_jBS); mode = str(gc.jBS_baseline_mode)
-            j_ind = np.asarray(bl.j_inductive, dtype=float)   # FUSE ohmic (kept)
-            j_BS_src = np.asarray(bl.j_BS, dtype=float)        # source bootstrap (FUSE)
-            FUSE_tot = np.asarray(bl.j_phi, dtype=float)       # source total (j_tor)
-            j_fixed = FUSE_tot - j_ind - j_BS_src              # = j_NBI + j_RF + j_other
+            iso = bool(gc.isolate_edge_jbs); mode = str(gc.jbs_baseline_mode)
+            j_ind = np.asarray(bl.jphi_ind, dtype=float)   # FUSE ohmic (kept)
+            jphi_bs_src = np.asarray(bl.jphi_bs, dtype=float)        # source bootstrap (FUSE)
+            FUSE_tot = np.asarray(bl.jphi_total, dtype=float)       # source total (j_tor)
+            j_fixed = FUSE_tot - j_ind - jphi_bs_src              # = jphi_nbi + jphi_rf + jphi_other
             # 'ohmic' mode: freeze the ANCHOR geometry now. solve_with_bootstrap
             # iterates its own GS solves (generic inductive seed + its bootstrap)
             # and leaves mygs on a different equilibrium; integrating FUSE's
@@ -4917,13 +4920,13 @@ class Bouquet(SwbBaseline):
                 _anchor["Ip_anchor"] = abs(float(mygs.get_stats(lcfs_pad=psi_pad)["Ip"]))
                 return _anchor
 
-            def _ohmic_close(_anchor, j_BS_swb, ratio, _pass=None):
+            def _ohmic_close(_anchor, jphi_bs_swb, ratio, _pass=None):
                 """The 'ohmic'-mode Ip closure on ONE geometry + bootstrap.
 
                 ``_anchor`` is a :func:`_closure_geometry` context (the
                 frozen pre-SWB anchor on the legacy path; the current
                 iterate on every pass of the self-consistent loop),
-                ``j_BS_swb`` the base bootstrap profile the channel scales,
+                ``jphi_bs_swb`` the base bootstrap profile the channel scales,
                 ``ratio`` its peak over the source bootstrap's (recorded).
                 ``_pass`` (loop only) carries the held q0 reference (and,
                 with ``jbs_loop_q0_corrector=True``, the pinned ``axis_row``
@@ -4948,13 +4951,13 @@ class Bouquet(SwbBaseline):
                 # it is the component with the weakest independent constraint.
                 # NOTE solve_jphi() passes the profile as a "jphi-linterp" SHAPE
                 # and TokaMaker rescales it uniformly to Ip_target, which would
-                # scale j_BS and j_fixed too -- so the closure MUST happen here,
+                # scale jphi_bs and j_fixed too -- so the closure MUST happen here,
                 # before the solve. We integrate with the same dA the l_i proxy
                 # uses, on the converged first-pass geometry, and record the
                 # proxy's own error on the FUSE total so a biased proxy cannot
                 # masquerade as a physical ohmic rescale.
                 # Ip integral: bouquet's LCFS-truncated FSA current integral,
-                #   I_p = int dpsi (V'/2pi) <j_phi/R>
+                #   I_p = int dpsi (V'/2pi) <jphi_total/R>
                 # (utils.Ip_fsa_integral, convention "jphi-linterp" -- the variable
                 # bouquet's arrays are handed to set_profiles as), evaluated on a
                 # copy_eq() SNAPSHOT of the converged first-pass geometry so no
@@ -4981,7 +4984,7 @@ class Bouquet(SwbBaseline):
                 # profile carries no P' and its current-direction convention
                 # enters only through sgn/abs handling of the linear parts
                 # below.  Two failed detectors are retired here: the old
-                # sign(dot(eq j_phi, cp j_tor)) heuristic tested a
+                # sign(dot(eq jphi_total, cp j_tor)) heuristic tested a
                 # current-direction convention (it flipped on ohmic-ramp
                 # slices, costing +1.31% of Ip), and the "self-consistency
                 # probe" that replaced it was a tautology -- the probe is
@@ -4998,7 +5001,7 @@ class Bouquet(SwbBaseline):
                 # _ip() calls counts c once PER COMPONENT -- the first version of
                 # this closure did exactly that and landed the hybrid +4.5% over
                 # Ip (which TokaMaker would then have renormalised out of the whole
-                # shape, j_BS included). Close on the LINEAR part and carry c once.
+                # shape, jphi_bs included). Close on the LINEAR part and carry c once.
                 _w_lin, _c_affine = Ip_fsa_weights(_geom, convention="jphi-linterp",
                                                    pprime_sign=_pps)
                 _lin = lambda j: float(_integ.trapezoid(
@@ -5083,7 +5086,7 @@ class Bouquet(SwbBaseline):
                       f"{fuse_tot_err_pct:+.2f}% of Ip_target (exact FSA measure) "
                       f"-> absorbed into the closure channel's scale",
                       flush=True)
-                ip_ind, ip_bs, ip_fix = _lin(j_ind), _lin(j_BS_swb), _lin(j_fixed)
+                ip_ind, ip_bs, ip_fix = _lin(j_ind), _lin(jphi_bs_swb), _lin(j_fixed)
                 # The data's current-direction convention: sign of the LINEAR
                 # total.  (Taking it from _ip(FUSE_tot) folded the anchor's c
                 # into the vote, which could flip it on a low-Ip ramp slice
@@ -5115,8 +5118,8 @@ class Bouquet(SwbBaseline):
                           flush=True)
                 # Which channel absorbs the Ip closure -- "bootstrap"
                 # (default): keep j_ohmic exactly as FUSE diffused it,
-                #   lin(ohm) + s_BS * lin(bs) + lin(fix) + c = Ip_target;
-                # "ohmic": rescale j_inductive instead,
+                #   lin(ohm) + s_bs * lin(bs) + lin(fix) + c = Ip_target;
+                # "ohmic": rescale jphi_ind instead,
                 #   s * lin(ohm) + lin(bs) + lin(fix) + c = Ip_target.
                 # The two are the extreme attributions of the same deficit;
                 # run both to bracket the closure uncertainty.  The algebra
@@ -5132,7 +5135,7 @@ class Bouquet(SwbBaseline):
                 # Ip-weighted MEANS of those profiles (recorded as such): they
                 # satisfy the scalar closure equation exactly, so every
                 # downstream consumer -- closure_health included -- keeps
-                # working, while j_inductive/j_BS carry the real structure.
+                # working, while jphi_ind/jphi_bs carry the real structure.
                 _chan = str(getattr(gc, "closure_channel", "bootstrap"))
                 _q0_extra = {}
                 _s_ind = _s_bs = None
@@ -5142,14 +5145,14 @@ class Bouquet(SwbBaseline):
                     ohm_scale, bs_scale, _q0_extra, _q0_state = \
                         self._close_ip_q0_predictor(
                             gc, bl, _eq_snap, _geom, _probe, psi_N,
-                            j_ind, j_BS_swb, j_fixed, FUSE_tot,
+                            j_ind, jphi_bs_swb, j_fixed, FUSE_tot,
                             sgn, Ip_t, _c_signed, ip_ind, ip_bs, ip_fix,
                             close_ip, q0_ref=_pq0)
                 elif _chan == "structured":
                     _s_ind, _s_bs, ohm_scale, bs_scale, _q0_extra, \
                         _structured_state = self._close_ip_structured_predictor(
                             gc, bl, _eq_snap, _geom, _probe, psi_N,
-                            j_ind, j_BS_swb, j_fixed, FUSE_tot,
+                            j_ind, jphi_bs_swb, j_fixed, FUSE_tot,
                             sgn, Ip_t, _w_lin, _c_signed,
                             ip_ind, ip_bs, ip_fix,
                             psi_pad=psi_pad, pprime_sign=_pps,
@@ -5157,15 +5160,15 @@ class Bouquet(SwbBaseline):
                 else:
                     ohm_scale, bs_scale = close_ip(
                         _chan, _Ip_signed, _c_signed, ip_ind, ip_bs, ip_fix)
-                bl.jBS_diff = None
+                bl.jphi_bs_diff = None
                 bl.bs_scale = float(bs_scale)
                 bl.ohm_scale = float(ohm_scale)
                 bl.bs_scale_profile = (None if _s_bs is None
                                        else np.asarray(_s_bs, dtype=float).copy())
-                bl.j_BS = (bs_scale if _s_bs is None else _s_bs) * j_BS_swb
-                bl.j_inductive = (ohm_scale if _s_ind is None
+                bl.jphi_bs = (bs_scale if _s_bs is None else _s_bs) * jphi_bs_swb
+                bl.jphi_ind = (ohm_scale if _s_ind is None
                                   else _s_ind) * j_ind
-                bl.j_phi = bl.j_inductive + bl.j_BS + j_fixed
+                bl.jphi_total = bl.jphi_ind + bl.jphi_bs + j_fixed
                 # GATE: the ALGEBRA of the assembly above.  It asks one
                 # question -- does the hybrid this method just built integrate
                 # to the current the closure said it would? -- so its reference
@@ -5191,11 +5194,11 @@ class Bouquet(SwbBaseline):
                 # part + the SIGNED constant.  _ip() adds the unsigned
                 # _c_affine, so on sgn=-1 data it would disagree with the
                 # closure by 2c and fail a correct result (identical to
-                # _ip(bl.j_phi) whenever sgn == +1).  Both correctors are
+                # _ip(bl.jphi_total) whenever sgn == +1).  Both correctors are
                 # handed this same measure as ip_of, never _ip.
                 from .utils import ip_roundtrip_gate
                 _ip_signed = lambda _j: float(_lin(_j) + _c_signed)
-                _ip_closed = float(_ip_signed(bl.j_phi))
+                _ip_closed = float(_ip_signed(bl.jphi_total))
                 _soft_ip = bool(_chan == "structured"
                                 and _q0_extra.get("structured_soft"))
                 _gate = ip_roundtrip_gate(
@@ -5230,9 +5233,9 @@ class Bouquet(SwbBaseline):
                           + "; ".join(_health["closure_limited_reasons"])
                           + " -- treat this slice's current split (and any "
                           "Delta' built on it) as unvalidated", flush=True)
-                _oft_tot, _oft_bs = _ip_oft(FUSE_tot), _ip_oft(j_BS_swb)
+                _oft_tot, _oft_bs = _ip_oft(FUSE_tot), _ip_oft(jphi_bs_swb)
                 _oft_fix, _oft_ind = _ip_oft(j_fixed), _ip_oft(j_ind)
-                _cyl_tot, _cyl_bs = _ip_cyl(FUSE_tot), _ip_cyl(j_BS_swb)
+                _cyl_tot, _cyl_bs = _ip_cyl(FUSE_tot), _ip_cyl(jphi_bs_swb)
                 _cyl_fix, _cyl_ind = _ip_cyl(j_fixed), _ip_cyl(j_ind)
                 _would_be = lambda tot, bs_, fix_, ind_: (
                     float(((np.sign(tot) or 1.0) * Ip_t - bs_ - fix_) / ind_)
@@ -5259,16 +5262,16 @@ class Bouquet(SwbBaseline):
                     Ip_target=Ip_t,
                     Ip_fuse_total=ip_fuse_tot,
                     fuse_total_err_pct=fuse_tot_err_pct,
-                    Ip_ohmic_unscaled=ip_ind, Ip_jBS_swb=ip_bs, Ip_fixed=ip_fix,
+                    Ip_ohmic_unscaled=ip_ind, Ip_jbs_swb=ip_bs, Ip_fixed=ip_fix,
                     closure_channel=_chan,
                     **_health,
                     ohm_scale=float(ohm_scale), bs_scale=float(getattr(bl, 'bs_scale', 1.0)),
                     # On the same signed affine measure the closure solved
-                    # (identical to _ip(bl.j_phi) for the positive convention).
-                    Ip_hybrid=float(_lin(bl.j_phi) + _c_signed),
+                    # (identical to _ip(bl.jphi_total) for the positive convention).
+                    Ip_hybrid=float(_lin(bl.jphi_total) + _c_signed),
                     jphi_diff_dropped_Ip=ip_jd,
                     jphi_diff_dropped_pct_of_Ip=100.0 * ip_jd / Ip_t,
-                    swb_over_fuse_jBS_peak=float(ratio),
+                    swb_over_fuse_jbs_peak=float(ratio),
                     # recorded-only alternatives (NOT used for closure).
                     # Each integrator runs ONCE per profile (they were
                     # re-evaluated up to 4x for print+dict), and the would-be
@@ -5304,7 +5307,7 @@ class Bouquet(SwbBaseline):
                 print(f"[imas SWB-split:ohmic] channel={_chan} ohm_scale={ohm_scale:.4f} bs_scale={float(getattr(bl,'bs_scale',1.0)):.4f}  "
                       f"linear Ip parts: ohm={ip_ind/1e6:.3f} jBS={ip_bs/1e6:.3f} "
                       f"fixed={ip_fix/1e6:.3f} + P'-term c={_c_affine/1e6:+.4f} MA "
-                      f"-> hybrid={_ip(bl.j_phi)/1e6:.4f} "
+                      f"-> hybrid={_ip(bl.jphi_total)/1e6:.4f} "
                       f"(target {Ip_t/1e6:.4f}); FSA-integral err on FUSE total "
                       f"{fuse_tot_err_pct:+.2f}% (roundtrip {bl.ip_closure['fsa_roundtrip_err_pct']:+.3f}%) "
                       f"[OFT compute_flux_integral would be {bl.ip_closure['oft_flux_integral_err_pct']:+.2f}%, "
@@ -5323,7 +5326,7 @@ class Bouquet(SwbBaseline):
                     ip_roundtrip_gate=ip_roundtrip_gate)
 
             _anchor = None
-            if str(gc.jBS_baseline_mode) == "ohmic":
+            if str(gc.jbs_baseline_mode) == "ohmic":
                 # Validate the channel BEFORE solve_with_bootstrap: the
                 # run-time dispatch would otherwise burn the full SWB
                 # iteration sequence and only then refuse a typo.
@@ -5342,12 +5345,12 @@ class Bouquet(SwbBaseline):
             def _imas_jbs_loop():
                 """The IMAS baseline with ``jbs_self_consistent=True``.
 
-                Every ``jBS_baseline_mode`` and closure channel; returns the
+                Every ``jbs_baseline_mode`` and closure channel; returns the
                 ``nl_its`` of the delivered solve.  See
                 :mod:`bouquet.jbs_loop` for the kernel and
                 docs/physics-notes.md for the method.
                 """
-                from .physics import evaluate_jBS
+                from .physics import evaluate_jbs
                 from .jbs_loop import (flag_reason, jsonable,
                                        residual_weights, run_jbs_loop,
                                        oft_build_info)
@@ -5364,28 +5367,28 @@ class Bouquet(SwbBaseline):
                 _corr_on = bool(getattr(gc, "imas_corrective_jphi", False))
 
                 def _redl(eq):
-                    j, d = evaluate_jBS(eq, psi_N, ne, te, ni, ti, Zeff,
+                    j, d = evaluate_jbs(eq, psi_N, ne, te, ni, ti, Zeff,
                                         psi_pad=psi_pad, isolate_edge=iso,
                                         smooth_axis=True, coord=coord,
                                         eps_definition=_eps_def)
-                    if gc.floor_j_BS:
+                    if gc.floor_jbs:
                         j = np.clip(j, 0.0, None)
                     return j, d
 
-                def _pass_solve(j_phi):
+                def _pass_solve(jphi_total):
                     """One loop solve: the SAME 2-pass solve_jphi the tail
                     uses, plus the opt-in corrective iteration when it is on,
                     so the delivered equilibrium is always the last pass."""
-                    j_phi = np.asarray(j_phi, dtype=float)
-                    nl = solve_jphi(j_phi)
-                    _delivery["request"] = j_phi.copy()
+                    jphi_total = np.asarray(jphi_total, dtype=float)
+                    nl = solve_jphi(jphi_total)
+                    _delivery["request"] = jphi_total.copy()
                     if _corr_on:
                         from .TokaMaker_interface import \
                             _corrective_jphi_iteration
                         _pr = mygs.psi_bounds[1] - mygs.psi_bounds[0]
                         _pp_y = solver_pprime(psi_N, p_total, _pr, _edge)
                         _cr = _corrective_jphi_iteration(
-                            mygs, psi_N, j_phi,
+                            mygs, psi_N, jphi_total,
                             coords.oft_prof("linterp", psi_N, _pp_y, coord),
                             abs(bl.Ip_target), solver_pax(p_total, _edge),
                             1e-3,
@@ -5406,7 +5409,7 @@ class Bouquet(SwbBaseline):
                     """jbs_init="swb": the legacy SWB result as the initial
                     guess (A/B only), with mygs put back on the anchor."""
                     _snap_a = mygs.copy_eq()
-                    _kw = dict(scale_jBS=1.0, isolate_edge_jBS=iso,
+                    _kw = dict(scale_jbs=1.0, isolate_edge_jbs=iso,
                                diagnostic_plots=False, verbose=False,
                                **gc.bootstrap_kwargs)
                     _seed = coords.swb_seed(psi_N, coords.psi_at(
@@ -5430,16 +5433,16 @@ class Bouquet(SwbBaseline):
                             coords.swb_seed(np.linspace(0.0, 1.0,
                                                         psi_N.size)),
                             **_kw)
-                    # SWB's j_BS -> the field-aligned toroidal bootstrap
+                    # SWB's jphi_bs -> the field-aligned toroidal bootstrap
                     # (review PR64 B1), on the equilibrium the call left in
                     # mygs and on the grid it was given
                     from .TokaMaker_interface import swb_result_toroidal
                     _swb = swb_result_toroidal(
-                        mygs, _swb, psi_N, coord, isolate_edge_jBS=iso,
+                        mygs, _swb, psi_N, coord, isolate_edge_jbs=iso,
                         grid_passed=_passed, bootstrap_kwargs=_kw)
                     _j = smooth_jbs_transition(np.asarray(
-                        _swb["isolated_j_BS"], dtype=float))
-                    if gc.floor_j_BS:
+                        _swb["jphi_bs"], dtype=float))
+                    if gc.floor_jbs:
                         _j = np.clip(_j, 0.0, None)
                     mygs.replace_eq(source_eq=_snap_a)
                     print("[imas jbs-loop] init: legacy solve_with_bootstrap "
@@ -5479,18 +5482,18 @@ class Bouquet(SwbBaseline):
                     nl = _pass_solve(_jphi_solve)
                     # The offset is taken on the DELIVERED baseline geometry
                     # (the equilibrium every sigma=0 draw converges back to),
-                    # so a sigma=0 draw reproduces the source j_BS exactly.
+                    # so a sigma=0 draw reproduces the source jphi_bs exactly.
                     _snap = mygs.copy_eq()
                     j_red, d_red = _redl(_snap)
-                    bl.jBS_diff = j_BS_src - j_red
-                    bl.j_BS = j_red
-                    bl.j_phi = FUSE_tot
+                    bl.jphi_bs_diff = jphi_bs_src - j_red
+                    bl.jphi_bs = j_red
+                    bl.jphi_total = FUSE_tot
                     bl.bs_scale = 1.0
-                    _ratio = j_red.max() / max(j_BS_src.max(), 1.0)
+                    _ratio = j_red.max() / max(jphi_bs_src.max(), 1.0)
                     print(f"[imas jbs-loop:diff] source total preserved; "
-                          f"jBS_diff = source j_BS - evaluate_jBS(delivered "
-                          f"baseline) min/max={bl.jBS_diff.min():.2e}/"
-                          f"{bl.jBS_diff.max():.2e}; Redl/source jBS peak="
+                          f"jphi_bs_diff = source jphi_bs - evaluate_jbs(delivered "
+                          f"baseline) min/max={bl.jphi_bs_diff.min():.2e}/"
+                          f"{bl.jphi_bs_diff.max():.2e}; Redl/source jBS peak="
                           f"{_ratio:.3f}; the draws iterate", flush=True)
                     rec = dict(
                         enabled=True, label="imas baseline diff",
@@ -5499,14 +5502,14 @@ class Bouquet(SwbBaseline):
                         stop_reason=("diff mode: the baseline total is "
                                      "pinned to the source, so the baseline "
                                      "needs no loop; every draw iterates"),
-                        jBS_diff_definition=(
-                            "source j_BS - evaluate_jBS(delivered baseline "
+                        jbs_diff_definition=(
+                            "source jphi_bs - evaluate_jbs(delivered baseline "
                             "equilibrium, source kinetics): a pure model "
                             "offset on the baseline geometry, frozen in "
                             "psi_N labels"),
                         I_BS=[float(d_red["I_BS"])],
-                        redl_over_source_jBS_peak=float(_ratio),
-                        evaluate_jBS_version=EVALUATE_JBS_VERSION,
+                        redl_over_source_jbs_peak=float(_ratio),
+                        evaluate_jbs_version=EVALUATE_JBS_VERSION,
                         oft_build=oft_build_info(),
                         tolerances=None, wall_s=0.0)
                     return _finish(rec, nl)
@@ -5550,11 +5553,11 @@ class Bouquet(SwbBaseline):
                                   f"{str(_sc_exc)[:160]}); FALLING BACK to "
                                   "bootstrap scale 1.0 for this pass",
                                   flush=True)
-                        bl.jBS_diff = None
+                        bl.jphi_bs_diff = None
                         bl.bs_scale = scale
-                        bl.j_BS = scale * np.asarray(jbs, dtype=float)
-                        bl.j_phi = j_ind + bl.j_BS + j_fixed
-                        _js = np.asarray(bl.j_phi, dtype=float)
+                        bl.jphi_bs = scale * np.asarray(jbs, dtype=float)
+                        bl.jphi_total = j_ind + bl.jphi_bs + j_fixed
+                        _js = np.asarray(bl.jphi_total, dtype=float)
                         if getattr(bl, "jphi_diff", None) is not None:
                             _js = _js + k2e(bl.jphi_diff)
                         st["nl"] = _pass_solve(_js if relax is None
@@ -5587,7 +5590,7 @@ class Bouquet(SwbBaseline):
                     if _fb:
                         import warnings as _w
                         _msg = (
-                            "IMAS rescale baseline (j_BS loop): the l_i-proxy "
+                            "IMAS rescale baseline (jphi_bs loop): the l_i-proxy "
                             "root find failed on pass(es) "
                             f"{rec['rescale_fallback_passes']} and the "
                             "bootstrap scale FELL BACK to 1.0 there"
@@ -5606,7 +5609,7 @@ class Bouquet(SwbBaseline):
 
                 # ================= ohmic (every closure channel) ============
                 if mode != "ohmic":
-                    raise ValueError(f"unknown jBS_baseline_mode {mode!r} "
+                    raise ValueError(f"unknown jbs_baseline_mode {mode!r} "
                                      "(expected 'diff', 'rescale' or "
                                      "'ohmic')")
                 from .utils import (eq_jphi_profile, unrenormalise_q0,
@@ -5650,7 +5653,7 @@ class Bouquet(SwbBaseline):
                     if _pin is None:
                         print(f"[imas jbs-loop] NOTICE: closure_channel="
                               f"'{_chan}' pins q0 via the axis row, and "
-                              "under the self-consistent j_BS loop its q0 "
+                              "under the self-consistent jphi_bs loop its q0 "
                               "corrector is RECORD-ONLY -- the axis row is "
                               "held at the anchor's requested axis current, "
                               "no Newton step is taken, and the q0 residual "
@@ -5660,7 +5663,7 @@ class Bouquet(SwbBaseline):
                     else:
                         print(f"[imas jbs-loop] NOTICE: closure_channel="
                               f"'{_chan}' pins q0 via the axis row, and the "
-                              "q0 pin ACTS under the self-consistent j_BS "
+                              "q0 pin ACTS under the self-consistent jphi_bs "
                               "loop (jbs_loop_q0_corrector=True): the axis "
                               "row is moved once per pass from the q0 "
                               "measured on that pass's equilibrium, and "
@@ -5721,7 +5724,7 @@ class Bouquet(SwbBaseline):
                     rec["q0_pin"] = _pr
                     if bl.ip_closure is not None:
                         bl.ip_closure.update(
-                            q0_pin_mode=("acting under the j_BS loop "
+                            q0_pin_mode=("acting under the jphi_bs loop "
                                          "(jbs_loop_q0_corrector=True): axis "
                                          "row moved once per pass from the "
                                          "measured q0"),
@@ -5747,7 +5750,7 @@ class Bouquet(SwbBaseline):
                     rec["converged"] = False
                     rec["jbs_converged"] = False
                     rec["stop_reason"] = _why
-                    rec["fail_message"] = ("self-consistent j_BS loop [imas "
+                    rec["fail_message"] = ("self-consistent jphi_bs loop [imas "
                                            f"baseline ohmic/{_chan}] did not "
                                            f"converge: {_why}")
                     print("  [jbs-loop] " + rec["fail_message"], flush=True)
@@ -5757,7 +5760,7 @@ class Bouquet(SwbBaseline):
 
                 def _step(jbs, k, relax=None):
                     jbs = np.asarray(jbs, dtype=float)
-                    _ratio = jbs.max() / max(j_BS_src.max(), 1.0)
+                    _ratio = jbs.max() / max(jphi_bs_src.max(), 1.0)
                     q0s, ss, oc = _ohmic_close(
                         st["ctx"], jbs, _ratio,
                         _pass=dict(q0_ref=q0_ref, k=k,
@@ -5771,15 +5774,15 @@ class Bouquet(SwbBaseline):
                             np.asarray(_icl0["structured_coeffs_b"], float)])
                     # the pass solves the closure's current relaxed against
                     # the previous pass's solved current (jbs_relax_current);
-                    # bl.j_phi stays the closure's own assembly
-                    _j_solved = np.array(bl.j_phi if relax is None
-                                         else relax(bl.j_phi), dtype=float,
+                    # bl.jphi_total stays the closure's own assembly
+                    _j_solved = np.array(bl.jphi_total if relax is None
+                                         else relax(bl.jphi_total), dtype=float,
                                          copy=True)
                     st["j_solved"] = _j_solved
                     st["nl"] = _pass_solve(_j_solved)
                     snap = mygs.copy_eq()
                     ctx_new = _closure_geometry(
-                        f"j_BS loop pass {k + 1}")
+                        f"jphi_bs loop pass {k + 1}")
                     g = ctx_new["geom"]
                     w = (g["dV_dpsi"] / (2.0 * np.pi) * g["dpsi_dpsiN"]
                          * g["inv_R2"] / g["inv_R"])
@@ -5891,7 +5894,7 @@ class Bouquet(SwbBaseline):
                         _pin.advance()
                     ctx_new = _closure_geometry(f"MSE chord step {k + 1}")
                     q0s_, ss_, oc_ = _ohmic_close(
-                        ctx_new, jbs, jbs.max() / max(j_BS_src.max(), 1.0),
+                        ctx_new, jbs, jbs.max() / max(jphi_bs_src.max(), 1.0),
                         _pass=dict(q0_ref=q0_ref, k=k,
                                    x_retry=st.get("x_prev"),
                                    axis_row=(None if _pin is None
@@ -5910,8 +5913,8 @@ class Bouquet(SwbBaseline):
                     st.update(ctx=ctx_new, q0s=q0s_, ss=ss_, oc=oc_)
                     return ss_
 
-                # ---- MSE pitch angles: converge j_BS without MSE (done),
-                # Jacobian once, chord steps with j_BS re-evaluated, one final
+                # ---- MSE pitch angles: converge jphi_bs without MSE (done),
+                # Jacobian once, chord steps with jphi_bs re-evaluated, one final
                 # Jacobian refresh (docs/physics-notes.md) ------------------
                 if ss is not None and ss.get("mse") is not None:
                     # what a refusal of the stage must put back: the closure
@@ -5982,7 +5985,7 @@ class Bouquet(SwbBaseline):
                               else int(ss.get("mse_n_solves", 0) or 0))
                     _upd = dict(n_extra_solves=_n_loop + _n_mse,
                                 sawtooth_verdict=(
-                                    f"j_BS loop: predictor re-solved on "
+                                    f"jphi_bs loop: predictor re-solved on "
                                     f"refreshed geometry for "
                                     f"{rec.get('n_passes')} pass(es) "
                                     "(record-only: no corrector step, rows "
@@ -6010,7 +6013,7 @@ class Bouquet(SwbBaseline):
                             structured_li_residual_predictor=_p0["li"] - _lt)
                     if _pin is not None:
                         _upd["sawtooth_verdict"] = (
-                            f"j_BS loop: predictor re-solved on refreshed "
+                            f"jphi_bs loop: predictor re-solved on refreshed "
                             f"geometry for {rec.get('n_passes')} pass(es) "
                             "with the q0 pin acting (axis row moved per "
                             "pass; no separate corrector step)")
@@ -6028,67 +6031,67 @@ class Bouquet(SwbBaseline):
                 swb_seed, swb_fix = self._swb_inputs(mygs, psi_N, coord)
                 swb = solve_with_bootstrap(
                     mygs, ne, te, ni, ti, Zeff, bl.Ip_target, swb_seed,
-                    scale_jBS=1.0, isolate_edge_jBS=iso,
+                    scale_jbs=1.0, isolate_edge_jbs=iso,
                     diagnostic_plots=False, verbose=False,
                     **swb_fix,
                     **coords.swb_grid_kwargs(psi_N, coord),
                     **gc.bootstrap_kwargs,
                 )
-                # SWB's j_BS -> the field-aligned toroidal bootstrap (review
+                # SWB's jphi_bs -> the field-aligned toroidal bootstrap (review
                 # PR64 B1), on the equilibrium the call left in mygs; the
                 # stamp is archived with the baseline (li_metrics)
                 from .TokaMaker_interface import swb_result_toroidal
                 swb = swb_result_toroidal(mygs, swb, psi_N, coord,
-                                          isolate_edge_jBS=iso,
+                                          isolate_edge_jbs=iso,
                                           bootstrap_kwargs=gc.bootstrap_kwargs)
                 self._swb_conversion_record = dict(swb["swb_conversion"])
                 # Same axis-transition smoothing every per-draw spike receives, so
                 # the sigma=0 draw reproduces this baseline split exactly.
-                j_BS_swb = smooth_jbs_transition(
-                    np.asarray(swb["isolated_j_BS"], dtype=float))
-                if gc.floor_j_BS:
-                    j_BS_swb = np.clip(j_BS_swb, 0.0, None)
-                ratio = j_BS_swb.max() / max(j_BS_src.max(), 1.0)
+                jphi_bs_swb = smooth_jbs_transition(
+                    np.asarray(swb["jphi_bs"], dtype=float))
+                if gc.floor_jbs:
+                    jphi_bs_swb = np.clip(jphi_bs_swb, 0.0, None)
+                ratio = jphi_bs_swb.max() / max(jphi_bs_src.max(), 1.0)
 
                 if mode == "diff":
-                    bl.jBS_diff = j_BS_src - j_BS_swb        # added to baseline + draws
-                    bl.j_BS = j_BS_swb
-                    bl.j_phi = FUSE_tot                      # total anchored to FUSE
+                    bl.jphi_bs_diff = jphi_bs_src - jphi_bs_swb        # added to baseline + draws
+                    bl.jphi_bs = jphi_bs_swb
+                    bl.jphi_total = FUSE_tot                      # total anchored to FUSE
                     bl.bs_scale = 1.0
                     print(f"[imas SWB-split:diff] FUSE total preserved; "
-                          f"diff min/max={bl.jBS_diff.min():.2e}/{bl.jBS_diff.max():.2e}; "
+                          f"diff min/max={bl.jphi_bs_diff.min():.2e}/{bl.jphi_bs_diff.max():.2e}; "
                           f"SWB/FUSE jBS peak={ratio:.3f}")
                 elif mode == "rescale":
                     tgt = calc_cylindrical_li_proxy(mygs, FUSE_tot, psi_pad,
                                                     psi_N, coord)
                     _f = lambda s: calc_cylindrical_li_proxy(
-                        mygs, j_ind + s * j_BS_swb + j_fixed, psi_pad, psi_N,
+                        mygs, j_ind + s * jphi_bs_swb + j_fixed, psi_pad, psi_N,
                         coord) - tgt
                     try:
                         scale = float(brentq(_f, 0.2, 4.0, xtol=1e-4))
                     except Exception:
                         scale = 1.0
-                    bl.jBS_diff = None
+                    bl.jphi_bs_diff = None
                     bl.bs_scale = scale
-                    bl.j_BS = scale * j_BS_swb
-                    bl.j_phi = j_ind + bl.j_BS + j_fixed
+                    bl.jphi_bs = scale * jphi_bs_swb
+                    bl.jphi_total = j_ind + bl.jphi_bs + j_fixed
                     print(f"[imas SWB-split:rescale] scale={scale:.3f}; FUSE ohmic kept; "
                           f"SWB/FUSE jBS peak={ratio:.3f}")
                 elif mode == "ohmic":
                     _q0_state, _structured_state, _oc = _ohmic_close(
-                        _anchor, j_BS_swb, ratio)
+                        _anchor, jphi_bs_swb, ratio)
                     _ip_signed = _oc["ip_signed"]
                     Ip_t = _oc["Ip_t"]
                     ip_roundtrip_gate = _oc["ip_roundtrip_gate"]
                 else:
-                    raise ValueError(f"unknown jBS_baseline_mode {mode!r} "
+                    raise ValueError(f"unknown jbs_baseline_mode {mode!r} "
                                      "(expected 'diff', 'rescale' or 'ohmic')")
                 # Solve the resulting total so coils + li_1 reflect this equilibrium.
                 # Anchor to equilibrium.j_tor (add the fixed jphi_diff) so the baseline
                 # l_i/coils reflect the same total the draws use (== equilibrium.j_tor),
                 # not the core_profiles total. The diff-mode component split above stays
                 # on core_profiles.j_tor; jphi_diff is the fixed equilibrium offset.
-                _jphi_solve = np.asarray(bl.j_phi, dtype=float)
+                _jphi_solve = np.asarray(bl.jphi_total, dtype=float)
                 # jphi_diff re-anchors the total to FUSE's equilibrium.j_tor; in
                 # 'ohmic' mode the whole point is NOT to anchor to FUSE, so skip it
                 # (its magnitude is recorded in bl.ip_closure for the reader).
@@ -6098,7 +6101,7 @@ class Bouquet(SwbBaseline):
 
                 # Corrective iteration (opt-in): the single jphi-linterp solve
                 # imposes the request with pre-solve geometry, so the ACHIEVED FSA
-                # j_phi lands a few % off the anchor once psi converges (-> l_i /
+                # jphi_total lands a few % off the anchor once psi converges (-> l_i /
                 # q(psi_N) biased vs the equilibrium IDS). Reuse the recon path's
                 # Newton corrector to drive the output onto the anchor target.
                 if getattr(self.config.generation, "imas_corrective_jphi", False):
@@ -6115,7 +6118,7 @@ class Bouquet(SwbBaseline):
                     print(f"[imas corrective-jphi] converged in {_n_corr} iteration(s)")
 
                 # ---- q0 corrector (closure_channel="sawtooth_bootstrap") --------
-                # The predictor above is FIRST ORDER (q0 ~ 1/j_phi(0) at the frozen
+                # The predictor above is FIRST ORDER (q0 ~ 1/jphi_total(0) at the frozen
                 # anchor geometry).  The closed-hybrid solve that just ran is the
                 # first time the real q0 is knowable, and it costs nothing extra to
                 # read it.  If the predictor already landed inside q0_tol we are
@@ -6233,7 +6236,7 @@ class Bouquet(SwbBaseline):
         metrics.update(tokamaker_li_1=tok_li1, tokamaker_li_3=tok_li3,
                        forward_solve_nl_its=nl_its,
                        forward_solve_ip_err_pct=ip_err_pct,
-                       jBS_baseline_mode=str(self.config.generation.jBS_baseline_mode),
+                       jbs_baseline_mode=str(self.config.generation.jbs_baseline_mode),
                        bs_scale=float(getattr(bl, "bs_scale", 1.0)),
                        ohm_scale=float(getattr(bl, "ohm_scale", 1.0)),
                        source_current_sign=float(getattr(bl, "source_current_sign", 1.0)),
@@ -6283,8 +6286,8 @@ class Bouquet(SwbBaseline):
                                      psi_pad, ctx["k2e"])
         print(
             f"[imas forward-solve] converged ({nl_its} its, "
-            f"Ip {ip_err_pct:+.2f}%) recalc_jBS="
-            f"{self.config.generation.recalculate_j_BS} "
+            f"Ip {ip_err_pct:+.2f}%) recalc_jbs="
+            f"{self.config.generation.recalculate_jbs} "
             f"TokaMaker li_1={tok_li1:.4f} li_3={tok_li3:.4f} | "
             f"IDS li_1={metrics.get('ids_li_1')} li_3={metrics.get('ids_li_3')}"
         )
@@ -6292,7 +6295,7 @@ class Bouquet(SwbBaseline):
     def _deliver_imas_state(self, delivery, ne, te, ni, ti, Zeff, psi_pad,
                             k2e):
         """The modelling-source path's ONE state, stored in the draws' form
-        (``jbs_self_consistent=True``; ``jBS_baseline_mode`` "diff" or
+        (``jbs_self_consistent=True``; ``jbs_baseline_mode`` "diff" or
         "rescale").
 
         ``mygs`` holds the delivered equilibrium F (``l_i_target`` was just
@@ -6306,10 +6309,10 @@ class Bouquet(SwbBaseline):
         perturbation).  Here the request is normalised to ``Ip_target`` in
         that same 'exact' measure on F (F is unchanged: the request's SHAPE
         is), the bootstrap stays the draws' own sigma=0 composition on F (in
-        diff mode ``j_BS + jBS_diff`` IS the source bootstrap, exactly as
+        diff mode ``jphi_bs + jphi_bs_diff`` IS the source bootstrap, exactly as
         before), the fixed parts and ``jphi_diff`` stay as read, and the
         inductive is the residual -- so it carries the whole normalisation.
-        ``jBS_baseline_mode="ohmic"`` (baseline-only; the draws refuse it) is
+        ``jbs_baseline_mode="ohmic"`` (baseline-only; the draws refuse it) is
         left as it was.
         """
         import numpy as np
@@ -6323,21 +6326,21 @@ class Bouquet(SwbBaseline):
         gc = self.config.generation
         psi_N = np.asarray(bl.psi_N, dtype=float)
         coord = getattr(bl, "coord", coords.PSI)
-        jdiff = (None if getattr(bl, "jBS_diff", None) is None
-                 else np.asarray(bl.jBS_diff, dtype=float))
+        jdiff = (None if getattr(bl, "jphi_bs_diff", None) is None
+                 else np.asarray(bl.jphi_bs_diff, dtype=float))
         if delivery["mode"] == "diff" and jdiff is not None:
             # Redl on F (+ the model offset): the source bootstrap, unchanged
-            j_bs0 = np.asarray(bl.j_BS, dtype=float) + jdiff
+            j_bs0 = np.asarray(bl.jphi_bs, dtype=float) + jdiff
         else:
             comp = _draw_jbs_composer(
                 psi_N, ne, te, ni, ti, Zeff, psi_pad,
-                bool(gc.isolate_edge_jBS), float(getattr(bl, "bs_scale", 1.0)),
-                bool(gc.floor_j_BS), jdiff, None, None, coord=coord,
+                bool(gc.isolate_edge_jbs), float(getattr(bl, "bs_scale", 1.0)),
+                bool(gc.floor_jbs), jdiff, None, None, coord=coord,
                 eps_definition=getattr(gc, "eps_definition", None))
             j_bs0 = np.asarray(comp(mygs.copy_eq())[0], dtype=float)
-            bl.j_BS = j_bs0 - (0.0 if jdiff is None else jdiff)
+            bl.jphi_bs = j_bs0 - (0.0 if jdiff is None else jdiff)
         # every channel the draws hold fixed, once each (the draws' _jfix =
-        # j_NBI + j_RF + j_other): j_other left out landed in the inductive
+        # jphi_nbi + jphi_rf + jphi_other): jphi_other left out landed in the inductive
         # residual and every draw added it again (PR #70 review B1)
         fixed = self._draw_fixed_current(psi_N)
         jd = (np.zeros_like(psi_N) if getattr(bl, "jphi_diff", None) is None
@@ -6345,17 +6348,17 @@ class Bouquet(SwbBaseline):
         dv = _deliver_request_split(mygs, psi_N, psi_pad, bl.Ip_target,
                                     delivery["request"], j_bs0, fixed + jd,
                                     label="imas delivered state", coord=coord)
-        bl.j_inductive = np.asarray(dv["j_inductive"], dtype=float)
-        # bl.j_phi excludes jphi_diff (generate adds it): j_phi + jphi_diff
+        bl.jphi_ind = np.asarray(dv["jphi_ind"], dtype=float)
+        # bl.jphi_total excludes jphi_diff (generate adds it): jphi_total + jphi_diff
         # is the normalised request
-        bl.j_phi = np.asarray(dv["request"], dtype=float) - jd
+        bl.jphi_total = np.asarray(dv["request"], dtype=float) - jd
         bl.jphi_request_offset, _n_fl_t = _request_offset(
-            bl.j_inductive, dv["achieved"], j_bs0, fixed + jd)
+            bl.jphi_ind, dv["achieved"], j_bs0, fixed + jd)
         _st = mygs.get_stats(lcfs_pad=psi_pad, li_normalization="iter")
         from .physics import SOLVER_Q0_PSI_N
         bl.delivered_state = dict(
             convention=DELIVERED_SPLIT_CONVENTION, path="imas",
-            jBS_baseline_mode=str(delivery["mode"]),
+            jbs_baseline_mode=str(delivery["mode"]),
             l_i=float(bl.l_i_target), l_i_scale="iter(li3)",
             q0=float(_st.get("q_0", float("nan"))),
             # get_stats' q0 is q at psi_N 0.02, not on axis (and not at the
@@ -6368,12 +6371,12 @@ class Bouquet(SwbBaseline):
             achieved_normalisation=float(dv["kappa_achieved"]),
             n_negative_inductive=int(dv["n_negative_inductive"]),
             n_floored_target_inductive=int(_n_fl_t),
-            j_phi_achieved=_achieved_jphi_fsa(
+            jphi_total_achieved=_achieved_jphi_fsa(
                 mygs, psi_N, psi_pad,
                 sign_ref=np.asarray(dv["request"], dtype=float), coord=coord),
             how=("the forward solve's delivered equilibrium (diff: the "
                  "source total; rescale: the loop's last pass); one "
-                 "jphi-linterp solve of j_phi + jphi_diff reproduces it"))
+                 "jphi-linterp solve of jphi_total + jphi_diff reproduces it"))
         print(f"[imas delivered state] stored split = the Ip-normalised "
               f"request of the delivered equilibrium (x{dv['kappa']:.6f} in "
               f"the exact measure; the inductive carries it); l_i(3)="
@@ -6387,7 +6390,7 @@ class Bouquet(SwbBaseline):
         Three panels from the in-memory :class:`~bouquet.baseline.Baseline`
         (no HDF5 needed): kinetic profiles (n_e/n_i, T_e/T_i), total pressure
         (thermal + fast), and the separated toroidal currents
-        (j_phi = j_inductive + j_BS [+ j_NBI + j_RF]). Returns ``(fig, axes)``.
+        (jphi_total = jphi_ind + jphi_bs [+ jphi_nbi + jphi_rf]). Returns ``(fig, axes)``.
         Call after :meth:`prepare_baseline` / :meth:`reconstruct`.
         """
         import numpy as np
@@ -6425,19 +6428,19 @@ class Bouquet(SwbBaseline):
         ax[1].set_title("pressure"); ax[1].legend(fontsize=8); ax[1].grid(alpha=0.3)
 
         # separated toroidal currents
-        ax[2].plot(pe, np.asarray(bl.j_phi) / 1e6, "-", color="k", label=r"$j_\phi$ total")
-        ax[2].plot(pe, np.asarray(bl.j_inductive) / 1e6, "-", color="tab:orange",
+        ax[2].plot(pe, np.asarray(bl.jphi_total) / 1e6, "-", color="k", label=r"$j_\phi$ total")
+        ax[2].plot(pe, np.asarray(bl.jphi_ind) / 1e6, "-", color="tab:orange",
                    label=r"$j_{ind}$")
-        ax[2].plot(pe, np.asarray(bl.j_BS) / 1e6, "-", color="tab:green", label=r"$j_{BS}$")
-        _fixed = (("j_NBI", bl.j_NBI), ("j_RF", bl.j_RF),
-                  ("j_other", getattr(bl, "j_other", None)))
-        if getattr(bl, "j_saw", None) is not None:
-            # swb_saw_q: j_saw replaces j_other's sawteeth share in j_phi
-            _jst = getattr(bl, "j_sawteeth", None)
-            _jo = np.asarray(bl.j_other if bl.j_other is not None else 0.0, dtype=float)
+        ax[2].plot(pe, np.asarray(bl.jphi_bs) / 1e6, "-", color="tab:green", label=r"$j_{BS}$")
+        _fixed = (("jphi_nbi", bl.jphi_nbi), ("jphi_rf", bl.jphi_rf),
+                  ("jphi_other", getattr(bl, "jphi_other", None)))
+        if getattr(bl, "jphi_saw_out", None) is not None:
+            # swb_saw_q: jphi_saw_out replaces jphi_other's sawteeth share in jphi_total
+            _jst = getattr(bl, "jphi_saw", None)
+            _jo = np.asarray(bl.jphi_other if bl.jphi_other is not None else 0.0, dtype=float)
             _fixed = _fixed[:2] + (
-                ("j_other - j_sawteeth", _jo - (0.0 if _jst is None else np.asarray(_jst))),
-                ("j_saw", bl.j_saw))
+                ("jphi_other - jphi_saw", _jo - (0.0 if _jst is None else np.asarray(_jst))),
+                ("jphi_saw_out", bl.jphi_saw_out))
         for nm, arr in _fixed:
             if arr is not None and np.any(np.asarray(arr)):
                 ax[2].plot(pe, np.asarray(arr) / 1e6, "--", lw=1, label=nm)
@@ -6452,7 +6455,7 @@ class Bouquet(SwbBaseline):
     def _bootstrap_multiplier(self):
         """The baseline's bootstrap multiplier on psi_N, or None when it is 1.
 
-        ``bl.j_BS = m * SWB(scale 1)`` with ``m`` the structured closure's
+        ``bl.jphi_bs = m * SWB(scale 1)`` with ``m`` the structured closure's
         ``s_bs(psi)`` or the scalar ``bs_scale``.
         """
         import numpy as np
@@ -6467,10 +6470,10 @@ class Bouquet(SwbBaseline):
     #: The fixed (held, never perturbed) current channels every draw adds:
     #: ``perturb_kinetic_equilibrium``'s ``_jfix``.  The delivered state and
     #: both sigma=0 guards hold exactly these.
-    DRAW_FIXED_CHANNELS = ("j_NBI", "j_RF", "j_other")
+    DRAW_FIXED_CHANNELS = ("jphi_nbi", "jphi_rf", "jphi_other")
 
     def _draw_fixed_current(self, psi_N):
-        """``j_NBI + j_RF + j_other`` of the baseline on ``psi_N`` (None ->
+        """``jphi_nbi + jphi_rf + jphi_other`` of the baseline on ``psi_N`` (None ->
         zero): the fixed current a draw holds (``_jfix``)."""
         import numpy as np
         bl = self.baseline
@@ -6484,13 +6487,13 @@ class Bouquet(SwbBaseline):
         """Whether ``generate()``'s draws compose their bootstrap with the
         self-consistent loop (``_DrawJBSComposer``) rather than SWB: the
         loop settings ``generate()`` hands the draws are enabled (after the
-        draw method's own say), ``recalculate_j_BS`` is on, and neither
+        draw method's own say), ``recalculate_jbs`` is on, and neither
         PIN_JPHI nor DIFF_BS (which take precedence over the loop in
         ``perturb_kinetic_equilibrium``) is set."""
         import os
         from .jbs_loop import jbs_settings as _jbs_settings
         gc = self.config.generation
-        if not bool(gc.recalculate_j_BS):
+        if not bool(gc.recalculate_jbs):
             return False
         st = _jbs_settings(gc, draw=True)
         if method is not None:
@@ -6503,20 +6506,20 @@ class Bouquet(SwbBaseline):
                     or os.environ.get("DIFF_BS", "0") == "1")
 
     def _draw_bootstrap_scaling(self, method=None):
-        """``(jBS_scale_range, jBS_scale_profile, record)``: how the draws
+        """``(jbs_scale_range, jbs_scale_profile, record)``: how the draws
         carry the baseline's bootstrap multiplier ``m`` (``bs_scale``, or
         the structured ``s_bs(psi)``; :meth:`_bootstrap_multiplier`).  The
         ONE rule ``generate()`` and both sigma=0 guards use, so a guard
         replays exactly the draws' scale and never compensates for them.
 
-        * SWB draws: ``m`` after SWB (``jBS_scale_profile``), the configured
-          ``jBS_scale_range`` the per-draw jitter inside SWB -- the baseline
-          built ``j_BS = m * SWB(scale 1)``, and OFT applies a scale inside
+        * SWB draws: ``m`` after SWB (``jbs_scale_profile``), the configured
+          ``jbs_scale_range`` the per-draw jitter inside SWB -- the baseline
+          built ``jphi_bs = m * SWB(scale 1)``, and OFT applies a scale inside
           SWB's own iteration, so ``SWB(m) != m * SWB(1)``.
         * Loop draws: the composer is linear in its scale (``spike =
           scale * Redl``) and takes no profile, so ``m`` rides in the scale:
           the range re-centred on ``m`` (``(m, m)`` when no range is set),
-          no profile.  The baseline composed ``j_BS`` at that scale, so a
+          no profile.  The baseline composed ``jphi_bs`` at that scale, so a
           sigma=0 draw reproduces it (PR #70 review B2: the loop draws had
           lost ``m``, off by ``1/m`` in rescale mode).  A non-uniform
           ``s_bs(psi)`` cannot reach the loop composer and is REFUSED.
@@ -6524,8 +6527,8 @@ class Bouquet(SwbBaseline):
         import numpy as np
         gc = self.config.generation
         mult = self._bootstrap_multiplier()
-        rng = (None if gc.jBS_scale_range is None
-               else tuple(gc.jBS_scale_range))
+        rng = (None if gc.jbs_scale_range is None
+               else tuple(gc.jbs_scale_range))
         loop = self._draws_run_jbs_loop(method)
         rec = dict(draws=("self-consistent loop" if loop else "SWB"),
                    multiplier=(None if mult is None else dict(
@@ -6539,7 +6542,7 @@ class Bouquet(SwbBaseline):
                 raise ValueError(
                     "the baseline carries a non-uniform bootstrap multiplier "
                     "s_bs(psi) (Baseline.bs_scale_profile, from the structured "
-                    "closure) but the draws run the self-consistent j_BS loop, "
+                    "closure) but the draws run the self-consistent jphi_bs loop, "
                     "whose composer takes a scalar scale only: the draws "
                     "cannot reproduce the baseline bootstrap.  Run the draws "
                     "with jbs_self_consistent=False (SWB draws apply s_bs(psi) "
@@ -6547,14 +6550,14 @@ class Bouquet(SwbBaseline):
             m = float(u[0])
             rng = (m, m) if rng is None else (rng[0] * m, rng[1] * m)
             mult = None
-            rec["applied_as"] = ("scale_jBS: jBS_scale_range re-centred on "
+            rec["applied_as"] = ("scale_jbs: jbs_scale_range re-centred on "
                                  f"bs_scale {m:.9g}")
         else:
-            rec["applied_as"] = ("jBS_scale_profile after SWB"
+            rec["applied_as"] = ("jbs_scale_profile after SWB"
                                  if mult is not None else "none (1.0)")
         if method is not None:
             rng, mult = method.scale_settings(rng, mult)
-        rec["jBS_scale_range"] = None if rng is None else [float(v) for v in rng]
+        rec["jbs_scale_range"] = None if rng is None else [float(v) for v in rng]
         return rng, mult, rec
 
     def _resolve_swb_seed(self):
@@ -6603,7 +6606,7 @@ class Bouquet(SwbBaseline):
         """
         bl = self.baseline
         if getattr(bl, "swb_seed_profile", None) is not None:
-            return bl.swb_seed_profile, {"jphi_fixed": bl.swb_jphi_fixed}
+            return bl.swb_seed_profile, {"jphi_fixed": bl.jphi_fixed}
         if (getattr(self, "_swb_seed_record", None) or {}).get(
                 "resolved") == "source_unavailable":
             raise self._swb_source_unavailable()
@@ -6612,14 +6615,14 @@ class Bouquet(SwbBaseline):
     def verify_sigma0_consistency(self, tol_frac=0.02, draw_route=True,
                                   draw_routes=None):
         """Regression guard: the draw pipeline must reproduce the baseline
-        j_BS split when the kinetics are UNPERTURBED (sigma=0).
+        jphi_bs split when the kinetics are UNPERTURBED (sigma=0).
 
         Replays the per-draw pre-SWB sequence -- state-anchor solve at
-        the baseline j_phi/pressure, ``solve_with_bootstrap`` on the baseline
+        the baseline jphi_total/pressure, ``solve_with_bootstrap`` on the baseline
         kinetics, axis-transition smoothing -- and
-        compares the resulting bootstrap spike to ``baseline.j_BS``.  Any
+        compares the resulting bootstrap spike to ``baseline.jphi_bs``.  Any
         systematic deviation found here is inherited by EVERY draw as a
-        j_phi target bias: the 2026-07 hollow-core/q0-offset bug was exactly
+        jphi_total target bias: the 2026-07 hollow-core/q0-offset bug was exactly
         such a sigma=0 inconsistency (recon-only axis smoothing), invisible
         to l_i but a wholesale +12% shift of the q0 distribution.
 
@@ -6648,7 +6651,7 @@ class Bouquet(SwbBaseline):
         configuration can use, :meth:`_sigma0_draw_routes`) -- to reproduce F
         at the loop's own, unchanged tolerances: the draw's loop converged,
         its bootstrap within ``jbs_rtol_j`` (profile, current-weighted) and
-        ``jbs_rtol_Ip`` (current) of ``baseline.j_BS`` (+ ``jBS_diff``), and
+        ``jbs_rtol_Ip`` (current) of ``baseline.jphi_bs`` (+ ``jphi_bs_diff``), and
         ``|l_i - l_i_target| <= jbs_tol_li``; q0, q95 and the total-current
         profile against F are reported beside them.  ``draw_route=False``
         leaves ``passed`` False (the identity is then unverified).  The
@@ -6675,13 +6678,13 @@ class Bouquet(SwbBaseline):
         Parameters
         ----------
         tol_frac : float
-            Pass threshold on ``max|spike0 - j_BS|`` as a fraction of
-            ``max(j_BS)`` (default 2%).
+            Pass threshold on ``max|spike0 - jphi_bs|`` as a fraction of
+            ``max(jphi_bs)`` (default 2%).
 
         Returns
         -------
-        dict with ``spike0`` (the sigma=0 draw-context j_BS), ``max_dev``,
-        ``rms_dev`` [A/m^2], ``max_dev_frac`` (of peak j_BS), ``psi_worst``
+        dict with ``spike0`` (the sigma=0 draw-context jphi_bs), ``max_dev``,
+        ``rms_dev`` [A/m^2], ``max_dev_frac`` (of peak jphi_bs), ``psi_worst``
         (in the run coordinate ``coord``), and ``passed``.
         """
         # the method's own check (engine and swb: their zero-perturbation
@@ -6697,8 +6700,7 @@ class Bouquet(SwbBaseline):
         from .utils import pchip_derivative
         # OpenFUSIONToolkit only on the legacy route, the one that calls
         # solve_with_bootstrap (the engine's check runs on its own solver)
-        from OpenFUSIONToolkit.TokaMaker.bootstrap import \
-            solve_with_bootstrap
+        from .oft_bootstrap import solve_with_bootstrap
 
         if self.baseline is None or self.mygs is None:
             raise ValueError("call setup_solver() + prepare_baseline() / "
@@ -6710,8 +6712,8 @@ class Bouquet(SwbBaseline):
             # No inductive/bootstrap split exists, so there is nothing for the
             # sigma=0 draw to reproduce. Report a pass rather than spending a
             # bootstrap solve comparing zeros.
-            print("[sigma0-check] SKIPPED: single_profile_jphi=True -- j_phi is "
-                  "one profile, so there is no j_BS split to verify")
+            print("[sigma0-check] SKIPPED: single_profile_jphi=True -- jphi_total is "
+                  "one profile, so there is no jphi_bs split to verify")
             return {"spike0": None, "max_dev": 0.0, "rms_dev": 0.0,
                     "max_dev_frac": 0.0, "psi_worst": float("nan"),
                     "coord": getattr(self.baseline, "coord", coords.PSI),
@@ -6754,11 +6756,11 @@ class Bouquet(SwbBaseline):
         if getattr(bl, "p_diff", None) is not None:
             pressure = pressure + np.asarray(bl.p_diff, dtype=float)
 
-        # state-anchor solve at the baseline j_phi (mirrors the per-draw flow)
+        # state-anchor solve at the baseline jphi_total (mirrors the per-draw flow)
         pp = solver_pp_profile(
             psi_N, pressure, (mygs.psi_bounds[1] - mygs.psi_bounds[0]), _edge, coord=coord)
         ffp = coords.oft_prof("jphi-linterp", psi_N,
-                              np.asarray(bl.j_phi, dtype=float).copy(), coord)
+                              np.asarray(bl.jphi_total, dtype=float).copy(), coord)
         if (bool(getattr(gc, "jbs_self_consistent", False))
                 and getattr(bl, "jphi_diff", None) is not None):
             # self-consistent loop: the anchor is the reconstruction's own
@@ -6824,33 +6826,33 @@ class Bouquet(SwbBaseline):
         res = solve_with_bootstrap(
             mygs, ne_eq, te_eq, ni_eq, ti_eq, Zeff_eq,
             float(bl.Ip_target), seed,
-            scale_jBS=float(sigma0_reference_scale(_rng0)),
-            isolate_edge_jBS=bool(gc.isolate_edge_jBS),
+            scale_jbs=float(sigma0_reference_scale(_rng0)),
+            isolate_edge_jbs=bool(gc.isolate_edge_jbs),
             **coords.swb_grid_kwargs(psi_N, coord),
             diagnostic_plots=False, **swb_fix, **gc.bootstrap_kwargs)
-        # SWB's j_BS -> the field-aligned toroidal bootstrap (review PR64
+        # SWB's jphi_bs -> the field-aligned toroidal bootstrap (review PR64
         # B1), as the draws convert theirs, before anything else solves
         from .TokaMaker_interface import swb_result_toroidal
         res = swb_result_toroidal(
             mygs, res, psi_N, coord,
-            scale_jBS=float(sigma0_reference_scale(_rng0)),
-            isolate_edge_jBS=bool(gc.isolate_edge_jBS),
+            scale_jbs=float(sigma0_reference_scale(_rng0)),
+            isolate_edge_jbs=bool(gc.isolate_edge_jbs),
             bootstrap_kwargs=gc.bootstrap_kwargs)
         spike0 = (1.0 if _mult is None else _mult) * smooth_jbs_transition(
-            np.asarray(res["isolated_j_BS"], dtype=float))
-        if gc.floor_j_BS:
+            np.asarray(res["jphi_bs"], dtype=float))
+        if gc.floor_jbs:
             spike0 = np.clip(spike0, 0.0, None)
 
-        ref = np.asarray(bl.j_BS, dtype=float)
+        ref = np.asarray(bl.jphi_bs, dtype=float)
         dev = spike0 - ref
         peak = float(np.max(np.abs(ref)))
         # Floored-zone carve-out: where floor_inductive_split clamped the
-        # baseline j_inductive to 0, the deficit was absorbed into bl.j_BS --
-        # so bl.j_BS deliberately differs from the raw SWB spike there (on a
+        # baseline jphi_ind to 0, the deficit was absorbed into bl.jphi_bs --
+        # so bl.jphi_bs deliberately differs from the raw SWB spike there (on a
         # strong-pedestal case, ~4% of peak at psi_N~0.98).  The
         # per-draw sampler has its own floor-zone handling, so these points
         # are excluded from the pass criterion and reported separately.
-        floored = np.asarray(bl.j_inductive, dtype=float) <= 0.0
+        floored = np.asarray(bl.jphi_ind, dtype=float) <= 0.0
         dev_eval = np.where(floored, 0.0, dev)
         iworst = int(np.argmax(np.abs(dev_eval)))
         out = dict(spike0=spike0,
@@ -6874,7 +6876,7 @@ class Bouquet(SwbBaseline):
         _fl = (f"; {out['n_floored']} floored pts excluded "
                f"(dev there {out['max_dev_floored']/1e6:.4f} MA/m²)"
                if out["n_floored"] else "")
-        print(f"[sigma0-check] {status}: max|spike0 - j_BS| = "
+        print(f"[sigma0-check] {status}: max|spike0 - jphi_bs| = "
               f"{out['max_dev']/1e6:.4f} MA/m² ({100*out['max_dev_frac']:.2f}% "
               f"of peak, worst at {'Phi_N' if coord == coords.PHI else 'psi_N'}"
               f"={out['psi_worst']:.3f}; "
@@ -6899,11 +6901,11 @@ class Bouquet(SwbBaseline):
         * ``stages["loop"]`` -- the draw's delivered loop state (before the
           homotopy): the first request BIT-IDENTICAL to the stored request,
           the loop converged, its bootstrap within ``jbs_rtol_j`` /
-          ``jbs_rtol_Ip`` of ``lambda_BS*``, ``|dl_i| <= jbs_tol_li``,
+          ``jbs_rtol_Ip`` of ``lambda_bs*``, ``|dl_i| <= jbs_tol_li``,
           ``|dq0| <= jbs_tol_q0`` at the q-row radius;
         * ``stages["archived"]`` -- the state the draw ARCHIVES (after the
           homotopy and the post-homotopy passes): the bootstrap it carries
-          within ``jbs_rtol_j`` / ``jbs_rtol_Ip`` of ``lambda_BS*`` on that
+          within ``jbs_rtol_j`` / ``jbs_rtol_Ip`` of ``lambda_bs*`` on that
           geometry, ``|dl_i| <= jbs_tol_li``, ``|dq0| <= jbs_tol_q0``; the
           homotopy stage and the flux-range change reported;
         * ``stages["archived_geometry"]`` -- the archived coil currents and
@@ -7189,29 +7191,29 @@ class Bouquet(SwbBaseline):
         _edge = resolve_edge_pressure(gc)
         coord = getattr(bl, "coord", coords.PSI)
         Ip = float(bl.Ip_target)
-        jdiff = (None if getattr(bl, "jBS_diff", None) is None
-                 else np.asarray(bl.jBS_diff, dtype=float))
+        jdiff = (None if getattr(bl, "jphi_bs_diff", None) is None
+                 else np.asarray(bl.jphi_bs_diff, dtype=float))
         compose = _draw_jbs_composer(
             psi_N, ne_eq, te_eq, ni_eq, ti_eq, Zeff_eq, psi_pad,
-            bool(gc.isolate_edge_jBS), float(getattr(bl, "bs_scale", 1.0)),
-            bool(gc.floor_j_BS), jdiff, None, None, coord=coord,
+            bool(gc.isolate_edge_jbs), float(getattr(bl, "bs_scale", 1.0)),
+            bool(gc.floor_jbs), jdiff, None, None, coord=coord,
             eps_definition=getattr(gc, "eps_definition", None))
-        j_ind = np.asarray(bl.j_inductive, dtype=float)
-        # the fixed current the draws hold (j_NBI + j_RF + j_other), not the
+        j_ind = np.asarray(bl.jphi_ind, dtype=float)
+        # the fixed current the draws hold (jphi_nbi + jphi_rf + jphi_other), not the
         # stored split's residual: a residual is self-consistent with a
-        # wrong split and hid j_other counted twice (PR #70 review B1).  How
+        # wrong split and hid jphi_other counted twice (PR #70 review B1).  How
         # far the stored split is from closing on it is recorded.
         j_fix = self._draw_fixed_current(psi_N)
-        _resid = (np.asarray(bl.j_phi, dtype=float) - j_ind
-                  - np.asarray(bl.j_BS, dtype=float)
+        _resid = (np.asarray(bl.jphi_total, dtype=float) - j_ind
+                  - np.asarray(bl.jphi_bs, dtype=float)
                   - (0.0 if jdiff is None else jdiff))
-        _peak_phi = float(np.max(np.abs(np.asarray(bl.j_phi, dtype=float))))
+        _peak_phi = float(np.max(np.abs(np.asarray(bl.jphi_total, dtype=float))))
         split_closure = dict(
             channels=list(self.DRAW_FIXED_CHANNELS),
             max_abs_frac=float(np.max(np.abs(_resid - j_fix))
                                / (_peak_phi or 1.0)),
-            definition=("max |j_phi - j_inductive - j_BS (- jBS_diff) - "
-                        "(j_NBI + j_RF + j_other)| / max |j_phi| of the "
+            definition=("max |jphi_total - jphi_ind - jphi_bs (- jphi_bs_diff) - "
+                        "(jphi_nbi + jphi_rf + jphi_other)| / max |jphi_total| of the "
                         "stored split: 0 to rounding when the stored "
                         "inductive excludes exactly what the draws hold"))
         if getattr(bl, "jphi_diff", None) is not None:
@@ -7220,7 +7222,7 @@ class Bouquet(SwbBaseline):
             j_fix = j_fix + pchip_interp(
                 np.asarray(bl.psi_N_kinetic, dtype=float),
                 np.asarray(bl.jphi_diff, dtype=float), psi_N)
-        ref = np.asarray(bl.j_BS, dtype=float) + (0.0 if jdiff is None
+        ref = np.asarray(bl.jphi_bs, dtype=float) + (0.0 if jdiff is None
                                                   else jdiff)
 
         # The reconstruction's final state F is, on both paths, ONE
@@ -7271,7 +7273,7 @@ class Bouquet(SwbBaseline):
                            lambda m: compose(m["snap"])[0], settings,
                            Ip=abs(Ip), meas0=dict(li=li0), gate_li=True,
                            label="sigma=0 check",
-                           init_source=("evaluate_jBS on the state anchor "
+                           init_source=("evaluate_jbs on the state anchor "
                                         "with the baseline (sigma=0) "
                                         "kinetics"),
                            raise_on_fail=False)
@@ -7375,15 +7377,15 @@ class Bouquet(SwbBaseline):
         Runs :func:`perturb_kinetic_equilibrium` -- the function every draw of
         ``generate()`` runs -- with the arguments ``generate()`` /
         ``generate_bouquet`` hand it, every sigma set to zero (kinetic,
-        j_phi and the auxiliary channels), the bootstrap scale at the centre
+        jphi_total and the auxiliary channels), the bootstrap scale at the centre
         the draws are sampled around (``sigma0_reference_scale`` of the
-        bs_scale-centred ``jBS_scale_range``; the reconstruction's own value
+        bs_scale-centred ``jbs_scale_range``; the reconstruction's own value
         for any range symmetric about 1) and, in ``jbs_delta_mode``, the
         sigma=0 reference evaluated the way ``generate_bouquet`` caches it.
         Each route starts from ``entry_snap`` (the state the check was
         handed).  Per route it measures, against the ONE reconstruction state
         (``ref`` = its bootstrap, ``li_delivered`` = its l_i, ``reference`` =
-        its q0/q95 and ``Baseline.delivered_state["j_phi_achieved"]``): the
+        its q0/q95 and ``Baseline.delivered_state["jphi_total_achieved"]``): the
         bootstrap profile / current residuals, l_i, q0, q95 and the
         total-current profile.  ``passed_draw_route`` (every route: loop
         converged, ``r_j <= rtol_j``, ``r_I <= rtol_Ip``, ``|dl_i| <=
@@ -7409,7 +7411,7 @@ class Bouquet(SwbBaseline):
             routes = self._sigma0_draw_routes()
         reference = dict(reference or {})
         _ds = getattr(bl, "delivered_state", None) or {}
-        _ja_ref = _ds.get("j_phi_achieved")
+        _ja_ref = _ds.get("jphi_total_achieved")
         _bs = float(getattr(bl, "bs_scale", 1.0))
         # exactly the draws' bootstrap scaling (generate() uses the same
         # helper): the range's centre and the after-SWB profile
@@ -7424,15 +7426,15 @@ class Bouquet(SwbBaseline):
         p_th = EC * (ne_eq * te_eq + ni_eq * ti_eq)
         psi_kin = np.asarray(bl.psi_N_kinetic, dtype=float)
         zk, zj = np.zeros_like(psi_kin), np.zeros_like(psi_N)
-        jdiff = (None if getattr(bl, "jBS_diff", None) is None
-                 else np.asarray(bl.jBS_diff, dtype=float))
+        jdiff = (None if getattr(bl, "jphi_bs_diff", None) is None
+                 else np.asarray(bl.jphi_bs_diff, dtype=float))
         _off = getattr(bl, "jphi_request_offset", None)
         blk = dict(
             what=("perturb_kinetic_equilibrium at zero perturbation with "
                   "generate()'s draw arguments (the draw's own route); "
                   "generate()'s coil regularisation, hard bounds and "
                   "homotopy are not part of the replay"),
-            scale_jBS=scale0, scale_jBS_reconstruction=_bs,
+            scale_jbs=scale0, scale_jbs_reconstruction=_bs,
             bootstrap_scaling=_scaling,
             fixed_channels=list(self.DRAW_FIXED_CHANNELS),
             l_i_target=float(bl.l_i_target),
@@ -7467,15 +7469,15 @@ class Bouquet(SwbBaseline):
 
         dref = dbase = None
         if bool(getattr(gc, "jbs_delta_mode", False)):
-            # generate_bouquet's delta cache under the loop: evaluate_jBS
+            # generate_bouquet's delta cache under the loop: evaluate_jbs
             # (RAW, at the centre scale) on a state-anchor solve of the
             # baseline total (+ jphi_diff) at the full pressure
-            from .physics import evaluate_jBS
+            from .physics import evaluate_jbs
             from .utils import pchip_derivative
             _restore()
             _pr = mygs.psi_bounds[1] - mygs.psi_bounds[0]
             _pp = solver_pp_profile(psi_N, pressure, _pr, _edge, coord=coord)
-            _yc = np.asarray(bl.j_phi, dtype=float).copy()
+            _yc = np.asarray(bl.jphi_total, dtype=float).copy()
             if getattr(bl, "jphi_diff", None) is not None:
                 _yc = _yc + np.asarray(bl.jphi_diff, dtype=float)
             mygs.set_targets(Ip=Ip, pax=solver_pax(pressure, _edge))
@@ -7485,9 +7487,9 @@ class Bouquet(SwbBaseline):
                 mygs.solve()
             except (ValueError, RuntimeError):
                 pass                      # generate_bouquet tolerates it too
-            _sel, _d = evaluate_jBS(mygs, psi_N, ne_eq, te_eq, ni_eq, ti_eq,
+            _sel, _d = evaluate_jbs(mygs, psi_N, ne_eq, te_eq, ni_eq, ti_eq,
                                     Zeff_eq, psi_pad=psi_pad,
-                                    isolate_edge=bool(gc.isolate_edge_jBS),
+                                    isolate_edge=bool(gc.isolate_edge_jbs),
                                     smooth_axis=False, coord=coord,
                                     eps_definition=getattr(
                                         gc, "eps_definition", None))
@@ -7503,19 +7505,19 @@ class Bouquet(SwbBaseline):
                 _restore()
                 d = perturb_kinetic_equilibrium(
                     mygs, psi_N, p_th, bl.ne, bl.te, bl.ni, bl.ti,
-                    np.asarray(bl.j_phi, dtype=float), zk, zk, zk, zk, zj,
+                    np.asarray(bl.jphi_total, dtype=float), zk, zk, zk, zk, zj,
                     env["n_ls"], env["t_ls"], env["j_ls"], Ip,
                     float(bl.l_i_target), Zeff_eq, len(psi_N),
-                    input_jinductive=np.asarray(bl.j_inductive, dtype=float),
+                    jphi_ind_input=np.asarray(bl.jphi_ind, dtype=float),
                     l_i_tolerance=l_i_construction_tolerance(gc),
                     psi_pad=psi_pad,
                     constrain_sawteeth=gc.constrain_sawteeth,
-                    recalculate_j_BS=gc.recalculate_j_BS,
-                    isolate_edge_jBS=gc.isolate_edge_jBS,
-                    floor_j_BS=gc.floor_j_BS, jBS_diff=jdiff,
+                    recalculate_jbs=gc.recalculate_jbs,
+                    isolate_edge_jbs=gc.isolate_edge_jbs,
+                    floor_jbs=gc.floor_jbs, jphi_bs_diff=jdiff,
                     accept_anchor_inband=gc.accept_anchor_inband,
                     perturb_jind_in_anchor=(route == "ip_renorm"),
-                    scale_jBS=scale0, jBS_scale_profile=_prof,
+                    scale_jbs=scale0, jbs_scale_profile=_prof,
                     bootstrap_kwargs=gc.bootstrap_kwargs,
                     edge_pressure=_edge,
                     diagnostic_plots=False, psi_N_kinetic=psi_kin,
@@ -7523,8 +7525,8 @@ class Bouquet(SwbBaseline):
                     z2_fast=getattr(bl, "z2_fast", None),
                     zeff_includes_fast=bool(getattr(
                         bl, "zeff_includes_fast", False)),
-                    j_NBI=bl.j_NBI, j_RF=bl.j_RF,
-                    j_other=getattr(bl, "j_other", None),
+                    jphi_nbi=bl.jphi_nbi, jphi_rf=bl.jphi_rf,
+                    jphi_other=getattr(bl, "jphi_other", None),
                     aux_sigmas=aux_zero,
                     aux_baselines=env.get("aux_baselines"),
                     aux_length_scales=env.get("aux_length_scales"),
@@ -7546,11 +7548,11 @@ class Bouquet(SwbBaseline):
                 if ctx.get("spike_used") is not None:
                     spk = np.asarray(ctx["spike_used"], dtype=float)
                     rr["bootstrap_compared"] = ("the draw's loop bootstrap "
-                                                "(composed, incl. jBS_diff)")
+                                                "(composed, incl. jphi_bs_diff)")
                 else:
-                    spk = np.asarray(d["j_BS_edge"] if d.get("j_BS_edge")
-                                     is not None else d["j_BS"], dtype=float)
-                    rr["bootstrap_compared"] = "the draw's archived j_BS split"
+                    spk = np.asarray(d["jphi_bs_edge"] if d.get("jphi_bs_edge")
+                                     is not None else d["jphi_bs"], dtype=float)
+                    rr["bootstrap_compared"] = "the draw's archived jphi_bs split"
                 cmp_ = profile_residuals(spk, ref, w, x, abs(Ip))
                 _st = mygs.get_stats(li_normalization="iter",
                                      lcfs_pad=psi_pad)
@@ -7589,7 +7591,7 @@ class Bouquet(SwbBaseline):
                               q0_d - reference.get("q0", float("nan"))),
                           dq95_vs_reference=float(
                               q95_d - reference.get("q95", float("nan"))),
-                          j_phi_vs_reference=jphi_cmp,
+                          jphi_total_vs_reference=jphi_cmp,
                           r2_ip_scale=d.get("r2_ip_scale"),
                           r2_f_ind=d.get("r2_f_ind"),
                           j0_scales=[float(v) for v in
@@ -7609,7 +7611,7 @@ class Bouquet(SwbBaseline):
                        if rr.get("r2_ip_scale") is not None else
                        "j0 scales=" + ",".join(f"{v:.4f}"
                                                for v in rr["j0_scales"]))
-                _jc = rr.get("j_phi_vs_reference") or {}
+                _jc = rr.get("jphi_total_vs_reference") or {}
                 print(f"[sigma0-check draw-route {route}] "
                       f"{'PASS' if ok else 'FAIL'}: loop "
                       f"{'converged' if rr['loop_converged'] else 'NOT converged'}"
@@ -7621,7 +7623,7 @@ class Bouquet(SwbBaseline):
                       f"{settings['tol_li']:.0e}); dq0="
                       f"{rr['dq0_vs_reference']:+.2e} dq95="
                       f"{rr['dq95_vs_reference']:+.2e}"
-                      + (f" j_phi r_j={_jc['r_j']:.2e}" if "r_j" in _jc
+                      + (f" jphi_total r_j={_jc['r_j']:.2e}" if "r_j" in _jc
                          else "") + f"; {_sc}")
         blk["passed_draw_route"] = bool(passed_all)
         return blk
@@ -7633,7 +7635,7 @@ class Bouquet(SwbBaseline):
         Raised outright -- not a workflow-lock problem the ``"custom"`` escape
         hatch could downgrade -- because the combination has no meaning:
         ``single_profile_jphi`` has no bootstrap component, and
-        ``recalculate_j_BS=False`` turns off exactly the re-evaluation the
+        ``recalculate_jbs=False`` turns off exactly the re-evaluation the
         loop is.  Called from :meth:`prepare_baseline` (the baseline loops
         without ``generate()``) and from :meth:`_validate_workflow`.
         """
@@ -7645,15 +7647,15 @@ class Bouquet(SwbBaseline):
             raise ValueError(
                 "jbs_self_consistent=True (the default) with "
                 "single_profile_jphi=True: there is no bootstrap component "
-                "to iterate (j_phi is one profile).  Set "
+                "to iterate (jphi_total is one profile).  Set "
                 "generation.jbs_self_consistent=False for a single-profile "
                 "run.")
-        if not bool(getattr(gc, "recalculate_j_BS", True)):
+        if not bool(getattr(gc, "recalculate_jbs", True)):
             raise ValueError(
                 "jbs_self_consistent=True (the default) with "
-                "recalculate_j_BS=False: the loop re-evaluates the bootstrap "
+                "recalculate_jbs=False: the loop re-evaluates the bootstrap "
                 "on every equilibrium, which is exactly what "
-                "recalculate_j_BS=False turns off.  Set "
+                "recalculate_jbs=False turns off.  Set "
                 "generation.jbs_self_consistent=False to keep the baseline "
                 "bootstrap frozen in the draws.")
 
@@ -7722,10 +7724,10 @@ class Bouquet(SwbBaseline):
         if wf == "imas-diff-c" and is_recon:
             problems.append("workflow='imas-diff-c' but the source is a g-file")
         custom = (wf == "custom") or bool(gc.allow_unsafe_workflow)
-        # Rule: j_inductive must be perturbed (both workflows do it via
+        # Rule: jphi_ind must be perturbed (both workflows do it via
         # jphi_scalar_sigma; zero sigma freezes it).
         if float(getattr(uc, "jphi_scalar_sigma", 0.0)) <= 0.0:
-            problems.append("jphi_scalar_sigma<=0 freezes j_inductive "
+            problems.append("jphi_scalar_sigma<=0 freezes jphi_ind "
                             "perturbation (violates the all-profiles rule)")
         self._check_jbs_loop_workflow(gc)
         # a method with its own route rules (engine: one draw route for both
@@ -7745,7 +7747,7 @@ class Bouquet(SwbBaseline):
                 return
             raise ValueError(msg)
         # closure_channel is consumed ONLY by the IMAS hybrid baseline
-        # (jBS_baseline_mode="ohmic" with recalculate_j_BS=True).  Anywhere
+        # (jbs_baseline_mode="ohmic" with recalculate_jbs=True).  Anywhere
         # else it used to be resolved (the structured preset even printed
         # "applied by default"), then never read -- so the caller believed a
         # closure ran that did not.  Refuse instead of ignoring.
@@ -7755,21 +7757,21 @@ class Bouquet(SwbBaseline):
             if not _is_imas:
                 problems.append(
                     f"closure_channel={_chan!r} is only read on the IMAS "
-                    "path with jBS_baseline_mode='ohmic' (the hybrid "
-                    "baseline); a g-file source has no FUSE j_inductive to "
+                    "path with jbs_baseline_mode='ohmic' (the hybrid "
+                    "baseline); a g-file source has no FUSE jphi_ind to "
                     "close on, so the channel would be silently ignored")
-            elif str(gc.jBS_baseline_mode) != "ohmic":
+            elif str(gc.jbs_baseline_mode) != "ohmic":
                 problems.append(
                     f"closure_channel={_chan!r} is only read when "
-                    f"jBS_baseline_mode='ohmic' (it is "
-                    f"{str(gc.jBS_baseline_mode)!r}), so it would be "
-                    "silently ignored; set jBS_baseline_mode='ohmic' or "
+                    f"jbs_baseline_mode='ohmic' (it is "
+                    f"{str(gc.jbs_baseline_mode)!r}), so it would be "
+                    "silently ignored; set jbs_baseline_mode='ohmic' or "
                     "leave closure_channel at 'bootstrap'")
-            elif not bool(gc.recalculate_j_BS):
+            elif not bool(gc.recalculate_jbs):
                 problems.append(
-                    f"closure_channel={_chan!r} needs recalculate_j_BS=True "
+                    f"closure_channel={_chan!r} needs recalculate_jbs=True "
                     "(the closure runs inside the SWB bootstrap split); with "
-                    "recalculate_j_BS=False it would be silently ignored")
+                    "recalculate_jbs=False it would be silently ignored")
         if isinstance(self.config.source, ReconstructionSource):
             # perturb_jind_in_anchor (route R2) is no longer a hard error on
             # the geqdsk path -- see the method docstring.  It is still not
@@ -7789,11 +7791,11 @@ class Bouquet(SwbBaseline):
                                 "find_optimal_scale/corrector matching loop "
                                 "homogenizes draws; use diff+C "
                                 "(perturb_jind_in_anchor=True)")
-            if gc.jBS_baseline_mode not in ("diff", "rescale", "ohmic"):
-                problems.append(f"IMAS path jBS_baseline_mode="
-                                f"{gc.jBS_baseline_mode!r} not in "
+            if gc.jbs_baseline_mode not in ("diff", "rescale", "ohmic"):
+                problems.append(f"IMAS path jbs_baseline_mode="
+                                f"{gc.jbs_baseline_mode!r} not in "
                                 f"('diff','rescale','ohmic')")
-            elif gc.jBS_baseline_mode == "ohmic":
+            elif gc.jbs_baseline_mode == "ohmic":
                 if str(getattr(gc, "closure_channel", "bootstrap")) \
                         not in ("bootstrap", "ohmic", "sawtooth_bootstrap",
                                 "structured"):
@@ -7853,7 +7855,7 @@ class Bouquet(SwbBaseline):
                 # that opt-out; test_custom_workflow_downgrades_to_warning
                 # pins the downgrade.  Nothing here makes it unreachable.
                 problems.append(
-                    "jBS_baseline_mode='ohmic' is baseline-only for now "
+                    "jbs_baseline_mode='ohmic' is baseline-only for now "
                     "(draw-path sigma=0 reproduction unverified); run the "
                     "baseline study without generate()")
         if not problems:
@@ -7871,8 +7873,8 @@ class Bouquet(SwbBaseline):
                  on_inspec=None, stop_check=None) -> list:
         """Generate the perturbed bouquet and archive to ``{header}.h5``.
 
-        Auto-feeds the baseline (j_phi, j_inductive, l_i_target, Ip_target) and
-        the uncertainty envelope (kinetic sigmas, j_phi sigma, GPR lengths).
+        Auto-feeds the baseline (jphi_total, jphi_ind, l_i_target, Ip_target) and
+        the uncertainty envelope (kinetic sigmas, jphi_total sigma, GPR lengths).
         ``n`` overrides ``config.generation.n_equils`` for a quick smaller run.
 
         With ``config.generation.n_inspec_target`` set, the run keeps drawing
@@ -7973,20 +7975,20 @@ class Bouquet(SwbBaseline):
         # stays readable; the full text is kept on generation_log for debugging.
         # Set BouquetConfig.verbose=True to stream it (and the tqdm progress bar).
         #
-        # The baseline built j_BS as (multiplier) x SWB(scale 1); the draws
-        # apply the same multiplier after SWB (jBS_scale_profile) and keep
-        # jBS_scale_range as the per-draw jitter inside it.  Passing the
-        # multiplier INTO SWB as scale_jBS instead is not the same thing:
+        # The baseline built jphi_bs as (multiplier) x SWB(scale 1); the draws
+        # apply the same multiplier after SWB (jbs_scale_profile) and keep
+        # jbs_scale_range as the per-draw jitter inside it.  Passing the
+        # multiplier INTO SWB as scale_jbs instead is not the same thing:
         # OFT applies it inside SWB's self-consistent iteration.
         # Under the self-consistent loop the composer takes the multiplier
         # as its (linear) scale instead: the range re-centred on bs_scale
         # (_draw_bootstrap_scaling, shared with both sigma=0 guards).
         # The method's scale range and profile (swb: neither, SWB re-solves
-        # j_BS at scale 1; engine: the range on top of s_bs(x*)).
+        # jphi_bs at scale 1; engine: the range on top of s_bs(x*)).
         _jbs_range, _bs_mult, _bs_scaling = self._draw_bootstrap_scaling(_m)
         self._draw_bootstrap_scaling_record = _bs_scaling
         if ((getattr(self, "_swb_seed_record", None) or {}).get("resolved")
-                == "source_unavailable" and bool(gc.recalculate_j_BS)
+                == "source_unavailable" and bool(gc.recalculate_jbs)
                 and not self._draws_run_jbs_loop(_m)):
             # the draws would call SWB with the generic seed in place of the
             # source seed that was asked for
@@ -8012,31 +8014,31 @@ class Bouquet(SwbBaseline):
                                loose_tol=_m.solve_loose_tol(gc.draw_solve_loose_tol)) as _solve_guard:
             self.diagnostics = generate_bouquet(
                 self.mygs, np.asarray(bl.psi_N, dtype=float), n_equils, header,
-                np.asarray(bl.j_phi, dtype=float),
+                np.asarray(bl.jphi_total, dtype=float),
                 bl.ne, bl.te, bl.ni, bl.ti,
                 env["sigma_ne"], env["sigma_te"], env["sigma_ni"], env["sigma_ti"],
                 env["sigma_jphi"],
                 env["n_ls"], env["t_ls"], env["j_ls"],
                 bl.Ip_target, bl.l_i_target, Zeff_eq,
-                input_jinductive=np.asarray(bl.j_inductive, dtype=float),
-                baseline_j_BS=(np.asarray(bl.j_BS, dtype=float)
-                               + (0.0 if bl.jBS_diff is None
-                                  else np.asarray(bl.jBS_diff, dtype=float))),
+                jphi_ind_input=np.asarray(bl.jphi_ind, dtype=float),
+                baseline_jphi_bs=(np.asarray(bl.jphi_bs, dtype=float)
+                               + (0.0 if bl.jphi_bs_diff is None
+                                  else np.asarray(bl.jphi_bs_diff, dtype=float))),
                 # the LEGACY routes' draw-construction tolerance (gc's when
                 # set, else the old 0.05); the engine's opt-in bands are its
                 # draw method's own (InspecBands)
                 l_i_tolerance=l_i_construction_tolerance(gc),
                 psi_pad=psi_pad,
                 constrain_sawteeth=gc.constrain_sawteeth,
-                recalculate_j_BS=gc.recalculate_j_BS,
-                isolate_edge_jBS=gc.isolate_edge_jBS,
-                floor_j_BS=gc.floor_j_BS,
-                jBS_diff=(None if bl.jBS_diff is None
-                          else np.asarray(bl.jBS_diff, dtype=float)),
+                recalculate_jbs=gc.recalculate_jbs,
+                isolate_edge_jbs=gc.isolate_edge_jbs,
+                floor_jbs=gc.floor_jbs,
+                jphi_bs_diff=(None if bl.jphi_bs_diff is None
+                          else np.asarray(bl.jphi_bs_diff, dtype=float)),
                 accept_anchor_inband=gc.accept_anchor_inband,
                 perturb_jind_in_anchor=gc.perturb_jind_in_anchor,
-                jBS_scale_range=_jbs_range,
-                jBS_scale_profile=_bs_mult,
+                jbs_scale_range=_jbs_range,
+                jbs_scale_profile=_bs_mult,
                 edge_pressure=resolve_edge_pressure(gc),
                 jbs_delta_mode=gc.jbs_delta_mode,
                 diagnostic_plots=gc.diagnostic_plots,
@@ -8084,7 +8086,7 @@ class Bouquet(SwbBaseline):
                 p_fast=bl.p_fast,
                 # Pressure anchor: impurity (carbon) thermal pressure via the
                 # single effective Z_imp, + the diff offset that anchors the solve
-                # pressure to the dd equilibrium.pressure (mirrors jBS_diff).
+                # pressure to the dd equilibrium.pressure (mirrors jphi_bs_diff).
                 Z_imp=getattr(bl, "Z_imp", None),
                 z_fast=getattr(bl, "z_fast", None),
                 z2_fast=getattr(bl, "z2_fast", None),
@@ -8094,10 +8096,11 @@ class Bouquet(SwbBaseline):
                 # Total-current anchor to equilibrium.j_tor (fixed offset; rides
                 # under the SWB bootstrap + perturbed j_ind in every draw).
                 jphi_diff=getattr(bl, "jphi_diff", None),
-                j_NBI=bl.j_NBI,
-                j_RF=bl.j_RF,
-                j_other=getattr(bl, "j_other", None),
-                j_sawteeth=getattr(bl, "j_sawteeth", None),
+                jphi_nbi=bl.jphi_nbi,
+                jphi_rf=bl.jphi_rf,
+                jphi_other=getattr(bl, "jphi_other", None),
+                jphi_saw=getattr(bl, "jphi_saw", None),
+                iso_update_ref_points=gc.iso_update_ref_points,
                 # Switchboard: auxiliary perturbed profiles -- rotation /
                 # transport channels (passive) + Zeff (active).
                 aux_sigmas=env.get("aux_sigmas"),
@@ -8118,13 +8121,13 @@ class Bouquet(SwbBaseline):
                              if type(self.config.source).__name__ == "ImasSource"
                              else "geqdsk"),
                 # Baseline provenance for readers: the li_metrics dict (l_i
-                # comparison, forward-solve residuals, jBS_baseline_mode,
+                # comparison, forward-solve residuals, jbs_baseline_mode,
                 # scales) and -- on a closed hybrid baseline -- the full
                 # ip_closure health record with its closure_limited verdict.
                 # Downstream bands need that flag per slice; before this it
                 # lived only on the in-memory Baseline object.
                 baseline_meta=getattr(bl, "li_metrics", None),
-                # BOTH paths: archive the ACHIEVED FSA j_phi of each converged
+                # BOTH paths: archive the ACHIEVED FSA jphi_total of each converged
                 # solve (baseline + draws) so the stored 1-D current always
                 # matches the stored eqdsk in the same group. On the IMAS path
                 # the single-pass forward solve lands a few % off its anchor
@@ -8147,8 +8150,8 @@ class Bouquet(SwbBaseline):
                 draw_method=_m,
                 coord=getattr(bl, "coord", coords.PSI),
                 source_seed_profile=getattr(bl, "swb_seed_profile", None),
-                source_jphi_fixed=getattr(bl, "swb_jphi_fixed", None),
-                # owner decision D2: p'G archived as its own j_pressure, the
+                source_jphi_fixed=getattr(bl, "jphi_fixed", None),
+                # owner decision D2: p'G archived as its own jphi_pd, the
                 # archived state's own (legacy: evaluated on it there)
                 baseline_split=_archive_baseline_split(
                     bl, getattr(_m, "name", "legacy")),
@@ -8161,7 +8164,7 @@ class Bouquet(SwbBaseline):
         self.solve_failures = list(_solve_guard.records)
         print(_solve_guard.summary())
 
-        # Rejected draw attempts, OUTSIDE the capture: a draw the j_BS loop
+        # Rejected draw attempts, OUTSIDE the capture: a draw the jphi_bs loop
         # (or the coil-saturation guard, or the homotopy) rejected is never
         # archived and never counted, so the only trace of it is here.
         from .TokaMaker_interface import _rejection_summary
@@ -8178,7 +8181,7 @@ class Bouquet(SwbBaseline):
                       if r.get("reason") in _loop_codes)
         if _n_loop:
             print(f"[generate] {_n_loop} of them rejected by the "
-                  "self-consistent j_BS loop stage or its coil-saturation "
+                  "self-consistent jphi_bs loop stage or its coil-saturation "
                   "guard; per-attempt records: Bouquet.draw_rejections")
         # the method's own summary, outside the capture (engine: its capped
         # solves, Bouquet.engine_draw_cap_events)
@@ -8383,9 +8386,9 @@ class Bouquet(SwbBaseline):
             # (which already carries the reconstruction's bootstrap
             # scaling), so the configured range is used as is -- 1.0 is the
             # reconstruction's value
-            m.scale_range = (None if gc.jBS_scale_range is None
-                             else (float(gc.jBS_scale_range[0]),
-                                   float(gc.jBS_scale_range[1])))
+            m.scale_range = (None if gc.jbs_scale_range is None
+                             else (float(gc.jbs_scale_range[0]),
+                                   float(gc.jbs_scale_range[1])))
             if _s0 is not None:
                 m.scale_range = (1.0, 1.0)
                 m.sigma0_probe = _s0
@@ -8450,7 +8453,7 @@ class Bouquet(SwbBaseline):
 
     def plot_bouquet(self, mode: str = "all", selection: str = "all",
                      layout: str = "stack", pub_style: bool = False):
-        """Overlay plots of the generated bouquet (kinetic / pressure / j_phi /
+        """Overlay plots of the generated bouquet (kinetic / pressure / jphi_total /
         boundary). Thin wrapper over :func:`bouquet.plotting.plot_bouquet` on
         this run's HDF5 (``{output_header}.h5``). ``pub_style=False`` (default)
         is one combined dashboard figure; ``pub_style=True`` (with

@@ -162,9 +162,9 @@ def _probe(outdir, which):
                     None if bl.reconstruction_metrics is None else
                     {k: v for k, v in bl.reconstruction_metrics.items()
                      if k != "jbs_loop"}),
-                j_phi_achieved=np.asarray(ds.get("j_phi_achieved"),
+                jphi_total_achieved=np.asarray(ds.get("jphi_total_achieved"),
                                           float).tolist()
-                if ds.get("j_phi_achieved") is not None else None,
+                if ds.get("jphi_total_achieved") is not None else None,
                 psi_N=np.asarray(bl.psi_N, float).tolist())
         _stage("F", _F)
         snapF = mygs.copy_eq()
@@ -200,13 +200,13 @@ def _probe(outdir, which):
                 rec = (json.loads(grp.attrs[DELIVERED_STATE_ATTR])
                        if DELIVERED_STATE_ATTR in grp.attrs else None)
                 eqb = bytes(grp["eqdsk"][()]) if "eqdsk" in grp else None
-                jphi = (np.asarray(grp["j_phi"][()], float).tolist()
-                        if "j_phi" in grp else None)
+                jphi = (np.asarray(grp["jphi_total"][()], float).tolist()
+                        if "jphi_total" in grp else None)
             return dict(attrs={k: float(v) for k, v in attrs.items()},
                         delivered_state_record=rec,
                         saved_gfile=(None if eqb is None
                                      else _gfile_numbers(eqb)),
-                        archived_j_phi=jphi)
+                        archived_jphi_total=jphi)
         _stage("archive", _gen)
     except Exception as e:
         out["fatal"] = f"{type(e).__name__}: {e}\n" + traceback.format_exc()
@@ -274,7 +274,7 @@ def test_the_unperturbed_draw_reproduces_the_reconstruction(request, fix,
     assert rr["r_I"] <= _S["rtol_Ip"], rr
     assert rr["dl_i_vs_l_i_target"] <= _S["tol_li"], rr
     # reported beside them (no bar of their own in the loop): present
-    for k in ("dq0_vs_reference", "dq95_vs_reference", "j_phi_vs_reference"):
+    for k in ("dq0_vs_reference", "dq95_vs_reference", "jphi_total_vs_reference"):
         assert k in rr, (route, k)
     if route == "ip_renorm":
         # R2's own approved budget, unchanged
@@ -346,7 +346,7 @@ def test_the_saved_baseline_gfile_is_the_delivered_state(request, fix):
     assert abs(sg["q95"] - Fg["q95"]) <= _S["tol_q0"], (sg["q95"], Fg["q95"])
     assert _cur_rj(sg["jtor"], Fg["jtor"], Fg["psi_N"]) <= _S["rtol_j"]
     # the archived baseline current is the delivered state's achieved one
-    assert _cur_rj(a["archived_j_phi"], F["j_phi_achieved"],
+    assert _cur_rj(a["archived_jphi_total"], F["jphi_total_achieved"],
                    F["psi_N"]) <= _S["rtol_j"]
 
 

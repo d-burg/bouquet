@@ -9,7 +9,7 @@ JSON of measurements and the tests below read it.
 Plan tests covered here (the iteration-only ones -- (c), (d), (e) on synthetic
 maps -- are in ``test_jbs_loop.py``; (d) and (e) also run live below):
 
-(a) ``evaluate_jBS`` on a uniform grid equals ``solve_with_bootstrap``'s own
+(a) ``evaluate_jbs`` on a uniform grid equals ``solve_with_bootstrap``'s own
     FIRST-pass Redl evaluation on the same equilibrium, bit for bit (needs an
     OFT build whose ``solve_with_bootstrap`` takes ``psi_N=``; skipped with the
     reason otherwise), with ``<a>/<R>`` (``eps_definition="a_over_R"``) on
@@ -22,7 +22,7 @@ maps -- are in ``test_jbs_loop.py``; (d) and (e) also run live below):
 (a3) the default ``r_over_R_geo`` epsilon at psi_N 0.999 equals the solved
     boundary's ``a/R_geo`` to 1e-3, its ``nu*`` R the boundary's ``R_geo``;
 (b) the same physical profiles on a uniform and on a strongly non-uniform
-    (rho-like) psi_N grid give the same j_BS on a live equilibrium, while the
+    (rho-like) psi_N grid give the same jphi_bs on a live equilibrium, while the
     legacy uniform reading of the non-uniform arrays does not (defect A);
     plus the IMAS-type grid whose first intervals are finer than psi_pad;
 (d) two different initial guesses (the anchor evaluation and the legacy SWB
@@ -31,7 +31,7 @@ maps -- are in ``test_jbs_loop.py``; (d) and (e) also run live below):
     delivers the slice flagged;
 (f) the sigma=0 draw loop reproduces the baseline under the loop (IMAS diff
     mode and the reconstruction path), and a sigma=0 route-R2 draw converges;
-(g) diff mode at sigma=0 reproduces the source j_BS exactly.
+(g) diff mode at sigma=0 reproduces the source jphi_bs exactly.
 (7f) a perturbed draw's anchor loop reaches the same fixed point from its own
     start (Redl at the anchor on the draw's own kinetics) and from the
     unperturbed baseline bootstrap (the counterfactual), and the per-draw
@@ -40,7 +40,7 @@ maps -- are in ``test_jbs_loop.py``; (d) and (e) also run live below):
 Plus: the loop in every IMAS baseline mode/closure channel converges and
 records its block; the structured closure's correctors are subsumed with their
 bookkeeping intact; the MSE stage composes with the loop (converge without
-MSE -> Jacobian -> chord steps with j_BS re-evaluated -> final Jacobian
+MSE -> Jacobian -> chord steps with jphi_bs re-evaluated -> final Jacobian
 refresh).
 """
 import json
@@ -108,7 +108,7 @@ def _imas_probe(outdir, part):
     from bouquet.baseline import resolve_baseline
     from bouquet.jbs_loop import (JBSNotConverged, profile_residuals,
                                   residual_weights, weighted_norm)
-    from bouquet.physics import (EPS_ROUTE_SANITY_RTOL, evaluate_jBS,
+    from bouquet.physics import (EPS_ROUTE_SANITY_RTOL, evaluate_jbs,
                                  fork_eps_diagnostic, geometric_eps)
     from bouquet.TokaMaker_interface import _draw_jbs_composer
     from bouquet.utils import pchip_interp
@@ -122,7 +122,7 @@ def _imas_probe(outdir, part):
     b.setup_solver()
     g = b.config.generation
     src = resolve_baseline(b.config, None)
-    src_jbs = np.asarray(src.j_BS, dtype=float)
+    src_jbs = np.asarray(src.jphi_bs, dtype=float)
 
     # ---- legacy baseline (flag OFF): the evaluator on its equilibrium ------
     if part != "core":
@@ -156,7 +156,7 @@ def _imas_probe(outdir, part):
 
     # (a3) the default eps on the outermost evaluated surface (psi_N 0.999)
     # equals the solved boundary's a/R_geo (traced by OFT itself)
-    _jd, _dd = evaluate_jBS(mygs, psi, *kin, smooth_axis=False)
+    _jd, _dd = evaluate_jbs(mygs, psi, *kin, smooth_axis=False)
     _lcfs = None
     for _x in (1.0, 0.9999):
         try:
@@ -182,11 +182,16 @@ def _imas_probe(outdir, part):
     # bar holds on the fork too (the fork's own eps is not bouquet's -- a2)
     _swb_par = inspect.signature(B.solve_with_bootstrap).parameters
     _use_sauter = _swb_par.get("use_sauter_eps")
-    swb_eps = "a_over_R"
+    swb_eps, _R_key = "a_over_R", "R_avg"
     _swb_eps_kw = ({} if _use_sauter is None else {"use_sauter_eps": False})
+    from bouquet.oft_bootstrap import toolkit_options
+    if "taper_edge_jphi" in (toolkit_options() or ()):
+        # OFT PSFC_dev: its nu* takes R_geo, so its first pass is r/R_geo with
+        # R_geo in nu*, the evaluator's r_over_R_geo
+        swb_eps, _R_key, _swb_eps_kw = "r_over_R_geo", "R_nu_star", {"use_sauter_eps": True}
     out["a_eps_definition"] = swb_eps
     if "psi_N" in _swb_par:
-        j_new, d_new = evaluate_jBS(mygs, psi, *kin, smooth_axis=False,
+        j_new, d_new = evaluate_jbs(mygs, psi, *kin, smooth_axis=False,
                                     eps_definition=swb_eps)
         cap = {}
         orig = B.redl_bootstrap
@@ -212,24 +217,24 @@ def _imas_probe(outdir, part):
         finally:
             B.redl_bootstrap = orig
         out["a"] = dict(
-            bitwise=bool(np.array_equal(cap["j"], d_new["j_dot_B"])),
+            bitwise=bool(np.array_equal(cap["j"], d_new["jdotB_bs"])),
             inputs_bitwise={k: bool(np.array_equal(
                 np.asarray(cap["kw"][k]), d_new[m])) for k, m in
-                (("fT", "f_T"), ("q", "q"), ("eps", "eps"), ("R", "R_avg"),
+                (("fT", "f_T"), ("q", "q"), ("eps", "eps"), ("R", _R_key),
                  ("I_psi", "F"))},
-            max_abs=float(np.max(np.abs(cap["j"] - d_new["j_dot_B"]))))
+            max_abs=float(np.max(np.abs(cap["j"] - d_new["jdotB_bs"]))))
     else:
         out["a"] = dict(skip="this OFT build's solve_with_bootstrap has no "
                              "psi_N argument, so its first pass cannot be "
                              "evaluated on the caller's grid")
 
     # (b) live: uniform vs rho-like non-uniform grid on the same equilibrium
-    ju, _ = evaluate_jBS(mygs, psi, *kin, smooth_axis=False)
+    ju, _ = evaluate_jbs(mygs, psi, *kin, smooth_axis=False)
     rho = np.linspace(0.0, 1.0, 1025)
     xn = rho ** 2
     kin_n = tuple(pchip_interp(psi, np.asarray(a, float), xn) for a in kin)
-    jn, dn = evaluate_jBS(mygs, xn, *kin_n, smooth_axis=False)
-    jl, _ = evaluate_jBS(mygs, np.linspace(0.0, 1.0, xn.size), *kin_n,
+    jn, dn = evaluate_jbs(mygs, xn, *kin_n, smooth_axis=False)
+    jl, _ = evaluate_jbs(mygs, np.linspace(0.0, 1.0, xn.size), *kin_n,
                          smooth_axis=False)      # legacy uniform reading
     w, x, _k = residual_weights(mygs.copy_eq(), psi)
     sel = (psi > 0.02) & (psi < 0.99)
@@ -245,7 +250,7 @@ def _imas_probe(outdir, part):
     xi = np.sort(xi)
     xi = xi[np.concatenate([[True], np.diff(xi) > 0])]
     kin_i = tuple(pchip_interp(psi, np.asarray(a, float), xi) for a in kin)
-    ji, di = evaluate_jBS(mygs, xi, *kin_i)
+    ji, di = evaluate_jbs(mygs, xi, *kin_i)
     out["imas_grid"] = dict(finite=bool(np.all(np.isfinite(ji))),
                             n=int(xi.size),
                             n_inside_pad=int(np.sum(xi < 1e-3)),
@@ -257,15 +262,15 @@ def _imas_probe(outdir, part):
     bl = b.prepare_baseline()
     rec = bl.li_metrics["jbs_loop"]
     peak = float(np.max(np.abs(src_jbs)))
-    comp = _draw_jbs_composer(psi, *kin, 1e-3, bool(g.isolate_edge_jBS),
-                              1.0, bool(g.floor_j_BS),
-                              np.asarray(bl.jBS_diff, float), None, None)
+    comp = _draw_jbs_composer(psi, *kin, 1e-3, bool(g.isolate_edge_jbs),
+                              1.0, bool(g.floor_jbs),
+                              np.asarray(bl.jphi_bs_diff, float), None, None)
     spike_on_base, _f, _d = comp(b.mygs.copy_eq())
     out["g"] = dict(
         converged=bool(rec["converged"]), n_passes=int(rec["n_passes"]),
-        definition=rec.get("jBS_diff_definition"),
+        definition=rec.get("jbs_diff_definition"),
         split_identity=float(np.max(np.abs(
-            np.asarray(bl.j_BS) + np.asarray(bl.jBS_diff) - src_jbs)) / peak),
+            np.asarray(bl.jphi_bs) + np.asarray(bl.jphi_bs_diff) - src_jbs)) / peak),
         spike_on_baseline=float(np.max(np.abs(spike_on_base - src_jbs))
                                 / peak))
     # ---- (f) sigma=0 invariant under the loop (diff baseline) --------------
@@ -299,7 +304,7 @@ def _imas_probe_loop(outdir, part, b, g, out):
             reasons=list(ic.get("closure_limited_reasons", ()) or ()),
             ip_closure_has_block=("jbs_loop" in ic),
             l_i=float(blx.l_i_target),
-            j_BS=[float(v) for v in blx.j_BS],
+            jphi_bs=[float(v) for v in blx.jphi_bs],
             n_extra_solves=ic.get("n_extra_solves"),
             sawtooth_verdict=ic.get("sawtooth_verdict"),
             q0_residual=ic.get("q0_residual"),
@@ -315,13 +320,13 @@ def _imas_probe_loop(outdir, part, b, g, out):
 
     if part == "structured":
         return _imas_probe_structured(outdir, b, g, out, _run)
-    _run("rescale", jBS_baseline_mode="rescale")
-    _run("ohmic_anchor", jBS_baseline_mode="ohmic",
+    _run("rescale", jbs_baseline_mode="rescale")
+    _run("ohmic_anchor", jbs_baseline_mode="ohmic",
          closure_channel="bootstrap", jbs_init="anchor")
-    _run("ohmic_swb", jBS_baseline_mode="ohmic",
+    _run("ohmic_swb", jbs_baseline_mode="ohmic",
          closure_channel="bootstrap", jbs_init="swb")
     g.jbs_init = "anchor"
-    _run("sawtooth", jBS_baseline_mode="ohmic",
+    _run("sawtooth", jbs_baseline_mode="ohmic",
          closure_channel="sawtooth_bootstrap")
     # (e) live: a loop that cannot converge (two passes, the first of which
     # starts from the anchor) raises; "flag" delivers it flagged
@@ -341,7 +346,7 @@ def _imas_probe_loop(outdir, part, b, g, out):
 
 def _imas_probe_structured(outdir, b, g, out, _run):
     import numpy as np
-    g.jBS_baseline_mode = "ohmic"
+    g.jbs_baseline_mode = "ohmic"
     from bouquet.config import GenerationConfig
     # the shipped default ceiling (see the note at the top of the module)
     assert g.jbs_max_passes == GenerationConfig().jbs_max_passes
@@ -411,19 +416,19 @@ def _recon_probe(outdir):
     zk, zj = np.zeros_like(psi_kin), np.zeros_like(psi_N)
     d = perturb_kinetic_equilibrium(
         b.mygs, psi_N, pressure, bl.ne, bl.te, bl.ni, bl.ti,
-        np.asarray(bl.j_phi, dtype=float), zk, zk, zk, zk, zj,
+        np.asarray(bl.jphi_total, dtype=float), zk, zk, zk, zk, zj,
         0.5, 0.4, 0.25, float(bl.Ip_target), float(bl.l_i_target), Zeff_eq,
-        len(psi_N), input_jinductive=np.asarray(bl.j_inductive, float),
+        len(psi_N), jphi_ind_input=np.asarray(bl.jphi_ind, float),
         l_i_tolerance=g.l_i_tolerance, psi_pad=psi_pad,
-        constrain_sawteeth=False, recalculate_j_BS=True,
-        isolate_edge_jBS=g.isolate_edge_jBS, floor_j_BS=g.floor_j_BS,
-        scale_jBS=float(getattr(bl, "bs_scale", 1.0)),
+        constrain_sawteeth=False, recalculate_jbs=True,
+        isolate_edge_jbs=g.isolate_edge_jbs, floor_jbs=g.floor_jbs,
+        scale_jbs=float(getattr(bl, "bs_scale", 1.0)),
         perturb_jind_in_anchor=True, accept_anchor_inband=False,
         psi_N_kinetic=psi_kin, p_thresh=0.05, rng=12345,
         jbs_loop=jbs_settings(g, draw=True))[6]
     w, x, _k = residual_weights(b.mygs.copy_eq(), psi_N, psi_pad)
-    cmp_ = profile_residuals(np.asarray(d["j_BS"], float),
-                             np.asarray(bl.j_BS, float), w, x,
+    cmp_ = profile_residuals(np.asarray(d["jphi_bs"], float),
+                             np.asarray(bl.jphi_bs, float), w, x,
                              float(bl.Ip_target))
     out["f_draw"] = dict(
         converged=bool(d["jbs_loop"]["converged"]),
@@ -456,13 +461,13 @@ def _recon_probe(outdir):
     ti_d = k2e(bl.ti) * 1.04
     from bouquet.physics import ELEMENTARY_CHARGE as _EC   # loop-on draws
     pres_d = _EC * (ne_d * te_d + ni_d * ti_d)
-    j_ind = np.asarray(bl.j_inductive, dtype=float)
-    j_phi_bl = np.asarray(bl.j_phi, dtype=float)
-    j_fix = j_phi_bl - j_ind - np.asarray(bl.j_BS, dtype=float)
+    j_ind = np.asarray(bl.jphi_ind, dtype=float)
+    jphi_total_bl = np.asarray(bl.jphi_total, dtype=float)
+    j_fix = jphi_total_bl - j_ind - np.asarray(bl.jphi_bs, dtype=float)
     compose = _draw_jbs_composer(
         psi_N, ne_d, te_d, ni_d, ti_d, Zeff_eq, psi_pad,
-        bool(g.isolate_edge_jBS), float(getattr(bl, "bs_scale", 1.0)),
-        bool(g.floor_j_BS), None, None, None)
+        bool(g.isolate_edge_jbs), float(getattr(bl, "bs_scale", 1.0)),
+        bool(g.floor_jbs), None, None, None)
     Ip = float(bl.Ip_target)
     mygs = b.mygs
 
@@ -488,10 +493,10 @@ def _recon_probe(outdir):
         return _meas()
 
     out["draw_init"] = {}
-    for tag in ("baseline_jBS", "own_kinetics"):
-        _solve(j_phi_bl)                   # the draw's state anchor
+    for tag in ("baseline_jbs", "own_kinetics"):
+        _solve(jphi_total_bl)                   # the draw's state anchor
         li0 = _meas()["li"]
-        jbs0 = (np.asarray(bl.j_BS, dtype=float) if tag == "baseline_jBS"
+        jbs0 = (np.asarray(bl.jphi_bs, dtype=float) if tag == "baseline_jbs"
                 else compose(mygs.copy_eq())[0])
         r = run_jbs_loop(jbs0, _step, lambda m: compose(m["snap"])[0],
                          jbs_settings(g, draw=True), Ip=abs(Ip),
@@ -502,7 +507,7 @@ def _recon_probe(outdir):
             converged=bool(r["converged"]),
             n_passes=int(r["record"]["n_passes"]),
             r_j=r["record"]["r_j"], init_source=r["record"]["init_source"],
-            j_BS=np.asarray(r["jbs_used"], float).tolist(),
+            jphi_bs=np.asarray(r["jbs_used"], float).tolist(),
             li=float(_meas()["li"]))
 
     # ---- B1: the post-homotopy re-solves go through the saturation guard --
@@ -520,7 +525,7 @@ def _recon_probe(outdir):
     ctx["spike_used"] = 1.02 * np.asarray(ctx["spike_used"], dtype=float)
     out["b1"] = {}
     for tag, lim in (("saturating", 0.01), ("headroom", 10.0)):
-        _solve(j_phi_bl)
+        _solve(jphi_total_bl)
         cur, _ = mygs.get_coil_currents()
         base = {n: float(v) / 1.02 for n, v in cur.items()}
         guard = _make_coil_saturation_guard(mygs, base, ("F9A", "F9B"),
@@ -561,7 +566,7 @@ def _legacy_probe(outdir, part):
     import OpenFUSIONToolkit.TokaMaker.bootstrap as B
 
     _harness.assert_bouquet_is_repo_local()
-    calls = {"evaluate_jBS": 0, "run_jbs_loop": 0, "solve_with_bootstrap": 0}
+    calls = {"evaluate_jbs": 0, "run_jbs_loop": 0, "solve_with_bootstrap": 0}
 
     def _tripwire(name):
         def _f(*a, **k):
@@ -570,7 +575,7 @@ def _legacy_probe(outdir, part):
                                  "jbs_self_consistent=False")
         return _f
 
-    P.evaluate_jBS = _tripwire("evaluate_jBS")
+    P.evaluate_jbs = _tripwire("evaluate_jbs")
     L.run_jbs_loop = _tripwire("run_jbs_loop")
     _swb = B.solve_with_bootstrap
 
@@ -637,7 +642,7 @@ def _legacy_probe_imas(outdir, calls, _archived_jbs_attrs, out):
                     swb_baseline=n2 - n1,
                     archived=_archived_jbs_attrs(
                         bi.config.output_header + ".h5"))
-    gi.jBS_baseline_mode = "ohmic"
+    gi.jbs_baseline_mode = "ohmic"
     gi.closure_channel = "structured"
     gi.structured_li_target = None
     n3 = calls["solve_with_bootstrap"]
@@ -777,7 +782,7 @@ def test_g_diff_mode_sigma0_reproduces_the_source_bootstrap_exactly(imas):
     assert g["converged"] and g["n_passes"] == 0
     assert "pure model offset" in g["definition"]
     # the baseline split and the sigma=0 draw's first evaluation on the
-    # delivered baseline both ARE the source j_BS, to rounding
+    # delivered baseline both ARE the source jphi_bs, to rounding
     assert g["split_identity"] <= 1e-12, g
     assert g["spike_on_baseline"] <= 1e-12, g
 
@@ -805,7 +810,7 @@ def test_every_mode_converges_and_records_its_block(request, fix, tag):
     assert r["converged"], (tag, r["r_j"], r["r_I"], r["dl_i"], r["dq0"])
     for k in ("enabled", "init", "grid", "n_passes", "converged",
               "tolerances", "omega", "r_j", "r_I", "dl_i", "dq0", "I_BS",
-              "jBS_peak_psiN", "jBS_peak", "wall_s", "evaluate_jBS_version",
+              "jbs_peak_psiN", "jbs_peak", "wall_s", "evaluate_jbs_version",
               "oft_build"):
         assert k in r["keys"], (tag, k)
     # the last two passes meet every active criterion
@@ -823,7 +828,7 @@ def test_d_the_fixed_point_does_not_depend_on_the_initial_guess(imas_modes):
     assert a["init"] == "anchor" and s["init"] == "swb"
     # each delivered bootstrap is within rtol_j of its own fixed-point
     # residual; two converged runs of a contraction sit within a few rtol_j
-    assert _rj(a["j_BS"], s["j_BS"]) <= 5 * _S["rtol_j"]
+    assert _rj(a["jphi_bs"], s["jphi_bs"]) <= 5 * _S["rtol_j"]
     assert abs(a["l_i"] - s["l_i"]) <= 2 * _S["tol_li"]
 
 
@@ -836,7 +841,7 @@ def test_e_non_convergence_raises_and_flag_mode_flags_the_slice(imas_modes):
     f = imas_modes["e_flag"]
     assert f["converged"] is False
     assert f["closure_limited"]
-    assert any(str(x).startswith("j_BS loop: ") for x in f["reasons"])
+    assert any(str(x).startswith("jphi_bs loop: ") for x in f["reasons"])
 
 
 @pytest.mark.solver
@@ -845,7 +850,7 @@ def test_axis_row_channels_subsume_the_corrector_with_bookkeeping(
         imas_modes, imas_structured):
     for r in (imas_modes["sawtooth"], imas_structured["structured"]):
         assert r["n_extra_solves"] == r["n_passes"] - 1
-        assert "j_BS loop" in str(r["sawtooth_verdict"])
+        assert "jphi_bs loop" in str(r["sawtooth_verdict"])
         assert r["q0_residual"] is not None
         assert r["q0_solved_predictor"] is not None
         # the q0 acceptance is still the unchanged q0_tol flag
@@ -904,7 +909,7 @@ def test_f_sigma0_route_r2_draw_converges_near_the_baseline(recon):
     # the draw's first loop started from Redl at its anchor on its own
     # kinetics, and the per-draw block says so
     assert d["init_source"].startswith(
-        "evaluate_jBS on the draw's state-anchor equilibrium"), d
+        "evaluate_jbs on the draw's state-anchor equilibrium"), d
     assert d["loops"] and d["loops"][0]["init_source"] == d["init_source"]
 
 
@@ -939,13 +944,13 @@ def test_draw_fixed_point_does_not_depend_on_its_start(recon):
     perturbed kinetics.  Initialisation only: the same draw loop started from
     the unperturbed baseline bootstrap (the counterfactual) converges to the
     same fixed point; the own-kinetics start begins closer to it."""
-    a = recon["draw_init"]["baseline_jBS"]
+    a = recon["draw_init"]["baseline_jbs"]
     b = recon["draw_init"]["own_kinetics"]
     assert a["converged"] and b["converged"], (a["r_j"], b["r_j"])
-    assert a["init_source"] == "baseline_jBS"
+    assert a["init_source"] == "baseline_jbs"
     assert b["init_source"] == "own_kinetics"
     # the same bar as the baseline's init-independence test (d)
-    assert _rj(a["j_BS"], b["j_BS"]) <= 5 * _S["rtol_j"]
+    assert _rj(a["jphi_bs"], b["jphi_bs"]) <= 5 * _S["rtol_j"]
     assert abs(a["li"] - b["li"]) <= 2 * _S["tol_li"]
     assert b["r_j"][0] < a["r_j"][0]
 
@@ -978,7 +983,7 @@ def test_the_legacy_flag_never_enters_the_loop(legacy):
     the IMAS diff baseline and the structured closure, and neither the loop
     kernel nor the Redl evaluator is ever called."""
     c = legacy["calls"]
-    assert c["evaluate_jBS"] == 0 and c["run_jbs_loop"] == 0, c
+    assert c["evaluate_jbs"] == 0 and c["run_jbs_loop"] == 0, c
     r = legacy["recon"]
     assert r["swb_recon"] >= 1, r               # the recon's own SWB call
     assert r["swb_total"] > r["swb_recon"], r   # + the sigma=0 check / draw

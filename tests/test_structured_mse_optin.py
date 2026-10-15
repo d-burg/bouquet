@@ -188,7 +188,7 @@ def _scenarios(patch):
 
     def pipeline(**kw):
         gc = GenerationConfig(closure_channel="structured",
-                              jBS_baseline_mode="ohmic", **kw)
+                              jbs_baseline_mode="ohmic", **kw)
         cyl = _Cyl(psi, Ip_s, li_scale)
         probe = j_ind + j_bs + j_fix
         bl = types.SimpleNamespace(sawtooth=None, ip_closure=None)
@@ -197,19 +197,19 @@ def _scenarios(patch):
                 gc, bl, _Snap(cyl), dict(g), probe, psi, j_ind, j_bs, j_fix,
                 probe, 1.0, abs(Ip_s), w, c, lin(j_ind), lin(j_bs),
                 lin(j_fix))
-        bl.j_inductive, bl.j_BS = s_ind * j_ind, s_bs * j_bs
-        bl.j_phi = bl.j_inductive + bl.j_BS + j_fix
+        bl.jphi_ind, bl.jphi_bs = s_ind * j_ind, s_bs * j_bs
+        bl.jphi_total = bl.jphi_ind + bl.jphi_bs + j_fix
         bl.ohm_scale, bl.bs_scale = ohm, bs
         bl.ip_closure = dict(closure_limited=False,
                              closure_limited_reasons=(), **extra)
-        cyl.solve(bl.j_phi)
+        cyl.solve(bl.jphi_total)
         if state is not None:
             Bouquet._close_ip_structured_corrector(
                 state, bl, _GS(cyl), cyl.solve,
                 ip_of=lambda j: float(lin(j) + c),
                 roundtrip_gate=Bouquet._structured_roundtrip_gate(abs(Ip_s)))
-        return dict(record=bl.ip_closure, j_phi=bl.j_phi,
-                    j_inductive=bl.j_inductive, j_BS=bl.j_BS,
+        return dict(record=bl.ip_closure, jphi_total=bl.jphi_total,
+                    jphi_ind=bl.jphi_ind, jphi_bs=bl.jphi_bs,
                     ohm_scale=bl.ohm_scale, bs_scale=bl.bs_scale,
                     n_solves=cyl.n, state=(None if state is None
                                            else sorted(state)))

@@ -177,7 +177,7 @@ def test_the_fixture_is_a_self_consistent_bootstrap_run():
 
 
 def test_the_fixture_archives_the_input_current(manifest):
-    """The systematics replay feeds ``_baseline/j_phi`` back as the input of
+    """The systematics replay feeds ``_baseline/jphi_total`` back as the input of
     its baseline solve, so the fixture must archive the INPUT current
     (``regenerate_golden_run.py``, ``store_achieved_jphi=False``).  A fixture
     regenerated through plain ``Bouquet.generate()`` archives the ACHIEVED

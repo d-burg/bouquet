@@ -180,7 +180,7 @@ from a SECOND TokaMaker solve with a different current profile (same
 kinetics, the >10 mm surface shift), each slice's gm*/f/p'/rho_tor_norm from
 `physics.capture_equilibrium_fsa` converted to COCOS 11, core_profiles on a
 rho-uniform 257 grid, `j_total` from analytic ohmic + the Redl bootstrap
-(`physics.evaluate_jBS(...)[1]["j_dot_B"]`) + one analytic beam, and `j_tor`
+(`physics.evaluate_jBS(...)[1]["jdotB_bs"]`) + one analytic beam, and `j_tor`
 from `j_total` by A6 on the PREVIOUS slice (`io.imas._jtor_from_jpar`), so the
 reader's pairing check passes at round-off.
 

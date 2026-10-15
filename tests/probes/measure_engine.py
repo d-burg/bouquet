@@ -15,7 +15,7 @@ interpreter (``OFT_env`` is a per-process singleton).  Per part it records:
 * the DISTANCE-TO-INPUT table, in the units of the three-state comparison
   report (g-file: l_i(3) matched and l_i(1) free, q on axis and at
   psi_N = 0.02, q95, the q-profile max/rms over psi_N 0.05-0.95, the
-  achieved <j_phi> against the input core (psi_N < 0.8) / edge (>= 0.8)
+  achieved <jphi_total> against the input core (psi_N < 0.8) / edge (>= 0.8)
   max/rms in % of the input's peak, beta_N, W_MHD, beta_p, the LCFS
   distance rms/max, requested - achieved core/edge; modelling source: the
   same against the IDS's own li_3, q profile, j_tor and boundary);
@@ -59,7 +59,7 @@ solver's frame (its own pressure, zero at the boundary) against the input's
 ``p - p_edge`` quantities, and the full frame (``p_sep`` added back) against
 the input's full-pressure quantities; a g-file's edge pressure is read from
 its own ``PRES`` array.  Stage ``edge`` records the solved ``P'``, the
-pressure, the achieved ``<j_phi>`` and its pressure-driven part on the
+pressure, the achieved ``<jphi_total>`` and its pressure-driven part on the
 engine grid, the edge current over psi_N 0.95-1 and the pressure-driven
 current at the boundary; stage ``solves`` every GS solve of the part
 (iterations, seconds; opt-in with ``BQ_ENGINE_PROBE_SOLVELOG=1``, off the
@@ -257,7 +257,7 @@ def _distance_gfile(b, bl, psi_pad):
     # the achieved current is SAMPLED on the solver's uniform grid; every
     # comparison below is on the input's psi_N (see _registered)
     A = _registered(A_u, psi, psi_pad)
-    R = np.asarray(bl.j_phi, float)
+    R = np.asarray(bl.jphi_total, float)
     st_i = mygs.get_stats(lcfs_pad=psi_pad, li_normalization="iter")
     st_s = mygs.get_stats(lcfs_pad=psi_pad, li_normalization="std")
     qin = np.abs(np.asarray(eq.qpsi, float))
@@ -400,7 +400,7 @@ def _distance_ids(b, bl, psi_pad):
     # (an IDS grid is not uniform: index for index this compared the current
     # at one radius with the source's at another)
     A = _registered(A_u, psi, psi_pad)
-    R = np.asarray(bl.j_phi, float)
+    R = np.asarray(bl.jphi_total, float)
     st_i = mygs.get_stats(lcfs_pad=psi_pad, li_normalization="iter")
     qp = np.abs(_q_profile(mygs, psi))
     m = (psi >= 0.05) & (psi <= 0.95)
@@ -425,7 +425,7 @@ def _distance_ids(b, bl, psi_pad):
             core=_pct_stats(A - jin, peak, core),
             edge=_pct_stats(A - jin, peak, edge),
             note=("the synthetic OMAS j_tor was written as a jphi-linterp "
-                  "input (<j_phi>), so this is like for like on THIS file "
+                  "input (<jphi_total>), so this is like for like on THIS file "
                   "only (jphi convention experiment, claim (d))")),
         requested_minus_achieved_pct_of_peak=dict(
             core=_pct_stats(R - A, peak, core),
@@ -523,7 +523,7 @@ def _solve_pressure(bl):
 
 
 def _edge(b, bl, psi_pad):
-    """The solved P', pressure, achieved <j_phi> and its pressure-driven
+    """The solved P', pressure, achieved <jphi_total> and its pressure-driven
     part on the baseline grid, with the edge numbers of the study."""
     import numpy as np
     from types import SimpleNamespace
@@ -566,7 +566,7 @@ def _edge(b, bl, psi_pad):
         pprime_solver=Pp.tolist(), pressure_solver=P.tolist(),
         pressure_full=(P + p_add).tolist(), pressure_input=p_in.tolist(),
         pprime_input_abs=np.abs(pp_in).tolist(),
-        jphi_achieved=A.tolist(), j_pressure_driven=j_p.tolist(),
+        jphi_achieved=A.tolist(), jphi_pd_driven=j_p.tolist(),
         j_pprime_term=j_ppR.tolist(), j_ffprime_term=j_ffp.tolist(),
         q=np.abs(q).tolist(),
         flux_range=dpsi,
@@ -574,8 +574,8 @@ def _edge(b, bl, psi_pad):
             jphi_edge_mean_095_1=float(np.mean(A[em])),
             jphi_at_095=_at(A, 0.95), jphi_at_099=_at(A, 0.99),
             jphi_last_node=float(A[-1]),
-            j_pressure_driven_last_node=float(j_p[-1]),
-            j_pressure_driven_at_099=_at(j_p, 0.99),
+            jphi_pd_driven_last_node=float(j_p[-1]),
+            jphi_pd_driven_at_099=_at(j_p, 0.99),
             j_pprime_term_last_node=float(j_ppR[-1]),
             j_ffprime_term_last_node=float(j_ffp[-1]),
             pprime_solver_last_node=float(Pp[-1]),
@@ -592,9 +592,9 @@ def _edge(b, bl, psi_pad):
             q_row_psi_N=float(pq[0]),
             q0_stats=m["stats"].get("q_0"), q95=m["stats"].get("q_95"),
             note=("positive-current frame; the last node is sampled at "
-                  "psi_N = 1 - psi_pad; j_pressure_driven = p'(<R> - "
+                  "psi_N = 1 - psi_pad; jphi_pd_driven = p'(<R> - "
                   "F^2<1/R>/<B^2>), j_pprime_term = <R> p', j_ffprime_term "
-                  "= <1/R> FF'/mu0 (their sum is the achieved <j_phi>)")))
+                  "= <1/R> FF'/mu0 (their sum is the achieved <jphi_total>)")))
 
 
 def _kin(bl, psi):
@@ -840,7 +840,7 @@ def child(part, outdir, draws=None, seed=None):
                 l_i_target=float(bl.l_i_target),
                 delivered_state={k: v for k, v in
                                  (bl.delivered_state or {}).items()
-                                 if k != "j_phi_achieved"},
+                                 if k != "jphi_total_achieved"},
                 engine_record=rec)
         _stage("build", _build_legacy if legacy else _build)
         slog.mark("build")

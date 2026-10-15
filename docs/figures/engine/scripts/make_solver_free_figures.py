@@ -223,12 +223,12 @@ def fig_gfile_identity():
          "(examples/D3D-like g-file + p-file), computed by calling the "
          "branch's own adapters.gfile_parallel_current and engine.compose "
          "(no solver). The engine stores currents as parallel <j.B> and "
-         "forms the solver's <j_phi> as kappa<j.B> + p'(<R> - F^2<1/R>/<B^2>) "
+         "forms the solver's <jphi_total> as kappa<j.B> + p'(<R> - F^2<1/R>/<B^2>) "
          "(identity I2). Split here as 0.6/0.3/0.1 of the parallel current "
          "across inductive/bootstrap/fixed: the composition reproduces the "
-         f"g-file's own <j_phi> to max {float(np.max(np.abs(J - jin))) / sc:.1e} "
+         f"g-file's own <jphi_total> to max {float(np.max(np.abs(J - jin))) / sc:.1e} "
          f"of the peak; the pressure-driven term is a median {100 * m:.0f} % of "
-         "<j_phi> at psi_N > 0.9.")
+         "<jphi_total> at psi_N > 0.9.")
 
 
 # ---------------------------------------------------------------------------

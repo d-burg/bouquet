@@ -1,11 +1,11 @@
 """PR #70 review: the fixed channels, the bootstrap multiplier and swb_seed.
 
 * B1 -- the IMAS delivered state holds EVERY channel the draws hold fixed
-  (``j_NBI + j_RF + j_other``) exactly once.  ``_deliver_imas_state`` summed
-  NBI + RF only, so ``j_other`` landed in the stored inductive residual and
+  (``jphi_nbi + jphi_rf + jphi_other``) exactly once.  ``_deliver_imas_state`` summed
+  NBI + RF only, so ``jphi_other`` landed in the stored inductive residual and
   every draw added it again; both sigma=0 guards were blind to it (the
   baseline-way check took the fixed current as the stored split's residual,
-  the draw route did not pass ``j_other``).
+  the draw route did not pass ``jphi_other``).
 * B2 -- the bootstrap multiplier reaches the loop draws: the composer is
   linear in its scale and takes no profile, so the multiplier rides in the
   scale (range re-centred on ``bs_scale``); SWB draws keep it after SWB.  The
@@ -53,7 +53,7 @@ def _reconstruct(mygs, j_fixed, bs=1.0, kappa_short=0.965, n_loop=80):
     return kappa_short * _IP / _trap(_W * req) * req
 
 
-def _bouquet(mygs, bs=1.0, j_other=_J_OTHER, **gen):
+def _bouquet(mygs, bs=1.0, jphi_other=_J_OTHER, **gen):
     from bouquet.run import Bouquet
     gc = GenerationConfig()
     for k, v in gen.items():
@@ -62,8 +62,8 @@ def _bouquet(mygs, bs=1.0, j_other=_J_OTHER, **gen):
     b.mygs = mygs
     b.config = SimpleNamespace(generation=gc)
     b.baseline = SimpleNamespace(
-        psi_N=_X, coord="psi_n", jBS_diff=None, j_BS=None, bs_scale=bs,
-        bs_scale_profile=None, j_NBI=_J_NBI, j_RF=None, j_other=j_other,
+        psi_N=_X, coord="psi_n", jphi_bs_diff=None, jphi_bs=None, bs_scale=bs,
+        bs_scale_profile=None, jphi_nbi=_J_NBI, jphi_rf=None, jphi_other=jphi_other,
         jphi_diff=None, Ip_target=_IP, l_i_target=_li(mygs.achieved),
         edge_pressure=None)
     return b
@@ -75,7 +75,7 @@ def _deliver(b, mode, request):
     return b.baseline
 
 
-def _draw(b, s, scale_jBS=None, profile="helper", route="ip_renorm"):
+def _draw(b, s, scale_jbs=None, profile="helper", route="ip_renorm"):
     """The draw generate() runs, at zero perturbation, with generate()'s own
     bootstrap scaling (unless overridden) and fixed channels."""
     from bouquet.sampling import make_rng
@@ -83,22 +83,22 @@ def _draw(b, s, scale_jBS=None, profile="helper", route="ip_renorm"):
                                              sigma0_reference_scale)
     bl = b.baseline
     rng, prof, _ = b._draw_bootstrap_scaling()
-    if scale_jBS is None:
-        scale_jBS = sigma0_reference_scale(rng)
+    if scale_jbs is None:
+        scale_jbs = sigma0_reference_scale(rng)
     if isinstance(profile, str):
         profile = prof
     z = np.zeros(_N)
     return perturb_kinetic_equilibrium(
         b.mygs, _X, _EC * (_NE * _TE + _NI * _TI), _NE, _TE, _NI, _TI,
-        np.asarray(bl.j_phi, float), z, z, z, z, z, 0.5, 0.4, 0.25, _IP,
+        np.asarray(bl.jphi_total, float), z, z, z, z, z, 0.5, 0.4, 0.25, _IP,
         float(bl.l_i_target), _ZEFF, _N,
-        input_jinductive=np.asarray(bl.j_inductive, float),
+        jphi_ind_input=np.asarray(bl.jphi_ind, float),
         l_i_tolerance=0.05, psi_pad=_PAD, constrain_sawteeth=False,
-        recalculate_j_BS=True, isolate_edge_jBS=False, scale_jBS=scale_jBS,
-        jBS_scale_profile=profile, floor_j_BS=False, jBS_diff=bl.jBS_diff,
+        recalculate_jbs=True, isolate_edge_jbs=False, scale_jbs=scale_jbs,
+        jbs_scale_profile=profile, floor_jbs=False, jphi_bs_diff=bl.jphi_bs_diff,
         perturb_jind_in_anchor=(route == "ip_renorm"),
-        accept_anchor_inband=False, j_NBI=bl.j_NBI, j_RF=bl.j_RF,
-        j_other=bl.j_other, max_proxy_draws=5, p_thresh=0.05,
+        accept_anchor_inband=False, jphi_nbi=bl.jphi_nbi, jphi_rf=bl.jphi_rf,
+        jphi_other=bl.jphi_other, max_proxy_draws=5, p_thresh=0.05,
         rng=make_rng(7), jbs_loop=s,
         jphi_request_offset=bl.jphi_request_offset)[6]
 
@@ -118,7 +118,7 @@ def _identity(mygs, F, ref_jbs, d, s):
 # ---------------------------------------------------------------------------
 #  B1
 # ---------------------------------------------------------------------------
-def test_the_delivered_state_holds_j_other_once_and_the_draw_reproduces_it(
+def test_the_delivered_state_holds_jphi_other_once_and_the_draw_reproduces_it(
         toy):
     req = _reconstruct(toy, _J_NBI + _J_OTHER)
     F = toy.copy_eq()
@@ -126,60 +126,60 @@ def test_the_delivered_state_holds_j_other_once_and_the_draw_reproduces_it(
     bl = _deliver(b, "diff", req)
     # the stored split sums to the request with each fixed channel once
     np.testing.assert_allclose(
-        bl.j_inductive + bl.j_BS + _J_NBI + _J_OTHER, bl.j_phi, rtol=0,
-        atol=1e-9 * np.max(np.abs(bl.j_phi)))
+        bl.jphi_ind + bl.jphi_bs + _J_NBI + _J_OTHER, bl.jphi_total, rtol=0,
+        atol=1e-9 * np.max(np.abs(bl.jphi_total)))
     s = _settings()
     toy.replace_eq(source_eq=F)
     d = _draw(b, s)
-    r = _identity(toy, F, bl.j_BS, d, s)
+    r = _identity(toy, F, bl.jphi_bs, d, s)
     assert r["ok"] and r["eq"] <= 1e-10, r
 
 
-def test_the_draw_route_guard_hands_the_draw_j_other_and_the_draws_scale(
+def test_the_draw_route_guard_hands_the_draw_jphi_other_and_the_draws_scale(
         monkeypatch):
-    """_sigma0_draw_route replays perturb_kinetic_equilibrium with j_other
+    """_sigma0_draw_route replays perturb_kinetic_equilibrium with jphi_other
     and with exactly the draws' scale and profile (the helper generate()
     uses)."""
     import test_sigma0_draw_route as SR
     from bouquet.TokaMaker_interface import sigma0_reference_scale
     b, calls = SR._bouquet(monkeypatch, li_draw=0.8002)
-    b.baseline.j_other = 1.0e4 * np.ones_like(SR._X)
+    b.baseline.jphi_other = 1.0e4 * np.ones_like(SR._X)
     b.baseline.bs_scale = 0.77
     blk = SR._run(b)
     k = calls[0][1]
-    np.testing.assert_array_equal(k["j_other"], b.baseline.j_other)
+    np.testing.assert_array_equal(k["jphi_other"], b.baseline.jphi_other)
     rng, prof, rec = b._draw_bootstrap_scaling()
-    assert k["scale_jBS"] == sigma0_reference_scale(rng)
-    assert k["scale_jBS"] == pytest.approx(0.77)
-    assert k["jBS_scale_profile"] is None and prof is None
+    assert k["scale_jbs"] == sigma0_reference_scale(rng)
+    assert k["scale_jbs"] == pytest.approx(0.77)
+    assert k["jbs_scale_profile"] is None and prof is None
     assert blk["bootstrap_scaling"] == rec
-    assert blk["fixed_channels"] == ["j_NBI", "j_RF", "j_other"]
+    assert blk["fixed_channels"] == ["jphi_nbi", "jphi_rf", "jphi_other"]
 
 
 # ---------------------------------------------------------------------------
 #  B2
 # ---------------------------------------------------------------------------
 def test_a_loop_draw_at_zero_sigma_reproduces_a_rescaled_bootstrap(toy):
-    """jBS_baseline_mode='rescale' with bs_scale 0.77: the baseline is
+    """jbs_baseline_mode='rescale' with bs_scale 0.77: the baseline is
     0.77 Redl(F); the loop draw, handed generate()'s scaling, reproduces it.
     Handed what #70 gave it (scale 1, the multiplier as an after-SWB profile
     the loop never reads) it composes 1.0 Redl and misses F."""
     m = 0.77
     req = _reconstruct(toy, _J_NBI, bs=m)
     F = toy.copy_eq()
-    b = _bouquet(toy, bs=m, j_other=None)
+    b = _bouquet(toy, bs=m, jphi_other=None)
     bl = _deliver(b, "rescale", req)
-    np.testing.assert_allclose(bl.j_BS, m * _kin_redl(F), rtol=1e-12)
+    np.testing.assert_allclose(bl.jphi_bs, m * _kin_redl(F), rtol=1e-12)
     s = _settings()
     rng, prof, rec = b._draw_bootstrap_scaling()
     assert prof is None and rng == pytest.approx((0.99 * m, 1.01 * m))
-    assert rec["applied_as"].startswith("scale_jBS")
+    assert rec["applied_as"].startswith("scale_jbs")
     toy.replace_eq(source_eq=F)
-    r = _identity(toy, F, bl.j_BS, _draw(b, s), s)
+    r = _identity(toy, F, bl.jphi_bs, _draw(b, s), s)
     assert r["ok"] and r["eq"] <= 1e-10, r
     # guard the guard: #70's hand-over misses
     toy.replace_eq(source_eq=F)
-    r70 = _identity(toy, F, bl.j_BS, _draw(b, s, scale_jBS=1.0,
+    r70 = _identity(toy, F, bl.jphi_bs, _draw(b, s, scale_jbs=1.0,
                                             profile=np.full(_N, m)), s)
     assert not r70["ok"] and r70["r_j"] > 0.1, r70
 
@@ -190,14 +190,14 @@ def test_the_scaling_rule_per_draw_kind(monkeypatch):
     rng, prof, _ = b._draw_bootstrap_scaling()
     assert prof is None and rng == pytest.approx((0.99 * 0.8, 1.01 * 0.8))
     # ... and with no range: exactly the multiplier
-    b.config.generation.jBS_scale_range = None
+    b.config.generation.jbs_scale_range = None
     assert b._draw_bootstrap_scaling()[0] == (0.8, 0.8)
     # SWB draws (loop off): the configured range, the multiplier after SWB
-    b.config.generation.jBS_scale_range = (0.99, 1.01)
+    b.config.generation.jbs_scale_range = (0.99, 1.01)
     b.config.generation.jbs_self_consistent = False
     rng, prof, rec = b._draw_bootstrap_scaling()
     assert rng == (0.99, 1.01) and np.all(prof == 0.8)
-    assert rec["applied_as"] == "jBS_scale_profile after SWB"
+    assert rec["applied_as"] == "jbs_scale_profile after SWB"
     # DIFF_BS takes precedence over the loop: SWB semantics
     b.config.generation.jbs_self_consistent = True
     monkeypatch.setenv("DIFF_BS", "1")
@@ -259,11 +259,11 @@ def test_the_ohmic_structured_mse_stage_records_the_multiplier():
     multiplier the draws apply is the one the baseline bootstrap carries."""
     from test_structured_mse import _run_stage
     gc = GenerationConfig(closure_channel="structured",
-                          jBS_baseline_mode="ohmic")
+                          jbs_baseline_mode="ohmic")
     bl, state, _n, _cyl, _ch = _run_stage(gc)
     assert bl.ip_closure["structured_mse_status"] == "applied"
     np.testing.assert_allclose(
-        bl.j_BS, np.asarray(bl.bs_scale_profile) * state["j_BS_swb"],
+        bl.jphi_bs, np.asarray(bl.bs_scale_profile) * state["jphi_bs_swb"],
         rtol=1e-12)
 
 
@@ -283,19 +283,19 @@ def test_the_loop_mse_stage_records_the_multiplier(monkeypatch):
     assert srec["converged"], srec["stop_reason"]
     bl = t["bl"]
     np.testing.assert_array_equal(bl.bs_scale_profile, s_bs)
-    np.testing.assert_allclose(bl.j_BS, s_bs * np.asarray(cur["j_BS_swb"]),
+    np.testing.assert_allclose(bl.jphi_bs, s_bs * np.asarray(cur["jphi_bs_swb"]),
                                rtol=1e-12)
 
 
 @pytest.mark.parametrize("channels, closes", [
-    (("j_NBI", "j_RF", "j_other"), True),
-    (("j_NBI", "j_RF"), False)])        # the delivery before the fix
+    (("jphi_nbi", "jphi_rf", "jphi_other"), True),
+    (("jphi_nbi", "jphi_rf"), False)])        # the delivery before the fix
 def test_the_baseline_way_guard_holds_the_draws_fixed_current(
         toy, monkeypatch, channels, closes):
-    """The baseline-way sigma=0 check composes j_inductive + bootstrap +
-    the fixed current the DRAWS hold.  On a split stored without j_other in
+    """The baseline-way sigma=0 check composes jphi_ind + bootstrap +
+    the fixed current the DRAWS hold.  On a split stored without jphi_other in
     its fixed part it now fails (it took the split's own residual as the
-    fixed current and passed) and the closure gap is the j_other share."""
+    fixed current and passed) and the closure gap is the jphi_other share."""
     from bouquet.run import Bouquet
     req = _reconstruct(toy, _J_NBI + _J_OTHER)
     F = toy.copy_eq()
@@ -303,18 +303,18 @@ def test_the_baseline_way_guard_holds_the_draws_fixed_current(
     monkeypatch.setattr(Bouquet, "DRAW_FIXED_CHANNELS", channels)
     bl = _deliver(b, "diff", req)
     monkeypatch.setattr(Bouquet, "DRAW_FIXED_CHANNELS",
-                        ("j_NBI", "j_RF", "j_other"))
+                        ("jphi_nbi", "jphi_rf", "jphi_other"))
     s = _settings()
     toy.replace_eq(source_eq=F)
     p = _EC * (_NE * _TE + _NI * _TI)
     out = b._verify_sigma0_jbs_loop(
-        s, None, {"y": np.asarray(bl.j_phi, float)}, p, _NE, _TE, _NI, _TI,
+        s, None, {"y": np.asarray(bl.jphi_total, float)}, p, _NE, _TE, _NI, _TI,
         _ZEFF, _X, _PAD, draw_route=False)
     gap = out["split_closure"]["max_abs_frac"]
     if closes:
         assert gap <= 1e-12 and out["passed_baseline_way"], out
     else:
-        share = np.max(_J_OTHER) / np.max(np.abs(bl.j_phi))
+        share = np.max(_J_OTHER) / np.max(np.abs(bl.jphi_total))
         assert gap == pytest.approx(share, rel=1e-6)
         assert not out["passed_baseline_way"]
 

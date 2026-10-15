@@ -31,7 +31,7 @@ the comprehensive suite off automated CI and run it deliberately.
 
 ## Pre-merge checklist (the manual gate)
 Before merging a branch that touches the perturbation/solve pipeline into `main`:
-1. On a machine with the OFT fork built: `pytest -m solver` (or trigger
+1. On a machine with OFT built from [`LCFS_grid_pack`](https://github.com/StuartBenjamin/OpenFUSIONToolkit/tree/LCFS_grid_pack) (open OpenFUSIONToolkit [PR #365](https://github.com/OpenFUSIONToolkit/OpenFUSIONToolkit/pull/365)): `pytest -m solver` (or trigger
    `solver.yml` on a self-hosted runner via `gh workflow run`).
 2. Confirm all solver tests pass; note it in the PR.
 3. The automated `fast` check must also be green.

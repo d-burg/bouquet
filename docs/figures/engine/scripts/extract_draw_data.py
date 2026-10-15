@@ -118,6 +118,6 @@ if eng:
             row["l_i_rel"] = abs(r["l_i"] - ref["l_i"]) / ref["l_i"]
         out[o] = row
     if ref:
-        out["_profile"] = dict(j_phi=ref["arrays"]["j_phi"])
+        out["_profile"] = dict(jphi_total=ref["arrays"]["jphi_total"])
     json.dump(out, open(os.path.join(OUT, "revip_engine.json"), "w"), default=str)
 print("extracted to", OUT)

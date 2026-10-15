@@ -1,4 +1,4 @@
-"""One ``<j.B>`` -> ``<j_phi>`` conversion in the package.
+"""One ``<j.B>`` -> ``<jphi_total>`` conversion in the package.
 
 Every site that turns a field-aligned parallel current ``<j.B>`` into the
 toroidal current the solver consumes uses the engine's factor
@@ -6,8 +6,8 @@ toroidal current the solver consumes uses the engine's factor
     kappa = F <1/R> / <B^2>            (bouquet.physics.field_aligned_conversion)
 
 -- the solver-consistent one: OFT's ``jphi-linterp`` consumes the plain
-flux-surface average ``<j_phi>``, and for ``j = lambda(psi) B`` (``lambda =
-<j.B>/<B^2>``, ``B_phi = F/R``) ``<j_phi> = lambda F <1/R> = kappa <j.B>``
+flux-surface average ``<jphi_total>``, and for ``j = lambda(psi) B`` (``lambda =
+<j.B>/<B^2>``, ``B_phi = F/R``) ``<jphi_total> = lambda F <1/R> = kappa <j.B>``
 exactly.  Before 2026-10-06 the legacy sites used ``<j.B>/(F<1/R>)`` (no
 ``<1/R^2>``) and the IDS exporter ``<j.B>F<1/R^2>/(<B^2><1/R>)``.
 
@@ -15,7 +15,7 @@ Checked here, on the synthetic example's own flux-surface averages (the
 golden fixture's captured ``eq_fsa`` block):
 
 * ``physics.parallel_to_toroidal`` / ``toroidal_to_parallel``,
-  ``physics.evaluate_jBS`` (its toroidal output), ``physics.
+  ``physics.evaluate_jbs`` (its toroidal output), ``physics.
   _swb_jbs_to_toroidal`` (SWB's ``R_avg/F`` output) and
   ``engine.conversion_factor`` agree with kappa bit for bit;
 * the installed toolkit's SWB output convention is identified, never
@@ -25,7 +25,7 @@ golden fixture's captured ``eq_fsa`` block):
   ``<B^2>/<B_phi^2>`` times the Jensen ratio ``<1/R^2>/<1/R>^2``;
 * the engine's composition is unchanged: its request is rebuilt bit for bit
   from the literal kappa formula (this fails if kappa itself moved), and the
-  engine's TokaMaker backend consumes ``evaluate_jBS``'s PARALLEL output,
+  engine's TokaMaker backend consumes ``evaluate_jbs``'s PARALLEL output,
   never its toroidal one.
 
 Synthetic inputs only; no solver, no device data.
@@ -128,11 +128,11 @@ def test_the_old_legacy_factor_was_bracket_times_jensen_high(fsa):
 
 
 # ---------------------------------------------------------------------------
-#  evaluate_jBS and _swb_jbs_to_toroidal, on a mock of the example
+#  evaluate_jbs and _swb_jbs_to_toroidal, on a mock of the example
 # ---------------------------------------------------------------------------
 class _ExampleEq:
     """A mygs stand-in serving the example's captured averages: the
-    primitives ``evaluate_jBS`` (``psi=``) and ``_swb_jbs_to_toroidal``
+    primitives ``evaluate_jbs`` (``psi=``) and ``_swb_jbs_to_toroidal``
     (``npsi=``, ``psi_pad=`` or ``psi=``) read.  ``<R>`` and ``<a>`` are not captured;
     plausible synthetic values stand in (neither enters the conversion)."""
 
@@ -212,18 +212,18 @@ def fake_redl(monkeypatch, fsa):
     return state
 
 
-def test_evaluate_jBS_toroidal_output_is_kappa(fsa, fake_redl):
+def test_evaluate_jbs_toroidal_output_is_kappa(fsa, fake_redl):
     eq = _ExampleEq(fsa)
     psi = np.linspace(0.0, 1.0, 201)
     n = psi.size
     kin = dict(ne=np.full(n, 5e19), te=np.full(n, 1e3), ni=np.full(n, 4e19),
                ti=np.full(n, 1e3), zeff=np.full(n, 2.0))
-    _j, d = physics.evaluate_jBS(eq, psi, kin["ne"], kin["te"], kin["ni"],
+    _j, d = physics.evaluate_jbs(eq, psi, kin["ne"], kin["te"], kin["ni"],
                                  kin["ti"], kin["zeff"], smooth_axis=False)
     kap = _kappa_literal(d["F"], d["avg_inv_R"], d["avg_B2"])
-    np.testing.assert_array_equal(d["j_dot_B"], fake_redl["jB"])
-    np.testing.assert_array_equal(d["j_tor_full_raw"], d["j_dot_B"] * kap)
-    np.testing.assert_array_equal(_j, d["j_dot_B"] * kap)
+    np.testing.assert_array_equal(d["jdotB_bs"], fake_redl["jB"])
+    np.testing.assert_array_equal(d["j_tor_full_raw"], d["jdotB_bs"] * kap)
+    np.testing.assert_array_equal(_j, d["jdotB_bs"] * kap)
     assert "kappa" in d["version"]
 
 
@@ -385,7 +385,7 @@ def test_engine_request_is_rebuilt_bit_for_bit_from_the_literal_kappa():
 
 
 def test_engine_backend_consumes_the_parallel_redl_output(monkeypatch):
-    """The TokaMaker backend's bootstrap is ``evaluate_jBS``'s ``j_dot_B``
+    """The TokaMaker backend's bootstrap is ``evaluate_jbs``'s ``jdotB_bs``
     (with the shared axis repair); the toroidal output never reaches it."""
     import _engine_toy as T
     from bouquet.engine import TokaMakerBackend
@@ -394,9 +394,9 @@ def test_engine_backend_consumes_the_parallel_redl_output(monkeypatch):
     jB = _jdotB(np.asarray(c.psi_N, float))
 
     def fake_eval(*a, **k):
-        return np.full_like(jB, np.nan), dict(j_dot_B=jB.copy())
+        return np.full_like(jB, np.nan), dict(jdotB_bs=jB.copy())
 
-    monkeypatch.setattr(physics, "evaluate_jBS", fake_eval)
+    monkeypatch.setattr(physics, "evaluate_jbs", fake_eval)
 
     class _GS:
         def copy_eq(self):

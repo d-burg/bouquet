@@ -347,11 +347,11 @@ def test_generate_keeps_the_setup_cap_for_the_baseline_and_sigma0_solves(
 
     gs = GS()
     monkeypatch.setattr(R, "_FakeGS", lambda: gs)
-    # the sigma=0 reference is evaluate_jBS on the cache anchor; the mock
+    # the sigma=0 reference is evaluate_jbs on the cache anchor; the mock
     # solver has no flux-surface geometry, so give it a fixed bootstrap --
     # the reference is then really built (no silent cache fallback)
     import bouquet.physics as P
-    monkeypatch.setattr(P, "evaluate_jBS", lambda mygs, psi_N, *a, **k: (
+    monkeypatch.setattr(P, "evaluate_jbs", lambda mygs, psi_N, *a, **k: (
         1.0e5 * (1.0 - np.asarray(psi_N, float)), {"I_BS": 1.0e5}))
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")

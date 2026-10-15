@@ -110,16 +110,16 @@ guess = create_power_flux_fun(len(psi_N), 1.5, 1.5)['y']
 print("[gen147] reconstruct_equilibrium ...", flush=True)
 result = reconstruct_equilibrium(
     mygs, eqdsk, ne_SI, te_SI, ni_SI, ti_SI, Zeff_eq, iso, isow, PSI_PAD,
-    guess_jinductive=guess, n_k=5, psi_bridge=0.99, rescale_j_BS=False,
+    guess_jinductive=guess, n_k=5, psi_bridge=0.99, rescale_jbs=False,
     shelf_psi_N=0.0, initialize_psi=True,
     # As-built: the committed D3Dlike fixture was generated with the isolated
     # edge spike (flat-shelf core). Pinned for reproducibility -- the recon path
     # (Bouquet.from_geqdsk) now defaults to the full Sauter bootstrap instead.
-    isolate_edge_jBS=True)
+    isolate_edge_jbs=True)
 st = mygs.get_stats(lcfs_pad=PSI_PAD, li_normalization='std')
-jbs=np.abs(result['j_BS_used']); jphi=np.abs(result['j_phi_fit'])
+jbs=np.abs(result['jphi_bs_used']); jphi=np.abs(result['jphi_total_fit'])
 print(f"[gen147] solved: li(1)={st['l_i']:.4f} q95={st['q_95']:.3f} q0={st['q_0']:.3f} Ip={st['Ip']:.4e}", flush=True)
-print(f"[gen147] BOOTSTRAP: j_BS peak={jbs.max()/1e6:.4f}  j_phi peak={jphi.max()/1e6:.4f}  "
+print(f"[gen147] BOOTSTRAP: jphi_bs peak={jbs.max()/1e6:.4f}  jphi_total peak={jphi.max()/1e6:.4f}  "
       f"ratio={jbs.max()/jphi.max():.3f}", flush=True)
 
 # save: truncate_eq removes the held-then-snapped last separatrix node

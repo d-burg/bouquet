@@ -44,16 +44,16 @@ def test_residual_weights_on_phi_are_the_psi_weights_at_the_mapped_nodes():
     assert k_phi == k_psi
 
 
-def test_evaluate_jBS_on_phi_is_the_psi_evaluation_at_the_mapped_nodes():
+def test_evaluate_jbs_on_phi_is_the_psi_evaluation_at_the_mapped_nodes():
     pytest.importorskip("OpenFUSIONToolkit.TokaMaker.bootstrap",
-                        reason="evaluate_jBS wraps OFT's Redl")
-    from bouquet.physics import evaluate_jBS
+                        reason="evaluate_jbs wraps OFT's Redl")
+    from bouquet.physics import evaluate_jbs
     x = np.linspace(0.0, 1.0, 81)
     psi = _psi_of_phi(x)
     kin = _kin(psi)                    # the same node values either way
-    j_phi, d_phi = evaluate_jBS(_MapEq(), x, *kin, coord="phi_n")
-    j_psi, d_psi = evaluate_jBS(_MapEq(), psi, *kin)
-    np.testing.assert_array_equal(j_phi, j_psi)
+    jphi_total, d_phi = evaluate_jbs(_MapEq(), x, *kin, coord="phi_n")
+    j_psi, d_psi = evaluate_jbs(_MapEq(), psi, *kin)
+    np.testing.assert_array_equal(jphi_total, j_psi)
     assert d_phi["I_BS"] == d_psi["I_BS"]
     np.testing.assert_array_equal(d_phi["psi_N"], psi)
     np.testing.assert_array_equal(d_phi["x"], x)

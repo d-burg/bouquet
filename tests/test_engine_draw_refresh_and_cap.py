@@ -12,7 +12,7 @@ reconstruction's geometry.  Checked on the toy Grad-Shafranov stand-in:
   carries the residuals before and after, a non-finite refresh is refused at
   once; ``start_refresh=None`` is covered by the frozen-kernel bit-identity
   tests (``test_engine_kernel_hook.py``);
-* at ZERO perturbation the refreshed bootstrap is the stored ``lambda_BS*``
+* at ZERO perturbation the refreshed bootstrap is the stored ``lambda_bs*``
   to rounding, the first request is still bit-identical and the draw
   reproduces the reconstruction (``verify_zero_perturbation`` passes, same
   pass count);
@@ -184,7 +184,7 @@ def test_the_on_pass_hook_sees_a_further_pass_before_the_restart():
 
 
 # ---------------------------------------------------------------------------
-#  zero perturbation: the refresh is lambda_BS* to rounding
+#  zero perturbation: the refresh is lambda_bs* to rounding
 # ---------------------------------------------------------------------------
 def test_the_zero_perturbation_refresh_is_the_stored_bootstrap(
         recon, monkeypatch):
@@ -265,7 +265,7 @@ def test_the_refresh_changes_the_path_not_the_delivered_state(recon, fj):
         pr = profile_residuals(o1["jbs_used"], o0["jbs_used"], w, ctx.psi,
                                float(ctx.c.Ip))
         assert pr["r_j"] <= s["rtol_j"] and pr["r_I"] <= s["rtol_Ip"], pr
-        j0, j1 = o0["split"]["j_phi"], o1["split"]["j_phi"]
+        j0, j1 = o0["split"]["jphi_total"], o1["split"]["jphi_total"]
         assert np.max(np.abs(j1 - j0)) <= s["rtol_j"] * np.max(np.abs(j0))
     assert fewer >= 1
 
@@ -376,10 +376,10 @@ def _generate_capped(tmp_path, monkeypatch, *, maxits, fail, n=1):
         k["ni"], k["ti"], unc["sigma_ne"], unc["sigma_te"], unc["sigma_ni"],
         unc["sigma_ti"], unc["sigma_jphi"], 0.3, 0.3, 0.25,
         float(eng.c.Ip), ctx.ref["l_i"], eng.c.kinetics["zeff"],
-        input_jinductive=0.5 * ctx.request,
-        baseline_j_BS=0.1 * ctx.request, l_i_tolerance=0.05,
-        psi_pad=T.PAD, constrain_sawteeth=False, isolate_edge_jBS=False,
-        jBS_scale_range=(0.99, 1.01), coil_drift=0.01,
+        jphi_ind_input=0.5 * ctx.request,
+        baseline_jphi_bs=0.1 * ctx.request, l_i_tolerance=0.05,
+        psi_pad=T.PAD, constrain_sawteeth=False, isolate_edge_jbs=False,
+        jbs_scale_range=(0.99, 1.01), coil_drift=0.01,
         homotopy_passes=[(0.05, 0.1), (0.01, 0.01)], seed=12345,
         capture_live_eq=False, store_achieved_jphi=True,
         jbs_loop=G.loop_settings, rejection_log=rej, draw_method=G,
@@ -437,8 +437,8 @@ def test_a_solve_under_the_cap_is_unchanged(tmp_path, monkeypatch):
     e0, e1 = d0[0]["engine"], d1[0]["engine"]
     assert e0["delivered"]["l_i_3"] == e1["delivered"]["l_i_3"]
     assert e0["loop"]["n_passes"] == e1["loop"]["n_passes"]
-    np.testing.assert_array_equal(np.asarray(d0[0]["j_BS"]),
-                                  np.asarray(d1[0]["j_BS"]))
+    np.testing.assert_array_equal(np.asarray(d0[0]["jphi_bs"]),
+                                  np.asarray(d1[0]["jphi_bs"]))
     assert d0[0]["homotopy_pass"] == d1[0]["homotopy_pass"]
     assert e1["homotopy"]["cap_events"] == []
 

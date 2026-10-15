@@ -63,7 +63,7 @@ def _child_rec(bq, np, res, geq, pf, mesh, outdir, tag):
     b.setup_solver()
     bl = b.prepare_baseline()
     res["recon_baseline"] = {k: np.asarray(getattr(bl, k), float).tolist()
-                             for k in ("j_phi", "j_inductive", "j_BS")}
+                             for k in ("jphi_total", "jphi_ind", "jphi_bs")}
     res["recon_l_i_target"] = float(bl.l_i_target)
     s0 = b.verify_sigma0_consistency()
     res["recon_sigma0"] = {k: float(s0[k]) for k in (
@@ -81,7 +81,7 @@ def _child_imas(bq, np, res, omas, mesh, outdir, tag):
     bi.setup_solver()
     bli = bi.prepare_baseline()
     res["imas_baseline"] = {k: np.asarray(getattr(bli, k), float).tolist()
-                            for k in ("j_phi", "j_inductive", "j_BS")}
+                            for k in ("jphi_total", "jphi_ind", "jphi_bs")}
     res["imas_l_i_target"] = float(bli.l_i_target)
     bi.generate()
 

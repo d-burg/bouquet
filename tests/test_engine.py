@@ -259,7 +259,7 @@ def test_a_stated_orientation_the_data_contradict_is_kept_and_flagged():
     b = T.ToyGS(chords=ch)
     b.solve(c.anchor_request, n_passes=2)
     a = b.measure()
-    c = ad.finalize(a["redl"], complete_geometry(a["geom"]))
+    c = ad.finalize(a["jdotB_bs"], complete_geometry(a["geom"]))
     eng = UnifiedEngine(c, b, T.settings(engine_rows=["Ip", "l_i", "mse"],
                                          mse_data=md,
                                          jbs_loop_on_fail="flag"),
@@ -296,7 +296,7 @@ def test_the_soft_rows_delivered_residual_is_the_one_the_fit_weighed():
 
 def test_the_stored_state_reproduces_the_delivered_request_bit_for_bit():
     """The zero-perturbation identity's foundation: composing on the stored
-    geometry snapshot with x*, lambda_BS* (and Delta) IS the request."""
+    geometry snapshot with x*, lambda_bs* (and Delta) IS the request."""
     from bouquet.utils import structured_basis_eval
     for dc in (False, True):
         ad = T.ToyAdapter(li_target=LI0 * 1.01)
@@ -330,7 +330,7 @@ def _consistent_inductive():
     b.solve(c.anchor_request, n_passes=2)
     a = b.measure()
     g = complete_geometry(a["geom"])
-    _, p = compose(g, c.jB_ind, a["redl"], c.jB_fix)
+    _, p = compose(g, c.jB_ind, a["jdotB_bs"], c.jB_fix)
     lin = lambda j: float(np.trapezoid(g["w_lin"] * j, g["psi_N"]))  # noqa
     f = (c.Ip - g["c_affine"] - lin(p["bs"]) - lin(p["fix"] + p["pressure"])
          ) / lin(p["ind"])
@@ -633,7 +633,7 @@ def test_the_engine_record_is_stored_beside_the_baseline(tmp_path):
     assert back["converged"] is True
     with h5py.File(h + ".h5", "r") as hf:
         assert ENGINE_ATTR in hf["_baseline"].attrs
-        assert int(hf.attrs["schema_version"]) == 3
+        assert int(hf.attrs["schema_version"]) == 4
 
 
 def test_the_mse_jacobian_defaults_to_the_fixed_finite_difference():

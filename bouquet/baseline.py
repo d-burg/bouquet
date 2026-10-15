@@ -11,22 +11,25 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, TYPE_CHECKING
 
+from ._renamed import accepts_old_names, add_attribute_aliases
+
 if TYPE_CHECKING:
     import numpy as np
     from .config import BaselineSource, SolverConfig
 
 
+@add_attribute_aliases
 @dataclass
 class Baseline:
     """Separated baseline currents + targets + kinetic profiles.
 
-    The currents are split into ohmic + bootstrap + driven (j_phi =
-    j_inductive + j_BS + j_NBI + j_RF) regardless of provenance: the
+    The currents are split into ohmic + bootstrap + driven (jphi_total =
+    jphi_ind + jphi_bs + jphi_nbi + jphi_rf) regardless of provenance: the
     reconstruction source *produces* the split, the IMAS source *reads* it
     pre-separated.
 
     CURRENT CONVENTION: every current component here is TokaMaker ``jphi`` =
-    <j_phi> [A/m^2] (``docs/current-conventions.md``). IMAS inputs (``j_tor``
+    <jphi_total> [A/m^2] (``docs/current-conventions.md``). IMAS inputs (``j_tor``
     and parallel <j.B>/B0) are converted exactly on read
     (:mod:`bouquet.physics` docstring), so downstream code never mixes
     conventions.
@@ -35,9 +38,9 @@ class Baseline:
     # --- required fields (no defaults) ---------------------------------
     # current-density grid + separated currents
     psi_N: "np.ndarray"
-    j_phi: "np.ndarray"            # total [A/m^2] = j_inductive + j_BS + j_NBI + j_RF + j_other
-    j_inductive: "np.ndarray"     # ohmic part [A/m^2]   (perturbed via l_i matching)
-    j_BS: "np.ndarray"            # bootstrap part [A/m^2] (recomputed per draw)
+    jphi_total: "np.ndarray"            # total [A/m^2] = jphi_ind + jphi_bs + jphi_nbi + jphi_rf + jphi_other
+    jphi_ind: "np.ndarray"     # ohmic part [A/m^2]   (perturbed via l_i matching)
+    jphi_bs: "np.ndarray"            # bootstrap part [A/m^2] (recomputed per draw)
 
     # baseline kinetic profiles (SI: m^-3, eV) on `psi_N_kinetic`
     psi_N_kinetic: "np.ndarray"
@@ -63,10 +66,10 @@ class Baseline:
     l_i_scale: str = "iter(li3)"    # == utils.LI_SCALE
     # Fixed additive components -- summed into EVERY draw, never GPR-perturbed.
     # None is treated as zeros. See FixedComponentsConfig for the contract:
-    #   j_phi_total = j_inductive + j_BS + j_NBI + j_RF
+    #   jphi_total = jphi_ind + jphi_bs + jphi_nbi + jphi_rf
     #   p_total     = p_thermal(perturbed) + p_fast
-    j_NBI: Optional["np.ndarray"] = None    # beam-driven current [A/m^2]
-    j_RF: Optional["np.ndarray"] = None     # RF-driven current [A/m^2]
+    jphi_nbi: Optional["np.ndarray"] = None    # beam-driven current [A/m^2]
+    jphi_rf: Optional["np.ndarray"] = None     # RF-driven current [A/m^2]
     p_fast: Optional["np.ndarray"] = None   # fast/beam pressure
 
     # How p_fast was reduced from the source's anisotropic fields, and how that
@@ -81,13 +84,13 @@ class Baseline:
     # See bouquet.io.imas.resolve_p_fast_reduction.
     p_fast_meta: Optional[dict] = None
 
-    # bootstrap amplitude factor applied when the j_BS/j_inductive split is
+    # bootstrap amplitude factor applied when the jphi_bs/jphi_ind split is
     # rebuilt against SWB and calibrated to the measured l_i (IMAS path's
     # _forward_solve_imas_baseline, mirroring the g-file fit_inductive_profile).
     # 1.0 means no rebuild was done (raw source split kept).
     bs_scale: float = 1.0
-    # 'ohmic' mode only: factor applied to FUSE j_inductive so the hybrid
-    # (s*j_ohm + SWB_jBS + j_fixed) integrates to Ip_target. 1.0 otherwise.
+    # 'ohmic' mode only: factor applied to FUSE jphi_ind so the hybrid
+    # (s*j_ohm + SWB_jbs + j_fixed) integrates to Ip_target. 1.0 otherwise.
     ohm_scale: float = 1.0
     # 'ohmic' mode bookkeeping: proxy-Ip of each component, the proxy's own
     # error on the FUSE total, and the jphi_diff anchor that was NOT applied.
@@ -106,13 +109,13 @@ class Baseline:
     # this time, in which case it is not active here).
     sawtooth: Optional[dict] = None
 
-    # Case-B ("diff") fixed bootstrap correction profile [A/m^2] = FUSE_jBS - SWB,
-    # added to the baseline AND every draw's j_phi so the total anchors to the
+    # Case-B ("diff") fixed bootstrap correction profile [A/m^2] = FUSE_jbs - SWB,
+    # added to the baseline AND every draw's jphi_total so the total anchors to the
     # FUSE bootstrap while the SWB delta tracks per-draw kinetics. None => not in
     # diff mode (Case-A "rescale" or no SWB rebuild).
-    jBS_diff: Optional["np.ndarray"] = None
+    jphi_bs_diff: Optional["np.ndarray"] = None
 
-    # IMAS pressure anchor ("diff" approach, mirroring jBS_diff). p_equilibrium
+    # IMAS pressure anchor ("diff" approach, mirroring jphi_bs_diff). p_equilibrium
     # is the authoritative dd equilibrium.pressure on psi_N; p_diff =
     # p_equilibrium - reconstructed baseline pressure (e*(ne*Te + ni*Ti) +
     # impurity + p_fast). p_diff is added to the baseline AND every draw so the
@@ -135,7 +138,7 @@ class Baseline:
     # (the GS-consistent current GPEC reads, with the pedestal current) minus the
     # reconstructed core_profiles.j_tor total. A FIXED offset added to the baseline
     # AND every draw so the total anchors to the equilibrium while the SWB bootstrap
-    # + perturbed j_inductive ride underneath. None on the geqdsk path / when
+    # + perturbed jphi_ind ride underneath. None on the geqdsk path / when
     # GenerationConfig.anchor_jtor_to_equilibrium is False.
     jphi_diff: Optional["np.ndarray"] = None
 
@@ -213,20 +216,20 @@ class Baseline:
     mse_record: Optional[dict] = None
 
     # ---- the ONE reconstruction state (jbs_self_consistent=True only) -------
-    # With the self-consistent loop on, the current split above (j_phi,
-    # j_inductive, j_BS, jBS_diff, the fixed parts) is the jphi-linterp
+    # With the self-consistent loop on, the current split above (jphi_total,
+    # jphi_ind, jphi_bs, jphi_bs_diff, the fixed parts) is the jphi-linterp
     # REQUEST of the reconstruction's final equilibrium F, in the form every
-    # draw consumes it: one jphi-linterp solve of j_phi (+ jphi_diff) is F;
+    # draw consumes it: one jphi-linterp solve of jphi_total (+ jphi_diff) is F;
     # it is normalised to Ip_target in the 'exact' FSA current measure on F;
-    # j_BS (+ jBS_diff) is the draws' own sigma=0 bootstrap composition on F;
-    # j_inductive is the residual.  ``jphi_request_offset`` is that request
+    # jphi_bs (+ jphi_bs_diff) is the draws' own sigma=0 bootstrap composition on F;
+    # jphi_ind is the residual.  ``jphi_request_offset`` is that request
     # minus F's ACHIEVED current (in the corrective iteration's form, also
     # Ip-normalised): the standard draw route targets achieved currents, so
-    # it perturbs ``j_inductive - jphi_request_offset`` and starts its
+    # it perturbs ``jphi_ind - jphi_request_offset`` and starts its
     # corrective iteration from target + offset -- F's own request at zero
     # perturbation.  ``delivered_state`` records F: l_i (== l_i_target), q0,
     # q95, the normalisation factors, F's achieved FSA current
-    # (``j_phi_achieved``) and how the state was reached.  Both None with the
+    # (``jphi_total_achieved``) and how the state was reached.  Both None with the
     # loop off (the legacy split, bit for bit).
     jphi_request_offset: Optional["np.ndarray"] = None
     delivered_state: Optional[dict] = None
@@ -284,27 +287,27 @@ class Baseline:
     psi_map: Optional[tuple] = None
     # Fields appended so every earlier field keeps its positional slot.
     # Other fixed driven current [A/m^2] (IMAS: fusion, runaways, sawteeth,
-    # unknown core_sources indices); j_phi carries it.
-    j_other: Optional["np.ndarray"] = None
-    # The sawteeth share of j_other [A/m^2] (core_sources 701; IMAS path only).
+    # unknown core_sources indices); jphi_total carries it.
+    jphi_other: Optional["np.ndarray"] = None
+    # The sawteeth share of jphi_other [A/m^2] (core_sources 701; IMAS path only).
     # With GenerationConfig.swb_saw_q it is SWB's jphi_saw input, and
-    # j_phi = j_inductive + j_BS + j_NBI + j_RF + (j_other - j_sawteeth) + j_saw.
-    j_sawteeth: Optional["np.ndarray"] = None
+    # jphi_total = jphi_ind + jphi_bs + jphi_nbi + jphi_rf + (jphi_other - jphi_saw) + jphi_saw_out.
+    jphi_saw: Optional["np.ndarray"] = None
     # The structured closure's bootstrap multiplier PROFILE s_bs(psi) on psi_N
-    # (bl.j_BS = s_bs * SWB(scale 1)); None when the multiplier is the scalar
+    # (bl.jphi_bs = s_bs * SWB(scale 1)); None when the multiplier is the scalar
     # bs_scale.  generate() hands it to the draws, which apply it after SWB.
     bs_scale_profile: Optional["np.ndarray"] = None
     # swb_seed="source": the SWB inputs of the baseline split (inductive seed,
     # jphi_fixed) on SWB's grid, reused unchanged by the draws and the sigma=0
     # check.  None => generic seed.
     swb_seed_profile: Optional["np.ndarray"] = None
-    swb_jphi_fixed: Optional["np.ndarray"] = None
-    # swb_saw_q set: SWB's jphi_saw input (j_sawteeth on SWB's grid), which
-    # swb_jphi_fixed then excludes.  None => saw off.
-    swb_jphi_saw: Optional["np.ndarray"] = None
-    # swb_saw_q set: solve B's j_saw output (jphi_saw + the q reset current),
-    # in place of j_sawteeth in j_phi.  None => saw off.
-    j_saw: Optional["np.ndarray"] = None
+    jphi_fixed: Optional["np.ndarray"] = None
+    # swb_saw_q set: SWB's jphi_saw input (jphi_saw on SWB's grid), which
+    # jphi_fixed then excludes.  None => saw off.
+    jphi_saw_input: Optional["np.ndarray"] = None
+    # swb_saw_q set: solve B's jphi_saw_out output (jphi_saw + the q reset current),
+    # in place of jphi_saw in jphi_total.  None => saw off.
+    jphi_saw_out: Optional["np.ndarray"] = None
     # imas_baseline="swb": solve A's coil currents {name: A-t}, the target of the
     # strong reg of solve B, the sigma=0 check and every draw.
     coil_reg_target: Optional[dict] = None
@@ -317,10 +320,10 @@ class Baseline:
     experimental_features: Optional[list] = None
     # The Redl epsilon the run's archived bootstrap uses, by route
     # (bouquet.engine.bootstrap_eps_route_record): {"eps_definition",
-    # "eps_formula", "nu_star_R", "evaluate_jBS_version", "bootstrap",
+    # "eps_formula", "nu_star_R", "evaluate_jbs_version", "bootstrap",
     # "route", ...} -- GenerationConfig.eps_definition on the engine and the
     # legacy loop; the toolkit solve_with_bootstrap's own on the swb and
-    # frozen legacy routes (evaluate_jBS_version None there).
+    # frozen legacy routes (evaluate_jbs_version None there).
     # Set by Bouquet.prepare_baseline on every path; archived as the
     # _baseline attr bootstrap_eps_json (and in the engine record).
     bootstrap_eps: Optional[dict] = None
@@ -353,7 +356,7 @@ def resolve_baseline(config: "BouquetConfig", mygs=None) -> Baseline:
     """Dispatch on ``config.source`` and return a populated :class:`Baseline`.
 
     * :class:`ImasSource` -> delegate to
-      :func:`bouquet.io.imas.read_imas_baseline`: take j_ohmic / j_BS / Ip / l_i
+      :func:`bouquet.io.imas.read_imas_baseline`: take j_ohmic / jphi_bs / Ip / l_i
       and core_profiles directly (no GS reconstruction), convert parallel->
       toroidal, isotropize p_fast. ``mygs`` is unused.
     * :class:`ReconstructionSource` -> read g-file + profiles (IDA .cdf or
@@ -361,8 +364,8 @@ def resolve_baseline(config: "BouquetConfig", mygs=None) -> Baseline:
       fitted split currents (converted to toroidal) plus any user-supplied
       fixed components. (Implemented in phase 2 step 3.)
 
-    Both paths return a :class:`Baseline` with every current as toroidal j_phi
-    and the fixed additive components (j_NBI, j_RF, p_fast) attached.
+    Both paths return a :class:`Baseline` with every current as toroidal jphi_total
+    and the fixed additive components (jphi_nbi, jphi_rf, p_fast) attached.
 
     Implemented as a free function so sources stay declarative (plain config)
     and the resolution logic lives in one place.
@@ -820,7 +823,7 @@ def resolve_uncertainty(config, baseline) -> dict:
     """Resolve the perturbation envelope for :func:`generate_bouquet`.
 
     Returns kinetic sigmas (on ``baseline.psi_N_kinetic``), ``sigma_jphi`` (a
-    fractional envelope on ``|baseline.j_phi|``, on ``baseline.psi_N``), and the
+    fractional envelope on ``|baseline.jphi_total|``, on ``baseline.psi_N``), and the
     GPR correlation length scales.
 
     Kinetic sigma source precedence:
@@ -1063,8 +1066,8 @@ def resolve_uncertainty(config, baseline) -> dict:
         print("  " + sigma_exceeds_profile_line(out["sigma_exceeds_profile"]),
               flush=True)
 
-    out["sigma_jphi"] = unc.jphi_scalar_sigma * np.abs(np.asarray(baseline.j_phi, dtype=float))
-    _won["jphi"] = f"scalar {float(unc.jphi_scalar_sigma):g} x |j_phi|"
+    out["sigma_jphi"] = unc.jphi_scalar_sigma * np.abs(np.asarray(baseline.jphi_total, dtype=float))
+    _won["jphi"] = f"scalar {float(unc.jphi_scalar_sigma):g} x |jphi_total|"
     # Which source each envelope came from, warning-free (the uncertainty
     # record): kind "explicit" (sigma_profiles), "ida" (an IDA .cdf),
     # "imas" (the IMAS source's own *_error_upper), "assumed" (the assumed
@@ -1234,24 +1237,27 @@ def resolve_uncertainty(config, baseline) -> dict:
     return out
 
 
-def floor_inductive_split(j_inductive, j_BS, psi_N=None, warn_frac=1e-4,
+@accepts_old_names
+
+
+def floor_inductive_split(jphi_ind, jphi_bs, psi_N=None, warn_frac=1e-4,
                           coord="psi_n"):
-    """Enforce the ``j_inductive >= 0`` component convention on a (j_ind, j_BS)
-    split, absorbing any negative sliver into ``j_BS`` so the pair still sums
+    """Enforce the ``jphi_ind >= 0`` component convention on a (j_ind, jphi_bs)
+    split, absorbing any negative sliver into ``jphi_bs`` so the pair still sums
     exactly to the same total.
 
     A strong pedestal can push the achieved total BELOW the full-Sauter
     bootstrap locally, leaving a small negative inductive residual. That is
     unphysical in this convention and -- fed to the GPR sampler as its mean --
     makes essentially every current draw go negative and be rejected. Returns
-    ``(j_inductive_floored, j_BS_adjusted)`` (copies; inputs untouched) and
+    ``(jphi_ind_floored, jphi_bs_adjusted)`` (copies; inputs untouched) and
     prints a one-line note when the correction is non-trivial.  ``psi_N`` is
     the grid, in ``coord`` (labels the note).
     """
     import numpy as np
 
-    j_ind = np.asarray(j_inductive, dtype=float)
-    jbs = np.asarray(j_BS, dtype=float)
+    j_ind = np.asarray(jphi_ind, dtype=float)
+    jbs = np.asarray(jphi_bs, dtype=float)
     if not np.any(j_ind < 0.0):
         return j_ind, jbs
     j_ind_f = np.maximum(j_ind, 0.0)
@@ -1267,9 +1273,9 @@ def floor_inductive_split(j_inductive, j_BS, psi_N=None, warn_frac=1e-4,
             sel = pn[deficit < 0.0]
             lab = "Phi_N" if coord == "phi_n" else "psi_N"
             where = f" over {lab} [{sel.min():.3f}, {sel.max():.3f}]"
-        print(f"  [baseline] floored negative j_inductive ({n} pts{where}, "
+        print(f"  [baseline] floored negative jphi_ind ({n} pts{where}, "
               f"worst {worst/1e6:.4f} MA/m^2, {100*worst/scale:.2f}% of peak) "
-              f"-- deficit absorbed into j_BS (split still sums to j_phi)")
+              f"-- deficit absorbed into jphi_bs (split still sums to jphi_total)")
     return j_ind_f, jbs_f
 
 
@@ -1347,8 +1353,8 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
 
     Mirrors the operational notebook: read g-file + IDA profiles, interpolate
     onto the g-file's nodes (in the run coordinate), run :func:`reconstruct_equilibrium`, and package
-    the (toroidal) fitted currents. The reconstructed total ``j_phi_fit`` already
-    contains all driven current, so fixed components (j_NBI / j_RF) default to
+    the (toroidal) fitted currents. The reconstructed total ``jphi_total_fit`` already
+    contains all driven current, so fixed components (jphi_nbi / jphi_rf) default to
     zero and only re-partition the inductive part if the user supplies them;
     ``p_fast`` (absent from thermal IDA profiles) likewise defaults to zero.
     """
@@ -1385,7 +1391,7 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
     # kinetic profiles (native SI) regridded onto the equilibrium nodes.
     # Shape-preserving PCHIP (single shared helper): a linear regrid leaves a
     # slope kink at every kinetic knot, which the Sauter bootstrap inherits
-    # as a stepped j_BS (see utils.pchip_interp).
+    # as a stepped jphi_bs (see utils.pchip_interp).
     from .utils import pchip_interp
 
     def to_eq(arr):
@@ -1455,7 +1461,7 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
             guess_jinductive=guess_jinductive,
             n_k=source.n_k,
             psi_bridge=source.psi_bridge,
-            rescale_j_BS=source.rescale_j_BS,
+            rescale_jbs=source.rescale_jbs,
             shelf_psi_N=source.shelf_psi_N,
             initialize_psi=True,
             p_fast=p_fast_eq,
@@ -1537,22 +1543,22 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
             recon_metrics = dict(recon_metrics or {})
             recon_metrics["jbs_loop"] = _jsonable(result["jbs_loop"])
         # the +/-50 % bootstrap prior on the legacy g-file path: the inductive
-        # fit's bootstrap scale (1.0 unless rescale_j_BS) -- flagged when
+        # fit's bootstrap scale (1.0 unless rescale_jbs) -- flagged when
         # |s_bs - 1| > 0.5 (a closure failure, never clamped), recorded
         from .utils import bootstrap_prior_record, merge_closure_flags
         recon_metrics = dict(recon_metrics or {})
         recon_metrics["closure_health"] = bootstrap_prior_record(
             float(result.get("bs_scale_fit", 1.0)),
-            "fit_inductive_profile's bootstrap scale (rescale_j_BS; 1.0 "
+            "fit_inductive_profile's bootstrap scale (rescale_jbs; 1.0 "
             "otherwise)", "g-file reconstruction")
         merge_closure_flags(recon_metrics, recon_metrics["closure_health"])
 
-    j_phi = np.asarray(result["j_phi_fit"], dtype=float)
-    j_BS = np.asarray(result["j_BS_used"], dtype=float)
+    jphi_total = np.asarray(result["jphi_total_fit"], dtype=float)
+    jphi_bs = np.asarray(result["jphi_bs_used"], dtype=float)
 
-    j_NBI = _resolve_fixed(fc.j_NBI, fc_x, x_run)
-    j_RF = _resolve_fixed(fc.j_RF, fc_x, x_run)
-    j_other = _resolve_fixed(getattr(fc, "j_other", None), fc_x, x_run)
+    jphi_nbi = _resolve_fixed(fc.jphi_nbi, fc_x, x_run)
+    jphi_rf = _resolve_fixed(fc.jphi_rf, fc_x, x_run)
+    jphi_other = _resolve_fixed(getattr(fc, "jphi_other", None), fc_x, x_run)
     _request_offset = None
     _delivered = None
     if _jbs["enabled"] and result.get("request_jphi") is not None:
@@ -1560,11 +1566,11 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
         # the form the draws consume it (see Baseline.jphi_request_offset).
         _log2 = None
         with capture_native_output(enabled=not verbose) as _cap2:
-            j_phi, j_inductive, j_BS, _request_offset, _delivered = \
+            jphi_total, jphi_ind, jphi_bs, _request_offset, _delivered = \
                 _deliver_reconstruction_state(
                     mygs, config, source, result, x_run, ne_eq, te_eq, ni_eq,
-                    ti_eq, Zeff_eq, Ip_target, l_i_target, j_NBI,
-                    j_RF + j_other,     # every fixed part (j_other: unified)
+                    ti_eq, Zeff_eq, Ip_target, l_i_target, jphi_nbi,
+                    jphi_rf + jphi_other,     # every fixed part (jphi_other: unified)
                     recon_metrics, coord=coord)
         _log2 = _cap2["text"] or None
         if _log2:
@@ -1578,16 +1584,16 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
                   "reconstruction there (it composes the Redl bootstrap, not "
                   "the floored remainder)", flush=True)
     else:
-        j_inductive = j_phi - j_BS - j_NBI - j_RF - j_other   # == j_inductive_fit when all 0
+        jphi_ind = jphi_total - jphi_bs - jphi_nbi - jphi_rf - jphi_other   # == jphi_ind_fit when all 0
         # Physical component convention: the inductive current is >= 0. On shots
         # with a strong pedestal the achieved total can dip BELOW the full-Sauter
         # bootstrap there, leaving a small negative residual (~1% of the core) --
         # which, fed to the GPR sampler as its mean, makes essentially every draw
         # go negative and be rejected (observed on a strong-pedestal case:
         # 0/500 candidates survived).
-        # Floor the inductive at zero and absorb the deficit into j_BS so the
-        # split still sums exactly to j_phi.
-        j_inductive, j_BS = floor_inductive_split(j_inductive, j_BS, x_run,
+        # Floor the inductive at zero and absorb the deficit into jphi_bs so the
+        # split still sums exactly to jphi_total.
+        jphi_ind, jphi_bs = floor_inductive_split(jphi_ind, jphi_bs, x_run,
                                                   coord=coord)
 
     # Resolved above (before the reconstruction, which now consumes it).
@@ -1600,9 +1606,9 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
 
     return Baseline(
         psi_N=x_run,
-        j_phi=j_phi,
-        j_inductive=j_inductive,
-        j_BS=j_BS,
+        jphi_total=jphi_total,
+        jphi_ind=jphi_ind,
+        jphi_bs=jphi_bs,
         psi_N_kinetic=x_kin,
         coord=coord,
         psi_map=psi_map,
@@ -1614,9 +1620,9 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
         Ip_target=Ip_target,
         l_i_target=l_i_target,
         provenance="reconstruction",
-        j_NBI=j_NBI,
-        j_RF=j_RF,
-        j_other=j_other,
+        jphi_nbi=jphi_nbi,
+        jphi_rf=jphi_rf,
+        jphi_other=jphi_other,
         p_fast=p_fast,
         # SAME source as the value handed to the reconstruction above, so the
         # two paths activate together or not at all.  The draws read
@@ -1661,7 +1667,7 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
 
 def _deliver_reconstruction_state(mygs, config, source, result, psi_N, ne_eq,
                                   te_eq, ni_eq, ti_eq, Zeff_eq, Ip_target,
-                                  l_i_target, j_NBI, j_RF, recon_metrics,
+                                  l_i_target, jphi_nbi, jphi_rf, recon_metrics,
                                   coord="psi_n"):
     """The reconstruction path's ONE state, stored in the draws' form
     (``jbs_self_consistent=True`` only).
@@ -1670,12 +1676,12 @@ def _deliver_reconstruction_state(mygs, config, source, result, psi_N, ne_eq,
     re-matched state; ``result["request_jphi"]`` is the jphi-linterp input one
     solve of which is F).  The bootstrap is the draws' own sigma=0 composition
     on F (:func:`~bouquet.TokaMaker_interface._draw_jbs_composer` with the
-    generation's ``isolate_edge_jBS`` / ``floor_j_BS``, scale 1 -- this
+    generation's ``isolate_edge_jbs`` / ``floor_jbs``, scale 1 -- this
     path's ``bs_scale``), the request is normalised to ``Ip_target`` in the
     'exact' measure on F, and the inductive is the residual, floored at zero
     by the usual convention (``floor_inductive_split``; a floored point is
     one where a zero-perturbation draw cannot reproduce F, and is counted).
-    Returns ``(j_phi, j_inductive, j_BS, request_offset, delivered_state)``.
+    Returns ``(jphi_total, jphi_ind, jphi_bs, request_offset, delivered_state)``.
     """
     import numpy as np
     from .TokaMaker_interface import (DELIVERED_SPLIT_CONVENTION,
@@ -1685,20 +1691,20 @@ def _deliver_reconstruction_state(mygs, config, source, result, psi_N, ne_eq,
     gc = config.generation
     psi_pad = float(source.psi_pad)
     comp = _draw_jbs_composer(psi_N, ne_eq, te_eq, ni_eq, ti_eq, Zeff_eq,
-                              psi_pad, bool(gc.isolate_edge_jBS), 1.0,
-                              bool(gc.floor_j_BS), None, None, None,
+                              psi_pad, bool(gc.isolate_edge_jbs), 1.0,
+                              bool(gc.floor_jbs), None, None, None,
                               coord=coord,
                               eps_definition=getattr(gc, "eps_definition",
                                                      None))
     j_bs0 = np.asarray(comp(mygs.copy_eq())[0], dtype=float)
-    fixed = np.asarray(j_NBI, dtype=float) + np.asarray(j_RF, dtype=float)
+    fixed = np.asarray(jphi_nbi, dtype=float) + np.asarray(jphi_rf, dtype=float)
     dv = _deliver_request_split(mygs, psi_N, psi_pad, Ip_target,
                                 result["request_jphi"], j_bs0, fixed,
                                 label="recon delivered state", coord=coord)
-    j_ind, j_BS = floor_inductive_split(dv["j_inductive"], j_bs0, psi_N,
+    j_ind, jphi_bs = floor_inductive_split(dv["jphi_ind"], j_bs0, psi_N,
                                         coord=coord)
-    n_floored = int(np.sum(np.asarray(dv["j_inductive"]) < 0.0))
-    j_phi = j_ind + j_BS + fixed          # == dv["request"] (floor: sum kept)
+    n_floored = int(np.sum(np.asarray(dv["jphi_ind"]) < 0.0))
+    jphi_total = j_ind + jphi_bs + fixed          # == dv["request"] (floor: sum kept)
     offset, n_fl_t = _request_offset(j_ind, dv["achieved"], j_bs0, fixed)
     from .physics import SOLVER_Q0_PSI_N
     m = recon_metrics or {}
@@ -1719,12 +1725,12 @@ def _deliver_reconstruction_state(mygs, config, source, result, psi_N, ne_eq,
         li_step6_matched=result.get("li_step6_matched"),
         li_input=float((result.get("eqdsk_li") or {}).get(
             "li(2)", float("nan"))),
-        j_phi_achieved=_achieved_jphi_fsa(mygs, psi_N, psi_pad,
-                                          sign_ref=j_phi, coord=coord),
+        jphi_total_achieved=_achieved_jphi_fsa(mygs, psi_N, psi_pad,
+                                          sign_ref=jphi_total, coord=coord),
         how=("step-7 corrective iteration, then the l_i re-match of its "
              "landed request (every loop pass ends there); one jphi-linterp "
-             "solve of j_phi reproduces it"))
-    return j_phi, j_ind, j_BS, offset, state
+             "solve of jphi_total reproduces it"))
+    return jphi_total, j_ind, jphi_bs, offset, state
 
 
 def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved,
@@ -1735,7 +1741,7 @@ def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved,
     Each global scalar that isn't ~0 by construction (Ip, l_i, q0/q95, beta,
     shape, separatrix current, stored energy) is reported as a % error against
     the g-file's own EFIT value. Geometric residuals that *should* be ~0
-    (boundary match, axis offset, j_phi profile RMS) stay absolute. A simple
+    (boundary match, axis offset, jphi_total profile RMS) stay absolute. A simple
     pass/fail verdict is applied to the reconstruction targets.
     """
     import numpy as np
@@ -1785,7 +1791,7 @@ def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved,
     # edge current is better-defined than the near-singular psi_N=1 point.
     _psiN_eq = np.asarray(eqdsk.psi_N, dtype=float)
     _jsep_psiN = 0.99
-    jphi = np.asarray(result.get("j_phi_fit"), dtype=float)
+    jphi = np.asarray(result.get("jphi_total_fit"), dtype=float)
     jsep_tok = float(np.interp(_jsep_psiN, _psiN_eq, jphi)) / 1e6   # MA/m^2
 
     # --- EFIT (g-file) reference values; tolerate a tracing failure ---

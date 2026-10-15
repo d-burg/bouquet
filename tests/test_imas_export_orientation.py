@@ -5,7 +5,7 @@ source dd, in the source's own frame, and the writer keeps the template fields
 it does not overwrite (core_sources beam current, pf_active, b0, ...).  Every
 quantity it does overwrite must therefore be taken back to the source frame,
 or a re-read of the export mixes frames (e.g. a positive ip with the
-template's negative beam current: j_inductive off by 2|j_NBI|).
+template's negative beam current: jphi_ind off by 2|jphi_nbi|).
 
 Checked on the synthetic D3D-like example and its four orientation mirrors
 (tests/_mirror_dd.py): the export of a mirrored source IS the mirror of the
@@ -44,8 +44,8 @@ def _archive(path, bl, stamp=None):
         g.create_dataset("psi_N", data=np.asarray(bl.psi_N))
         g.create_dataset("psi_N_kinetic", data=np.asarray(bl.psi_N_kinetic))
         for k, v in (("n_e", bl.ne), ("T_e", bl.te), ("n_i", bl.ni),
-                     ("T_i", bl.ti), ("j_phi", bl.j_phi),
-                     ("j_inductive", bl.j_inductive), ("j_BS", bl.j_BS)):
+                     ("T_i", bl.ti), ("jphi_total", bl.jphi_total),
+                     ("jphi_ind", bl.jphi_ind), ("jphi_bs", bl.jphi_bs)):
             g.create_dataset(k, data=np.asarray(v, float))
         with open(_GEQ, "rb") as fh:
             g.create_dataset("eqdsk", data=np.void(fh.read()))

@@ -17,7 +17,7 @@ Git-tracked regression fixtures for `tests/test_golden_bouquet.py`.
 possible only when `GenerationConfig.seed` started reaching the GPR: before
 that, every draw site re-seeded from OS entropy and no drawn value was
 reproducible. It replays what `perturb_kinetic_equilibrium` does for one draw
-— ne, Te, ni, Ti through `_draw_monotonic_perturbation`, then the `j_phi` GPR
+— ne, Te, ni, Ti through `_draw_monotonic_perturbation`, then the `jphi_total` GPR
 candidate — off one `make_rng(seed)` Generator. Pure NumPy: no solver, no
 mesh, so it is bitwise identical on any machine.
 
@@ -57,10 +57,10 @@ input-current rebuild of the self-consistent-bootstrap refresh):
   verbosity are set;
 * the **class API**: `Bouquet(cfg) -> setup_solver() -> prepare_baseline() ->
   generate()`;
-* **input-current archival** (`store_achieved_jphi=False`): `_baseline/j_phi`
-  and each draw's `j_phi` / `j_inductive` hold the current the generator
+* **input-current archival** (`store_achieved_jphi=False`): `_baseline/jphi_total`
+  and each draw's `jphi_total` / `jphi_ind` hold the current the generator
   handed the solver, not the achieved flux-surface average. The systematics
-  replay feeds `_baseline/j_phi` back as the input of its baseline solve, so
+  replay feeds `_baseline/jphi_total` back as the input of its baseline solve, so
   this is its premise ("archived current reproduces archived LCFS").
   **`Bouquet.generate()` hard-wires `store_achieved_jphi=True`**, so a plain
   notebook run does NOT follow the recipe (an earlier refresh built that way
@@ -175,6 +175,11 @@ draws, one thread), OFT `fix/jphi-update-ravgs-and-nonfinite-abort` 7da4f18
 engine never reads back to their defaults (printed and recorded in the run's
 `summary.json`; here only `isolate_edge_jBS` False -> True). No bar changed.
 
+The manifest's boundary numbers (`bnd_rms_mm`, `bnd_max_mm`) are distances to
+the perturbed LCFS polyline (`filtering.contour_distance`), recomputed from the
+same slim h5: RMS −0.05…−0.12 mm and max up to −2.4 mm against the
+nearest-vertex values they replace. Nothing else changed.
+
 * Unified engine: 20 attempts, **16 archived** (4 rejected), **6 in spec** (draws 0, 7, 8, 9, 13, 17). An engine draw's
   `in_spec` is the coil verdict AND its post-hoc l_i band
   (`passes_draw_band`, one of `filtering._FILTER_FLAGS`): 5 of 17 pass the
@@ -184,13 +189,13 @@ engine never reads back to their defaults (printed and recorded in the run's
   `D3Dlike_Hmode_legacy_golden.json`, made from a legacy-engine run of the
   same recipe at the same code (regenerated 2026-10-09: the run at `67aba59`,
   the record built from its archive at `5c92249`, the builder that carries
-  `j_pressure`; see below): 20 archived, 11 in spec. Wall time: reconstruction 218 s, draws
+  `jphi_pd`; see below): 20 archived, 11 in spec. Wall time: reconstruction 218 s, draws
   184.2 min (552 s per equilibrium). The record archives the pressure-driven
-  current as its own `j_pressure` beside a `j_inductive` that does not carry
+  current as its own `jphi_pd` beside a `jphi_ind` that does not carry
   it, and says so (`current_split_convention = "pressure_separate"`); the
   legacy replay composes the legacy path's carried (in-memory) inductive,
-  `j_inductive + j_pressure`, before handing it to `generate_bouquet` as
-  `input_jinductive` -- a record from before that convention replays as is.
+  `jphi_ind + jphi_pd`, before handing it to `generate_bouquet` as
+  `jphi_ind_input` -- a record from before that convention replays as is.
   `tests/test_systematics.py` (legacy replay) reads it;
   `tests/test_legacy_golden.py` checks what it is.
 * `rng_stream_manifest.json` is pinned from this fixture's baseline.
@@ -200,10 +205,10 @@ engine never reads back to their defaults (printed and recorded in the run's
   clean tree; OFT build `20260929_7da4f18`, lib `7885fedc1e62`, the same
   fixed build as before) after the declared changes to the default
   bootstrap evaluator: the pressure-driven current `p'G` is archived as its
-  own `j_pressure` bucket (owner decision D2) and the default Redl epsilon
+  own `jphi_pd` bucket (owner decision D2) and the default Redl epsilon
   is `eps_definition = "r_over_R_geo"`, `eps = (R_max - R_min)/(R_max +
   R_min)` with `R_geo = (R_max + R_min)/2` also as the R of `nu*` (owner
-  decision E7; version tag `evaluate_jBS/4`). Same recipe, same seed, same
+  decision E7; version tag `evaluate_jbs/4`). Same recipe, same seed, same
   yield (20 attempts, 16 archived, 6 in spec); reconstruction 62 s, draws
   43.8 min. The fixture's stored config carries no `eps_definition`, so a
   replay takes the default (warned once at load); do not add the field to
@@ -216,11 +221,11 @@ engine never reads back to their defaults (printed and recorded in the run's
 ## Why input-current archival: the mode-1 coil drift
 
 Mode 1 of `tests/test_systematics.py` builds its baseline from the fixture's
-`_baseline/j_phi`, handed to the unperturbed `jphi-linterp` baseline solve,
+`_baseline/jphi_total`, handed to the unperturbed `jphi-linterp` baseline solve,
 and compares the coil currents after that solve with
 `_baseline/coil_currents`. The generator handed the same solve the
 reconstruction's own delivered current, so the replay is faithful only if
-`_baseline/j_phi` holds that INPUT current. A refresh made through plain
+`_baseline/jphi_total` holds that INPUT current. A refresh made through plain
 `Bouquet.generate()` (which archives the ACHIEVED flux-surface-averaged
 current) failed mode 1 at 1.23 % max coil drift on one coil against the
 0.3 % bar; the same run rebuilt with `regenerate_golden_run.py`
@@ -248,7 +253,7 @@ loosened bar; each narrows what a passing suite shows.
   is real (`<R>` spans more than 10 % of its mean) and two solver-free tests
   of the guard. The production guard in `utils.fsa_current_geometry` uses the
   raw `<R>` span, zero (untraced) rows included, so an untraced row can hide
-  a collapse from it; `physics.evaluate_jBS` now refuses a zero (failed-trace)
+  a collapse from it; `physics.evaluate_jbs` now refuses a zero (failed-trace)
   row on its own surfaces.
 * **Six zero-perturbation tests run on the legacy path only.** The route-R2
   sigma=0 tests of `tests/test_seeded_reproducibility.py`

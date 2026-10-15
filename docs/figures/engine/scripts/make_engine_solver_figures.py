@@ -84,7 +84,7 @@ def fig_profiles(name, inp, eng, leg, src_label, extra=""):
     fig, ax = plt.subplots(2, 3, figsize=(13, 7))
     x = np.asarray(ee["psi_N"])
     xl = np.asarray(le["psi_N"]) if le else None
-    # (a) <j_phi>
+    # (a) <jphi_total>
     a = ax[0, 0]
     a.plot(inp["psi"], MA(inp["j"]), color=W["black"], lw=2.5, label="input")
     if le:
@@ -133,12 +133,12 @@ def fig_profiles(name, inp, eng, leg, src_label, extra=""):
     a.plot(x, MA(ee["j_ffprime_term"]), color=W["blue"], ls="--",
            label=r"$\langle 1/R\rangle FF'/\mu_0$")
     a.plot(x, MA(ee["j_pprime_term"]), color=W["orange"], ls="-.", label=r"$\langle R\rangle p'$")
-    a.plot(x, MA(ee["j_pressure_driven"]), color=W["pink"], ls=":",
+    a.plot(x, MA(ee["jphi_pd_driven"]), color=W["pink"], ls=":",
            label=r"pressure-driven $p'(\langle R\rangle - F^2\langle 1/R\rangle/\langle B^2\rangle)$")
     a.set(xlabel=r"$\psi_N$", ylabel=r"current density [MA/m$^2$]",
           title="(e) engine current split")
     a.legend(fontsize=7)
-    # (f) edge zoom of <j_phi>
+    # (f) edge zoom of <jphi_total>
     a = ax[1, 2]
     m = inp["psi"] >= 0.85
     a.plot(inp["psi"][m], MA(inp["j"][m]), color=W["black"], lw=2.5, label="input")
@@ -163,7 +163,7 @@ def fig_profiles(name, inp, eng, leg, src_label, extra=""):
     ql = (dl.get("q_profile_rel_pct") or {}).get("rms")
     cap = (f"{PROV} Input (black) against the legacy reconstruction path (default "
            f"reconstruction_engine='legacy') and the unified engine on the {src_label}: "
-           r"achieved <j_phi>, its difference to the input, q, pressure, and the engine's "
+           r"achieved <jphi_total>, its difference to the input, q, pressure, and the engine's "
            f"current split into FF' and p' terms. q-profile rms deviation over psi_N 0.05-0.95: "
            f"engine {qe:.2f} %" + (f", legacy {ql:.2f} %" if ql is not None else "") + f".{extra}")
     save(fig, name, cap)
@@ -279,7 +279,7 @@ def fig_draws(draws_meta):
     if not srcs:
         print("no draw profiles; skipping draw figures")
         return
-    keys = [("j_phi", r"$\langle j_\phi\rangle$ [MA/m$^2$]", 1e-6),
+    keys = [("jphi_total", r"$\langle j_\phi\rangle$ [MA/m$^2$]", 1e-6),
             ("q", "q", 1.0), ("pressure", "p [kPa]", 1e-3)]
     fig, ax = plt.subplots(len(srcs), 3, figsize=(13, 3.7 * len(srcs)), squeeze=False)
     summ = {}
@@ -298,13 +298,13 @@ def fig_draws(draws_meta):
                 continue
             x = np.asarray(have[0]["profiles"][xk], float)
             Y = [np.interp(x, d["profiles"][xk], d["profiles"][k]) for d in have]
-            Yabs = np.abs(Y) if k in ("j_phi", "q") else Y
+            Yabs = np.abs(Y) if k in ("jphi_total", "q") else Y
             _band(a, x, np.asarray(Yabs) * f, W["blue"], f"all archived (n={len(have)})")
             ins = [y for y, d in zip(Yabs, have) if bool(d["flags"].get("in_spec", False))]
             if len(ins) >= 2:
                 _band(a, x, np.asarray(ins) * f, W["verm"], f"in spec (n={len(ins)})")
             if k in bl and xk in bl:
-                yb = np.abs(bl[k]) if k in ("j_phi", "q") else np.asarray(bl[k])
+                yb = np.abs(bl[k]) if k in ("jphi_total", "q") else np.asarray(bl[k])
                 a.plot(bl[xk], np.asarray(yb) * f, color=W["black"], ls="--", lw=1.4,
                        label="baseline (reconstruction)")
             a.set(xlabel=r"$\psi_N$", ylabel=yl,
@@ -625,7 +625,7 @@ def fig_revip():
     cols = [W["blue"], W["verm"], W["green"], W["pink"], W["orange"], W["sky"], W["black"], W["yellow"]]
     for m, c in zip(R["modes"], cols):
         p = R["profiles"][m]
-        ax[0].plot(p["psi_N"], MA(np.abs(p["j_phi"])), color=c, lw=1.6, label=m)
+        ax[0].plot(p["psi_N"], MA(np.abs(p["jphi_total"])), color=c, lw=1.6, label=m)
     ax[0].set(xlabel=r"$\psi_N$", ylabel=r"baseline $|j_\phi|$ [MA/m$^2$]",
               title="(a) solved baseline current, (Ip+, B0+), per closure mode")
     ax[0].legend(fontsize=6.5, ncol=2)
@@ -636,7 +636,7 @@ def fig_revip():
         for m in R["modes"]:
             r = R["rows"][f"{m}|{o}"]
             v.append(max(r[k]["max_abs_diff_of_magnitudes"] / max(r[k]["scale"], 1e-300)
-                         for k in ("bl_j_phi", "bl_j_BS", "bl_j_inductive", "eq_q")))
+                         for k in ("bl_jphi_total", "bl_jphi_bs", "bl_jphi_ind", "eq_q")))
         mx += v
         a.bar(np.arange(len(v)) + (i - 1) * 0.27, np.maximum(v, 1e-17), 0.27,
               color=[W["verm"], W["green"], W["pink"]][i], label=f"{o} vs ip+_b0+")

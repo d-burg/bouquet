@@ -16,7 +16,7 @@ tested here is that identity and the ways it could quietly rot:
   * the THRESHOLDS.  The loop must read them from the same FilterConfig
     ``.filter()`` later cuts on.
   * the RNG STREAM.  With the feature off nothing may change, so the block
-    ``jBS_scales`` draw stays one ``size=n_equils`` call and the lazy
+    ``jbs_scales`` draw stays one ``size=n_equils`` call and the lazy
     extension is only reachable past that block.
 
 Solve-free throughout: the predicate takes raw numbers and contours, and the
@@ -72,9 +72,9 @@ def test_direction_is_load_bearing_and_is_the_filter_s_direction():
     """Swapping the arguments must change the answer -- else the choice of
     direction is untested and a refactor could flip it unnoticed.
 
-    A dense baseline against a sparse perturbed contour: querying the sparse
-    tree with dense points hits the sampling gaps (large max), while the
-    reverse finds every sparse point close to some dense point (small max).
+    A dense baseline against a sparse perturbed contour (an octagon): the
+    dense points lie off the octagon's chords (large max), while every
+    octagon vertex lies on the dense circle (max ~0).
     """
     dense = _circle(n=720)
     sparse = _circle(n=8)
@@ -82,11 +82,37 @@ def test_direction_is_load_bearing_and_is_the_filter_s_direction():
     rev = boundary_deviation_mm(sparse, dense)
     assert fwd[1] > 10.0 * rev[1], (fwd, rev)
 
-    # ...and the filter direction is the one that builds the tree on the
-    # PERTURBED contour and queries it with the BASELINE points.
-    from scipy.spatial import cKDTree
-    devs, _ = cKDTree(sparse).query(dense)
+    # ...and the filter direction measures the BASELINE points against the
+    # PERTURBED contour.
+    from bouquet.filtering import contour_distance
+    devs = contour_distance(dense, sparse)
     assert fwd[0] == pytest.approx(float(np.sqrt(np.mean(devs ** 2)) * 1e3))
+
+
+def _to_every_segment(pts, c):
+    a, ab = c, np.roll(c, -1, axis=0) - c
+    t = np.clip(((pts[:, None] - a) * ab).sum(-1) / (ab ** 2).sum(-1), 0.0, 1.0)
+    return np.linalg.norm(a + t[..., None] * ab - pts[:, None], axis=-1).min(axis=1)
+
+
+def test_contour_distance_is_the_distance_to_the_polyline():
+    from bouquet.filtering import contour_distance
+    dense, octagon = _circle(n=720), _circle(n=8)
+    r = np.linalg.norm(octagon[0] - octagon.mean(axis=0))
+    # the farthest circle point from the octagon is mid-chord: r (1 - cos(pi/8)) away
+    assert contour_distance(dense, octagon).max() == pytest.approx(r * (1 - np.cos(np.pi / 8)), rel=1e-4)
+
+
+def test_contour_distance_is_exact_beside_a_dense_cluster():
+    # a sharp corner, one leg 10x more finely sampled than the other: the nearest vertices of a point
+    # beside the coarse leg are all on the fine leg, and their segments are not the nearest one
+    from bouquet.filtering import contour_distance
+    fine = np.column_stack([np.arange(0.3, 0.0, -0.002), np.zeros(150)])
+    s = np.arange(0.0, 0.3, 0.02)
+    coarse = np.column_stack([s * np.cos(np.pi / 6), s * np.sin(np.pi / 6)])
+    c = np.vstack([fine, coarse, [[0.6, 0.3], [0.6, -0.1]]])
+    pts = np.random.default_rng(0).uniform(-0.02, 0.1, (5000, 2))
+    np.testing.assert_allclose(contour_distance(pts, c), _to_every_segment(pts, c), rtol=0, atol=1e-15)
 
 
 @pytest.mark.parametrize("bl,pt", [
@@ -354,10 +380,10 @@ def test_the_jbs_block_draw_is_untouched_when_the_feature_is_off():
     and the lazy extension reachable only past that block (``i >= len``)."""
     src = _gb_source()
     assert src.count("rng.uniform(lo, hi, size=n_equils)") == 1
-    assert "while i >= len(jBS_scales):" in src
+    assert "while i >= len(jbs_scales):" in src
     # the loop must go through the accessor, not index the array directly
-    assert "scale_jBS = _jBS_scale_for(count)" in src
-    assert "float(jBS_scales[count])" not in src
+    assert "scale_jbs = _jbs_scale_for(count)" in src
+    assert "float(jbs_scales[count])" not in src
 
 
 def test_a_boundary_bounded_target_refuses_to_run_without_a_reference():
@@ -974,10 +1000,10 @@ def _solverless_bouquet(header, monkeypatch, recorder, *, coil_sets,
     b.mygs = SimpleNamespace(coil_sets=coil_sets)
     x = np.linspace(0.0, 1.0, 5)
     b.baseline = SimpleNamespace(
-        psi_N=x, psi_N_kinetic=x, Zeff=np.full(5, 1.5), j_phi=x, j_inductive=x,
-        j_BS=x, jBS_diff=None, ne=x, te=x, ni=x, ti=x, Ip_target=1.0e6,
+        psi_N=x, psi_N_kinetic=x, Zeff=np.full(5, 1.5), jphi_total=x, jphi_ind=x,
+        jphi_bs=x, jphi_bs_diff=None, ne=x, te=x, ni=x, ti=x, Ip_target=1.0e6,
         l_i_target=1.0, recon=None, pfile_bytes=None, eqdsk_bytes=None,
-        p_fast=None, j_NBI=None, j_RF=None)
+        p_fast=None, jphi_nbi=None, jphi_rf=None)
     return b
 
 

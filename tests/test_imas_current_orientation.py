@@ -317,7 +317,7 @@ class TestRecordedSigns:
         bl = _read(_write(tmp_path, dd, "slices.json"),
                    anchor_jtor_to_equilibrium=False)
         assert bl.source_current_sign == -1.0
-        assert trapezoid(bl.j_phi, bl.psi_N) > 0.0
+        assert trapezoid(bl.jphi_total, bl.psi_N) > 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -359,8 +359,8 @@ class TestOverlaysHonourTheOverride:
         with h5py.File(h5, "w") as hf:
             b = hf.create_group(f"scan/{sk}/_baseline")
             b["psi_N"] = psi
-            b["j_phi"] = 1.0e6 * (1.0 - psi ** 2)
-            b["j_BS"] = 1.0e5 * psi
+            b["jphi_total"] = 1.0e6 * (1.0 - psi ** 2)
+            b["jphi_bs"] = 1.0e5 * psi
             if cfg_orient is not None:
                 cfg = BouquetConfig(
                     source=ImasSource(ids_path="dd.json",

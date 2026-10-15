@@ -17,8 +17,8 @@ The recipe
 * **Archival: INPUT current** (``store_achieved_jphi=False``).
   ``Bouquet.generate()`` hard-wires ``store_achieved_jphi=True``, which
   archives the ACHIEVED flux-surface-averaged current of each converged solve
-  as ``j_phi`` (and ``j_inductive`` as the residual).  The systematics replay
-  (``tests/test_systematics.py``) feeds ``_baseline/j_phi`` back to the
+  as ``jphi_total`` (and ``jphi_ind`` as the residual).  The systematics replay
+  (``tests/test_systematics.py``) feeds ``_baseline/jphi_total`` back to the
   unperturbed ``jphi-linterp`` baseline solve as its input; that is a faithful
   replay only if the archive holds the current the generator handed that
   solve, i.e. the INPUT current (``docs/CHANGES_SUMMARY.md``, 1.3.0: "a replay

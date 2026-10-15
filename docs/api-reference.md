@@ -138,7 +138,7 @@ should use `Bouquet`.
 | Function | Description |
 |----------|-------------|
 | `generate_bouquet()` | Batch driver: draw N perturbations, solve GS, archive to HDF5. Supports `psi_N_kinetic` for SOL-aware profiles |
-| `perturb_kinetic_equilibrium()` | Single perturbation: draw profiles, match pressure and l_i, corrective j_phi iteration |
+| `perturb_kinetic_equilibrium()` | Single perturbation: draw profiles, match pressure and l_i, corrective jphi_total iteration |
 | `reconstruct_equilibrium()` | Reconstruct one GS equilibrium from a g-file + profiles, with corrective iteration |
 | `classify_jphi_profile()` | Classify the edge current profile (`H_mode` / `Lmode_like_jphi` / `L_mode`) |
 | `fit_inductive_profile()` | Smoothing-spline + PCHIP fit of the inductive current, scaled to a target l_i |

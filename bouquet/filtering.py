@@ -88,6 +88,57 @@ _FILTER_FLAGS = ("passes_coil_filter", "passes_boundary_filter",
 _BAND_FLAGS = ("passes_l_i_band", "passes_beta_p_band", "passes_q0_gate")
 
 
+class _Polyline:
+    """A closed polyline's segments ``a[i] -> a[i+1]``, and a KD-tree of samples along them at most
+    ``s`` apart: the larger of the median and the mean segment length, so a few long segments among
+    dense points add few samples."""
+
+    def __init__(self, contour):
+        a = np.asarray(contour, dtype=float)
+        ab = np.roll(a, -1, axis=0) - a
+        seg_len = np.linalg.norm(ab, axis=1)
+        # rows ax, ay, abx, aby, 1/|ab|^2: one gather per row in distance()
+        self.segments = np.vstack([a.T, ab.T, 1.0 / np.maximum(seg_len ** 2, 1e-300)])
+        total = seg_len.sum()
+        self.s = max(np.median(seg_len[seg_len > 0]), total / len(a)) if total > 0 else 1.0
+        n_sub = np.maximum(np.ceil(seg_len / self.s).astype(int), 1)
+        self.owner = np.repeat(np.arange(len(a)), n_sub)    # the segment each sample lies on
+        frac = (np.arange(len(self.owner)) - np.repeat(np.cumsum(n_sub) - n_sub, n_sub) + 0.5) / n_sub[self.owner]
+        self.tree = _cKDTree(a[self.owner] + frac[:, None] * ab[self.owner])
+
+    def distance(self, p, j):
+        """Distance from points ``p`` (m, 2) to segments ``j`` (m,) or (m, k)."""
+        px, py = (p[:, c].reshape((-1,) + (1,) * (j.ndim - 1)) for c in (0, 1))
+        ax, ay, bx, by, inv = self.segments[:, j]
+        dx, dy = px - ax, py - ay
+        t = np.clip((dx * bx + dy * by) * inv, 0.0, 1.0)
+        return np.hypot(dx - t * bx, dy - t * by)
+
+
+def contour_distance(pts, contour, k=8):
+    """Distance from each of ``pts`` to the closed polyline through ``contour``, exactly.
+
+    Measured to the segments, not the vertices: OFT's cut-cell ``trace_surf`` spaces its points ~5 mm
+    apart, which a nearest-vertex distance would read as boundary deviation.  Each point is measured to
+    the segments of its ``k`` nearest samples (:class:`_Polyline`, spacing ``s``).  Any other segment
+    has every sample at least the k-th sample's distance ``r_k`` away, so it is at least ``r_k - s/2``
+    away; the few points nearer than that bound are re-measured against every segment with a sample
+    within their distance + ``s/2``."""
+    pts = np.asarray(pts, dtype=float)
+    line = _Polyline(contour)
+    k = min(k, line.tree.n)
+    r, idx = line.tree.query(pts, k=k)
+    r, idx = np.reshape(r, (len(pts), k)), np.reshape(idx, (len(pts), k))
+    d = line.distance(pts, line.owner[idx]).min(axis=1)
+    unsure = np.flatnonzero(d > r[:, -1] - 0.5 * line.s) if k < line.tree.n else []
+    if len(unsure):
+        near = line.tree.query_ball_point(pts[unsure], (d[unsure] + 0.5 * line.s) * (1 + 1e-9))
+        n_near = np.fromiter(map(len, near), dtype=int, count=len(unsure))
+        dn = line.distance(pts[np.repeat(unsure, n_near)], line.owner[np.concatenate(near).astype(int)])
+        d[unsure] = np.minimum.reduceat(dn, np.cumsum(n_near) - n_near)
+    return d
+
+
 # --------------------------------------------------------------------------
 #  the selection predicate -- ONE definition, two call sites
 # --------------------------------------------------------------------------
@@ -108,9 +159,9 @@ _BAND_FLAGS = ("passes_l_i_band", "passes_beta_p_band", "passes_q0_gate")
 def boundary_deviation_mm(baseline_boundary, perturbed_boundary):
     """``(rms_mm, max_mm)`` of a perturbed LCFS vs the baseline contour.
 
-    Nearest-neighbour distance **from each baseline point to the perturbed
-    contour** -- the direction ``plot_traces`` and the boundary filter both
-    report. Returns ``(nan, nan)`` when either contour is missing or too
+    Distance **from each baseline point to the perturbed contour**
+    (:func:`contour_distance`) -- the direction ``plot_traces`` and the
+    boundary filter both report. Returns ``(nan, nan)`` when either contour is missing or too
     short to build a tree from (fewer than 2 points), which the callers
     treat as "no verdict" rather than as a pass.
     """
@@ -121,7 +172,7 @@ def boundary_deviation_mm(baseline_boundary, perturbed_boundary):
     if bl.ndim != 2 or pt.ndim != 2 or len(bl) < 2 or len(pt) < 2:
         return (np.nan, np.nan)
     try:
-        devs, _ = _cKDTree(pt).query(bl)
+        devs = contour_distance(bl, pt)
         return (float(np.sqrt(np.mean(devs ** 2)) * 1e3),
                 float(np.max(devs) * 1e3))
     except Exception:

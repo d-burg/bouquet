@@ -27,7 +27,7 @@ def _bl(psi_kin, psi_map=None):
     ne = 5e19 * (1 - 0.8 * psi_kin ** 2) + 1e18
     te = 3000.0 * (1 - 0.9 * psi_kin ** 2) + 50.0
     j = 8.0e5 * (1.0 - psi_N ** 2)
-    return Baseline(psi_N=psi_N, j_phi=j, j_inductive=0.85 * j, j_BS=0.15 * j,
+    return Baseline(psi_N=psi_N, jphi_total=j, jphi_ind=0.85 * j, jphi_bs=0.15 * j,
                     psi_N_kinetic=psi_kin, ne=ne, te=te, ni=0.85 * ne, ti=0.9 * te,
                     Zeff=1.5 + 0.5 * psi_kin, Ip_target=1.2e6, l_i_target=0.85,
                     provenance="reconstruction", psi_map=psi_map)

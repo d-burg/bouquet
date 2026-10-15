@@ -11,7 +11,7 @@ ONE loop reconstructs the baseline for both input types (docs/engine.md):
 * every pass composes the solver's variable on the LATEST solved geometry
   ``G_k`` -- the only place a toroidal current is formed::
 
-      J_k = F<1/R> [ s_ind lambda_ind + s_bs lambda_BS,k + lambda_fix ] / <B^2>
+      J_k = F<1/R> [ s_ind lambda_ind + s_bs lambda_bs,k + lambda_fix ] / <B^2>
             + p' (<R> - F^2 <1/R>/<B^2>)                      (identity I2)
 
   (the components are stored as ``<j.B>``, so the field-aligned conversion is
@@ -37,7 +37,7 @@ constants (see :func:`convergence_table`); failure is exactly the loop's.
 A final unrelaxed composition on the last geometry is solved (two passes) and
 checked (:func:`bouquet.jbs_loop.check_delivered` plus every row on the
 delivered equilibrium).  That solve, its request, its geometry snapshot, the
-coefficients ``x*``, ``lambda_BS*`` and the discrepancies ARE the
+coefficients ``x*``, ``lambda_bs*`` and the discrepancies ARE the
 reconstruction (:class:`EngineState`), and the :class:`~bouquet.baseline.
 Baseline` the rest of the package consumes is built from it.
 
@@ -159,7 +159,7 @@ def mse_scheme_text(scheme) -> str:
 #: The engine's SWB edge taper (OFT's ``taper_edge_*`` of
 #: ``solve_with_bootstrap``), off by default as in OFT; read from
 #: ``GenerationConfig.bootstrap_kwargs`` and overridden there.
-ENGINE_EDGE_TAPER_DEFAULT = {"taper_edge_jBS": False, "taper_edge_psi0": 0.999,
+ENGINE_EDGE_TAPER_DEFAULT = {"taper_edge_jphi": False, "taper_edge_psi0": 0.999,
                              "taper_edge_shape": 2}
 #: The ``bootstrap_kwargs`` keys the engine honours (the edge taper; and
 #: ``use_sauter_eps`` at True, accepted as a no-op for configs written for
@@ -180,10 +180,10 @@ def engine_edge_taper(gc) -> dict:
     bk = dict(ENGINE_EDGE_TAPER_DEFAULT)
     bk.update({k: v for k, v in (getattr(gc, "bootstrap_kwargs", None)
                                  or {}).items() if k in bk})
-    on, psi0, shape = (bk["taper_edge_jBS"], bk["taper_edge_psi0"],
+    on, psi0, shape = (bk["taper_edge_jphi"], bk["taper_edge_psi0"],
                        bk["taper_edge_shape"])
     if not isinstance(on, (bool, np.bool_)):
-        raise ValueError(f"bootstrap_kwargs['taper_edge_jBS'] must be a "
+        raise ValueError(f"bootstrap_kwargs['taper_edge_jphi'] must be a "
                          f"bool, got {on!r}")
     if not (np.isfinite(float(psi0)) and 0.0 < float(psi0) < 1.0):
         raise ValueError(f"bootstrap_kwargs['taper_edge_psi0'] must be in "
@@ -419,14 +419,14 @@ def validate_engine_settings(gc) -> None:
     if engine_edge_taper(gc)["on"] and not resolve_edge_pressure(
             gc).edge_pprime_pin:
         raise ValueError(
-            "the engine's edge taper (bootstrap_kwargs['taper_edge_jBS']=True) "
+            "the engine's edge taper (bootstrap_kwargs['taper_edge_jphi']=True) "
             "refuses edge_pprime_pin=False: the taper takes the "
             "request to zero at the LCFS while the unpinned P' stays finite "
             "there, and the solve does not converge.  Either turn the taper "
-            "off (bootstrap_kwargs={'taper_edge_jBS': False}) or zero the "
+            "off (bootstrap_kwargs={'taper_edge_jphi': False}) or zero the "
             "edge pressure gradient (edge_pprime_pin=True)")
     for name, want in (("jbs_self_consistent", True),
-                       ("recalculate_j_BS", True),
+                       ("recalculate_jbs", True),
                        ("single_profile_jphi", False)):
         if bool(getattr(gc, name, want)) != want:
             raise ValueError(
@@ -499,7 +499,7 @@ def _mse_knobs_unread(gc, rows):
 #: (:func:`_legacy_knobs_unread`) -- it would otherwise be silently ignored.
 ENGINE_UNREAD_LEGACY_FIELDS = {
     "closure_channel": "the engine's closure is engine_preset / engine_rows",
-    "jBS_baseline_mode": "the engine composes the inductive and the Redl "
+    "jbs_baseline_mode": "the engine composes the inductive and the Redl "
                          "bootstrap itself (engine_preset / engine_rows)",
     "structured_preset": "engine_preset",
     "structured_basis": "engine_preset (its basis)",
@@ -526,7 +526,7 @@ ENGINE_UNREAD_LEGACY_FIELDS = {
                             "remedy for the jphi-linterp delivery defect)",
     "jbs_loop_q0_corrector": "engine_rows with 'q0' (engine_draw_q0_row "
                              "keeps it in the draws)",
-    "floor_j_BS": "nothing: the engine never floors the bootstrap",
+    "floor_jbs": "nothing: the engine never floors the bootstrap",
     "accept_anchor_inband": "nothing: the engine draws have no legacy "
                             "anchor in-band shortcut",
     "diagnostic_plots": "nothing: the engine draws make no per-draw SWB "
@@ -534,7 +534,7 @@ ENGINE_UNREAD_LEGACY_FIELDS = {
     # owner-approved 2026-10-05: refused like the rest.  Both are
     # ENGINE_DEPENDENT_DEFAULTS (default None, resolved per engine at
     # prepare_baseline()): None or the engine's own value is accepted
-    "isolate_edge_jBS": "nothing: the engine never isolates the edge "
+    "isolate_edge_jbs": "nothing: the engine never isolates the edge "
                         "bootstrap (its bootstrap is Redl on the whole "
                         "profile); leave it unset (None: resolved per "
                         "engine at prepare_baseline(), False under "
@@ -556,11 +556,11 @@ ENGINE_UNREAD_LEGACY_FIELDS = {
     "draw_solve_loose_tol": "nothing: the engine draws are capped by "
                             "engine_draw_solve_maxits and never rescued",
     # review PR60 B8: the opt-in for solve_with_bootstrap's convergence keys
-    # (djBS_tol, saw_relax), which the engine refuses with every other SWB
+    # (djbs_tol, saw_relax), which the engine refuses with every other SWB
     # key -- the flag itself unlocks nothing under the engine
     "bootstrap_convergence_override": "nothing: the engine never runs "
                                       "solve_with_bootstrap (its bootstrap "
-                                      "is physics.evaluate_jBS), and the "
+                                      "is physics.evaluate_jbs), and the "
                                       "convergence keys the flag admits are "
                                       "refused under the engine",
 }
@@ -580,7 +580,7 @@ ENGINE_UNREAD_LEGACY_FIELDS = {
 #: loop; ``from_imas``: diff+C); the unified values are the fields' former
 #: dataclass defaults, which the engine never reads.
 ENGINE_DEPENDENT_DEFAULTS = {
-    "isolate_edge_jBS": {"unified": True,
+    "isolate_edge_jbs": {"unified": True,
                          "legacy": {"reconstruction": False, "imas": False}},
     "perturb_jind_in_anchor": {"unified": False,
                                "legacy": {"reconstruction": False,
@@ -845,19 +845,19 @@ def _eps_definition_of(gc) -> str:
 
 def eps_record(eps_definition) -> dict:
     """The record of the Redl epsilon a run evaluates with: name, formula,
-    the R in ``nu*`` and the ``evaluate_jBS`` version tag."""
+    the R in ``nu*`` and the ``evaluate_jbs`` version tag."""
     from .physics import (EPS_DEFINITION_DEFAULT, EPS_DEFINITIONS, NU_STAR_R,
                           check_eps_definition, evaluate_jbs_version)
     d = check_eps_definition(EPS_DEFINITION_DEFAULT if eps_definition is None
                              else eps_definition)
     return dict(eps_definition=d, eps_formula=EPS_DEFINITIONS[d],
                 nu_star_R=NU_STAR_R[d],
-                evaluate_jBS_version=evaluate_jbs_version(d))
+                evaluate_jbs_version=evaluate_jbs_version(d))
 
 
 #: ``bootstrap`` of :func:`bootstrap_eps_route_record`: which evaluator
 #: produced the run's archived bootstrap.
-BOOTSTRAP_EVALUATOR_BOUQUET = "bouquet evaluate_jBS"
+BOOTSTRAP_EVALUATOR_BOUQUET = "bouquet evaluate_jbs"
 BOOTSTRAP_EVALUATOR_SWB = "toolkit solve_with_bootstrap"
 
 
@@ -867,7 +867,7 @@ def bootstrap_eps_route_record(gc, solve_method, swb_convention=None) -> dict:
 
     * the unified engine and the legacy self-consistent loop
       (``jbs_self_consistent=True``) evaluate the bootstrap with bouquet's
-      ``evaluate_jBS`` at ``GenerationConfig.eps_definition``:
+      ``evaluate_jbs`` at ``GenerationConfig.eps_definition``:
       :func:`eps_record`, plus ``bootstrap`` = :data:`BOOTSTRAP_EVALUATOR_BOUQUET`;
     * ``solve_method="swb"`` and the frozen legacy route
       (``jbs_self_consistent=False``) take every bootstrap from the toolkit's
@@ -879,8 +879,8 @@ def bootstrap_eps_route_record(gc, solve_method, swb_convention=None) -> dict:
       internal-solve toolkit (``kappa<j.B>+p'G``) uses the half-width over its
       own ``<R>`` with ``bootstrap_kwargs['use_sauter_eps']=True``,
       ``<a>/<R>`` with ``False``, and its own default when the key is unset
-      (recorded as such, ``eps_definition`` None).  ``evaluate_jBS_version``
-      is None (no ``evaluate_jBS`` produced it) and the configured
+      (recorded as such, ``eps_definition`` None).  ``evaluate_jbs_version``
+      is None (no ``evaluate_jbs`` produced it) and the configured
       ``eps_definition`` is kept as ``eps_definition_configured``.
     """
     gc_eps = getattr(gc, "eps_definition", None)
@@ -925,7 +925,7 @@ def bootstrap_eps_route_record(gc, solve_method, swb_convention=None) -> dict:
                  "default" if conv == SWB_JBS_TOROIDAL
                  else "toolkit convention not identified")
     return dict(eps_definition=d, eps_formula=formula, nu_star_R=nu_r,
-                evaluate_jBS_version=None,
+                evaluate_jbs_version=None,
                 bootstrap=BOOTSTRAP_EVALUATOR_SWB,
                 route=("swb" if solve_method == "swb"
                        else "legacy frozen (jbs_self_consistent=False)"),
@@ -976,7 +976,7 @@ def convergence_table(settings: dict, contract=None) -> list:
 #  composition (identity I2)
 # ---------------------------------------------------------------------------
 def conversion_factor(geom) -> np.ndarray:
-    """``F<1/R>/<B^2>``: the field-aligned ``<j.B>`` -> ``<j_phi>`` factor
+    """``F<1/R>/<B^2>``: the field-aligned ``<j.B>`` -> ``<jphi_total>`` factor
     (conversion (c) of the verification report) on an engine geometry
     (keys ``F``, ``inv_R``, ``B2``) -- the package's ONE conversion,
     :func:`bouquet.physics.field_aligned_conversion`."""
@@ -995,7 +995,7 @@ def composed_factor(geom) -> np.ndarray:
 
 def pressure_term(geom) -> np.ndarray:
     """``p'(<R> - F^2<1/R>/<B^2>)``: the pressure-driven (diamagnetic +
-    Pfirsch-Schlueter) part of ``<j_phi>``, whose ``<j.B>`` is zero."""
+    Pfirsch-Schlueter) part of ``<jphi_total>``, whose ``<j.B>`` is zero."""
     F = np.asarray(geom["F"], dtype=float)
     return np.asarray(geom["pprime"], dtype=float) * (
         np.asarray(geom["R_avg"], dtype=float)
@@ -1225,7 +1225,7 @@ class UnifiedEngine:
         self._prior()
         g0 = complete_geometry(anchor["geom"])
         self.state.geom = g0
-        self.state.lambda_bs = np.asarray(anchor["redl"], dtype=float).copy()
+        self.state.lambda_bs = np.asarray(anchor["jdotB_bs"], dtype=float).copy()
         self.anchor = anchor
         if self.s["delivery_correction"]:
             self.state.delivery_correction = np.zeros_like(self.psi)
@@ -1519,7 +1519,7 @@ class UnifiedEngine:
                 "mse"]["chords"]["sigma_eff"]))
         self._pending = p
         meas = dict(w=g1["w_lin"] * conversion_factor(g1), x=g1["psi_N"],
-                    li=m["li"], redl=m["redl"],
+                    li=m["li"], jdotB_bs=m["jdotB_bs"],
                     q0=(m["q_row"] if "q0" in self.rows else None))
         if "q0" in self.rows:
             meas["axis_current_solved"] = float(np.interp(
@@ -1604,10 +1604,10 @@ class UnifiedEngine:
         meas0 = dict(li=self.anchor["li"],
                      q0=(self.anchor["q_row"] if self.pin else None))
         res = run_jbs_loop(
-            st.lambda_bs, self.step, lambda m: m["redl"], s["loop"],
+            st.lambda_bs, self.step, lambda m: m["jdotB_bs"], s["loop"],
             Ip=float(self.rows["Ip"]["target"]), meas0=meas0, gate_li=True,
             gate_q0=bool(self.pin), label=self.label,
-            init_source=("evaluate_jBS <j.B> on the anchor (the source's own "
+            init_source=("evaluate_jbs <j.B> on the anchor (the source's own "
                          "total current at the full pressure)"),
             on_pass=self.on_pass, q0_pin=self.pin, extra=rows_x)
         phases = [dict(name="loop", record=res["record"])]
@@ -2195,7 +2195,7 @@ class UnifiedEngine:
                                           else li["criterion_tol"]),
                             mse_tol=self.s["mse_tol_sigma"])
         return run_jbs_loop(
-            lam, self.step, lambda m: m["redl"], dict(self.s["loop"]),
+            lam, self.step, lambda m: m["jdotB_bs"], dict(self.s["loop"]),
             Ip=float(self.rows["Ip"]["target"]), meas0=meas0, gate_li=True,
             gate_q0=bool(self.pin), label=label, init_source=init_source,
             on_pass=self.on_pass, q0_pin=self.pin, extra=rows_x)
@@ -2309,7 +2309,7 @@ class UnifiedEngine:
                            final=True)
         g1 = complete_geometry(m["geom"])
         w = g1["w_lin"] * conversion_factor(g1)
-        chk = check_delivered(m["redl"], lam, w, g1["psi_N"],
+        chk = check_delivered(m["jdotB_bs"], lam, w, g1["psi_N"],
                               float(self.rows["Ip"]["target"]), lp)
         checks = dict(loop=dict(r_j=chk["r_j"], r_I=chk["r_I"],
                                 ok=bool(chk["ok"])))
@@ -2424,11 +2424,11 @@ class TokaMakerBackend:
     pressure over the CURRENT flux range, ``jphi-linterp`` request,
     ``set_targets(Ip, pax)``), one or two passes; ``measure`` reads the
     solved equilibrium: :func:`bouquet.utils.fsa_current_geometry`,
-    :func:`bouquet.physics.evaluate_jBS` (its Redl ``<j.B>`` with the shared
+    :func:`bouquet.physics.evaluate_jbs` (its Redl ``<j.B>`` with the shared
     innermost-surface repair :func:`~bouquet.TokaMaker_interface.
     smooth_jbs_transition`), :func:`bouquet.utils.li_closure_geometry`,
     :func:`bouquet.utils.li_achieved`, q at the row radius, the achieved
-    ``<j_phi>`` (:func:`bouquet.utils.eq_jphi_profile`) and the field at the
+    ``<jphi_total>`` (:func:`bouquet.utils.eq_jphi_profile`) and the field at the
     MSE chords (:func:`bouquet.mse.mse_field_at`).
 
     ``maxits``: the GS iteration cap set on the solver for EVERY solve of
@@ -2453,7 +2453,7 @@ class TokaMakerBackend:
         self.mygs = mygs
         self.c = contract
         #: the Redl eps / nu* R of every evaluation of this backend
-        #: (GenerationConfig.eps_definition; None: evaluate_jBS's default)
+        #: (GenerationConfig.eps_definition; None: evaluate_jbs's default)
         self.eps_definition = eps_definition
         #: the run grid (psi_N, or Phi_N with coord="phi_n"); every solve
         #: tags its profiles with coord and every measurement samples the
@@ -2511,16 +2511,16 @@ class TokaMakerBackend:
     def redl(self, kinetics=None):
         """Redl ``<j.B>`` on the CURRENT equilibrium with *kinetics*
         (default: the backend's), with the shared innermost-surface repair --
-        exactly the ``redl`` :meth:`measure` returns, without the rest."""
-        from .physics import evaluate_jBS
+        exactly the ``jdotB_bs`` :meth:`measure` returns, without the rest."""
+        from .physics import evaluate_jbs
         from .TokaMaker_interface import smooth_jbs_transition
         kin = self._kinetics() if kinetics is None else kinetics
-        _j, d = evaluate_jBS(self.mygs.copy_eq(), self.psi, kin["ne"],
+        _j, d = evaluate_jbs(self.mygs.copy_eq(), self.psi, kin["ne"],
                              kin["te"], kin["ni"], kin["ti"], kin["zeff"],
                              psi_pad=self.psi_pad, isolate_edge=False,
                              smooth_axis=False, coord=self.coord,
                              eps_definition=self.eps_definition)
-        return smooth_jbs_transition(np.asarray(d["j_dot_B"], dtype=float))
+        return smooth_jbs_transition(np.asarray(d["jdotB_bs"], dtype=float))
 
     def p_sep(self) -> float:
         """The separatrix pressure added back at reporting / delivery for
@@ -2584,7 +2584,7 @@ class TokaMakerBackend:
         return float(st["a_geo"])
 
     def measure(self, want_chords=False, final=False):
-        from .physics import evaluate_jBS
+        from .physics import evaluate_jbs
         from .TokaMaker_interface import smooth_jbs_transition
         from .utils import (eq_jphi_profile, fsa_current_geometry,
                             li_achieved, li_closure_geometry)
@@ -2600,12 +2600,12 @@ class TokaMakerBackend:
             raise EngineSolveError("engine: this OFT build's get_q returns no "
                                    "<1/R^2>; the jphi-linterp Ip measure "
                                    "cannot be formed")
-        _j, d = evaluate_jBS(eq, self.psi, kin["ne"], kin["te"], kin["ni"],
+        _j, d = evaluate_jbs(eq, self.psi, kin["ne"], kin["te"], kin["ni"],
                              kin["ti"], kin["zeff"], psi_pad=pad,
                              isolate_edge=False, smooth_axis=False,
                              coord=self.coord,
                              eps_definition=self.eps_definition)
-        redl = smooth_jbs_transition(np.asarray(d["j_dot_B"], dtype=float))
+        redl = smooth_jbs_transition(np.asarray(d["jdotB_bs"], dtype=float))
         geom["F"] = np.asarray(d["F"], dtype=float)
         geom["B2"] = np.asarray(d["avg_B2"], dtype=float)
         geom["li_geom"] = li_closure_geometry(eq, geom, psi_pad=pad)
@@ -2622,7 +2622,7 @@ class TokaMakerBackend:
         Ip = abs(float(eq.get_globals()[0]))
         achieved = np.asarray(eq_jphi_profile(geom, "jphi-linterp", eq=eq),
                               dtype=float)
-        out = dict(geom=geom, redl=redl, redl_I_BS=float(d["I_BS"]), li=li,
+        out = dict(geom=geom, jdotB_bs=redl, redl_I_bs=float(d["I_BS"]), li=li,
                    q_row=q_row, Ip=Ip, achieved=achieved)
         if want_chords and self.chords is not None:
             from .mse import mse_field_at
@@ -2739,7 +2739,7 @@ def reconstruct(adapter, backend, settings, *, label=""):
     backend.solve(c0.anchor_request, n_passes=2)
     anchor = backend.measure(want_chords=False)
     ag = complete_geometry(anchor["geom"])
-    contract = adapter.finalize(anchor["redl"], ag)
+    contract = adapter.finalize(anchor["jdotB_bs"], ag)
     eng = UnifiedEngine(contract, backend, settings, anchor=anchor,
                         label=label)
     res = eng.run()
@@ -2816,18 +2816,18 @@ def engine_record(eng, res, wall_s=None) -> dict:
 #: (``Baseline.delivered_state["convention"]``).
 ENGINE_SPLIT_CONVENTION = (
     "unified engine: jphi-linterp REQUEST of the delivery solve (one "
-    "jphi-linterp solve of j_phi reproduces the delivered equilibrium); "
-    "j_BS = s_bs F<1/R>/<B^2> <j.B>_BS*, j_pressure = p'(<R> - "
+    "jphi-linterp solve of jphi_total reproduces the delivered equilibrium); "
+    "jphi_bs = s_bs F<1/R>/<B^2> <j.B>_BS*, jphi_pd = p'(<R> - "
     "F^2<1/R>/<B^2>) (the pressure-driven current, its own bucket: owner "
-    "decision D2), j_NBI/j_RF = F<1/R>/<B^2> <j.B>_fix (j_RF: the rf part "
+    "decision D2), jphi_nbi/jphi_rf = F<1/R>/<B^2> <j.B>_fix (jphi_rf: the rf part "
     "plus any other driven source entry) on the delivery composition's "
-    "geometry, all times its edge taper; j_inductive the residual (it "
+    "geometry, all times its edge taper; jphi_ind the residual (it "
     "carries s_ind F<1/R>/<B^2> <j.B>_ind and any delivery correction)")
 
 
 def split_pressure_term(geom):
     """The pressure-driven current of the archived split, its own bucket
-    ``j_pressure`` (owner decision D2; never part of ``j_BS``): p'G times
+    ``jphi_pd`` (owner decision D2; never part of ``jphi_bs``): p'G times
     the geometry's edge taper."""
     P = pressure_term(geom)
     w = geom.get("edge_taper")
@@ -2863,26 +2863,26 @@ def _lcfs_deviation_mm(mygs, pts):
 
 def _split(eng, res):
     """The Baseline's toroidal split of the delivered request:
-    ``(R, j_inductive, j_BS, j_NBI, j_RF, j_pressure)`` with ``R = j_inductive
-    + j_BS + j_NBI + j_RF + j_pressure`` exactly."""
+    ``(R, jphi_ind, jphi_bs, jphi_nbi, jphi_rf, jphi_pd)`` with ``R = jphi_ind
+    + jphi_bs + jphi_nbi + jphi_rf + jphi_pd`` exactly."""
     st, c = res["state"], eng.c
     g = st.geom
     kap = composed_factor(g)
     out = eng.delivered_closure["out"]
     R = np.asarray(st.request, dtype=float)
     # the pressure-driven p'G (docs/current-conventions.md, A7) is its own
-    # bucket, j_pressure (owner decision D2): never part of j_BS, so the
+    # bucket, jphi_pd (owner decision D2): never part of jphi_bs, so the
     # bootstrap is the field-aligned s_bs kappa lambda alone (as
-    # evaluate_jBS/4's toroidal output and the IMAS reader's j_BS)
-    j_BS = np.asarray(out["s_bs"], float) * kap * np.asarray(st.lambda_bs)
+    # evaluate_jbs/4's toroidal output and the IMAS reader's jphi_bs)
+    jphi_bs = np.asarray(out["s_bs"], float) * kap * np.asarray(st.lambda_bs)
     P = np.asarray(split_pressure_term(g), dtype=float)
-    j_NBI = kap * np.asarray(c.jB_fix_parts["nbi"], float)
-    # j_RF carries the RF part AND any other driven core_sources entry (the
+    jphi_nbi = kap * np.asarray(c.jB_fix_parts["nbi"], float)
+    # jphi_rf carries the RF part AND any other driven core_sources entry (the
     # IDS adapter's "other" part; absent on the g-file path), so the split
     # sums exactly to the request
-    j_RF = kap * (np.asarray(c.jB_fix_parts["rf"], float)
+    jphi_rf = kap * (np.asarray(c.jB_fix_parts["rf"], float)
                   + np.asarray(c.jB_fix_parts.get("other", 0.0), float))
-    return R, R - j_BS - j_NBI - j_RF - P, j_BS, j_NBI, j_RF, P
+    return R, R - jphi_bs - jphi_nbi - jphi_rf - P, jphi_bs, jphi_nbi, jphi_rf, P
 
 
 def _delivered_state(eng, res, rec, path):
@@ -2905,10 +2905,10 @@ def _delivered_state(eng, res, rec, path):
         Ip_target=float(eng.c.Ip), request_normalisation=cfac,
         edge_pressure=edge_pressure_record(eng),
         achieved_normalisation=None, n_floored_inductive=0,
-        j_phi_achieved=A,
+        jphi_total_achieved=A,
         how=("unified engine delivery solve: the unrelaxed composition on "
-             "the last solved geometry with x*, lambda_BS* and the row "
-             "discrepancies, solved twice; one jphi-linterp solve of j_phi "
+             "the last solved geometry with x*, lambda_bs* and the row "
+             "discrepancies, solved twice; one jphi-linterp solve of jphi_total "
              "reproduces it")), R - A / cfac
 
 
@@ -2987,7 +2987,7 @@ def _gfile_baseline(bq, eng, res, rec, ad, iso_pts, iso_w):
     from .baseline import Baseline, _reconstruction_metrics
     mygs, src, c = bq.mygs, bq.config.source, eng.c
     eqdsk = ad.eqdsk
-    R, j_ind, j_BS, j_NBI, j_RF, P = _split(eng, res)
+    R, j_ind, jphi_bs, jphi_nbi, jphi_rf, P = _split(eng, res)
     ds, offset = _delivered_state(eng, res, rec, "reconstruction")
     m = eng.delivered_meas
     A = np.asarray(m["achieved"], dtype=float)
@@ -3008,8 +3008,8 @@ def _gfile_baseline(bq, eng, res, rec, ad, iso_pts, iso_w):
         isoflux_pts=np.asarray(iso_pts, float).copy(),
         weights=np.asarray(iso_w, float).copy(),
         psi_lcfs_val=float(mygs.psi_bounds[0]),
-        j_inductive_fit=j_ind.copy(), j_phi_fit=A.copy(),
-        j_BS_used=j_BS.copy(), psi=mygs.get_psi(False),
+        jphi_ind_fit=j_ind.copy(), jphi_total_fit=A.copy(),
+        jphi_bs_used=jphi_bs.copy(), psi=mygs.get_psi(False),
         ffprime=np.asarray(F_prof * Fp_prof, dtype=float),
         Ip_tokamaker=float(m["Ip"]), eqdsk_jtor=jt_in,
         eqdsk_psi_N=psi.copy(), eqdsk_pres=np.asarray(eqdsk.pres).copy(),
@@ -3061,11 +3061,11 @@ def _gfile_baseline(bq, eng, res, rec, ad, iso_pts, iso_w):
         # the run grid (the g-file's psi_N, or its Phi_N in a toroidal-flux
         # run); recon keeps the g-file's own psi_N
         psi_N=np.asarray(c.psi_N, dtype=float), coord=ad.coord,
-        j_phi=R, j_inductive=j_ind, j_BS=j_BS,
+        jphi_total=R, jphi_ind=j_ind, jphi_bs=jphi_bs,
         psi_N_kinetic=np.asarray(kn["psi_N"], float), ne=kn["ne"],
         te=kn["te"], ni=kn["ni"], ti=kn["ti"], Zeff=kn["Zeff"],
         Ip_target=float(c.Ip), l_i_target=float(m["li"]),
-        provenance="reconstruction", j_NBI=j_NBI, j_RF=j_RF,
+        provenance="reconstruction", jphi_nbi=jphi_nbi, jphi_rf=jphi_rf,
         p_fast=kn.get("p_fast"), Z_imp=c.pressure_parts.get("Z_imp"),
         eqdsk_bytes=eqdsk_bytes, pfile_bytes=kn.get("raw_bytes"),
         aux={"zeff": np.asarray(kn["Zeff"], dtype=float)}, recon=recon,
@@ -3079,7 +3079,7 @@ def _gfile_baseline(bq, eng, res, rec, ad, iso_pts, iso_w):
                     if kn.get("zeff_provenance") else None))
     # the third bucket (owner decision D2), archived beside the split
     from .schema import SPLIT_PRESSURE_SEPARATE
-    bl.j_pressure = P
+    bl.jphi_pd = P
     bl.current_split_convention = SPLIT_PRESSURE_SEPARATE
     return bl
 
@@ -3088,7 +3088,7 @@ def _ids_baseline(bq, eng, res, rec, bl_src):
     import copy
     c = eng.c
     bl = copy.copy(bl_src)
-    R, j_ind, j_BS, j_NBI, j_RF, P = _split(eng, res)
+    R, j_ind, jphi_bs, jphi_nbi, jphi_rf, P = _split(eng, res)
     ds, offset = _delivered_state(eng, res, rec, "imas")
     out = eng.delivered_closure["out"]
     cl = eng.delivered_closure
@@ -3116,17 +3116,17 @@ def _ids_baseline(bq, eng, res, rec, bl_src):
                    out_of_prior=any(
                        str(r).startswith("bootstrap_scale_out_of_prior")
                        for r in ch["closure_limited_reasons"])))
-    bl.j_phi, bl.j_inductive, bl.j_BS = R, j_ind, j_BS
-    bl.j_NBI, bl.j_RF = j_NBI, j_RF
+    bl.jphi_total, bl.jphi_ind, bl.jphi_bs = R, j_ind, jphi_bs
+    bl.jphi_nbi, bl.jphi_rf = jphi_nbi, jphi_rf
     # the third bucket (owner decision D2) on the engine's own delivery
     # geometry, replacing the reader's (whose inductive carried it)
     from .schema import SPLIT_PRESSURE_SEPARATE
-    bl.j_pressure = P
+    bl.jphi_pd = P
     bl.current_split_convention = SPLIT_PRESSURE_SEPARATE
-    # the engine's j_RF carries every other driven entry (sawteeth included):
-    # the reader's j_other / j_sawteeth are not separate channels here
-    bl.j_other, bl.j_sawteeth = None, None
-    bl.jBS_diff, bl.jphi_diff, bl.p_diff = None, None, None
+    # the engine's jphi_rf carries every other driven entry (sawteeth included):
+    # the reader's jphi_other / jphi_saw are not separate channels here
+    bl.jphi_other, bl.jphi_saw = None, None
+    bl.jphi_bs_diff, bl.jphi_diff, bl.p_diff = None, None, None
     bl.bs_scale = float(out["bs_scale_eff"])
     bl.ohm_scale = float(out["ohm_scale_eff"])
     bl.l_i_target = float(m["li"])

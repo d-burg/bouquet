@@ -43,8 +43,8 @@ FACTOR, SIGMA, N = 1.03, 0.004, 8
 
 def _bouquet(header):
     """The engine configuration, selected IN the factory call: ``from_imas``
-    then leaves its legacy-path workflow settings (``isolate_edge_jBS``,
-    ``perturb_jind_in_anchor``, ``jBS_baseline_mode``) at their defaults.
+    then leaves its legacy-path workflow settings (``isolate_edge_jbs``,
+    ``perturb_jind_in_anchor``, ``jbs_baseline_mode``) at their defaults.
     Building the legacy configuration and flipping the engine afterwards is
     refused by the engine's settings validation (those fields are never read
     by the engine and are refused when not at their defaults)."""

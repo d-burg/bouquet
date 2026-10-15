@@ -3,7 +3,7 @@
 Three coordinated changes, all cheap to pin without a GS solve:
 
 1. ``protect_state=True`` on the geqdsk-path ``_corrective_jphi_iteration``
-   (keep-best on the FULL-domain j_phi RMS) -- the semantics the IMAS path has
+   (keep-best on the FULL-domain jphi_total RMS) -- the semantics the IMAS path has
    used since the corrector was reused there.  The loop's own stopping rule is
    on the EDGE RMS, so an iterate that improves the edge while degrading the
    core satisfies it and used to be kept.
@@ -361,7 +361,7 @@ def test_reconstruction_metrics_carries_the_post_corrective_fields():
 
     result = {
         "Ip_tokamaker": 1.4e6,
-        "j_phi_fit": np.linspace(1e6, 0.0, 51),
+        "jphi_total_fit": np.linspace(1e6, 0.0, 51),
         "eqdsk_jtor": np.linspace(1e6, 0.0, 51),
         "quality": {"li3_corrective_drift_pct": 0.75,
                     "li3_corrective_band_pct": 1.0,
@@ -383,9 +383,9 @@ def test_a_first_solve_failure_returns_the_input_not_a_NameError(
         _patched_jphi_from_GS, capsys, protect_state):
     """If the FIRST solve raises, the function must still return sanely.
 
-    The failure handler ``break``s out of the loop, but ``j_phi_output`` is
+    The failure handler ``break``s out of the loop, but ``jphi_total_output`` is
     only assigned AFTER a successful solve -- so on an iteration-0 failure the
-    return statement raised ``NameError: name 'j_phi_output' is not defined``,
+    return statement raised ``NameError: name 'jphi_total_output' is not defined``,
     masking a solve failure behind an unrelated-looking crash.  The truthful
     degradation is "no correction was applied": return the uncorrected input.
     """
@@ -407,7 +407,7 @@ def test_a_first_solve_failure_returns_the_input_not_a_NameError(
         verbose=False, protect_state=protect_state)
 
     np.testing.assert_array_equal(out, target), \
-        "a first-solve failure must hand back the uncorrected input j_phi"
+        "a first-solve failure must hand back the uncorrected input jphi_total"
     assert edge_hist == [], "no iterate succeeded, so there is no RMS history"
     assert n_iters == 1
     # and it must SAY so, unconditionally -- not only under verbose

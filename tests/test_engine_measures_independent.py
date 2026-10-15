@@ -7,7 +7,7 @@ test).  Here:
 
 * ``Ip_fsa_weights`` (the jphi-linterp affine Ip measure) against a direct
   2-D area integral of the Grad-Shafranov toroidal current density
-  ``j_phi = R p' + F F' / (mu0 R)`` over an analytic cross-section
+  ``jphi_total = R p' + F F' / (mu0 R)`` over an analytic cross-section
   (concentric circular surfaces), with ``F F'`` from the jphi-linterp
   relation ``J = <R> p' + F F' <1/R> / mu0``;
 * the engine's l_i row criterion (``EngineRows``) binds exactly at its
@@ -46,7 +46,7 @@ def _profiles(x):
 
 
 def _direct_Ip(R0, a, dpsi, Jf, pf):
-    """Gauss-Legendre area integral of j_phi(R, psi) over the disc."""
+    """Gauss-Legendre area integral of jphi_total(R, psi) over the disc."""
     from numpy.polynomial.legendre import leggauss
     nr, nt = 400, 256
     ur, wr = leggauss(nr)

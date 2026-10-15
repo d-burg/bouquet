@@ -1,7 +1,7 @@
 """The q0 pin acting under the loop -- live-solver half (``pytest -m solver``).
 
 ``GenerationConfig.jbs_loop_q0_corrector`` on the synthetic D3D-like example
-(the OMAS data dictionary; ``jBS_baseline_mode="ohmic"``), for the two
+(the OMAS data dictionary; ``jbs_baseline_mode="ohmic"``), for the two
 channels that pin the on-axis safety factor:
 
 * ``closure_channel="sawtooth_bootstrap"``;
@@ -58,7 +58,7 @@ def _probe(outdir):
     b.setup_solver()
     g = b.config.generation
     g.jbs_self_consistent = True
-    g.jBS_baseline_mode = "ohmic"
+    g.jbs_baseline_mode = "ohmic"
     g.jbs_init = "anchor"
     g.jbs_loop_on_fail = "raise"
     out = dict(q0_tol=float(g.q0_tol), tolerances=dict(_S))

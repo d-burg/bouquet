@@ -45,7 +45,7 @@ def test_a_failed_anchor_solve_rejects_the_draw(toy, route, exc, capsys):
     F = toy.copy_eq()
     st = _fail_next_solve(toy, exc)
     with pytest.raises(DrawAnchorSolveFailed) as ei:
-        _draw(toy, route, dv["request"], dv["j_inductive"], _li(F.achieved),
+        _draw(toy, route, dv["request"], dv["jphi_ind"], _li(F.achieved),
               _settings(), offset=off)
     # the anchor was the draw's first solve, and nothing solved after it
     assert st["n"] == 1
@@ -66,7 +66,7 @@ def test_a_bug_in_the_anchor_is_not_relabelled(toy):
     F = toy.copy_eq()
     _fail_next_solve(toy, TypeError("a bug"))
     with pytest.raises(TypeError):
-        _draw(toy, "standard", dv["request"], dv["j_inductive"],
+        _draw(toy, "standard", dv["request"], dv["jphi_ind"],
               _li(F.achieved), _settings(), offset=off)
 
 
@@ -92,7 +92,7 @@ def test_the_generate_loop_records_the_reason(tmp_path, monkeypatch, capsys):
         R._FakeGS(), X, 2, str(tmp_path / "anc"), jphi, ne, te, 0.9 * ne,
         te, 0.05 * ne, 0.05 * te, 0.05 * ne, 0.05 * te, 0.05 * jphi,
         0.4, 0.4, 0.25, 1.0e6, 0.8, 1.5 * np.ones(len(X)),
-        input_jinductive=jphi - Jb, baseline_j_BS=Jb, psi_N_kinetic=None,
+        jphi_ind_input=jphi - Jb, baseline_jphi_bs=Jb, psi_N_kinetic=None,
         diagnostic_plots=False, seed=3,
         jbs_loop=jbs_settings(_GC(), draw=True),
         homotopy_passes=[(0.05, 0.10), (0.01, 0.01)], rejection_log=rej)

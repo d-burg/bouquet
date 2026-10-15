@@ -86,7 +86,7 @@ def test_the_loop_draw_pressure_uses_the_exact_constant():
         req, jbs, fx = T._reconstruct(toy, kappa_short=0.997)
         dv, off, _n = T._delivered(toy, req, jbs, fx)
         F = toy.copy_eq()
-        T._draw(toy, "standard", dv["request"], dv["j_inductive"],
+        T._draw(toy, "standard", dv["request"], dv["jphi_ind"],
                 T._li(F.achieved), T._settings(), offset=off)
     finally:
         mp.undo()

@@ -100,7 +100,7 @@ _LEAKS = [
 
 _NOT_PATHS = [
     "A/m^2", "1/(<R><1/R>)", "~1/R", "psi_N/B0", "r_j/r_I", "(eps/q)^2",
-    "evaluate_jBS/1 (Redl 2021 jboot1)", "09/29/2026", "~11.8 MB",
+    "evaluate_jbs/1 (Redl 2021 jboot1)", "09/29/2026", "~11.8 MB",
     "||jc_k - js_{k-1}||_w / ||jc_k||_w", "OpenFUSIONToolkit 26.6 git abc",
     "d/dpsi = numpy.gradient(y, psi_N) / psi_range", "<j.B>/B0",
 ]

@@ -208,7 +208,7 @@ def _probe(outdir):
     bl = b.prepare_baseline()
     mygs = b.mygs
     psi_N = np.asarray(bl.psi_N, dtype=float)
-    J = np.asarray(bl.j_phi, dtype=float)
+    J = np.asarray(bl.jphi_total, dtype=float)
     Ip_true = float(mygs.compute_area_integral(mygs.calc_jtor_plasma()))
     vol_true = float(mygs.get_stats(
         lcfs_pad=float(getattr(b.config.source, "psi_pad", 1e-3)))["vol"])
@@ -302,7 +302,7 @@ solver_only = pytest.mark.skipif(
 @solver_only
 @pytest.mark.parametrize("convention", ["jphi-linterp", "fsa"])
 def test_measure_reproduces_the_equilibriums_own_current(measured, convention):
-    """THE validation: integrate the solved equilibrium's own j_phi profile and
+    """THE validation: integrate the solved equilibrium's own jphi_total profile and
     demand its true I_p back, to 0.1 %.  Measured +0.0071 %."""
     got = float(measured["live"][convention]["self"])
     err = abs(got / float(measured["Ip_true"]) - 1.0)

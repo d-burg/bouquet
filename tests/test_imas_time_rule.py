@@ -116,7 +116,7 @@ def test_a_single_time_core_sources_at_another_time_is_refused(tmp_path):
     # at its own time it is read, dt = 0
     bl = _read(p, t[0])
     assert bl.source_time_match["core_sources"]["dt"] == 0.0
-    assert np.max(np.abs(np.asarray(bl.j_NBI))) > 0.0
+    assert np.max(np.abs(np.asarray(bl.jphi_nbi))) > 0.0
 
 
 def test_the_slice_helper_refuses_for_both_readers():
@@ -250,7 +250,7 @@ def test_a_beam_starting_mid_shot_is_off_before_its_record(tmp_path,
     p = _write(tmp_path, dd, "midshot.json")
     msgs = []
     bl = _read(p, t[0], msgs)
-    assert np.all(np.asarray(bl.j_NBI) == 0.0)
+    assert np.all(np.asarray(bl.jphi_nbi) == 0.0)
     e = bl.source_time_match["entries"][0]
     assert e["status"] == "off_before_record" and e["first_own_time"] == t[1]
     ann = [m for m in msgs if "has no record before its first own time" in m]
@@ -258,14 +258,14 @@ def test_a_beam_starting_mid_shot_is_off_before_its_record(tmp_path,
     assert "off_before_record" in capsys.readouterr().out
     msgs2 = []
     bl2 = _read(p, t[0], msgs2)                    # again: not re-announced
-    assert np.all(np.asarray(bl2.j_NBI) == 0.0)
+    assert np.all(np.asarray(bl2.jphi_nbi) == 0.0)
     assert not any("no record before" in m for m in msgs2)
     assert "no record before" not in capsys.readouterr().out
     for k in (1, 2):
         blk = _read(p, t[k])
         ek = blk.source_time_match["entries"][0]
         assert ek["status"] == "matched" and ek["dt"] == 0.0
-        assert np.max(np.abs(np.asarray(blk.j_NBI))) > 0.0
+        assert np.max(np.abs(np.asarray(blk.jphi_nbi))) > 0.0
     c = _adapter(p, t[0])
     assert np.all(c.jB_fix_parts["nbi"] == 0.0)
     assert c.provenance["off_sources"] == [dict(
@@ -288,5 +288,5 @@ def test_past_the_entrys_last_time_with_current_is_still_refused(tmp_path):
         nb["profiles_1d"][-1]["j_parallel"])
     p = _write(tmp_path, copy.deepcopy(dd), "ends_idle.json")
     bl = _read(p, t[-1])
-    assert np.all(np.asarray(bl.j_NBI) == 0.0)
+    assert np.all(np.asarray(bl.jphi_nbi) == 0.0)
     assert bl.source_time_match["entries"][0]["status"] == "off_idle"

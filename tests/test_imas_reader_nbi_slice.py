@@ -18,7 +18,7 @@ owner-approved 2026-10-07, it was float precision -- when neither grid has
 a step);
 otherwise the read is REFUSED -- a beam is never silently zeroed.
 
-The slice read is visible in ``Baseline.j_NBI``: the beam entry's
+The slice read is visible in ``Baseline.jphi_nbi``: the beam entry's
 j_parallel at core_sources time t_k is the constant 1e3*(k+1) A/m^2, and the
 reference is the same entry on the full time base (the parallel -> toroidal
 ratio depends only on the slice's core_profiles, so a correct read is
@@ -79,7 +79,7 @@ def _read(tmp_path, dd, time, name, record=None):
 
 def _reference(tmp_path, t, k):
     dd, _ = _dd_with_tagged_nbi()
-    return np.asarray(_read(tmp_path, dd, t[k], f"ref{k}.json").j_NBI,
+    return np.asarray(_read(tmp_path, dd, t[k], f"ref{k}.json").jphi_nbi,
                       dtype=float)
 
 
@@ -88,14 +88,14 @@ def test_the_last_slice_reads_its_own_nbi_slice(tmp_path):
     (the list-index rule's fallback past the end of a late entry)."""
     dd, t = _dd_with_tagged_nbi(drop_first=True)
     k = len(t) - 1
-    got = np.asarray(_read(tmp_path, dd, t[k], "last.json").j_NBI)
+    got = np.asarray(_read(tmp_path, dd, t[k], "last.json").jphi_nbi)
     np.testing.assert_array_equal(got, _reference(tmp_path, t, k))
     assert np.max(np.abs(got)) > 0.0
 
 
 def test_a_middle_slice_is_not_read_one_slice_late(tmp_path):
     dd, t = _dd_with_tagged_nbi(drop_first=True)
-    got = np.asarray(_read(tmp_path, dd, t[1], "mid.json").j_NBI)
+    got = np.asarray(_read(tmp_path, dd, t[1], "mid.json").jphi_nbi)
     np.testing.assert_array_equal(got, _reference(tmp_path, t, 1))
 
 
@@ -108,7 +108,7 @@ def test_a_slice_before_the_entry_starts_is_off_before_record(tmp_path):
     dd, t = _dd_with_tagged_nbi(drop_first=True)
     msgs = []
     bl = _read(tmp_path, dd, t[0], "first.json", msgs)
-    assert np.all(np.asarray(bl.j_NBI) == 0.0)
+    assert np.all(np.asarray(bl.jphi_nbi) == 0.0)
     e = [x for x in bl.source_time_match["entries"] if x["index"] == 2][0]
     assert e["status"] == "off_before_record"
     assert e["first_own_time"] == t[1]
@@ -129,10 +129,10 @@ def test_a_late_beam_entry_idle_before_it_starts_is_off_not_refused(
     nbi["profiles_1d"][0]["j_parallel"] = [0.0] * len(
         nbi["profiles_1d"][0]["j_parallel"])
     got = np.asarray(_read(tmp_path, copy.deepcopy(dd), t[0],
-                           "idle.json").j_NBI)
+                           "idle.json").jphi_nbi)
     assert np.all(got == 0.0)
     got = np.asarray(_read(tmp_path, copy.deepcopy(dd), t[-1],
-                           "idle_last.json").j_NBI)
+                           "idle_last.json").jphi_nbi)
     np.testing.assert_array_equal(got, _reference(tmp_path, t, len(t) - 1))
 
 def _shifted(dd, shift):
@@ -153,7 +153,7 @@ def test_a_two_microsecond_offset_reads_the_nearest_slice_not_zero(
         dd, t = _dd_with_tagged_nbi()
         msgs = []
         got = np.asarray(_read(tmp_path, _shifted(dd, 2e-6), t[k],
-                               f"us{k}.json", msgs).j_NBI)
+                               f"us{k}.json", msgs).jphi_nbi)
         np.testing.assert_array_equal(got, _reference(tmp_path, t, k))
         assert np.max(np.abs(got)) > 0.0
         assert not any("NBI" in m for m in msgs)
@@ -196,12 +196,12 @@ def test_single_time_bases_match_within_the_ten_microsecond_floor(
     dd = _single_time(dd, t, k)
     # on the time: read, dt = 0
     bl = _read(tmp_path, copy.deepcopy(dd), t[k], "one.json")
-    np.testing.assert_array_equal(np.asarray(bl.j_NBI),
+    np.testing.assert_array_equal(np.asarray(bl.jphi_nbi),
                                   _reference(tmp_path, t, k))
     assert _nbi_match(bl)["dt"] == 0.0
     msgs = []
     bl = _read(tmp_path, _shifted(dd, shift), t[k], "one_us.json", msgs)
-    got = np.asarray(bl.j_NBI)
+    got = np.asarray(bl.jphi_nbi)
     np.testing.assert_array_equal(got, _reference(tmp_path, t, k))
     assert np.max(np.abs(got)) > 0.0
     e = _nbi_match(bl)
@@ -228,7 +228,7 @@ def test_single_time_bases_beyond_the_floor_keep_the_record_rules(tmp_path):
     msgs = []
     bl = _read(tmp_path, _shifted(dd, 2e-5), t[k], "twenty_us_late.json",
                msgs)
-    assert np.all(np.asarray(bl.j_NBI) == 0.0)
+    assert np.all(np.asarray(bl.jphi_nbi) == 0.0)
     e = _nbi_match(bl)
     assert e["status"] == "off_before_record"
     assert e["first_own_time"] == t[k] + 2e-5
@@ -239,7 +239,7 @@ def test_an_entry_exactly_on_a_slice_time_matches(tmp_path):
     dd, t = _dd_with_tagged_nbi()
     for k, tk in enumerate(t):
         got = np.asarray(_read(tmp_path, copy.deepcopy(dd), tk,
-                               f"on{k}.json").j_NBI)
+                               f"on{k}.json").jphi_nbi)
         np.testing.assert_array_equal(got, _reference(tmp_path, t, k))
         assert np.max(np.abs(got)) > 0.0
 
@@ -261,7 +261,7 @@ def test_a_coarser_entry_grid_is_refused_between_its_own_slices(tmp_path):
         _read(tmp_path, copy.deepcopy(dd), t[1], "coarse.json")
     for k in (0, 2):
         got = np.asarray(_read(tmp_path, copy.deepcopy(dd), t[k],
-                               f"coarse{k}.json").j_NBI)
+                               f"coarse{k}.json").jphi_nbi)
         np.testing.assert_array_equal(got, _reference(tmp_path, t, k))
 
 
@@ -286,7 +286,7 @@ def test_past_the_end_by_more_than_half_a_step_is_refused(tmp_path):
         nbi["profiles_1d"][0]["time"] = last - 0.1
         nbi["profiles_1d"][1]["time"] = last
         if ok:
-            got = np.asarray(_read(tmp_path, dd, t[-1], "in.json").j_NBI)
+            got = np.asarray(_read(tmp_path, dd, t[-1], "in.json").jphi_nbi)
             assert np.max(np.abs(got)) > 0.0
         else:
             with pytest.raises(ValueError, match="within half a time-step"):
@@ -305,13 +305,13 @@ def test_an_nbi_entry_on_the_full_time_base_without_times_reads_by_index(
     by index, exactly as before (= the time-tagged reference)."""
     dd, t = _dd_with_tagged_nbi(with_times=False)
     for k, tk in enumerate(t):
-        got = np.asarray(_read(tmp_path, dd, tk, f"full{k}.json").j_NBI)
+        got = np.asarray(_read(tmp_path, dd, tk, f"full{k}.json").jphi_nbi)
         np.testing.assert_array_equal(got, _reference(tmp_path, t, k))
 
 
 def test_the_shipped_example_reads_the_same_nbi_as_the_index_rule(tmp_path):
     """Nothing moves for the shipped example (its beam entry is on the full
-    time base, without per-slice times): at every slice the reader's j_NBI
+    time base, without per-slice times): at every slice the reader's jphi_nbi
     is the entry's slice k converted, i.e. what the list-index rule read."""
     dd = _example()
     t = list(dd["core_sources"]["time"])
@@ -329,6 +329,6 @@ def test_the_shipped_example_reads_the_same_nbi_as_the_index_rule(tmp_path):
         for j, q in enumerate(nb2["profiles_1d"]):
             q["time"] = t[j]
         bl2 = _read(tmp_path, dd2, tk, f"ex_t{k}.json")
-        np.testing.assert_array_equal(np.asarray(bl.j_NBI),
-                                      np.asarray(bl2.j_NBI))
+        np.testing.assert_array_equal(np.asarray(bl.jphi_nbi),
+                                      np.asarray(bl2.jphi_nbi))
         assert not any("NBI entry" in m for m in msgs)

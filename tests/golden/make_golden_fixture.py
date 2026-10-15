@@ -126,14 +126,10 @@ def _ip_from_eqdsk_bytes(raw):
 
 
 def _boundary_devs(bl_boundary, grp):
-    from scipy.spatial import cKDTree
+    from bouquet.filtering import boundary_deviation_mm
     if bl_boundary is None or "perturbed_lcfs_ref" not in grp:
         return (np.nan, np.nan)
-    pert = np.asarray(grp["perturbed_lcfs_ref"][()], dtype=float)
-    tree = cKDTree(pert)
-    devs, _ = tree.query(bl_boundary)
-    return (float(np.sqrt(np.mean(devs ** 2)) * 1e3),
-            float(np.max(devs) * 1e3))
+    return boundary_deviation_mm(bl_boundary, grp["perturbed_lcfs_ref"][()])
 
 
 def _select_subset(draws):
@@ -292,7 +288,7 @@ def bouquet_provenance():
 
 
 def source_jphi_archival(source):
-    """The run's j_phi archival convention, as ``regenerate_golden_run.py``
+    """The run's jphi_total archival convention, as ``regenerate_golden_run.py``
     stamps it on the archive root (``"input"``), or ``None`` when the source
     does not say (a run not made by that recipe)."""
     if not source or not os.path.isfile(source):
@@ -443,7 +439,7 @@ def build_rng_stream(source_slim=None, out_dir=_HERE, seed=RNG_STREAM_SEED):
         psi_N = np.asarray(bl["psi_N"][()], dtype=float)
         profiles = {"ne": bl["n_e"][()], "te": bl["T_e"][()],
                     "ni": bl["n_i"][()], "ti": bl["T_i"][()],
-                    "jphi": bl["j_phi"][()]}
+                    "jphi": bl["jphi_total"][()]}
         sigmas = {"ne": bl["sigma_ne"][()], "te": bl["sigma_te"][()],
                   "ni": bl["sigma_ni"][()], "ti": bl["sigma_ti"][()],
                   "jphi": bl["sigma_jphi"][()]}
@@ -778,7 +774,7 @@ def build(source, out_dir=_HERE, eqdsk="all"):
     size_mb = os.path.getsize(slim_path) / 1e6
     print(f"[golden] wrote {slim_path}  ({size_mb:.2f} MB, eqdsk={eqdsk})")
     print(f"[golden] wrote {manifest_path}")
-    print(f"[golden] j_phi archival: "
+    print(f"[golden] jphi_total archival: "
           f"{prov['generator_args']['jphi_archival'] or 'NOT STATED by the source'}")
     for sk, se in manifest["scans"].items():
         print(f"[golden]   scan {sk}: {se['n_draws']} draws, "
@@ -824,8 +820,8 @@ def build_legacy_json(source, out_dir=_HERE):
     import sys
     sys.path.insert(0, os.path.abspath(os.path.join(_HERE, "..", "..")))
     from bouquet.schema import read_jbs_loop, read_current_split_convention
+    from bouquet.filtering import contour_distance
     from bouquet.utils import _read_coil_names
-    from scipy.spatial import cKDTree
     out_path = os.path.join(out_dir, LEGACY_JSON_NAME)
     prov = fixture_provenance(source=source, eqdsk="none")
     with h5py.File(source, "r") as hf:
@@ -864,15 +860,15 @@ def build_legacy_json(source, out_dir=_HERE):
             x_points=np.asarray(bl["x_points"][()], dtype=float).tolist()
             if "x_points" in bl else None,
             # where the archived split keeps the pressure-driven p'G (owner
-            # decision D2: its own j_pressure beside a j_inductive that does
-            # not carry it; a pre-#64 archive carried it in j_inductive).
+            # decision D2: its own jphi_pd beside a jphi_ind that does
+            # not carry it; a pre-#64 archive carried it in jphi_ind).
             # The replay composes the legacy path's carried inductive from
             # these, so the record says which form it holds.
             current_split_convention=read_current_split_convention(bl),
             profiles={k: _f(bl[k][()]) for k in
                       ("psi_N", "psi_N_kinetic", "n_e", "T_e", "n_i", "T_i",
-                       "aux_zeff", "j_phi", "j_BS", "j_inductive",
-                       "j_pressure", "pressure") if k in bl},
+                       "aux_zeff", "jphi_total", "jphi_bs", "jphi_ind",
+                       "jphi_pd", "pressure") if k in bl},
             recon_lcfs_ref=dict(stride=LEGACY_LCFS_STRIDE,
                                 decimals=LEGACY_LCFS_DECIMALS,
                                 n_full=int(lcfs.shape[0]),
@@ -897,8 +893,8 @@ def build_legacy_json(source, out_dir=_HERE):
         for i in in_spec[:LEGACY_REPLAY_DRAWS]:
             gi = g[str(i)]
             pert = np.asarray(gi["perturbed_lcfs_ref"][()], dtype=float)
-            d_sub, _ = cKDTree(pert).query(tree_sub)
-            d_full, _ = cKDTree(pert).query(lcfs)
+            d_sub = contour_distance(tree_sub, pert)
+            d_full = contour_distance(lcfs, pert)
             replay[str(i)] = dict(
                 summary[str(i)],
                 coil_names=list(_read_coil_names(gi)),
@@ -906,8 +902,8 @@ def build_legacy_json(source, out_dir=_HERE):
                 current_split_convention=read_current_split_convention(
                     gi, baseline_attrs=bl.attrs),
                 profiles={k: _f(gi[k][()]) for k in
-                          ("n_e", "T_e", "n_i", "T_i", "aux_zeff", "j_phi",
-                           "j_inductive", "j_pressure") if k in gi},
+                          ("n_e", "T_e", "n_i", "T_i", "aux_zeff", "jphi_total",
+                           "jphi_ind", "jphi_pd") if k in gi},
                 bnd_rms_to_recon_mm=float(np.sqrt(np.mean(d_sub ** 2)) * 1e3),
                 bnd_rms_to_recon_mm_full_trace=float(
                     np.sqrt(np.mean(d_full ** 2)) * 1e3))

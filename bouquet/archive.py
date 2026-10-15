@@ -16,7 +16,7 @@ than hand-rolling h5 tree traversal + ``.eqdsk``-suffix scanning + byte parsing
     d.li1, d.li3, d.flags, d.attrs       # scalars + filter/spec metadata
     d.jbs_loop, sc.baseline_jbs_loop     # self-consistent bootstrap records
     sc.bootstrap_model                   # "self-consistent Redl bootstrap" / legacy
-    d.profiles                           # dict of named arrays (psi_N, j_phi, ...)
+    d.profiles                           # dict of named arrays (psi_N, jphi_total, ...)
     d.equilibrium()                      # parsed GEQDSKEquilibrium (stored bytes)
     d.pfile()                            # parsed PFile (None if absent)
     d.extract("out/", formats=("geqdsk", "pfile"))
@@ -112,7 +112,7 @@ class DrawView:
             import h5py
             with h5py.File(self._ar.path, "r") as hf:
                 a = hf[self._gp].attrs
-                # scalars as Python values; profiles (e.g. swb_j_saw) stay arrays
+                # scalars as Python values; profiles (e.g. jphi_saw_out) stay arrays
                 self._attrs_cache = {
                     k: (a[k].item() if getattr(a[k], "size", 0) == 1 else a[k]) for k in a}
         return dict(self._attrs_cache)
@@ -164,7 +164,7 @@ class DrawView:
     # ---- profiles / bytes --------------------------------------------------
     @property
     def profiles(self) -> dict:
-        """Named 1-D arrays stored for the draw (``psi_N``, ``j_phi [..]``, …)."""
+        """Named 1-D arrays stored for the draw (``psi_N``, ``jphi_total [..]``, …)."""
         import h5py
         out = {}
         with h5py.File(self._ar.path, "r") as hf:
@@ -262,7 +262,7 @@ class DrawView:
         from .utils import load_eq_fsa
         prof = self.profiles
         attrs = self.attrs
-        # profile attrs (swb_j_saw) go with the profiles; scalars stay JSON-safe
+        # profile attrs (jphi_saw_out) go with the profiles; scalars stay JSON-safe
         prof.update({k: attrs.pop(k) for k in [k for k, v in attrs.items() if isinstance(v, np.ndarray)]})
         doc = {
             "scan_key": _scan_key(self.scan_key),
@@ -621,7 +621,7 @@ class BouquetArchive:
                     f"{self.path} carries no schema_version attr (pre-v2 or "
                     "hand-built archive). eqdsk/pfile bytes are still "
                     "readable, but profile keys may be the old bracketed "
-                    "names (e.g. 'j_phi [A m^-2]'); regenerate the archive "
+                    "names (e.g. 'jphi_total [A m^-2]'); regenerate the archive "
                     "with the current bouquet for full v2 support.")
 
     def __repr__(self):

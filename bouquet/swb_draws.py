@@ -31,7 +31,7 @@ class SwbSeedRedrawRefused(RuntimeError):
     """No non-negative GPR redraw of the swb inductive seed within
     :data:`SWB_JIND_MAX_RESAMPLES` tries: the draw is refused (and recorded
     as :data:`SWB_JIND_REJECTION`) instead of silently keeping the
-    unperturbed seed, which would drop its j_inductive perturbation."""
+    unperturbed seed, which would drop its jphi_ind perturbation."""
 
 
 def swb_fixed_pressure(ne_eq, ni_eq, ti_eq, p_fast_eq=None, z_fast_eq=None,
@@ -58,7 +58,7 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
              p_fast=None, z_fast=None, z2_fast=None, zeff_includes_fast=False,
              Z_imp=None, aux_sigmas=None, aux_baselines=None,
              aux_length_scales=None, ni_from_zeff=True, zeff_dne=None,
-             isolate_edge_jBS=False, kinetic_clips=False):
+             isolate_edge_jbs=False, kinetic_clips=False):
     """One ``imas_baseline="swb"`` draw: the baseline's solve B with resampled
     inputs.
 
@@ -69,7 +69,7 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
     exactly as the baseline's solve B did. All sigmas zero: the baseline
     inputs are passed through unchanged (no rng), so the draw is solve B.
     Returns the :func:`perturb_kinetic_equilibrium` tuple; with the sawtooth
-    reset on, the diagnostics carry ``j_saw``, ``saw_rho_m``, ``saw_rho_out``,
+    reset on, the diagnostics carry ``jphi_saw_out``, ``saw_rho_m``, ``saw_rho_out``,
     ``saw_n_dips`` (and ``saw_map_warn`` from the recipe's jphi_saw check).
     """
     rng = make_rng(rng)
@@ -142,12 +142,12 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
                    None if z_fast is None else _kin_to_eq(np.asarray(z_fast, dtype=float)),
                    Z_imp))
     res = swb_recipe(kin, j_seed)
-    # the recipe returns bouquet's split (Bouquet._swb_split): j_BS the
-    # field-aligned bootstrap, j_pressure the third bucket, SWB's own
-    # inductive (alpha's) as swb_raw_j_inductive
-    j_ind = np.asarray(res["j_inductive"], dtype=float)
-    j_bs = np.asarray(res["isolated_j_BS"], dtype=float)
-    j_raw = np.asarray(res.get("swb_raw_j_inductive", j_ind), dtype=float)
+    # the recipe returns bouquet's split (Bouquet._swb_split): jphi_bs the
+    # field-aligned bootstrap, jphi_pd the third bucket, SWB's own
+    # inductive (alpha's) as swb_raw_jphi_ind
+    j_ind = np.asarray(res["jphi_ind"], dtype=float)
+    j_bs = np.asarray(res["jphi_bs"], dtype=float)
+    j_raw = np.asarray(res.get("swb_raw_jphi_ind", j_ind), dtype=float)
     alpha = float(np.dot(j_raw, j_seed) / np.dot(j_seed, j_seed))
     print(f"  [swb-draw] alpha={alpha:.5f}"
           + ("" if j_seed is jind_seed else f" (j_ind GPR, {n_tries} tries)")
@@ -155,9 +155,9 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
     diagnostics = {
         "j0_scales": [], "Ip_scales": [], "iteration_l_is": [],
         "iteration_Ips": [],
-        "j_inductive": j_ind,
-        "j_BS": j_bs,
-        "j_BS_edge": j_bs if isolate_edge_jBS else None,
+        "jphi_ind": j_ind,
+        "jphi_bs": j_bs,
+        "jphi_bs_edge": j_bs if isolate_edge_jbs else None,
         "proxy_bias_observed": None,
         "r2_ip_scale": None,
         "r2_f_ind": None,
@@ -166,8 +166,8 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
         "kinetic_sampler": _ks,
         "swb_alpha": alpha,
         "jind_resamples": int(n_tries),
-        "j_pressure": (None if res.get("j_pressure") is None
-                       else np.asarray(res["j_pressure"], dtype=float)),
+        "jphi_pd": (None if res.get("jphi_pd") is None
+                       else np.asarray(res["jphi_pd"], dtype=float)),
         "swb_ip_rel_err": res.get("ip_rel_err"),
         # OFT's SWB solves with pax = p[0] - p[-1]: the separatrix pressure
         # the written g-file adds back (generate_bouquet's p_sep_applied)
@@ -175,8 +175,8 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
             ELEMENTARY_CHARGE * (ne_eq[-1] * te_eq[-1] + ni_eq[-1] * ti_eq[-1])
             + kin["p_fixed"][-1])},
     }
-    if res.get("j_saw") is not None:      # swb_saw_q: the draw's own q reset
-        diagnostics.update(j_saw=np.asarray(res["j_saw"], dtype=float),
+    if res.get("jphi_saw_out") is not None:      # swb_saw_q: the draw's own q reset
+        diagnostics.update(jphi_saw_out=np.asarray(res["jphi_saw_out"], dtype=float),
                            saw_rho_m=float(res["saw_rho_m"]),
                            saw_n_dips=int(res["saw_n_dips"]))
         if res.get("saw_rho_out") is not None:
@@ -184,17 +184,17 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
         if res.get("saw_map_warn") is not None:
             diagnostics["saw_map_warn"] = bool(res["saw_map_warn"])
     return (ne_p, te_p, ni_p, ti_p, np.zeros_like(psi_N),
-            np.asarray(res["total_j_phi"], dtype=float), diagnostics)
+            np.asarray(res["jphi_total"], dtype=float), diagnostics)
 
 
-def _write_current_split(header, scan_key, count, j_pressure):
+def _write_current_split(header, scan_key, count, jphi_pd):
     """The swb split's third bucket on one archived group (a draw, or
-    ``_baseline`` for ``count`` None): ``j_pressure`` and
+    ``_baseline`` for ``count`` None): ``jphi_pd`` and
     ``current_split_convention = "pressure_separate"`` (schema; owner
     decision D2).  Nothing when the draw carried none (a recipe that did not
     split)."""
     from .utils import write_group_current_split
-    write_group_current_split(header, scan_key, count, j_pressure)
+    write_group_current_split(header, scan_key, count, jphi_pd)
 
 
 class SwbDraws(DrawMethod):
@@ -212,7 +212,7 @@ class SwbDraws(DrawMethod):
     homotopy = False
 
     def __init__(self, recipe, jind_seed, sigma_jind, *, stamp=None,
-                 j_pressure=None):
+                 jphi_pd=None):
         #: the per-draw solve ``recipe(kin, j_seed)``: solve B's recipe
         self.recipe = recipe
         self.jind_seed = np.asarray(jind_seed, dtype=float)
@@ -223,8 +223,8 @@ class SwbDraws(DrawMethod):
                 f"swb: the inductive seed has seed[0] = {self.jind_seed[0]!r} "
                 "with a non-zero sigma_jphi: its GPR redraw is normalised by "
                 "it -- every draw would be refused")
-        #: the baseline's (solve B's) j_pressure, archived on _baseline
-        self.j_pressure = j_pressure
+        #: the baseline's (solve B's) jphi_pd, archived on _baseline
+        self.jphi_pd = jphi_pd
         #: the attrs stamped on _baseline (bouquet.swb.build_swb_context)
         self.stamp = dict(stamp or {})
 
@@ -245,7 +245,7 @@ class SwbDraws(DrawMethod):
             aux_sigmas=i["aux_sigmas"], aux_baselines=i["aux_baselines"],
             aux_length_scales=i["aux_length_scales"],
             ni_from_zeff=i["ni_from_zeff"], zeff_dne=i["zeff_dne"],
-            isolate_edge_jBS=i["isolate_edge_jBS"],
+            isolate_edge_jbs=i["isolate_edge_jbs"],
             kinetic_clips=bool(i.get("kinetic_clips", False)))
 
     def announce_coil_reg(self):
@@ -269,12 +269,12 @@ class SwbDraws(DrawMethod):
     def store_draw(self, header, count, scan_key, diagnostics):
         from .utils import stamp_group_attrs
         _write_current_split(header, scan_key, count,
-                             diagnostics.get("j_pressure"))
+                             diagnostics.get("jphi_pd"))
         stamp_group_attrs(header, scan_key, count, {
             "swb_alpha": diagnostics.get("swb_alpha"),
             "swb_ip_rel_err": diagnostics.get("swb_ip_rel_err"),
             "swb_jind_resamples": diagnostics.get("jind_resamples"),
-            "swb_j_saw": diagnostics.get("j_saw"),
+            "jphi_saw_out": diagnostics.get("jphi_saw_out"),
             "swb_saw_rho_m": diagnostics.get("saw_rho_m"),
             "swb_saw_rho_out": diagnostics.get("saw_rho_out"),
             "swb_saw_n_dips": diagnostics.get("saw_n_dips"),
@@ -283,8 +283,8 @@ class SwbDraws(DrawMethod):
     # ---- Bouquet.generate -------------------------------------------------
     def scale_settings(self, jbs_range, bs_mult):
         if jbs_range is not None:
-            print(f"[swb] jBS_scale_range={jbs_range} ignored: SWB re-solves "
-                  "j_BS at scale 1 in every draw")
+            print(f"[swb] jbs_scale_range={jbs_range} ignored: SWB re-solves "
+                  "jphi_bs at scale 1 in every draw")
         return None, None
 
     def solve_maxits(self, maxits):
@@ -298,7 +298,7 @@ class SwbDraws(DrawMethod):
 
     def store_baseline(self, header, scan_key, baseline):
         from .utils import stamp_group_attrs
-        _write_current_split(header, scan_key, None, self.j_pressure)
+        _write_current_split(header, scan_key, None, self.jphi_pd)
         stamp_group_attrs(header, scan_key, None, self.stamp)
 
     @classmethod

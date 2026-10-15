@@ -5,11 +5,11 @@ bootstrap recompute and the IDS write-back:
 
   * isotropize_fast_pressure -- anisotropic fast pressure -> scalar GS pressure
   * parallel_to_toroidal     -- FSA parallel current <j.B> -> toroidal
-                                <j_phi> = kappa <j.B>, kappa = F<1/R>/<B^2>
-                                (2026-10-06; was <j_phi/R>/<1/R>), ratio +
+                                <jphi_total> = kappa <j.B>, kappa = F<1/R>/<B^2>
+                                (2026-10-06; was <jphi_total/R>/<1/R>), ratio +
                                 analytic methods
-  * current conventions      -- TokaMaker jphi = <j_phi> vs IMAS j_tor =
-                                <j_phi/R>/<1/R> vs parallel <J.B>
+  * current conventions      -- TokaMaker jphi = <jphi_total> vs IMAS j_tor =
+                                <jphi_total/R>/<1/R> vs parallel <J.B>
                                 (docs/current-conventions.md, A5-A7)
 """
 
@@ -76,15 +76,15 @@ def _synthetic_geom(n=64, seed=0):
 class TestFSAQuadratureBenchmark:
     def test_forward_matches_independent_fsa_quadrature(self):
         # For a field-aligned current j = lambda*B: the code's formula output
-        # must equal the plain FSA <j_phi> (what the solver's jphi-linterp
+        # must equal the plain FSA <jphi_total> (what the solver's jphi-linterp
         # consumes) computed by DIRECT FSA quadrature (a fully independent
         # path from the closed-form kappa = F<1/R>/<B^2>).  Since 2026-10-06
-        # (the one-conversion change; was <j_phi/R>/<1/R>).
+        # (the one-conversion change; was <jphi_total/R>/<1/R>).
         geom, f = _fsa_metrics_circular()
         g = {k: geom[k] for k in ("F", "avg_inv_R", "avg_B2")}
         lam = 4.2e5                                  # lambda = <j.B>/<B^2>
         jdotB = lam * geom["avg_B2"]                 # <j.B> on the surface
-        # independent direct path: j_phi = lambda*Bphi, then FSA of j_phi
+        # independent direct path: jphi_total = lambda*Bphi, then FSA of jphi_total
         j_tor_direct = f["fsa"](lam * f["Bphi"])
         j_tor_formula = parallel_to_toroidal(np.array([jdotB]), geom=g)[0]
         assert np.isclose(j_tor_formula, j_tor_direct, rtol=1e-10)
@@ -94,7 +94,7 @@ class TestFSAQuadratureBenchmark:
             j_tor_formula, {**geom, "pprime": 0.0}), J_IMAS_direct, rtol=1e-10)
 
     def test_gs_current_matches_independent_fsa_quadrature(self):
-        # j_phi = R p' + FF'/(mu0 R) with J.B = F p' + F' B^2/mu0 pointwise:
+        # jphi_total = R p' + FF'/(mu0 R) with J.B = F p' + F' B^2/mu0 pointwise:
         # A3/A4 by direct quadrature equal A7 (field-aligned + p'G) and A5.
         geom, f = _fsa_metrics_circular()
         pp, FFp = 5.0e4, -0.8                        # p' [Pa/Wb], FF' [T^2 m^2/Wb]
@@ -478,7 +478,7 @@ class TestParallelToToroidalAnalytic:
         assert np.allclose(raw, viaB0)
 
     def test_kappa_formula_on_shaped_surface(self):
-        # <j_phi> = <j.B> F <1/R> / <B^2> reproduced exactly (the one
+        # <jphi_total> = <j.B> F <1/R> / <B^2> reproduced exactly (the one
         # field-aligned conversion, 2026-10-06)
         R0, eps, F = 1.7, 0.36, 3.4
         th = np.linspace(0, 2 * np.pi, 4000, endpoint=False)
@@ -693,8 +693,8 @@ class TestRadialField:
 
 
 class TestFloorInductiveSplit:
-    """j_inductive >= 0 convention: negative pedestal residuals are floored and
-    absorbed into j_BS with the total exactly preserved (a real-discharge
+    """jphi_ind >= 0 convention: negative pedestal residuals are floored and
+    absorbed into jphi_bs with the total exactly preserved (a real-discharge
     regression: a negative GPR mean rejected all 500 candidate draws)."""
 
     def test_floor_and_absorb(self):

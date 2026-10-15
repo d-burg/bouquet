@@ -1,6 +1,6 @@
 """The engine's archived split keeps the pressure-driven current
-p'(<R> - F^2<1/R>/<B^2>) as its own bucket, j_pressure (owner decision D2,
-2026-10-09; PR #64 had put it on j_BS).  Solver-free."""
+p'(<R> - F^2<1/R>/<B^2>) as its own bucket, jphi_pd (owner decision D2,
+2026-10-09; PR #64 had put it on jphi_bs).  Solver-free."""
 from types import SimpleNamespace
 
 import numpy as np
@@ -24,7 +24,7 @@ def test_the_split_keeps_pG_as_its_own_bucket():
     pg = pressure_term(g)
     assert np.max(np.abs(pg)) > 0.0
     np.testing.assert_array_equal(j_p, pg)
-    # j_BS is the field-aligned bootstrap alone
+    # jphi_bs is the field-aligned bootstrap alone
     np.testing.assert_allclose(
         j_bs, 1.2 * composed_factor(g) * st.lambda_bs, rtol=0, atol=1e-9)
     np.testing.assert_array_equal(j_ind, R - j_bs - j_nbi - j_rf - j_p)

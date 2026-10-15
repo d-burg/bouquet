@@ -79,7 +79,7 @@ the volume average):
 | Z_eff | 5 % | 11 % | 16 / 8.7 / 12 / 41 % |
 
 The material changes are T_e (too tight by 1.6-3.8x from mid radius to the
-separatrix at a flat 5 %, exactly where the pedestal gradient drives j_BS) and
+separatrix at a flat 5 %, exactly where the pedestal gradient drives jphi_bs) and
 Z_eff; n_e narrows at mid radius and widens 3x at the separatrix. (The design
 note quotes 9.7 % / 9.8 % for n_i / T_i, the means of the unrounded median; the
 shipped 2-s.f. nodes give 9.6 % / 9.7 %.) A Φ_N run evaluates the templates at
@@ -454,7 +454,7 @@ restores the index pairing.
 - **Every legacy SWB call site** (the draw and DIFF_BS draw calls, the
   σ=0 / DIFF_BS cache, `reconstruct_equilibrium`, `jbs_init="swb"`, the
   IMAS frozen-SWB baseline and the SWB σ=0 reference) now converts SWB's
-  `j_BS` / `isolated_j_BS` right after the call with
+  `jphi_bs` / `jphi_bs` right after the call with
   `TokaMaker_interface.swb_result_toroidal` (`physics._swb_jbs_to_toroidal`
   for the installed toolkit's output convention). On upstream
   OpenFUSIONToolkit this is the 6116d5f conversion bit for bit (undo SWB's
@@ -472,36 +472,36 @@ restores the index pairing.
 - **Edge taper on the TokaMaker-jphi toolkit (review of #78, B3).** With
   the toolkit's edge taper on (`swb_edge_taper_psi0` on the swb method,
   `bootstrap_kwargs["taper_edge_jBS"]` on the legacy call sites), SWB returns
-  `w (κ⟨j·B⟩ + p′G)`; the untapered `p′G` was subtracted, leaving `j_BS`
+  `w (κ⟨j·B⟩ + p′G)`; the untapered `p′G` was subtracted, leaving `jphi_bs`
   short by `(1 − w) p′G` in the taper zone and moving that into
-  `j_inductive`. The `p′G` taken off now carries the same weight
-  (`physics.swb_edge_taper`), so `j_BS = w κ⟨j·B⟩` and `j_pressure = w p′G`.
+  `jphi_ind`. The `p′G` taken off now carries the same weight
+  (`physics.swb_edge_taper`), so `jphi_bs = w κ⟨j·B⟩` and `jphi_pd = w p′G`.
   Nothing changes with the taper off or on upstream OFT (no taper there).
 
-### Archived split: `p′G` is its own `j_pressure` on every path (owner decision D2; archive convention)
+### Archived split: `p′G` is its own `jphi_pd` on every path (owner decision D2; archive convention)
 
 - **Engine (default path) — archive only, the solve is untouched.** The
-  engine baseline's and every engine draw's archived `j_BS` no longer carry
+  engine baseline's and every engine draw's archived `jphi_bs` no longer carry
   the pressure-driven `p′(⟨R⟩ − F²⟨1/R⟩/⟨B²⟩)`: it is archived as the
-  `j_pressure` dataset with `current_split_convention = "pressure_separate"`
-  on the group, and the residual `j_inductive` excludes it, so `j_phi =
-  j_inductive + j_BS + j_NBI + j_RF + j_pressure` exactly. Against
-  `e16d541` the archived engine `j_BS` moves by `−p′G` and `j_inductive` is
-  unchanged (it already excluded it); the `jB_parallel/` block is unchanged.
-  `Baseline.j_pressure` / `Baseline.current_split_convention` carry it in
+  `jphi_pd` dataset with `current_split_convention = "pressure_separate"`
+  on the group, and the residual `jphi_ind` excludes it, so `jphi_total =
+  jphi_ind + jphi_bs + jphi_nbi + jphi_rf + jphi_pd` exactly. Against
+  `e16d541` the archived engine `jphi_bs` moves by `−p′G` and `jphi_ind` is
+  unchanged (it already excluded it); the `jdotB/` block is unchanged.
+  `Baseline.jphi_pd` / `Baseline.current_split_convention` carry it in
   memory.
 - **Legacy (and the IMAS legacy reader's) archives.** The legacy in-memory
-  split keeps `p′G` in `j_inductive` (the solver needs the total); the
+  split keeps `p′G` in `jphi_ind` (the solver needs the total); the
   archive writer (`generate_bouquet`, with the run's `baseline_split`) now
-  takes it off and stores it as `j_pressure` with the same attr — per draw
+  takes it off and stores it as `jphi_pd` with the same attr — per draw
   evaluated on the archived state (`TokaMaker_interface.
   archived_pressure_term`), and for the baseline likewise on the
   archived (baseline-converged) state, on the reconstruction AND the IMAS
   path (review of #78, B2: the IMAS baseline first archived the dd
   source's `p′G`, which the legacy forward solve does not hold, so a σ=0
   draw split differently from its baseline; the dd's value stays in memory
-  as `Baseline.j_pressure_source`). The archived
-  legacy `j_inductive` therefore moves by `−p′G`; `j_BS`, `j_phi` and every
+  as `Baseline.jphi_pd_source`). The archived
+  legacy `jphi_ind` therefore moves by `−p′G`; `jphi_bs`, `jphi_total` and every
   solve are unchanged. Where the solver cannot evaluate `p′G` the group
   keeps the old convention, with a warning. A direct `generate_bouquet`
   call without `baseline_split` archives as before.
@@ -510,9 +510,9 @@ restores the index pairing.
 
 ## Unreleased — PR #56 (IDA/FUSE ion coupling) and PR #60 (bootstrap options), integrated
 
-### Redl ε: `(R_max − R_min)/(R_max + R_min)` with `R_geo` in ν\* by default (`evaluate_jBS/4`, PR #60, owner decisions E4/E7)
+### Redl ε: `(R_max − R_min)/(R_max + R_min)` with `R_geo` in ν\* by default (`evaluate_jbs/4`, PR #60, owner decisions E4/E7)
 
-- **Default physics change, declared.** `evaluate_jBS`'s inverse aspect ratio
+- **Default physics change, declared.** `evaluate_jbs`'s inverse aspect ratio
   is now `ε = (R_max − R_min)/(R_max + R_min)` per flux surface -- the
   surface's half-width over its geometric major radius `R_geo = (R_max +
   R_min)/2`, the "ε = r/R0" of Sauter (1999) / Redl (2021), as OMFIT's
@@ -533,11 +533,11 @@ restores the index pairing.
   sanity bar of 1e-3 (`physics.EPS_ROUTE_SANITY_RTOL`; a diagnostic, not a
   physics criterion). A build without `get_fsa` is refused by name for the
   half-width forms.
-- **Version and records.** `EVALUATE_JBS_VERSION` is `evaluate_jBS/4 (...,
+- **Version and records.** `EVALUATE_JBS_VERSION` is `evaluate_jbs/4 (...,
   eps = (R_max-R_min)/(R_max+R_min), nu* R = R_geo = (R_max + R_min)/2, ...;
-  p'G separate as j_pressure)`. `/4` is ONE convention carrying the owner
+  p'G separate as jphi_pd)`. `/4` is ONE convention carrying the owner
   decisions on ε (E4/E7) and on p′G returned beside the bootstrap as
-  `diag["j_pressure"]`, never inside `j_BS` (D2, PR #64; see
+  `diag["jphi_pd"]`, never inside `jphi_bs` (D2, PR #64; see
   `docs/current-conventions.md`). `/3` keeps its meaning (p′G with the
   bootstrap, PR #64, never on main). The opt-ins' tags name their ε and ν\* R
   and say `OPT-IN`, so the three are distinguishable; every loop record
@@ -549,12 +549,12 @@ restores the index pairing.
   without the field replays with the new default (warned once); one that
   names a definition keeps it.
 - **What moves** (synthetic D3D-like g-file case, one equilibrium, same
-  kinetics). Against `"half_width_over_fsa_R"`: j_BS −4.9 % at ψ_N 0.98,
+  kinetics). Against `"half_width_over_fsa_R"`: jphi_bs −4.9 % at ψ_N 0.98,
   −10 % at 0.99, peak −1.2 %, I_BS −0.5 % (ε alone −3 % / −6 % / I_BS −0.3 %;
-  the ν\* R, ×1.07–1.08 there, the rest). Against `"a_over_R"`: j_BS −16 % at
+  the ν\* R, ×1.07–1.08 there, the rest). Against `"a_over_R"`: jphi_bs −16 % at
   0.98, −31 % at 0.99, peak −4.3 %, I_BS −1.6 % (ε alone −12 % / −23 % /
   −1.0 %). On real H-mode pedestals the `⟨a⟩/⟨R⟩` → `(R_max − R_min)/(2⟨R⟩)`
-  step alone measured I_BS −4 to −10 % and pedestal j_BS −16 to −32 % at
+  step alone measured I_BS −4 to −10 % and pedestal jphi_bs −16 to −32 % at
   ψ_N ≈ 0.98 across eleven slices (dd-kinetics slices at the lower end,
   IDA-kinetics slices with steeper pedestals at the upper end), l_i(3) +0.5
   to +1.0 %, q0 about +0.8 %; the default moves further by the `R_geo` steps
@@ -564,7 +564,7 @@ restores the index pairing.
   X-point near the separatrix (−7 % below `R_geo` at ψ_N 0.99), so both
   older forms exceed `r/R_geo` most in the pedestal, where ν\* ∝ R ε^-3/2
   then rises most. Every default-path bootstrap (unified engine and legacy
-  loop) changes accordingly; the goldens that pin `evaluate_jBS` output must
+  loop) changes accordingly; the goldens that pin `evaluate_jbs` output must
   be regenerated (`tests/golden/README.md`).
 - **Stored configs:** a unified config carrying solve_with_bootstrap keys (the
   D3D-like notebooks' `{"iterations": 3}`, 2026-10-04..09) loads with them
@@ -703,9 +703,9 @@ map to the original history on the archival tag
 
 ### PRs #70 / #71: review fixes (2026-10-09)
 
-- **IMAS delivered state holds `j_other` once** (#70, blocker): the legacy
-  diff/rescale loop draws counted `j_other` twice; both σ=0 guards now hold the
-  draws' own fixed channels (`j_NBI + j_RF + j_other`) and record
+- **IMAS delivered state holds `jphi_other` once** (#70, blocker): the legacy
+  diff/rescale loop draws counted `jphi_other` twice; both σ=0 guards now hold the
+  draws' own fixed channels (`jphi_nbi + jphi_rf + jphi_other`) and record
   `split_closure`.
 - **Bootstrap multiplier on loop draws** (#70): `bs_scale` rides in the loop
   composer's scale (range re-centred, as before #70); SWB draws keep it after
@@ -734,7 +734,7 @@ map to the original history on the archival tag
   each of these (`equilibrium_slices_read`; recorded in
   `equilibrium.code.parameters`) and the core_profiles times next to its one
   slice, so it re-reads bit-identically (keeping only the nearest slice
-  moved the re-read j_pressure by 3.9 % and j_phi by 0.18 % of peak on a
+  moved the re-read jphi_pd by 3.9 % and jphi_total by 0.18 % of peak on a
   real time-dependent dd).  An exported draw still holds one equilibrium
   slice, the draw's own; `fidelity="reconstruct"` now converts on the
   template's PAIRED slice.  The reader stamps the pairing
@@ -803,8 +803,8 @@ map to the original history on the archival tag
   (two fast tests that converged only on the iterate are left failing,
   owner decision pending).
 - **IDS export from the stored `<j.B>` parts.** Engine draws archive a
-  `jB_parallel/` subgroup; the exporter writes it as it is, and subtracts
-  the pressure-driven term from older / legacy `j_inductive` (below).
+  `jdotB/` subgroup; the exporter writes it as it is, and subtracts
+  the pressure-driven term from older / legacy `jphi_ind` (below).
 - **IMAS time rule.** The core_sources slice is windowed at half the
   core_profiles step, dt and the bracketing pair recorded, and a driven
   entry whose record starts after the slice is OFF there (zero, stamped
@@ -851,10 +851,10 @@ map to the original history on the archival tag
   values; the resolution is archived (below).
 - **What an archive field MEANS changed on the default path** (names and
   units did not). An earlier entry called schema v3 "additive"; it is
-  additive in its names only. On an engine archive `j_inductive` / `j_BS`
-  are the engine's UNFLOORED split (`j_inductive` the residual, may be
+  additive in its names only. On an engine archive `jphi_ind` / `jphi_bs`
+  are the engine's UNFLOORED split (`jphi_ind` the residual, may be
   negative, carries the pressure-driven term; legacy floors it at zero and
-  moves the sliver into `j_BS`); `in_spec` is the coil verdict AND the
+  moves the sliver into `jphi_bs`); `in_spec` is the coil verdict AND the
   post-hoc band (legacy: coil only); and under `separatrix_pressure=
   "offset"` the stored g-files' `PRES` is the solver's pressure + `p_sep`
   (zero at the boundary before). See archive-schema.md.
@@ -922,7 +922,7 @@ Aggregate numbers only; where each was measured:
   `engine.ENGINE_UNREAD_LEGACY_FIELDS`, `homotopy_passes` with
   `engine_draw_homotopy=False`, `draw_solve_maxits`, the MSE knobs the engine
   does not read, and the engine's requirements `jbs_self_consistent=True`,
-  `recalculate_j_BS=True`, `single_profile_jphi=False`,
+  `recalculate_jbs=True`, `single_profile_jphi=False`,
   `jbs_init="anchor"`). Every such refusal now ends with how to get the
   legacy paths back. `workflow="custom"` still downgrades the
   unread-field refusals to a printed WARN.
@@ -970,18 +970,18 @@ Aggregate numbers only; where each was measured:
   outputs are legacy-path runs); the golden fixtures are regenerated on the
   engine default separately (with a slim legacy golden).
 
-### One `<j.B>` -> `<j_phi>` conversion in the package (declared physics change)
+### One `<j.B>` -> `<jphi_total>` conversion in the package (declared physics change)
 
 - **What moves.** Every field-aligned conversion is now
   `kappa = F<1/R>/<B^2>` (`physics.field_aligned_conversion`; the engine's
-  `engine.conversion_factor` calls it): `<j_phi> = kappa <j.B>`, the plain
+  `engine.conversion_factor` calls it): `<jphi_total> = kappa <j.B>`, the plain
   flux-surface average OFT's `jphi-linterp` consumes, so
-  `<j_phi> = kappa<j.B> + p'(<R> - F^2<1/R>/<B^2>)` is exact. The legacy
-  bootstrap (`evaluate_jBS`, `_swb_jbs_to_toroidal`) used `<j.B>/(F<1/R>)`;
+  `<jphi_total> = kappa<j.B> + p'(<R> - F^2<1/R>/<B^2>)` is exact. The legacy
+  bootstrap (`evaluate_jbs`, `_swb_jbs_to_toroidal`) used `<j.B>/(F<1/R>)`;
   the IDS export (`toroidal_to_parallel`) used the `<1/R^2>` form
   `<j.B>F<1/R^2>/(<B^2><1/R>)`. `parallel_to_toroidal` / `toroidal_to_parallel`
   keep their names and are now kappa and its exact inverse; a `geom` carrying
-  `avg_inv_R2` is refused by name. `EVALUATE_JBS_VERSION` is `evaluate_jBS/2`.
+  `avg_inv_R2` is refused by name. `EVALUATE_JBS_VERSION` is `evaluate_jbs/2`.
 - **Size.** The old legacy factor exceeds kappa by
   `[<B^2>/<B_phi^2>] x [<1/R^2>/<1/R>^2]` -- the bracket (~1.5 %) times the
   Jensen ratio (~5 %), +6.8 % at psi_N ~ 0.97 on the synthetic example
@@ -998,21 +998,21 @@ Aggregate numbers only; where each was measured:
 ### IDS export: no pressure-driven current in any parallel field (fix)
 
 - **What was wrong (pre-dates the engine).** `write_imas_draw` converted the
-  archived toroidal `j_inductive` -- the residual `j_phi - j_BS - fixed`,
+  archived toroidal `jphi_ind` -- the residual `jphi_total - jphi_bs - fixed`,
   which carries the pressure-driven term `P = p'(<R> - F^2<1/R>/<B^2>)`
   (engine draws by construction; legacy draws freeze it there) -- to
   `<j.B>/B0` as it was, so `P/kappa` sat inside the exported `j_ohmic` and
   `j_total`; the engine's `IdsAdapter` re-adds `P` from the pressure, so a
-  re-read counted it twice (+0.3 / +3.9 / +8.6 / +10.4 / +17.7 % of `j_phi`
+  re-read counted it twice (+0.3 / +3.9 / +8.6 / +10.4 / +17.7 % of `jphi_total`
   at psi_N 0.5 / 0.9 / 0.95 / 0.97 / 0.99 on the synthetic example).
-- **Now.** Engine draws archive their `<j.B>` parts (`jB_parallel/`, schema:
-  `jB_inductive` the field-aligned inductive only, `jB_BS`, `jB_NBI`,
-  `jB_RF`, with `kappa` and `j_pressure`); the exporter writes them as they
+- **Now.** Engine draws archive their `<j.B>` parts (`jdotB/`, schema:
+  `jdotB_ind` the field-aligned inductive only, `jdotB_bs`, `jdotB_nbi`,
+  `jdotB_rf`, with `kappa` and `jphi_pd`); the exporter writes them as they
   are. Draws without them (legacy; engine archives before this change) have
   `P` -- from the archived eqdsk's own flux surfaces,
-  `io.imas.archived_pressure_term` -- subtracted from `j_inductive` before
+  `io.imas.archived_pressure_term` -- subtracted from `jphi_ind` before
   the conversion. `j_total = j_ohmic + j_bootstrap + driven`. Export ->
-  `IdsAdapter.read` returns the archived parts and `<j_phi>` to 1e-9
+  `IdsAdapter.read` returns the archived parts and `<jphi_total>` to 1e-9
   (`tests/test_imas_export_roundtrip.py`, engine and legacy archives).
   The exported `j_ohmic` / `j_total` change by `-P/kappa` (as above); `j_tor`
   and `j_bootstrap` do not.
@@ -1087,7 +1087,7 @@ refusal) still ends the sweep unrecorded.
   with the loop off they had no effect and are not back-filled.
 - **The loud entries fire for every stored config.** `FIELD_PRE_INTRODUCTION`
   was consulted for stored unified configs only, so its loud entries
-  (`l_i_tolerance`, `jBS_scale_range`, `homotopy_passes`, `floor_j_BS`,
+  (`l_i_tolerance`, `jbs_scale_range`, `homotopy_passes`, `floor_jbs`,
   `jbs_max_passes_draw`) never fired for a config bouquet itself stored
   (all legacy before the engine). Now: for every stored config; the
   engine-only entries (`engine_ids_inductive`, `engine_mse_jacobian`) for
@@ -1403,13 +1403,13 @@ test bar.
 - **Engine draws: the archived current split is evaluated on the draw's own
   archived (final) state, and the inductive is never clipped**
   (owner-approved, engine only, 2026-10-05). Before, an engine draw's
-  archived `j_BS` was the bootstrap composed on the geometry of the PREVIOUS
+  archived `jphi_bs` was the bootstrap composed on the geometry of the PREVIOUS
   solve, its fixed beam/RF parts were the RECONSTRUCTION's (at its
-  `F<1/R>/<B^2>`), and `j_inductive` was clipped at zero twice (post-homotopy
-  re-split and archival) with the sliver moved into `j_BS`. Now: `j_phi` the
-  archived state's achieved FSA current (as before); `j_BS` = `s_bs (1 +
+  `F<1/R>/<B^2>`), and `jphi_ind` was clipped at zero twice (post-homotopy
+  re-split and archival) with the sliver moved into `jphi_bs`. Now: `jphi_total` the
+  archived state's achieved FSA current (as before); `jphi_bs` = `s_bs (1 +
   d_bs) x scale x Redl` of the archived state times its `F<1/R>/<B^2>`; the
-  fixed parts the contract's `<j.B>` times the same factor; `j_inductive` the
+  fixed parts the contract's `<j.B>` times the same factor; `jphi_ind` the
   residual, never clipped -- a negative value is RECORDED
   (`engine.archived.split`: `n_negative_inductive`, `min_inductive`,
   `negative_inductive_psi_N`, plus a console note), not altered and not
@@ -1417,9 +1417,9 @@ test bar.
   parts, unclipped. The draws' reference flux range (and q-row radius) is
   the DELIVERED measurement's, not the last loop pass's geometry `G*`, so a
   zero-perturbation draw's flux-range delta measures only its own
-  reproduction. **What moves:** archived `j_BS` / `j_inductive` of engine
+  reproduction. **What moves:** archived `jphi_bs` / `jphi_ind` of engine
   draws (on the 16 stored synthetic draws: no clip sliver was ever active;
-  fixed-part conversion <= 0.012 % of peak; j_BS within the final
+  fixed-part conversion <= 0.012 % of peak; jphi_bs within the final
   post-homotopy r_j, 5e-5 ... 1.8e-4) and the engine σ=0 flux-range delta.
   No solve, l_i, q, beta, coil or in-spec verdict changes. Legacy draws keep
   their clips exactly as they are.
@@ -1444,7 +1444,7 @@ test bar.
   it was fixed the same way afterwards (next item).
 - **Legacy IMAS reader: each NBI entry is read at the slice TIME** (the same
   defect, the same rule as the sawteeth entry above; owner-approved
-  2026-10-05). The beam current `Baseline.j_NBI` summed the `core_sources`
+  2026-10-05). The beam current `Baseline.jphi_nbi` summed the `core_sources`
   NBI entries (identifier 2) at their LIST index (`pr[isrc]`, or `pr[0]` past
   the end of a short entry). Now an entry carrying per-slice times is matched
   by time to the core_sources slice time; at a time it does not cover it
@@ -1456,7 +1456,7 @@ test bar.
   slice's; afterwards its own slice instead of one late; past a short
   entry's end no longer its first slice) or one written on another grid
   (e.g. the core_profiles times where those differ from core_sources': now
-  matched, or warned and zero where nothing matches). There `j_NBI` changes,
+  matched, or warned and zero where nothing matches). There `jphi_nbi` changes,
   and with it the legacy path's fixed beam current, the inductive residual
   and every draw built on them. An NBI entry with no per-slice time and a
   different slice count is now refused. Dds whose NBI entries are on the full
@@ -1513,10 +1513,10 @@ test bar.
   window that carries current on its own slices bracketing the time; see "second-pass review fixes (2026-10-06)" above.)
 
 - **Engine: legacy settings it never reads are refused** (they were accepted
-  and silently ignored): `closure_channel`, `jBS_baseline_mode`, the
+  and silently ignored): `closure_channel`, `jbs_baseline_mode`, the
   `structured_*` closure fields (except `structured_li_tol`),
   `anchor_pressure_to_equilibrium`, `imas_corrective_jphi`,
-  `jbs_loop_q0_corrector`, `floor_j_BS`, `swb_iterations`,
+  `jbs_loop_q0_corrector`, `floor_jbs`, `swb_iterations`,
   `accept_anchor_inband`, `diagnostic_plots`, and `homotopy_passes` with
   `engine_draw_homotopy=False` -- each message names the engine setting that
   replaces it. Defaults and the factories' configs are unaffected. Legacy
@@ -1687,7 +1687,7 @@ which applies to every path.*
   `j_bootstrap` is refused (`"j_ohmic"` uses its `j_ohmic` explicitly).
   Evidence: on self-consistent sources the two are indistinguishable
   (`|Δl_i| ≤ 1.8e-3`); where a source's own split is locally inconsistent the
-  residual is closer to its `<j_phi>`. `"auto"` and `"j_ohmic"` remain as
+  residual is closer to its `<jphi_total>`. `"auto"` and `"j_ohmic"` remain as
   explicit options with their semantics unchanged. No tolerance, criterion,
   ceiling or target moved. The IDS inductive changes on every source whose
   `j_ohmic` does not equal the residual exactly.
@@ -1744,7 +1744,7 @@ which applies to every path.*
   (`run_jbs_loop(start_refresh=...)`, a kernel hook that is a no-op when
   `None`) -- the path only, zero extra solves, no criterion or tolerance
   changed, the zero-perturbation request still bit-identical and the
-  refreshed bootstrap `lambda_BS*` up to the re-solve's reproduction of
+  refreshed bootstrap `lambda_bs*` up to the re-solve's reproduction of
   the stored equilibrium (rounding on the toy, r_j 1.9e-5 on the live
   g-file example); recorded as
   `loop.bootstrap_refresh`. `draw_solve_maxits` (default `None`) now also
@@ -1801,7 +1801,7 @@ which applies to every path.*
     forced to zero at the boundary and the edge current moves between the
     `P'` and `FF'` terms. Measured on the synthetic g-file example (unified
     engine): pressure-driven current at the boundary 0.006 -> 0.018 MA/m^2,
-    `<j_phi>` at the last node 0.076 -> 0.115 MA/m^2, the `FF'` term there
+    `<jphi_total>` at the last node 0.076 -> 0.115 MA/m^2, the `FF'` term there
     changes sign, `q95` +0.002, `l_i` and the core unchanged; no extra
     passes, solves or GS iterations.
   - `GenerationConfig.separatrix_pressure` (introduced with default
@@ -1905,7 +1905,7 @@ the default path (see that section). Also:
   dict/JSON without it) loads with `jbs_self_consistent=False` and a warning
   -- it replays the bootstrap model it was produced with; the warning says how
   to opt in (`"jbs_self_consistent": true` in the `generation` section).
-- `single_profile_jphi=True` and `recalculate_j_BS=False` have no bootstrap to
+- `single_profile_jphi=True` and `recalculate_jbs=False` have no bootstrap to
   iterate and are refused unless `jbs_self_consistent=False` is set.
 - **Archive schema v3** (additive in its NAMES; field meanings changed on
   the default path later -- see the first entry's "At a glance"): the
@@ -1969,9 +1969,9 @@ bit for bit (`tests/probes/legacy_bitwise_ab.py` runs the out-of-tree A/B).
 - Both paths: the stored split is the delivered state's jphi-linterp request,
   normalised to I_p in the 'exact' FSA current measure on it (on the
   modelling-source example the source total read 0.965 I_p there; the
-  solver had made the rest up uniformly), `j_BS` (+ `jBS_diff`) the draws'
-  σ=0 bootstrap composition on it, the fixed parts as read, `j_inductive` the
-  residual. In diff mode `j_BS + jBS_diff` is still the source bootstrap.
+  solver had made the rest up uniformly), `jphi_bs` (+ `jphi_bs_diff`) the draws'
+  σ=0 bootstrap composition on it, the fixed parts as read, `jphi_ind` the
+  residual. In diff mode `jphi_bs + jphi_bs_diff` is still the source bootstrap.
   New: `Baseline.delivered_state`, `Baseline.jphi_request_offset`, the
   archive attr `_baseline@delivered_state_json`
   ([archive-schema.md](archive-schema.md)).
@@ -1979,7 +1979,7 @@ bit for bit (`tests/probes/legacy_bitwise_ab.py` runs the out-of-tree A/B).
 **What changed in the draws (loop on).** Every stage is the identity at zero
 perturbation: the state anchor carries `jphi_diff`; route R2's scale reads 1;
 the standard route perturbs the achieved-convention inductive
-(`j_inductive - jphi_request_offset`), roots its amplitude in the exact
+(`jphi_ind - jphi_request_offset`), roots its amplitude in the exact
 measure on the live geometry instead of the limiter-area flux integral, and
 starts every corrective iteration from `target + jphi_request_offset`; the
 delta-mode reference anchor carries `jphi_diff`. **This moves draws with
@@ -1993,7 +1993,7 @@ expected of the order of the old single-solve baseline g-file's, which sat
 standard-route draws get a different amplitude root (the limiter measure read
 10–44 % high; `find_optimal_scale` compensated partly, j0 scale 1.153 on the
 g-file example, 1.035 on the modelling-source one) and a warm corrective
-start; the j_φ GPR envelope (`jphi_scalar_sigma·|j_phi|`) follows the
+start; the j_φ GPR envelope (`jphi_scalar_sigma·|jphi_total|`) follows the
 normalised request (+3.6 % in amplitude on the modelling-source example,
 edge-shape changes of order 1 % on the g-file one).
 
@@ -2019,18 +2019,18 @@ ones are kept).
 `GenerationConfig.jbs_self_consistent=True` replaces the once-computed, frozen
 `solve_with_bootstrap` bootstrap with a Redl bootstrap re-evaluated on the
 delivered equilibrium inside a relaxed outer loop (closure ↔ GS solve ↔ Redl)
-that runs to a convergence test. New: `physics.evaluate_jBS` (Redl on the
+that runs to a convergence test. New: `physics.evaluate_jbs` (Redl on the
 caller's own ψ_N grid, geometry of the current equilibrium, gradients on the
 true grid, direct toroidal conversion; bit-identical to SWB's first pass on a
 uniform grid), `bouquet/jbs_loop.py` (residuals, two-consecutive-pass
 convergence, relaxation, `JBSNotConverged` / `"flag"`), and the loop in the
-IMAS baseline (every `jBS_baseline_mode` and closure channel; the correctors'
+IMAS baseline (every `jbs_baseline_mode` and closure channel; the correctors'
 steps not taken, their bookkeeping and acceptance flags kept -- for q0 that
 leaves a residual only recorded, see `jbs_loop_q0_corrector` below), the structured
-closure's MSE stage (Jacobian once, chord steps with j_BS re-evaluated, one
+closure's MSE stage (Jacobian once, chord steps with jphi_bs re-evaluated, one
 final Jacobian refresh), every draw (Fix C and the standard l_i loop, a
 post-homotopy check), the σ=0 check and the geqdsk reconstruction. In diff mode
-`jBS_diff` becomes a pure model offset on the delivered baseline geometry.
+`jphi_bs_diff` becomes a pure model offset on the delivered baseline geometry.
 Records: `li_metrics["jbs_loop"]`, `ip_closure["jbs_loop"]`,
 `reconstruction_metrics["jbs_loop"]`, per-draw archive attrs `jbs_converged` /
 `jbs_n_passes` / `jbs_loop_json`. Config: `jbs_self_consistent`, `jbs_init`,
@@ -2106,7 +2106,7 @@ legacy corrector already takes its step.
   the frozen path included. A non-finite or non-positive noise
   estimate now accepts nothing; every acceptance is printed as well as
   recorded. `NOISE_FLOOR_FACTOR` (2) and every tolerance are unchanged.
-- **`evaluate_jBS` never returns a silently zeroed bootstrap.** Non-physical
+- **`evaluate_jbs` never returns a silently zeroed bootstrap.** Non-physical
   input (`n_e`, `n_i`, `T_e`, `T_i` not strictly positive, `Z_eff < 1`) and a
   failed-trace geometry row raise `physics.JBSEvaluationError` (a
   `ValueError`) naming the quantity and ψ_N; the historical `nan_to_num`
@@ -2233,7 +2233,7 @@ bootstrap bouquet recomputes on its positive-current anchor is positive, so on
 a reversed-current source the bootstrap was added **against** Ip — in the
 legacy `solve_with_bootstrap` path, in the draws, and (on builds that have it)
 in the self-consistent loop. The Ip closure, the q0 target (negative),
-`fuse_total_err_pct` (off by 2c) and `swb_over_fuse_jBS_peak` were all wrong for
+`fuse_total_err_pct` (off by 2c) and `swb_over_fuse_jbs_peak` were all wrong for
 such a source.
 
 - **Changes results only for sources with `ip < 0`.** For `ip ≥ 0` the reader
@@ -2261,13 +2261,13 @@ such a source.
   records it; `coil_reg_from_measured` stamps each term with
   `"source_current_sign"`, and `_apply_coil_reg` refuses a term whose factor
   disagrees with the IMAS baseline's. Unchanged for `ip > 0`.
-- A user-supplied `FixedComponentsConfig.j_NBI` / `j_RF` is defined in
+- A user-supplied `FixedComponentsConfig.jphi_nbi` / `jphi_rf` is defined in
   bouquet's positive-Ip frame (co-current positive) and used as given on both
   source paths; the IMAS reader does not multiply it by `sign(ip)`.
 - **The IMAS export is written in the source's frame.** `write_imas_draw`
   used to write positive-frame `ip`, ψ, P′, FF′, `f`, q and currents into a
   template that keeps source-frame `core_sources`, `pf_active` and `b0`, so a
-  re-read of a reversed-source export was off by 2|j_NBI| in `j_inductive`. It
+  re-read of a reversed-source export was off by 2|jphi_nbi| in `jphi_ind`. It
   now restores the source orientation (archive `source_current_sign`, template
   `b0` and q-sign convention) on every field it writes, and refuses a template
   whose orientation contradicts the archive. For `ip > 0` sources only `f`
@@ -2621,7 +2621,7 @@ changes which exactly-closing profile is chosen, never what "closed" means.
 ## 1.3.0 — the seeded draw is now machine-independent; find_ida (2026-08-05)
 
 1.2.0 shipped the contract "same seed → bitwise-identical archives". True on
-one machine; **not** true across machines: the CI golden's j_phi[0] differed by
+one machine; **not** true across machines: the CI golden's jphi_total[0] differed by
 **1.3%** between the macOS build that pinned it and the Linux runners, and the
 draw-stream golden failed on CI from the hour it was written. This closes that
 gap.
@@ -2630,7 +2630,7 @@ gap.
 
 `GPRProfilePerturber.generate_profiles` factorised the kernel with
 `np.linalg.eigh` and used the eigenvectors raw. A squared-exponential kernel is
-numerically rank-deficient — on the golden's 257-point j_phi grid, 242 of 257
+numerically rank-deficient — on the golden's 257-point jphi_total grid, 242 of 257
 eigenvalues sit at the double-precision floor (cond(K) ~ 8e19) — so LAPACK
 returns two things it is free to choose: an **arbitrary basis** for that null
 subspace, and an **arbitrary sign** per eigenvector. Both leave `V Λ Vᵀ`
@@ -2742,7 +2742,7 @@ the default — read them in order.)
 (`TokaMaker_interface.py:2717-2719`), but every one of the nine GPR draw sites
 called `generate_perturbed_GPR(..., rng=None)` and `sampling.py:186-187`
 answers that with `np.random.default_rng()` — **fresh OS entropy per draw**.
-Only `np.random.uniform` (`scale_jBS`) and `np.random.normal` (the per-draw
+Only `np.random.uniform` (`scale_jbs`) and `np.random.normal` (the per-draw
 `l_i` target) honoured the seed. Seeded ensembles were not regenerable, and no
 draw-level value could be pinned as a golden. `parallel.py:158` inherited the
 same defect through `GenerationConfig.seed`.
@@ -2813,7 +2813,7 @@ the amplitude from the solved equilibrium. The anchor snapshot is not even
 captured off R2.
 
 Also: `perturb_kinetic_equilibrium` diagnostics carry `r2_ip_scale` (and
-`generate_bouquet`'s per-draw diagnostics carry `scale_jBS`), and
+`generate_bouquet`'s per-draw diagnostics carry `scale_jbs`), and
 `run.py:_validate_workflow` no longer hard-errors on geqdsk +
 `perturb_jind_in_anchor` — that guard existed because of this defect. It prints
 a one-line note instead. R2 remains opt-in.
@@ -2934,7 +2934,7 @@ measure self-checks to +0.015 % at those states.
   its own derived bar `_S_ATOL_EXACT = 5e-3` (measured 3.25e-3) — a **new pin
   on new behaviour, not a widening of `_S_ATOL`**, which still governs the
   default path — plus the same 0.5 % `l_i` acceptance, bit-reproducibility, and
-  that changing the measure leaves `j_BS` untouched.
+  that changing the measure leaves `jphi_bs` untouched.
 * `tests/test_rng_reproducibility.py` (fast) — `make_rng`; samplers honour an
   injected Generator; an AST check that **every** draw call site passes `rng=`
   (the defect was invisible at runtime, so only a structural assertion prevents
@@ -2943,9 +2943,9 @@ measure self-checks to +0.015 % at those states.
   package can hold at all. Pure NumPy, so it is bitwise-portable. Re-pin with
   `python tests/golden/make_golden_fixture.py --rng-stream-only`.
 * `tests/test_seeded_reproducibility.py` (`solver`) — two seeded runs produce
-  bitwise-identical archives (with `jBS_scale_range` and `l_i_uncertainty` on,
+  bitwise-identical archives (with `jbs_scale_range` and `l_i_uncertainty` on,
   so the two previously-seeded streams cannot regress while the GPR is fixed),
-  and the σ=0 R2 invariant `s == 1.000`, `l_i` within 0.5 %, `j_BS` within the
+  and the σ=0 R2 invariant `s == 1.000`, `l_i` within 0.5 %, `jphi_bs` within the
   σ0-guard bar, bit-reproducible.
 * `tests/test_sigma_precedence.py` (fast) — resolution, the warning, the log.
 

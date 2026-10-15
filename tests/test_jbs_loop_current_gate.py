@@ -352,7 +352,7 @@ def test_the_criteria_timeline_reads_an_ungated_record_too():
 def test_at_the_shipped_ceilings_a_gated_loop_is_on_its_fixed_point_or_fails(
         g, beta, K):
     """Positive coupling: with the gate ON a declared convergence is within
-    the loop's own tolerances of the closed-form fixed point (l_i, j_BS) and
+    the loop's own tolerances of the closed-form fixed point (l_i, jphi_bs) and
     delivers a current its own closure reproduces -- or the loop raises."""
     o, st, ev, Lstar, Jstar, s = _run_two_state(g, beta, K, True)
     if isinstance(o, JBSNotConverged):

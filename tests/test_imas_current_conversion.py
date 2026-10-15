@@ -4,7 +4,7 @@ Synthetic FUSE-shaped dd: two equilibrium slices, core_profiles.j_tor built
 from j_total with the EARLIER slice's geometry (A6, as FUSE does on a
 time-dependent run), a bootstrap and a beam source.  Checks the slice pairing,
 the exact conversions (docs/current-conventions.md A5-A7), that the components
-sum to j_phi, the jphi_diff anchor, and the averages a non-FUSE dd omits being
+sum to jphi_total, the jphi_diff anchor, and the averages a non-FUSE dd omits being
 traced from profiles_2d (else an error).
 """
 import json
@@ -97,30 +97,30 @@ def test_reader_converts_exactly_on_the_paired_slice(tmp_path, capsys):
     assert "equilibrium t=0.9800" in out                  # the earlier slice won
     g = current_geom(dd["equilibrium"]["time_slice"][0]["profiles_1d"], _B0[0])
     pt = jphi_tokamaker_pressure_term(g)
-    assert np.allclose(bl.j_phi, jtor_imas_to_jphi_tokamaker(raw["j_tor"], g), rtol=1e-12)
+    assert np.allclose(bl.jphi_total, jtor_imas_to_jphi_tokamaker(raw["j_tor"], g), rtol=1e-12)
     # the bootstrap is field-aligned only; p'G is the third bucket (D2)
-    assert np.allclose(bl.j_BS, jpar_to_jphi_tokamaker(raw["j_bs"], g), rtol=1e-12)
-    assert np.allclose(bl.j_pressure, pt, rtol=1e-12)
-    assert np.max(np.abs(pt)) > 1e-2 * np.max(np.abs(bl.j_BS))
-    assert np.allclose(bl.j_NBI, jpar_to_jphi_tokamaker(raw["j_nbi"], g), rtol=1e-12)
-    # the total's own parallel current closes on j_phi (j_tor came from it)
-    assert np.allclose(jpar_to_jphi_tokamaker(raw["j_total"], g) + pt, bl.j_phi,
+    assert np.allclose(bl.jphi_bs, jpar_to_jphi_tokamaker(raw["j_bs"], g), rtol=1e-12)
+    assert np.allclose(bl.jphi_pd, pt, rtol=1e-12)
+    assert np.max(np.abs(pt)) > 1e-2 * np.max(np.abs(bl.jphi_bs))
+    assert np.allclose(bl.jphi_nbi, jpar_to_jphi_tokamaker(raw["j_nbi"], g), rtol=1e-12)
+    # the total's own parallel current closes on jphi_total (j_tor came from it)
+    assert np.allclose(jpar_to_jphi_tokamaker(raw["j_total"], g) + pt, bl.jphi_total,
                        rtol=1e-12)
     # J_TM != J_IMAS: the conversion is not vacuous on this geometry
-    assert np.max(np.abs(bl.j_phi / raw["j_tor"] - 1)) > 1e-2
+    assert np.max(np.abs(bl.jphi_total / raw["j_tor"] - 1)) > 1e-2
 
 
-def test_reader_components_sum_to_j_phi(tmp_path):
+def test_reader_components_sum_to_jphi_total(tmp_path):
     dd, _ = _dd()
     bl = _read(tmp_path, dd)
-    total = bl.j_inductive + bl.j_BS + bl.j_NBI + bl.j_RF
-    assert np.allclose(total, bl.j_phi, rtol=0, atol=1e-9 * np.max(np.abs(bl.j_phi)))
+    total = bl.jphi_ind + bl.jphi_bs + bl.jphi_nbi + bl.jphi_rf
+    assert np.allclose(total, bl.jphi_total, rtol=0, atol=1e-9 * np.max(np.abs(bl.jphi_total)))
     # the solve split's inductive residual is the ohmic <J.B>'s field-aligned
     # image plus the pressure-driven p'G it carries for the solve; minus
-    # j_pressure it is the ohmic alone (the archived third-bucket split)
+    # jphi_pd it is the ohmic alone (the archived third-bucket split)
     g = current_geom(dd["equilibrium"]["time_slice"][0]["profiles_1d"], _B0[0])
     j_ohm = np.asarray(dd["core_profiles"]["profiles_1d"][0]["j_ohmic"])
-    assert np.allclose(bl.j_inductive - bl.j_pressure,
+    assert np.allclose(bl.jphi_ind - bl.jphi_pd,
                        jpar_to_jphi_tokamaker(j_ohm, g), rtol=1e-10)
     assert (bl.li_metrics["imas_current_conversion"]["current_split_convention"]
             == "pressure_in_inductive")
@@ -131,7 +131,7 @@ def test_jphi_diff_uses_the_anchor_slice_own_geometry(tmp_path):
     bl = _read(tmp_path, dd)
     p1 = dd["equilibrium"]["time_slice"][1]["profiles_1d"]   # nearest to T
     eq_jphi = jtor_imas_to_jphi_tokamaker(np.asarray(p1["j_tor"]), current_geom(p1, _B0[1]))
-    assert np.allclose(bl.jphi_diff, eq_jphi - bl.j_phi, rtol=1e-12, atol=1e-6)
+    assert np.allclose(bl.jphi_diff, eq_jphi - bl.jphi_total, rtol=1e-12, atol=1e-6)
 
 
 def test_dd_without_geometry_or_profiles_2d_falls_back_to_the_ratio(tmp_path):
@@ -145,13 +145,13 @@ def test_dd_without_geometry_or_profiles_2d_falls_back_to_the_ratio(tmp_path):
     assert conv["method"].startswith("ratio")
     assert "profiles_2d" in conv["reason"]
     c = raw["j_tor"] / raw["j_total"]
-    np.testing.assert_allclose(bl.j_phi, raw["j_tor"], rtol=1e-15)
-    np.testing.assert_allclose(bl.j_BS, c * raw["j_bs"], rtol=1e-14)
-    np.testing.assert_allclose(bl.j_NBI, c * raw["j_nbi"], rtol=1e-14)
-    assert bl.j_pressure is None
-    total = bl.j_inductive + bl.j_BS + bl.j_NBI + bl.j_RF
-    np.testing.assert_allclose(total, bl.j_phi, rtol=0,
-                               atol=1e-9 * np.max(np.abs(bl.j_phi)))
+    np.testing.assert_allclose(bl.jphi_total, raw["j_tor"], rtol=1e-15)
+    np.testing.assert_allclose(bl.jphi_bs, c * raw["j_bs"], rtol=1e-14)
+    np.testing.assert_allclose(bl.jphi_nbi, c * raw["j_nbi"], rtol=1e-14)
+    assert bl.jphi_pd is None
+    total = bl.jphi_ind + bl.jphi_bs + bl.jphi_nbi + bl.jphi_rf
+    np.testing.assert_allclose(total, bl.jphi_total, rtol=0,
+                               atol=1e-9 * np.max(np.abs(bl.jphi_total)))
 
 
 # Concentric circular surfaces, psi ~ r^2: weight dl/Bp ~ R dtheta, so
@@ -214,8 +214,8 @@ def test_reader_computes_missing_averages_from_profiles_2d(tmp_path):
         s.update({k: ts[k] for k in ("profiles_2d", "boundary")})
         s["global_quantities"].update(ts["global_quantities"])
     bl = _read(tmp_path, dd)
-    pk = np.max(np.abs(ref.j_phi))
-    for name in ("j_phi", "j_BS", "j_NBI", "j_inductive", "jphi_diff"):
+    pk = np.max(np.abs(ref.jphi_total))
+    for name in ("jphi_total", "jphi_bs", "jphi_nbi", "jphi_ind", "jphi_diff"):
         assert np.max(np.abs(getattr(bl, name) - getattr(ref, name))) < 2e-4 * pk, name
 
 
@@ -228,7 +228,7 @@ def test_pairing_prefers_the_slice_that_reproduces_j_tor(tmp_path, capsys):
     dd["core_profiles"]["profiles_1d"][0]["j_tor"] = jt.tolist()
     bl = _read(tmp_path, dd)
     assert "equilibrium t=1.0000" in capsys.readouterr().out
-    assert np.allclose(bl.j_phi, jtor_imas_to_jphi_tokamaker(jt, g1), rtol=1e-12)
+    assert np.allclose(bl.jphi_total, jtor_imas_to_jphi_tokamaker(jt, g1), rtol=1e-12)
 
 
 if __name__ == "__main__":                                   # pragma: no cover

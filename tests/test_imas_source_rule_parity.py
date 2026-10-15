@@ -118,14 +118,14 @@ def test_an_ec_entry_matched_within_the_core_profiles_window_is_read_on_both(
     e = [x for x in bl.source_time_match["entries"] if x["index"] == 3][0]
     assert e["status"] == "matched" and e["matched_time"] == 2.17
     assert e["dt"] == pytest.approx(2.17 - T)
-    assert np.max(np.abs(bl.j_RF)) > 0.0
+    assert np.max(np.abs(bl.jphi_rf)) > 0.0
     assert np.max(np.abs(c.jB_fix_parts["rf"])) > 0.0
     # it is the 2.17 s slice that is read: changing the other one changes
     # nothing on either reader
     ec2 = _entry(dd, 3, "ec", [2.17, 2.37], [5.0e3, 0.0])
     p2 = _write(tmp_path, _with(dd, ec2, cs_times=cs_t), "ec_offset2.json")
     bl2 = _read(p2)
-    np.testing.assert_array_equal(bl.j_RF, bl2.j_RF)
+    np.testing.assert_array_equal(bl.jphi_rf, bl2.jphi_rf)
     np.testing.assert_array_equal(c.jB_fix_parts["rf"],
                                   _engine_read(p2, bl2).jB_fix_parts["rf"])
 
@@ -141,7 +141,7 @@ def test_an_ec_entry_starting_after_the_slice_is_off_before_record_on_both(
         warnings.simplefilter("always")
         bl = read_imas_baseline(ImasSource(ids_path=p, time=T))
         c = _engine_read(p, bl)
-    assert np.all(np.asarray(bl.j_RF) == 0.0)
+    assert np.all(np.asarray(bl.jphi_rf) == 0.0)
     assert np.all(c.jB_fix_parts["rf"] == 0.0)
     off = dict(name="ec", index=3, reason="off_before_record",
                first_own_time=2.27)
@@ -167,7 +167,7 @@ def test_an_entry_idle_on_its_bracketing_slices_is_off_and_stamped_on_both(
     p = _write(tmp_path, _with(dd, fus), "fusion_idle.json")
     bl = _read(p)
     c = _engine_read(p, bl)
-    assert np.all(np.asarray(bl.j_other) == 0.0)
+    assert np.all(np.asarray(bl.jphi_other) == 0.0)
     assert np.all(c.jB_fix_parts["other"] == 0.0)
     e = [x for x in bl.source_time_match["entries"] if x["index"] == 6][0]
     assert e["status"] == "off_idle"
@@ -225,17 +225,17 @@ def test_a_matched_sawteeth_entry_is_held_and_the_opt_out_leaves_it_inductive(
     held = _read(p)
     c = _engine_read(p, held)
     _same_records(held, c)
-    assert np.max(np.abs(held.j_sawteeth)) > 0.0
-    np.testing.assert_array_equal(held.j_other, held.j_sawteeth)
+    assert np.max(np.abs(held.jphi_saw)) > 0.0
+    np.testing.assert_array_equal(held.jphi_other, held.jphi_saw)
     assert held.source_time_match["sawteeth_hold"]["held"] is True
     out = _read(p, hold_sawteeth=False)
     assert out.source_time_match["sawteeth_hold"]["held"] is False
-    assert not np.any(out.j_sawteeth) and not np.any(out.j_other)
+    assert not np.any(out.jphi_saw) and not np.any(out.jphi_other)
     # the current moves to the residual inductive, nothing else changes
-    np.testing.assert_allclose(out.j_inductive, held.j_inductive + held.j_other,
-                               rtol=0, atol=1e-9 * np.max(np.abs(held.j_phi)))
-    np.testing.assert_array_equal(out.j_phi, held.j_phi)
-    np.testing.assert_array_equal(out.j_NBI, held.j_NBI)
+    np.testing.assert_allclose(out.jphi_ind, held.jphi_ind + held.jphi_other,
+                               rtol=0, atol=1e-9 * np.max(np.abs(held.jphi_total)))
+    np.testing.assert_array_equal(out.jphi_total, held.jphi_total)
+    np.testing.assert_array_equal(out.jphi_nbi, held.jphi_nbi)
     # the gate still reads it (a flag) and its match is still recorded
     assert out.sawtooth["active"] and held.sawtooth["active"]
     assert [e["index"] for e in out.source_time_match["entries"]
@@ -281,9 +281,9 @@ def test_rf_and_other_channels_read_in_the_positive_ip_frame(tmp_path, s_ip,
     ref = _read(_write(tmp_path, dd, "pos.json"))
     bl = _read(_write(tmp_path, mdd.mirror_dd(dd, s_ip, s_b0), "mir.json"))
     assert bl.source_current_sign == s_ip
-    for k in ("j_NBI", "j_RF", "j_other", "j_sawteeth", "j_inductive",
-              "j_BS", "j_phi"):
+    for k in ("jphi_nbi", "jphi_rf", "jphi_other", "jphi_saw", "jphi_ind",
+              "jphi_bs", "jphi_total"):
         np.testing.assert_array_equal(getattr(bl, k), getattr(ref, k), k)
-    assert np.all(np.asarray(ref.j_RF) > 0) and np.all(
-        np.asarray(ref.j_other) > 0)
+    assert np.all(np.asarray(ref.jphi_rf) > 0) and np.all(
+        np.asarray(ref.jphi_other) > 0)
     assert bl.source_time_match["entries"] == ref.source_time_match["entries"]

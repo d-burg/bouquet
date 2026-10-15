@@ -545,9 +545,9 @@
    "subsystem": "Bouquet orchestrator / IMAS forward solve"
   },
   {
-   "id": "cfg.generation.isolate_edge_jBS",
+   "id": "cfg.generation.isolate_edge_jbs",
    "type": "knob",
-   "label": "config.generation.isolate_edge_jBS",
+   "label": "config.generation.isolate_edge_jbs",
    "file": "bouquet/run.py",
    "line": 643,
    "desc": "Control: isolate edge j_BS spike (True, reconstruction) or use full profile (False, IMAS). Defaults: False for both paths (full Sauter).",
@@ -689,9 +689,9 @@
    "subsystem": "Configuration"
   },
   {
-   "id": "cfg.generationconfig.isolate_edge_jBS",
+   "id": "cfg.generationconfig.isolate_edge_jbs",
    "type": "knob",
-   "label": "isolate_edge_jBS: bool = True",
+   "label": "isolate_edge_jbs: bool = True",
    "file": "bouquet/config.py",
    "line": 299,
    "desc": "Isolate edge j_BS spike from inner negative lobe",
@@ -842,9 +842,9 @@
    "subsystem": "Configuration"
   },
   {
-   "id": "cfg.isolate_edge_jBS",
+   "id": "cfg.isolate_edge_jbs",
    "type": "knob",
-   "label": "isolate_edge_jBS",
+   "label": "isolate_edge_jbs",
    "file": "bouquet/config.py",
    "line": 299,
    "desc": "Separate edge bootstrap spike from core; False=full Sauter (default True)",
@@ -2625,12 +2625,12 @@
    "subsystem": "Configuration"
   },
   {
-   "id": "fn.run.isolate_edge_jBS",
+   "id": "fn.run.isolate_edge_jbs",
    "type": "transform",
-   "label": "isolate_edge_jBS",
+   "label": "isolate_edge_jbs",
    "file": "bouquet/run.py",
    "line": 616,
-   "desc": "j_BS = isolate_edge_jBS(j_BS, mode=config.generation.isolate",
+   "desc": "j_BS = isolate_edge_jbs(j_BS, mode=config.generation.isolate",
    "subsystem": "Configuration"
   },
   {
@@ -3183,7 +3183,7 @@
   {
    "id": "gate.j_inductive_decomposition",
    "type": "decision",
-   "label": "j_inductive storage logic (isolate_edge_jBS)",
+   "label": "j_inductive storage logic (isolate_edge_jbs)",
    "line": 2158,
    "desc": "True=closing_decomp (spike+shelf blend); False=residual",
    "subsystem": "Per-draw solve (SWB / l_i / homotopy)",
@@ -4144,7 +4144,7 @@
    "label": "j_BS (bootstrap current)",
    "file": "bouquet/baseline.py",
    "line": 620,
-   "desc": "Sauter model with full core hump + edge; set via isolate_edge_jBS flag",
+   "desc": "Sauter model with full core hump + edge; set via isolate_edge_jbs flag",
    "subsystem": "Shared quantities"
   },
   {
@@ -5888,10 +5888,10 @@
    "subsystem": "Configuration"
   },
   {
-   "src": "cfg.generationconfig.isolate_edge_jBS",
-   "dst": "fn.run.isolate_edge_jBS",
+   "src": "cfg.generationconfig.isolate_edge_jbs",
+   "dst": "fn.run.isolate_edge_jbs",
    "kind": "data",
-   "desc": "Controls isolate_edge_jBS",
+   "desc": "Controls isolate_edge_jbs",
    "subsystem": "Configuration"
   },
   {
@@ -6014,21 +6014,21 @@
    "subsystem": "Configuration"
   },
   {
-   "src": "cfg.isolate_edge_jBS",
+   "src": "cfg.isolate_edge_jbs",
    "dst": "ext.solve_with_bootstrap",
    "kind": "control",
    "desc": "Control whether to isolate edge spike",
    "subsystem": "GS reconstruction"
   },
   {
-   "src": "cfg.isolate_edge_jBS",
+   "src": "cfg.isolate_edge_jbs",
    "dst": "ext.solve_with_bootstrap",
    "kind": "data",
    "desc": "Edge-spike isolation flag",
    "subsystem": "Per-draw solve (SWB / l_i / homotopy)"
   },
   {
-   "src": "cfg.isolate_edge_jBS",
+   "src": "cfg.isolate_edge_jbs",
    "dst": "gate.j_inductive_decomposition",
    "kind": "control",
    "desc": "True=closing decomp; False=residual",
@@ -10259,7 +10259,7 @@
    "src": "qty.spike_profile",
    "dst": "qty.diagnostics",
    "kind": "data",
-   "desc": "Store j_BS_edge if isolate_edge_jBS=True",
+   "desc": "Store j_BS_edge if isolate_edge_jbs=True",
    "subsystem": "Per-draw solve (SWB / l_i / homotopy)"
   },
   {

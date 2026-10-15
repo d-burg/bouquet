@@ -1,6 +1,6 @@
 """Toroidal-flux (coord="phi_n") solver checks.
 
-  * one p(ψ), j_phi solved ψ-tagged and Φ-tagged gives the same equilibrium;
+  * one p(ψ), jphi_total solved ψ-tagged and Φ-tagged gives the same equilibrium;
   * Φ round trip on the D3D-like g-file: the σ=0 prepare in phi_n
     reproduces the g-file's Ip, q0, q95 and l_i;
   * the phi_n run (windows in ψ_N) keeps the psi_n classifier mode.
@@ -73,7 +73,7 @@ def _state(mygs, psi):
 
 
 def _probe_direct(work):
-    """Test 1: one p, j_phi solved ψ-tagged, then Φ-tagged."""
+    """Test 1: one p, jphi_total solved ψ-tagged, then Φ-tagged."""
     import bouquet as bq
     from bouquet import coords
     from bouquet.edge_pressure import solver_pp_profile

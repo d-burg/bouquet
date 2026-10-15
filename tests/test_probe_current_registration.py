@@ -74,7 +74,7 @@ def _run_ids(tmp_path, monkeypatch, psi, sign=1.0, stamp_sign=True):
                         lambda src: (1.0, np.zeros((4, 2))))
     b = SimpleNamespace(mygs=_GS(), config=SimpleNamespace(
         source=SimpleNamespace(ids_path=_dd(tmp_path, sign), time=1.0)))
-    bl = SimpleNamespace(psi_N=psi, j_phi=_j(psi))
+    bl = SimpleNamespace(psi_N=psi, jphi_total=_j(psi))
     if stamp_sign:
         bl.source_current_sign = sign
     return ME._distance_ids(b, bl, PAD)

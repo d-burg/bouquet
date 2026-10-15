@@ -46,7 +46,7 @@ def _block(src):
     # back to the start of the first line, keep its indentation
     i = src.rindex("\n", 0, i) + 1
     body = textwrap.dedent(src[i:k])
-    code = ("def _secant(mygs, eqdsk, j_inductive_fit, j_BS_isolated, "
+    code = ("def _secant(mygs, eqdsk, jphi_ind_fit, jphi_bs_isolated, "
             "pp_prof, psi_pad, li_target, li_tol, max_li_iters, "
             "max_step_frac):\n"
             # a psi_n run: the run grid is the g-file's psi_N
@@ -79,7 +79,7 @@ class _GS:
 
     def set_profiles(self, ffp_prof=None, pp_prof=None):
         y = np.asarray(ffp_prof["y"], float)
-        self.scale = float(y[0])           # j_inductive_fit = 1, j_BS = 0
+        self.scale = float(y[0])           # jphi_ind_fit = 1, jphi_bs = 0
 
     def solve(self):
         self.n += 1

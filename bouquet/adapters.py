@@ -7,13 +7,13 @@ only place (with the exporters) where a current convention is converted:
 
 * the engine stores every current component as the flux-surface-averaged
   parallel current ``<j.B>`` [T A/m^2];
-* the solver's variable -- the plain flux-surface average ``<j_phi>`` that
+* the solver's variable -- the plain flux-surface average ``<jphi_total>`` that
   TokaMaker's ``jphi-linterp`` profile consumes -- is formed in exactly one
   place, the engine's composition, with the field-aligned conversion
   ``<j.B> F<1/R>/<B^2>`` plus the pressure-driven term
   ``p'(<R> - F^2<1/R>/<B^2>)`` (identity (I2) of
   docs/engine.md);
-* a g-file carries ``<j_phi>`` (its ``p'`` and ``FF'``) and is converted to
+* a g-file carries ``<jphi_total>`` (its ``p'`` and ``FF'``) and is converted to
   ``<j.B>`` HERE, with the g-file's own flux surfaces; an IDS carries IMAS
   ``<j.B>/B0`` and is multiplied by ``|B0|`` HERE.
 
@@ -198,7 +198,7 @@ def inductive_basis(psi_N, residual, *, k=3, psi_bridge=0.99,
     applied to *residual*, WITHOUT the amplitude (l_i proxy) search.
 
     A verbatim copy of that function's basis construction on its
-    ``shelf_psi_N=0``, ``rescale_j_BS=False`` path (the zero edge anchor at
+    ``shelf_psi_N=0``, ``rescale_jbs=False`` path (the zero edge anchor at
     psi_N = 1, the smoothing spline with ``s = n var * 0.1``, the ~32-point
     subsample with the raw-residual core window below *core_exact_psi*, the
     PCHIP and the ``>= 0`` floors), so the engine's g-file inductive is
@@ -242,11 +242,11 @@ def gfile_parallel_current(eqdsk):
     ``<j.B> = F p' + F' <B^2>/mu0`` (identity (I0)) with ``p'``, ``FF'``,
     ``F`` and ``<B^2>`` from the reader's OWN traced flux surfaces
     (``eqdsk.averages``: ``PPRIME``, ``FFPRIM``, ``F``, ``Btot**2``) and the
-    COCOS factor the reader applies to its own ``<j_phi>``
+    COCOS factor the reader applies to its own ``<jphi_total>``
     (``Jt_GS = -sigma_Bp (p'<R> + FF'<1/R>/mu0) (2 pi)^exp_Bp``), so that
     ``p'_+ <R> + FF'_+ <1/R>/mu0`` reproduces ``sgn * Jt_GS`` exactly.  The
     positive frame is ``sgn = sign(Ip)``; the input is REFUSED when its
-    ``<j_phi>`` does not carry the sign of its own Ip in the bulk.
+    ``<jphi_total>`` does not carry the sign of its own Ip in the bulk.
 
     ``parts`` carries ``F``, ``pprime``, ``ffprime`` (positive frame),
     ``R_avg``, ``inv_R``, ``B2``, ``jphi_in`` (= ``sgn * Jt_GS``) and the
@@ -262,13 +262,13 @@ def gfile_parallel_current(eqdsk):
     sgn = 1.0 if Ip > 0.0 else -1.0
     jt = np.asarray(avg["Jt_GS"], dtype=float)
     if not np.all(np.isfinite(jt)):
-        raise EngineInputRefused("g-file adapter: the g-file's <j_phi> is not "
+        raise EngineInputRefused("g-file adapter: the g-file's <jphi_total> is not "
                                  "finite")
     if float(np.median(sgn * jt)) <= 0.0:
         raise EngineInputRefused(
-            "g-file adapter: the g-file's flux-surface current <j_phi> does "
+            "g-file adapter: the g-file's flux-surface current <jphi_total> does "
             "not carry the sign of its own Ip in the bulk (median of "
-            f"sign(Ip) * <j_phi> = {float(np.median(sgn * jt)):.4g}); check "
+            f"sign(Ip) * <jphi_total> = {float(np.median(sgn * jt)):.4g}); check "
             "the COCOS the file was read with")
     F = np.abs(np.asarray(avg["F"], dtype=float))
     pp = sgn * fac * np.asarray(avg["PPRIME"], dtype=float)
@@ -427,12 +427,12 @@ class GFileAdapter:
                    f"{int(eqdsk.cocos)} (sigma_RpZ {_srpz:+.0f})"))
         # user fixed parts are TOROIDAL (FixedComponentsConfig); converted to
         # parallel in finalize() with the anchor geometry
-        # (j_other as the legacy reconstruction takes it, review of #78 A4;
-        # the engine archives it inside j_RF = rf + other)
-        self._fix_tor = dict(nbi=_resolve_fixed(fc.j_NBI, fc_x, x_run),
-                             rf=_resolve_fixed(fc.j_RF, fc_x, x_run),
+        # (jphi_other as the legacy reconstruction takes it, review of #78 A4;
+        # the engine archives it inside jphi_rf = rf + other)
+        self._fix_tor = dict(nbi=_resolve_fixed(fc.jphi_nbi, fc_x, x_run),
+                             rf=_resolve_fixed(fc.jphi_rf, fc_x, x_run),
                              other=_resolve_fixed(
-                                 getattr(fc, "j_other", None), fc_x, x_run))
+                                 getattr(fc, "jphi_other", None), fc_x, x_run))
         psi_pad = float(src.psi_pad)
         from .engine import gfile_li_row_tol
         tol = (gfile_li_row_tol() if self.li_row_tol is None
@@ -720,7 +720,7 @@ def resolve_li3_radius(ts, setting="auto", tol=LI3_RADIUS_MATCH_TOL):
 #: slices of two IDS source families): on self-consistent sources residual
 #: and ``j_ohmic`` are indistinguishable (|dl_i| <= 1.8e-3); where the
 #: source's own split is locally inconsistent the residual is closer to the
-#: source's <j_phi>.
+#: source's <jphi_total>.
 IDS_INDUCTIVE_DEFAULT = "residual"
 #: Net mismatch ``j_ohmic - (j_total - j_bootstrap - sum(driven))`` as a
 #: fraction of the total current above which ``inductive="auto"`` takes the
@@ -1111,7 +1111,7 @@ class IdsAdapter:
         j_tot = _cur("j_total")
         # driven parallel currents, by the explicit IMAS identifier
         # classification (IDS_DRIVEN_SOURCE_PARTS: beams -> "nbi", the
-        # reader's j_NBI before its toroidal conversion; ec/lh/ic -> "rf";
+        # reader's jphi_nbi before its toroidal conversion; ec/lh/ic -> "rf";
         # fusion, runaways, sawteeth -> "other"; an unknown index -> "other"
         # with a warning), all held fixed; aggregates and bootstrap-like
         # entries are never added (stamped in provenance["ignored_sources"]);
@@ -1236,18 +1236,18 @@ class IdsAdapter:
                                   None if self.coord == coords.PSI
                                   else (psi_cp, psi_N))
         user_fix = {}
-        if fc.j_NBI is not None:
-            user_fix["nbi"] = np.interp(psi_N, fc_x, fc.j_NBI) \
-                if fc.psi_N is not None else np.asarray(fc.j_NBI, float)
-        if fc.j_RF is not None:
-            user_fix["rf"] = np.interp(psi_N, fc_x, fc.j_RF) \
-                if fc.psi_N is not None else np.asarray(fc.j_RF, float)
-        # an explicit j_other replaces the dd's "other" channel (fusion,
+        if fc.jphi_nbi is not None:
+            user_fix["nbi"] = np.interp(psi_N, fc_x, fc.jphi_nbi) \
+                if fc.psi_N is not None else np.asarray(fc.jphi_nbi, float)
+        if fc.jphi_rf is not None:
+            user_fix["rf"] = np.interp(psi_N, fc_x, fc.jphi_rf) \
+                if fc.psi_N is not None else np.asarray(fc.jphi_rf, float)
+        # an explicit jphi_other replaces the dd's "other" channel (fusion,
         # runaways, sawteeth, unknown indices), as the legacy reader does
         # (review of #78, A4)
-        if getattr(fc, "j_other", None) is not None:
-            user_fix["other"] = np.interp(psi_N, fc_x, fc.j_other) \
-                if fc.psi_N is not None else np.asarray(fc.j_other, float)
+        if getattr(fc, "jphi_other", None) is not None:
+            user_fix["other"] = np.interp(psi_N, fc_x, fc.jphi_other) \
+                if fc.psi_N is not None else np.asarray(fc.jphi_other, float)
         self._user_fix_tor = user_fix
         # kinetics + pressure exactly as the reader resolved them (thermal +
         # impurity + fast; NO p_diff -- the engine does not anchor pressure)
@@ -1308,7 +1308,7 @@ class IdsAdapter:
             mse=mse_rows(gc, self.orientation),
         )
         _F0, boundary = read_imas_geometry(src)
-        anchor = np.asarray(bl.j_phi, dtype=float)
+        anchor = np.asarray(bl.jphi_total, dtype=float)
         c = EngineContract(
             kind="ids", psi_N=psi_N,
             kinetics=dict(ne=ne, te=te, ni=ni, ti=ti, zeff=zeff),

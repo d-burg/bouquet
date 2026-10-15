@@ -1,6 +1,6 @@
 """jbs_delta_mode sigma=0 reference: scale semantics + the scoping regression.
 
-The first version of the issue-#44 fix passed ``scale_jBS`` -- a per-draw
+The first version of the issue-#44 fix passed ``scale_jbs`` -- a per-draw
 local that is only bound INSIDE the draw loop -- into the pre-loop cache
 call.  Python scoping made that an UnboundLocalError, which the cache
 block's blanket ``except Exception`` swallowed into a silent
@@ -49,7 +49,7 @@ class TestReferenceScale:
         """The pre-loop SWB cache must take its scale from
         sigma0_reference_scale, not from any per-draw local."""
         src = inspect.getsource(tmi)
-        assert "_scale_ref = sigma0_reference_scale(jBS_scale_range)" in src
+        assert "_scale_ref = sigma0_reference_scale(jbs_scale_range)" in src
 
 
 class TestDegradationIsLoudAndRecorded:
@@ -64,7 +64,7 @@ class TestDegradationIsLoudAndRecorded:
         assert active is False
 
     def test_missing_baseline_jbs_warns(self):
-        with pytest.warns(RuntimeWarning, match="baseline_j_BS"):
+        with pytest.warns(RuntimeWarning, match="baseline_jphi_bs"):
             active = delta_mode_activation(True, True, False)
         assert active is False
 

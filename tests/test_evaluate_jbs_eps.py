@@ -1,4 +1,4 @@
-"""The inverse aspect ratio of the Redl collisionalities in ``evaluate_jBS``,
+"""The inverse aspect ratio of the Redl collisionalities in ``evaluate_jbs``,
 and the major radius ``R`` that goes with it in ``nu*``.
 
 Owner decision E7 (2026-10-09): the default is ``eps_definition =
@@ -40,7 +40,7 @@ import pytest
 
 from bouquet.physics import (EPS_DEFINITION_DEFAULT, EPS_DEFINITIONS,
                              EPS_ROUTE_SANITY_RTOL, EVALUATE_JBS_VERSION,
-                             NU_STAR_R, evaluate_jBS, evaluate_jbs_version,
+                             NU_STAR_R, evaluate_jbs, evaluate_jbs_version,
                              fork_eps_diagnostic, geometric_eps, redl_eps)
 from test_jbs_loop import _MockEq, _kin
 
@@ -52,10 +52,10 @@ _GFILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data",
 
 @pytest.fixture
 def oft():
-    """OFT's pure-Python Redl (``evaluate_jBS`` past its input checks)."""
+    """OFT's pure-Python Redl (``evaluate_jbs`` past its input checks)."""
     return pytest.importorskip(
         "OpenFUSIONToolkit.TokaMaker.bootstrap",
-        reason="evaluate_jBS wraps OFT's pure-Python Redl implementation; "
+        reason="evaluate_jbs wraps OFT's pure-Python Redl implementation; "
                "OpenFUSIONToolkit is not importable here")
 
 
@@ -86,12 +86,12 @@ def _nu_R_expected(eq, x, definition):
 def test_the_default_is_r_over_R_geo_and_says_so(oft):
     assert EPS_DEFINITION_DEFAULT == "r_over_R_geo"
     assert EPS_DEFINITIONS["r_over_R_geo"] == "(R_max - R_min)/(R_max + R_min)"
-    assert EVALUATE_JBS_VERSION.startswith("evaluate_jBS/4")
+    assert EVALUATE_JBS_VERSION.startswith("evaluate_jbs/4")
     assert "eps = (R_max-R_min)/(R_max+R_min)" in EVALUATE_JBS_VERSION
     assert "nu* R = R_geo = (R_max + R_min)/2" in EVALUATE_JBS_VERSION
     assert "OPT-IN" not in EVALUATE_JBS_VERSION
     eq = _MockEq()
-    _j, d = evaluate_jBS(eq, X, *_kin(X))
+    _j, d = evaluate_jbs(eq, X, *_kin(X))
     np.testing.assert_allclose(d["eps"], _eps_expected(eq, X, "r_over_R_geo"),
                                rtol=1e-13)
     assert d["eps_definition"] == "r_over_R_geo"
@@ -109,9 +109,9 @@ def test_every_definition_is_build_independent(oft, definition):
     (whose ``sauter_fc(return_eps=True)`` is 1.4e-4 off, as the real fork's
     is) give the SAME bootstrap to the last bit: no definition reads the
     fork's value."""
-    j_main, d_main = evaluate_jBS(_MockEq(fork=False), X, *_kin(X),
+    j_main, d_main = evaluate_jbs(_MockEq(fork=False), X, *_kin(X),
                                   eps_definition=definition)
-    j_fork, d_fork = evaluate_jBS(_MockEq(fork=True), X, *_kin(X),
+    j_fork, d_fork = evaluate_jbs(_MockEq(fork=True), X, *_kin(X),
                                   eps_definition=definition)
     np.testing.assert_array_equal(j_fork, j_main)
     np.testing.assert_array_equal(d_fork["eps"], d_main["eps"])
@@ -137,7 +137,7 @@ def test_the_nu_star_R_is_R_geo_for_the_default_and_fsa_R_otherwise(
 
     oft.redl_bootstrap = _spy
     try:
-        _j, d = evaluate_jBS(eq, X, *_kin(X), eps_definition=definition)
+        _j, d = evaluate_jbs(eq, X, *_kin(X), eps_definition=definition)
     finally:
         oft.redl_bootstrap = real
     np.testing.assert_allclose(d["R_nu_star"], _nu_R_expected(eq, X,
@@ -160,7 +160,7 @@ def test_the_nu_star_ratio_between_definitions_is_R_times_eps_minus_3_2(oft):
     """``nu* ~ R eps^-3/2``: between any two definitions on the same
     surfaces and kinetics the collisionalities differ by exactly
     ``(R_1/R_2) (eps_1/eps_2)^-3/2`` -- both factors, not only the eps one."""
-    ds = {k: evaluate_jBS(_MockEq(), X, *_kin(X), smooth_axis=False,
+    ds = {k: evaluate_jbs(_MockEq(), X, *_kin(X), smooth_axis=False,
                           eps_definition=k)[1] for k in EPS_DEFINITIONS}
     inner = (X > 0.01) & (X < 0.99)
     ref = ds["a_over_R"]
@@ -178,13 +178,13 @@ def test_the_nu_star_ratio_between_definitions_is_R_times_eps_minus_3_2(oft):
 
 def test_the_version_string_distinguishes_the_three_definitions():
     """(e) Each definition's tag names its epsilon and its ``nu*`` R; every
-    one stays in the ``evaluate_jBS/4`` family (p'G separate), and the opt-ins
+    one stays in the ``evaluate_jbs/4`` family (p'G separate), and the opt-ins
     are marked."""
     tags = {k: evaluate_jbs_version(k) for k in EPS_DEFINITIONS}
     assert len(set(tags.values())) == 3
     for k, v in tags.items():
-        assert v.startswith("evaluate_jBS/4 (")
-        assert "p'G separate as j_pressure" in v
+        assert v.startswith("evaluate_jbs/4 (")
+        assert "p'G separate as jphi_pd" in v
         assert EPS_DEFINITIONS[k].replace(" ", "") in v
         assert f"nu* R = {NU_STAR_R[k]}" in v
         assert ("OPT-IN" in v) == (k != EPS_DEFINITION_DEFAULT)
@@ -207,24 +207,24 @@ class _MainSauter(_MockEq):
 @pytest.mark.parametrize("definition", sorted(EPS_DEFINITIONS))
 def test_a_signature_without_return_eps_is_never_called_with_it(
         oft, definition):
-    j, d = evaluate_jBS(_MainSauter(), X, *_kin(X),
+    j, d = evaluate_jbs(_MainSauter(), X, *_kin(X),
                         eps_definition=definition)
     assert np.all(np.isfinite(j)) and d["eps_fork_diagnostic"] is None
 
 
 def test_the_fork_value_is_recorded_beside_ours_as_a_cross_build_check(oft):
     """CROSS-BUILD SANITY CHECK (a diagnostic, not a physics bar): where the
-    build has ``sauter_fc(return_eps=True)``, its ``(R_max - R_min)/(2<R>)``
+    build has ``sauter_fc(return_eps=True)``, its ``(R_max - R_min)/(R_max + R_min)``
     is stamped beside the ``get_fsa`` value of the same formula, with their
     largest relative difference and the documented 1e-3 bar.  The real fork
     and ``get_fsa`` agree to ~1.4e-4 (cut-cell ``<R>``), never to rounding,
     which is why no evaluation uses the fork's value."""
     assert EPS_ROUTE_SANITY_RTOL == 1.0e-3
     eq = _MockEq(fork=True)
-    _j, d = evaluate_jBS(eq, X, *_kin(X))
+    _j, d = evaluate_jbs(eq, X, *_kin(X))
     fd = d["eps_fork_diagnostic"]
     assert fd is not None and fd["sanity_rtol"] == EPS_ROUTE_SANITY_RTOL
-    np.testing.assert_allclose(fd["eps_get_fsa"], _eps_expected(eq, X, _HW),
+    np.testing.assert_allclose(fd["eps_get_fsa"], _eps_expected(eq, X, "r_over_R_geo"),
                                rtol=1e-13)
     np.testing.assert_allclose(fd["eps_sauter_fc_return_eps"],
                                fd["eps_get_fsa"], rtol=EPS_ROUTE_SANITY_RTOL)
@@ -264,8 +264,8 @@ def test_the_half_width_opt_in_is_get_fsa_on_every_build():
 # ---------------------------------------------------------------------------
 def test_the_a_over_R_opt_in_is_named_and_never_traces_get_fsa(oft):
     eq = _MockEq()
-    j_def, _ = evaluate_jBS(_MockEq(), X, *_kin(X), smooth_axis=False)
-    j_aR, d_aR = evaluate_jBS(eq, X, *_kin(X), smooth_axis=False,
+    j_def, _ = evaluate_jbs(_MockEq(), X, *_kin(X), smooth_axis=False)
+    j_aR, d_aR = evaluate_jbs(eq, X, *_kin(X), smooth_axis=False,
                               eps_definition="a_over_R")
     assert not any(name == "get_fsa" for name, _a in eq.calls)
     np.testing.assert_allclose(d_aR["eps"], _eps_expected(eq, X, "a_over_R"),
@@ -280,7 +280,7 @@ def test_the_a_over_R_opt_in_is_named_and_never_traces_get_fsa(oft):
 
 def test_an_unknown_definition_is_refused_and_the_draft_name_is_explained():
     with pytest.raises(ValueError, match="eps_definition"):
-        evaluate_jBS(_MockEq(), X, *_kin(X), eps_definition="inverse_aspect")
+        evaluate_jbs(_MockEq(), X, *_kin(X), eps_definition="inverse_aspect")
     with pytest.raises(ValueError, match="half_width_over_fsa_R"):
         evaluate_jbs_version("geometric")
 
@@ -295,9 +295,9 @@ def test_a_build_without_get_fsa_is_refused_by_name_not_silently(oft):
     there."""
     for definition in ("r_over_R_geo", _HW):
         with pytest.raises(RuntimeError, match="a_over_R"):
-            evaluate_jBS(_NoFsaNoFork(), X, *_kin(X),
+            evaluate_jbs(_NoFsaNoFork(), X, *_kin(X),
                          eps_definition=definition)
-    j, d = evaluate_jBS(_NoFsaNoFork(), X, *_kin(X),
+    j, d = evaluate_jbs(_NoFsaNoFork(), X, *_kin(X),
                         eps_definition="a_over_R")
     assert np.all(np.isfinite(j)) and d["eps_definition"] == "a_over_R"
 
@@ -432,7 +432,7 @@ def test_the_config_field_defaults_to_r_over_R_geo_and_is_validated():
 
 
 def test_it_is_engine_independent_not_an_engine_unread_field():
-    """It configures physics.evaluate_jBS on every path: not an engine-only
+    """It configures physics.evaluate_jbs on every path: not an engine-only
     field (refused under legacy) nor an engine-unread legacy field (refused
     under unified)."""
     from bouquet.config import GenerationConfig
@@ -457,7 +457,7 @@ def test_the_engine_settings_and_record_carry_it():
         assert rec == dict(eps_definition=name,
                            eps_formula=EPS_DEFINITIONS[name],
                            nu_star_R=NU_STAR_R[name],
-                           evaluate_jBS_version=evaluate_jbs_version(name))
+                           evaluate_jbs_version=evaluate_jbs_version(name))
     assert eps_record(None)["eps_definition"] == "r_over_R_geo"
 
 
@@ -467,10 +467,10 @@ def _spy_evaluate(monkeypatch, j):
 
     def _spy(*a, **k):
         seen.append(k.get("eps_definition"))
-        return j.copy(), dict(j_dot_B=j.copy(), j_tor_full_raw=j.copy(),
+        return j.copy(), dict(jdotB_bs=j.copy(), j_tor_full_raw=j.copy(),
                               I_BS=1.0)
 
-    monkeypatch.setattr(physics, "evaluate_jBS", _spy)
+    monkeypatch.setattr(physics, "evaluate_jbs", _spy)
     return seen
 
 
@@ -517,7 +517,7 @@ def test_the_legacy_draw_composer_evaluates_with_it(monkeypatch, name):
 def test_the_loop_settings_carry_a_non_default_and_the_record_names_it():
     """``jbs_settings`` (the legacy loops' and the engine's loop settings)
     carries a non-default definition -- the default dict keeps its keys --
-    and every loop record's ``evaluate_jBS_version`` is that definition's."""
+    and every loop record's ``evaluate_jbs_version`` is that definition's."""
     from bouquet.jbs_loop import jbs_settings, run_jbs_loop
     from test_jbs_loop import _GC, _IP, _affine_problem
     assert "eps_definition" not in jbs_settings(_GC())
@@ -530,7 +530,7 @@ def test_the_loop_settings_carry_a_non_default_and_the_record_names_it():
         Jstar, step, ev = _affine_problem(-0.1)
         rec = run_jbs_loop(0.5 * Jstar, step, ev, s, Ip=_IP,
                            meas0=dict(li=0.0))["record"]
-        assert rec["evaluate_jBS_version"] == evaluate_jbs_version(name)
+        assert rec["evaluate_jbs_version"] == evaluate_jbs_version(name)
 
 
 def test_the_archive_stamp_round_trips(tmp_path):
@@ -577,7 +577,7 @@ def test_the_eps_stamp_names_the_evaluator_each_route_uses():
         assert up["bootstrap"] == BOOTSTRAP_EVALUATOR_SWB
         assert up["eps_definition"] == "a_over_R"
         assert up["eps_formula"] == "<a>/<R>"
-        assert up["evaluate_jBS_version"] is None
+        assert up["evaluate_jbs_version"] is None
         assert up["eps_definition_configured"] == "r_over_R_geo"
         # the internal-solve toolkit: what use_sauter_eps selects, or its
         # own default (not claimed)

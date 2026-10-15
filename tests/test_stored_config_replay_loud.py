@@ -6,8 +6,8 @@
   SILENTLY at today's 0.7 / 3.  Now it loads with 1.0 / 1 and ONE warning
   naming the fields.
 * The "loud" :data:`~bouquet.config.FIELD_PRE_INTRODUCTION` entries
-  (``l_i_tolerance``, ``jBS_scale_range``, ``homotopy_passes``,
-  ``floor_j_BS``, ``jbs_max_passes_draw``) were consulted for unified
+  (``l_i_tolerance``, ``jbs_scale_range``, ``homotopy_passes``,
+  ``floor_jbs``, ``jbs_max_passes_draw``) were consulted for unified
   configs only, so they never fired for a (legacy) config bouquet itself
   stored.  Now for every stored config.
 * ``coil_solve_mode`` was written but never read back.  ``load_config``
@@ -27,13 +27,14 @@ import h5py
 import numpy as np
 import pytest
 
-from bouquet.config import BouquetConfig
+from bouquet.config import RENAMED_OPTIONS, BouquetConfig
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _FIX = os.path.join(_HERE, "data", "stored_configs", "config_554edfb.json")
 RELAX = ("jbs_relax_current", "jbs_relax_halve_on")
-LOUD = ("l_i_tolerance", "jBS_scale_range", "homotopy_passes", "floor_j_BS",
+LOUD = ("l_i_tolerance", "jbs_scale_range", "homotopy_passes", "floor_jbs",
         "jbs_max_passes_draw")
+_SPELT = {new: old for old, new in RENAMED_OPTIONS.items()}   # the fixture's (older) spellings
 
 
 def _stored(eng):
@@ -57,7 +58,7 @@ def test_a_loop_config_without_the_relax_fields_loads_what_it_ran(eng):
             c0.generation.jbs_relax_halve_on) == (0.7, 3)
     assert not any("jbs_relax" in m for m in m0)
     for f in RELAX:
-        d["generation"].pop(f)
+        d["generation"].pop(_SPELT.get(f, f))
     c, msgs = _load(d)
     assert c.generation.jbs_relax_current == 1.0
     assert c.generation.jbs_relax_halve_on == 1
@@ -84,7 +85,7 @@ def test_a_config_that_did_not_run_the_loop_is_not_back_filled():
     d = _stored("legacy")
     d["generation"]["jbs_self_consistent"] = False
     for f in RELAX:
-        d["generation"].pop(f)
+        d["generation"].pop(_SPELT.get(f, f))
     c, msgs = _load(d)
     assert (c.generation.jbs_relax_current,
             c.generation.jbs_relax_halve_on) == (0.7, 3)
@@ -97,7 +98,7 @@ def test_the_loud_entries_fire_for_a_stored_legacy_config():
     each named, today's default used."""
     d = _stored("legacy")
     for f in LOUD:
-        d["generation"].pop(f)
+        d["generation"].pop(_SPELT.get(f, f))
     c, msgs = _load(d)
     for f in LOUD:
         hit = [m for m in msgs if f"STORED CONFIG LACKS generation.{f}," in m]
@@ -114,7 +115,7 @@ def test_the_loop_loud_entry_waits_for_the_loop():
     d = _stored("legacy")
     d["generation"]["jbs_self_consistent"] = False
     for f in LOUD:
-        d["generation"].pop(f)
+        d["generation"].pop(_SPELT.get(f, f))
     _, msgs = _load(d)
     assert not any("generation.jbs_max_passes_draw" in m for m in msgs)
     for f in LOUD[:-1]:

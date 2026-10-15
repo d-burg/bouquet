@@ -179,7 +179,7 @@ def test_generate_bouquet_consumes_the_seed_once():
         src = fh.read()
     assert "rng = make_rng(seed)" in src
     # and the two formerly-legacy draws must come off it
-    assert "rng.uniform(" in src, "scale_jBS draw is not on the run Generator"
+    assert "rng.uniform(" in src, "scale_jbs draw is not on the run Generator"
     assert "rng.normal(" in src, "l_i target draw is not on the run Generator"
 
 
@@ -336,7 +336,7 @@ def test_seeded_draw_stream_matches_golden():
         psi_N = np.asarray(bl["psi_N"][()], dtype=float)
         profiles = {"ne": bl["n_e"][()], "te": bl["T_e"][()],
                     "ni": bl["n_i"][()], "ti": bl["T_i"][()],
-                    "jphi": bl["j_phi"][()]}
+                    "jphi": bl["jphi_total"][()]}
         sigmas = {"ne": bl["sigma_ne"][()], "te": bl["sigma_te"][()],
                   "ni": bl["sigma_ni"][()], "ti": bl["sigma_ti"][()],
                   "jphi": bl["sigma_jphi"][()]}

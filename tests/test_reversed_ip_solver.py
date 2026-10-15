@@ -13,7 +13,7 @@ each mirror's baseline is forward-solved -- the full ``prepare_baseline`` --
 under every closure path that recomputes a bootstrap:
 
   * ``diff``                -- the ``from_imas`` default (full-profile SWB);
-  * ``diff_floor_isolate``  -- ``floor_j_BS`` + ``isolate_edge_jBS``: the SWB
+  * ``diff_floor_isolate``  -- ``floor_jbs`` + ``isolate_edge_jbs``: the SWB
     clip at >= 0 and the edge-spike isolation, the two places a wrongly signed
     bootstrap would be silently zeroed or mislabelled;
   * ``ohmic_bootstrap``     -- the hybrid closure (bootstrap channel);
@@ -21,10 +21,10 @@ under every closure path that recomputes a bootstrap:
     the sawtooth q0 gate (q0 target, radial multipliers, Ip posterior).
 
 and, on builds that carry the self-consistent bootstrap loop, each of those
-again with the loop both OFF (legacy frozen SWB) and ON (``evaluate_jBS``).
+again with the loop both OFF (legacy frozen SWB) and ON (``evaluate_jbs``).
 
 **The bar is BITWISE identity**, not a tolerance: every array on the Baseline
-(``j_phi``, ``j_inductive``, ``j_BS``, the fixed components, ``jBS_diff``), the
+(``jphi_total``, ``jphi_ind``, ``jphi_bs``, the fixed components, ``jphi_bs_diff``), the
 solved flux, q profile, l_i, the closure multipliers and the whole Ip-closure
 record must equal the original orientation's exactly.  That is the right bar,
 and the only honest one: the reader's normalisation is a multiplication by
@@ -67,10 +67,10 @@ _files_ok = all(os.path.isfile(p) for p in (mdd.EXAMPLE_DD, mdd.EXAMPLE_MESH))
 #: applied on top of the ``Bouquet.from_imas`` defaults.
 _BASE_CONFIGS = (
     ("diff", {}),
-    ("diff_floor_isolate", {"floor_j_BS": True, "isolate_edge_jBS": True}),
-    ("ohmic_bootstrap", {"jBS_baseline_mode": "ohmic",
+    ("diff_floor_isolate", {"floor_jbs": True, "isolate_edge_jbs": True}),
+    ("ohmic_bootstrap", {"jbs_baseline_mode": "ohmic",
                          "closure_channel": "bootstrap"}),
-    ("ohmic_structured", {"jBS_baseline_mode": "ohmic",
+    ("ohmic_structured", {"jbs_baseline_mode": "ohmic",
                           "closure_channel": "structured",
                           "structured_soft": True,
                           "structured_li_target": 1.20,
@@ -101,15 +101,31 @@ def _oft_importable():
         return False
 
 
+def _isolate_refused():
+    """A toolkit whose solve_with_bootstrap returns TokaMaker jphi without
+    reporting p'G apart (no ``jphi_pd`` boot profile) refuses
+    ``isolate_edge_jbs`` at its SWB calls (where p'G sits in the isolated spike
+    is not defined)."""
+    try:
+        from OpenFUSIONToolkit.TokaMaker import _core
+        from bouquet.physics import SWB_JBS_TOROIDAL, swb_jbs_convention
+        return (swb_jbs_convention() == SWB_JBS_TOROIDAL
+                and "jphi_pd" not in getattr(_core, "_BOOT_PROF_NAMES", ()))
+    except Exception:
+        return False
+
+
 def _configs():
     """The closure paths, doubled with the bootstrap loop OFF/ON on builds that
-    carry ``GenerationConfig.jbs_self_consistent``."""
+    carry ``GenerationConfig.jbs_self_consistent`` (the loop-off isolate case
+    only where the toolkit takes it)."""
     from bouquet.config import GenerationConfig
     if not hasattr(GenerationConfig(), "jbs_self_consistent"):
         return list(_BASE_CONFIGS)
     out = []
     for name, ov in _BASE_CONFIGS:
-        out.append((name + "_legacy", dict(ov, jbs_self_consistent=False)))
+        if not (ov.get("isolate_edge_jbs") and _isolate_refused()):
+            out.append((name + "_legacy", dict(ov, jbs_self_consistent=False)))
         out.append((name + "_loop", dict(ov, jbs_self_consistent=True)))
     return out
 
@@ -168,8 +184,8 @@ def _probe(dd_path, outdir):
         except Exception as exc:                     # a refusal is a RESULT
             rec["error"] = f"{type(exc).__name__}: {exc}"
         else:
-            for f in ("psi_N", "j_phi", "j_inductive", "j_BS", "j_NBI", "j_RF",
-                      "jBS_diff", "jphi_diff", "ne", "te", "ni", "ti", "Zeff",
+            for f in ("psi_N", "jphi_total", "jphi_ind", "jphi_bs", "jphi_nbi", "jphi_rf",
+                      "jphi_bs_diff", "jphi_diff", "ne", "te", "ni", "ti", "Zeff",
                       "p_fast"):
                 v = getattr(bl, f, None)
                 if v is not None:
@@ -271,10 +287,10 @@ def test_the_source_orientation_delivers_a_solved_baseline(solved, name):
     SOLVE on every closure path (two identical refusals would compare equal)."""
     rec, arrays = _load(solved[(1.0, 1.0)], name)
     assert "error" not in rec, rec.get("error")
-    assert arrays["bl_j_phi"].size > 0
+    assert arrays["bl_jphi_total"].size > 0
     # every delivered current is in the positive-Ip frame
     assert rec["source_current_sign"] == 1.0
-    assert float(np.trapezoid(arrays["bl_j_phi"], arrays["bl_psi_N"])) > 0.0
+    assert float(np.trapezoid(arrays["bl_jphi_total"], arrays["bl_psi_N"])) > 0.0
 
 
 @pytest.mark.solver

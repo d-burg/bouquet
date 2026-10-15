@@ -125,7 +125,7 @@ def _archive(path, bl, d):
                      ("z_fast", bl.z_fast), ("z2_fast", bl.z2_fast)):
             g.create_dataset(k, data=np.asarray(a, float))
         g.attrs["Z_imp"] = float(bl.Z_imp)
-        for k in ("j_phi", "j_inductive", "j_BS"):
+        for k in ("jphi_total", "jphi_ind", "jphi_bs"):
             g.create_dataset(k, data=np.asarray(getattr(bl, k), float))
         g.create_dataset("eqdsk", data=np.void(eqb))
         fg = g.create_group("eq_fsa")

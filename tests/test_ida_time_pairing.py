@@ -277,7 +277,7 @@ def test_the_reader_reads_the_kinetics_at_ida_time_and_the_currents_at_time(file
     at_t = _read(ddp, cdf)
     at_ida = _read(ddp, cdf, ida_time=1.01)
     np.testing.assert_allclose(at_ida.ne, 1.3 * at_t.ne, rtol=1e-12)
-    for k in ("j_BS", "Ip_target"):
+    for k in ("jphi_bs", "Ip_target"):
         np.testing.assert_array_equal(getattr(at_ida, k), getattr(at_t, k))
     m = at_ida.li_metrics["ida_time_match"]
     assert m["ida_time_used"] == 1.01 and m["fuse_time_cp"] == 1.0

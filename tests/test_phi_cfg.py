@@ -69,7 +69,7 @@ def test_phi_run_refuses_the_python_solve_at_construction(monkeypatch):
 
 
 def test_json_round_trip_keeps_the_coords():
-    fc = FixedComponentsConfig(j_NBI=np.ones(3), psi_N=np.linspace(0, 1, 3),
+    fc = FixedComponentsConfig(jphi_nbi=np.ones(3), psi_N=np.linspace(0, 1, 3),
                                coord="psi_n")
     cfg = _cfg(generation=_legacy(jbs_self_consistent=False),
                fixed_components=fc)
@@ -206,8 +206,8 @@ def recon(monkeypatch):
         def fake(mygs, eqdsk, ne, te, ni, ti, Zeff, iso_pts, iso_w, psi_pad, **kw):
             seen.update(kw, ne=ne, eqdsk=eqdsk)
             n = len(eqdsk.psi_N)
-            return dict(j_phi_fit=np.linspace(2.0e6, 2.0e5, n),
-                        j_BS_used=np.full(n, 1.0e5), li_final=0.9,
+            return dict(jphi_total_fit=np.linspace(2.0e6, 2.0e5, n),
+                        jphi_bs_used=np.full(n, 1.0e5), li_final=0.9,
                         li_realized_post_corrective=0.9)
         monkeypatch.setattr(tmi, "reconstruct_equilibrium", fake)
         cfg = _cfg(source=ReconstructionSource(
@@ -267,16 +267,16 @@ def test_recon_fixed_components_on_phi(recon, tmp_path, fc_coord):
     cdf = _cdf(str(tmp_path / "ida.cdf"), q=Q_SRC)
     g = np.linspace(0.0, 1.0, 21)
     f = 1.0e5 * (1.0 - g)
-    fc = FixedComponentsConfig(j_NBI=f, p_fast=1.0e3 * (1.0 - g), psi_N=g,
+    fc = FixedComponentsConfig(jphi_nbi=f, p_fast=1.0e3 * (1.0 - g), psi_N=g,
                                coord=fc_coord)
     bl, seen, _ = recon(cdf, fixed_components=fc)
     gx = g if fc_coord == "run" else np.interp(
         g, seen["eqdsk"].psi_N, bl.psi_N)
-    np.testing.assert_allclose(bl.j_NBI, np.interp(bl.psi_N, gx, f))
+    np.testing.assert_allclose(bl.jphi_nbi, np.interp(bl.psi_N, gx, f))
     np.testing.assert_allclose(bl.p_fast,
                                np.interp(bl.psi_N_kinetic, gx, 1.0e3 * (1.0 - g)))
     if fc_coord == "psi_n":     # not the same as reading g as Phi_N
-        assert np.max(np.abs(bl.j_NBI - np.interp(bl.psi_N, g, f))) > 1e2
+        assert np.max(np.abs(bl.jphi_nbi - np.interp(bl.psi_N, g, f))) > 1e2
 
 
 # ---------------------------------------------------------------------------

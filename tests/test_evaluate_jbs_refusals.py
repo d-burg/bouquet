@@ -1,21 +1,21 @@
-"""evaluate_jBS refuses what it cannot evaluate -- and changes nothing else.
+"""evaluate_jbs refuses what it cannot evaluate -- and changes nothing else.
 
 The Redl expressions are undefined for non-physical kinetic input
 (``Z_eff < 1``, non-positive densities or temperatures) and on a surface the
 flux-surface tracer failed on (it returns an all-zero row).  The historical
-evaluator mapped the resulting NaN to ``j_BS = 0`` at that node with no
+evaluator mapped the resulting NaN to ``jphi_bs = 0`` at that node with no
 signal.  It now raises :class:`bouquet.physics.JBSEvaluationError` naming the
 quantity and the ``psi_N`` location, and keeps the historical treatment only
 at the END nodes (geometry on the clipped axis / separatrix surface,
 identified by coordinate).
 
 The bit-identity half compares the new function against a verbatim copy of
-the evaluator as it was before this change (:func:`_evaluate_jBS_reference`
+the evaluator as it was before this change (:func:`_evaluate_jbs_reference`
 below) on the synthetic mock equilibrium of ``test_jbs_loop`` over several
 grids and options: for every accepted input the output is identical to the
 last bit.  The reference uses the ``<a>/<R>`` epsilon of that time, so the
 comparison runs with the explicit opt-in ``eps_definition="a_over_R"``; the
-default epsilon and the other opt-in (``evaluate_jBS/4``) are tested in
+default epsilon and the other opt-in (``evaluate_jbs/4``) are tested in
 ``test_evaluate_jbs_eps.py``.
 
 Synthetic inputs only; no device data.  Needs OFT's pure-Python ``bootstrap``
@@ -26,12 +26,12 @@ import pytest
 
 _bs = pytest.importorskip(
     "OpenFUSIONToolkit.TokaMaker.bootstrap",
-    reason="evaluate_jBS wraps OFT's pure-Python Redl implementation; "
+    reason="evaluate_jbs wraps OFT's pure-Python Redl implementation; "
            "OpenFUSIONToolkit is not importable here")
 
 from bouquet.physics import (EVALUATE_JBS_VERSION, JBSEvaluationError,  # noqa: E402
                              _EC, _SAUTER_MODB_INDEX, _SAUTER_RAVG_INDEX,
-                             _sauter_avg, evaluate_jBS, parallel_to_toroidal,
+                             _sauter_avg, evaluate_jbs, parallel_to_toroidal,
                              q_ravg)
 from test_jbs_loop import _MockEq, _kin  # noqa: E402
 
@@ -39,27 +39,27 @@ from test_jbs_loop import _MockEq, _kin  # noqa: E402
 # ---------------------------------------------------------------------------
 #  the reference: the evaluator exactly as it was before the refusals
 # ---------------------------------------------------------------------------
-def _evaluate_jBS_reference(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
+def _evaluate_jbs_reference(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
                  isolate_edge=False, smooth_axis=True):
-    """Verbatim copy of evaluate_jBS as it was BEFORE the refusals (the
+    """Verbatim copy of evaluate_jbs as it was BEFORE the refusals (the
     historical nan_to_num at every node); docstring dropped."""
     import OpenFUSIONToolkit.TokaMaker.bootstrap as _oft_bs
 
     psi_N = np.asarray(psi_N, dtype=float)
     n = psi_N.size
     if psi_N.ndim != 1 or n < 3:
-        raise ValueError("evaluate_jBS: psi_N must be 1-D with >= 3 points")
+        raise ValueError("evaluate_jbs: psi_N must be 1-D with >= 3 points")
     if not np.all(np.isfinite(psi_N)):
-        raise ValueError("evaluate_jBS: psi_N contains non-finite values")
+        raise ValueError("evaluate_jbs: psi_N contains non-finite values")
     if np.any(np.diff(psi_N) <= 0.0):
-        raise ValueError("evaluate_jBS: psi_N must be strictly increasing")
+        raise ValueError("evaluate_jbs: psi_N must be strictly increasing")
     if psi_N[0] < 0.0 or psi_N[-1] > 1.0:
         raise ValueError(
-            f"evaluate_jBS: psi_N must lie in [0, 1] (got {psi_N[0]}, "
+            f"evaluate_jbs: psi_N must lie in [0, 1] (got {psi_N[0]}, "
             f"{psi_N[-1]})")
     psi_pad = float(psi_pad)
     if not (0.0 < psi_pad < 0.5):
-        raise ValueError(f"evaluate_jBS: psi_pad must be in (0, 0.5), got "
+        raise ValueError(f"evaluate_jbs: psi_pad must be in (0, 0.5), got "
                          f"{psi_pad!r}")
 
     def _prof(a, name):
@@ -67,10 +67,10 @@ def _evaluate_jBS_reference(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
         if a.ndim == 0:
             a = np.full(n, float(a))
         if a.shape != (n,):
-            raise ValueError(f"evaluate_jBS: {name} has shape {a.shape}, "
+            raise ValueError(f"evaluate_jbs: {name} has shape {a.shape}, "
                              f"expected ({n},) to match psi_N")
         if not np.all(np.isfinite(a)):
-            raise ValueError(f"evaluate_jBS: {name} contains non-finite "
+            raise ValueError(f"evaluate_jbs: {name} contains non-finite "
                              "values")
         return a
 
@@ -107,7 +107,7 @@ def _evaluate_jBS_reference(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
     bounds = np.asarray(mygs.psi_bounds, dtype=float)
     psi_range = float(bounds[1] - bounds[0])
     if psi_range == 0.0 or not np.isfinite(psi_range):
-        raise ValueError(f"evaluate_jBS: degenerate psi_bounds {bounds}")
+        raise ValueError(f"evaluate_jbs: degenerate psi_bounds {bounds}")
 
     def _d(y):
         return np.gradient(y, psi_N, edge_order=2) / psi_range
@@ -174,7 +174,7 @@ def _evaluate_jBS_reference(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
         R_avg=R_avg, F=F, avg_inv_R=avg_inv_R, avg_B2=avg_B2,
         ln_lambda_e=np.asarray(ln_le, dtype=float),
         ln_lambda_ii=np.asarray(ln_lii, dtype=float),
-        dpsi=psi_range, j_dot_B=j_dot_B,
+        dpsi=psi_range, jdotB_bs=j_dot_B,
         j_tor_full_raw=j_tor_full, j_tor_raw=np.asarray(j_tor_sel, float),
         I_BS=I_BS, isolate_edge=bool(isolate_edge),
         smooth_axis=bool(smooth_axis), version=EVALUATE_JBS_VERSION,
@@ -202,7 +202,7 @@ def _grids():
 
 _DIAG_ARRAYS = ("psi_eval", "f_T", "nu_e_star", "nu_i_star", "q", "eps",
                 "R_avg", "F", "avg_inv_R", "avg_B2", "ln_lambda_e",
-                "ln_lambda_ii", "j_dot_B", "j_tor_full_raw", "j_tor_raw")
+                "ln_lambda_ii", "jdotB_bs", "j_tor_full_raw", "j_tor_raw")
 
 
 #: (grid, isolate_edge, smooth_axis, legacy layout).  isolate_edge=True runs
@@ -221,9 +221,9 @@ def test_every_accepted_input_is_bit_identical_to_the_historical_evaluator(
     x = _grids()[grid]
     k = _kin(x)
     kw = dict(isolate_edge=isolate_edge, smooth_axis=smooth_axis)
-    j_ref, d_ref = _evaluate_jBS_reference(_MockEq(legacy=legacy), x, *k,
+    j_ref, d_ref = _evaluate_jbs_reference(_MockEq(legacy=legacy), x, *k,
                                            **kw)
-    j_new, d_new = evaluate_jBS(_MockEq(legacy=legacy), x, *k,
+    j_new, d_new = evaluate_jbs(_MockEq(legacy=legacy), x, *k,
                                 eps_definition="a_over_R", **kw)
     np.testing.assert_array_equal(j_new, j_ref)
     for key in _DIAG_ARRAYS:
@@ -238,9 +238,9 @@ def test_bit_identity_holds_for_scalar_zeff_and_other_flux_ranges():
     ne, te, ni, ti, _z = _kin(x)
     for bounds in ((-0.9, 0.1), (0.4, -0.3), (-2.5, -0.5)):
         for zeff in (1.0, 1.8, 3.2):
-            j_ref, _ = _evaluate_jBS_reference(
+            j_ref, _ = _evaluate_jbs_reference(
                 _MockEq(psi_bounds=bounds), x, ne, te, ni, ti, zeff)
-            j_new, _ = evaluate_jBS(_MockEq(psi_bounds=bounds), x, ne, te,
+            j_new, _ = evaluate_jbs(_MockEq(psi_bounds=bounds), x, ne, te,
                                     ni, ti, zeff, eps_definition="a_over_R")
             np.testing.assert_array_equal(j_new, j_ref)
 
@@ -266,9 +266,9 @@ def test_the_clipped_axis_surface_keeps_the_historical_zeroing(grid):
     x = _grids()[grid]
     k = _kin(x)
     with np.errstate(invalid="ignore"):
-        j_ref, d_ref = _evaluate_jBS_reference(_AxisLimitEq(), x, *k,
+        j_ref, d_ref = _evaluate_jbs_reference(_AxisLimitEq(), x, *k,
                                                smooth_axis=False)
-        j_new, d_new = evaluate_jBS(_AxisLimitEq(), x, *k, smooth_axis=False,
+        j_new, d_new = evaluate_jbs(_AxisLimitEq(), x, *k, smooth_axis=False,
                                     eps_definition="a_over_R")
     np.testing.assert_array_equal(j_new, j_ref)
     n_end = int(np.count_nonzero(x <= 1e-3))
@@ -292,15 +292,15 @@ def test_a_non_finite_redl_value_off_the_end_nodes_is_refused(monkeypatch):
         return redl
 
     monkeypatch.setattr(_bs, "redl_bootstrap", poisoned(0))
-    j, d = evaluate_jBS(_MockEq(), x, *k, smooth_axis=False)
+    j, d = evaluate_jbs(_MockEq(), x, *k, smooth_axis=False)
     assert j[0] == 0.0 and d["n_nonfinite_zeroed_at_ends"] >= 1
     monkeypatch.setattr(_bs, "redl_bootstrap", poisoned(100))
-    j, d = evaluate_jBS(_MockEq(), x, *k, smooth_axis=False)
+    j, d = evaluate_jbs(_MockEq(), x, *k, smooth_axis=False)
     assert j[100] == 0.0
     monkeypatch.setattr(_bs, "redl_bootstrap", poisoned(1))
-    with pytest.raises(JBSEvaluationError, match=r"<j_BS\.B>.*psi_N=0\.01 ") \
+    with pytest.raises(JBSEvaluationError, match=r"<jphi_bs\.B>.*psi_N=0\.01 ") \
             as ei:
-        evaluate_jBS(_MockEq(), x, *k, smooth_axis=False)
+        evaluate_jbs(_MockEq(), x, *k, smooth_axis=False)
     assert ei.value.index == 1 and ei.value.psi_N == pytest.approx(0.01)
 
 
@@ -321,12 +321,12 @@ def test_non_physical_input_is_refused_by_name_and_location(which, value,
     prof[which][idx] = value
     # the historical evaluator returned a silently zeroed node here
     with np.errstate(all="ignore"):
-        j_ref, _ = _evaluate_jBS_reference(
+        j_ref, _ = _evaluate_jbs_reference(
             _MockEq(), x, prof["ne"], prof["te"], prof["ni"], prof["ti"],
             prof["zeff"], smooth_axis=False)
     assert np.all(np.isfinite(j_ref))
     with pytest.raises(JBSEvaluationError, match=which) as ei:
-        evaluate_jBS(_MockEq(), x, prof["ne"], prof["te"], prof["ni"],
+        evaluate_jbs(_MockEq(), x, prof["ne"], prof["te"], prof["ni"],
                      prof["ti"], prof["zeff"], smooth_axis=False)
     e = ei.value
     assert isinstance(e, ValueError)
@@ -377,12 +377,12 @@ def test_a_failed_trace_zero_row_is_refused_everywhere(bad_psi):
     x = np.linspace(0.0, 1.0, 101)
     k = _kin(x)
     with np.errstate(all="ignore"):
-        j_ref, _ = _evaluate_jBS_reference(_FailedTraceEq(bad_psi), x, *k,
+        j_ref, _ = _evaluate_jbs_reference(_FailedTraceEq(bad_psi), x, *k,
                                            smooth_axis=False)
     i = int(np.argmin(np.abs(np.clip(x, 1e-3, 1 - 1e-3) - bad_psi)))
     assert j_ref[i] == 0.0                  # the historical silent zero
     with pytest.raises(JBSEvaluationError, match="failed") as ei:
-        evaluate_jBS(_FailedTraceEq(bad_psi), x, *k, smooth_axis=False)
+        evaluate_jbs(_FailedTraceEq(bad_psi), x, *k, smooth_axis=False)
     assert ei.value.index == i
 
 
@@ -395,7 +395,7 @@ def test_a_negative_trapped_fraction_inside_the_plasma_is_refused():
             return (psi_, fc, rav, modb, *eps)
     x = np.linspace(0.0, 1.0, 101)
     with pytest.raises(JBSEvaluationError, match="f_T") as ei:
-        evaluate_jBS(_Bad(), x, *_kin(x))
+        evaluate_jbs(_Bad(), x, *_kin(x))
     assert ei.value.index == 30
 
 
@@ -404,7 +404,7 @@ def test_a_negative_trapped_fraction_inside_the_plasma_is_refused():
 # ---------------------------------------------------------------------------
 def test_the_toroidal_conversion_is_the_one_field_aligned_factor():
     """Pins the convention the evaluator shares with the frozen path's
-    ``_swb_jbs_to_toroidal`` and the unified engine: ``<j_phi> = kappa
+    ``_swb_jbs_to_toroidal`` and the unified engine: ``<jphi_total> = kappa
     <j.B>``, ``kappa = F <1/R> / <B^2>``.  Until 2026-10-06 this pinned
     ``<j.B> / (F <1/R>)``; the owner-approved change (one conversion in the
     package) moved it -- by ``[<B^2>/<B_phi^2>] [<1/R^2>/<1/R>^2]``, ~6.8 %
@@ -415,19 +415,19 @@ def test_the_toroidal_conversion_is_the_one_field_aligned_factor():
     evaluator's.)"""
     from bouquet.physics import field_aligned_conversion
     x = np.linspace(0.0, 1.0, 151)
-    _j, d = evaluate_jBS(_MockEq(), x, *_kin(x), smooth_axis=False)
+    _j, d = evaluate_jbs(_MockEq(), x, *_kin(x), smooth_axis=False)
     np.testing.assert_array_equal(
         d["j_tor_full_raw"],
-        d["j_dot_B"] * (d["F"] * d["avg_inv_R"] / d["avg_B2"]))
+        d["jdotB_bs"] * (d["F"] * d["avg_inv_R"] / d["avg_B2"]))
     np.testing.assert_array_equal(
         d["j_tor_full_raw"],
-        d["j_dot_B"] * field_aligned_conversion(d["F"], d["avg_inv_R"],
+        d["jdotB_bs"] * field_aligned_conversion(d["F"], d["avg_inv_R"],
                                                 d["avg_B2"]))
 
 
 def test_the_pressure_driven_current_is_returned_beside_the_bootstrap():
     """D2 (owner decision 2026-10-09): ``p'G`` is the third bucket.  The
-    evaluator returns it as ``diag["j_pressure"]`` -- ``p'(<R> -
+    evaluator returns it as ``diag["jphi_pd"]`` -- ``p'(<R> -
     F^2<1/R>/<B^2>)`` on the same nodes -- and the bootstrap profile it
     returns carries none of it."""
     class _PressureEq(_MockEq):
@@ -437,12 +437,12 @@ def test_the_pressure_driven_current_is_returned_beside_the_bootstrap():
             return psi_, F, 0.01 * (1.0 - p) / F, 0 * F, 2.0e5 * (1.0 - p)
 
     x = np.linspace(0.0, 1.0, 151)
-    j0, d0 = evaluate_jBS(_MockEq(), x, *_kin(x), smooth_axis=False)
-    j, d = evaluate_jBS(_PressureEq(), x, *_kin(x), smooth_axis=False)
+    j0, d0 = evaluate_jbs(_MockEq(), x, *_kin(x), smooth_axis=False)
+    j, d = evaluate_jbs(_PressureEq(), x, *_kin(x), smooth_axis=False)
     G = d["R_avg"] - d["F"] ** 2 * d["avg_inv_R"] / d["avg_B2"]
-    np.testing.assert_array_equal(d["j_pressure"], d["pprime"] * G)
-    assert np.max(np.abs(d["j_pressure"])) > 1e3
+    np.testing.assert_array_equal(d["jphi_pd"], d["pprime"] * G)
+    assert np.max(np.abs(d["jphi_pd"])) > 1e3
     # p' moves no bootstrap value: the profile is p'-free
     np.testing.assert_array_equal(j, j0)
     np.testing.assert_array_equal(j, d["j_tor_full_raw"])
-    assert "/4" in d["version"] and "j_pressure" in d["version"]
+    assert "/4" in d["version"] and "jphi_pd" in d["version"]

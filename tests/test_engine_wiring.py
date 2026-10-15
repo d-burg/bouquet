@@ -126,11 +126,11 @@ def test_a_gfile_engine_baseline_is_a_complete_baseline(toy_solver, monkeypatch)
     # ... with the pressure-driven p'G as its own bucket (owner decision D2)
     from bouquet.schema import SPLIT_PRESSURE_SEPARATE
     assert bl.current_split_convention == SPLIT_PRESSURE_SEPARATE
-    np.testing.assert_allclose(bl.j_inductive + bl.j_BS + bl.j_NBI + bl.j_RF
-                               + bl.j_pressure,
-                               bl.j_phi, rtol=0, atol=1e-9 * np.max(bl.j_phi))
-    np.testing.assert_array_equal(bl.j_phi, np.asarray(st["request"]))
-    np.testing.assert_array_equal(toy_solver["backend"].state["R"], bl.j_phi)
+    np.testing.assert_allclose(bl.jphi_ind + bl.jphi_bs + bl.jphi_nbi + bl.jphi_rf
+                               + bl.jphi_pd,
+                               bl.jphi_total, rtol=0, atol=1e-9 * np.max(bl.jphi_total))
+    np.testing.assert_array_equal(bl.jphi_total, np.asarray(st["request"]))
+    np.testing.assert_array_equal(toy_solver["backend"].state["R"], bl.jphi_total)
     # the recorded state and the targets
     assert bl.l_i_target == toy_solver["backend"].state["li"]
     assert bl.delivered_state["l_i"] == bl.l_i_target
@@ -166,7 +166,7 @@ def test_an_ids_engine_baseline_is_a_complete_baseline(toy_solver,
     assert b.mygs.calls[2] == ("foffset", F0)
     assert b.mygs.calls[3][1:] == (len(lcfs), 500.0)
     # the legacy anchors are not carried into the engine's baseline
-    assert bl.jBS_diff is None and bl.jphi_diff is None and bl.p_diff is None
+    assert bl.jphi_bs_diff is None and bl.jphi_diff is None and bl.p_diff is None
     icl = bl.ip_closure
     assert icl["engine"] is True and icl["jbs_converged"] is True
     assert not icl["closure_limited"]
@@ -174,9 +174,9 @@ def test_an_ids_engine_baseline_is_a_complete_baseline(toy_solver,
     # ... with the pressure-driven p'G as its own bucket (owner decision D2)
     from bouquet.schema import SPLIT_PRESSURE_SEPARATE
     assert bl.current_split_convention == SPLIT_PRESSURE_SEPARATE
-    np.testing.assert_allclose(bl.j_inductive + bl.j_BS + bl.j_NBI + bl.j_RF
-                               + bl.j_pressure,
-                               bl.j_phi, rtol=0, atol=1e-9 * np.max(bl.j_phi))
+    np.testing.assert_allclose(bl.jphi_ind + bl.jphi_bs + bl.jphi_nbi + bl.jphi_rf
+                               + bl.jphi_pd,
+                               bl.jphi_total, rtol=0, atol=1e-9 * np.max(bl.jphi_total))
     assert bl.engine["contract"]["kind"] == "ids"
 
 

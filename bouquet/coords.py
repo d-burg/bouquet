@@ -12,6 +12,7 @@ argument, so its calls are those of an OFT without toroidal-flux support.
 from __future__ import annotations
 
 import numpy as np
+from ._renamed import accepts_old_names
 
 PSI, PHI = "psi_n", "phi_n"
 COORDS = (PSI, PHI)
@@ -163,7 +164,7 @@ def readback_kw(mygs, x, coord=PSI, psi_pad=1e-3):
     solver's own uniform sampling ``npsi=n, psi_pad``.  A KNOWN ERROR kept for
     legacy bit-identity: callers pair those padded samples with the nodes
     index for index, a misplacement of up to ``psi_pad``
-    (docs/physics-notes.md, Corrective j_phi iteration).  Any other grid (a
+    (docs/physics-notes.md, Corrective jphi_total iteration).  Any other grid (a
     non-uniform IMAS grid, a Φ_N run) is sampled at its nodes' ψ_N
     (:func:`psi_of`), where the uniform sampling would misplace them.
     """
@@ -236,14 +237,17 @@ def swb_seed(x, psi=None):
     return np.power(1.0 - np.power(s, 1.5), 1.5)
 
 
-def swb_source_seed(x, j_ind, j_fixed, j_saw=None):
+@accepts_old_names
+
+
+def swb_source_seed(x, j_ind, j_fixed, jphi_saw_out=None):
     """Source-consistent SWB inputs (``GenerationConfig.swb_seed="source"``):
     the source's inductive current as ``inductive_jphi`` (SWB rescales it to
     Ip) and its non-inductive, non-bootstrap current as ``jphi_fixed`` (held
     as given), both toroidal, resampled onto :func:`swb_grid`.  SWB then
     solves only for the bootstrap.  Returns ``(seed, jphi_fixed)``.
 
-    ``j_saw`` (the sawteeth share of ``j_fixed``) moves that share to SWB's
+    ``jphi_saw_out`` (the sawteeth share of ``j_fixed``) moves that share to SWB's
     ``jphi_saw`` input: returns ``(seed, jphi_fixed - j_saw_in, j_saw_in)``.
     """
     if "jphi_fixed" not in _swb_params():
@@ -254,12 +258,12 @@ def swb_source_seed(x, j_ind, j_fixed, j_saw=None):
     g = swb_grid(x)
     seed = np.interp(g, x, np.asarray(j_ind, dtype=float))
     fixed = np.interp(g, x, np.asarray(j_fixed, dtype=float))
-    if j_saw is None:
+    if jphi_saw_out is None:
         return seed, fixed
     if "jphi_saw" not in _swb_params():
         raise RuntimeError("swb_saw_q needs an OpenFUSIONToolkit whose "
                            "solve_with_bootstrap takes jphi_saw.")
-    saw = np.interp(g, x, np.asarray(j_saw, dtype=float))
+    saw = np.interp(g, x, np.asarray(jphi_saw_out, dtype=float))
     return seed, fixed - saw, saw
 
 

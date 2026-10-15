@@ -39,7 +39,7 @@ _IDA = os.path.join(_DATA, "diiid_profs_synthetic.cdf")
 _GEQ = os.path.join(_DATA, "g_synthetic.geqdsk")
 _MESH = os.path.abspath(os.path.join(_HERE, "..", "examples", "D3D-like", "DIIID_mesh.h5"))
 _TIME = 1.200
-_SEED, _SEED_B = 20261008, 7
+_SEED, _SEED_B = 20261012, 7
 _N_P, _N, _N_R = 10, 16, 3            # pressure-only, production, each seeded twin
 _KIN_NODES = (0.1, 0.5, 0.9)
 _KIN = ("n_e", "T_e", "T_i", "n_i", "aux_zeff")
@@ -49,9 +49,9 @@ _S0_REL = 1e-9            # pressure-only inductive seed vs solve B: measured 0
 # filters, resolved through the library for this device, replace the bespoke per-coil 4 % band and
 # the fixed 1.5 mm boundary RMS bar -- the chi2 coil filter (coil_filter="chi2", PR #49) and the
 # calibrated boundary cut (rms_max_mm="auto", PR #63).  Nothing is re-implemented here.
-_BIAS_MM = 2.0            # |signed-mean| boundary shift (test_systematics mode 2): measured <= 0.21
-_K = 4.0                  # |mean - base| < _K std/sqrt(N), ~25 checks on t15 tails: measured <= 1.9
-_IP_REL = 1e-4            # every draw's |Ip/Ip_target - 1|: measured <= 8e-6
+_BIAS_MM = 2.0            # |signed-mean| boundary shift (test_systematics mode 2): measured <= 0.73
+_K = 4.0                  # |mean - base| < _K std/sqrt(N), ~25 checks on t15 tails: measured <= 2.4
+_IP_REL = 1e-4            # every draw's |Ip/Ip_target - 1|: measured <= 1.7e-5
 
 pytestmark = pytest.mark.solver
 
@@ -93,7 +93,7 @@ def _group(g, base, nodes):
     from bouquet.utils import _read_coil_names, read_eqdsk_from_bytes
     eq = read_eqdsk_from_bytes(g["eqdsk"][()].tobytes(), read_geqdsk)
     pk, pe = g["psi_N_kinetic"][()], g["psi_N"][()]
-    seed = g["j_inductive"][()] / float(g.attrs["swb_alpha"])
+    seed = g["jphi_ind"][()] / float(g.attrs["swb_alpha"])
     out = dict(q0=float(eq.qpsi[0]), Ip=float(abs(eq.Ip)),
                coils=dict(zip(_read_coil_names(g), map(float, g["coil_currents"][()]))),
                **{f"{k}@{x}": float(np.interp(x, pk, g[k][()]))
@@ -303,7 +303,7 @@ def test_seeded_generations_reproduce(swb_runs):
         _draws(swb_runs, t, _N_R)
     assert a == b
     for k in a:
-        assert all(a[k][n] != c[k][n] for n in ("n_e", "T_e", "j_phi", "coil_currents")), k
+        assert all(a[k][n] != c[k][n] for n in ("n_e", "T_e", "jphi_total", "coil_currents")), k
 
 
 if __name__ == "__main__":

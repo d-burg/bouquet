@@ -19,7 +19,7 @@ Schema v3 (additive over v2; every v2 reader keeps working):
 
 Schema v2 (clean break, no legacy readers):
 
-  * profile datasets carry **bare names** (``j_phi``, ``n_e``, …) with the unit
+  * profile datasets carry **bare names** (``jphi_total``, ``n_e``, …) with the unit
     in ``ds.attrs["units"]`` -- not embedded in the dataset name (F16);
   * the raw g-file / p-file bytes are stored under the fixed names ``eqdsk`` /
     ``pfile`` in each group (draw and baseline), not ``{header}_{scan}_{count}``
@@ -35,7 +35,41 @@ the package never hard-codes a bracketed string.
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
+
+#: v4: current components under OpenFUSIONToolkit's boot_profs names.  An older archive's dataset
+#: name -> its v4 name; :func:`stored_name` reads either, :func:`migrate_names` renames in place.
+LEGACY_NAMES = {
+    "j_phi": "jphi_total", "j_inductive": "jphi_ind", "j_BS": "jphi_bs", "j_BS,edge": "jphi_bs,edge",
+    "j_pressure": "jphi_pd", "j_NBI": "jphi_nbi", "j_RF": "jphi_rf", "j_other": "jphi_other",
+    "j_sawteeth": "jphi_saw", "swb_j_saw": "jphi_saw_out", "jBS_diff": "jphi_bs_diff",
+    "jB_parallel": "jdotB", "jB_inductive": "jdotB_ind", "jB_BS": "jdotB_bs", "jB_NBI": "jdotB_nbi",
+    "jB_RF": "jdotB_rf",
+}
+_V3_NAME = {new: old for old, new in LEGACY_NAMES.items()}
+
+
+def stored_name(grp, name):
+    """The name dataset (or subgroup) ``name`` is stored under in ``grp``: ``name``, or its pre-v4
+    spelling in an older archive; ``name`` when neither is there."""
+    old = _V3_NAME.get(name)
+    return old if (name not in grp and old is not None and old in grp) else name
+
+
+def migrate_names(h5):
+    """Rename every pre-v4 dataset / subgroup in an open, writable h5 file or group to its v4 name
+    (:data:`LEGACY_NAMES`), recursively; returns the number renamed."""
+    import h5py
+    n = 0
+    for key in list(h5.keys()):
+        obj = h5[key]
+        if isinstance(obj, h5py.Group):
+            n += migrate_names(obj)
+        new = LEGACY_NAMES.get(key)
+        if new is not None and new not in h5:
+            h5.move(key, new)
+            n += 1
+    return n
 
 # ---- the self-consistent bootstrap record (v3) ------------------------------
 #: Group attrs of the per-draw (and ``_baseline``) ``jbs_loop`` block.
@@ -109,10 +143,10 @@ def read_jbs_loop(grp):
 PROFILE_UNITS = {
     "psi_N": "",
     "psi_N_kinetic": "",
-    "j_phi": "A m^-2",
-    "j_BS": "A m^-2",
-    "j_BS,edge": "A m^-2",
-    "j_inductive": "A m^-2",
+    "jphi_total": "A m^-2",
+    "jphi_bs": "A m^-2",
+    "jphi_bs,edge": "A m^-2",
+    "jphi_ind": "A m^-2",
     "n_e": "m^-3",
     "T_e": "eV",
     "n_i": "m^-3",
@@ -128,8 +162,8 @@ PROFILE_UNITS = {
     "sigma_ni": "m^-3",
     "sigma_ti": "eV",
     "sigma_jphi": "A m^-2",
-    "j_pressure": "A m^-2",
-    "swb_j_saw": "A m^-2",
+    "jphi_pd": "A m^-2",
+    "jphi_saw_out": "A m^-2",
     "coil_currents": "A",
 }
 
@@ -168,26 +202,26 @@ EQ_FSA_UNITS = {
 # <j.B> components the archived toroidal split was converted from, on the
 # subgroup's own psi_N (the draw's grid), positive (co-Ip) frame, raw <j.B>
 # (NOT IMAS <j.B>/B0).  Identity, exact to round-off on that grid:
-#   j_phi = kappa (jB_inductive + jB_BS + jB_NBI + jB_RF) + j_pressure
+#   jphi_total = kappa (jdotB_ind + jdotB_bs + jdotB_nbi + jdotB_rf) + jphi_pd
 # with kappa = F<1/R>/<B^2> (physics.field_aligned_conversion) and
-# j_pressure = p'(<R> - F^2<1/R>/<B^2>) of the archived state.  jB_inductive
-# is the field-aligned inductive ONLY (the archived toroidal j_inductive
-# minus j_pressure, over kappa).  The IDS exporter writes these, so no
+# jphi_pd = p'(<R> - F^2<1/R>/<B^2>) of the archived state.  jdotB_ind
+# is the field-aligned inductive ONLY (the archived toroidal jphi_ind
+# minus jphi_pd, over kappa).  The IDS exporter writes these, so no
 # exported parallel current carries the pressure-driven term.
-JB_PARALLEL_GROUP = "jB_parallel"
+JB_PARALLEL_GROUP = "jdotB"
 JB_PARALLEL_UNITS = {
     "psi_N": "",
-    "jB_inductive": "T A m^-2",
-    "jB_BS": "T A m^-2",
-    "jB_NBI": "T A m^-2",
-    "jB_RF": "T A m^-2",       # rf (ec/lh/ic) + other driven
+    "jdotB_ind": "T A m^-2",
+    "jdotB_bs": "T A m^-2",
+    "jdotB_nbi": "T A m^-2",
+    "jdotB_rf": "T A m^-2",       # rf (ec/lh/ic) + other driven
     "kappa": "T^-1",           # F<1/R>/<B^2>
-    "j_pressure": "A m^-2",    # toroidal, p'(<R> - F^2<1/R>/<B^2>)
+    "jphi_pd": "A m^-2",    # toroidal, p'(<R> - F^2<1/R>/<B^2>)
 }
 
 
-def write_jB_parallel(grp, parts):
-    """Write the ``jB_parallel/`` subgroup (see :data:`JB_PARALLEL_GROUP`)
+def write_jdotB(grp, parts):
+    """Write the ``jdotB/`` subgroup (see :data:`JB_PARALLEL_GROUP`)
     into the draw group *grp*, replacing any earlier one."""
     import numpy as np
     if JB_PARALLEL_GROUP in grp:
@@ -195,64 +229,65 @@ def write_jB_parallel(grp, parts):
     sub = grp.create_group(JB_PARALLEL_GROUP)
     for name, unit in JB_PARALLEL_UNITS.items():
         if parts.get(name) is None:
-            raise ValueError(f"write_jB_parallel: missing {name!r}")
+            raise ValueError(f"write_jdotB: missing {name!r}")
         ds = sub.create_dataset(name, data=np.asarray(parts[name],
                                                       dtype=np.float64))
         if unit:
             ds.attrs["units"] = unit
-    sub.attrs["identity"] = ("j_phi = kappa (jB_inductive + jB_BS + jB_NBI "
-                             "+ jB_RF) + j_pressure")
+    sub.attrs["identity"] = ("jphi_total = kappa (jdotB_ind + jdotB_bs + jdotB_nbi "
+                             "+ jdotB_rf) + jphi_pd")
     return sub
 
 
-def read_jB_parallel(grp):
-    """The ``jB_parallel/`` subgroup of a draw group as a dict of float
+def read_jdotB(grp):
+    """The ``jdotB/`` subgroup of a draw group as a dict of float
     arrays, or ``None`` (a legacy draw, or an engine draw archived before
     2026-10-06)."""
     import numpy as np
-    if JB_PARALLEL_GROUP not in grp:
+    name = stored_name(grp, JB_PARALLEL_GROUP)
+    if name not in grp:
         return None
-    sub = grp[JB_PARALLEL_GROUP]
-    return {k: np.asarray(sub[k][()], dtype=float) for k in sub}
+    sub = grp[name]
+    return {LEGACY_NAMES.get(k, k): np.asarray(sub[k][()], dtype=float) for k in sub}
 
 
 # ---- where the pressure-driven current sits in the archived split ----------
 #: Group attr (draw and ``_baseline``) naming where the pressure-driven
 #: ``p'G = p'(<R> - F^2<1/R>/<B^2>)`` (A7 of docs/current-conventions.md) sits
-#: in the archived toroidal split ``j_phi = j_inductive + j_BS + fixed (+
-#: j_pressure)``.  Its <j.B> is zero, so the IDS exporter must take it off
+#: in the archived toroidal split ``jphi_total = jphi_ind + jphi_bs + fixed (+
+#: jphi_pd)``.  Its <j.B> is zero, so the IDS exporter must take it off
 #: whichever bucket carries it before converting to parallel currents.
 CURRENT_SPLIT_CONVENTION_ATTR = "current_split_convention"
-#: Owner decision D2 (2026-10-09): ``p'G`` is its own ``j_pressure`` dataset;
-#: neither ``j_BS`` nor ``j_inductive`` carries it.
+#: Owner decision D2 (2026-10-09): ``p'G`` is its own ``jphi_pd`` dataset;
+#: neither ``jphi_bs`` nor ``jphi_ind`` carries it.
 SPLIT_PRESSURE_SEPARATE = "pressure_separate"
-#: Every archive before PR #64 (absent attr): the residual ``j_inductive``
+#: Every archive before PR #64 (absent attr): the residual ``jphi_ind``
 #: carries ``p'G``.
 SPLIT_PRESSURE_IN_INDUCTIVE = "pressure_in_inductive"
-#: PR #64's convention (evaluate_jBS/3; never on main): ``j_BS`` carries it.
+#: PR #64's convention (evaluate_jbs/3; never on main): ``jphi_bs`` carries it.
 SPLIT_PRESSURE_IN_BOOTSTRAP = "pressure_in_bootstrap"
 CURRENT_SPLIT_CONVENTIONS = (SPLIT_PRESSURE_SEPARATE,
                              SPLIT_PRESSURE_IN_INDUCTIVE,
                              SPLIT_PRESSURE_IN_BOOTSTRAP)
-JPRESSURE_DS = "j_pressure"
+JPRESSURE_DS = "jphi_pd"
 
 
-def write_current_split(grp, j_pressure, convention=SPLIT_PRESSURE_SEPARATE):
+def write_current_split(grp, jphi_pd, convention=SPLIT_PRESSURE_SEPARATE):
     """Stamp *grp* (a draw group or ``_baseline``) with its split convention
-    and, for :data:`SPLIT_PRESSURE_SEPARATE`, write the ``j_pressure``
-    dataset (replacing an earlier one).  ``j_pressure`` may be None only for
+    and, for :data:`SPLIT_PRESSURE_SEPARATE`, write the ``jphi_pd``
+    dataset (replacing an earlier one).  ``jphi_pd`` may be None only for
     the two carried conventions."""
     import numpy as np
     if convention not in CURRENT_SPLIT_CONVENTIONS:
         raise ValueError(f"convention must be one of {CURRENT_SPLIT_CONVENTIONS},"
                          f" got {convention!r}")
     if convention == SPLIT_PRESSURE_SEPARATE:
-        if j_pressure is None:
+        if jphi_pd is None:
             raise ValueError("write_current_split: the separate convention "
-                             "needs the j_pressure profile")
+                             "needs the jphi_pd profile")
         if JPRESSURE_DS in grp:
             del grp[JPRESSURE_DS]
-        write_profile(grp, JPRESSURE_DS, np.asarray(j_pressure, dtype=float))
+        write_profile(grp, JPRESSURE_DS, np.asarray(jphi_pd, dtype=float))
     grp.attrs[CURRENT_SPLIT_CONVENTION_ATTR] = convention
 
 
@@ -261,8 +296,8 @@ def read_current_split_convention(grp, baseline_attrs=None) -> str:
     :data:`CURRENT_SPLIT_CONVENTIONS`).
 
     The group's own attr, else the ``_baseline`` attrs' (*baseline_attrs*);
-    without either: a ``j_pressure`` dataset means separate; a loop record
-    written by ``evaluate_jBS/3`` (PR #64's evaluator) means in the
+    without either: a ``jphi_pd`` dataset means separate; a loop record
+    written by ``evaluate_jbs/3`` (PR #64's evaluator) means in the
     bootstrap; anything else is an archive from before PR #64 -- in the
     inductive."""
     def _s(v):
@@ -278,8 +313,8 @@ def read_current_split_convention(grp, baseline_attrs=None) -> str:
     if JPRESSURE_DS in grp:
         return SPLIT_PRESSURE_SEPARATE
     rec = read_jbs_loop(grp)
-    if rec is not None and str(rec.get("evaluate_jBS_version", "")).startswith(
-            "evaluate_jBS/3"):
+    if rec is not None and str(rec.get("evaluate_jbs_version", "")).startswith(
+            "evaluate_jbs/3"):
         return SPLIT_PRESSURE_IN_BOOTSTRAP
     return SPLIT_PRESSURE_IN_INDUCTIVE
 
@@ -328,8 +363,10 @@ def write_profile(grp, name, data):
 
 
 def read_profile(grp, name):
-    """Read dataset ``name`` from ``grp`` as a float ndarray (``None`` if absent)."""
+    """Read dataset ``name`` from ``grp`` as a float ndarray (``None`` if absent); an older archive's
+    spelling of it is read too (:func:`stored_name`)."""
     import numpy as np
+    name = stored_name(grp, name)
     if name not in grp:
         return None
     return np.array(grp[name], dtype=float)

@@ -448,7 +448,7 @@ def _mk_bl(psi_kin):
     _, ne, te, zeff = _grids()
     j = 8.0e5 * (1.0 - psi_N ** 2)
     return Baseline(
-        psi_N=psi_N, j_phi=j, j_inductive=0.85 * j, j_BS=0.15 * j,
+        psi_N=psi_N, jphi_total=j, jphi_ind=0.85 * j, jphi_bs=0.15 * j,
         psi_N_kinetic=psi_kin, ne=ne, te=te, ni=0.9 * ne, ti=0.9 * te,
         Zeff=zeff, Ip_target=1.2e6, l_i_target=0.85,
         provenance="reconstruction",

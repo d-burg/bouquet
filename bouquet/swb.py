@@ -23,9 +23,9 @@ SWB_IP_TOL = 5e-3
 #: so how often the looser acceptance is used is visible (review PR69 B1).
 SWB_IP_WARN = 1e-4
 #: solve_with_bootstrap outputs of the sawtooth reset (GenerationConfig.swb_saw_q).
-_SWB_SAW_KEYS = ("j_saw", "saw_rho_m", "saw_rho_out", "saw_n_dips")
-#: swb_saw_q: with no reset (saw_n_dips 0) warn when max|j_saw - jphi_saw| exceeds
-#: this fraction of max|j_phi| (an OFT mis-mapping jphi_saw; also frozen-saw reporting).
+_SWB_SAW_KEYS = ("jphi_saw_out", "saw_rho_m", "saw_rho_out", "saw_n_dips")
+#: swb_saw_q: with no reset (saw_n_dips 0) warn when max|jphi_saw_out - jphi_saw| exceeds
+#: this fraction of max|jphi_total| (an OFT mis-mapping jphi_saw; also frozen-saw reporting).
 SWB_SAW_MAP_TOL = 1e-3
 
 
@@ -39,27 +39,27 @@ def _swb_taper_factor(j_fixed_out, jf_in):
 
 
 def _swb_saw_map_check(res, jphi_saw, jf_in=None):
-    """``(dev_frac, warn)``: max|j_saw - f jphi_saw| / max|j_phi| of a solve that
+    """``(dev_frac, warn)``: max|jphi_saw_out - f jphi_saw| / max|jphi_total| of a solve that
     reports no reset (``saw_n_dips`` 0; else ``(None, False)``).  ``f`` the edge
     taper (from ``res["j_fixed"]`` / ``jf_in``), compared only inside the first
     tapered node and where ``f`` is known."""
-    if res.get("j_saw") is None or int(res.get("saw_n_dips") or 0) != 0:
+    if res.get("jphi_saw_out") is None or int(res.get("saw_n_dips") or 0) != 0:
         return None, False
-    j_saw = np.asarray(res["j_saw"], dtype=float)
+    jphi_saw_out = np.asarray(res["jphi_saw_out"], dtype=float)
     ref = np.asarray(jphi_saw, dtype=float)
-    ok = np.ones(j_saw.size, dtype=bool)
+    ok = np.ones(jphi_saw_out.size, dtype=bool)
     if jf_in is not None and res.get("j_fixed") is not None:
         f = _swb_taper_factor(res["j_fixed"], jf_in)
         ref = f * ref
         tap = np.flatnonzero(f != 1.0)
-        ok = (np.arange(j_saw.size) < (tap[0] if tap.size else j_saw.size)) \
+        ok = (np.arange(jphi_saw_out.size) < (tap[0] if tap.size else jphi_saw_out.size)) \
             | (np.asarray(jf_in, dtype=float) != 0.0)
-    peak = float(np.max(np.abs(np.asarray(res["total_j_phi"], dtype=float)))) or 1.0
-    dev = float(np.max(np.abs(j_saw - ref)[ok], initial=0.0)) / peak
+    peak = float(np.max(np.abs(np.asarray(res["jphi_total"], dtype=float)))) or 1.0
+    dev = float(np.max(np.abs(jphi_saw_out - ref)[ok], initial=0.0)) / peak
     warn = dev > SWB_SAW_MAP_TOL
     if warn:
-        print(f"WARN: swb_saw_q: no reset (saw_n_dips 0) but max|j_saw - jphi_saw| = "
-              f"{dev:.2e} of max|j_phi| (> {SWB_SAW_MAP_TOL:g}): this toolkit may mis-map "
+        print(f"WARN: swb_saw_q: no reset (saw_n_dips 0) but max|jphi_saw_out - jphi_saw| = "
+              f"{dev:.2e} of max|jphi_total| (> {SWB_SAW_MAP_TOL:g}): this toolkit may mis-map "
               "jphi_saw (or report a frozen saw)")
     return dev, warn
 
@@ -94,21 +94,21 @@ class SwbBaseline:
                                     np.asarray(bl.psi_N, dtype=float)), 1.0, None)
 
     def _swb_source_split(self, psi_N):
-        """Set ``bl.swb_seed_profile`` / ``swb_jphi_fixed`` from the source
-        split as read; with ``swb_saw_q`` also ``swb_jphi_saw`` (=
-        ``bl.j_sawteeth``), which ``swb_jphi_fixed`` then excludes.
+        """Set ``bl.swb_seed_profile`` / ``jphi_fixed`` from the source
+        split as read; with ``swb_saw_q`` also ``jphi_saw_input`` (=
+        ``bl.jphi_saw``), which ``jphi_fixed`` then excludes.
 
         The reader's solve split carries the pressure-driven ``p'G`` in
-        ``j_inductive`` (``Baseline.j_pressure`` records it).  A toolkit whose
+        ``jphi_ind`` (``Baseline.jphi_pd`` records it).  A toolkit whose
         SWB returns TokaMaker jphi adds ``p'G`` itself (with its bootstrap),
-        so the seed is ``j_inductive - j_pressure`` there; the upstream
+        so the seed is ``jphi_ind - jphi_pd`` there; the upstream
         ``R_avg/F`` SWB adds none, and the seed keeps it."""
         from .physics import SWB_JBS_TOROIDAL, swb_jbs_convention
         bl = self.baseline
-        j_ind = np.asarray(bl.j_inductive, dtype=float)
-        j_fix = np.asarray(bl.j_phi, dtype=float) - j_ind - np.asarray(bl.j_BS, dtype=float)
+        j_ind = np.asarray(bl.jphi_ind, dtype=float)
+        j_fix = np.asarray(bl.jphi_total, dtype=float) - j_ind - np.asarray(bl.jphi_bs, dtype=float)
         if swb_jbs_convention() == SWB_JBS_TOROIDAL:
-            P = getattr(bl, "j_pressure", None)
+            P = getattr(bl, "jphi_pd", None)
             if P is None:
                 raise RuntimeError(
                     'imas_baseline="swb": the source was read without its '
@@ -116,14 +116,14 @@ class SwbBaseline:
                     "no equilibrium geometry), and this toolkit's SWB adds "
                     "p'G itself -- the seed would count it twice")
             j_ind = j_ind - np.asarray(P, dtype=float)
-        bl.swb_jphi_saw = None
+        bl.jphi_saw_input = None
         if self.config.generation.swb_saw_q is None:
-            bl.swb_seed_profile, bl.swb_jphi_fixed = coords.swb_source_seed(
+            bl.swb_seed_profile, bl.jphi_fixed = coords.swb_source_seed(
                 psi_N, j_ind, j_fix)
             return
-        j_st = getattr(bl, "j_sawteeth", None)
+        j_st = getattr(bl, "jphi_saw", None)
         j_st = np.zeros_like(j_fix) if j_st is None else np.asarray(j_st, dtype=float)
-        bl.swb_seed_profile, bl.swb_jphi_fixed, bl.swb_jphi_saw = \
+        bl.swb_seed_profile, bl.jphi_fixed, bl.jphi_saw_input = \
             coords.swb_source_seed(psi_N, j_ind, j_fix, j_st)
 
     def _swb_saw_kwargs(self):
@@ -133,10 +133,10 @@ class SwbBaseline:
         gc, bl = self.config.generation, self.baseline
         if gc.swb_saw_q is None:
             return {}
-        if getattr(bl, "swb_jphi_saw", None) is None:
+        if getattr(bl, "jphi_saw_input", None) is None:
             raise RuntimeError("swb_saw_q: no jphi_saw input (baseline not "
                                "prepared by _swb_imas_baseline)")
-        return dict(jphi_saw=np.asarray(bl.swb_jphi_saw, dtype=float),
+        return dict(jphi_saw=np.asarray(bl.jphi_saw_input, dtype=float),
                     saw_q_s=float(gc.swb_saw_q), saw_dq=float(gc.swb_saw_dq),
                     saw_tol=float(gc.swb_saw_tol), saw_ramp=float(gc.swb_saw_ramp),
                     saw_rule=SWB_SAW_RULES[gc.swb_saw_rule])
@@ -148,10 +148,10 @@ class SwbBaseline:
         ``coil_reg_target`` None keeps the setup coil reg (solve A); a
         ``{coil: A-t}`` dict installs the strong reg toward it (solve B, the
         sigma=0 check and every draw). ``kin``: ``ne te ni ti Zeff p_fixed`` on
-        ``psi_N``.  Returns the SWB result dict (its ``j_saw`` / ``saw_rho_m``
+        ``psi_N``.  Returns the SWB result dict (its ``jphi_saw_out`` / ``saw_rho_m``
         / ``saw_n_dips`` only when ``swb_saw_q`` is set).
         """
-        from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
+        from .oft_bootstrap import solve_with_bootstrap
         from .TokaMaker_interface import strong_coil_reg
         from .config import swb_bootstrap_kwargs
         bl, mygs, gc = self.baseline, self.mygs, self.config.generation
@@ -163,11 +163,11 @@ class SwbBaseline:
         mygs.init_psi(*_shape_from_boundary(self._geom.boundary_RZ))
         self._seed_coil_init(mygs)
         saw_kw = self._swb_saw_kwargs()
-        j_seed, jphi_fixed = np.asarray(j_seed, dtype=float), bl.swb_jphi_fixed
+        j_seed, jphi_fixed = np.asarray(j_seed, dtype=float), bl.jphi_fixed
         res = solve_with_bootstrap(
             mygs, kin["ne"], kin["te"], kin["ni"], kin["ti"], kin["Zeff"],
             float(bl.Ip_target), j_seed,
-            scale_jBS=1.0, isolate_edge_jBS=bool(gc.isolate_edge_jBS),
+            scale_jbs=1.0, isolate_edge_jbs=bool(gc.isolate_edge_jbs),
             diagnostic_plots=False, verbose=False,
             jphi_fixed=jphi_fixed, p_fixed=kin["p_fixed"],
             **saw_kw,
@@ -179,7 +179,7 @@ class SwbBaseline:
             # the taper factor is measured from j_fixed / jphi_fixed (1 where
             # untapered), whatever the setting: a toolkit may taper anyway
             res["saw_map_dev"], res["saw_map_warn"] = _swb_saw_map_check(
-                res, bl.swb_jphi_saw, bl.swb_jphi_fixed)
+                res, bl.jphi_saw_input, bl.jphi_fixed)
         else:               # saw off: no saw outputs, whatever the toolkit returns
             res = {k: v for k, v in res.items() if k not in _SWB_SAW_KEYS}
         ip = abs(float(mygs.get_globals()[0]))
@@ -197,71 +197,79 @@ class SwbBaseline:
         return res
 
     def _swb_split(self, res, swb_fn, psi_N, coord):
-        """SWB's raw split -> bouquet's: ``j_BS`` / ``isolated_j_BS`` the
+        """SWB's raw split -> bouquet's: ``jphi_bs`` / ``jphi_bs`` the
         field-aligned ``kappa <j.B>`` (:func:`bouquet.physics.
         _swb_jbs_to_toroidal`, for the installed toolkit's own output
-        convention), ``j_pressure`` the pressure-driven ``p'G`` of the solved
+        convention), ``jphi_pd`` the pressure-driven ``p'G`` of the solved
         equilibrium (the third bucket, owner decision D2; tapered with the
-        edge taper when it is on), and ``j_inductive`` the rest, so
-        ``total_j_phi = j_inductive + isolated_j_BS + j_pressure + fixed``
+        edge taper when it is on), and ``jphi_ind`` the rest -- or, from a
+        toolkit that reports p'G apart (``jphi_pd``), its own split as
+        returned (:func:`bouquet.physics.swb_reported_split`) -- so
+        ``jphi_total = jphi_ind + jphi_bs + jphi_pd + fixed``
         exactly.  SWB's own arrays are kept as ``swb_raw_*``.  Evaluated on
         the equilibrium the SWB call left in ``mygs``, before anything else
         touches it."""
         from .physics import (SWB_JBS_TOROIDAL, _swb_jbs_to_toroidal,
-                              swb_edge_taper, swb_jbs_convention,
-                              swb_pressure_term)
+                              swb_conversion_record, swb_edge_taper,
+                              swb_jbs_convention, swb_pressure_term,
+                              swb_reported_split)
         gc = self.config.generation
         conv = swb_jbs_convention()
-        if conv == SWB_JBS_TOROIDAL and bool(gc.isolate_edge_jBS):
+        reported = swb_reported_split(res) if conv == SWB_JBS_TOROIDAL else None
+        if conv == SWB_JBS_TOROIDAL and reported is None and bool(gc.isolate_edge_jbs):
             raise RuntimeError(
-                "isolate_edge_jBS with a toolkit whose solve_with_bootstrap "
-                "returns TokaMaker jphi (kappa<j.B> + p'G): where p'G sits in "
-                "its isolated spike is not defined, so the field-aligned "
-                "bootstrap cannot be recovered; use isolate_edge_jBS=False")
+                "isolate_edge_jbs with a toolkit whose solve_with_bootstrap "
+                "returns TokaMaker jphi (kappa<j.B> + p'G) without reporting "
+                "p'G apart (jphi_pd): where p'G sits in its isolated spike is "
+                "not defined; use isolate_edge_jbs=False")
         mygs = self.mygs
         x = np.asarray(psi_N, dtype=float)
         grid = (np.asarray(coords.psi_at(mygs, x, coord), dtype=float)
                 if coords._swb_grid_arg() else None)
-        P = swb_pressure_term(mygs, x.size, 1e-3, grid)
-        # the edge taper multiplies every toroidal component SWB returns,
-        # p'G included: the SAME weight tapers j_pressure and is taken off
-        # the bootstrap (review of #78, B3: an untapered p'G subtracted from
-        # the tapered output left j_BS short by (1-w)P, moved into
-        # j_inductive)
-        # (the call's own kwargs, swb_bootstrap_kwargs: psi0 from
-        # swb_edge_taper_psi0, a taper_edge_shape from bootstrap_kwargs)
-        w = None
-        if gc.swb_edge_taper_psi0 is not None:
-            w = swb_edge_taper(
-                dict(gc.bootstrap_kwargs, taper_edge_jBS=True,
-                     taper_edge_psi0=float(gc.swb_edge_taper_psi0)),
-                coords.swb_grid(x) if grid is None else grid)
-            P = P * w
-        raw_iso = np.asarray(res["isolated_j_BS"], dtype=float)
-        raw_bs = np.asarray(res.get("j_BS", raw_iso), dtype=float)
-        raw_ind = np.asarray(res["j_inductive"], dtype=float)
-        fa_bs = _swb_jbs_to_toroidal(mygs, raw_bs, 1e-3, psi=grid,
-                                     convention=conv, taper=w)
-        fa_iso = (fa_bs if np.array_equal(raw_iso, raw_bs) else
-                  _swb_jbs_to_toroidal(mygs, raw_iso, 1e-3, psi=grid,
-                                       convention=conv, taper=w))
+        raw_iso = np.asarray(res["jphi_bs"], dtype=float)
+        raw_bs = np.asarray(res.get("jphi_bs_raw", raw_iso), dtype=float)
+        raw_ind = np.asarray(res["jphi_ind"], dtype=float)
+        if reported is not None:        # the toolkit's own split is bouquet's
+            fa_bs, fa_iso, P = reported
+            j_ind = raw_ind
+        else:
+            P = swb_pressure_term(mygs, x.size, 1e-3, grid)
+            # the edge taper multiplies every toroidal component SWB returns,
+            # p'G included: the SAME weight tapers jphi_pd and is taken off
+            # the bootstrap (review of #78, B3: an untapered p'G subtracted from
+            # the tapered output left jphi_bs short by (1-w)P, moved into
+            # jphi_ind)
+            # (the call's own kwargs, swb_bootstrap_kwargs: psi0 from
+            # swb_edge_taper_psi0, a taper_edge_shape from bootstrap_kwargs)
+            w = None
+            if gc.swb_edge_taper_psi0 is not None:
+                w = swb_edge_taper(
+                    dict(gc.bootstrap_kwargs, taper_edge_jphi=True,
+                         taper_edge_psi0=float(gc.swb_edge_taper_psi0)),
+                    coords.swb_grid(x) if grid is None else grid)
+                P = P * w
+            fa_bs = _swb_jbs_to_toroidal(mygs, raw_bs, 1e-3, psi=grid,
+                                         convention=conv, taper=w)
+            fa_iso = (fa_bs if np.array_equal(raw_iso, raw_bs) else
+                      _swb_jbs_to_toroidal(mygs, raw_iso, 1e-3, psi=grid,
+                                           convention=conv, taper=w))
+            j_ind = raw_ind + (raw_iso - fa_iso - P)
         res = dict(res)
-        res.update(swb_raw_j_BS=raw_bs, swb_raw_isolated_j_BS=raw_iso,
-                   swb_raw_j_inductive=raw_ind, j_BS=fa_bs,
-                   isolated_j_BS=fa_iso, j_pressure=P,
-                   j_inductive=raw_ind + (raw_iso - fa_iso - P),
-                   swb_jbs_convention=conv)
+        res.update(swb_raw_jphi_bs_raw=raw_bs, swb_raw_jphi_bs=raw_iso,
+                   swb_raw_jphi_ind=raw_ind, jphi_bs_raw=fa_bs,
+                   jphi_bs=fa_iso, jphi_pd=P, jphi_ind=j_ind,
+                   **swb_conversion_record(conv, reported is not None))
         return res
 
     def _swb_state(self, res, j_seed, psi_pad=1e-3):
         """Record of one swb solve on ``mygs``: alpha, coils, LCFS, li, Ip
-        (and j_saw, saw_rho_m, saw_rho_out, saw_n_dips and the jphi_saw map
+        (and jphi_saw_out, saw_rho_m, saw_rho_out, saw_n_dips and the jphi_saw map
         check with the sawtooth reset on)."""
         from .utils import safe_trace_surf
         mygs = self.mygs
-        j_ind = np.asarray(res["j_inductive"], dtype=float)
+        j_ind = np.asarray(res["jphi_ind"], dtype=float)
         # alpha is SWB's own scale of the seed (its raw inductive)
-        j_raw = np.asarray(res.get("swb_raw_j_inductive", j_ind), dtype=float)
+        j_raw = np.asarray(res.get("swb_raw_jphi_ind", j_ind), dtype=float)
         j_seed = np.asarray(j_seed, dtype=float)
         coils, _ = mygs.get_coil_currents()
         st = dict(
@@ -270,16 +278,16 @@ class SwbBaseline:
             lcfs=safe_trace_surf(mygs, 1.0 - psi_pad),
             li_3=float(mygs.get_stats(lcfs_pad=psi_pad, li_normalization="iter")["l_i"]),
             Ip=float(mygs.get_globals()[0]),
-            j_inductive=j_ind,
-            j_BS=np.asarray(res["isolated_j_BS"], dtype=float),
-            j_phi=np.asarray(res["total_j_phi"], dtype=float),
+            jphi_ind=j_ind,
+            jphi_bs=np.asarray(res["jphi_bs"], dtype=float),
+            jphi_total=np.asarray(res["jphi_total"], dtype=float),
             j_fixed=(None if res.get("j_fixed") is None
                      else np.asarray(res["j_fixed"], dtype=float)),
             ip_rel_err=res.get("ip_rel_err"))
-        if res.get("j_pressure") is not None:
-            st["j_pressure"] = np.asarray(res["j_pressure"], dtype=float)
-        if res.get("j_saw") is not None:
-            st.update(j_saw=np.asarray(res["j_saw"], dtype=float),
+        if res.get("jphi_pd") is not None:
+            st["jphi_pd"] = np.asarray(res["jphi_pd"], dtype=float)
+        if res.get("jphi_saw_out") is not None:
+            st.update(jphi_saw_out=np.asarray(res["jphi_saw_out"], dtype=float),
                       saw_rho_m=float(res["saw_rho_m"]),
                       saw_n_dips=int(res["saw_n_dips"]),
                       saw_map_dev=res.get("saw_map_dev"),
@@ -297,13 +305,13 @@ class SwbBaseline:
         current alone (alpha) to Ip, holds NBI + RF + other fixed and re-solves
         the Redl bootstrap; the recorded split is SWB's raw output.  With
         ``swb_saw_q`` the sawteeth source is SWB's jphi_saw instead of part of
-        jphi_fixed, and ``bl.j_saw`` (input + q reset) replaces it in j_phi.
+        jphi_fixed, and ``bl.jphi_saw_out`` (input + q reset) replaces it in jphi_total.
         """
         bl = self.baseline
         psi_N = np.asarray(bl.psi_N, dtype=float)
         if not np.array_equal(coords.swb_grid(psi_N), psi_N):
             raise RuntimeError('imas_baseline="swb" needs SWB on the run grid')
-        j_phi_src = np.asarray(bl.j_phi, dtype=float).copy()
+        jphi_total_src = np.asarray(bl.jphi_total, dtype=float).copy()
         self._swb_source_split(psi_N)
         kin = self._swb_baseline_kinetics()
 
@@ -314,22 +322,22 @@ class SwbBaseline:
 
         bl.coil_reg_target = st_a["coils"]
         bl.swb_baseline = st_b                 # what the sigma=0 check repeats
-        bl.j_inductive = st_b["j_inductive"]
-        bl.j_BS = st_b["j_BS"]
-        bl.j_phi = st_b["j_phi"]
-        # the third bucket (D2): j_phi = j_inductive + j_BS + j_pressure +
+        bl.jphi_ind = st_b["jphi_ind"]
+        bl.jphi_bs = st_b["jphi_bs"]
+        bl.jphi_total = st_b["jphi_total"]
+        # the third bucket (D2): jphi_total = jphi_ind + jphi_bs + jphi_pd +
         # fixed; archived as such (SwbDraws.store_baseline)
-        bl.j_pressure = st_b.get("j_pressure")
-        if bl.j_pressure is not None:
+        bl.jphi_pd = st_b.get("jphi_pd")
+        if bl.jphi_pd is not None:
             from .schema import SPLIT_PRESSURE_SEPARATE
             bl.current_split_convention = SPLIT_PRESSURE_SEPARATE
-        bl.j_saw = st_b.get("j_saw")
-        # taper_edge_jBS also tapers the fixed current: carry the same factor onto the
-        # channels so j_phi = j_inductive + j_BS + j_NBI + j_RF + j_other still holds.
+        bl.jphi_saw_out = st_b.get("jphi_saw_out")
+        # taper_edge_jphi also tapers the fixed current: carry the same factor onto the
+        # channels so jphi_total = jphi_ind + jphi_bs + jphi_nbi + jphi_rf + jphi_other still holds.
         # The factor is MEASURED (j_fixed / jphi_fixed; 1 where untapered), so the
         # split holds whatever the toolkit did; a taper with swb_edge_taper_psi0=None
         # (a toolkit whose own default is taper-on, review PR69 B2) is loud.
-        jf_in = np.asarray(bl.swb_jphi_fixed, dtype=float)
+        jf_in = np.asarray(bl.jphi_fixed, dtype=float)
         if st_b["j_fixed"] is not None:
             f = _swb_taper_factor(st_b["j_fixed"], jf_in)
             if np.any(f != 1.0) and self.config.generation.swb_edge_taper_psi0 is None:
@@ -337,14 +345,14 @@ class SwbBaseline:
                 warnings.warn(
                     "swb: the toolkit TAPERED the edge current although "
                     "swb_edge_taper_psi0=None (off): its own default is "
-                    "taper-on and it did not take taper_edge_jBS=False",
+                    "taper-on and it did not take taper_edge_jphi=False",
                     RuntimeWarning, stacklevel=2)
-            for name in ("j_NBI", "j_RF", "j_other", "j_sawteeth"):
+            for name in ("jphi_nbi", "jphi_rf", "jphi_other", "jphi_saw"):
                 if getattr(bl, name, None) is not None:
                     setattr(bl, name, f * np.asarray(getattr(bl, name), dtype=float))
         bl.ohm_scale, bl.bs_scale = st_b["alpha"], 1.0
         bl.bs_scale_profile = None
-        bl.jBS_diff = bl.jphi_diff = None
+        bl.jphi_bs_diff = bl.jphi_diff = None
         _dc = {k: st_b["coils"][k] - st_a["coils"].get(k, 0.0) for k in st_b["coils"]}
         _worst = max(_dc, key=lambda k: abs(_dc[k])) if _dc else None
         bl.ip_closure = dict(
@@ -358,8 +366,8 @@ class SwbBaseline:
             ip_rel_err=st_b.get("ip_rel_err"),
             swb_ip_tol=float(getattr(self.config.generation, "swb_ip_tol",
                                      SWB_IP_TOL)),
-            fuse_total_peak=float(np.max(np.abs(j_phi_src))))
-        if bl.j_saw is not None:
+            fuse_total_peak=float(np.max(np.abs(jphi_total_src))))
+        if bl.jphi_saw_out is not None:
             bl.ip_closure.update(saw_q_s=float(self.config.generation.swb_saw_q),
                                  saw_rho_m=st_b["saw_rho_m"],
                                  saw_rho_out=st_b.get("saw_rho_out"),
@@ -372,12 +380,12 @@ class SwbBaseline:
               f"solve B (strong reg toward A's coils): alpha={st_b['alpha']:.5f} "
               f"li_3={st_b['li_3']:.4f}; max coil B-A {bl.ip_closure['coil_B_minus_A_max']:+.1f} "
               f"A-t ({_worst})")
-        if bl.j_saw is not None:
+        if bl.jphi_saw_out is not None:
             print(f"[imas swb] saw reset q_s={bl.ip_closure['saw_q_s']}: rho_m "
                   f"{st_a['saw_rho_m']:.4f} (A) {st_b['saw_rho_m']:.4f} (B), "
-                  f"n_dips {st_b['saw_n_dips']}, j_saw peak "
-                  f"{np.max(np.abs(bl.j_saw))/1e6:.4f} MA/m^2 (input "
-                  f"{np.max(np.abs(bl.swb_jphi_saw))/1e6:.4f})")
+                  f"n_dips {st_b['saw_n_dips']}, jphi_saw_out peak "
+                  f"{np.max(np.abs(bl.jphi_saw_out))/1e6:.4f} MA/m^2 (input "
+                  f"{np.max(np.abs(bl.jphi_saw_input))/1e6:.4f})")
         # the pressure SWB solved with: the thermal part plus p_fixed
         from .physics import ELEMENTARY_CHARGE as _EC
         _pth_e = _EC * kin["ne"] * kin["te"]
@@ -387,7 +395,7 @@ class SwbBaseline:
             p_total=_pth_e + _pth_i + _pfix, psi_N=np.asarray(bl.psi_N, float),
             p_components={"electron_thermal": _pth_e, "ion_thermal": _pth_i,
                           "fixed": _pfix}))
-        bl.li_metrics.update(imas_baseline="swb", jBS_baseline_mode="swb",
+        bl.li_metrics.update(imas_baseline="swb", jbs_baseline_mode="swb",
                              forward_solve_nl_its=None)
 
     def _verify_sigma0_swb(self):
@@ -418,11 +426,11 @@ class SwbBaseline:
             z_fast=getattr(bl, "z_fast", None), Z_imp=getattr(bl, "Z_imp", None),
             zeff_includes_fast=bool(getattr(bl, "zeff_includes_fast", False)),
             ni_from_zeff=True,
-            isolate_edge_jBS=bool(self.config.generation.isolate_edge_jBS)))
+            isolate_edge_jbs=bool(self.config.generation.isolate_edge_jbs)))
         st = self._swb_state(got["res"], got["j_seed"])
         psi_N = np.asarray(bl.psi_N, dtype=float)
         dev = {k: float(np.max(np.abs(st[k] - ref[k])))
-               for k in ("j_inductive", "j_BS", "j_phi", "j_saw", "j_pressure")
+               for k in ("jphi_ind", "jphi_bs", "jphi_total", "jphi_saw_out", "jphi_pd")
                if k in ref}
         dev["alpha"] = abs(st["alpha"] - ref["alpha"])
         dev["li_3"] = abs(st["li_3"] - ref["li_3"])
@@ -436,12 +444,12 @@ class SwbBaseline:
             if k in ref:
                 dev[k] = abs(st.get(k, np.nan) - ref[k])
         passed = all(v == 0.0 for v in dev.values())
-        d_bs = np.abs(st["j_BS"] - ref["j_BS"])
+        d_bs = np.abs(st["jphi_bs"] - ref["jphi_bs"])
         iw = int(np.argmax(d_bs))
-        peak = float(np.max(np.abs(ref["j_BS"])))
+        peak = float(np.max(np.abs(ref["jphi_bs"])))
         print(f"[sigma0-check swb] {'PASS' if passed else 'FAIL'} (sigma=0 draw vs "
               f"solve B): " + ", ".join(f"{k} {v:.3g}" for k, v in dev.items()))
-        return dict(spike0=st["j_BS"], max_dev=float(d_bs[iw]),
+        return dict(spike0=st["jphi_bs"], max_dev=float(d_bs[iw]),
                     rms_dev=float(np.sqrt(np.mean(d_bs ** 2))),
                     max_dev_frac=float(d_bs[iw]) / peak if peak else 0.0,
                     psi_worst=float(psi_N[iw]),
@@ -460,10 +468,9 @@ def build_swb_context(bq, env):
     if bl.coil_reg_target is None or bl.swb_baseline is None:
         raise ValueError('imas_baseline="swb": the baseline was not prepared '
                          'by _swb_imas_baseline (no solve A coils)')
-    bq._swb_solve(bq._swb_baseline_kinetics(), bl.swb_seed_profile,
-                  coil_reg_target=bl.coil_reg_target)
+    res_b = bq._swb_solve(bq._swb_baseline_kinetics(), bl.swb_seed_profile,
+                          coil_reg_target=bl.coil_reg_target)
     _ic = bl.ip_closure or {}
-    from .physics import swb_conversion_record
     stamp = {
         "imas_baseline": "swb",
         # the swb-only acceptance and options this run used (D4, E6)
@@ -472,7 +479,7 @@ def build_swb_context(bq, env):
         "swb_ip_rel_err_solve_A": _ic.get("ip_rel_err_solve_A"),
         "swb_edge_taper_psi0": ("off" if gc.swb_edge_taper_psi0 is None
                                 else float(gc.swb_edge_taper_psi0)),
-        **swb_conversion_record(),
+        **{k: res_b[k] for k in ("swb_jbs_convention", "swb_jbs_conversion")},
         "swb_alpha": float(bl.ohm_scale),
         "swb_alpha_solve_A": _ic.get("alpha_solve_A"),
         "swb_li_3_solve_A": _ic.get("li_3_solve_A"),
@@ -483,11 +490,11 @@ def build_swb_context(bq, env):
         "swb_saw_rho_out": _ic.get("saw_rho_out"),
         "swb_saw_n_dips": _ic.get("saw_n_dips"),
         "swb_saw_map_warn": _ic.get("saw_map_warn"),
-        "swb_j_saw": bl.j_saw,
-        "swb_jphi_saw": bl.swb_jphi_saw}
+        "jphi_saw_out": bl.jphi_saw_out,
+        "jphi_saw_input": bl.jphi_saw_input}
     return SwbDraws(
         partial(bq._swb_solve, coil_reg_target=bl.coil_reg_target),
         np.asarray(bl.swb_seed_profile, dtype=float),
         # sigma_jphi is on the solved inductive (alpha * seed)
         np.asarray(env["sigma_jphi"], dtype=float) / float(bl.ohm_scale),
-        stamp=stamp, j_pressure=getattr(bl, "j_pressure", None))
+        stamp=stamp, jphi_pd=getattr(bl, "jphi_pd", None))

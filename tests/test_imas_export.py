@@ -53,25 +53,25 @@ def _fsa_geom_on(x):
 
 def _make_archive(path, with_fsa=True, legacy_fsa=False,
                   convention="pressure_in_bootstrap", j_ind=None, j_bs=None,
-                  j_pressure=None):
+                  jphi_pd=None):
     """``convention``: the draw's ``current_split_convention`` attr (None:
     no attr, an archive from before PR #64).  The default archive is the
-    PR #64 one (p'G inside j_BS) these checks were written for."""
+    PR #64 one (p'G inside jphi_bs) these checks were written for."""
     j_ind = _J_IND if j_ind is None else j_ind
     j_bs = _J_BS if j_bs is None else j_bs
     with h5py.File(path, "w") as hf:
         g = hf.require_group("scan/0/0")
         if convention is not None:
             g.attrs["current_split_convention"] = convention
-        if j_pressure is not None:
-            g.create_dataset("j_pressure", data=j_pressure)
+        if jphi_pd is not None:
+            g.create_dataset("jphi_pd", data=jphi_pd)
         g.create_dataset("psi_N", data=_PEQ)
         g.create_dataset("psi_N_kinetic", data=np.linspace(0, 1, 20))
         for k in ("n_e", "T_e", "n_i", "T_i"):
             g.create_dataset(k, data=np.linspace(1.0, 0.1, 20))
-        g.create_dataset("j_phi", data=_J_PHI)
-        g.create_dataset("j_inductive", data=j_ind)
-        g.create_dataset("j_BS", data=j_bs)
+        g.create_dataset("jphi_total", data=_J_PHI)
+        g.create_dataset("jphi_ind", data=j_ind)
+        g.create_dataset("jphi_bs", data=j_bs)
         with open(_GEQ, "rb") as fh:
             g.create_dataset("eqdsk", data=np.void(fh.read()))
         if with_fsa:
@@ -317,7 +317,7 @@ class TestSplitConventions:
         ind, _ = self._export(tmp_path, "ind", convention="pressure_in_inductive",
                               j_ind=_J_IND + P_eq, j_bs=bs_fa)
         sep, _ = self._export(tmp_path, "sep", convention="pressure_separate",
-                              j_bs=bs_fa, j_pressure=P_eq)
+                              j_bs=bs_fa, jphi_pd=P_eq)
         geom = _fsa_geom_on(x)
         Px = _P(x)
         for cp in (pre, ind, sep):
@@ -325,12 +325,12 @@ class TestSplitConventions:
         for cp in (pre, ind):        # sep subtracts the archived (coarser) P
             np.testing.assert_allclose(cp["j_total"], ref["j_total"], rtol=1e-12)
         # the eqdsk's own p'G (pre64 / inductive / bootstrap) on the export grid
-        for cp in (pre, ind):        # the eqdsk's p'G comes off j_inductive
+        for cp in (pre, ind):        # the eqdsk's p'G comes off jphi_ind
             np.testing.assert_allclose(cp["j_ohmic"], jphi_tokamaker_to_jpar(
                 np.interp(x, _PEQ, _J_IND + P_eq) - Px, geom), rtol=1e-12)
             np.testing.assert_allclose(cp["j_bootstrap"], jphi_tokamaker_to_jpar(
                 np.interp(x, _PEQ, bs_fa), geom), rtol=1e-12, atol=1e-9)
-        # separate: the archived j_pressure, not the eqdsk's, comes off
+        # separate: the archived jphi_pd, not the eqdsk's, comes off
         np.testing.assert_allclose(sep["j_ohmic"], jphi_tokamaker_to_jpar(
             np.interp(x, _PEQ, _J_IND), geom), rtol=1e-12)
         np.testing.assert_allclose(sep["j_bootstrap"], jphi_tokamaker_to_jpar(
@@ -353,3 +353,30 @@ class TestReconstructFidelityValues:
         write_imas_draw(arc, 0, tmpl, a, scan_key=0, fidelity="auto")
         write_imas_draw(arc, 0, tmpl, r, scan_key=0, fidelity="reconstruct")
         assert json.load(open(a)) == json.load(open(r))
+
+
+@pytest.mark.skipif(not os.path.isfile(_GEQ), reason="d3dlike.geqdsk absent")
+def test_a_drawset_parses_the_template_once(tmp_path, monkeypatch):
+    """export_imas_drawset cuts the template once per scan and no draw mutates
+    it; every draw's file is the one write_imas_draw writes on its own."""
+    import bouquet.io.imas as imas
+    arc = str(tmp_path / "run.h5"); _make_archive(arc, with_fsa=True)
+    with h5py.File(arc, "r+") as hf:
+        hf.copy("scan/0/0", "scan/0/1")
+        hf["scan/0/1/jphi_total"][...] = 1.1 * _J_PHI
+    tmpl = str(tmp_path / "tmpl.json"); _make_template(tmpl)
+    built = []
+    real = imas._export_template
+    monkeypatch.setattr(imas, "_export_template",
+                        lambda *a, **k: built.append(real(*a, **k)) or built[-1])
+    paths = imas.export_imas_drawset(arc, tmpl, str(tmp_path / "set"), scan_key=0,
+                                     selection="all", fidelity="exact")
+    assert len(paths) == 2 and len(built) == 1
+    shared = json.dumps(built[0][0], sort_keys=True)
+    assert shared == json.dumps(real(tmpl, None, "exact")[0], sort_keys=True)
+    files = [open(p).read() for p in paths]
+    assert files[0] != files[1]
+    for i, f in enumerate(files):
+        one = str(tmp_path / f"one{i}.json")
+        write_imas_draw(arc, i, tmpl, one, scan_key=0, fidelity="exact")
+        assert f == open(one).read()

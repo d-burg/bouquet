@@ -11,7 +11,7 @@ res = dict(modes=modes, orientations=ORS, rows={}, profiles={})
 for m in modes:
     ref = np.load(os.path.join(R, ORS[0], m + ".npz"))
     rj = json.load(open(os.path.join(R, ORS[0], m + ".json")))
-    res["profiles"][m] = dict(psi_N=ref["bl_psi_N"].tolist(), j_phi=ref["bl_j_phi"].tolist(),
+    res["profiles"][m] = dict(psi_N=ref["bl_psi_N"].tolist(), jphi_total=ref["bl_jphi_total"].tolist(),
                               q=np.abs(ref["eq_q"]).tolist())
     for o in ORS:
         z = np.load(os.path.join(R, o, m + ".npz"))
@@ -19,7 +19,7 @@ for m in modes:
         row = dict(l_i_target=j.get("l_i_target"), Ip_target=j.get("Ip_target"),
                    source_current_sign=j.get("source_current_sign"),
                    source_b0_sign=j.get("source_b0_sign"))
-        for k in ("bl_j_phi", "bl_j_BS", "bl_j_inductive", "eq_q", "eq_psi", "eq_globals"):
+        for k in ("bl_jphi_total", "bl_jphi_bs", "bl_jphi_ind", "eq_q", "eq_psi", "eq_globals"):
             a, b = np.asarray(z[k], float), np.asarray(ref[k], float)
             row[k] = dict(max_abs_diff=float(np.max(np.abs(a - b))),
                           max_abs_diff_of_magnitudes=float(np.max(np.abs(np.abs(a) - np.abs(b)))),

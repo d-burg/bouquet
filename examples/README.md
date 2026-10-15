@@ -33,7 +33,7 @@ what you need. The two share a skeleton — the only real difference is the
 | [`D3D-like/bouquet_D3Dlike_geqdsk_example.ipynb`](D3D-like/bouquet_D3Dlike_geqdsk_example.ipynb) | EFIT **g-file** + Osborne **p-file** (reconstructed) | reconstruction fidelity report, perturbed LCFS/profile overlays, manual switchboard extras | ~7–10 min |
 | [`D3D-like/bouquet_D3Dlike_omas_example.ipynb`](D3D-like/bouquet_D3Dlike_omas_example.ipynb) | FUSE **IMAS/OMAS** IDS (pre-separated) | pre-separated currents, switchboard extras from the IDS, 3-slice L→H time evolution | ~10 min/slice |
 | [`D3D-like/bouquet_D3Dlike_parallel_IMAS_example.ipynb`](D3D-like/bouquet_D3Dlike_parallel_IMAS_example.ipynb) | same OMAS IDS, **process-parallel** | `parallel_generate` (laptop pool) + SLURM job-array emission, shard merge + baseline guard | scales with cores |
-| [`D3D-like/bouquet_D3Dlike_systematics.ipynb`](D3D-like/bouquet_D3Dlike_systematics.ipynb) | committed golden fixture | bias/systematics decomposition: j_phi pinned σ=0 / pinned IDA-σ / full production | solver-marked |
+| [`D3D-like/bouquet_D3Dlike_systematics.ipynb`](D3D-like/bouquet_D3Dlike_systematics.ipynb) | committed golden fixture | bias/systematics decomposition: jphi_total pinned σ=0 / pinned IDA-σ / full production | solver-marked |
 
 **New to bouquet?** Start with the **geqdsk** notebook — it's fully
 self-contained (reconstructs from the committed fixtures) and the reconstruction

@@ -232,7 +232,7 @@ def test_r2_ip_scale_maps_psi_only_on_the_legacy_branch(monkeypatch):
     from bouquet import TokaMaker_interface as ti
 
     class _Anchor:
-        def solve_scale(self, j_ind, j_other):
+        def solve_scale(self, j_ind, jphi_other):
             return 1.5
 
     eq = _Eq()
@@ -243,7 +243,7 @@ def test_r2_ip_scale_maps_psi_only_on_the_legacy_branch(monkeypatch):
 
     seen = {}
 
-    def _f(alpha, mygs, j_ind, j_other, psi_N, Ip_target):
+    def _f(alpha, mygs, j_ind, jphi_other, psi_N, Ip_target):
         seen["psi"] = psi_N
         return alpha - 2.0 * Ip_target
 

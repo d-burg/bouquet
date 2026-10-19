@@ -1,5 +1,51 @@
 # Bouquet — change summaries
 
+## Unreleased (1.4.1)
+
+A patch on 1.4.0: bug fixes and a warning. No default moves, and the
+goldens are bit-identical to 1.4.0 (the shipped fixtures never reach the
+changed code, or reach it bit for bit).
+
+- **`generate_bouquet(coil_drift=None)` archives its draws (#95).** With
+  coil handling off the per-draw loop read names only the coil-handling
+  block bound, and every run raised `UnboundLocalError` before archiving.
+  They are bound before the branch now. A coil-off draw is stamped
+  `homotopy_pass` -1 with NaN coil drifts, so the coil half of the in-spec
+  rule fails by design.
+- **p-file ion species roles by charge, mass and `nb` (#19).**
+  `PFile.compute_zeff` read the main ion as `Z[-2]`, which on a two-entry
+  `[impurity, main]` block is the impurity (a carbon plasma came out at
+  Z_eff ~ 30). `PFile.ion_roles()` identifies the beam (the last species,
+  only with a non-zero `nb`), the main ion (the first hydrogenic species)
+  and the impurity (the first other one), and raises when a role is
+  ambiguous or missing. The shipped three-entry p-files read bit-identically.
+- **`generate_bouquet` exit teardown (#13).** On every exit, an exception
+  included, it re-installs the reconstruction's coil regularisation (the
+  toward-zero default when none is on record), releases the coil bounds and
+  removes the `_strong_coil_reg` / `_coil_drift_bounds` stashes, so a second
+  run in the same process does not start under the first one's draw-phase
+  state. Two sequential in-process σ=0 runs give identical archives.
+- **`read_ida_cer` returns B_θ with the force balance's sign.** IDA's
+  `Bpol_midplane` is B_Z at the outboard midplane; `read_ida_cer` now returns
+  B_θ = −B_Z, so E_r from `radial_field_from_impurity_force_balance` has
+  IDA's own sign (the v_φ B_θ term had the wrong sign). Public API only; the
+  library does not consume it internally. An E_r built with 1.4.0 or earlier
+  from this reader (for example an `e_r` auxiliary channel) has the wrong
+  sign. From #81, by @StuartBenjamin.
+- **The experimental Z_eff classification follows the stored-Z_eff check's
+  rule.** With `ImasSource.zeff_fast_ions=True`, `_dd_zeff` compares a stored
+  `core_profiles.zeff` on every node with n_e > 0 (it was ψ_N ≤ 0.8) and
+  weighs each ion by its charge state `ion[].z_ion` when present, as the
+  default route's check does since 1.4.0; the worst node is stamped.
+  Experimental route only; dds without `z_ion` whose stored zeff fits on
+  every node read bit-identically.
+- **IDA-hybrid `ni_source="standard"`: the template fallback warns.** A
+  hand-built config without `UncertaintyConfig.ida_path` gets the assumed σ
+  templates on that sub-route although the run's IDA file is in play
+  (`Bouquet.from_imas` sets it). It now says so; what is resolved is
+  unchanged.
+- **Docs:** known-limitations.md drops the #95 entry.
+
 ## 1.4.0 — the unified engine, the magnetics as the in-spec rule, one Z_eff rule (2026-10-18)
 
 This is the summary of everything since 1.3.1. The detailed account is in

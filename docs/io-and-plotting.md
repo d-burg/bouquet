@@ -111,7 +111,9 @@ layout dispatch and ensemble reduction).
 
 `read_ida_cer()` loads impurity CER channels as an `IDACERProfiles` bundle, and
 `radial_field_from_impurity_force_balance()` evaluates the impurity radial force balance E_r from
-them with propagated uncertainty.
+them with propagated uncertainty. `IDACERProfiles.Bpol` is the force balance's B_θ, i.e. −B_Z at
+the outboard midplane (IDA's `Bpol_midplane` is B_Z); before 1.4.1 it was returned with the
+opposite sign, which flipped the dominant v_φ B_θ term of E_r.
 
 ## IMAS/OMAS reader and writer
 

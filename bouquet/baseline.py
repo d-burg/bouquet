@@ -1067,6 +1067,23 @@ def resolve_uncertainty(config, baseline) -> dict:
             # dd route only unc.ida_path supplies IDA sigmas
             # (from_imas sets it), as before PR #56
             ida_path = getattr(src, "ida_path", None)
+    # The IDA-hybrid ni_source="standard" sub-route reads the IDA tiers only
+    # from unc.ida_path (from_imas sets it).  A hand-built config that leaves
+    # it unset gets the ASSUMED template for every kinetic channel and the
+    # Z_eff width although the run's own IDA file is in play: say so
+    # (ZEFF_RULE finding 3; report only, nothing is read in its place).
+    if (ida_path is None and isinstance(src, ImasSource) and not _ion_route
+            and _kin_src == "ida_hybrid"
+            and getattr(src, "ida_path", None)):
+        warnings.warn(
+            "resolve_uncertainty: IDA-hybrid with ni_source="
+            f"{out_ni_source!r} reads the IDA uncertainty envelopes only from "
+            "UncertaintyConfig.ida_path, which is unset here (Bouquet."
+            "from_imas sets it to source.ida_path); the n_e / T_e / T_i / n_i "
+            "sigmas and the Z_eff width fall back to the ASSUMED template, "
+            f"not the envelopes of {os.path.basename(str(src.ida_path))}.  "
+            "Set uncertainty.ida_path = source.ida_path to use them.",
+            UserWarning, stacklevel=2)
 
     # IDA arrays (read once) available as a fallback below
     ida_sig = None

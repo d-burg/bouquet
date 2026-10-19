@@ -5,9 +5,14 @@ The synthetic g-file + IDA-layout profile pair (the g-file golden's inputs)
 is reconstructed on the unified engine and one seeded draw is generated with
 coil handling off.  Before the fix every such run raised
 ``UnboundLocalError`` before archiving anything.  The draw must be archived,
-with its geqdsk, and stamped as a draw whose coils were not measured
-(``homotopy_pass`` -1, NaN drifts, the coil half of the rule failed by
-design).  The fast half is ``tests/test_coil_drift_off.py``.
+with its geqdsk, and stamped as a draw whose coil drifts were not measured
+(``homotopy_pass`` -1, NaN drifts, the legacy drift verdict
+``coil_drift_in_spec`` False).  Its ``in_spec`` is the in-spec rule's verdict
+under the CONFIGURED coil filter (chi2 by default: the draw's coil currents
+against the measured per-coil sigma, which a coil-off draw has like any
+other), so it is not asserted to be False: ``Bouquet.filter()`` must
+reproduce it, and only under the legacy filter is it False by construction.
+The fast half is ``tests/test_coil_drift_off.py``.
 
 One interpreter (``OFT_env`` is a per-process singleton), one thread.
 Synthetic inputs only.
@@ -97,6 +102,17 @@ def child(out):
                     coil_drift_in_spec=bool(a["coil_drift_in_spec"]),
                     in_spec=bool(a["in_spec"]))
                 rec["l_i"] = float(a.get("l_i(3)", np.nan))
+        rec["coil_filter"] = str(diags[0].get("in_spec_coil_filter"))
+        # the configured filter, re-applied by Bouquet.filter(): it must
+        # reproduce the archived verdict
+        from bouquet.filtering import read_filter_flags
+        b.filter()
+        flags = read_filter_flags(header + ".h5")     # {scan: {idx: {}}}
+        f0 = next(iter(flags.values()))[int(rec["draws"][0])]
+        rec["filter_selected"] = (None if "selected" not in f0
+                                  else bool(f0["selected"]))
+        rec["filter_in_spec"] = (None if "in_spec" not in f0
+                                 else bool(f0["in_spec"]))
     except Exception as exc:                       # recorded, never lost
         import traceback
         rec["error"] = f"{type(exc).__name__}: {exc}\n" \
@@ -137,7 +153,12 @@ def test_coil_off_draw_is_stamped_unmeasured(solved):
     assert s["max_F_drift_pct"] != s["max_F_drift_pct"]       # NaN
     assert s["max_VSC_drift_pct"] != s["max_VSC_drift_pct"]   # NaN
     assert s["coil_drift_in_spec"] is False
-    assert s["in_spec"] is False
+    # in_spec: the configured coil filter's verdict, reproduced by filter()
+    assert solved["coil_filter"] in ("chi2", "legacy"), solved
+    assert solved["filter_in_spec"] is s["in_spec"], solved
+    assert solved["filter_selected"] is s["in_spec"], solved
+    if solved["coil_filter"] == "legacy":
+        assert s["in_spec"] is False
 
 
 if __name__ == "__main__":

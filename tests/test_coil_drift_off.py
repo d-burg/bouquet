@@ -6,9 +6,13 @@ runs, and the per-draw loop read names only that block bound (the warm-start
 snapshot, the SKIP_* switches, the boundary diagnostic): every run raised
 ``UnboundLocalError`` before archiving a draw.  Here the run must archive its
 draws, and each archived draw must say what it is: no homotopy ran
-(``homotopy_pass`` -1, both limits 0), the coil drifts were not measured
-(NaN), so the coil half of the in-spec rule fails by design and ``in_spec``
-is False.  The live-solver half is ``tests/test_coil_drift_off_solver.py``.
+(``homotopy_pass`` -1, both limits 0) and the coil drifts were not measured
+(NaN), so the legacy drift verdict ``coil_drift_in_spec`` is False.  The
+archived ``in_spec`` is the in-spec rule's verdict with the CONFIGURED coil
+filter: under the legacy +/-drift filter (what this toy run resolves to) a
+NaN drift fails it, so ``in_spec`` is False here; under the default chi2
+filter a coil-off draw's coil currents are judged like any other draw's
+(see the live half, ``tests/test_coil_drift_off_solver.py``).
 """
 import math
 
@@ -52,11 +56,13 @@ def test_coil_off_draw_stamps(tmp_path, monkeypatch):
             assert float(a["homotopy_VSC_lim"]) == 0.0
             assert math.isnan(float(a["max_F_drift_pct"]))
             assert math.isnan(float(a["max_VSC_drift_pct"]))
-            # unmeasured coils fail the coil half of the rule by design
+            # unmeasured drifts fail the legacy drift verdict ...
             assert not bool(a["coil_drift_in_spec"])
+            # ... and, under the legacy coil filter this run uses, the rule
             assert not bool(a["in_spec"])
             assert str(a["in_spec_source"]) == "inspec_rule"
     for d in diags:
+        assert d["in_spec_coil_filter"] == "legacy"
         assert np.isnan(d["max_F_drift_pct"]) and np.isnan(d["max_VSC_drift_pct"])
         assert not bool(d["in_spec"])
 

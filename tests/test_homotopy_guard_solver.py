@@ -268,4 +268,5 @@ def test_a_kept_jump_leaves_the_draw_bit_identical_to_off(off, forced):
 
 
 if __name__ == "__main__":
+    _harness.assert_bouquet_is_repo_local()
     _probe(sys.argv[2], sys.argv[1])

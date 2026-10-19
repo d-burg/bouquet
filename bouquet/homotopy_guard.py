@@ -29,12 +29,13 @@ unguarded one bit for bit.
 
 The action (:func:`continue_in_halves`, only when the detector fires).  The
 stage's objective is parametrised by ``s`` in [0, 1] (:func:`blend_reg`,
-:func:`blend_bounds`): the loop's own regularisation terms fade linearly to
-zero while the strong terms' weights rise geometrically from the loop's
-weight scale to their own; each coil bound moves linearly from the previous
-stage's interval (stage 1 without hard bounds: the stage's interval widened
-just enough to contain the starting state) to the stage's.  ``s = 1`` is
-EXACTLY the stage's objective.  From the starting state the guard re-solves
+:func:`blend_bounds`): in stage 1, which installs the strong regularisation,
+every strong term keeps its weight while its target moves linearly from the
+starting state's coil currents to its own (the coils are walked from where
+the loop left them to the reconstruction's); each coil bound moves linearly
+from the previous stage's interval (stage 1 without hard bounds: the stage's
+interval widened just enough to contain the starting state) to the stage's.
+``s = 1`` is EXACTLY the stage's objective.  From the starting state the guard re-solves
 at ``s = 1/2``; a sub-step that again moves the axis beyond the threshold is
 retried at half the step (1/4, 1/8, ``GUARD_MIN_STEP``); an accepted sub-step
 becomes the new starting state.  Then:
@@ -205,38 +206,42 @@ def _term_parts(t):
     return dict(c) if isinstance(c, dict) else c, float(tg), float(w)
 
 
-def _weights(terms):
-    return [_term_parts(t)[2] for t in (terms or [])]
+def term_value(coffs, currents):
+    """``sum_i alpha_i I_i`` of a regularisation term's coefficients
+    *coffs* over the coil *currents*; ``None`` when a coil (or a virtual
+    channel such as ``#VSC``, whose current the toolkit does not report) is
+    missing."""
+    try:
+        items = coffs.items() if isinstance(coffs, dict) else \
+            ((k, 1.0) for k in coffs)
+        tot = 0.0
+        for k, a in items:
+            if k not in currents:
+                return None
+            tot += float(a) * float(currents[k])
+        return tot
+    except (TypeError, ValueError):
+        return None
 
 
-def reg_lambda0(loop_terms, strong_terms) -> float:
-    """The strong terms' weight factor at ``s = 0``: the loop's largest
-    weight over the strong terms' largest (at most 1), so the strong
-    regularisation starts on the loop's weight scale."""
-    wl = [w for w in _weights(loop_terms) if w > 0.0]
-    ws = [w for w in _weights(strong_terms) if w > 0.0]
-    if not wl or not ws:
-        return 1.0
-    return float(min(1.0, max(wl) / max(ws)))
-
-
-def blend_reg(make_term, loop_terms, strong_terms, s):
-    """The coil-regularisation terms at objective *s*: every loop term at
-    ``(1 - s)`` of its weight (dropped at ``s = 1``), every strong term at
-    ``lambda0 ** (1 - s)`` of its own (:func:`reg_lambda0`), so ``s = 1`` is
-    exactly the strong terms.  *make_term* is the solver's
-    ``coil_reg_term(coffs, target=, weight=)``."""
+def blend_reg(make_term, strong_terms, start_currents, s):
+    """The coil-regularisation terms at objective *s* of the FIRST stage
+    (the one that installs the strong regularisation): every strong term at
+    its own weight, its TARGET moved linearly from the starting state's
+    value of the term (:func:`term_value` over *start_currents*) to its own;
+    a term whose starting value is unknown (the ``#VSC`` channel) keeps its
+    target.  At ``s = 0`` the strong terms hold the coils where the loop
+    left them; ``s = 1`` is exactly the strong terms (the coils pulled to the
+    reconstruction's).  *make_term* is the solver's ``coil_reg_term(coffs,
+    target=, weight=)``."""
     s = float(s)
-    lam = reg_lambda0(loop_terms, strong_terms) ** (1.0 - s)
     out = []
-    if s < 1.0:
-        for t in (loop_terms or []):
-            c, tg, w = _term_parts(t)
-            out.append(make_term(c, target=tg, weight=w * (1.0 - s)))
     for t in strong_terms:
         c, tg, w = _term_parts(t)
-        out.append(make_term(c, target=tg,
-                             weight=w * (1.0 if s >= 1.0 else lam)))
+        v0 = None if s >= 1.0 else term_value(c, start_currents or {})
+        out.append(make_term(c, target=(tg if v0 is None
+                                        else v0 + s * (tg - v0)),
+                             weight=w))
     return out
 
 
@@ -289,16 +294,14 @@ class HomotopyBranchGuard:
     ``mygs.solve()``; :attr:`record` is the draw's ``engine[
     "bistability_guard"]``."""
 
-    def __init__(self, *, reference_axis, loop_reg_terms=None,
-                 strong_reg_terms=None, entry_bounds=None,
+    def __init__(self, *, reference_axis, strong_reg_terms=None,
+                 entry_bounds=None,
                  vsc_pair=None, baseline_coils=None,
                  reconstruction_bistable=None, threshold=GUARD_AXIS_FRAC,
                  min_step=GUARD_MIN_STEP):
         ref = dict(reference_axis or {})
         self.reference = ref
         self.a = ref.get("minor_radius_m")
-        self.loop_reg_terms = (None if loop_reg_terms is None
-                               else list(loop_reg_terms))
         self.strong_reg_terms = (None if strong_reg_terms is None
                                  else list(strong_reg_terms))
         self.entry_bounds = (None if entry_bounds is None
@@ -313,8 +316,7 @@ class HomotopyBranchGuard:
             first_step=GUARD_FIRST_STEP,
             minor_radius_m=(None if self.a is None else float(self.a)),
             reconstruction_bistable=reconstruction_bistable,
-            reg_blend=(self.loop_reg_terms is not None
-                       and self.strong_reg_terms is not None),
+            reg_blend=self.strong_reg_terms is not None,
             entry_axis=None, stages=[], fired=False, action="none",
             path=None, n_extra_solves=0, seconds=0.0,
             actions=dict(GUARD_ACTION_MEANING),
@@ -400,12 +402,16 @@ class HomotopyBranchGuard:
         mygs.replace_eq(source_eq=pre)
         b0 = self._start_bounds(mygs, bounds, prev_bounds)
         strong = self.strong_reg_terms
+        try:
+            cur0 = dict(mygs.get_coil_currents()[0])
+        except Exception:                           # noqa: BLE001
+            cur0 = {}
 
         def solve_from(state, s):
             mygs.replace_eq(source_eq=state)
             if blend:
                 mygs.set_coil_reg(reg_terms=blend_reg(
-                    mygs.coil_reg_term, self.loop_reg_terms, strong, s))
+                    mygs.coil_reg_term, strong, cur0, s))
             mygs.set_coil_bounds(blend_bounds(b0, bounds, s))
             mygs.solve()
             return mygs.copy_eq(), state_axis(mygs)

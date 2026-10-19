@@ -54,6 +54,9 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │          [n_axis_shift_large, n_axis_recorded, axis_bimodal,
     │           axis_bimodal_json]    engine scans: the draws' axis record and the
     │                                  per-scan bimodality stamp (1.4.0)
+    │          [n_bistability_guard_armed, n_bistability_guard_fired,
+    │           bistability_guard_counts_json]  the opt-in continuity guard's
+    │                                  per-scan count (guard_bistability, 1.4.1)
     │          [parallel_manifest_json] process-parallel runs: per-worker record
     │          [refused_reason]        a slice refused before any draw (write_refused_scan;
     │                                  run() / run_slices() write it when prepare_baseline
@@ -167,6 +170,9 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
         └── attrs: l_i(1), l_i(3), count, profile_coord, homotopy_*, max_F_drift_pct,
                    [axis_shift_large, axis_shift_frac_a, axis_dR_mm, axis_dZ_mm,
                     axis_minor_radius_m]  ← engine draws: the axis record (1.4.0)
+                   [bistability_guard_armed, bistability_guard_fired,
+                    bistability_guard_action]  ← engine draws with the opt-in
+                                         continuity guard (guard_bistability, 1.4.1)
                    max_VSC_drift_pct, in_spec, coil_drift_in_spec, in_spec_source,
                    inspec_*, l_i_target_used, [jbs_delta_active],
                    [diverted], [passes_coil_filter, passes_boundary_filter,
@@ -563,6 +569,31 @@ budgets and sums the rejections.
   had not said bistable; a restamp that no longer supports it removes it.
   Absent `bistability`: the check was off (legacy route, or an explicit
   `False`) or the archive predates it.
+- The homotopy continuity guard (opt-in `GenerationConfig.guard_bistability`,
+  1.4.1, #87; `bouquet.homotopy_guard`; absent everywhere when off). Engine
+  draw attrs: `bistability_guard_armed`, `bistability_guard_fired` (bools)
+  and `bistability_guard_action` (str: `"none"`, `"legitimate"`, `"held"`,
+  `"crossed"`, `"failed"` -- the most significant of the draw's stages).
+  The draw's engine record carries `bistability_guard`: `version`
+  (`bistability_guard/1`), `armed` (and `reason` when not), `threshold_frac_a`
+  (= `engine.AXIS_BRANCH_FRAC`), `first_step`, `min_step`, `minor_radius_m`,
+  `reconstruction_bistable` (the reconstruction's bistability `outcome`),
+  `reg_blend`, `entry_axis` (the homotopy's starting axis against the
+  reconstruction's, an `axis_shift_record`), `stages` (per stage: `stage`,
+  `label`, `step_displacement_frac_a`, `step_dR_mm`, `step_dZ_mm`, `fired`,
+  `action`; when fired also `walk_outcome`, `s_reached`, `substeps` (`s_from`,
+  `s`, `displacement_frac_a`, `accepted`, `error`), `n_extra_solves`,
+  `endpoint_separation_frac_a`, `final_step_displacement_frac_a`,
+  `reg_blended`, `seconds`), `fired`, `action`, `path` (`"continuous"` /
+  `"crossed"` / null), `n_extra_solves`, `seconds`, `actions` (the meaning of
+  each action), `rule`, `draw`, `archived`. `scan/<key>` attrs, recounted
+  from the archive after `generate()` and `merge_archives`
+  (`homotopy_guard.stamp_guard_scan`): `n_bistability_guard_armed`,
+  `n_bistability_guard_fired` (ints) and `bistability_guard_counts_json`
+  (`n_records`, `n_armed`, `n_fired`, `by_action`, `version`; archived draws
+  only). The baseline engine record's `draws.bistability_guard` (`on`,
+  `version`, `threshold_frac_a`, `min_step`) says the run had it on. Report
+  only: nothing is filtered on any of it.
 
 ### Capped solves and `vertical_runaway`
 

@@ -1420,7 +1420,6 @@ class GenerateEngineDraws(DrawMethod):
         else:
             g = HomotopyBranchGuard(
                 reference_axis=ref,
-                loop_reg_terms=self._cur.get("loop_reg_terms"),
                 strong_reg_terms=getattr(mygs, "_strong_coil_reg", None),
                 entry_bounds=getattr(mygs, "_coil_drift_bounds", None),
                 vsc_pair=vsc_pair, baseline_coils=baseline_coils,
@@ -1723,9 +1722,6 @@ class GenerateEngineDraws(DrawMethod):
             print(f"  [engine draw] coil-regularisation install failed "
                   f"({_e}); the loop runs under the regularisation already "
                   "installed", flush=True)
-        if out.get("installed") and getattr(self, "_cur", None) is not None:
-            # the s = 0 end of the homotopy guard's first-stage continuation
-            self._cur["loop_reg_terms"] = list(terms)
         return out
 
     # ---- one draw ---------------------------------------------------------

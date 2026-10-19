@@ -414,6 +414,7 @@ as an enormous sigma.
 | `engine_draw_homotopy` | `True` | `"unified"` draws: run the coil homotopy after a draw's loop (then the post-homotopy bootstrap check with its saturation guard); `False` measures the coil drift of the loop's own delivered draw |
 | `engine_draw_bootstrap_refresh` | `False` | `"unified"` draws: after a draw's first loop solve, restart the bootstrap iterate from the anchor's Redl increment re-evaluated on that solved geometry. Path only (no criterion, tolerance or ceiling; zero extra solves) |
 | `check_bistability` | `None` (on) | `"unified"` only. `None` resolves at `prepare_baseline()` (recorded in `engine_resolved_defaults`): **`True` under `"unified"`** (on by default since 2026-10-15, owner decision -- ONE extra GS solve per reconstruction), `False` under `"legacy"` (not applicable there: the default is never refused, an explicit `True` is). An explicit value, a stored config's included, is kept (an explicit `False` under `"unified"` prints a note). After the reconstruction, ONE extra solve of the same inputs from a COLD start (psi re-initialised as the reconstruction's own start) is compared with the delivered state -- l_i(3) and q0 at the q-row radius at the σ=0 gates (`jbs_tol_li`, `jbs_tol_q0`), β_pol and the magnetic axis reported. A miss stamps `Baseline.engine["bistability"]` with `bistable=True` and the deltas (archived with the baseline's engine record) and warns; the delivered equilibrium is restored and nothing is refused. See [Bistable equilibria](#the-in-spec-rule) and [engine.md](engine.md) |
+| `guard_bistability` | `False` | **Opt-in** (1.4.1, #87; **EXPERIMENTAL**, [`bistability_guard`](#experimental-features-and-their-validation-status)), `"unified"` only: the homotopy continuity guard for bistable equilibria. Each engine draw's coil-homotopy stage whose solve moves the magnetic axis more than `engine.AXIS_BRANCH_FRAC` (1 %) x a from the stage's starting state is re-solved by continuation from that state (sub-steps 1/2, 1/4, 1/8 of the stage's change of coil regularisation and bounds); the continuous state is kept only when it ends away from the jumped one (`"held"`), else the jumped state is kept (`"legitimate"`, `"crossed"` when the jump persists at 1/8, `"failed"`). Below the threshold it only reads the solver (bit for bit the draws without it); it never changes an acceptance. Stamped per draw (`engine["bistability_guard"]`, attrs `bistability_guard_armed` / `_fired` / `_action`) and per scan (`n_bistability_guard_armed` / `_fired`, `bistability_guard_counts_json`); every attempt's record on `Bouquet.engine_bistability_guard`. Refused under `"legacy"` and with `engine_draw_homotopy=False`. Default-on pending the false-positive exercise. See [engine.md](engine.md) |
 | `edge_pprime_pin` | `True` | Every solve: `True` zeroes the last node of `P'` (ψ_N = 1), so `P'` ramps to zero across the final interval (the behaviour before the setting); `False` keeps the profile's own derivative there -- a physics change (edge current and q95 move; see [physics-notes.md](physics-notes.md#the-pressure-handed-to-the-solver-separatrix-pressure-and-the-edge-p-pin)). The solver's resulting uniform `P'` rescale is recorded as `p_scale` |
 | `separatrix_pressure` | `"offset"` | Every solve: `"offset"` (default since 2026-10-02, owner-approved physics change) hands the solver `p_axis − p_sep` and adds `p_sep` back wherever pressure, β or W_MHD is reported or delivered (written g-files carry the full `PRES`); `"legacy"` hands the full axis pressure (a non-zero `p_sep` then inflates `P'` by `p_axis/(p_axis − p_sep)`). A negative `p_sep` is refused under `"offset"` |
 | `coil_drift` | `0.01` | Soft coil-drift target |
@@ -827,8 +828,15 @@ the draws find: on the same slice's no-MSE arm the stamp said "single" while
 per-scan bimodality stamp exists for (applied after the fact it calls that
 ensemble bimodal: 30 and 6 draws, centres 15.8 mm apart, gap 6.4 mm against
 a 4.5 mm within-cluster spread; and none of thirteen ordinary ensembles of
-the same validation runs). A continuity guard for the draws (keeping a draw on the
-reconstruction's branch through its homotopy) is tracked as #87.
+the same validation runs). A continuity guard for the draws' coil homotopy is
+**opt-in since 1.4.1** (`guard_bistability=True`, #87; [engine.md](engine.md),
+"Keeping a draw on its branch"): a homotopy stage whose solve moves the axis
+more than 1 % of a from the stage's starting state is re-solved by
+continuation from that state, and the continuous state is kept only when the
+jump was branch hopping (`"held"`); otherwise the jumped state is kept and
+stamped (`"legitimate"`, `"crossed"`, `"failed"`). It changes no acceptance and,
+when it does not fire, no number. Default-on waits for the false-positive
+exercise on the ladder cases.
 
 ## until-N in-spec draws
 

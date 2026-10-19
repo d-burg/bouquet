@@ -155,25 +155,26 @@ def _term(coffs, target=0.0, weight=1.0):
     return T(dict(coffs), float(target), float(weight))
 
 
-def test_the_regularisation_ends_exactly_on_the_strong_terms():
-    loop = [_term({"F1A": 1.0}, 2.0e4, 1.0), _term({"#VSC": 1.0}, 0.0, 1e-2)]
+def test_the_regularisation_walks_the_coil_targets():
     strong = [_term({"F1A": 1.0}, 2.1e4, 1.0e4),
+              _term({"F9A": 1.0, "F9B": -1.0}, 0.0, 1.0e4),
               _term({"#VSC": 1.0}, 0.0, 1.0)]
-    assert H.reg_lambda0(loop, strong) == pytest.approx(1e-4)
-    at1 = H.blend_reg(_term, loop, strong, 1.0)
+    cur = {"F1A": 2.0e4, "F9A": 3.0e3, "F9B": -2.0e3}
+    assert H.term_value({"F9A": 1.0, "F9B": -1.0}, cur) == 5.0e3
+    assert H.term_value({"#VSC": 1.0}, cur) is None
+    at0 = H.blend_reg(_term, strong, cur, 0.0)
+    assert [t.target for t in at0] == [2.0e4, 5.0e3, 0.0]
+    half = H.blend_reg(_term, strong, cur, 0.5)
+    assert [t.target for t in half] == pytest.approx([2.05e4, 2.5e3, 0.0])
+    # weights never change; s = 1 is exactly the strong terms
+    assert [t.weight for t in half] == [1.0e4, 1.0e4, 1.0]
+    at1 = H.blend_reg(_term, strong, cur, 1.0)
     assert [(t.coffs, t.target, t.weight) for t in at1] == \
         [(t.coffs, t.target, t.weight) for t in strong]
-    half = H.blend_reg(_term, loop, strong, 0.5)
-    assert [t.weight for t in half] == pytest.approx(
-        [0.5, 0.5e-2, 1.0e4 * 1e-2, 1.0 * 1e-2])
-    # the strong weights rise monotonically with s
-    ws = [H.blend_reg(_term, loop, strong, s)[-2].weight
-          for s in (0.125, 0.25, 0.5, 0.75)]
-    assert all(np.diff(ws) > 0)
     # plain 3-tuples (the stand-in solver's terms) are read too
     tup = H.blend_reg(lambda c, target, weight: (c, target, weight),
-                      [(("F1A",), 0.0, 1.0)], [(("F1A",), 1.0, 1e4)], 1.0)
-    assert tup == [(("F1A",), 1.0, 1e4)]
+                      [(("F1A",), 1.0, 1e4)], {"F1A": 3.0}, 0.5)
+    assert tup == [(("F1A",), 2.0, 1e4)]
 
 
 def test_the_bounds_end_exactly_on_the_stage_and_start_containing():
@@ -294,13 +295,12 @@ def test_otherwise_the_jumped_state_is_kept(model, action, path):
 
 
 def test_the_first_stage_blends_the_regularisation_and_records_the_entry():
-    loop = [_term({"F1A": 1.0}, 0.0, 1.0)]
     strong = [_term({"F1A": 1.0}, 5.0, 1e4)]
     gs = _GS(_Branches())
     gs.set_coil_bounds(_STAGE)
     g = H.HomotopyBranchGuard(
         reference_axis=dict(R=R0, Z=0.0, minor_radius_m=A),
-        loop_reg_terms=loop, strong_reg_terms=strong)
+        strong_reg_terms=strong)
     st = g.solve_stage(gs, 0, "homotopy pass 1/3", _STAGE,
                        prev_bounds=_PREV, first=True)
     assert st["reg_blended"] is True and st["action"] == "held"

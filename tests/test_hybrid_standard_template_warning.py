@@ -3,7 +3,7 @@ sub-route is no longer silent (1.4.1; report only).
 
 That sub-route reads the IDA uncertainty envelopes only from
 ``UncertaintyConfig.ida_path`` (``Bouquet.from_imas`` sets it).  A
-hand-built config that leaves it unset got the ASSUMED template for every
+hand-built config that leaves it unset got the ASSUMED sigma (template) for every
 kinetic channel and the Z_eff width without a word, although the run's own
 IDA file was in play.  It now warns; what is resolved is unchanged.
 """
@@ -39,7 +39,7 @@ def test_a_hand_built_config_without_ida_path_warns(tmp_path):
     bl = HS._read(ddp, cdf, ni_source="standard")
     env, msgs = _resolve(_cfg(src, UncertaintyConfig()), bl)
     assert len(msgs) == 1
-    assert "'standard'" in msgs[0] and "ASSUMED template" in msgs[0]
+    assert "'standard'" in msgs[0] and "ASSUMED sigma" in msgs[0]
     # the fallback it reports: the assumed template, everywhere
     assert env["zeff_sigma_tier"]["tier"] == "scalar"
     for ch in ("ne", "te", "ni", "ti"):
@@ -123,3 +123,33 @@ def test_every_run_says_it_not_only_the_first_of_a_session(tmp_path):
             resolve_uncertainty(cfg, bl)
         seen.append(sum(_MSG in str(x.message) for x in w))
     assert seen == [1, 1]
+
+
+def test_a_user_scalar_is_named_as_a_scalar_not_a_template(tmp_path):
+    """Review of PR #100 (second pass): kind "assumed" also covers a
+    user-set <chan>_scalar_sigma; the message names what was assumed."""
+    src, bl = _std(tmp_path)
+    env, msgs = _resolve(_cfg(src, UncertaintyConfig(te_scalar_sigma=0.1)),
+                         bl)
+    assert env["sigma_source"]["te"]["assumed_default"] == "scalar 0.1"
+    assert len(msgs) == 1 and "T_e (scalar 0.1)" in msgs[0]
+    assert "n_e (template" in msgs[0]
+
+
+def test_an_internal_re_resolution_does_not_repeat_it(tmp_path):
+    """The sigma=0 draw-route check re-resolves the envelope under a filter
+    on the message's prefix: one warning per generate(), not two, while
+    every other warning still passes."""
+    import inspect
+    import re
+    from bouquet.baseline import UNREAD_IDA_WARNING_PREFIX
+    from bouquet.run import Bouquet
+    src_ = inspect.getsource(Bouquet._sigma0_draw_route)
+    assert "UNREAD_IDA_WARNING_PREFIX" in src_
+    src, bl = _std(tmp_path)
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("default")
+        warnings.filterwarnings("ignore",
+                                message=re.escape(UNREAD_IDA_WARNING_PREFIX))
+        resolve_uncertainty(_cfg(src, UncertaintyConfig()), bl)
+    assert not [x for x in w if _MSG in str(x.message)]

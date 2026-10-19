@@ -7591,7 +7591,15 @@ class Bouquet(SwbBaseline):
                    "loop): the zero-perturbation identity of the draws"),
             routes={})
         try:
-            env = resolve_uncertainty(self.config, bl)
+            # generate() says the IDA-hybrid template fallback; this internal
+            # re-resolution does not repeat it (filtered on its prefix; every
+            # other warning passes)
+            import re as _re
+            import warnings as _w
+            from .baseline import UNREAD_IDA_WARNING_PREFIX as _UIW
+            with _w.catch_warnings():
+                _w.filterwarnings("ignore", message=_re.escape(_UIW))
+                env = resolve_uncertainty(self.config, bl)
         except Exception as e:
             blk.update(error=f"resolve_uncertainty: {type(e).__name__}: "
                              f"{str(e)[:300]}", passed_draw_route=False)

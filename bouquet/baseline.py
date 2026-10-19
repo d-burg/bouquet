@@ -1463,6 +1463,12 @@ def resolve_uncertainty(config, baseline) -> dict:
     return out
 
 
+#: The start of :func:`_warn_unread_ida_template`'s message: an internal
+#: re-resolution of a run that has already said it (the sigma=0 draw-route
+#: check) filters on it, so it is said once per generate().
+UNREAD_IDA_WARNING_PREFIX = "resolve_uncertainty: IDA-hybrid with ni_source="
+
+
 def _warn_unread_ida_template(env, src, ni_source):
     """The IDA-hybrid standard sub-route's template fallback, said for the
     channels that actually fell back (``env["sigma_source"]`` kind
@@ -1475,19 +1481,22 @@ def _warn_unread_ida_template(env, src, ni_source):
     import sys
     import warnings
     ss = env.get("sigma_source") or {}
-    names = {"ne": "n_e", "te": "T_e", "ni": "n_i", "ti": "T_i"}
-    fell = [names[c] for c in ("ne", "te", "ni", "ti")
-            if (ss.get(c) or {}).get("kind") == "assumed"]
-    if (ss.get("zeff") or {}).get("kind") == "assumed":
-        fell.append("the Z_eff width")
+    names = {"ne": "n_e", "te": "T_e", "ni": "n_i", "ti": "T_i",
+             "zeff": "the Z_eff width"}
+    fell = []
+    for c in ("ne", "te", "ni", "ti", "zeff"):
+        rec = ss.get(c) or {}
+        if rec.get("kind") == "assumed":
+            how = rec.get("assumed_default")
+            fell.append(names[c] + (f" ({how})" if how else ""))
     if not fell:
         return
-    msg = ("resolve_uncertainty: IDA-hybrid with ni_source="
+    msg = (UNREAD_IDA_WARNING_PREFIX +
            f"{ni_source!r} reads the IDA uncertainty envelopes only from "
            "UncertaintyConfig.ida_path, which is unset here (Bouquet."
            "from_imas sets it to source.ida_path); "
            + ", ".join(fell) + (" fall" if len(fell) > 1 else " falls")
-           + " back to the ASSUMED template, not the envelopes of "
+           + " back to an ASSUMED sigma, not the envelopes of "
            f"{os.path.basename(str(src.ida_path))}.  Set "
            "uncertainty.ida_path = source.ida_path to use them.")
     try:

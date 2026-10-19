@@ -162,6 +162,30 @@ REGISTRY = {
             "the one FUSE's replay pairing used (ida_provenance.json)",
         ],
         status="experimental"),
+    "bistability_guard": dict(
+        description=(
+            "The homotopy continuity guard for bistable equilibria (#87, "
+            "bouquet.homotopy_guard): a unified-engine draw's coil-homotopy "
+            "stage whose solve moves the magnetic axis more than "
+            "engine.AXIS_BRANCH_FRAC x a from the stage's starting state is "
+            "re-solved by continuation from that state (sub-steps 1/2, 1/4, "
+            "1/8 of the stage's change of coil regularisation and bounds); "
+            "the continuous state is kept only when it ends away from the "
+            "jumped one (branch hopping undone), a jump that persists at "
+            "1/8 is stamped a crossing.  It changes a draw's iterate path "
+            "only when it fires and never an acceptance; stamped per draw "
+            "and counted per scan."),
+        enabled_by=["GenerationConfig.guard_bistability=True"],
+        introduced="#87, 1.4.1",
+        validation_todo=[
+            "the false-positive exercise: the guard's firing rate on the "
+            "non-bistable ladder cases (a firing on a case with no second "
+            "solution is a false positive) and its cost in solves and wall "
+            "time per draw",
+            "on the bistable cases: the sigma=0 draw and the ensemble's "
+            "axis bimodality with the guard on and off, same seeds",
+        ],
+        status="experimental"),
 }
 
 
@@ -415,6 +439,8 @@ _PREDICATES = {
     "bootstrap_convergence_override": lambda c: bool(getattr(
         getattr(c, "generation", None), "bootstrap_convergence_override",
         False)),
+    "bistability_guard": lambda c: bool(getattr(
+        getattr(c, "generation", None), "guard_bistability", False)),
     "ida_fuse_timing": lambda c: ida_fuse_timing_on(
         getattr(c, "source", None), getattr(c, "uncertainty", None)),
 }

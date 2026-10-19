@@ -735,6 +735,8 @@ def merge_archives(shard_paths, out_header, scan_key=None, *, cleanup=False,
     # merged draws' own records (reported, never a filter)
     from .engine_draws import stamp_axis_scan
     stamp_axis_scan(out_path, scan_key)
+    from .homotopy_guard import stamp_guard_scan
+    stamp_guard_scan(out_path, scan_key)
     if _resc:
         with h5py.File(out_path, "a") as out:
             gp = base_path if base_path else "/"

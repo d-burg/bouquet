@@ -8428,6 +8428,10 @@ class Bouquet(SwbBaseline):
             # a filter
             _axs = stamp_axis_scan(header, gc.scan_key)
             self._note_axis_scan(_axs)
+            # the homotopy continuity guard's per-scan count (opt-in, #87;
+            # nothing is written with the setting off)
+            from .homotopy_guard import stamp_guard_scan
+            stamp_guard_scan(header, gc.scan_key)
         except (OSError, KeyError) as _exc:
             import warnings as _w
             _w.warn(f"the in-spec rule ({_inspec_bands.rule()}) could not be "

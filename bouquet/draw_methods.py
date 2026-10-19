@@ -57,6 +57,13 @@ class DrawMethod:
         archives on the draw."""
         return None
 
+    def homotopy_guard(self, mygs, *, baseline_coils=None, vsc_pair=None):
+        """The continuity guard of the draw's coil homotopy
+        (:class:`bouquet.homotopy_guard.HomotopyBranchGuard`, issue #87), or
+        ``None`` (legacy, swb, the setting off): each stage is one plain
+        ``mygs.solve()``."""
+        return None
+
     def solve_pressure(self, psi_N, pressure_solve):
         """The pressure every draw solve and the baseline archive use."""
         return pressure_solve

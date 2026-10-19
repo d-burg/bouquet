@@ -612,6 +612,17 @@ Validation to do:
 - on >= 5 real IDA_fuse runs: the |dt| distribution of the slices it accepts beyond the window rule's half-step, and the kinetic profiles of each against the in-window slice
 - I_BS, l_i(3), q0 and beta_N of a run timed by 'ida_fuse' against the same slice timed by 'window', where both accept it, and wherever 'window' refuses: show the accepted slice is the one FUSE's replay pairing used (ida_provenance.json)
 
+#### `bistability_guard` (experimental; introduced #87, 1.4.1)
+
+The homotopy continuity guard for bistable equilibria (#87, bouquet.homotopy_guard): a unified-engine draw's coil-homotopy stage whose solve moves the magnetic axis more than engine.AXIS_BRANCH_FRAC x a from the stage's starting state is re-solved by continuation from that state (sub-steps 1/2, 1/4, 1/8 of the stage's change of coil regularisation and bounds); the continuous state is kept only when it ends away from the jumped one (branch hopping undone), a jump that persists at 1/8 is stamped a crossing.  It changes a draw's iterate path only when it fires and never an acceptance; stamped per draw and counted per scan.
+
+Enabled by: `GenerationConfig.guard_bistability=True`
+
+Validation to do:
+
+- the false-positive exercise: the guard's firing rate on the non-bistable ladder cases (a firing on a case with no second solution is a false positive) and its cost in solves and wall time per draw
+- on the bistable cases: the sigma=0 draw and the ensemble's axis bimodality with the guard on and off, same seeds
+
 <!-- experimental-registry:end -->
 
 ## Graduated features and their known limitations

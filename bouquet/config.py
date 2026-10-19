@@ -1888,6 +1888,22 @@ class GenerationConfig:
     # not exist there; an explicit True is refused).  An explicit value --
     # a stored config's included -- is kept.
     check_bistability: Optional[bool] = None
+    # The homotopy continuity guard for bistable equilibria (#87; unified
+    # engine draws only; OPT-IN, default False -- default-on pending the
+    # false-positive exercise on the ladder cases).  When on, every engine
+    # draw's coil-homotopy stage whose solve moves the magnetic axis more
+    # than engine.AXIS_BRANCH_FRAC x a from the stage's starting state is
+    # re-solved by continuation from that state (sub-steps 1/2, 1/4, 1/8 of
+    # the stage's change of coil regularisation and bounds), so a numerical
+    # jump to the other solution of a bistable free-boundary problem is
+    # undone; a jump that persists at 1/8 is stamped a crossing and kept.
+    # It changes a draw's iterate path ONLY when it fires, and never an
+    # acceptance (bouquet.homotopy_guard).  Stamped per draw
+    # (engine["bistability_guard"], group attrs bistability_guard_*) and
+    # counted per scan.  False: the guard does not exist (bit for bit the
+    # draws before the setting).  True is refused under "legacy" and with
+    # engine_draw_homotopy=False (no homotopy to guard).
+    guard_bistability: bool = False
     # The Grad-Shafranov iteration cap on EVERY solve inside an engine draw:
     # the loop (its anchor and passes), each coil-homotopy stage, a
     # homotopy rollback re-solve and the post-homotopy bootstrap passes (and

@@ -1263,8 +1263,18 @@ class GenerateEngineDraws(DrawMethod):
     def __init__(self, ctx, *, unc, psi_pad, q_psi=None, maxits=None,
                  homotopy=True, l_i_tolerance=None, p_thresh=0.05,
                  max_proxy_draws=500, coil_reg=None, delivered_eq=None,
-                 recon_isoflux=None, bands=None, delivered_axis=None):
+                 recon_isoflux=None, bands=None, delivered_axis=None,
+                 bistability_guard=False, reconstruction_bistability=None):
         self.ctx = ctx
+        #: the homotopy continuity guard (``GenerationConfig.
+        #: guard_bistability``, opt-in, issue #87; :meth:`homotopy_guard`)
+        self.bistability_guard = bool(bistability_guard)
+        #: the reconstruction's bistability outcome (``Baseline.engine[
+        #: "bistability"]["outcome"]``), recorded with every guard record
+        self.reconstruction_bistability = reconstruction_bistability
+        #: every guard record of this method's draw attempts (archived or
+        #: rejected), in order: the per-generate() count (:meth:`summarize`)
+        self.guard_records = []
         #: the reconstruction's delivered magnetic axis and minor radius
         #: (``Bouquet._engine_run["delivered_axis"]``, :func:`bouquet.engine.
         #: delivered_axis_reference`): the reference of every draw's axis
@@ -1389,6 +1399,52 @@ class GenerateEngineDraws(DrawMethod):
             # the same object: generate_bouquet marks a failed install on it
             self._cur["homotopy_isoflux"] = out["stamp"]
         return out
+
+    # ---- the continuity guard of the draw's homotopy (#87) --------------
+    def homotopy_guard(self, mygs, *, baseline_coils=None, vsc_pair=None):
+        """The draw's :class:`bouquet.homotopy_guard.HomotopyBranchGuard`
+        (``guard_bistability=True``), or ``None`` (off: the guard does not
+        exist, every stage is one plain solve).  With the setting on but no
+        reference to judge against (the reconstruction's delivered axis or
+        minor radius not on record), the draw is stamped NOT armed with the
+        reason and ``None`` is returned."""
+        if (not getattr(self, "bistability_guard", False)
+                or getattr(self, "_cur", None) is None):
+            return None
+        from .homotopy_guard import HomotopyBranchGuard, unarmed_record
+        ref = self.delivered_axis or {}
+        if (ref.get("R") is None or ref.get("Z") is None
+                or ref.get("minor_radius_m") is None):
+            rec = unarmed_record("the reconstruction's delivered axis or "
+                                 "minor radius is not on record")
+        else:
+            g = HomotopyBranchGuard(
+                reference_axis=ref,
+                loop_reg_terms=self._cur.get("loop_reg_terms"),
+                strong_reg_terms=getattr(mygs, "_strong_coil_reg", None),
+                entry_bounds=getattr(mygs, "_coil_drift_bounds", None),
+                vsc_pair=vsc_pair, baseline_coils=baseline_coils,
+                reconstruction_bistable=self.reconstruction_bistability)
+            rec = g.record
+        rec["draw"] = int(self._cur["count"])
+        self._cur["bistability_guard"] = rec
+        self.guard_records.append(rec)
+        return g if rec.get("armed") else None
+
+    def _guard_record(self):
+        """The current draw's guard record (``None`` with the setting off);
+        on but never built (the homotopy stage did not run): NOT armed."""
+        if (not getattr(self, "bistability_guard", False)
+                or getattr(self, "_cur", None) is None):
+            return None
+        rec = self._cur.get("bistability_guard")
+        if rec is None:
+            from .homotopy_guard import unarmed_record
+            rec = unarmed_record("the draw's coil homotopy did not run")
+            rec["draw"] = int(self._cur["count"])
+            self._cur["bistability_guard"] = rec
+            self.guard_records.append(rec)
+        return rec
 
     # ---- the pressure the baseline re-solve and every draw use --------
     def solve_pressure(self, psi_N=None, pressure_solve=None):
@@ -1667,6 +1723,9 @@ class GenerateEngineDraws(DrawMethod):
             print(f"  [engine draw] coil-regularisation install failed "
                   f"({_e}); the loop runs under the regularisation already "
                   "installed", flush=True)
+        if out.get("installed") and getattr(self, "_cur", None) is not None:
+            # the s = 0 end of the homotopy guard's first-stage continuation
+            self._cur["loop_reg_terms"] = list(terms)
         return out
 
     # ---- one draw ---------------------------------------------------------
@@ -1931,6 +1990,17 @@ class GenerateEngineDraws(DrawMethod):
             _fl[AXIS_DR_ATTR] = float(_ax["dR_mm"])
             _fl[AXIS_DZ_ATTR] = float(_ax["dZ_mm"])
             _fl[AXIS_MINOR_RADIUS_ATTR] = float(_ax["minor_radius_m"])
+        # the homotopy continuity guard (opt-in, #87): armed / fired / what
+        # it did, on the group (reported, never a filter)
+        _gr = self._guard_record()
+        if _gr is not None:
+            from .schema import (GUARD_ACTION_ATTR, GUARD_ARMED_ATTR,
+                                 GUARD_FIRED_ATTR)
+            _gr["archived"] = True
+            rec["bistability_guard"] = _gr
+            _fl[GUARD_ARMED_ATTR] = bool(_gr.get("armed"))
+            _fl[GUARD_FIRED_ATTR] = bool(_gr.get("fired"))
+            _fl[GUARD_ACTION_ATTR] = str(_gr.get("action") or "none")
         diagnostics["inspec_draw_attrs"] = _fl
         if v["reasons"]:
             print("  [engine draw post-hoc] OUT OF BAND (archived, "
@@ -2034,6 +2104,15 @@ class GenerateEngineDraws(DrawMethod):
         bq.engine_axis_shift = axis_shift_counts(
             getattr(bq, "diagnostics", None) or [])
         bq.engine_draw_cap_events = [dict(e) for e in self.cap_events]
+        if getattr(self, "bistability_guard", False):
+            from .homotopy_guard import guard_counts, guard_text
+            _gc = guard_counts(self.guard_records)
+            bq.engine_bistability_guard = dict(
+                _gc, records=[dict(r) for r in self.guard_records])
+            print("[generate] " + (guard_text(_gc) or
+                                   "bistability guard: no draw armed")
+                  + " (every attempt; per-draw records: "
+                  "Bouquet.engine_bistability_guard)", flush=True)
         if self.cap_events:
             from collections import Counter as _Ctr
             _by = _Ctr((e["stage"], e["outcome"]) for e in self.cap_events)
@@ -2111,6 +2190,13 @@ class GenerateEngineDraws(DrawMethod):
             # the reference of every draw's axis record / axis_shift_large
             axis_reference=(None if self.delivered_axis is None
                             else dict(self.delivered_axis)))
+        if getattr(self, "bistability_guard", False):
+            from .homotopy_guard import (GUARD_AXIS_FRAC, GUARD_MIN_STEP,
+                                         GUARD_VERSION)
+            rec["draws"]["bistability_guard"] = dict(
+                on=True, version=GUARD_VERSION,
+                threshold_frac_a=float(GUARD_AXIS_FRAC),
+                min_step=float(GUARD_MIN_STEP))
         store_baseline_engine(header, rec, scan_key=scan_key)
         # the reconstruction's beta_p and Lambda (filtering.
         # LAMBDA_DEFINITION): its delivered full-pressure frame and l_i
@@ -2404,7 +2490,11 @@ def build_generate_context(bq, env):
         coil_reg=run.get("coil_reg"),
         delivered_eq=run.get("delivered_eq"),
         recon_isoflux=run.get("recon_isoflux"),
-        delivered_axis=run.get("delivered_axis"))
+        delivered_axis=run.get("delivered_axis"),
+        bistability_guard=bool(getattr(gc, "guard_bistability", False)),
+        reconstruction_bistability=((getattr(bl, "engine", None) or {})
+                                    .get("bistability") or {}).get(
+                                        "outcome"))
 
 
 def context_from_run(run, gc, bl):

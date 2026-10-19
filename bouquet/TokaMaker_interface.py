@@ -8292,6 +8292,13 @@ def generate_bouquet(
                     _passes = (homotopy_passes if homotopy_passes is not None
                                else [(coil_drift, coil_drift)])
                     _m.cap_solver(mygs)
+                    # the continuity guard of the stages (opt-in,
+                    # guard_bistability, #87; bouquet.homotopy_guard): None
+                    # -- every method by default -- solves each stage with
+                    # one plain mygs.solve(), as before the setting existed
+                    _hguard = _m.homotopy_guard(
+                        mygs, baseline_coils=_baseline_coils,
+                        vsc_pair=_vsc_in_set)
                     _last_good_psi   = mygs.get_psi(False).copy()
                     _last_good_coils = dict(_baseline_coils)  # fallback only
                     # Full snapshot of the last good pass (psi, coils, profile
@@ -8348,7 +8355,22 @@ def generate_bouquet(
                         _label = (f"pass {_p_idx+1}/{len(_passes)}"
                                    if len(_passes) > 1 else "single-pass")
                         try:
-                            mygs.solve()
+                            if _hguard is None:
+                                mygs.solve()
+                            else:
+                                # the stage's starting state was solved
+                                # under the last good stage's bounds (stage
+                                # 1: the loop's, its hard bounds if any)
+                                _hguard.solve_stage(
+                                    mygs, _p_idx, f"homotopy {_label}",
+                                    _bounds_p,
+                                    prev_bounds=(
+                                        _build_bounds(
+                                            *_passes[_final_pass_idx])
+                                        if _final_pass_idx >= 0 else
+                                        getattr(mygs, '_coil_drift_bounds',
+                                                None)),
+                                    first=(_p_idx == 0))
                             # Snapshot success
                             _cur, _ = mygs.get_coil_currents()
                             _all_drifts = _coil_drift_pct(

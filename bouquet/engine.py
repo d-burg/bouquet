@@ -189,6 +189,9 @@ ENGINE_FIELD_DEFAULTS = {
     # default is unset or False (the value it resolves to there), and only
     # an explicit True is refused
     "check_bistability": None,
+    # the homotopy continuity guard for bistable equilibria (#87; opt-in,
+    # bouquet.homotopy_guard): False = the guard does not exist
+    "guard_bistability": False,
 }
 
 
@@ -412,6 +415,15 @@ def validate_engine_settings(gc) -> None:
         raise ValueError(f"generation.check_bistability must be a bool, or "
                          f"None (resolved per engine: True under 'unified'), "
                          f"got {_cb!r}")
+    _gb = vals["guard_bistability"]
+    if not isinstance(_gb, (bool, np.bool_)):
+        raise ValueError(f"generation.guard_bistability must be a bool, got "
+                         f"{_gb!r}")
+    if _gb and not vals["engine_draw_homotopy"]:
+        raise ValueError("generation.guard_bistability=True guards the "
+                         "engine draws' coil homotopy, but "
+                         "engine_draw_homotopy=False runs none (the setting "
+                         "would be silently ignored)")
     if vals["engine_draw_q0_row"] and "q0" not in rows:
         raise ValueError("generation.engine_draw_q0_row=True keeps the "
                          "reconstruction's q0 row in the draws, but "

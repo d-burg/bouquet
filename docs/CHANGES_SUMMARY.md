@@ -25,16 +25,21 @@ changed code, or reach it bit for bit).
   with no non-hydrogenic species (`[D, D]`, `[D, T]`: a clean plasma)
   loads as in 1.4.0, Z_eff = 1. It raises when a role is ambiguous (a
   two-entry `[C, D]` block with a non-zero `nb`, in `compute_zeff`) and
-  for a non-hydrogenic species lighter than the impurity (`[C, He, D]`): a
-  non-hydrogenic main ion is not supported. The shipped three-entry
-  p-files read bit-identically.
+  when a non-hydrogenic species lighter than the impurity could be the main
+  ion, i.e. no hydrogenic species precedes the last one (`[C, He, D]`): a
+  non-hydrogenic main ion is not supported. Multi-impurity blocks with a D
+  main ion (`[C, He, D, D]`, `[Ne, C, D, D]`) read as in 1.4.0. The
+  shipped three-entry p-files read bit-identically.
 - **`generate_bouquet` exit teardown (#13).** On every exit, an exception
   included, it re-installs the reconstruction's coil regularisation (with
   none on record, a functional caller's own: the equilibrium object copied
   at entry, which carries it, is restored), releases the coil bounds and
   removes the `_strong_coil_reg` / `_coil_drift_bounds` stashes, so a
   second run in the same process does not start under the first one's
-  draw-phase state. Through the class API the solver was already
+  draw-phase state. A direct `generate_bouquet` caller with no
+  reconstruction reg on record therefore gets its solver back at the
+  equilibrium it passed in (ψ, coil currents, targets, isoflux), not at the
+  last draw. Through the class API the solver was already
   restored on entry in 1.4.0, so two sequential σ=0 `generate()` calls
   were identical before and are guarded now; the direct functional path
   is what the fix changes.
@@ -61,7 +66,8 @@ changed code, or reach it bit for bit).
   hand-built config without `UncertaintyConfig.ida_path` gets the assumed σ
   templates on that sub-route although the run's IDA file is in play
   (`Bouquet.from_imas` sets it). It now says so, naming the channels that
-  fell back, on every run; what is resolved is unchanged.
+  fell back and the assumed sigma each got, once per `generate()`; what is
+  resolved is unchanged.
 - **Docs:** known-limitations.md drops the #95 entry.
 
 ## 1.4.0 — the unified engine, the magnetics as the in-spec rule, one Z_eff rule (2026-10-18)

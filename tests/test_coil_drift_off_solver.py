@@ -111,8 +111,8 @@ def child(out):
         f0 = next(iter(flags.values()))[int(rec["draws"][0])]
         rec["filter_selected"] = (None if "selected" not in f0
                                   else bool(f0["selected"]))
-        rec["filter_in_spec"] = (None if "in_spec" not in f0
-                                 else bool(f0["in_spec"]))
+        rec["filter_passes_coil"] = (None if "passes_coil_filter" not in f0
+                                     else bool(f0["passes_coil_filter"]))
     except Exception as exc:                       # recorded, never lost
         import traceback
         rec["error"] = f"{type(exc).__name__}: {exc}\n" \
@@ -155,8 +155,12 @@ def test_coil_off_draw_is_stamped_unmeasured(solved):
     assert s["coil_drift_in_spec"] is False
     # in_spec: the configured coil filter's verdict, reproduced by filter()
     assert solved["coil_filter"] in ("chi2", "legacy"), solved
-    assert solved["filter_in_spec"] is s["in_spec"], solved
+    # filter() recomputes the verdict: its selection equals the loop's
+    # archived in_spec, and its coil flag is the coil half of it
     assert solved["filter_selected"] is s["in_spec"], solved
+    assert isinstance(solved["filter_passes_coil"], bool), solved
+    if not solved["filter_passes_coil"]:
+        assert s["in_spec"] is False
     if solved["coil_filter"] == "legacy":
         assert s["in_spec"] is False
 

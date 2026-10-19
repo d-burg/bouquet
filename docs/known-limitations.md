@@ -69,10 +69,6 @@ closed by loosening a bar. The measurements behind them are in
   attempts were rejected as `post_align_failed` (none on the thermal g-file
   routes). The ensemble still reaches 24 in spec, but it costs about 1.5x the
   attempts. The cause is not established; #97 is the first suspect.
-- **`generate_bouquet(coil_drift=None)` crashes (#95).** With coil handling
-  off, generation raises `UnboundLocalError` before any draw is archived. The
-  coil-handling-off path is unusable until the fix; the default
-  (`coil_drift=0.01`) is unaffected.
 - **IDA versus dd consistency is reported only as warnings (#89).** When an
   IDA file and a dd describe different plasmas (on one validated case their
   n_i differed by far more than their uncertainties), the advisory warnings fire but

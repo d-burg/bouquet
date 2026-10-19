@@ -1882,6 +1882,17 @@ def radial_field_from_impurity_force_balance(
     ``dpsiN_dR`` (= d psi_N / dR) 1/m. Signs are taken from the inputs as given
     (the caller must supply ``B_phi``/``Bpol``/``v_pol``/``omega_tor`` in a
     consistent convention); inspect the returned component terms to check.
+    ``Bpol`` is :math:`B_\theta` for right-handed :math:`(r, \theta, \phi)`, i.e.
+    :math:`-B_Z` at the outboard midplane, for either :math:`I_p` / :math:`B_T`
+    direction (a geometric identity; :func:`bouquet.io.ida.read_ida_cer` returns
+    it so). ``v_pol`` is :math:`v_\theta` along the same :math:`\hat\theta`
+    (:math:`-\hat Z` at the outboard midplane; ``read_ida_cer`` passes IDA's
+    ``v_pol_12C6`` as stored). All of ``B_phi``, ``omega_tor`` and ``v_pol``
+    must be in the one lab frame: take ``B_phi = F/R`` from the INPUT
+    (lab-frame) g-file, not from a bouquet-written one (positive-:math:`I_p`
+    frame, #68). With ``read_ida_cer``'s inputs this reproduces IDA's own
+    ``E_r`` on the validated cases, all of the normal :math:`I_p` / :math:`B_T`
+    orientation; the reversed orientations are not yet validated against IDA.
 
     ``dp_C/dR`` is formed as ``d p_C/d psi_N * dpsiN_dR``. If the measured
     ``sigma_*`` envelopes are supplied, a 1-sigma ``sigma`` on E_r is propagated

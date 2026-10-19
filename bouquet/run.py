@@ -877,7 +877,8 @@ class Bouquet(SwbBaseline):
     def _reset_solver_state(self):
         """Back to this baseline's clean solver state: the post-setup equilibrium (zero coils), the
         configured coil reg (which also refreshes the weak exploratory stash), no drift bounds or strong
-        reg stash (``generate_bouquet`` leaves both), then this baseline's geometry (:meth:`point_solver`)."""
+        reg stash (``generate_bouquet``'s exit teardown already removes both since 1.4.1, #13; kept for a
+        solver left otherwise), then this baseline's geometry (:meth:`point_solver`)."""
         if self._geom is None:
             raise RuntimeError("no baseline geometry on the solver: point_solver() (prepare_baseline) first")
         mygs = self.mygs
@@ -7590,7 +7591,15 @@ class Bouquet(SwbBaseline):
                    "loop): the zero-perturbation identity of the draws"),
             routes={})
         try:
-            env = resolve_uncertainty(self.config, bl)
+            # generate() says the IDA-hybrid template fallback; this internal
+            # re-resolution does not repeat it (filtered on its prefix; every
+            # other warning passes)
+            import re as _re
+            import warnings as _w
+            from .baseline import UNREAD_IDA_WARNING_PREFIX as _UIW
+            with _w.catch_warnings():
+                _w.filterwarnings("ignore", message=_re.escape(_UIW))
+                env = resolve_uncertainty(self.config, bl)
         except Exception as e:
             blk.update(error=f"resolve_uncertainty: {type(e).__name__}: "
                              f"{str(e)[:300]}", passed_draw_route=False)

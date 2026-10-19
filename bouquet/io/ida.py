@@ -127,6 +127,17 @@ class IDACERProfiles:
     ``psi_N``. SI units: ``n_carbon`` m^-3, ``t_carbon`` eV, ``omega_tor`` rad/s,
     ``v_pol`` m/s, ``Bpol`` T, ``Rmaj`` m, ``dpsiN_dR`` 1/m. The ``sigma_*``
     fields are the measured 1-sigma envelopes (for propagating E_r uncertainty).
+    ``Bpol`` is that relation's B_theta: IDA's ``Bpol_midplane`` is the vertical
+    field B_Z at the outboard midplane, where B_theta = -B_Z (theta-hat = -Z-hat
+    for right-handed (r, theta, phi), phi counter-clockwise from above).  That
+    identity is geometric, so it holds for either I_p and B_T direction.
+    ``v_pol`` is returned as the file stores it (``v_pol_12C6``), taken as
+    v_theta along the same theta-hat (= -Z-hat at the outboard midplane); with
+    it, E_r reproduced IDA's own E_r on the validated cases, which were all of
+    the normal I_p / B_T orientation (the reversed orientations are not yet
+    validated against IDA).  ``omega_tor`` and ``B_phi`` must be in the same
+    lab frame: take ``B_phi = F/R`` from the INPUT (lab-frame) g-file, not
+    from a bouquet-written one, which is in the positive-I_p frame (#68).
     """
 
     psi_N: np.ndarray
@@ -811,7 +822,7 @@ def read_ida_cer(
 
     return IDACERProfiles(
         psi_N=psi_N, n_carbon=n_c, t_carbon=t_c, omega_tor=omg, v_pol=vpol,
-        Bpol=bpol, Rmaj=rmaj, dpsiN_dR=dpsidr,
+        Bpol=-bpol, Rmaj=rmaj, dpsiN_dR=dpsidr,
         sigma_n_carbon=s_nc, sigma_t_carbon=s_tc,
         sigma_omega_tor=s_om, sigma_v_pol=s_vp,
         time=t_sel,

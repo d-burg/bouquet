@@ -1,27 +1,35 @@
-"""Two sequential in-process sigma=0 runs are bit-identical (issue #13) --
-the LIVE-SOLVER half (``pytest -m solver``).
+"""The class-API path of issue #13 on the live solver (``pytest -m solver``):
+a GUARD, not a regression test of the fix.
 
 ``generate_bouquet`` installs a strong coil regularisation and coil-drift
 stashes on the solver object for its draws; since 1.4.1 its exit teardown
 puts back the reconstruction's regularisation, releases the bounds and
-clears the stashes.  The issue's regression test: one prepared baseline on
-the live solver, ``generate()`` twice in the same interpreter with every
-perturbation zero (the uncertainty envelope zeroed, no bootstrap scale
-range) and the same seed, into two archives.  The two archives must be
-identical: every dataset bit for bit and every attribute equal, except the
-wall-clock records and the run's own output header (:data:`_CLOCK`).  The
-solver state after each run must also be the reconstruction's (its coil
-regularisation back, no stash).
+clears the stashes.  Here: one prepared baseline on the live solver,
+``generate()`` twice in the same interpreter with every perturbation zero
+(the uncertainty envelope zeroed, no bootstrap scale range) and the same
+seed, into two archives.  The two archives must be identical: every
+dataset bit for bit and every attribute equal, except the wall-clock
+records and the run's own output header (:data:`_CLOCK`).
 
-On the unified engine the class API was already mitigated before the
-teardown (the engine's entry restores the reconstruction's delivered
-state, and each engine draw installs the reconstruction's regularisation),
-so this test guards that path; the fast half shows the teardown itself.
+What discriminates the fix:
+
+* ``test_each_run_archives_its_draws_and_leaves_no_stash`` -- the solver
+  after each run carries no strong-reg stash.  It FAILS on 1.4.0 (measured
+  on main: the stash is left);
+* ``test_two_sequential_sigma0_runs_are_bit_identical`` PASSES on 1.4.0
+  too (measured): the class-API engine path was already mitigated (the
+  engine's entry restores the reconstruction's delivered state, and each
+  engine draw installs the reconstruction's regularisation).  It guards
+  that path against a regression.
+
+The direct functional path #13 describes (``generate_bouquet`` twice on one
+solver) is covered on a toy solver in ``tests/test_generate_teardown.py``
+(``test_a_second_functional_run_starts_where_the_first_did``), which fails
+without the teardown.
 
 The synthetic g-file + IDA-layout profile pair (the g-file golden's
 inputs), the unified engine, one thread.  One interpreter (``OFT_env`` is a
-per-process singleton).  Synthetic inputs only.  The fast half is
-``tests/test_generate_teardown.py``.
+per-process singleton).  Synthetic inputs only.
 """
 import json
 import os

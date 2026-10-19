@@ -2833,7 +2833,28 @@ def strong_coil_reg(mygs, targets, soft_reg_weight=1.0e4,
     return rt
 
 
-def generate_exit_teardown(mygs):
+def generate_entry_snapshot(mygs):
+    """What :func:`generate_exit_teardown` needs from the entry of
+    :func:`generate_bouquet` (review of #100, F7): a copy of the caller's
+    equilibrium object when the solver carries NO record of the
+    reconstruction's coil regularisation (``_recon_coil_reg``; a functional
+    caller that did not go through ``Bouquet.setup_solver``).  The coil
+    regularisation lives in that object (OpenFUSIONToolkit's ``copy_eq``
+    copies its matrix, targets and weights), and there is no other way to
+    read back what the caller installed.  ``None`` when the record exists
+    (the teardown re-installs it) or the solver cannot copy its equilibrium.
+    Never raises."""
+    if getattr(mygs, "__dict__", {}).get("_recon_coil_reg") is not None:
+        return None
+    if not (hasattr(mygs, "copy_eq") and hasattr(mygs, "replace_eq")):
+        return None
+    try:
+        return mygs.copy_eq()
+    except Exception:
+        return None
+
+
+def generate_exit_teardown(mygs, entry_eq=None):
     """Put back the solver state ``generate_bouquet`` changed for its draws
     (issue #13); run on every exit of :func:`generate_bouquet`, an
     exception included.  Returns a record of what was done.
@@ -2847,10 +2868,18 @@ def generate_exit_teardown(mygs):
 
     * the coil regularisation is the reconstruction's own term list
       (``mygs._recon_coil_reg``, published by ``Bouquet._apply_coil_reg``);
-      a solver with no such record that this run left under the strong one
-      gets the toward-zero default ``setup_solver`` installs without a
-      configured ``coil_reg`` (every coil at weight 1, the #VSC at 1e-2),
-      which is what the draw phase replaced;
+      the equilibrium is then not touched (the next run's entry restores
+      its own starting state);
+    * with no such record (a functional caller), the CALLER'S
+      regularisation, whatever it was: the equilibrium object copied at
+      entry (*entry_eq*, :func:`generate_entry_snapshot`) is restored, and
+      it carries the caller's coil regularisation.  The solver is therefore
+      left at the caller's entry equilibrium (psi, coil currents,
+      constraints and targets as they were), not at the last draw;
+    * only when neither is available (no record and no entry copy) and
+      this run left the strong regularisation installed, the toward-zero
+      default ``setup_solver`` installs without a configured ``coil_reg``
+      (every coil at weight 1, the #VSC at 1e-2), recorded as a guess;
     * the coil bounds are released (``set_coil_bounds(None)``, +/-1e98),
       on a solver already in the bounded coil mode or with bounds on
       record only (the mode is one-way; see
@@ -2858,9 +2887,8 @@ def generate_exit_teardown(mygs):
     * the ``_coil_drift_bounds`` and ``_strong_coil_reg`` stashes are
       removed.
 
-    The equilibrium itself is not touched: the next run's entry restores
-    its own starting state.  A failure is printed and recorded, never
-    raised (this runs in a ``finally``)."""
+    A failure is printed and recorded, never raised (this runs in a
+    ``finally``)."""
     from .solver_state import COIL_SOLVE_BOUNDED, coil_solve_mode
     rec = dict(coil_reg=None, bounds_released=False, stashes_cleared=[])
     d = getattr(mygs, "__dict__", {})
@@ -2869,13 +2897,20 @@ def generate_exit_teardown(mygs):
         if terms is not None:
             mygs.set_coil_reg(reg_terms=list(terms))
             rec["coil_reg"] = "reconstruction"
+        elif entry_eq is not None:
+            mygs.replace_eq(source_eq=entry_eq)
+            rec["coil_reg"] = ("the caller's (the entry equilibrium "
+                               "restored)")
         elif d.get("_strong_coil_reg") is not None:
             dflt = [mygs.coil_reg_term({name: 1.0}, target=0.0, weight=1.0)
                     for name in mygs.coil_sets]
             dflt.append(mygs.coil_reg_term({'#VSC': 1.0}, target=0.0,
                                            weight=1e-2))
             mygs.set_coil_reg(reg_terms=dflt)
-            rec["coil_reg"] = "default (the reconstruction's is not on record)"
+            rec["coil_reg"] = ("default (neither the reconstruction's nor "
+                               "the caller's is on record)")
+            print("  [teardown] no record of the coil regularisation the "
+                  "run started under: the toward-zero default is installed")
     except Exception as exc:
         rec["coil_reg_error"] = f"{type(exc).__name__}: {exc}"
         print(f"  [teardown] coil-regularisation restore failed ({exc})")
@@ -2899,15 +2934,17 @@ def generate_exit_teardown(mygs):
 
 
 def _with_exit_teardown(fn):
-    """Run :func:`generate_exit_teardown` on every exit of *fn* (#13)."""
+    """Run :func:`generate_exit_teardown` on every exit of *fn* (#13), with
+    the entry snapshot :func:`generate_entry_snapshot` takes."""
     import functools
 
     @functools.wraps(fn)
     def generate_bouquet(mygs, *args, **kwargs):
+        entry_eq = generate_entry_snapshot(mygs)
         try:
             return fn(mygs, *args, **kwargs)
         finally:
-            generate_exit_teardown(mygs)
+            generate_exit_teardown(mygs, entry_eq=entry_eq)
     return generate_bouquet
 
 

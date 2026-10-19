@@ -63,16 +63,78 @@ def test_the_reconstruction_reg_is_back_and_the_stashes_gone(
     assert fake.bounds is None
 
 
-def test_without_a_record_the_default_reg_is_installed(tmp_path, monkeypatch):
-    """A solver ``setup_solver`` did not prepare: the toward-zero default,
-    every coil at weight 1 and the #VSC at 1e-2 (what the draw phase
-    replaced), never the strong one."""
-    diags, rej, h, G = TED._generate(tmp_path / "td0", monkeypatch, n=1)
+#: a functional caller's own regularisation (measured-current targets)
+_CALLER = [(("F1A",), 2.0e4, 50.0), (("F2A",), -1.5e4, 50.0),
+           (("#VSC",), 0.0, 1.0e-2)]
+
+
+class _RegInEqFake(FakeTokaMaker):
+    """A stand-in whose equilibrium object carries the coil regularisation,
+    as OpenFUSIONToolkit's does (copy_eq copies the reg matrix, targets and
+    weights), with the caller's own reg installed and no reconstruction
+    record (a functional caller)."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.reg = list(_CALLER)
+
+    def copy_eq(self):
+        return (super().copy_eq(), list(self.reg or []))
+
+    def replace_eq(self, source_eq=None):
+        if source_eq is not None:
+            super().replace_eq(source_eq=source_eq[0])
+            self.reg = list(source_eq[1])
+
+
+def test_without_a_record_the_callers_reg_is_put_back(tmp_path, monkeypatch):
+    """Review of #100, F7: a functional caller (no reconstruction record)
+    gets back the regularisation IT had installed, via the entry
+    equilibrium, not a guessed default."""
+    import bouquet.TokaMaker_interface as TI
+    seen = []
+    real = TI.generate_exit_teardown
+
+    def spy(mygs, entry_eq=None):
+        seen.append(list(mygs.reg or []))           # the run left it strong
+        out = real(mygs, entry_eq=entry_eq)
+        seen.append(out)
+        return out
+    monkeypatch.setattr(TI, "generate_exit_teardown", spy)
+    diags, rej, h, G = TED._generate(tmp_path / "td0", monkeypatch, n=1,
+                                     fake_cls=_RegInEqFake)
+    fake = G.fake
+    assert any(t[2] == 1.0e4 for t in seen[0])
+    assert seen[1]["coil_reg"].startswith("the caller's")
+    assert fake.reg == _CALLER
+    assert not hasattr(fake, "_strong_coil_reg")
+
+
+def test_without_a_record_or_a_copy_the_default_is_the_last_resort(
+        tmp_path, monkeypatch):
+    """No record and no entry copy (a solver that cannot copy its
+    equilibrium): the toward-zero default, every coil at weight 1 and the
+    #VSC at 1e-2, recorded as such, never the strong one."""
+    import bouquet.TokaMaker_interface as TI
+    monkeypatch.setattr(TI, "generate_entry_snapshot", lambda mygs: None)
+    diags, rej, h, G = TED._generate(tmp_path / "td1", monkeypatch, n=1)
     fake = G.fake
     assert not hasattr(fake, "_strong_coil_reg")
     want = [((n,), 0.0, 1.0) for n in fake.coil_sets] + [(("#VSC",), 0.0,
                                                            1e-2)]
     assert fake.reg == want
+
+
+def test_with_a_record_no_entry_copy_is_taken(tmp_path, monkeypatch):
+    """The class-API path (the record exists): the entry is not copied and
+    the equilibrium is left as the run left it; only the reg is put back."""
+    import bouquet.TokaMaker_interface as TI
+    taken = []
+    real = TI.generate_entry_snapshot
+    monkeypatch.setattr(TI, "generate_entry_snapshot",
+                        lambda mygs: taken.append(real(mygs)) or taken[-1])
+    TED._generate(tmp_path / "td2", monkeypatch, n=1, fake_cls=_SetUpFake)
+    assert taken == [None]
 
 
 def test_the_teardown_runs_when_generate_raises(tmp_path, monkeypatch):
@@ -100,3 +162,37 @@ def test_the_wrapper_keeps_the_function_identity():
     assert "def generate_bouquet(" in inspect.getsource(generate_bouquet)
     assert "mygs" in inspect.signature(generate_bouquet).parameters
     assert "n_inspec_target" in inspect.signature(generate_bouquet).parameters
+
+
+@pytest.mark.parametrize("fake_cls", [_SetUpFake, _RegInEqFake])
+def test_a_second_functional_run_starts_where_the_first_did(
+        tmp_path, monkeypatch, fake_cls):
+    """Review of #100, F8: the direct functional path #13 describes --
+    generate_bouquet twice on one solver, hard bounds on.  The second run
+    starts under the same coil regularisation, bounds and stashes as the
+    first (with the reconstruction's record, and with only the caller's
+    own reg).  Without the teardown it started under the first run's strong
+    reg, its hard bounds and both stashes."""
+    import bouquet.TokaMaker_interface as TI
+    from bouquet.utils import initialize_equilibrium_database
+    real = TI.generate_bouquet
+    entries = []
+
+    def twice(mygs, *a, **k):
+        out = None
+        for tag in ("", "_second"):
+            entries.append((list(mygs.reg or []), mygs.bounds,
+                            hasattr(mygs, "_strong_coil_reg"),
+                            hasattr(mygs, "_coil_drift_bounds")))
+            a2 = list(a)
+            a2[2] = a[2] + tag                       # the header
+            if tag:
+                initialize_equilibrium_database(a2[2])
+            out = real(mygs, *a2, **k)
+        return out
+    monkeypatch.setattr(TI, "generate_bouquet", twice)
+    TED._generate(tmp_path / "two", monkeypatch, n=1, fake_cls=fake_cls,
+                  coil_drift_hard_factor=2.0)
+    assert len(entries) == 2
+    assert entries[1] == entries[0]
+    assert entries[1][2:] == (False, False)

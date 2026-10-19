@@ -877,7 +877,8 @@ class Bouquet(SwbBaseline):
     def _reset_solver_state(self):
         """Back to this baseline's clean solver state: the post-setup equilibrium (zero coils), the
         configured coil reg (which also refreshes the weak exploratory stash), no drift bounds or strong
-        reg stash (``generate_bouquet`` leaves both), then this baseline's geometry (:meth:`point_solver`)."""
+        reg stash (``generate_bouquet``'s exit teardown already removes both since 1.4.1, #13; kept for a
+        solver left otherwise), then this baseline's geometry (:meth:`point_solver`)."""
         if self._geom is None:
             raise RuntimeError("no baseline geometry on the solver: point_solver() (prepare_baseline) first")
         mygs = self.mygs

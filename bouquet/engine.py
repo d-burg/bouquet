@@ -3261,9 +3261,12 @@ def reconstruction_coil_reg(mygs) -> dict:
     ``source`` and, when known, the ``terms`` as ``coils`` / ``target`` /
     ``weight``).
 
-    * ``"strong (left installed by generate())"`` -- a previous
-      ``generate()`` left its strong regularisation installed
-      (``_strong_coil_reg``; ``Bouquet._reset_solver_state`` clears it);
+    * ``"strong (left installed by generate())"`` -- a strong
+      regularisation stash (``_strong_coil_reg``) is on the solver.  Since
+      1.4.1 ``generate_bouquet`` removes its own on every exit (issue #13,
+      :func:`bouquet.TokaMaker_interface.generate_exit_teardown`), and
+      ``Bouquet._reset_solver_state`` clears it too, so this is a stash
+      set some other way;
     * ``"configured"`` / ``"default"`` -- what :meth:`bouquet.run.Bouquet.
       _apply_coil_reg` installed (``SolverConfig.coil_reg``'s terms at
       their configured weights, or the toward-zero default);

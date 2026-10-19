@@ -2833,6 +2833,84 @@ def strong_coil_reg(mygs, targets, soft_reg_weight=1.0e4,
     return rt
 
 
+def generate_exit_teardown(mygs):
+    """Put back the solver state ``generate_bouquet`` changed for its draws
+    (issue #13); run on every exit of :func:`generate_bouquet`, an
+    exception included.  Returns a record of what was done.
+
+    The draw phase installs a strong coil regularisation (stashed as
+    ``mygs._strong_coil_reg``) and, with ``coil_drift_hard_factor``, hard
+    coil bounds (stashed as ``mygs._coil_drift_bounds``).  Left in place,
+    a second run in the same process (a direct functional caller, or two
+    ``generate()`` calls on one prepared baseline) starts under them.  On
+    exit:
+
+    * the coil regularisation is the reconstruction's own term list
+      (``mygs._recon_coil_reg``, published by ``Bouquet._apply_coil_reg``);
+      a solver with no such record that this run left under the strong one
+      gets the toward-zero default ``setup_solver`` installs without a
+      configured ``coil_reg`` (every coil at weight 1, the #VSC at 1e-2),
+      which is what the draw phase replaced;
+    * the coil bounds are released (``set_coil_bounds(None)``, +/-1e98),
+      on a solver already in the bounded coil mode or with bounds on
+      record only (the mode is one-way; see
+      :mod:`bouquet.solver_state`);
+    * the ``_coil_drift_bounds`` and ``_strong_coil_reg`` stashes are
+      removed.
+
+    The equilibrium itself is not touched: the next run's entry restores
+    its own starting state.  A failure is printed and recorded, never
+    raised (this runs in a ``finally``)."""
+    from .solver_state import COIL_SOLVE_BOUNDED, coil_solve_mode
+    rec = dict(coil_reg=None, bounds_released=False, stashes_cleared=[])
+    d = getattr(mygs, "__dict__", {})
+    try:
+        terms = d.get("_recon_coil_reg")
+        if terms is not None:
+            mygs.set_coil_reg(reg_terms=list(terms))
+            rec["coil_reg"] = "reconstruction"
+        elif d.get("_strong_coil_reg") is not None:
+            dflt = [mygs.coil_reg_term({name: 1.0}, target=0.0, weight=1.0)
+                    for name in mygs.coil_sets]
+            dflt.append(mygs.coil_reg_term({'#VSC': 1.0}, target=0.0,
+                                           weight=1e-2))
+            mygs.set_coil_reg(reg_terms=dflt)
+            rec["coil_reg"] = "default (the reconstruction's is not on record)"
+    except Exception as exc:
+        rec["coil_reg_error"] = f"{type(exc).__name__}: {exc}"
+        print(f"  [teardown] coil-regularisation restore failed ({exc})")
+    try:
+        if (hasattr(mygs, "set_coil_bounds")
+                and (d.get("_coil_drift_bounds") is not None
+                     or coil_solve_mode(mygs) == COIL_SOLVE_BOUNDED)):
+            mygs.set_coil_bounds(None)
+            rec["bounds_released"] = True
+    except Exception as exc:
+        rec["bounds_error"] = f"{type(exc).__name__}: {exc}"
+        print(f"  [teardown] coil-bound release failed ({exc})")
+    for k in ("_coil_drift_bounds", "_strong_coil_reg"):
+        if k in d:
+            try:
+                delattr(mygs, k)
+                rec["stashes_cleared"].append(k)
+            except Exception:
+                pass
+    return rec
+
+
+def _with_exit_teardown(fn):
+    """Run :func:`generate_exit_teardown` on every exit of *fn* (#13)."""
+    import functools
+
+    @functools.wraps(fn)
+    def generate_bouquet(mygs, *args, **kwargs):
+        try:
+            return fn(mygs, *args, **kwargs)
+        finally:
+            generate_exit_teardown(mygs)
+    return generate_bouquet
+
+
 def _install_weak_swb_coil_reg(mygs):
     """Swap the strong coil reg for the weak SWB one (see the SWB hygiene
     block in :func:`perturb_kinetic_equilibrium`); return the strong reg to
@@ -5582,6 +5660,7 @@ def _extend_scale_block(scales, rng, scale_range, chunk):
                             size=int(chunk))])
 
 
+@_with_exit_teardown
 def generate_bouquet(
     mygs,
     psi_N,

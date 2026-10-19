@@ -122,3 +122,52 @@ def test_the_carbon_fixtures_are_bit_identical(tmp_path, kind):
     np.testing.assert_array_equal(
         bl.aux["zeff"], al if kind is None
         else np.asarray(cp["zeff"], dtype=float))
+
+
+# ------------------------------------------- review of PR #100, F1 and F5
+def _probe(edge=None, zero_last=False):
+    """The review's probe: 101 nodes, Z_eff,th 1.6, a beam term 6 % of it on
+    axis falling to 0 at the edge; the stored zeff is the total, times
+    *edge* beyond psi_N 0.85, or with one zero at the last node."""
+    psi = np.linspace(0.0, 1.0, 101)
+    ne = np.full(101, 5.0e19)
+    th = np.full(101, 1.6)
+    z2 = 0.06 * 1.6 * ne * (1.0 - psi) ** 2
+    total = th + z2 / ne
+    stored = total.copy()
+    if edge is not None:
+        stored = np.where(psi > 0.85, edge * total, total)
+    if zero_last:
+        stored[-1] = 0.0
+    return dict(zeff=stored.tolist()), th, z2, ne, psi
+
+
+@pytest.mark.parametrize("case", [dict(edge=0.90), dict(edge=1.10),
+                                  dict(zero_last=True)])
+def test_an_edge_misfit_does_not_decide_the_numerator(case):
+    """An exact core match with a x0.90 (or x1.10) edge, or a single zero
+    edge value: the numerator is chosen on the core (thermal+fast), and the
+    every-node check still says the dataset matches neither, through the
+    run's collector."""
+    from bouquet.io.imas import _dd_zeff
+    from bouquet.utils import deferred_warnings
+    cp, th, z2, ne, psi = _probe(**case)
+    rec = {}
+    with deferred_warnings() as got:
+        zeff, inc = _dd_zeff(cp, th, z2, ne, psi, record=rec)
+    assert inc is True and rec["convention"] == "thermal+fast"
+    assert rec["d_all_core"] < 1e-12 < rec["d_th_core"]
+    assert rec["matches_neither"] is True
+    assert rec["d_all_psi_N"] > 0.85
+    assert len(got) == 1 and "matches neither" in got[0][0]
+    np.testing.assert_array_equal(zeff, np.asarray(cp["zeff"]))
+
+
+def test_the_matches_neither_warning_goes_through_the_collector(tmp_path):
+    """F5: outside a collector it is a plain UserWarning, as before."""
+    ddp, *_ = NF._build(tmp_path, dd_mutate=PR._pedestal_off(0.90))
+    bl, msgs = _read(ddp)
+    assert len([m for m in msgs if "matches neither" in m]) == 1
+    rec = bl.li_metrics["zeff_dd_provenance"]
+    assert rec["convention"] == "thermal+fast"
+    assert rec["choice_window"].startswith("psi_N <= 0.8")

@@ -1548,7 +1548,8 @@ def _read_ida_omega(path, time_s, psi_N, place=None):
 
 #: psi_N points of the advisory IDA-vs-dd total-ni check: interior (an edge
 #: ratio reports the edge model) and the axis (where a beam peaks).  The last
-#: point also bounds the core :func:`_dd_zeff` classifies Z_eff on.
+#: point also bounds the core on which :func:`_dd_zeff` CHOOSES the numerator
+#: (its consistency check covers every node with n_e > 0).
 NI_FAST_GATE_PSI_N = (0.0, 0.2, 0.4, 0.6, 0.8)
 
 #: Relative IDA-vs-dd TOTAL ni disagreement, at any of
@@ -1695,24 +1696,39 @@ def _dd_zeff(cp, zeff_th, z2_fast, ne, psi_N, record=None):
 
     A stored ``cp1d.zeff`` may or may not include the fast ions in its
     numerator (IMAS's expression does; FUSE may have stored it before the
-    beam), so it is classified against both.  The comparison follows
-    :func:`_dd_total_zeff`'s rule (1.4.1): the misfits are the max over
-    EVERY node with ``n_e > 0`` and finite inputs, the pedestal and the
-    edge included (it was ``psi_N <= NI_FAST_GATE_PSI_N[-1]`` = 0.8), a
-    zero or non-finite stored value giving an infinite / NaN misfit; and
-    the caller passes *zeff_th* / *z2_fast* weighted by each ion's CHARGE
+    beam), so it is classified against both:
+
+    * the CHOICE between the two numerators is made on the core, the nodes
+      with ``n_e > 0``, finite inputs and ``psi_N <= NI_FAST_GATE_PSI_N[-1]``
+      (= 0.8), where the beam sits and the two numerators differ; at the
+      edge z2_fast ~ 0 and they coincide, so an edge misfit (a clipped or
+      zeroed edge value) must not decide it (review of #100, F1).  With no
+      core node, every node with n_e > 0 decides.
+    * the CONSISTENCY check follows :func:`_dd_total_zeff`'s rule (1.4.1):
+      the misfits ``d_th`` / ``d_all`` are the max over EVERY node with
+      ``n_e > 0`` and finite inputs, the pedestal and the edge included; a
+      zero or non-finite stored value gives an infinite / NaN misfit; when
+      neither numerator fits within :data:`ZEFF_CONVENTION_RTOL` there, the
+      worst node is named in a warning (issued through the run's collector,
+      :func:`bouquet.utils.warn_or_defer`), and the stored array is still
+      the one returned, as before.
+
+    The caller passes *zeff_th* / *z2_fast* weighted by each ion's CHARGE
     STATE (``ion[].z_ion`` when present, else ``z_n``;
-    :func:`_ion_charge_state`), so the numerators are the IMAS
-    definition's, in the check and in the no-dataset value alike.  Without
-    ``z_ion`` they are the ``z_n`` sums bit for bit.
+    :func:`_ion_charge_state`), so the numerators are the IMAS definition's,
+    in the check and in the no-dataset value alike.  Without ``z_ion`` they
+    are the ``z_n`` sums bit for bit.
 
     *record* (a dict, optional) is filled with how the convention was
     decided (owner item E1, archived as ``li_metrics["zeff_dd_provenance"]``):
     ``convention`` ("thermal+fast" / "thermal-only"), ``source`` ("stored
     cp.zeff" / "no stored zeff"), ``basis`` and, where both numerators were
-    compared, the misfits ``d_th`` / ``d_all``, the worst node of each
-    (``d_th_psi_N`` / ``d_all_psi_N``), ``window`` and ``rtol``.
+    compared, the core misfits that chose (``d_th_core`` / ``d_all_core``,
+    ``choice_window``), the every-node misfits (``d_th`` / ``d_all``), the
+    worst node of each (``d_th_psi_N`` / ``d_all_psi_N``), ``window``,
+    ``rtol`` and ``matches_neither``.
     """
+    from ..utils import warn_or_defer
     rec = {} if record is None else record
     zeff_th = np.asarray(zeff_th, dtype=float)
     z2_fast = np.asarray(z2_fast, dtype=float)
@@ -1742,38 +1758,47 @@ def _dd_zeff(cp, zeff_th, z2_fast, ne, psi_N, record=None):
         raise ValueError(
             "core_profiles.zeff cannot be classified: no node has n_e > 0 "
             "with finite densities")
-    _s = np.abs(stored[win])
     with np.errstate(divide="ignore", invalid="ignore"):
         # a zero or non-finite stored value gives inf / NaN: matches neither
-        r_th = np.abs(stored - zeff_th)[win] / _s
-        r_all = np.abs(stored - zeff_all)[win] / _s
+        r_th_all = np.abs(stored - zeff_th) / np.abs(stored)
+        r_all_all = np.abs(stored - zeff_all) / np.abs(stored)
+    r_th, r_all = r_th_all[win], r_all_all[win]
     d_th, d_all = float(np.max(r_th)), float(np.max(r_all))
+    core = win & (_psi <= NI_FAST_GATE_PSI_N[-1])
+    if np.any(core):
+        d_th_c = float(np.max(r_th_all[core]))
+        d_all_c = float(np.max(r_all_all[core]))
+        choice = f"psi_N <= {NI_FAST_GATE_PSI_N[-1]:g} with n_e > 0"
+    else:
+        d_th_c, d_all_c = d_th, d_all
+        choice = "every node with n_e > 0 and finite inputs (no core node)"
 
     def _worst_psi(r):
         bad = ~np.isfinite(r)
         k = int(np.argmax(bad)) if np.any(bad) else int(np.argmax(r))
         return float(_psi[win][k])
-    includes = bool(d_all < d_th)
+    includes = bool(d_all_c < d_th_c)
     neither = not (d_th <= ZEFF_CONVENTION_RTOL
                    or d_all <= ZEFF_CONVENTION_RTOL)
     rec.update(convention="thermal+fast" if includes else "thermal-only",
                source="stored cp.zeff",
-               basis=("the closer of the two numerators on every node with "
-                      "n_e > 0 and finite inputs"),
+               basis=("the closer of the two numerators on the core ("
+                      + choice + "); checked on every node with n_e > 0"),
+               d_th_core=d_th_c, d_all_core=d_all_c, choice_window=choice,
                d_th=d_th, d_all=d_all, d_th_psi_N=_worst_psi(r_th),
                d_all_psi_N=_worst_psi(r_all),
                window="every node with n_e > 0 and finite inputs",
                rtol=float(ZEFF_CONVENTION_RTOL), matches_neither=neither)
     if neither:
-        import warnings
-        warnings.warn(
+        warn_or_defer(
             f"core_profiles.zeff matches neither Z_eff numerator on every "
             f"node with n_e > 0 (thermal-only {d_th:.1e}, worst at psi_N = "
             f"{rec['d_th_psi_N']:.3f}; thermal+fast {d_all:.1e}, psi_N = "
-            f"{rec['d_all_psi_N']:.3f}); taking the closer "
-            f"({'thermal+fast' if includes else 'thermal-only'}). A zeff "
-            f"stored before the dd's ne or ion densities were last changed "
-            f"does this.")
+            f"{rec['d_all_psi_N']:.3f}); the numerator is the closer one on "
+            f"the core ({'thermal+fast' if includes else 'thermal-only'}; "
+            f"core misfits {d_th_c:.1e} / {d_all_c:.1e}). A zeff stored "
+            f"before the dd's ne or ion densities were last changed, or "
+            f"clipped at the edge, does this.", UserWarning, stacklevel=3)
     return stored, includes
 
 

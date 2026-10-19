@@ -1214,9 +1214,11 @@ belongs in the numerator. IMAS.jl's Z_eff expression for
 FUSE computes its own bootstrap from the stored Z_eff (Meneghini et al., FUSE,
 arXiv:2409.05894, 2024); a dd may however carry a Z_eff stored before the beam
 was added. bouquet therefore classifies
-a dd's stored Z_eff against both numerators (`io.imas._dd_zeff`; since 1.4.1
-on every node with n_e > 0 and with each ion weighted by its charge state
-`ion[].z_ion` when present, the rule of the default route's stored-Z_eff check)
+a dd's stored Z_eff against both numerators (`io.imas._dd_zeff`; the closer
+one on the core ψ_N ≤ 0.8, where the beam makes them differ, chooses; since
+1.4.1 the consistency check covers every node with n_e > 0 and each ion is
+weighted by its charge state `ion[].z_ion` when present, the rule of the
+default route's stored-Z_eff check)
 and passes `Zeff_th + Σ Z_s² n_s^fast / n_e` to the bootstrap when the dd's
 Z_eff includes the fast ions (with no stored Z_eff and a beam present, always).
 *Caveat:* the ion-ion terms of the theory assume Maxwellian ions; the fast-ion

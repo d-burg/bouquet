@@ -1690,19 +1690,32 @@ ZEFF_DATASET_RTOL = 5e-2
 
 
 def _dd_zeff(cp, zeff_th, z2_fast, ne, psi_N, record=None):
-    """``(zeff, includes_fast)``: the Z_eff the dd's own bootstrap consumed.
+    """``(zeff, includes_fast)``: the Z_eff the dd's own bootstrap consumed
+    (the EXPERIMENTAL classification, ``ImasSource.zeff_fast_ions``).
 
     A stored ``cp1d.zeff`` may or may not include the fast ions in its
     numerator (IMAS's expression does; FUSE may have stored it before the
-    beam), so it is classified against both on the core (``psi_N <= 0.8``).
+    beam), so it is classified against both.  The comparison follows
+    :func:`_dd_total_zeff`'s rule (1.4.1): the misfits are the max over
+    EVERY node with ``n_e > 0`` and finite inputs, the pedestal and the
+    edge included (it was ``psi_N <= NI_FAST_GATE_PSI_N[-1]`` = 0.8), a
+    zero or non-finite stored value giving an infinite / NaN misfit; and
+    the caller passes *zeff_th* / *z2_fast* weighted by each ion's CHARGE
+    STATE (``ion[].z_ion`` when present, else ``z_n``;
+    :func:`_ion_charge_state`), so the numerators are the IMAS
+    definition's, in the check and in the no-dataset value alike.  Without
+    ``z_ion`` they are the ``z_n`` sums bit for bit.
 
     *record* (a dict, optional) is filled with how the convention was
     decided (owner item E1, archived as ``li_metrics["zeff_dd_provenance"]``):
     ``convention`` ("thermal+fast" / "thermal-only"), ``source`` ("stored
     cp.zeff" / "no stored zeff"), ``basis`` and, where both numerators were
-    compared, the core misfits ``d_th`` / ``d_all`` and ``rtol``.
+    compared, the misfits ``d_th`` / ``d_all``, the worst node of each
+    (``d_th_psi_N`` / ``d_all_psi_N``), ``window`` and ``rtol``.
     """
     rec = {} if record is None else record
+    zeff_th = np.asarray(zeff_th, dtype=float)
+    z2_fast = np.asarray(z2_fast, dtype=float)
     if "zeff" not in cp:
         zeff_all = zeff_th + z2_fast / np.clip(ne, 1e-30, None)
         inc = bool(np.any(z2_fast))
@@ -1720,23 +1733,45 @@ def _dd_zeff(cp, zeff_th, z2_fast, ne, psi_N, record=None):
                    d_th=None, d_all=None)
         return stored, False
     zeff_all = zeff_th + z2_fast / np.clip(ne, 1e-30, None)
-    core = np.asarray(psi_N, dtype=float) <= NI_FAST_GATE_PSI_N[-1]
-    _s = np.abs(stored[core])
-    d_th = float(np.max(np.abs(stored - zeff_th)[core] / _s))
-    d_all = float(np.max(np.abs(stored - zeff_all)[core] / _s))
-    includes = d_all < d_th
+    _psi = np.asarray(psi_N, dtype=float)
+    _ne_raw = np.asarray(ne, dtype=float)
+    # every node where the densities define a Z_eff (as _dd_total_zeff)
+    win = (np.isfinite(_ne_raw) & (_ne_raw > 0.0) & np.isfinite(_psi)
+           & np.isfinite(zeff_th) & np.isfinite(zeff_all))
+    if not np.any(win):
+        raise ValueError(
+            "core_profiles.zeff cannot be classified: no node has n_e > 0 "
+            "with finite densities")
+    _s = np.abs(stored[win])
+    with np.errstate(divide="ignore", invalid="ignore"):
+        # a zero or non-finite stored value gives inf / NaN: matches neither
+        r_th = np.abs(stored - zeff_th)[win] / _s
+        r_all = np.abs(stored - zeff_all)[win] / _s
+    d_th, d_all = float(np.max(r_th)), float(np.max(r_all))
+
+    def _worst_psi(r):
+        bad = ~np.isfinite(r)
+        k = int(np.argmax(bad)) if np.any(bad) else int(np.argmax(r))
+        return float(_psi[win][k])
+    includes = bool(d_all < d_th)
+    neither = not (d_th <= ZEFF_CONVENTION_RTOL
+                   or d_all <= ZEFF_CONVENTION_RTOL)
     rec.update(convention="thermal+fast" if includes else "thermal-only",
                source="stored cp.zeff",
-               basis=("the closer of the two numerators on the core psi_N <= "
-                      f"{NI_FAST_GATE_PSI_N[-1]:g}"),
-               d_th=d_th, d_all=d_all, rtol=float(ZEFF_CONVENTION_RTOL),
-               matches_neither=bool(min(d_th, d_all) > ZEFF_CONVENTION_RTOL))
-    if min(d_th, d_all) > ZEFF_CONVENTION_RTOL:
+               basis=("the closer of the two numerators on every node with "
+                      "n_e > 0 and finite inputs"),
+               d_th=d_th, d_all=d_all, d_th_psi_N=_worst_psi(r_th),
+               d_all_psi_N=_worst_psi(r_all),
+               window="every node with n_e > 0 and finite inputs",
+               rtol=float(ZEFF_CONVENTION_RTOL), matches_neither=neither)
+    if neither:
         import warnings
         warnings.warn(
-            f"core_profiles.zeff matches neither Z_eff numerator on the core "
-            f"(thermal-only {d_th:.1e}, thermal+fast {d_all:.1e}); taking the "
-            f"closer ({'thermal+fast' if includes else 'thermal-only'}). A zeff "
+            f"core_profiles.zeff matches neither Z_eff numerator on every "
+            f"node with n_e > 0 (thermal-only {d_th:.1e}, worst at psi_N = "
+            f"{rec['d_th_psi_N']:.3f}; thermal+fast {d_all:.1e}, psi_N = "
+            f"{rec['d_all_psi_N']:.3f}); taking the closer "
+            f"({'thermal+fast' if includes else 'thermal-only'}). A zeff "
             f"stored before the dd's ne or ion densities were last changed "
             f"does this.")
     return stored, includes
@@ -2735,10 +2770,14 @@ def read_imas_baseline(
     _zeff_dd_rec = {}
     _zeff_classified = bool(fuse_zeff_fast_ions_on(source))
     if _zeff_classified:
+        # charge-state weighted numerators (z_ion when present, else z_n:
+        # the same arrays bit for bit), as _dd_total_zeff's (1.4.1); the
+        # species derivations keep Zeff_th (z_n)
+        _zeff_th_q = zeff_num_q / ne
         zeff_dd, dd_zeff_includes_fast = _dd_zeff(
-            cp, Zeff_th, z2_fast, ne, psi_N, record=_zeff_dd_rec)
-        Zeff = (Zeff_th + z2_fast / np.clip(ne, 1e-30, None)
-                if dd_zeff_includes_fast else Zeff_th)
+            cp, _zeff_th_q, z2_fast_q, ne, psi_N, record=_zeff_dd_rec)
+        Zeff = (_zeff_th_q + z2_fast_q / np.clip(ne, 1e-30, None)
+                if dd_zeff_includes_fast else _zeff_th_q)
     else:
         zeff_dd = (np.asarray(cp["zeff"], dtype=float) if "zeff" in cp
                    else Zeff_th)

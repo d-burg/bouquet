@@ -1069,21 +1069,13 @@ def resolve_uncertainty(config, baseline) -> dict:
             ida_path = getattr(src, "ida_path", None)
     # The IDA-hybrid ni_source="standard" sub-route reads the IDA tiers only
     # from unc.ida_path (from_imas sets it).  A hand-built config that leaves
-    # it unset gets the ASSUMED template for every kinetic channel and the
-    # Z_eff width although the run's own IDA file is in play: say so
-    # (ZEFF_RULE finding 3; report only, nothing is read in its place).
-    if (ida_path is None and isinstance(src, ImasSource) and not _ion_route
-            and _kin_src == "ida_hybrid"
-            and getattr(src, "ida_path", None)):
-        warnings.warn(
-            "resolve_uncertainty: IDA-hybrid with ni_source="
-            f"{out_ni_source!r} reads the IDA uncertainty envelopes only from "
-            "UncertaintyConfig.ida_path, which is unset here (Bouquet."
-            "from_imas sets it to source.ida_path); the n_e / T_e / T_i / n_i "
-            "sigmas and the Z_eff width fall back to the ASSUMED template, "
-            f"not the envelopes of {os.path.basename(str(src.ida_path))}.  "
-            "Set uncertainty.ida_path = source.ida_path to use them.",
-            UserWarning, stacklevel=2)
+    # it unset falls back to the ASSUMED template although the run's own IDA
+    # file is in play: said at the end, once the channels are resolved, for
+    # the channels that actually fell back (ZEFF_RULE finding 3; report only,
+    # nothing is read in its place).
+    _tpl_unread_ida = (ida_path is None and isinstance(src, ImasSource)
+                       and not _ion_route and _kin_src == "ida_hybrid"
+                       and bool(getattr(src, "ida_path", None)))
 
     # IDA arrays (read once) available as a fallback below
     ida_sig = None
@@ -1466,7 +1458,45 @@ def resolve_uncertainty(config, baseline) -> dict:
     out["aux_sigmas"] = resolved_sigma
     out["aux_baselines"] = resolved_base
     out["aux_length_scales"] = dict(unc.aux_length_scales or {})
+    if _tpl_unread_ida:
+        _warn_unread_ida_template(out, src, out_ni_source)
     return out
+
+
+def _warn_unread_ida_template(env, src, ni_source):
+    """The IDA-hybrid standard sub-route's template fallback, said for the
+    channels that actually fell back (``env["sigma_source"]`` kind
+    ``"assumed"``; nothing when every channel came from elsewhere, e.g.
+    explicit ``sigma_profiles``).  Issued against a fresh registry, so every
+    run (every ``generate()``) that falls back says so, not only the first
+    of a session; the warning filters still apply (the quiet prepare-time
+    resolution keeps it silent)."""
+    import os
+    import sys
+    import warnings
+    ss = env.get("sigma_source") or {}
+    names = {"ne": "n_e", "te": "T_e", "ni": "n_i", "ti": "T_i"}
+    fell = [names[c] for c in ("ne", "te", "ni", "ti")
+            if (ss.get(c) or {}).get("kind") == "assumed"]
+    if (ss.get("zeff") or {}).get("kind") == "assumed":
+        fell.append("the Z_eff width")
+    if not fell:
+        return
+    msg = ("resolve_uncertainty: IDA-hybrid with ni_source="
+           f"{ni_source!r} reads the IDA uncertainty envelopes only from "
+           "UncertaintyConfig.ida_path, which is unset here (Bouquet."
+           "from_imas sets it to source.ida_path); "
+           + ", ".join(fell) + (" fall" if len(fell) > 1 else " falls")
+           + " back to the ASSUMED template, not the envelopes of "
+           f"{os.path.basename(str(src.ida_path))}.  Set "
+           "uncertainty.ida_path = source.ida_path to use them.")
+    try:
+        f = sys._getframe(2)
+    except ValueError:
+        f = sys._getframe(1)
+    warnings.warn_explicit(msg, UserWarning, f.f_code.co_filename,
+                           f.f_lineno, module=f.f_globals.get("__name__"),
+                           registry={}, module_globals=f.f_globals)
 
 
 def floor_inductive_split(j_inductive, j_BS, psi_N=None, warn_frac=1e-4,

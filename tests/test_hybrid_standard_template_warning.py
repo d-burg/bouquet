@@ -73,3 +73,53 @@ def test_the_plain_dd_route_does_not_warn(tmp_path):
         bl = read_imas_baseline(src, kinetic_source="fuse")
     _, msgs = _resolve(_cfg(src, UncertaintyConfig(), "fuse"), bl)
     assert msgs == []
+
+
+# ------------------------------------------------ review of PR #100, F6
+def _std(tmp_path):
+    ddp, cdf, *_ = NF._build(tmp_path)
+    return (HS._src(ddp, cdf, ni_source="standard"),
+            HS._read(ddp, cdf, ni_source="standard"))
+
+
+def test_the_message_names_only_the_channels_that_fell_back(tmp_path):
+    import numpy as np
+    src, bl = _std(tmp_path)
+    prof = {"ne": 0.05 * np.abs(np.asarray(bl.ne, dtype=float))}
+    env, msgs = _resolve(_cfg(src, UncertaintyConfig(sigma_profiles=prof)),
+                         bl)
+    assert env["sigma_source"]["ne"]["kind"] == "explicit"
+    assert len(msgs) == 1
+    fell = msgs[0].split("ida_path); ")[1].split(" fall back")[0]
+    assert "n_e" not in fell
+    for name in ("T_e", "n_i", "T_i", "the Z_eff width"):
+        assert name in fell, (name, fell)
+
+
+def test_no_warning_when_nothing_falls_back(tmp_path):
+    """Every kinetic channel explicit (a hand-built sigma=0 run) and the
+    Z_eff width explicit: no template is used, so nothing is said."""
+    import numpy as np
+    src, bl = _std(tmp_path)
+    z = np.zeros_like(np.asarray(bl.psi_N_kinetic, dtype=float))
+    unc = UncertaintyConfig(
+        sigma_profiles={c: z for c in ("ne", "te", "ni", "ti")},
+        aux_sigmas={"zeff": z})
+    env, msgs = _resolve(_cfg(src, unc), bl)
+    assert all(env["sigma_source"][c]["kind"] != "assumed"
+               for c in ("ne", "te", "ni", "ti", "zeff"))
+    assert msgs == []
+
+
+def test_every_run_says_it_not_only_the_first_of_a_session(tmp_path):
+    """Issued against a fresh registry: a second resolution (a second
+    generate() in the same kernel) warns again under the default filters."""
+    src, bl = _std(tmp_path)
+    cfg = _cfg(src, UncertaintyConfig())
+    seen = []
+    for _ in range(2):
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("default")
+            resolve_uncertainty(cfg, bl)
+        seen.append(sum(_MSG in str(x.message) for x in w))
+    assert seen == [1, 1]

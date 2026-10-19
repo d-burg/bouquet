@@ -127,6 +127,9 @@ class IDACERProfiles:
     ``psi_N``. SI units: ``n_carbon`` m^-3, ``t_carbon`` eV, ``omega_tor`` rad/s,
     ``v_pol`` m/s, ``Bpol`` T, ``Rmaj`` m, ``dpsiN_dR`` 1/m. The ``sigma_*``
     fields are the measured 1-sigma envelopes (for propagating E_r uncertainty).
+    ``Bpol`` is that relation's B_theta: IDA's ``Bpol_midplane`` is the vertical
+    field B_Z at the outboard midplane, where B_theta = -B_Z (theta-hat = -Z-hat
+    for right-handed (r, theta, phi), phi counter-clockwise from above).
     """
 
     psi_N: np.ndarray
@@ -811,7 +814,7 @@ def read_ida_cer(
 
     return IDACERProfiles(
         psi_N=psi_N, n_carbon=n_c, t_carbon=t_c, omega_tor=omg, v_pol=vpol,
-        Bpol=bpol, Rmaj=rmaj, dpsiN_dR=dpsidr,
+        Bpol=-bpol, Rmaj=rmaj, dpsiN_dR=dpsidr,
         sigma_n_carbon=s_nc, sigma_t_carbon=s_tc,
         sigma_omega_tor=s_om, sigma_v_pol=s_vp,
         time=t_sel,

@@ -146,6 +146,19 @@ class TestReadCER:
         # sample-spread sigma is positive
         assert np.any(cer.sigma_v_pol > 0)
 
+    def test_bpol_is_b_theta(self, tmp_path):
+        """IDA's Bpol_midplane is B_Z (< 0 for the normal current); the force balance's
+        B_theta = -B_Z, so co-current rotation gives a positive toroidal term."""
+        from bouquet.physics import radial_field_from_impurity_force_balance
+        p = tmp_path / "ida_direct.cdf"
+        _write_direct(str(p))
+        cer = read_ida_cer(str(p), time=3.0)
+        np.testing.assert_allclose(cer.Bpol, 0.3 * cer.psi_N / 1.2)
+        _, info = radial_field_from_impurity_force_balance(
+            cer.psi_N, cer.n_carbon, cer.t_carbon, cer.omega_tor, cer.v_pol,
+            cer.Bpol, cer.Rmaj, cer.dpsiN_dR, np.full_like(cer.psi_N, -2.0))
+        assert np.all(info["toroidal"][1:] > 0)
+
     def test_cer_feeds_radial_field(self, tmp_path):
         from bouquet.physics import radial_field_from_impurity_force_balance
         p = tmp_path / "ida_direct.cdf"

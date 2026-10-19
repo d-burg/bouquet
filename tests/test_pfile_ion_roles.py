@@ -2,7 +2,8 @@
 
 ``PFile.compute_zeff`` used to read the main ion as ``Z[-2]``: on a natural
 two-entry ``[impurity, main]`` block that lands on the IMPURITY, and a carbon
-plasma came out at Z_eff ~ 27 instead of ~ 1.3, silently.  The roles are now
+plasma came out at Z_eff ~ 30 instead of ~ 1.3, silently (34 on the fixture
+below).  The roles are now
 identified by charge and mass and by whether the file carries a beam density
 (:meth:`PFile.ion_roles`), and an ambiguous block raises.  The shipped p-files
 are three-entry ``[C, D, D]`` blocks: their numbers must not move by a bit.
@@ -45,7 +46,7 @@ _PHYSICAL = (2.8 + 0.2 / 6.0 * 36.0) / 3.0
 def test_a_two_entry_block_gives_the_physical_zeff():
     z = _zeff(_pf([6, 1], [12, 2]))
     assert z[0] == pytest.approx(_PHYSICAL, rel=1e-12)
-    assert z[0] < 2.0          # the aliased read gave ~ 34 here
+    assert z[0] < 2.0          # the aliased read gave 34 here
 
 
 def test_two_and_three_entry_blocks_agree_without_a_beam():
@@ -106,9 +107,9 @@ def test_quasineutrality_needs_only_the_impurity_and_the_beam():
 
 
 @pytest.mark.parametrize("Z,A,nb,match", [
-    ([1, 1], [2, 2], None, "no impurity"),
-    ([6, 2], [12, 4], None, "no hydrogenic main ion"),
-    ([6, 1], [12, 12], None, "no hydrogenic main ion"),
+    ([6, 2], [12, 4], None, "non-hydrogenic main ion is not supported"),
+    ([2], [4], None, "no hydrogenic main ion"),          # a helium plasma
+    ([6, 1], [12, 12], None, "non-hydrogenic main ion is not supported"),
 ])
 def test_unidentifiable_roles_raise(Z, A, nb, match):
     with pytest.raises(ValueError, match=match):
@@ -150,3 +151,75 @@ def test_the_shipped_three_entry_pfiles_are_bit_unchanged(path):
         pf.compute_quasineutrality()
     np.testing.assert_array_equal(pf._get_data("nz1"), nz1_old)
     np.testing.assert_array_equal(pf.compute_zeff()[1], zeff_old)
+
+
+def _zeff_140(pf):
+    """1.4.0's position read (Z_imp = Z[0], Z_main = Z[-2], Z_beam = Z[-1],
+    and Z_beam 1 in quasineutrality for a two-entry block), inline."""
+    Z = np.asarray(pf.ion_species["Z"], dtype=float)
+    ne, ni = pf.ne, pf.ni
+    nb = pf._get_data("nb")
+    nb = np.zeros_like(ne) if nb is None else nb
+    zb_q = float(Z[-1]) if len(Z) > 2 else 1.0
+    nz1 = (ne - ni - zb_q * nb) / Z[0]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        zeff = (ni * Z[-2] ** 2 + nz1 * Z[0] ** 2 + nb * Z[-1] ** 2) / ne
+    np.nan_to_num(zeff, copy=False, nan=1.0, posinf=1.0, neginf=1.0)
+    return nz1, zeff
+
+
+@pytest.mark.parametrize("Z,A,nb", [
+    ([1, 1], [2, 2], None),        # [D, D], no beam density
+    ([1, 1], [2, 2], 0.05),        # [D, D], main + beam
+    ([1, 1], [2, 3], None),        # [D, T]
+    ([1, 1], [2, 3], 0.05),
+])
+def test_a_clean_plasma_block_loads_as_in_1_4_0(Z, A, nb):
+    """Review of PR #100, F2: an impurity-free block (no non-hydrogenic
+    species) carries the quasineutrality residual at charge 1, so Z_eff = 1
+    and nz1 are 1.4.0's, bit for bit."""
+    pf = _pf(Z, A, nb=nb)
+    nz1_old, zeff_old = _zeff_140(pf)
+    r = pf.ion_roles()
+    assert r["impurity"] is None and r["impurity_hydrogenic_residual"]
+    assert r["Z_imp"] == 1.0 and r["Z_main"] == 1.0
+    pf.compute_quasineutrality()
+    np.testing.assert_array_equal(pf._get_data("nz1"), nz1_old)
+    z = pf.compute_zeff()[1]
+    np.testing.assert_array_equal(z, zeff_old)
+    np.testing.assert_allclose(z, 1.0, rtol=1e-12)
+
+
+@pytest.mark.parametrize("nb", [None, 0.05])
+def test_a_helium_main_ion_is_refused_as_unsupported(nb):
+    """Review of PR #100, F3: [C, He, D] is a He plasma with a D beam (with
+    nb) or He ash beside a D main ion (without): a non-hydrogenic main ion is
+    not supported, and D is never silently promoted past the He."""
+    pf = _pf([6, 2, 1], [12, 4, 2], nb=nb)
+    for call in (pf.ion_roles, pf.compute_zeff, pf.compute_quasineutrality):
+        with pytest.raises(ValueError, match="non-hydrogenic main ion is "
+                                             "not supported"):
+            call()
+
+
+def test_a_heavier_second_impurity_is_still_accepted():
+    """[C, Ne, D, D]: the first impurity is nz1's, a heavier second one is
+    not a main-ion candidate (nothing lighter than the impurity)."""
+    r = _pf([6, 10, 1, 1], [12, 20, 2, 2], nb=0.05).ion_roles()
+    assert (r["impurity"], r["main"], r["beam"]) == (0, 2, 3)
+
+
+def test_the_diamagnetic_rotation_reads_the_impurity_by_role():
+    """Review of PR #100, F11: the impurity diamagnetic term uses the role,
+    so a main-ion-first block agrees with the OMFIT order."""
+    x = np.linspace(0.0, 1.0, 64)
+    psi = -1.0 + x
+    out = []
+    for Z, A in (([6, 1], [12, 2]), ([1, 6], [2, 12])):
+        pf = _pf(Z, A)
+        pf.set_profile("te", x, 2.0 * (1.0 - 0.9 * x ** 2))
+        pf.set_profile("ti", x, 2.0 * (1.0 - 0.9 * x ** 2))
+        pf.compute_quasineutrality()
+        pf.compute_diamagnetic_rotations(psi)
+        out.append(np.asarray(pf.omgpp, dtype=float))
+    np.testing.assert_array_equal(out[0], out[1])

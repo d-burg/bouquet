@@ -6153,6 +6153,36 @@ def generate_bouquet(
     # coil bounds (built below only when those bounds are installed)
     _hard_sat_guard = None
 
+    # ---- names the per-draw loop reads, bound before the coil branch -----
+    # (#95) With coil handling off (coil_drift=None) the branch below never
+    # runs, and the loop read these names unbound (UnboundLocalError before
+    # any draw was archived).  Bound here to their "nothing captured" values;
+    # the branch overwrites them exactly as before when coil handling is on.
+    #
+    # SKIP_HARD / SKIP_ISO / SKIP_HOMOTOPY env-var reads at function scope so
+    # the per-draw loop's pre-solve coil-pin block can reference them (it runs
+    # BEFORE the Step-3 homotopy block where these were originally defined).
+    # Reading them once gives a consistent view across all draws -- if a user
+    # toggles an env var mid-run we use the value captured here, not a
+    # per-draw race.
+    _skip_hard = os.environ.get('SKIP_HARD', '0') == '1'
+    _skip_iso  = os.environ.get('SKIP_ISO',  '0') == '1'
+    _skip_homotopy = os.environ.get('SKIP_HOMOTOPY', '0') == '1'
+    # the warm-start snapshot of the reconstruction state: none captured
+    # (each draw then starts from the solver's state as the draw method
+    # leaves it)
+    _warmstart_eq_snap = None
+    _warmstart_psi = None
+    _warmstart_coils = None
+    _warmstart_iso_pts = None
+    _warmstart_iso_w = None
+    _warmstart_captured = False
+
+    def _report_bnd(stage):
+        """The boundary-deviation diagnostic: a no-op unless the coil
+        branch below installs its reference LCFS (it rebinds this name)."""
+        return None
+
     # ---- the reconstruction's delivered state, restored FIRST (review F6)
     # The q0 sawtooth check, the strong-reg / drift reference coils
     # (_initial_coils) and the Ip every draw is aligned to (_recon_Ip) are
@@ -6552,16 +6582,8 @@ def generate_bouquet(
         _baseline_psi = mygs.get_psi(False).copy()
         _baseline_coils = dict(_initial_coils)
 
-        # Hoist SKIP_HARD / SKIP_ISO / SKIP_HOMOTOPY env-var reads
-        # to function scope so the per-draw loop's pre-solve coil-pin
-        # block can reference them (it runs BEFORE the Step-3 homotopy
-        # block where these were originally defined).  Reading at
-        # function entry also gives a consistent view across all
-        # draws -- if a user toggles an env var mid-run we use the
-        # value captured here, not a per-draw race.
-        _skip_hard = os.environ.get('SKIP_HARD', '0') == '1'
-        _skip_iso  = os.environ.get('SKIP_ISO',  '0') == '1'
-        _skip_homotopy = os.environ.get('SKIP_HOMOTOPY', '0') == '1'
+        # (SKIP_HARD / SKIP_ISO / SKIP_HOMOTOPY are read at function scope,
+        # before the coil-handling branch: see "coil handling off" above.)
 
         # Warm-start snapshot for per-draw state restoration.
         # Captured AT THE END of the first successful draw (not at

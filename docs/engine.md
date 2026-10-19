@@ -1158,7 +1158,15 @@ solve_stage` (`DrawMethod.homotopy_guard`; the engine only, refused under
 - **Status.** Registered as the experimental feature `bistability_guard`
   (one `ExperimentalFeatureWarning` per run). Default-on waits for the
   false-positive exercise on the ladder cases: its firing rate on the cases
-  with one solution and its cost in solves and wall time per draw.
+  with one solution and its cost in solves and wall time per draw. First
+  exercise (1.4.1, until 24 in spec): it fired on 3 of 30 and 2 of 32 draws
+  of two single-solution slices (continuous responses of 1.0-1.6 % of a,
+  `"legitimate"`, two extra solves each), never on the reversed-I_p control,
+  and on 7 of 28 draws of the bistable case (three `"legitimate"`, four
+  first-stage crossings between the solutions, two each way, kept as
+  `"crossed"` / `"failed"`); no draw was changed on any case. The guard does
+  not reach the draw's bootstrap loop, where 22 of that case's 28 draws had
+  already left the reconstruction's branch (docs/known-limitations.md).
 
 `verify_sigma0_consistency()` under the engine runs ONE draw through the
 route `generate()` runs -- it calls `generate(n=1)` itself, with every

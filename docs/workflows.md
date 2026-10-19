@@ -835,8 +835,13 @@ more than 1 % of a from the stage's starting state is re-solved by
 continuation from that state, and the continuous state is kept only when the
 jump was branch hopping (`"held"`); otherwise the jumped state is kept and
 stamped (`"legitimate"`, `"crossed"`, `"failed"`). It changes no acceptance and,
-when it does not fire, no number. Default-on waits for the false-positive
-exercise on the ladder cases.
+when it does not fire, no number. It guards the homotopy only: on the known
+case most draws leave the reconstruction's branch earlier, in the draw's
+bootstrap loop (22 of 28 entered the homotopy 16.5-17.6 mm below the
+reconstruction's axis), and the first-stage crossings it saw there persisted
+at the smallest sub-step, so that ensemble stays bimodal with it on
+([known limitations](known-limitations.md)). Default-on waits for the
+false-positive exercise on the ladder cases.
 
 ## until-N in-spec draws
 

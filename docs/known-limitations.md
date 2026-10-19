@@ -7,13 +7,28 @@ closed by loosening a bar. The measurements behind them are in
 
 ## Solver and reconstruction
 
-- **Bistable equilibria: no continuity guard (#87).** A near-double-null case
-  can have two neighbouring free-boundary solutions for the same inputs; the
-  bistability check stamps such a reconstruction, and the per-scan stamp marks
-  an axis-bimodal ensemble, but nothing keeps a draw's homotopy on the
-  reconstruction's branch. An ensemble on such a case can mix branches, so
-  read its `axis_shift` record and bimodality stamp before quoting its bands.
-  Planned for 1.4.1.
+- **Bistable equilibria: the continuity guard is opt-in since 1.4.1;
+  default-on pending the false-positive exercise (#87).** A near-double-null
+  case can have two neighbouring free-boundary solutions for the same
+  inputs; the bistability check stamps such a reconstruction and the
+  per-scan stamp marks an axis-bimodal ensemble. `guard_bistability=True`
+  (experimental `bistability_guard`) keeps a draw's coil homotopy on the
+  branch each stage starts from: a stage that moves the axis more than 1 %
+  of a is re-solved by continuation, and the continuous state is kept when
+  the jump was branch hopping. It does not guard the draw's bootstrap loop:
+  on the known reversed-I_p case 22 of 28 archived draws already sat
+  16.5-17.6 mm below the reconstruction's axis when they entered the
+  homotopy, so that ensemble stays bimodal with the guard on. There it
+  fired on 7 of 28 archived draws: three continuous responses (kept), and
+  four crossings between the two solutions in the first stage (two each
+  way) that persisted down to 1/8 of the stage or whose sub-steps did not
+  solve -- the starting branch ends inside the stage, so the guard keeps
+  and stamps them; it changed no draw. On two single-solution slices it
+  fired on 3 of 30 and 2 of 32 draws, each a continuous response of
+  1.0-1.6 % of a, kept unchanged at two extra solves each; on the
+  reversed-I_p control case it never fired. Until a loop-stage guard exists,
+  read an ensemble's `axis_shift` record and bimodality stamp before
+  quoting its bands.
 - **MSE-stage runtime (#88).** Reconstructions with the structured MSE stage
   take 149–213 s (legacy route 178–192 s), against the 90–120 s
   target; without MSE they take 41–103 s. A study that needs MSE on many

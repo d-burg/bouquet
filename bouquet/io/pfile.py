@@ -579,7 +579,8 @@ class PFile:
         Identified by charge and mass and by whether the file carries a beam
         density, never by position alone (issue #19: a two-entry
         ``[impurity, main]`` block read with the three-entry positions put
-        the impurity's charge on the main ion, a ~30x carbon-plasma Z_eff):
+        the impurity's charge on the main ion: a carbon plasma's Z_eff came out
+        ~30):
 
         * **beam**: only when the file carries a non-zero ``nb``; then it is
           the LAST species (the OMFIT order: impurities, main ion, beam ion
@@ -604,10 +605,14 @@ class PFile:
             (e.g. a two-entry ``[impurity, D]`` block with a non-zero ``nb``:
             is D the main ion or the beam?) the message says the block is
             ambiguous.  A non-hydrogenic species lighter than the impurity
-            (``[C, He, D]``: a helium main ion, or helium ash beside a D main
-            ion?) is refused whatever is needed: a non-hydrogenic main ion is
-            not supported, and a trailing hydrogenic species is never
-            silently promoted to main ion past it.
+            with no hydrogenic species before the last one (``[C, He, D]``:
+            a helium main ion, or helium ash beside a D main ion?) is refused
+            whatever is needed: a non-hydrogenic main ion is not supported,
+            and a trailing hydrogenic species is never silently promoted to
+            main ion past it.  With a hydrogenic species before the last one
+            (``[C, He, D, D]``, ``[Ne, C, D, D]``) the light species is a
+            second impurity and the block reads as in 1.4.0 (``nz1`` the
+            first impurity's).
 
         Returns
         -------
@@ -640,7 +645,13 @@ class PFile:
         imp = imps[0] if imps else None
         lighter = ([i for i in imps[1:] if Z[i] < Z[imp]]
                    if imp is not None else [])
-        if lighter:
+        # The light species could be the MAIN ion only when no hydrogenic
+        # species precedes the last one (the beam's slot with nb, or the
+        # slot a beam would take without it): [C, He, D] is refused, while
+        # [C, He, D, D] / [Ne, C, D, D] (a D main ion before the last
+        # species) are read as 1.4.0 read them (review of #100, N1).
+        h_before_last = any(_hydrogenic(i) for i in range(n - 1))
+        if lighter and not h_before_last:
             k = lighter[0]
             raise ValueError(
                 f"p-file N Z A block [{listed}] lists a non-hydrogenic "

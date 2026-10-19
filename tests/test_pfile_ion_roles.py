@@ -223,3 +223,25 @@ def test_the_diamagnetic_rotation_reads_the_impurity_by_role():
         pf.compute_diamagnetic_rotations(psi)
         out.append(np.asarray(pf.omgpp, dtype=float))
     np.testing.assert_array_equal(out[0], out[1])
+
+
+@pytest.mark.parametrize("Z,A", [
+    ([6, 2, 1, 1], [12, 4, 2, 2]),     # [C, He, D, D]: He ash after C
+    ([10, 6, 1, 1], [20, 12, 2, 2]),   # [Ne, C, D, D]: heavier impurity first
+    ([6, 3, 1, 1], [12, 7, 2, 2]),     # [C, Li, D, D]
+])
+def test_a_lighter_second_impurity_with_a_d_main_ion_reads_as_in_1_4_0(Z, A):
+    """Review of PR #100, N1: with a hydrogenic main ion before the beam the
+    lighter species is a second impurity, not a main-ion candidate: the
+    block is read as 1.4.0 read it (nz1 the first impurity's), bit for
+    bit."""
+    pf = _pf(Z, A, nb=0.05)
+    r = pf.ion_roles()
+    assert (r["impurity"], r["main"], r["beam"]) == (0, 2, 3)
+    nz1_old, zeff_old = _zeff_140(pf)
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        pf.compute_quasineutrality()
+    np.testing.assert_array_equal(pf._get_data("nz1"), nz1_old)
+    np.testing.assert_array_equal(pf.compute_zeff()[1], zeff_old)

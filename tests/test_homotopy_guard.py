@@ -130,11 +130,32 @@ def test_a_jump_that_persists_at_an_eighth_is_a_crossing():
     assert w["n_solves"] <= 2 + 8 + 1
 
 
-def test_a_failed_substep_is_failed():
-    m = _Branches(fail_at=0.25)
+def test_a_substep_that_does_not_solve_is_backed_off():
+    """A sub-step that raises is retried at half the step, like a jump:
+    here s = 0.5 jumps and s = 0.25 fails, s = 0.125 solves, and the walk
+    goes on in eighths (the step never grows again)."""
+    class _Once(_Branches):
+        def solve_from(self, state, s):
+            if state["s"] == 0.0 and abs(s - 0.25) < 1e-12:
+                raise RuntimeError("maxits")
+            return super().solve_from(state, s)
+    m = _Once()
     w = H.continue_in_halves(m.solve_from, dict(_START), (R0, 0.0), A)
-    assert w["outcome"] == "failed"
-    assert "maxits" in w["steps"][-1]["error"]
+    assert w["outcome"] == "completed" and w["state"]["branch"] == "A"
+    assert "maxits" in w["steps"][1]["error"]
+    assert [round(x["s"], 3) for x in w["steps"][:3]] == [0.5, 0.25, 0.125]
+
+
+def test_a_substep_that_never_solves_is_failed():
+    class _Never(_Branches):
+        def solve_from(self, state, s):
+            if s - state["s"] < 0.6:
+                raise RuntimeError("maxits")
+            return super().solve_from(state, s)
+    w = H.continue_in_halves(_Never().solve_from, dict(_START), (R0, 0.0), A)
+    assert w["outcome"] == "failed" and w["s_reached"] == 0.0
+    assert all("maxits" in x["error"] for x in w["steps"])
+    assert [round(x["s"], 3) for x in w["steps"]] == [0.5, 0.25, 0.125]
     assert H.classify(w, (R0, -0.017), A) == ("failed", None)
 
 
@@ -283,7 +304,7 @@ def test_branch_hopping_leaves_the_draw_on_its_branch():
 @pytest.mark.parametrize("model, action, path", [
     (_Branches(slope_mm=20.0, basin=10.0), "legitimate", "continuous"),
     (_Branches(s_fold=0.6), "crossed", "crossed"),
-    (_Branches(fail_at=0.25), "failed", "continuous")])
+    (_Branches(fail_at=0.125, basin=0.0), "failed", "continuous")])
 def test_otherwise_the_jumped_state_is_kept(model, action, path):
     gs, g, st = _stage(model)
     assert st["fired"] is True and st["action"] == action

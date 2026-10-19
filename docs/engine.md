@@ -1136,7 +1136,8 @@ solve_stage` (`DrawMethod.homotopy_guard`; the engine only, refused under
   branch hopping, the continuous state is kept (`"held"`, the ONE outcome
   that changes a draw); a jump that persists at 1/8 -- the branch ends
   inside the stage, the jumped state is restored and the path is stamped
-  `"crossed"`; a sub-step that fails to solve -- the jumped state is
+  `"crossed"`. A sub-step that does not solve (the iteration cap) is backed
+  off like a jump; one that still fails at 1/8 -- the jumped state is
   restored (`"failed"`). A restore is exact: on the live solver a firing
   that keeps the jumped state leaves the archived draw bit-identical to the
   unguarded one (`tests/test_homotopy_guard_solver.py`).

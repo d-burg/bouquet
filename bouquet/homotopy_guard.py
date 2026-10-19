@@ -49,8 +49,9 @@ becomes the new starting state.  Then:
 * a sub-step of ``GUARD_MIN_STEP`` still jumps: the draw's branch ends inside
   the stage (a fold) -- a boundary crossing; the jumped state is restored and
   the draw's path is stamped ``"crossed"``;
-* a sub-step solve fails (an exception, the iteration cap): the jumped state
-  is restored (``"failed"``).
+* a sub-step solve that fails (an exception, the iteration cap) is backed
+  off like a jump; one that still fails at the smallest sub-step: the jumped
+  state is restored (``"failed"``).
 
 Nothing is accepted, refused or relabelled by the guard: every state it
 leaves the stage in is judged by the stage's own saturation test, the
@@ -96,8 +97,9 @@ GUARD_ACTION_MEANING = {
     "crossed": ("a stage jumped and the jump persisted at the smallest "
                 "sub-step (the branch ends inside the stage): the jumped "
                 "state was kept and the path is stamped crossed"),
-    "failed": ("a stage jumped and a continuation sub-step failed to "
-               "solve: the jumped state was kept"),
+    "failed": ("a stage jumped and a continuation sub-step still failed "
+               "to solve at the smallest sub-step: the jumped state was "
+               "kept"),
 }
 
 
@@ -132,7 +134,9 @@ def continue_in_halves(solve_from, start_state, start_axis, minor_radius_m,
     ``solve_from(state, s) -> (state, axis)`` solves at objective *s* from
     *state* (it may raise).  A sub-step whose axis moved more than
     ``threshold x a`` from the state it started from is rejected and retried
-    at half the step; below *min_step* the jump PERSISTS.  The step never
+    at half the step; below *min_step* the jump PERSISTS.  A sub-step that
+    raises (does not solve) is retried at half the step likewise; below
+    *min_step* the walk FAILED.  The step never
     grows again after a halving, so the walk takes at most
     ``log2(first_step/min_step) + 1/min_step`` solves (11 at the defaults).
 
@@ -148,12 +152,17 @@ def continue_in_halves(solve_from, start_state, start_axis, minor_radius_m,
         try:
             new_state, new_axis = solve_from(state, s)
         except Exception as exc:                    # noqa: BLE001
+            # a sub-step that does not solve (the iteration cap) is backed
+            # off like a jump: retried at half the step, down to min_step
             steps.append(dict(s_from=s_done, s=s, displacement_frac_a=None,
                               accepted=False,
                               error=f"{type(exc).__name__}: "
                                     f"{str(exc).strip()[:200]}"))
-            return dict(outcome="failed", s_reached=s_done, state=state,
-                        axis=axis, steps=steps, n_solves=len(steps))
+            if ds / 2.0 < float(min_step) - 1e-12:
+                return dict(outcome="failed", s_reached=s_done, state=state,
+                            axis=axis, steps=steps, n_solves=len(steps))
+            ds /= 2.0
+            continue
         d = step_displacement_frac(axis, new_axis, minor_radius_m)
         ok = d is not None and not jumped(d, threshold)
         steps.append(dict(s_from=s_done, s=s, displacement_frac_a=d,

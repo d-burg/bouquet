@@ -114,7 +114,7 @@ def test_gradients_at_each_draws_own_q2_surface(stamped):
         assert s.surface["psi_N_by_draw"][d] == pytest.approx(x, rel=1e-12)
         psi, q = _q(p, key, d)
         assert np.interp(x, psi, q) == pytest.approx(2.0, rel=1e-6)
-    for name, ds in (("dp_dpsi", "pressure"), ("djphi_dpsi", "j_phi")):
+    for name, ds in (("dp_dpsi", "pressure"), ("djphi_dpsi", "jphi_total")):
         r = s[name]
         assert r.n_used == len(has)
         for d, x in has.items():
@@ -215,7 +215,7 @@ def test_phi_n_profiles_are_mapped_through_the_draws_own_q(stamped, tmp_path):
             phi /= phi[-1]
             phi_grid = np.linspace(0.0, 1.0, 513)           # a Phi_N-uniform run grid
             psi_at = np.interp(phi_grid, phi, xe)            # independent of the helper
-            for ds, f in (("pressure", P), ("j_phi", J)):
+            for ds, f in (("pressure", P), ("jphi_total", J)):
                 del g[ds]
                 g[ds] = f(psi_at)
             del g["psi_N"]

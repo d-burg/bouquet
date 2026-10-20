@@ -18,7 +18,7 @@ with the couplings the engine has to handle:
   the flux range fixed;
 * **the Redl bootstrap follows the geometry** (``~ 1/dpsi``: gradients per
   unit flux);
-* **q at the row radius** ``~ 1 / j_phi(axis)`` of the delivered current;
+* **q at the row radius** ``~ 1 / jphi_total(axis)`` of the delivered current;
 * **pitch angles**: ``B_Z / B_phi`` at a few chords from the delivered
   enclosed current.
 
@@ -218,7 +218,7 @@ class ToyGS:
         st = self.state
         g = dict(st["geom"])
         g["li_geom"] = self.li_geom(g)
-        out = dict(geom=g, redl=self._redl_profile(st["dpsi"], self.kin),
+        out = dict(geom=g, jdotB_bs=self._redl_profile(st["dpsi"], self.kin),
                    li=st["li"],
                    q_row=self.q_at(st, float(g["psi_q"][0])), Ip=self.Ip,
                    achieved=st["A"].copy())

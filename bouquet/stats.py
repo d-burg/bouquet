@@ -1469,11 +1469,11 @@ SUMMARY_SCALARS = {
 #: each is d(dataset)/d(psi_N) of the draw's own archived profile
 SUMMARY_GRADIENTS = {
     "dp_dpsi": ("pressure", "Pa/psi_N"),
-    "djphi_dpsi": ("j_phi", "A m^-2/psi_N"),
+    "djphi_dpsi": ("jphi_total", "A m^-2/psi_N"),
 }
 GRADIENT_DEFINITION = (
     "d(profile)/d(psi_N) of the draw's own archived profile (pressure: the "
-    "'pressure' dataset [Pa]; j_phi: the 'j_phi' dataset [A m^-2]), by "
+    "'pressure' dataset [Pa]; jphi_total: the 'jphi_total' dataset [A m^-2]), by "
     "second-order central differences (numpy.gradient) on the archived grid "
     "(mapped to psi_N through the draw's own q when the profile coordinate "
     "is Phi_N), linearly interpolated to the evaluation surface")
@@ -1644,7 +1644,7 @@ def bands_summary(archive, scan_key=None, *,
 
     ``gradients``: names from :data:`SUMMARY_GRADIENTS` -- ``dp_dpsi`` and
     ``djphi_dpsi``, the derivative with respect to psi_N of the draw's own
-    archived ``pressure`` [Pa] and ``j_phi`` [A m^-2] profiles
+    archived ``pressure`` [Pa] and ``jphi_total`` [A m^-2] profiles
     (:data:`GRADIENT_DEFINITION`), evaluated on each draw at its OWN
     surface:
 
@@ -1784,8 +1784,9 @@ def bands_summary(archive, scan_key=None, *,
                    ("no_q_profile" if psi is None else "no_surface"))
 
     def _gradient(view, name, psi_s, eq_fn):
-        ds = SUMMARY_GRADIENTS[name][0]
+        from .schema import stored_name
         prof = view.profiles
+        ds = stored_name(prof, SUMMARY_GRADIENTS[name][0])   # a pre-v4 archive: j_phi
         if ds not in prof or "psi_N" not in prof:
             return {"value": _NAN, "status": f"no_{ds}"}
         y = np.asarray(prof[ds], float)

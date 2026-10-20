@@ -5,7 +5,7 @@ No GS solver: every solve is a mock.  The live counterparts are in
 
 * **Coil saturation (B1).**  The homotopy treats a bounded solve whose coil
   drift reaches ``COIL_SATURATION_FRACTION`` (0.99) of its bound as
-  infeasible.  The post-homotopy j_BS passes and the draw's j_BS loop passes
+  infeasible.  The post-homotopy jphi_bs passes and the draw's jphi_bs loop passes
   under the hard coil bounds re-solve at installed bounds too, so they must
   apply the SAME criterion and reject a saturated draw -- a check added, not a
   bar moved.
@@ -105,9 +105,9 @@ def _ph_setup(monkeypatch, kind):
                                                 None),
                spike_used=1.0015 * Jstar, cand=j_ind.copy(),
                j_ind_used=j_ind.copy(), j_fixed_eff=np.zeros_like(x),
-               pres_tmp=1e4 * (1.0 - x ** 2) + 10.0, input_j_phi=j_ind + Jstar,
-               r2_mode="legacy", j_phi_request=j_ind + Jstar,
-               isolate_edge_jBS=False)
+               pres_tmp=1e4 * (1.0 - x ** 2) + 10.0, jphi_total_input=j_ind + Jstar,
+               r2_mode="legacy", jphi_total_request=j_ind + Jstar,
+               isolate_edge_jbs=False)
     return TI, x, ctx, calls, jbs_settings(_GC(), draw=True)
 
 
@@ -218,7 +218,7 @@ def test_a_draw_inside_tolerance_takes_no_pass_and_no_check(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-#  B1: the draw's j_BS loop passes under the hard coil bounds
+#  B1: the draw's jphi_bs loop passes under the hard coil bounds
 # ---------------------------------------------------------------------------
 def test_the_draw_loop_guards_every_pass_under_the_hard_bounds_only():
     """Every loop pass's measurement goes through the guard, which is live

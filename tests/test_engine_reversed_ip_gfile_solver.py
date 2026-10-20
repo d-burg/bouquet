@@ -47,13 +47,13 @@ import test_engine_reversed_ip_gfile as F  # noqa: E402
 #: Provenance -- measured on the first run (2026-10-05, bouquet ee69a60, the
 #: fixed OpenFUSIONToolkit build at fork commit 7da4f18, one thread), as
 #: max|delta| / max|reference| per array against the unmirrored file, worst
-#: over the two Ip mirrors (Ip and Ip+B_t, identical): j_BS 5.34e-5,
-#: j_phi 1.97e-5, j_inductive 7.35e-6, j_NBI / j_RF 0; l_i 1.3e-7 relative.
+#: over the two Ip mirrors (Ip and Ip+B_t, identical): jphi_bs 5.34e-5,
+#: jphi_total 1.97e-5, jphi_ind 7.35e-6, jphi_nbi / jphi_rf 0; l_i 1.3e-7 relative.
 #: The B_t mirror is bitwise (asserted separately).  Margin on the worst
-#: array (j_BS): 1e-4 / 5.34e-5 = 1.9x.
+#: array (jphi_bs): 1e-4 / 5.34e-5 = 1.9x.
 _IP_MIRROR_REL = 1e-4
 
-_ARRAYS = ("j_phi", "j_inductive", "j_BS", "j_NBI", "j_RF")
+_ARRAYS = ("jphi_total", "jphi_ind", "jphi_bs", "jphi_nbi", "jphi_rf")
 
 
 def _oft_importable():
@@ -140,7 +140,7 @@ def test_every_orientation_converges_and_delivers(solved, o):
     r = solved[o]
     assert "error" not in r, r.get("error")
     assert r["converged"] and r["delivered_ok"], r["misses"]
-    assert float(np.trapezoid(r["arrays"]["j_phi"])) > 0.0  # positive frame
+    assert float(np.trapezoid(r["arrays"]["jphi_total"])) > 0.0  # positive frame
 
 
 @pytest.mark.solver

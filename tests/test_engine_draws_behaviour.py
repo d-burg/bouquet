@@ -4,7 +4,7 @@ review's surviving mutants and stand-ins that enforced what they asserted).
 On the toy Grad-Shafranov stand-in (``tests/_engine_toy.py``), each test runs
 the package's own code path and observes its effect:
 
-* the draw starts its loop from ``lambda_BS*`` plus the KINETIC increment of
+* the draw starts its loop from ``lambda_bs*`` plus the KINETIC increment of
   Redl on the starting state (mutant D3);
 * with ``engine_delivery_correction`` on, every pass's correction is the
   previous pass's own ``intended - achieved`` (mutant D7);
@@ -142,7 +142,7 @@ def test_post_homotopy_runs_its_passes_when_the_homotopy_moved_the_draw(
     # the delivered state now passes the check it failed
     m = b.measure()
     g = complete_geometry(m["geom"])
-    chk = check_delivered(np.asarray(m["redl"], dtype=float), jbs,
+    chk = check_delivered(np.asarray(m["jdotB_bs"], dtype=float), jbs,
                           g["w_lin"] * conversion_factor(g), ctx.psi,
                           float(ctx.c.Ip), s)
     assert chk["ok"], chk

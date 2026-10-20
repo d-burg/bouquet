@@ -44,11 +44,11 @@ Baseline: g-file + profiles (p-file / IDA), or IMAS/OMAS JSON
             ▼
 ┌────────────────────────┐
 │  Derive n_i (quasi-    │  Z_eff-primary density scheme
-│  neutrality) + p_total │  + fixed p_fast / j_NBI / j_RF
+│  neutrality) + p_total │  + fixed p_fast / jphi_nbi / jphi_rf
 └───────────┬────────────┘
             ▼
 ┌────────────────────────┐
-│  Rebuild j_phi         │  j_ind (GPR) + j_BS (Sauter, per-draw)
+│  Rebuild jphi_total         │  j_ind (GPR) + jphi_bs (Sauter, per-draw)
 │  Match pressure & l_i  │  + fixed anchors; secant l_i iteration
 └───────────┬────────────┘
             ▼
@@ -74,7 +74,7 @@ logic map with a `file:line` anchor on every node:
 |---|---|---|
 | Solver | `setup_solver()` | Stands up the TokaMaker object from `SolverConfig` (mesh, order, isoflux/saddle constraints, VSC definition). Idempotent. |
 | Baseline | `prepare()` / `reconstruct()` / `prepare_baseline()` | Resolves the baseline from `config.source`. `reconstruct()` is the g-file-path alias (`setup_solver()` + `prepare_baseline()`) and prints the reconstruction-fidelity summary; `prepare()` is the source-agnostic form. The IMAS path does a single forward solve instead of a reconstruction. |
-| Guard | `verify_sigma0_consistency()` | Optional but recommended: one bootstrap solve confirming the *draw* pipeline reproduces the *baseline* j_BS split at σ=0. See [physics-notes.md](physics-notes.md#the-0-consistency-guard). |
+| Guard | `verify_sigma0_consistency()` | Optional but recommended: one bootstrap solve confirming the *draw* pipeline reproduces the *baseline* jphi_bs split at σ=0. See [physics-notes.md](physics-notes.md#the-0-consistency-guard). |
 | Draws | `generate(n=None)` | Draws `n` (default `GenerationConfig.n_equils`) perturbations, solves each, archives to `{header}.h5`. Returns the per-draw diagnostics list. With `generation.n_inspec_target` set, keeps drawing until that many pass the filters — see [until-N](#until-n-in-spec-draws). |
 | Selection | `filter(rms_max_mm=None, plot=False)` | Applies the coil-drift and boundary-RMS filters, writing non-destructive pass flags into the archive. `rms_max_mm=None` applies `filtering.rms_max_mm`; a number, `"auto"` or `"off"` overrides it for this call (announced and stamped). Returns a summary dict. |
 | Export | `export()` / `export_bundle()` / `export_ids()` | Pruned `{header}_selected.h5`, a per-draw file bundle, or one IMAS/OMAS IDS per draw. |
@@ -93,12 +93,12 @@ non-default knobs), `archive` (its `BouquetArchive`), `selected_indices()`,
 | Z_eff | ✓ | Active channel (on by default; `zeff_scalar_sigma=0.0` turns it off) |
 | n_i, n_z (impurity) | derived | Quasi-neutrality with the drawn Z_eff (`impurity_Z`) |
 | Total pressure (p_tot) | ✓ | Recomputed from the perturbed kinetics |
-| Bootstrap current (j_BS) | ✓ | Sauter model recomputed per draw (`recalculate_j_BS`) |
+| Bootstrap current (jphi_bs) | ✓ | Sauter model recomputed per draw (`recalculate_jbs`) |
 | Inductive current (j_ind) | ✓ | GPR-perturbed, then scaled to match l_i |
 | Coil currents | ✓ | Adjusted by TokaMaker within the homotopy bounds |
 | Aux channels (ω_tor, E_r, χ_e, χ_i) | optional | Switchboard: perturbed + stored when sigmas are supplied (passive) |
-| p_fast, j_NBI, j_RF, j_other | ✗ | Fixed additive components, never perturbed (`j_other`: fusion, runaways, sawteeth and unknown-index core_sources entries on the IMAS path) |
-| Equilibrium anchors (p_diff, jphi_diff, jBS_diff) | ✗ | Fixed offsets applied to the baseline **and** every draw |
+| p_fast, jphi_nbi, jphi_rf, jphi_other | ✗ | Fixed additive components, never perturbed (`jphi_other`: fusion, runaways, sawteeth and unknown-index core_sources entries on the IMAS path) |
+| Equilibrium anchors (p_diff, jphi_diff, jphi_bs_diff) | ✗ | Fixed offsets applied to the baseline **and** every draw |
 
 ## Configuration reference
 
@@ -112,9 +112,10 @@ is a navigational summary of the defaults.
 
 | Knob | Default | Meaning |
 |---|---|---|
-| `mesh_path` | *(required)* | TokaMaker mesh; `bq.find_mesh()` resolves it |
+| `mesh_path` | *(required)* | TokaMaker mesh; `bq.find_mesh()` resolves it. Loaded by `utils.load_mesh`: the detected device's turn-table coils (DIII-D F coils) at `nturns` 1, so their currents are ampere-turns whatever turns the mesh carries (OFT #268's DIII-D mesh: 58 / 55) |
 | `nthreads` | `1` | **Keep at 1.** OpenMP reduction order is non-deterministic and jitters `l_i(1)` by ~1%; parallelise across processes instead |
 | `order` | `3` | FE order |
+| `nl_tol` | `None` | TokaMaker's Picard tolerance for every solve; `None`: OpenFUSIONToolkit's default (1e-6) |
 | `F0` | `None` | Vacuum `R·B_t`; defaults from the g-file / IDS |
 | `isoflux_pts`, `isoflux_weights` | `None` | Boundary (isoflux) constraint points and weights, **used as given** (never resampled; points without weights get per-length weights summing to `ISOFLUX_WEIGHT_TOTAL` under the unified engine, with a UserWarning). Default (unified engine, #84): the source boundary resampled to `solver_geometry.N_ISOFLUX` = 256 points by arc length, X-points kept exactly, each point weighted by the arc length it represents, the weights summing to `solver_geometry.ISOFLUX_WEIGHT_TOTAL` = 2e5 (a constant inside a measured window: engine.md "The boundary constraint: a constant total inside a measured window"), or `isoflux_weight_total` when set -- one set for the reconstruction and the draws, whatever the source's point count. Legacy route: the source boundary as given at `ISOFLUX_WEIGHT` = 500 per point. See [The boundary constraint](#the-boundary-constraint-per-unit-length-84) |
 | `isoflux_weight_total` | `None` | The total weight of the unified engine's standard boundary set. `None`: the constant `solver_geometry.ISOFLUX_WEIGHT_TOTAL` = 2e5, inside the measured window (engine.md, "The boundary constraint: a constant total inside a measured window"; stamped as `isoflux_weight_mode` "constant"). A number: an explicit OVERRIDE, installed as given, stamped "override". Also the total of an `isoflux_pts` set given without weights |
@@ -178,7 +179,7 @@ stored config carrying it still loads.
 | `te_scalar_sigma` | `None` | " (was `0.05`) |
 | `ni_scalar_sigma` | `None` | " (the derived-n_i template row; was `0.10`; used only when `ni_from_zeff` resolves False) |
 | `ti_scalar_sigma` | `None` | " (was `0.10`) |
-| `jphi_scalar_sigma` | `0.10` | Inductive-current envelope. **Must be > 0** — setting it to 0 freezes `j_inductive` and trips the workflow guard |
+| `jphi_scalar_sigma` | `0.10` | Inductive-current envelope. **Must be > 0** — setting it to 0 freezes `jphi_ind` and trips the workflow guard. `solve_method="swb"` applies it as a relative width on the inductive seed (`swb.swb_jind_sigma`), not on `|jphi_total|` |
 | `zeff_scalar_sigma` | `None` | One Z_eff perturbation per draw; n_i / n_z follow from quasi-neutrality. The width of the bottom (assumed) tier below: `None` = the Z_eff template (was `0.05`), a number = a flat fraction, `0.0` = the channel off |
 | `zeff_sigma_source` | `"auto"` | Which tier supplies the Z_eff envelope's **magnitude**: `"auto"` / `"carbon"` / `"measured"` / `"scalar"` — see the ladder below |
 | `ni_from_zeff` | `None` (auto) | With the Z_eff channel on: `True` derives n_i per draw from the drawn (n_e, Z_eff) as an increment on the baseline n_i; `False` draws n_i from its own σ and Z_eff passively after T_i (different RNG order). Auto: `True` (n_i always derived, as before PR #56). On a measured `ni_source` (the `ida_hybrid` default) auto is the PR #56 rule: `True` when n_i's σ is the scalar fallback, or n_i and the Z_eff envelope are the same IDA resolution (tier `"IDA-resolved"`); `False` for any other real n_i envelope. That rule follows the Z_eff tier: pin it for an A/B of Z_eff envelopes |
@@ -209,7 +210,7 @@ engine run Φ_N as well.
 - Every solve tags its profiles with the run coordinate.
 - After each solve the run nodes are mapped to ψ_N on that equilibrium's own
   toroidal-flux map (`get_torflux_map`, inverse), and the Redl evaluation
-  (`physics.evaluate_jBS(..., coord=)`), the loop's residual weights and the
+  (`physics.evaluate_jbs(..., coord=)`), the loop's residual weights and the
   FSA current integrals work on those ψ_N. This is what OFT's Fortran bootstrap
   does: kinetic values at the mapped nodes, gradients numerical in ψ.
 - The engine's structured basis lives on the run grid, so the closure
@@ -343,27 +344,29 @@ as an enormous sigma.
 | `n_equils` | `20` | Draws to attempt — or, with `n_inspec_target` set, the initial allocation |
 | `n_inspec_target` | `None` | Draw **until N draws are in spec** ([the in-spec rule](#the-in-spec-rule): by default the coil test and the boundary cut) rather than exactly `n_equils`. See [until-N](#until-n-in-spec-draws) below |
 | `max_total_draws` | `None` | Attempt cap for `n_inspec_target` (default `5 ×` the target, never below `n_equils`). Hitting it is a loud, non-fatal outcome |
-| `seed` | `None` | The run's one RNG seed. Consumed once into a single `numpy.random.Generator` threaded into every draw (GPR kinetic/aux/j_φ, the per-draw `scale_jBS`, the per-draw l_i target), so the same seed + inputs + solver gives a **bitwise-identical** archive on one machine (across machines the draws agree to ~1e-9, not bitwise -- LAPACK/BLAS). `None` = OS entropy |
+| `seed` | `None` | The run's one RNG seed. Consumed once into a single `numpy.random.Generator` threaded into every draw (GPR kinetic/aux/j_φ, the per-draw `scale_jbs`, the per-draw l_i target), so the same seed + inputs + solver gives a **bitwise-identical** archive on one machine (across machines the draws agree to ~1e-9, not bitwise -- LAPACK/BLAS). `None` = OS entropy |
 | `scan_key` | `0` | Label for this bouquet within the archive (`scan/<key>/`) — a time in ms, a beta value, … |
 | `l_i_tolerance` | `None` | **Opt-in** fractional l_i(3) band of the in-spec rule, `\|l_i - l_i*\| <= l_i_tolerance * l_i*` around the reconstruction's l_i (a **fraction**: `0.05` = ±5 %). `None` = no l_i band (**default since 2026-10-14**, owner decision; it was `0.05` and applied to every engine draw). The legacy routes also *construct* their draws with it (rejection sampling inside the draw, not a filter): unset, they use the old `0.05`. See [the in-spec rule](#the-in-spec-rule) |
 | `l_i_sigma` | `None` | **Opt-in** l_i(3) band from a **stated measurement uncertainty** (absolute 1σ of an MSE / diamagnetic fit): `\|l_i - l_i*\| <= inspec_band_nsigma * l_i_sigma`. Exclusive with `l_i_tolerance`; unified engine only (refused on the legacy routes at `generate()`; `refilter_inspec` applies it to any archive afterwards) |
 | `beta_p_target` / `beta_p_sigma` | `None` / `None` | **Opt-in** β_p band for a diamagnetic measurement (both or neither): `\|β_p - beta_p_target\| <= inspec_band_nsigma * beta_p_sigma`, β_p of the full-pressure frame (see [Λ](physics-notes.md#lambda--beta_p--l_i2-reported-never-filtered)). Unified engine only, as `l_i_sigma` |
 | `inspec_band_nsigma` | `2.0` | Half-width of a σ band (`l_i_sigma`, `beta_p_sigma`) in σ |
 | `constrain_sawteeth` | `False` | Gate draws on q0 ≥ 1 (unified engine: a post-hoc gate of the in-spec rule, `+q0` in its name; legacy routes: inside the draw construction) |
-| `recalculate_j_BS` | `True` | Recompute the Sauter bootstrap per draw (vs. reusing the baseline's) |
-| `single_profile_jphi` | `False` | Legacy path: perturb the TOTAL `j_phi` as one profile (no inductive / bootstrap split; no per-draw Sauter call). `jphi_scalar_sigma` then applies to the total, a larger absolute perturbation -- re-tune it. Needs `jbs_self_consistent=False` (refused otherwise); the unified engine refuses it |
-| `jBS_scale_range` | `(0.99, 1.01)` | Legacy draws: the per-draw multiplicative spread of the bootstrap (uniform in the range; default `None` -> `(0.99, 1.01)` on 2026-06-04). The baseline's multiplier (`bs_scale` / `s_bs(ψ)`) is applied after SWB on SWB draws and re-centres this range on loop draws -- see [physics-notes.md](physics-notes.md) ("The bootstrap multiplier") |
-| `swb_seed` | `None` | IMAS path, every legacy SWB call (baseline split, draws, σ=0 check): `"source"` seeds SWB with the source's `j_inductive` and holds its NBI + RF + other current fixed (`jphi_fixed`); `"generic"` the `(1 - s^1.5)^1.5` seed. `None` resolves at `prepare_baseline()` to `"source"` when the installed OFT's `solve_with_bootstrap` takes `jphi_fixed`, else `"generic"` -- never an error; an explicit `"source"` on a toolkit without `jphi_fixed` is refused at the first SWB call only. Stamped in `li_metrics["swb_seed"]` |
+| `jphi_band_nsigma` / `core_gradient_ratio` | `None` / `None` | swb only: the core-current checks of the in-spec rule (`+jphi`, `+jgrad`), judged on each draw's solved `jphi_total` inside the pedestal top (`filtering.pedestal_top`: the baseline's current minimum between x = 0.5 and its edge peak): within `jphi_band_nsigma` × the baseline's `sigma_jphi` of the baseline's current, and the steepest d`jphi_total`/d√x at most `core_gradient_ratio` × the baseline's. They remove the draws whose single-solve sawtooth reset leaves an unrelaxed current step. Counted by until-N; `refilter_inspec` applies them to any archive |
+| `recalculate_jbs` | `True` | Recompute the Sauter bootstrap per draw (vs. reusing the baseline's) |
+| `single_profile_jphi` | `False` | Legacy path: perturb the TOTAL `jphi_total` as one profile (no inductive / bootstrap split; no per-draw Sauter call). `jphi_scalar_sigma` then applies to the total, a larger absolute perturbation -- re-tune it. Needs `jbs_self_consistent=False` (refused otherwise); the unified engine refuses it |
+| `jbs_scale_range` | `(0.99, 1.01)` | Legacy draws: the per-draw multiplicative spread of the bootstrap (uniform in the range; default `None` -> `(0.99, 1.01)` on 2026-06-04). The baseline's multiplier (`bs_scale` / `s_bs(ψ)`) is applied after SWB on SWB draws and re-centres this range on loop draws -- see [physics-notes.md](physics-notes.md) ("The bootstrap multiplier") |
+| `swb_seed` | `None` | IMAS path, every legacy SWB call (baseline split, draws, σ=0 check): `"source"` seeds SWB with the source's `jphi_ind` and holds its NBI + RF + other current fixed (`jphi_fixed`); `"generic"` the `(1 - s^1.5)^1.5` seed. `None` resolves at `prepare_baseline()` to `"source"` when the installed OFT's `solve_with_bootstrap` takes `jphi_fixed`, else `"generic"` -- never an error; an explicit `"source"` on a toolkit without `jphi_fixed` is refused at the first SWB call only. Stamped in `li_metrics["swb_seed"]` |
 | `solve_method` | `None` | The internal solve method: `"legacy"` (**deprecated in 1.4.0, removed in 1.5, #90**; one `DeprecationWarning` per run), `"swb"` (**EXPERIMENTAL**, [`swb_solve_method`](#experimental-features-and-their-validation-status); `solve_with_bootstrap` is the baseline and every draw; IMAS sources) or `"engine"` (the unified engine). `None` derives it from `imas_baseline` / `reconstruction_engine`. Nothing is rewritten at construction; the effective fields are set where the run is resolved (`prepare_baseline()`, the draw method, the solver setup) and a later switch back restores the user's own fields. A contradicting pair (`imas_baseline="swb"` with another method, `reconstruction_engine="legacy"` with `"engine"`) is refused |
 | `imas_baseline` | `"closure"` | IMAS path: `"swb"` (**EXPERIMENTAL**, [`swb_solve_method`](#experimental-features-and-their-validation-status)) selects the swb method (solve A at the setup coil reg, solve B with a strong reg toward A's coils is the baseline, every draw is solve B with resampled kinetics and a GPR redraw of the inductive seed; 20 negative redraws refuse the draw, `swb_jind_redraw_refused`) |
 | `swb_coil_reg_weight` | `1e3` | swb only: weight of solve B's (and every draw's) coil reg toward solve A's coils |
-| `swb_edge_taper_psi0` | `None` | swb only: taper `j_phi` to zero from this ψ_N to the LCFS in every SWB solve (OFT `taper_edge_jBS`). **Opt-in** (owner decision D4; was 0.999): `None` is off and is sent as `taper_edge_jBS=False` where the toolkit has the option (a toolkit whose own default is taper-on keeps it on otherwise; such a taper with the setting off warns). The channel taper factor is measured, not assumed |
+| `swb_edge_taper_psi0` | `None` | swb only: taper `jphi_total` to zero from this ψ_N to the LCFS in every SWB solve (OFT `taper_edge_jphi`). **Opt-in** (owner decision D4; was 0.999): `None` is off and is sent as `taper_edge_jphi=False` where the toolkit has the option (a toolkit whose own default is taper-on keeps it on otherwise; such a taper with the setting off warns). The channel taper factor is measured, not assumed |
+| `swb_taper_source` | `False` | swb only, needs `swb_edge_taper_psi0`: the read-in SWB currents (inductive seed, `jphi_fixed`, sawteeth input) are zeroed on the LCFS node, where the taper weight is 0 (the solve is unchanged), and any negative node left in the inductive seed is clipped to 0 (warned); each draw's seed redraw is clipped to 0 too (`swb_jind_clipped`) instead of redrawn. Lets a source seed negative at the LCFS be drawn. Stamped on `_baseline`: `swb_taper_source`, `swb_source_edge_zeroed`, `swb_source_clipped` (`swb_source_clip_min` when clipped) |
 | `swb_ip_tol` | `5e-3` | swb only: the largest `|Ip/Ip_target - 1|` an swb solve (solve A, solve B, every draw) is accepted at; beyond it the solve raises. Validated in (0, 1); stamped on `_baseline` (`swb_ip_tol`, `swb_ip_rel_err`, `swb_ip_rel_err_solve_A`) and per draw (`swb_ip_rel_err`); a solve accepted above 1e-4 (the engine's acceptance) warns. Value pending owner decision E6 |
 | `swb_saw_q` / `swb_saw_dq` / `swb_saw_tol` / `swb_saw_ramp` / `swb_saw_rule` | `None` / `0.03` / `1e-4` / `0.01` / `"local"` | swb only: the sawtooth q reset inside SWB (OFT `saw_q_s` ...; `None` = off). Set from these fields, never from `bootstrap_kwargs` |
 | `jbs_delta_mode` | `False` | Opt-in differential bootstrap composition — see [physics-notes.md](physics-notes.md#differential-bootstrap-jbs_delta_mode) |
-| `isolate_edge_jBS` | `None` | Legacy path only. `None` is resolved per engine at `prepare_baseline()`: **`False`** under `reconstruction_engine="legacy"` (both input types; the unified forward decomposition -- pure-ohmic `j_inductive`, full bootstrap in `j_BS` -- closes exactly and yields better), `True` under `"unified"` (never read; the engine refuses `False`). Set `True` explicitly only for dedicated edge-spike studies (kept, with a warning). Recorded in the archive ([engine.md](engine.md)) |
-| `jBS_baseline_mode` | `"diff"` | IMAS path: how the SWB bootstrap is reconciled with the source (`"diff"` / `"rescale"`) |
-| `closure_channel` | `"bootstrap"` | IMAS `jBS_baseline_mode="ohmic"` path: which component absorbs the Ip closure. `"bootstrap"` / `"ohmic"` (deprecated bracket) rescale one component by a scalar; `"sawtooth_bootstrap"` adds a q0 pin where sawteeth justify it; `"structured"` replaces the scalars with minimal-norm radial multiplier **profiles** `s_ind(ψ)`, `s_bs(ψ)` — see [physics-notes.md](physics-notes.md#the-structured-closure-and-its-l_i-constraint) |
+| `isolate_edge_jbs` | `None` | Legacy path only. `None` is resolved per engine at `prepare_baseline()`: **`False`** under `reconstruction_engine="legacy"` (both input types; the unified forward decomposition -- pure-ohmic `jphi_ind`, full bootstrap in `jphi_bs` -- closes exactly and yields better), `True` under `"unified"` (never read; the engine refuses `False`). Set `True` explicitly only for dedicated edge-spike studies (kept, with a warning). Recorded in the archive ([engine.md](engine.md)) |
+| `jbs_baseline_mode` | `"diff"` | IMAS path: how the SWB bootstrap is reconciled with the source (`"diff"` / `"rescale"`) |
+| `closure_channel` | `"bootstrap"` | IMAS `jbs_baseline_mode="ohmic"` path: which component absorbs the Ip closure. `"bootstrap"` / `"ohmic"` (deprecated bracket) rescale one component by a scalar; `"sawtooth_bootstrap"` adds a q0 pin where sawteeth justify it; `"structured"` replaces the scalars with minimal-norm radial multiplier **profiles** `s_ind(ψ)`, `s_bs(ψ)` — see [physics-notes.md](physics-notes.md#the-structured-closure-and-its-l_i-constraint) |
 | `structured_preset` | `None` → **`"li_soft_onesided"` on the `"structured"` channel** | A **named one-switch configuration**, resolved at construction (and again at the closure's entry point, for a channel set afterwards). `None` = no preference: with `closure_channel="structured"` that now resolves to the validated preset `"li_soft_onesided"` — σ_bs `(0.50, 0.30, 0.15, 0.10)`, σ_ind,down `(0.10, 0.40, 0.40, 0.40)`, σ_ind,up `(0.10, 0.10, 0.10, 0.40)`, `structured_soft=True`, `structured_ip_sigma_frac=0.005`, σ_li `0.04` **only** when `structured_li_target` is set; the raw shipped fields it replaces are the configuration that study superseded. **`"none"` is the opt-out**: it declines the default and reproduces those raw fields exactly. Explicit settings win unless they equal the field's own default, which a dataclass cannot distinguish from unset (a `UserWarning` names every field the preset filled and says `BY DEFAULT` when it was not named); an unknown name is refused; it does **not** change `closure_channel`, which stays `"bootstrap"`. The default steps aside for an explicit `structured_basis`, and does not fill `structured_ip_sigma_frac` next to an explicit `structured_ip_sigma`. The σ values are **relative-unit priors from one device and one `j_ind` source**, not device constants — elsewhere, a starting point to check against the recorded closure-health flags. Recorded as `structured_preset` / `structured_preset_source` (`default` vs `explicit`) — see [physics-notes.md](physics-notes.md#recommended-configuration) |
 | `structured_preset_in_force` / `structured_preset_source` / `structured_preset_fields` | (recorded) | Not settable (`init=False`): which preset is in force after resolution, how it got there (`"explicit"`, `"default"`, `"opt-out"`, `"default-declined-custom-basis"`, `"unset"`) and the fields it filled |
 | `structured_basis` / `structured_weights` | `None` | `"structured"`: the multiplier basis (default: four peak-normalised Gaussians at ψ_N 0.15/0.45/0.75/0.95) and the trust weights that pick among the exactly-closing profiles (default: the physics prior, or the preset's ladder where the preset applies). Weights are **W = 1/σ²**; `utils.sigma_from_weights` is the bridge. A **prior**, not a tolerance |
@@ -382,18 +385,18 @@ as an enormous sigma.
 | `q0_gate` | `1.1` | `closure_channel="sawtooth_bootstrap"` (and the engine's `"q0"` row): the axis row is admitted only where the source's sawtooth model is active at the slice OR its own axis `|q0_dd|` is at/below this value; otherwise the slice falls back to `"bootstrap"` with a printed note (`q0_gate_basis` recorded) |
 | `accept_anchor_inband` | `False` | Legacy draws (Fix B): when the reconstruction anchor's l_i is already in the band, accept the anchor and skip the scale search and the corrective iteration. Refused non-default under the unified engine |
 | `kinetic_source` | `"fuse"` | IMAS path: `"ida_hybrid"` takes n_e/T_e/T_i/ω_tor -- and by default (`ImasSource.ni_source="auto"`) Z_eff and n_i -- from an IDA `.cdf` while keeping FUSE currents / equilibrium / p_fast: one thermal-kinetics source per run, with the dd's fast-ion pressure the one declared cross-source input and its beam density subtracted from the IDA n_i (`ni_subtract_fast` follows `include_pfast`). The dd's Z_eff is an explicit choice (`ni_source="standard"`, or `zeff_from_fuse=True`); an IDA file with no Z_eff information is refused. `from_imas(ida_path=…)` selects it automatically |
-| `anchor_jtor_to_equilibrium` | `True` | IMAS path: anchor total j_phi to `equilibrium.profiles_1d.j_tor` rather than `core_profiles.j_tor` |
+| `anchor_jtor_to_equilibrium` | `True` | IMAS path: anchor total jphi_total to `equilibrium.profiles_1d.j_tor` rather than `core_profiles.j_tor` |
 | `anchor_pressure_to_equilibrium` | `False` | IMAS path: add the fixed `p_diff = equilibrium.pressure − p_reconstructed` offset |
-| `imas_corrective_jphi` | `False` | Opt-in corrective j_phi iteration on the IMAS baseline solve (still being validated) |
-| `floor_j_BS` | `False` | Clip negative bootstrap excursions; only needed with `isolate_edge_jBS=False` on sources that carry an inner negative lobe |
-| `bootstrap_kwargs` | `{}` | Keyword options passed through to `solve_with_bootstrap` on the **legacy** paths (e.g. `{"iterations": 2}`; replaces `swb_iterations`). Checked when the config is built **and whenever the attribute is reassigned**: a key outside the explicit allow-list `config.BOOTSTRAP_KWARGS_ALLOWED` is refused (a typo is refused with or without the toolkit), a key the call sites already set is refused, and on the legacy path a key the **installed** toolkit lacks (the internal-solve options `use_python_solve`, `use_sauter_eps`, `diagnose_bs`, `djBS_tol`, `saw_relax`, `taper_edge_*` exist only on a toolkit with the internal Fortran bootstrap solve) is refused -- warned instead while a stored config is loaded, so an archive written on another build reloads. Under the self-consistent loop SWB runs only for `jbs_init="swb"` and the jBS-delta / `DIFF_BS` caches (a non-empty dict is warned). It reaches **every** SWB call (reconstruction / IMAS baseline, caches, σ=0 check, draws): a stored `swb_iterations=n` (which reached only the draws) loads as `{"iterations": n}` with a warning that the baseline SWB now runs with it too. With `reconstruction_engine="unified"` only the engine's own keys are read -- the edge taper (`taper_edge_jBS`, `taper_edge_psi0`, `taper_edge_shape`; **off** by default, 0.999, quintic; implemented by bouquet, so no toolkit capability is needed) and `use_sauter_eps=True` (an accepted no-op: the engine's ε is `eps_definition`; `False` is refused, pointing at `eps_definition="a_over_R"`); any other key is refused (and dropped with a warning from a stored unified config, which never ran it) |
-| `eps_definition` | `"r_over_R_geo"` | The inverse aspect ratio of the Redl collisionalities **and** the major radius R in ν\*_e, ν\*_i (Sauter Eqs. 18b/18c), at every bouquet Redl evaluation (unified engine reconstruction and draws, legacy self-consistent loop, IMAS baseline loop, delta caches); engine-independent. `"r_over_R_geo"`: ε = (R_max − R_min)/(R_max + R_min), R_geo = (R_max + R_min)/2 in ν\* (Sauter 1999 / Redl 2021 "ε = r/R0"; OMFIT, FUSE). Opt-ins: `"half_width_over_fsa_R"`, (R_max − R_min)/(2⟨R⟩) with ⟨R⟩ in ν\*; `"a_over_R"`, ⟨a⟩/⟨R⟩ with ⟨R⟩ in ν\* (the pre-2026-10-09 evaluator, bit for bit). R_min/R_max/⟨R⟩ from `get_fsa` on every OFT build. Recorded in every loop record's `evaluate_jBS_version` and the `_baseline` attr `bootstrap_eps_json`. A stored config without the field replays with the default (warned); toolkit-internal `solve_with_bootstrap` calls do not read it: on `solve_method="swb"` and the frozen legacy route (`jbs_self_consistent=False`), whose bootstrap is the toolkit's, `bootstrap_eps_json` records the toolkit's own definition (`bootstrap: "toolkit solve_with_bootstrap"`; upstream OFT `<a>/<R>`; on the internal-solve toolkit what `bootstrap_kwargs["use_sauter_eps"]` selects, or "the toolkit's own default"), with the configured value as `eps_definition_configured`. See [physics-notes](physics-notes.md) |
-| `bootstrap_convergence_override` | `False` | **EXPERIMENTAL** ([`bootstrap_convergence_override`](#experimental-features-and-their-validation-status)). The explicit opt-in for the `bootstrap_kwargs` keys that change a **convergence criterion** of the toolkit's bootstrap solve (`config.BOOTSTRAP_CONVERGENCE_KWARGS`: `djBS_tol`, the j_BS freeze threshold; `saw_relax`). Without it such a key is refused; with it the key is accepted with a warning, and the archive's `config_json` records the flag and the values. Legacy paths only (the unified engine refuses those keys). A stored config that carries such a key from before the flag existed loads with it on, warned |
+| `imas_corrective_jphi` | `False` | Opt-in corrective jphi_total iteration on the IMAS baseline solve (still being validated) |
+| `floor_jbs` | `False` | Clip negative bootstrap excursions; only needed with `isolate_edge_jbs=False` on sources that carry an inner negative lobe |
+| `bootstrap_kwargs` | `{}` | Keyword options passed through to `solve_with_bootstrap` on the **legacy** paths (e.g. `{"iterations": 2}`; replaces `swb_iterations`). Checked when the config is built **and whenever the attribute is reassigned**: a key outside the explicit allow-list `config.BOOTSTRAP_KWARGS_ALLOWED` is refused (a typo is refused with or without the toolkit), a key the call sites already set is refused, and on the legacy path a key the **installed** toolkit lacks (the internal-solve options `use_python_solve`, `use_sauter_eps`, `diagnose_bs`, `djbs_tol`, `saw_relax`, `taper_edge_*` exist only on a toolkit with the internal Fortran bootstrap solve) is refused -- warned instead while a stored config is loaded, so an archive written on another build reloads. Under the self-consistent loop SWB runs only for `jbs_init="swb"` and the jBS-delta / `DIFF_BS` caches (a non-empty dict is warned). It reaches **every** SWB call (reconstruction / IMAS baseline, caches, σ=0 check, draws): a stored `swb_iterations=n` (which reached only the draws) loads as `{"iterations": n}` with a warning that the baseline SWB now runs with it too. With `reconstruction_engine="unified"` only the engine's own keys are read -- the edge taper (`taper_edge_jphi`, `taper_edge_psi0`, `taper_edge_shape`; **off** by default, 0.999, quintic; implemented by bouquet, so no toolkit capability is needed) and `use_sauter_eps=True` (an accepted no-op: the engine's ε is `eps_definition`; `False` is refused, pointing at `eps_definition="a_over_R"`); any other key is refused (and dropped with a warning from a stored unified config, which never ran it) |
+| `eps_definition` | `"r_over_R_geo"` | The inverse aspect ratio of the Redl collisionalities **and** the major radius R in ν\*_e, ν\*_i (Sauter Eqs. 18b/18c), at every bouquet Redl evaluation (unified engine reconstruction and draws, legacy self-consistent loop, IMAS baseline loop, delta caches); engine-independent. `"r_over_R_geo"`: ε = (R_max − R_min)/(R_max + R_min), R_geo = (R_max + R_min)/2 in ν\* (Sauter 1999 / Redl 2021 "ε = r/R0"; OMFIT, FUSE). Opt-ins: `"half_width_over_fsa_R"`, (R_max − R_min)/(2⟨R⟩) with ⟨R⟩ in ν\*; `"a_over_R"`, ⟨a⟩/⟨R⟩ with ⟨R⟩ in ν\* (the pre-2026-10-09 evaluator, bit for bit). R_min/R_max/⟨R⟩ from `get_fsa` on every OFT build. Recorded in every loop record's `evaluate_jbs_version` and the `_baseline` attr `bootstrap_eps_json`. A stored config without the field replays with the default (warned); toolkit-internal `solve_with_bootstrap` calls do not read it: on `solve_method="swb"` and the frozen legacy route (`jbs_self_consistent=False`), whose bootstrap is the toolkit's, `bootstrap_eps_json` records the toolkit's own definition (`bootstrap: "toolkit solve_with_bootstrap"`; upstream OFT `<a>/<R>`; on the internal-solve toolkit what `bootstrap_kwargs["use_sauter_eps"]` selects, or "the toolkit's own default"), with the configured value as `eps_definition_configured`. See [physics-notes](physics-notes.md) |
+| `bootstrap_convergence_override` | `False` | **EXPERIMENTAL** ([`bootstrap_convergence_override`](#experimental-features-and-their-validation-status)). The explicit opt-in for the `bootstrap_kwargs` keys that change a **convergence criterion** of the toolkit's bootstrap solve (`config.BOOTSTRAP_CONVERGENCE_KWARGS`: `djbs_tol`, the jphi_bs freeze threshold; `saw_relax`). Without it such a key is refused; with it the key is accepted with a warning, and the archive's `config_json` records the flag and the values. Legacy paths only (the unified engine refuses those keys). A stored config that carries such a key from before the flag existed loads with it on, warned |
 | `draw_solve_maxits` / `draw_solve_retry_urf` / `draw_solve_loose_tol` | `"auto"` / `()` / `None` | The legacy and swb draws' GS iteration cap and its OPT-IN rescue. `"auto"` resolves at `prepare_baseline()` (recorded in `engine_resolved_defaults`): 100 for the legacy draws; with `reconstruction_engine="unified"` all three are refused (the engine draws use `engine_draw_solve_maxits`, see engine.md "The solve cap", and are never rescued). `None` keeps the solver's setup cap (800) for the legacy draws, which is also what a stored config without the field, or with `null`, replays; the swb draws always run with at least `SWB_DRAW_MAXITS` = 100 iterations (`max(100, draw_solve_maxits)`, so `None` gives 100 there). The cap and the rescue act on DRAW solves only: the cold baseline re-solve and the σ=0 reference solve before the draw loop keep the setup cap. Draw solves converge in ≤ ~25 iterations; one that does not sits in a limit cycle just above `nl_tol`. The rescue (off by default) re-solves a capped draw solve from where it stopped at each `draw_solve_retry_urf` (the same criterion), then, if `draw_solve_loose_tol` is set, accepts it at that LOOSER `nl_tol`. With the rescue on every stored draw is stamped `solve_recovered`, and a rescued one `solve_recovered_by`, `solve_nl_tol_accepted`, `solve_residual_upper` / `solve_residual_lower` (bounds: OFT reports no residual value), `solve_strict_nl_tol` and `solve_rescue_its`; `draw_band(rescued="exclude")` and `merge_archives(rescued="exclude")` leave rescued draws out (the default keeps them and warns with their count). Failed solves, and what recovered each, are listed per draw in `diagnostics['solve_failures']`, on `Bouquet.solve_failures`, and in one printed `[draw-solves]` line |
 | `draw_wall_budget_s` | `600.0` | The per-draw WALL-CLOCK budget [s], both routes; `None` = off. Checked before each of a draw's solves (a running GS solve is never interrupted) and once before archiving; a draw over it is rejected as `draw_wall_budget` (recorded like every rejection; the reason it pre-empted kept as `masked_reason`), and the budget and its rejection count are stamped in the generation provenance. It ends stalled draws; the structural bound (every solve capped at `engine_draw_solve_maxits`, a bounded number of solves per draw) is separate. See engine.md "Cost" |
-| `jbs_self_consistent` | `True` | Iterate the bootstrap to self-consistency with the delivered equilibrium (Redl on the caller's own ψ_N grid, re-evaluated after every solve; joint under-relaxation of the bootstrap and the solved current) in the baseline, every closure channel, the MSE stage, every draw and the reconstruction -- see [physics-notes.md](physics-notes.md#self-consistent-bootstrap-jbs_self_consistent). `False` = the **legacy** frozen-SWB bootstrap (legacy engine only; the unified engine refuses it); required with `single_profile_jphi=True` or `recalculate_j_BS=False` (refused otherwise). Not by itself a pre-release reproduction: that needs `reconstruction_engine="legacy"` + `separatrix_pressure="legacy"` too, and the coil-solve mode and the current conversion still differ (CHANGES_SUMMARY, "Reproducing a run made before this release"). A stored config without the field (pre-loop archive) loads as `False` |
+| `jbs_self_consistent` | `True` | Iterate the bootstrap to self-consistency with the delivered equilibrium (Redl on the caller's own ψ_N grid, re-evaluated after every solve; joint under-relaxation of the bootstrap and the solved current) in the baseline, every closure channel, the MSE stage, every draw and the reconstruction -- see [physics-notes.md](physics-notes.md#self-consistent-bootstrap-jbs_self_consistent). `False` = the **legacy** frozen-SWB bootstrap (legacy engine only; the unified engine refuses it); required with `single_profile_jphi=True` or `recalculate_jbs=False` (refused otherwise). Not by itself a pre-release reproduction: that needs `reconstruction_engine="legacy"` + `separatrix_pressure="legacy"` too, and the coil-solve mode and the current conversion still differ (CHANGES_SUMMARY, "Reproducing a run made before this release"). A stored config without the field (pre-loop archive) loads as `False` |
 | `jbs_init` | `"anchor"` | The loop's initial guess: Redl on the anchor equilibrium, or `"swb"` (legacy result; A/B only). The fixed point does not depend on it |
-| `jbs_rtol_j` / `jbs_rtol_Ip` | `1e-3` / `1e-4` | Loop convergence: current-weighted L2 residual of the j_BS profile, and its current integral over I_p |
+| `jbs_rtol_j` / `jbs_rtol_Ip` | `1e-3` / `1e-4` | Loop convergence: current-weighted L2 residual of the jphi_bs profile, and its current integral over I_p |
 | `jbs_tol_li` / `jbs_tol_q0` | `1e-3` / `2e-3` | Loop convergence: pass-to-pass change of the solved l_i, and of q0 where an axis row is active |
 | `jbs_max_passes` / `jbs_max_passes_draw` / `jbs_max_passes_post_homotopy` | `12` / `12` / `6` | Pass ceilings (limits, not tolerances): baseline / reconstruction; each loop of a draw; passes after a draw's coil homotopy when its Redl check misses (6 since the approved change from 4: measured need 5, plus one pass). Convergence = every active criterion on **two consecutive** passes |
 | `jbs_relax` / `jbs_relax_halve_on` | `0.7` / `3` | Under-relaxation ω of the bootstrap; halved (floor 0.25) only when `r_j` grows on `jbs_relax_halve_on` consecutive passes (`1` = on every growth); three growing passes at the floor abort |
@@ -419,6 +422,7 @@ as an enormous sigma.
 | `coil_drift` | `0.01` | Soft coil-drift target |
 | `coil_drift_hard_factor` | `None` | Optional hard inequality bounds at `± factor·coil_drift` in every solve |
 | `homotopy_passes` | `[(0.05, 0.10), (0.02, 0.05), (0.01, 0.01)]` | Progressive `(F_tol, VSC_tol)` schedule — see [coil-constraints.md](coil-constraints.md) |
+| `iso_update_ref_points` | `9000` | Legacy draws' iso-update: the isoflux constraint on the perturbed LCFS has the strength of this many evenly spaced points at weight 200, spread per unit length of the traced LCFS, so it does not depend on `trace_surf`'s sampling (the field-line tracer gives ~9000 points, OFT's cut-cell trace 1000). `None`: weight 200 per traced point, as before |
 | `workflow` | `"auto"` | Named preset; see below |
 | `allow_unsafe_workflow` | `False` | Deprecated alias for `workflow="custom"` |
 | `allow_incomplete_pressure` | `False` | IMAS path: bypass the fail-fast pressure-accounting check |
@@ -426,7 +430,12 @@ as an enormous sigma.
 | `capture_npsi` | `257` | FSA grid for that block |
 | `capture_exact_inv_R2` | `True` | Record ⟨1/R²⟩ in the draw's `eq_fsa` block (read from `get_q`, else by flux-surface quadrature). Archived geometry only: since 2026-10-06 the current conversion is the one field-aligned factor `F⟨1/R⟩/⟨B²⟩`, which does not read it |
 | `diagnostic_plots` | `False` | Per-draw diagnostic figures |
-| `write_ifile` / `ifile_npsi` / `ifile_ntheta` | `False` / `129` / `257` | Also archive an OFT i-file (`TokaMaker.save_ifile`: ψ, F, p, q per flux surface and R, Z on the surfaces; GPEC `eq_type="ldp_i"`) per stored draw and for the baseline (`DrawView.ifile_bytes`, `extract(formats=("ifile",))`), traced from the same state and with the same `lcfs_pressure` (the separatrix pressure) and `lcfs_pad` as that state's g-file, so its pressure is the g-file's. Every route writes the baseline i-file (with `coil_drift=None` from the recon-converged state). Each group is stamped `ifile_written` (and `ifile_error` when the save failed), the grid, `ifile_lcfs_pressure` and `ifile_frame`: like every bouquet output it is in the positive-Ip frame (issue #68); the scan's `_baseline` `source_current_sign` / `source_b0_sign` map it back. Refused at `generate()` on a solver without `save_ifile`; a failed state restore after the save rejects the draw (`ifile_restore_failed`). Grid sizes are integers ≥ 2. About 0.5 MB per draw at the defaults |
+| `write_ifile` / `ifile_npsi` / `ifile_ntheta` | `False` / `129` / `257` | Also archive an OFT i-file (`TokaMaker.save_ifile`: ψ, F, p, q per flux surface and R, Z on the surfaces; GPEC `eq_type="ldp_i"`) per stored draw and for the baseline (`DrawView.ifile_bytes`, `extract(formats=("ifile",))`), traced from the same state and with the same `lcfs_pressure` (the separatrix pressure) and `lcfs_pad` as that state's g-file, so its pressure is the g-file's. Every route writes the baseline i-file (with `coil_drift=None` from the recon-converged state). Each group is stamped `ifile_written`, the grid, `ifile_lcfs_pressure` and `ifile_frame`: like every bouquet output it is in the positive-Ip frame (issue #68); the scan's `_baseline` `source_current_sign` / `source_b0_sign` map it back. Refused at `generate()` on a solver without `save_ifile`. A failed save rejects the draw (`ifile_save_failed`; the baseline's refuses the run), as does a failed state restore after it (`ifile_restore_failed`). Grid sizes are integers ≥ 2. About 0.5 MB per draw at the defaults |
+| `ifile_profile_derivs` / `ifile_psi_bounds` | `False` / `False` | Append OFT `save_ifile`'s extended records to every i-file (readers of the standard format stop before them): FF′ and p′ after Z, which GPEC uses with `profile_source = "integrate"` (Julia GPEC `"derivatives"`) instead of differentiating the tabulated F and P, and the unpadded [ψ_axis, ψ_LCFS] last, to which GPEC and Julia GPEC then normalize ψ_N (the last surface, at 1 − `psi_pad`, sits below ψ_N = 1). Stamped `ifile_profile_derivs` / `ifile_psi_bounds`; on a `save_ifile` without them the baseline i-file fails and the run is refused |
+| `store_eqdsk` | `True` | Archive each group's g-file. `False` (needs `write_ifile` and `store_tokamaker_state`): none is stored; the run still writes and uses it, and `DrawView.eqdsk_bytes` (so `equilibrium()`, `extract`, the stats, the IDS writer) rebuilds it from the TokaMaker state |
+| `ifile_axis_pack` | `0.0` | OFT `save_ifile`'s axis zone: ψ_N of the innermost surface (0: none, today's file); the spacing grows outward until it joins the packed grid, and the zone's surfaces count in `ifile_npsi`. Stamped `ifile_axis_pack`; handed to `save_ifile` only when set (needs an OFT with `axis_pack`) |
+| `store_tokamaker_state` | `False` | Also archive the TokaMaker equilibrium each i-file is written from (`save_TokaMaker`, ~0.9 MB per group on the D3D mesh) as the group's `tokamaker_state` blob, stamped `tokamaker_state_written`. Any i-file or g-file can then be rebuilt later at any grid (`DrawView.rebuild_ifile` / `rebuild_eqdsk`, on the run's mesh by default), so the archived i-files and g-files can be dropped once used (`bouquet.filtering.drop_file_blobs`); `DrawView.eqdsk_bytes` (and so `equilibrium()`, `extract`, the stats and the IDS writer) then rebuilds the g-file. Only with `write_ifile` (no i-file, no state); a failed state save fails the i-file |
+| `eqdsk_nr` / `eqdsk_nz` | `257` / `257` | The archived g-files' R × Z grid (`TokaMaker.save_eqdsk` `nr` / `nz`), for the baseline and every draw; the 1-D profiles come on `nr` uniform ψ_N points. Integers ≥ 2. |
 
 **Timing the IDA slice (`ImasSource.ida_time`, ida_hybrid only).** By default
 the IDA slice is read at the dd slice `time`; `ida_time` reads it at another
@@ -444,6 +453,15 @@ separate `uncertainty.ida_path` too). The match — requested and used IDA time,
 basis, the dd slice times, and the verdict of FUSE's `ida_provenance.json`
 replay pairing when that table names this run's IDA file and holds the dd
 slice — is archived in the baseline's `li_metrics["ida_time_match"]`.
+On ida_hybrid, a dd step `time` outside the window the run simulated
+(`time_grid.json`: t0 < t ≤ `reached`; a FUSE run that stopped early still
+lists its planned steps in that table) raises `IdaTimeNotSimulated`: the IDA time
+is not attempted, so `run()` / `run_slices()` do not archive it as refused.
+With `ida_timing="ida_fuse"`, the pair must also be one of the run's consistent pairs
+(`bq.consistent_pairs(ida_provenance.json)`: each IDA slice a reached macro step replayed, with
+the nearest such step), else the same `IdaTimeNotSimulated`; the check is skipped (and stamped
+in `li_metrics["ida_time_match"]["consistent_pair"]`) when the two json files are absent or
+the table names another IDA file.
 `ida_time` outside ida_hybrid is refused. `set_slice(time=t)` keeps a
 configured `ida_time` (with a warning), `set_slice(ida_time=x)` applies it
 alone, and a series takes one per slice: `run_slices(times, ida_times=[…])`.
@@ -492,12 +510,12 @@ part of the verdict. The `pb` block's header unit is checked: anything but
 kPa warns and is **not** converted (stamped `pb_header_units`,
 `pb_units_ok`).
 
-`p_fast`, `j_NBI`, `j_RF`, `j_other` on their own `psi_N` grid — additive
-components that are never perturbed (an explicit `j_other` replaces every
+`p_fast`, `jphi_nbi`, `jphi_rf`, `jphi_other` on their own `psi_N` grid — additive
+components that are never perturbed (an explicit `jphi_other` replaces every
 fusion / runaways / sawteeth / unknown-index entry the IMAS reader would hold,
-and zeroes `j_sawteeth`). `coord` (default `"run"`) is the coordinate of that grid:
+and zeroes `jphi_saw`). `coord` (default `"run"`) is the coordinate of that grid:
 `"run"` (Φ_N in a `"phi_n"` run) or `"psi_n"`, mapped to the run coordinate
-through the source equilibrium's ψ_N → Φ_N map. `j_NBI` / `j_RF` are given in bouquet's **positive-Ip
+through the source equilibrium's ψ_N → Φ_N map. `jphi_nbi` / `jphi_rf` are given in bouquet's **positive-Ip
 frame** — co-current drive positive — on both source paths and for either
 orientation of the source; unlike the dd's own currents they are *not*
 multiplied by `sign(ip)` on the IMAS path (see
@@ -592,13 +610,13 @@ Validation to do:
 
 #### `bootstrap_convergence_override` (experimental; introduced PR #60, 1.4.0)
 
-Accept the bootstrap_kwargs keys that change a convergence criterion of the toolkit's internal bootstrap solve (BOOTSTRAP_CONVERGENCE_KWARGS: djBS_tol, saw_relax).  Legacy and swb paths only; the unified engine refuses it.
+Accept the bootstrap_kwargs keys that change a convergence criterion of the toolkit's internal bootstrap solve (BOOTSTRAP_CONVERGENCE_KWARGS: djbs_tol, saw_relax).  Legacy and swb paths only; the unified engine refuses it.
 
 Enabled by: `GenerationConfig.bootstrap_convergence_override=True`
 
 Validation to do:
 
-- for each key, the converged j_BS, l_i and q0 against the toolkit's default criterion on >= 5 real slices; a value that changes a converged result beyond the default criterion's own residual is a loosened criterion and must be flagged
+- for each key, the converged jphi_bs, l_i and q0 against the toolkit's default criterion on >= 5 real slices; a value that changes a converged result beyond the default criterion's own residual is a loosened criterion and must be flagged
 - the effective values stamped per run are read back by load_config and shown with the archive summary
 
 #### `ida_fuse_timing` (experimental; introduced #79, 1.4.0)
@@ -692,6 +710,8 @@ it was the binding filter on the synthetic ensembles. It is now opt-in.
 | l_i band (`l_i_tolerance` fraction, or `l_i_sigma` × `inspec_band_nsigma`) | off | `passes_l_i_band` | the engine's post-hoc stage; `refilter_inspec` |
 | β_p band (`beta_p_target`, `beta_p_sigma` × `inspec_band_nsigma`) | off | `passes_beta_p_band` | the engine's post-hoc stage; `refilter_inspec` |
 | q0 ≥ 1 gate (`constrain_sawteeth`) | off | `passes_q0_gate` | the engine's post-hoc stage; `refilter_inspec` (engine draws) |
+| core current band (`jphi_band_nsigma`): the draw's `jphi_total` inside the pedestal top within this many of the baseline's `sigma_jphi` | off | `passes_jphi_band` (+ `jphi_band_z`) | the swb draws in flight; `refilter_inspec` |
+| core gradient (`core_gradient_ratio`): the draw's steepest d`jphi_total`/d√x inside the pedestal top over the baseline's | off | `passes_core_gradient` (+ `core_gradient_ratio`) | the swb draws in flight; `refilter_inspec` |
 
 `passes_draw_band` is the AND of the opt-in bands that are on (True when none
 is: every engine draw carries it), and `selected` = coil AND boundary AND
@@ -913,7 +933,7 @@ Points worth knowing:
   (the default) and the SLURM merge job run the configured filters on the
   merged archive, exactly as a serial `run.filter()`; the parallel path used to
   leave only the in-loop legacy band on it.
-- **The RNG stream is untouched when the feature is off.** The `jBS_scales`
+- **The RNG stream is untouched when the feature is off.** The `jbs_scales`
   block draw is unchanged for the first `n_equils` draws and only extends past
   it when until-N actually runs on, so `n_inspec_target=None` runs are bitwise
   what they were.
@@ -921,7 +941,7 @@ Points worth knowing:
 ## Workflow presets and the guard
 
 These presets are the LEGACY paths' (`reconstruction_engine="legacy"`). The
-factories set none of these flags: `isolate_edge_jBS` and
+factories set none of these flags: `isolate_edge_jbs` and
 `perturb_jind_in_anchor` default to `None` and `prepare_baseline()` resolves
 them for the engine configured when it runs, so the engine may be named at
 construction or set afterwards with the same result (the unified engine
@@ -931,15 +951,15 @@ validated for its path, and `generate()` raises on a known-bad combination:
 
 | Preset | Input | What it resolves to |
 |---|---|---|
-| `geqdsk-standard` | g-file | Standard flagship l_i loop (`perturb_jind_in_anchor=False`), unified decomposition (`isolate_edge_jBS=False`) |
-| `imas-diff-c` | IDS | Bootstrap anchored to the source via the fixed diff (`jBS_baseline_mode="diff"`, the default), inductive perturbed in the recon-anchor (`perturb_jind_in_anchor=True`), unified decomposition |
+| `geqdsk-standard` | g-file | Standard flagship l_i loop (`perturb_jind_in_anchor=False`), unified decomposition (`isolate_edge_jbs=False`) |
+| `imas-diff-c` | IDS | Bootstrap anchored to the source via the fixed diff (`jbs_baseline_mode="diff"`, the default), inductive perturbed in the recon-anchor (`perturb_jind_in_anchor=True`), unified decomposition |
 | `auto` *(default)* | — | Resolve per source type at `generate()` |
 | `custom` | you | Leave the flags as set and downgrade the guard to a warning. For deliberate backend experiments only |
 
 Known-bad combinations the guard rejects: geqdsk + `perturb_jind_in_anchor`
 (drops draws on stiff, high-l_i baselines via band-conditioning rejection),
 IMAS without it (the matching loop homogenizes the draws), and
-`jphi_scalar_sigma <= 0` (freezes `j_inductive`, so the draws carry no
+`jphi_scalar_sigma <= 0` (freezes `jphi_ind`, so the draws carry no
 current-profile uncertainty at all).
 
 ## Reading an archive back
@@ -1040,7 +1060,7 @@ s["dp_dpsi"].provenance["surface"]     # where each draw was evaluated
 It is `draw_band` with one evaluator, so the population, floors, counts and
 provenance are the recipe's. Scalars: `beta_N` (the draw's g-file),
 `beta_p`, `Lambda`, `l_i_3`, `l_i_1`, `q0`, `q95`. Gradients: `dp_dpsi` and
-`djphi_dpsi`, d/dψ_N of the draw's own archived `pressure` [Pa] and `j_phi`
+`djphi_dpsi`, d/dψ_N of the draw's own archived `pressure` [Pa] and `jphi_total`
 [A m⁻²] (central differences on the archived grid; a Φ_N-coordinate archive
 is mapped to ψ_N through the draw's own q), evaluated on each draw at **its
 own** `at` surface: the outermost q = 2 crossing of its archived q profile
@@ -1091,18 +1111,18 @@ and `fidelity` picks where that geometry comes from:
 
 | `fidelity` | Geometry | When |
 |---|---|---|
-| `"exact"` | an engine draw's stored `<j.B>` parts (`jB_parallel/`, no conversion); otherwise the draw's **own** captured `eq_fsa` geometry (needs `avg_R`, `avg_inv_R2`, `pprime`) | draws deviate from the baseline; the split must track each perturbed equilibrium |
+| `"exact"` | an engine draw's stored `<j.B>` parts (`jdotB/`, no conversion); otherwise the draw's **own** captured `eq_fsa` geometry (needs `avg_R`, `avg_inv_R2`, `pprime`) | draws deviate from the baseline; the split must track each perturbed equilibrium |
 | `"reconstruct"` | the template's baseline equilibrium (`gm1/gm5/gm8/gm9/f/dpressure_dpsi`) | exact only when a draw's flux geometry matches the baseline's |
 | `"auto"` *(default)* | stored parts, else exact when a complete `eq_fsa` block is present, else reconstruct | — |
 
 No exported parallel current carries the pressure-driven term
 `P = p'(<R> - F^2<1/R>/<B^2>)` (its `<j.B>` is zero; a reader recovers it from
 the pressure): `j_ohmic` is the field-aligned inductive only and `j_total =
-j_ohmic + j_bootstrap + driven`. The archived toroidal `j_BS` carries `P`
+j_ohmic + j_bootstrap + driven`. The archived toroidal `jphi_bs` carries `P`
 (FUSE's convention); when the draw has no stored
 `<j.B>` parts the exporter subtracts `P` (from the archived eqdsk's own flux
 surfaces) before converting. Export -> `IdsAdapter.read` returns the archived
-`<j.B>` parts and `<j_phi>` (2026-10-06; before, `P/kappa` sat inside the
+`<j.B>` parts and `<jphi_total>` (2026-10-06; before, `P/kappa` sat inside the
 exported `j_ohmic` / `j_total` and a re-read counted it twice).
 
 `eq_fsa` is captured at generate time from the live TokaMaker object

@@ -38,7 +38,7 @@ draw-*level* goldens, and they became possible only when
 `GenerationConfig.seed` started reaching the GPR: before that, every draw site
 re-seeded from OS entropy and no drawn value was reproducible. Each replays
 what `perturb_kinetic_equilibrium` does for one draw -- ne, Te, ni, Ti through
-`_draw_monotonic_perturbation`, then the `j_phi` GPR candidate -- off one
+`_draw_monotonic_perturbation`, then the `jphi_total` GPR candidate -- off one
 `make_rng(seed)` Generator, from its golden's baseline profiles. Pure NumPy: no
 solver, no mesh, so it is bitwise identical on the machine that pinned it and
 equal to `1e-7` elsewhere.
@@ -80,10 +80,10 @@ first in spec, the first out of spec, the min and max boundary deviation), or
   dd unpacked from its `.gz`), so the stored config names no path;
 * the **class API**: `Bouquet(cfg) -> setup_solver() -> prepare_baseline() ->
   generate()`;
-* **input-current archival** (`store_achieved_jphi=False`): `_baseline/j_phi`
-  and each draw's `j_phi` / `j_inductive` hold the current the generator
+* **input-current archival** (`store_achieved_jphi=False`): `_baseline/jphi_total`
+  and each draw's `jphi_total` / `jphi_ind` hold the current the generator
   handed the solver, not the achieved flux-surface average. The systematics
-  replay feeds `_baseline/j_phi` back as the input of its baseline solve, so
+  replay feeds `_baseline/jphi_total` back as the input of its baseline solve, so
   this is its premise ("archived current reproduces archived LCFS").
   **`Bouquet.generate()` hard-wires `store_achieved_jphi=True`**, so a plain
   notebook run does NOT follow the recipe (an earlier refresh built that way
@@ -194,7 +194,7 @@ radial sigma templates (the profile file's own envelopes here), the warm
 baseline re-solve in `generate()`, engine draws held on the reconstruction's
 isoflux with the boundary constraint weighted per unit length, `check_bistability`
 on, the coil-saturation test against the installed bound, and the Redl epsilon
-`(R_max - R_min)/(R_max + R_min)` (`evaluate_jBS/4`); since `27979d1` also the
+`(R_max - R_min)/(R_max + R_min)` (`evaluate_jbs/4`); since `27979d1` also the
 homotopy's VSC bound floor (10 kA), the report-only boundary-partition probe
 (stamped in the baseline's `solver_geometry_json`: g-file 1.16, IDS 0.95), the
 600 s per-draw wall budget (stamped in the generation provenance; 0 rejections
@@ -215,6 +215,12 @@ the drift test; the IDS golden: 18 of 20).
 | g-file, unified | 20 | 18 (2 homotopy_saturated) | 18 (9) | 76 s | 32 min | single | PASS (archived dl_i -1.5e-5, dq0 +4.1e-5, r_j 5.6e-5, r_I 7.8e-6) |
 | IDS, unified | 20 | 20 | 20 (18) | 73 s | 31 min | single | PASS (archived dl_i -9.6e-6, dq0 -4.7e-5, r_j 1.4e-4, r_I 1.4e-5) |
 
+* On the integration branch both h5 goldens' datasets and the legacy JSON
+  golden's keys carry the v4 names (`schema.migrate_names`,
+  `schema.LEGACY_NAMES`), and both manifests' boundary numbers are distances
+  to the perturbed LCFS polyline (`filtering.contour_distance`), recomputed
+  from the same slim h5s: RMS -0.05…-0.13 mm, max up to -4.5 mm against the
+  nearest-vertex values. Nothing else changed.
 * The IDS route archives no schema `jbs_loop` block on its `_baseline` (the
   g-file route does); its reconstruction's loop verdict is in the baseline's
   engine record (`engine_json`: `converged`, `loop_converged`), which the
@@ -238,20 +244,20 @@ class API's `DrawSolveGuard`, so it runs with no budget too -- the same
 setting. The legacy replay reconstructs from the pair its stored config names.
 
 * The legacy record archives the pressure-driven current as its own
-  `j_pressure` beside a `j_inductive` that does not carry it, and says so
+  `jphi_pd` beside a `jphi_ind` that does not carry it, and says so
   (`current_split_convention = "pressure_separate"`); the legacy replay
-  composes the legacy path's carried (in-memory) inductive, `j_inductive +
-  j_pressure`, before handing it to `generate_bouquet` as `input_jinductive`
+  composes the legacy path's carried (in-memory) inductive, `jphi_ind +
+  jphi_pd`, before handing it to `generate_bouquet` as `jphi_ind_input`
   -- a record from before that convention replays as is.
 
 ## Why input-current archival: the mode-1 coil drift
 
 Mode 1 of `tests/test_systematics.py` builds its baseline from the fixture's
-`_baseline/j_phi`, handed to the unperturbed `jphi-linterp` baseline solve,
+`_baseline/jphi_total`, handed to the unperturbed `jphi-linterp` baseline solve,
 and compares the coil currents after that solve with
 `_baseline/coil_currents`. The generator handed the same solve the
 reconstruction's own delivered current, so the replay is faithful only if
-`_baseline/j_phi` holds that INPUT current. A refresh made through plain
+`_baseline/jphi_total` holds that INPUT current. A refresh made through plain
 `Bouquet.generate()` (which archives the ACHIEVED flux-surface-averaged
 current) failed mode 1 at 1.23 % max coil drift on one coil against the
 0.3 % bar; the same run rebuilt with `regenerate_golden_run.py`
@@ -279,7 +285,7 @@ loosened bar; each narrows what a passing suite shows.
   is real (`<R>` spans more than 10 % of its mean) and two solver-free tests
   of the guard. The production guard in `utils.fsa_current_geometry` uses the
   raw `<R>` span, zero (untraced) rows included, so an untraced row can hide
-  a collapse from it; `physics.evaluate_jBS` now refuses a zero (failed-trace)
+  a collapse from it; `physics.evaluate_jbs` now refuses a zero (failed-trace)
   row on its own surfaces.
 * **Six zero-perturbation tests run on the legacy path only.** The route-R2
   sigma=0 tests of `tests/test_seeded_reproducibility.py`

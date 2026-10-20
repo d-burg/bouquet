@@ -3,6 +3,7 @@ HDF5 archive helpers and eqdsk I/O utilities for perturbed equilibria.
 """
 
 import contextlib
+import functools
 import json
 import os
 import sys
@@ -12,6 +13,7 @@ import warnings
 import h5py
 import numpy as np
 
+from ._renamed import accepts_old_names
 from .schema import write_profile
 
 #: The single l_i estimator the whole reconstruction/draw chain runs on.
@@ -355,6 +357,20 @@ def capture_native_output(enabled=True):
 #  Internal helpers
 # ====================================================================
 
+def isoflux_length_weights(pts, weight, n_ref):
+    """Isoflux weights for a closed contour, per unit length: weight ``weight`` at the spacing
+    of ``n_ref`` evenly spaced points, so the constraint's strength (sum of squared weights;
+    TokaMaker scales each least-squares row by its weight) does not depend on how densely
+    ``trace_surf`` samples the contour (tracer ~9000 points, cut-cell 1000).  A contour of zero
+    length raises."""
+    pts = np.asarray(pts, dtype=float)
+    seg = np.linalg.norm(np.roll(pts, -1, axis=0) - pts, axis=1)
+    if not seg.sum() > 0:
+        raise ValueError("isoflux contour has zero length")
+    ds = 0.5 * (seg + np.roll(seg, 1))
+    return float(weight) * np.sqrt(n_ref * ds / seg.sum())
+
+
 def safe_trace_surf(mygs, psi):
     r'''Snapshot/restore-wrapped trace_surf.
 
@@ -451,7 +467,7 @@ IFILE_FRAME = ("bouquet positive-Ip frame (|F0|, Ip > 0; issue #68): map to "
 def try_save_ifile(mygs, filename, record=None, **kwargs):
     r'''Snapshot/restore-wrapped `mygs.save_ifile` (see :func:`safe_save_eqdsk`),
     returning `filename`; on failure warn, remove any partial file and return
-    None (the i-file is optional; the run continues without it).  The
+    None (the caller refuses: generate_bouquet rejects the draw).  The
     failure text goes to ``record["ifile_error"]`` when a dict is given.  A
     failed RESTORE of the snapshot is not swallowed: it raises
     :class:`SnapshotRestoreError`.'''
@@ -463,7 +479,7 @@ def try_save_ifile(mygs, filename, record=None, **kwargs):
             os.remove(filename)
         raise
     except Exception as exc:
-        msg = f"save_ifile failed ({type(exc).__name__}: {exc}); stored without an i-file"
+        msg = f"save_ifile failed ({type(exc).__name__}: {exc})"
         print(f"  WARN: {msg}")
         import warnings
         warnings.warn(msg, RuntimeWarning, stacklevel=2)
@@ -475,27 +491,82 @@ def try_save_ifile(mygs, filename, record=None, **kwargs):
 
 
 def save_state_ifile(mygs, filename, *, npsi, ntheta, psi_pad, p_sep,
-                     orientation=None):
+                     orientation=None, profile_derivs=False, psi_bounds=False,
+                     axis_pack=0.0, state_path=None):
     r'''The OFT i-file of ``mygs``'s current state, carrying the SAME
     pressure frame as the g-file bouquet writes of that state: the
     separatrix pressure ``p_sep`` is passed as ``lcfs_pressure`` exactly as
     :func:`bouquet.edge_pressure.lcfs_kwargs` passes it to ``save_eqdsk``
     (#74 review B1), with the same ``lcfs_pad``.  Returns ``(path or None,
     record)``; the record (``ifile_written``, ``ifile_error``, the grid,
-    the ``lcfs_pressure`` handed over, the frame and the source orientation
-    signs) is stamped on the archive group by the caller.'''
+    the ``lcfs_pressure`` handed over, the extended records written, the
+    frame and the source orientation signs) is stamped on the archive group
+    by the caller.  ``profile_derivs`` / ``psi_bounds`` / ``axis_pack`` are
+    handed to ``save_ifile`` only when set (an older OFT has none of them).  With
+    ``state_path`` the same state's TokaMaker equilibrium is saved there too
+    (``save_TokaMaker``); a failed state save fails the i-file the same way.'''
     from .edge_pressure import lcfs_kwargs
     rec = dict(ifile_written=False, ifile_error=None, ifile_npsi=int(npsi),
                ifile_ntheta=int(ntheta), ifile_lcfs_pad=float(psi_pad),
-               ifile_lcfs_pressure=float(p_sep), ifile_frame=IFILE_FRAME)
+               ifile_lcfs_pressure=float(p_sep), ifile_frame=IFILE_FRAME,
+               ifile_profile_derivs=bool(profile_derivs),
+               ifile_psi_bounds=bool(psi_bounds), ifile_axis_pack=float(axis_pack))
+    ext = {k: True for k, v in dict(profile_derivs=profile_derivs,
+                                    psi_bounds=psi_bounds).items() if v}
+    if axis_pack:
+        ext["axis_pack"] = float(axis_pack)
     for k, v in (orientation or {}).items():
         if v is not None:
             rec[f"ifile_{k}"] = float(v)
     path = try_save_ifile(mygs, filename, record=rec, npsi=int(npsi),
                           ntheta=int(ntheta), lcfs_pad=psi_pad,
-                          **lcfs_kwargs(p_sep))
+                          **lcfs_kwargs(p_sep), **ext)
+    if path is not None and state_path is not None:
+        try:
+            mygs.copy_eq().save_TokaMaker(state_path)
+        except Exception as exc:
+            rec["ifile_error"] = f"save_TokaMaker failed ({type(exc).__name__}: {exc})"[:500]
+            for p in (path, state_path):
+                if os.path.exists(p):
+                    os.remove(p)
+            path = None
     rec["ifile_written"] = path is not None
+    if state_path is not None:
+        rec["tokamaker_state_written"] = path is not None
     return path, rec
+
+
+def load_mesh(mesh_path):
+    r'''``load_gs_mesh(mesh_path)`` with the coils of the detected device's turn
+    table (the DIII-D F coils) at ``nturns = 1``, so their solver current is in
+    ampere-turns -- the unit of bouquet's coil sigma floors, coil-reg weights and
+    targets and archived currents -- whatever turns the mesh carries (OFT #268
+    gave the F coils 58 / 55).  The field is the same (region current = current
+    x nturns); coils outside the table (the E coils) keep the mesh's turns.'''
+    from OpenFUSIONToolkit.TokaMaker.meshing import load_gs_mesh
+    from .devices import resolve_device
+    pts, lc, reg, coils, conds = load_gs_mesh(mesh_path)
+    spec = resolve_device(None, {c["coil_set"] for c in coils.values()})
+    for c in coils.values():
+        if spec is not None and c["coil_set"] in spec.turns:
+            c["nturns"] = 1.0
+    return pts, lc, reg, coils, conds
+
+
+@functools.lru_cache(maxsize=None)
+def tokamaker_on_mesh(mesh_path, order, nthreads=1):
+    r'''A TokaMaker set up on ``mesh_path`` at FE ``order`` and nothing else:
+    enough to load an archived state (:meth:`DrawView.rebuild_ifile`).  Made
+    once per process and reused; on the process's ``OFT_env`` when one exists
+    (a per-process singleton: e.g. a generating run's).'''
+    from OpenFUSIONToolkit import OFT_env
+    from OpenFUSIONToolkit.TokaMaker import TokaMaker
+    mygs = TokaMaker(getattr(OFT_env, "instance", None) or OFT_env(nthreads=nthreads))
+    pts, lc, reg, coils, conds = load_mesh(mesh_path)
+    mygs.setup_mesh(pts, lc, reg)
+    mygs.setup_regions(cond_dict=conds, coil_dict=coils)
+    mygs.setup(order=order)
+    return mygs
 
 
 def read_ifile(data):
@@ -503,7 +574,9 @@ def read_ifile(data):
     unformatted, little-endian, 4-byte record markers): ``dict(npsi, ntheta,
     psi, f, p, q, R, Z)`` -- ``psi`` / ``f`` / ``p`` / ``q`` per flux surface
     (``p`` in Pa, including the ``lcfs_pressure`` handed to the writer),
-    ``R`` / ``Z`` the surfaces.  Double or single precision.'''
+    ``R`` / ``Z`` the surfaces -- plus, when the file has them, ``ffp`` /
+    ``pp`` (``profile_derivs``) and ``psi_bounds`` = [psi_axis, psi_LCFS]
+    (``psi_bounds``), told apart by length.  Double or single precision.'''
     import struct
     buf = bytes(data)
     recs, pos = [], 0
@@ -519,6 +592,12 @@ def read_ifile(data):
                p=cols[2], q=cols[3])
     if len(rz) == 2:
         out["R"], out["Z"] = rz
+    extra = [np.frombuffer(r, dtype=dt).astype(float) for r in recs[7:]]
+    if len(extra) >= 2 and extra[0].size == npsi:
+        out["ffp"], out["pp"] = extra[:2]
+        extra = extra[2:]
+    if extra and extra[0].size == 2:
+        out["psi_bounds"] = extra[0]
     return out
 
 
@@ -700,7 +779,7 @@ def pchip_derivative(x, y, x_eval=None, strict=False):
 
     5. Duplicate *x* points were dropped (count + first few duplicated
        locations reported) -- a duplicated ``psi_N`` grid is a suspected
-       upstream cause of stepwise ``j_BS`` artifacts, so this is surfaced
+       upstream cause of stepwise ``jphi_bs`` artifacts, so this is surfaced
        loudly rather than silently fixed.
     6. Input *x* was not sorted (ascending sort was applied).
     7. More than 5% of points were dropped as duplicates ("grid likely
@@ -740,7 +819,7 @@ def pchip_derivative(x, y, x_eval=None, strict=False):
     -----
     ``PchipInterpolator`` requires strictly increasing abscissas.
     Duplicated or non-monotonic ``psi_N`` grid points are a suspected
-    cause of stepwise ``j_BS`` artifacts downstream, so this guard is
+    cause of stepwise ``jphi_bs`` artifacts downstream, so this guard is
     load-bearing, not cosmetic: repeated ``x`` values are collapsed via
     ``np.unique`` (keeping the first occurrence of each distinct value,
     then sorting), silently making the interpolant well-posed rather than
@@ -802,13 +881,13 @@ def pchip_derivative(x, y, x_eval=None, strict=False):
                 f"pchip_derivative: {n_dropped}/{n_total} points "
                 f"({100*frac_dropped:.1f}%) dropped as duplicate x values "
                 f"(at x = {loc_str}) -- grid likely corrupted. A duplicated "
-                "psi_N grid is a suspected cause of stepwise j_BS "
+                "psi_N grid is a suspected cause of stepwise jphi_bs "
                 "artifacts; check the upstream profile/grid construction.")
         else:
             _flag(
                 f"pchip_derivative: dropped {n_dropped} duplicate x "
                 f"point(s) (at x = {loc_str}) before fitting. A duplicated "
-                "psi_N grid is a suspected cause of stepwise j_BS "
+                "psi_N grid is a suspected cause of stepwise jphi_bs "
                 "artifacts; check the upstream profile/grid construction.")
 
     # ---- Tier 1.2: degenerate grid ---------------------------------------
@@ -898,18 +977,18 @@ def pchip_derivative(x, y, x_eval=None, strict=False):
 # The measure below never uses the mesh integral.  It is the textbook
 # axisymmetric current integral,
 #
-#     I_p = int j_phi dA = int dpsi (V'/2pi) <j_phi/R>,
+#     I_p = int jphi_total dA = int dpsi (V'/2pi) <jphi_total/R>,
 #
 # with ``V' = dV/dpsi`` and the flux-surface averages taken from ``get_q``.
 #
 # CONVENTION.  Two readings of a bouquet current array are in play and they
 # differ by O(1 %) on a DIII-D-like case:
 #
-#   ``"fsa"``           J = <j_phi/R>/<1/R>, the FSA toroidal density
+#   ``"fsa"``           J = <jphi_total/R>/<1/R>, the FSA toroidal density
 #                       => I_p = int dpsi (V'/2pi) <1/R> J
 #   ``"jphi-linterp"``  J = <R> P' + <1/R> FF'/mu0, TokaMaker's own
 #                       ``jphi-linterp`` profile variable (``jphi_update`` in
-#                       ``grad_shaf_prof_phys.F90``), i.e. j_phi evaluated at
+#                       ``grad_shaf_prof_phys.F90``), i.e. jphi_total evaluated at
 #                       the surface's mean major radius
 #                       => FF'/mu0 = (J - <R> P')/<1/R> and hence
 #                          I_p = int dpsi (V'/2pi) [ J <1/R^2>/<1/R>
@@ -1186,12 +1265,12 @@ def close_ip(channel, Ip_target_signed, c_affine, ip_ind, ip_bs, ip_fix,
     deficit = float(Ip_target_signed) - float(c_affine) - float(ip_fix)
     if channel == "bootstrap":
         if abs(ip_bs) < 1e-6 * Ip_t:
-            raise RuntimeError("close_ip/bootstrap channel: j_BS integrates "
+            raise RuntimeError("close_ip/bootstrap channel: jphi_bs integrates "
                                "to ~0; cannot close Ip on it")
         scales = (1.0, (deficit - float(ip_ind)) / float(ip_bs))
     elif channel == "ohmic":
         if abs(ip_ind) < 1e-6 * Ip_t:
-            raise RuntimeError("close_ip/ohmic channel: j_inductive "
+            raise RuntimeError("close_ip/ohmic channel: jphi_ind "
                                "integrates to ~0; cannot close Ip on it")
         scales = ((deficit - float(ip_bs)) / float(ip_ind), 1.0)
     else:
@@ -1218,7 +1297,7 @@ def unrenormalise_q0(q0_anchor, j_achieved0, j_requested0):
     carry Ip (FUSE's ``core_profiles`` total reads -3.89 % on the reference
     validation slice) the anchor equilibrium therefore sits at a current the
     source never claimed, and its ``q0`` with it.  Undo that to the same first
-    order the whole predictor runs on -- ``q0 ~ 1/j_phi(0)`` at frozen
+    order the whole predictor runs on -- ``q0 ~ 1/jphi_total(0)`` at frozen
     geometry:
 
     .. math:: q_{0,\mathrm{target}} = q_{0,\mathrm{anchor}}
@@ -1352,7 +1431,7 @@ SOFT_IP_FLAG_PREFIX = "soft Ip beyond 1 sigma_Ip"
 
 
 #: Half-width of the bootstrap-model prior: the closure's bootstrap scale is
-#: expected within ``1 +/- 0.5`` (the +/-50 % j_BS uncertainty prior).  A
+#: expected within ``1 +/- 0.5`` (the +/-50 % jphi_bs uncertainty prior).  A
 #: scale outside it is a CLOSURE FAILURE -- the closure paid for I_p / l_i
 #: by rescaling the bootstrap beyond what the bootstrap model's uncertainty
 #: allows -- not a finding about the bootstrap.  Flagged, never clamped.
@@ -1457,7 +1536,7 @@ def closure_health(ohm_scale, bs_scale, Ip_target_signed, c_affine,
     **Non-finite inputs are flagged, not ignored.**  Every test here is of the
     form ``abs(x) > threshold``, which is ``False`` for a NaN, so a NaN scale
     or a NaN component integral used to give ``closure_limited = False`` with
-    ``f_BS_closed = nan`` and an empty reason tuple -- a clean verdict on an
+    ``f_bs_closed = nan`` and an empty reason tuple -- a clean verdict on an
     unreadable slice.  A quantity this record cannot read is now its own named
     reason.  Flag, not refusal: the caller decides what to do with a slice it
     could not measure, and every other verdict in this record is a flag too.
@@ -1492,8 +1571,8 @@ def closure_health(ohm_scale, bs_scale, Ip_target_signed, c_affine,
                        + f" (z_Ip = {float(soft_ip_residual_sigma):+.2f})")
     return dict(
         raw_components_ip_mismatch_pct=float(mismatch_pct),
-        f_BS_unscaled=float(f_bs_unscaled),
-        f_BS_closed=float(f_bs_closed),
+        f_bs_unscaled=float(f_bs_unscaled),
+        f_bs_closed=float(f_bs_closed),
         closure_limited=bool(reasons),
         closure_limited_reasons=tuple(reasons),
         # the record's keys are unchanged (bs_scale_min = 1 - halfwidth);
@@ -1509,7 +1588,7 @@ def warn_deprecated_channel(channel):
     """DeprecationWarning for ``closure_channel="ohmic"`` -- diagnostic only.
 
     Kept selectable for bracketing studies, but never for production or for
-    anything that feeds a stability code: rescaling j_inductive alone hollows
+    anything that feeds a stability code: rescaling jphi_ind alone hollows
     the core, lifts q0 well above the source's (1.3-2.6 measured), loses the
     q=1 surface on most sawtoothing slices, and produces implausible Delta'.
     Use ``"sawtooth_bootstrap"`` (sawtoothing discharges) or ``"bootstrap"``.
@@ -1517,7 +1596,7 @@ def warn_deprecated_channel(channel):
     if str(channel) == "ohmic":
         import warnings
         msg = ("closure_channel='ohmic' is DEPRECATED (diagnostic bracket "
-               "only): rescaling j_inductive alone hollows the core and lifts "
+               "only): rescaling jphi_ind alone hollows the core and lifts "
                "q0 far above the source's, drops the q=1 surface and gives "
                "implausible Delta'. Use 'sawtooth_bootstrap' (sawtoothing "
                "discharges) or 'bootstrap'. Do not feed its output to GPEC.")
@@ -2830,7 +2909,7 @@ def close_ip_structured(psi_N, w_lin, c_affine, Ip_target_signed,
         s_{\rm bs}(\psi)  = 1 + \sum_k b_k \phi_k(\psi),
 
     and the closed hybrid is
-    ``s_ind*j_ind + s_bs*j_BS + j_fix``.  Among all coefficient vectors that
+    ``s_ind*j_ind + s_bs*jphi_bs + j_fix``.  Among all coefficient vectors that
     satisfy the constraints exactly, the one returned minimises
 
     .. math:: \sum_k W^{\rm ind}_k a_k^2 + \sum_k W^{\rm bs}_k b_k^2,
@@ -2841,12 +2920,12 @@ def close_ip_structured(psi_N, w_lin, c_affine, Ip_target_signed,
 
     * **Ip, exactly, in the affine FSA measure.**  ``I_p[J] = trapezoid(w_lin
       J, psi_N) + c`` is affine and linear in *J*, so
-      ``sum_k a_k lin(phi_k j_ind) + sum_k b_k lin(phi_k j_BS) = deficit`` with
-      ``deficit = sgn*Ip - c - lin(j_ind) - lin(j_BS) - lin(j_fix)``.  The
+      ``sum_k a_k lin(phi_k j_ind) + sum_k b_k lin(phi_k jphi_bs) = deficit`` with
+      ``deficit = sgn*Ip - c - lin(j_ind) - lin(jphi_bs) - lin(j_fix)``.  The
       affine ``c`` is carried ONCE, exactly as in :func:`close_ip`.
     * **the on-axis current (q0), when *axis* is given.**  Same row as
       :func:`close_ip_q0`: ``s_ind(0) j_ind0 + s_bs(0) j_bs0 + j_fix0 =
-      j_ref0``, from ``q0 ~ 1/j_phi(0)`` at frozen anchor geometry.  Pass
+      j_ref0``, from ``q0 ~ 1/jphi_total(0)`` at frozen anchor geometry.  Pass
       ``axis=None`` (the sawtooth gate rejected the slice) and only Ip is
       imposed.
     * **the internal inductance, when *li_target* is given** (with the matching
@@ -4129,7 +4208,7 @@ def Ip_flux_integral_vs_target(alpha, mygs, jtor_prof, spike_profile, psi_N, Ip_
     r'''! Compute difference between integrated a*j_tor+j_spike profile and Ip_target
 
     @param alpha Scaling factor to solve for
-    @param jtor_prof Input j_inductive profile
+    @param jtor_prof Input jphi_ind profile
     @param spike_profile Isolated j_bootstrap spike (a Gaussian), 0.0 everywhere else
     @param my_psi_N Local psi_N grid
     @param my_Ip_target Ip target
@@ -4257,9 +4336,9 @@ def _group_path(scan_key, count):
 
 
 #: The held-fixed driven currents a draw / baseline group archives (review
-#: PR70 B10): the closure j_phi = j_inductive + j_BS + j_NBI + j_RF +
-#: j_other (+ j_pressure); j_sawteeth is the sawteeth share OF j_other.
-FIXED_CURRENT_DATASETS = ("j_NBI", "j_RF", "j_other", "j_sawteeth")
+#: PR70 B10): the closure jphi_total = jphi_ind + jphi_bs + jphi_nbi + jphi_rf +
+#: jphi_other (+ jphi_pd); jphi_saw is the sawteeth share OF jphi_other.
+FIXED_CURRENT_DATASETS = ("jphi_nbi", "jphi_rf", "jphi_other", "jphi_saw")
 
 
 def _write_fixed_currents(grp, fixed_currents):
@@ -4276,22 +4355,25 @@ def _write_fixed_currents(grp, fixed_currents):
         write_profile(grp, name, np.asarray(arr, dtype=float))
 
 
-def write_group_current_split(header, scan_key, count, j_pressure):
+@accepts_old_names
+
+
+def write_group_current_split(header, scan_key, count, jphi_pd):
     """The third current bucket on one archived group (a draw, or
-    ``_baseline`` for ``count`` None): the ``j_pressure`` dataset and
+    ``_baseline`` for ``count`` None): the ``jphi_pd`` dataset and
     ``current_split_convention = "pressure_separate"``
     (:func:`bouquet.schema.write_current_split`; owner decision D2).  The
-    caller has already written ``j_inductive`` WITHOUT ``p'G``.  Nothing for
-    ``j_pressure`` None (the group keeps the pre-#64 convention, p'G in
-    ``j_inductive``, which readers infer from the absent attr)."""
-    if j_pressure is None:
+    caller has already written ``jphi_ind`` WITHOUT ``p'G``.  Nothing for
+    ``jphi_pd`` None (the group keeps the pre-#64 convention, p'G in
+    ``jphi_ind``, which readers infer from the absent attr)."""
+    if jphi_pd is None:
         return
     from .schema import write_current_split
     bkey = _scan_key(scan_key)
     path = (_group_path(scan_key, count) if count is not None
             else (f"scan/{bkey}/_baseline" if bkey is not None else "_baseline"))
     with h5py.File(f"{header}.h5", "a") as hf:
-        write_current_split(hf[path], np.asarray(j_pressure, dtype=float))
+        write_current_split(hf[path], np.asarray(jphi_pd, dtype=float))
 
 
 def stamp_group_attrs(header, scan_key, count, attrs):
@@ -4425,6 +4507,72 @@ def stamp_source_orientation(h5path_or_header, scan_key=None,
         grp.attrs["current_frame"] = CURRENT_FRAME
 
 
+#: ``_baseline`` subgroup holding FUSE's summed sources (io.imas.dd_source_totals).
+DD_SOURCES_GROUP = "dd_sources"
+DD_SOURCES_UNITS = {"rho_tor_norm": "", "Q_e": "W", "Q_i": "W", "Gamma_e": "s^-1",
+                    "P_net": "W", "P_rad": "W", "b0": "T", "r0": "m",
+                    "core_profiles_time": "s"}
+
+
+def store_transport(h5path_or_header, scan_key, count, rec):
+    """Write one equilibrium's chi_perp profiles (datasets) and tau scalars
+    (attrs) from :func:`bouquet.transport.transport_record` on its draw group,
+    or on ``_baseline`` when *count* is None."""
+    from .transport import TRANSPORT_PROFILES, TRANSPORT_SCALARS
+    bkey = _scan_key(scan_key)
+    path = (_group_path(scan_key, count) if count is not None
+            else (f"scan/{bkey}/_baseline" if bkey is not None else "_baseline"))
+    with h5py.File(_resolve_h5(h5path_or_header), "a") as hf:
+        grp = hf[path]
+        for k, u in TRANSPORT_PROFILES.items():
+            if k in grp:
+                del grp[k]
+            grp.create_dataset(k, data=np.asarray(rec[k], dtype=float)).attrs["units"] = u
+        for k in TRANSPORT_SCALARS:
+            grp.attrs[k] = float(rec[k])
+
+
+def store_dd_sources(h5path_or_header, scan_key, src):
+    """Write FUSE's summed sources (``Baseline.dd_sources``) as the
+    ``_baseline/dd_sources`` group: arrays as datasets, scalars and the
+    included / skipped entries (JSON) as attrs.  A no-op without ``_baseline``."""
+    import json
+    bkey = _scan_key(scan_key)
+    path = f"scan/{bkey}/_baseline" if bkey is not None else "_baseline"
+    with h5py.File(_resolve_h5(h5path_or_header), "a") as hf:
+        if path not in hf:
+            return
+        if DD_SOURCES_GROUP in hf[path]:
+            del hf[path][DD_SOURCES_GROUP]
+        grp = hf[path].create_group(DD_SOURCES_GROUP)
+        for k, u in DD_SOURCES_UNITS.items():
+            v = src.get(k)
+            if v is None:
+                continue
+            if np.ndim(v):
+                grp.create_dataset(k, data=np.asarray(v, dtype=float)).attrs["units"] = u
+            else:
+                grp.attrs[k] = float(v)
+        grp.attrs["sources_json"] = json.dumps(src.get("sources", []), default=str)
+        grp.attrs["skipped_json"] = json.dumps(src.get("skipped", []), default=str)
+        grp.attrs["rule"] = str(src.get("rule", ""))
+
+
+def load_dd_sources(h5path_or_header, scan_key=None):
+    """``_baseline/dd_sources`` as a dict (see :func:`store_dd_sources`), or None."""
+    import json
+    bkey = _scan_key(scan_key)
+    path = (f"scan/{bkey}/_baseline" if bkey is not None else "_baseline") + "/" + DD_SOURCES_GROUP
+    with h5py.File(_resolve_h5(h5path_or_header), "r") as hf:
+        if path not in hf:
+            return None
+        grp = hf[path]
+        out = {k: np.array(grp[k]) for k in grp}
+        for k, v in grp.attrs.items():
+            out[k] = json.loads(v) if k.endswith("_json") else v
+    return out
+
+
 #: The coil-solve mode every solve of a run is in since 2026-10-06
 #: (bouquet.solver_state.enter_bounded_coil_mode at Bouquet.setup_solver).
 CANONICAL_COIL_SOLVE_MODE = "bounded"
@@ -4448,7 +4596,7 @@ def stamp_coil_solve_mode(h5path_or_header, scan_key=None, mode=None):
 def stamp_bootstrap_eps(h5path_or_header, scan_key=None, record=None):
     """Record the Redl epsilon of the run (``Baseline.bootstrap_eps``,
     :func:`bouquet.engine.eps_record`: ``eps_definition``, ``eps_formula``,
-    ``nu_star_R``, ``evaluate_jBS_version``) as the JSON attr
+    ``nu_star_R``, ``evaluate_jbs_version``) as the JSON attr
     ``bootstrap_eps_json`` of the ``_baseline`` group.  No-op without a
     record or a ``_baseline`` group."""
     if not record:
@@ -4466,7 +4614,7 @@ def load_bootstrap_eps(h5path_or_header, scan_key=None):
     """The record :func:`stamp_bootstrap_eps` wrote, or ``None`` for an
     archive that predates it (before 2026-10-09: such a run evaluated with
     ``<a>/<R>`` or ``(R_max - R_min)/(2<R>)``, ``<R>`` in ``nu*``; its loop
-    records' ``evaluate_jBS_version`` says which)."""
+    records' ``evaluate_jbs_version`` says which)."""
     import json
     path = _resolve_h5(h5path_or_header)
     gp = _baseline_group_path(scan_key)
@@ -4802,10 +4950,10 @@ def load_config(h5path_or_header, scan_key=None):
 # ====================================================================
 _PROFILE_KEYS = [
     "psi_N",
-    "j_phi",
-    "j_BS",
-    "j_BS,edge",
-    "j_inductive",
+    "jphi_total",
+    "jphi_bs",
+    "jphi_bs,edge",
+    "jphi_ind",
     "n_e",
     "T_e",
     "n_i",
@@ -4822,14 +4970,17 @@ def _read_coil_names(grp):
             for n in grp["coil_names"][()]]
 
 
+@accepts_old_names
+
+
 def store_equilibrium(
     header,
     count,
     eqdsk_filepath,
     psi_N,
-    j_phi,
-    j_BS,
-    j_inductive,
+    jphi_total,
+    jphi_bs,
+    jphi_ind,
     n_e,
     T_e,
     n_i,
@@ -4840,7 +4991,7 @@ def store_equilibrium(
     scan_key=None,
     pressure=None,
     pressure_thermal=None,
-    j_BS_edge=None,
+    jphi_bs_edge=None,
     pfile_bytes=None,
     Zeff=None,
     z_fast=None,
@@ -4867,7 +5018,9 @@ def store_equilibrium(
     jbs_loop=None,
     profile_coord="psi_n",
     ifile_filepath=None,
+    tokamaker_state_filepath=None,
     fixed_currents=None,
+    compress_file_bytes=False,
 ):
     """
     Write one perturbed equilibrium into the HDF5 database.
@@ -4878,10 +5031,11 @@ def store_equilibrium(
         Base name (same string passed to ``initialize_equilibrium_database``).
     count : int
         Perturbation index (typically 0 -- N-1).
-    eqdsk_filepath : str
+    eqdsk_filepath : str or None
         Path to the ``.geqdsk`` / ``.eqdsk`` file.  Read as raw bytes so
-        the Fortran-namelist formatting is preserved exactly.
-    psi_N, j_phi, j_BS, j_inductive,
+        the Fortran-namelist formatting is preserved exactly.  ``None``
+        stores no g-file (``GenerationConfig.store_eqdsk=False``).
+    psi_N, jphi_total, jphi_bs, jphi_ind,
     n_e, T_e, n_i, T_i, w_ExB : array_like, 1-D
         Profile arrays.
     li1 : float
@@ -4893,18 +5047,24 @@ def store_equilibrium(
         group layer is inserted.  ``None`` gives the flat layout.
     pressure : array_like or None
         1-D total pressure.
-    j_BS_edge : array_like or None
+    jphi_bs_edge : array_like or None
         1-D isolated edge bootstrap current [A m^-2].
     pfile_bytes : bytes or None
         Raw p-file content to store alongside the g-file bytes.
     ifile_filepath : str or None
         OFT i-file (``save_ifile``) to store as the ``ifile`` blob.
+    tokamaker_state_filepath : str or None
+        The TokaMaker equilibrium of that state (``save_TokaMaker``), stored
+        as the ``tokamaker_state`` blob.
+    compress_file_bytes : bool
+        Store the g-file / p-file / i-file bytes gzip-compressed
+        (:func:`schema.write_bytes`).
     fixed_currents : dict or None
         The draw's held-fixed driven currents on ``psi_N``
-        (:data:`FIXED_CURRENT_DATASETS`: ``j_NBI``, ``j_RF``, ``j_other`` and
-        ``j_sawteeth``, the sawteeth share of ``j_other``), each written as a
-        dataset when not None, so the archived split closes: ``j_phi =
-        j_inductive + j_BS + j_NBI + j_RF + j_other (+ j_pressure)``.
+        (:data:`FIXED_CURRENT_DATASETS`: ``jphi_nbi``, ``jphi_rf``, ``jphi_other`` and
+        ``jphi_saw``, the sawteeth share of ``jphi_other``), each written as a
+        dataset when not None, so the archived split closes: ``jphi_total =
+        jphi_ind + jphi_bs + jphi_nbi + jphi_rf + jphi_other (+ jphi_pd)``.
     Zeff : array_like or None
         1-D effective charge profile (dimensionless).
     coil_currents : dict or None
@@ -4925,9 +5085,6 @@ def store_equilibrium(
             f"Call initialize_equilibrium_database('{header}') first."
         )
 
-    with open(eqdsk_filepath, "rb") as fh:
-        eqdsk_bytes = fh.read()
-
     grp_path = _group_path(scan_key, count)
 
     with h5py.File(db_path, "a") as hf:
@@ -4940,20 +5097,21 @@ def store_equilibrium(
 
         # ---- raw eqdsk (opaque binary -- bit-perfect; schema-v2 fixed
         # name, the group path carries the coordinates) --------------------
-        from .schema import EQDSK_DS, IFILE_DS
-        grp.create_dataset(EQDSK_DS, data=np.void(eqdsk_bytes))
-        if ifile_filepath is not None:
-            with open(ifile_filepath, "rb") as fh:
-                grp.create_dataset(IFILE_DS, data=np.void(fh.read()))
+        from .schema import EQDSK_DS, IFILE_DS, TOKAMAKER_STATE_DS, write_bytes
+        for ds, p in ((EQDSK_DS, eqdsk_filepath), (IFILE_DS, ifile_filepath),
+                      (TOKAMAKER_STATE_DS, tokamaker_state_filepath)):
+            if p is not None:
+                with open(p, "rb") as fh:
+                    write_bytes(grp, ds, fh.read(), compress_file_bytes)
 
         # ---- 1-D profiles -----------------------------------------------
         write_profile(grp, "psi_N", psi_N)
-        write_profile(grp, "j_phi", j_phi)
-        write_profile(grp, "j_BS", j_BS)
-        write_profile(grp, "j_inductive", j_inductive)
+        write_profile(grp, "jphi_total", jphi_total)
+        write_profile(grp, "jphi_bs", jphi_bs)
+        write_profile(grp, "jphi_ind", jphi_ind)
 
-        if j_BS_edge is not None:
-            write_profile(grp, "j_BS,edge", j_BS_edge)
+        if jphi_bs_edge is not None:
+            write_profile(grp, "jphi_bs,edge", jphi_bs_edge)
         _write_fixed_currents(grp, fixed_currents)
         write_profile(grp, "n_e", n_e)
         write_profile(grp, "T_e", T_e)
@@ -4996,10 +5154,9 @@ def store_equilibrium(
         # duplicated verbatim into every draw (~190 MB x n_draws with the new
         # IDA-database files); it lives ONCE in _baseline and per-draw readers
         # (BouquetArchive.DrawView.pfile_bytes, load_equilibrium) fall back.
-        from .schema import is_binary_profile_source
+        from .schema import PFILE_DS, is_binary_profile_source, write_bytes
         if pfile_bytes is not None and not is_binary_profile_source(pfile_bytes):
-            pf_ds = "pfile"
-            grp.create_dataset(pf_ds, data=np.void(pfile_bytes))
+            write_bytes(grp, PFILE_DS, pfile_bytes, compress_file_bytes)
 
         # ---- optional: Zeff profile ----------------------------------------
         if Zeff is not None:
@@ -5363,6 +5520,9 @@ def _json_default_for_h5(o):
     return str(o)
 
 
+@accepts_old_names
+
+
 def store_baseline_profiles(
     header,
     psi_N,
@@ -5371,7 +5531,7 @@ def store_baseline_profiles(
     ni,
     ti,
     pressure,
-    j_phi,
+    jphi_total,
     sigma_ne,
     sigma_te,
     sigma_ni,
@@ -5395,14 +5555,16 @@ def store_baseline_profiles(
     diverted=None,
     aux_baselines=None,
     aux_sigmas=None,
-    j_BS=None,
-    j_inductive=None,
+    jphi_bs=None,
+    jphi_ind=None,
     source_kind=None,
     mse_record=None,
     baseline_meta=None,
     profile_coord="psi_n",
     ifile_bytes=None,
+    tokamaker_state_bytes=None,
     fixed_currents=None,
+    compress_file_bytes=False,
 ):
     """
     Store the input (baseline) profiles and their uncertainties.
@@ -5421,6 +5583,10 @@ def store_baseline_profiles(
         Raw baseline p-file content.
     ifile_bytes : bytes or None
         Raw baseline OFT i-file content (``write_ifile`` runs).
+    tokamaker_state_bytes : bytes or None
+        The TokaMaker equilibrium that i-file was written from.
+    compress_file_bytes : bool
+        As :func:`store_equilibrium`.
     fixed_currents : dict or None
         The baseline's held-fixed driven currents
         (:data:`FIXED_CURRENT_DATASETS`), as :func:`store_equilibrium`.
@@ -5433,7 +5599,7 @@ def store_baseline_profiles(
         ``None`` writes nothing.
     baseline_meta : dict or None
         Baseline provenance (``Baseline.li_metrics``): the l_i comparison,
-        forward-solve residuals, ``jBS_baseline_mode``, the closure scales
+        forward-solve residuals, ``jbs_baseline_mode``, the closure scales
         and, on a hybrid (ohmic-mode) baseline, the full ``ip_closure``
         health record including ``closure_limited`` and its reasons, and
         the report-only ``core_pressure_hollow`` record.
@@ -5476,11 +5642,11 @@ def store_baseline_profiles(
                 write_profile(grp, _k, _v)
         if Z_imp:
             grp.attrs["Z_imp"] = float(Z_imp)
-        write_profile(grp, "j_phi", j_phi)
-        if j_BS is not None:
-            write_profile(grp, "j_BS", j_BS)
-        if j_inductive is not None:
-            write_profile(grp, "j_inductive", j_inductive)
+        write_profile(grp, "jphi_total", jphi_total)
+        if jphi_bs is not None:
+            write_profile(grp, "jphi_bs", jphi_bs)
+        if jphi_ind is not None:
+            write_profile(grp, "jphi_ind", jphi_ind)
         _write_fixed_currents(grp, fixed_currents)
         write_profile(grp, "sigma_ne", sigma_ne)
         write_profile(grp, "sigma_te", sigma_te)
@@ -5530,12 +5696,11 @@ def store_baseline_profiles(
             if isinstance(_icl, dict) and "closure_limited" in _icl:
                 grp.attrs["closure_limited"] = bool(_icl["closure_limited"])
 
-        if eqdsk_bytes is not None:
-            grp.create_dataset("eqdsk", data=np.void(eqdsk_bytes))
-        if ifile_bytes is not None:
-            grp.create_dataset("ifile", data=np.void(ifile_bytes))
-        if pfile_bytes is not None:
-            grp.create_dataset("pfile", data=np.void(pfile_bytes))
+        from .schema import EQDSK_DS, IFILE_DS, PFILE_DS, TOKAMAKER_STATE_DS, write_bytes
+        for ds, b in ((EQDSK_DS, eqdsk_bytes), (IFILE_DS, ifile_bytes), (PFILE_DS, pfile_bytes),
+                      (TOKAMAKER_STATE_DS, tokamaker_state_bytes)):
+            if b is not None:
+                write_bytes(grp, ds, b, compress_file_bytes)
 
         # ---- Recon-LCFS reference for downstream boundary-deviation
         # measurements.  Captured by the caller via mygs.trace_surf() at
@@ -5695,9 +5860,10 @@ def load_baseline_profiles(h5path_or_header, scan_key=None):
             )
         grp = hf[grp_path]
         for key in grp.keys():
+            if key == DD_SOURCES_GROUP:
+                continue                       # load_dd_sources reads it
             if isinstance(grp[key], h5py.Group):
-                # the structured closure's per-chord MSE record (the only
-                # subgroup a baseline carries)
+                # the structured closure's per-chord MSE record
                 result[key] = _read_mse_record(grp[key])
                 continue
             result[key] = np.array(grp[key])
@@ -5803,8 +5969,8 @@ def pchip_interp(x_src, y_src, x_out):
     ``interp1d(kind='linear')`` pattern: linear regrid leaves a slope kink
     at every source knot, so ANY subsequent derivative (including OFT's
     PCHIP-derivative bootstrap) is a staircase with plateaus between knots
-    -- visible as stepped j_BS between the kinetic knots (verified on a
-    weak-pedestal case: |d2 j_BS| correlates 0.99 with |d2 dTe/dpsi| of the
+    -- visible as stepped jphi_bs between the kinetic knots (verified on a
+    weak-pedestal case: |d2 jphi_bs| correlates 0.99 with |d2 dTe/dpsi| of the
     linear regrid, identical in np.gradient and PCHIP OFT builds; direct
     PCHIP regrid cuts the step energy ~7x).
 

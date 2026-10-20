@@ -12,7 +12,7 @@ identity at zero perturbation:
   residual -- so the state anchor, the anchor loop and route R2 re-solve F,
   and R2's Ip bookkeeping reads a scale of 1;
 * the standard route targets ACHIEVED currents, so it perturbs
-  ``j_inductive - jphi_request_offset``, roots its amplitude in the same
+  ``jphi_ind - jphi_request_offset``, roots its amplitude in the same
   measure (1 at zero perturbation), and starts its corrective iteration from
   ``target + offset`` = F's request;
 * the g-file reconstruction ends on the l_i re-match of the corrective
@@ -229,17 +229,17 @@ def toy(monkeypatch):
         util.mu0 = mu0
         boot = types.ModuleType("OpenFUSIONToolkit.TokaMaker.bootstrap")
 
-        def _fos(mygs, psi_N, pressure, ffp_prof, pp_prof, j_inductive,
+        def _fos(mygs, psi_N, pressure, ffp_prof, pp_prof, jphi_ind,
                  Ip_target, psi_pad, spike_prof=None, tolerance=0.01,
                  max_iter=5, diagnostic_plots=False, verbose=True):
             psi_eval = np.clip(psi_N, psi_pad, 1.0 - psi_pad)
-            ffp_prof["y"] = j_inductive + spike_prof
+            ffp_prof["y"] = jphi_ind + spike_prof
             mygs.set_targets(Ip=Ip_target, pax=pressure[0])
             mygs.set_profiles(ffp_prof=ffp_prof, pp_prof=pp_prof)
             mygs.solve()
             _, f, fp, _, pp = mygs.get_profiles(psi=psi_eval)
             out0 = f[0] * fp[0]
-            inp0 = j_inductive[0] + spike_prof[0]
+            inp0 = jphi_ind[0] + spike_prof[0]
             if abs(inp0 - out0) / out0 < tolerance:
                 return 1.0, f * fp
             raise AssertionError(
@@ -269,7 +269,7 @@ def toy(monkeypatch):
     monkeypatch.setattr(L, "residual_weights",
                         lambda eq, psi_N, psi_pad=1e-3, coord="psi_n": (_W.copy(), _X,
                                                          "toy"))
-    monkeypatch.setattr(P, "evaluate_jBS", _toy_redl)
+    monkeypatch.setattr(P, "evaluate_jbs", _toy_redl)
     monkeypatch.delenv("BOUQUET_R2_IP_MODE", raising=False)
     return ToyGS()
 
@@ -325,26 +325,26 @@ def _delivered(mygs, request, jbs, fixed_eff):
     from bouquet.TokaMaker_interface import (_deliver_request_split,
                                              _request_offset)
     dv = _deliver_request_split(mygs, _X, _PAD, _IP, request, jbs, fixed_eff)
-    off, n_fl = _request_offset(dv["j_inductive"], dv["achieved"], jbs,
+    off, n_fl = _request_offset(dv["jphi_ind"], dv["achieved"], jbs,
                                 fixed_eff)
     return dv, off, n_fl
 
 
-def _draw(mygs, route, input_j_phi, j_ind, l_i_target, settings,
-          offset=None, j_NBI=None, jphi_diff=None):
+def _draw(mygs, route, jphi_total_input, j_ind, l_i_target, settings,
+          offset=None, jphi_nbi=None, jphi_diff=None):
     from bouquet.TokaMaker_interface import perturb_kinetic_equilibrium
     from bouquet.sampling import make_rng
     z = np.zeros(_N)
     pressure = _EC * (_NE * _TE + _NI * _TI)
     return perturb_kinetic_equilibrium(
         mygs, _X, pressure, _NE, _TE, _NI, _TI,
-        np.asarray(input_j_phi, float), z, z, z, z, z, 0.5, 0.4, 0.25,
+        np.asarray(jphi_total_input, float), z, z, z, z, z, 0.5, 0.4, 0.25,
         _IP, float(l_i_target), _ZEFF, _N,
-        input_jinductive=np.asarray(j_ind, float), l_i_tolerance=0.05,
-        psi_pad=_PAD, constrain_sawteeth=False, recalculate_j_BS=True,
-        isolate_edge_jBS=False, scale_jBS=1.0, floor_j_BS=False,
-        jBS_diff=None, perturb_jind_in_anchor=(route == "ip_renorm"),
-        accept_anchor_inband=False, j_NBI=j_NBI, jphi_diff=jphi_diff,
+        jphi_ind_input=np.asarray(j_ind, float), l_i_tolerance=0.05,
+        psi_pad=_PAD, constrain_sawteeth=False, recalculate_jbs=True,
+        isolate_edge_jbs=False, scale_jbs=1.0, floor_jbs=False,
+        jphi_bs_diff=None, perturb_jind_in_anchor=(route == "ip_renorm"),
+        accept_anchor_inband=False, jphi_nbi=jphi_nbi, jphi_diff=jphi_diff,
         max_proxy_draws=5, p_thresh=0.05, rng=make_rng(7),
         jbs_loop=settings, jphi_request_offset=offset)[6]
 
@@ -381,7 +381,7 @@ def test_delivered_split_sums_to_the_normalised_request_and_resolves_to_F(toy):
     assert _trap(_W * dv["request"]) == pytest.approx(_IP, rel=1e-12)
     assert dv["kappa"] == pytest.approx(1.0 / 0.965, rel=1e-12)
     # the parts sum to it exactly (the inductive is the residual)
-    np.testing.assert_allclose(dv["j_inductive"] + jbs + fx, dv["request"],
+    np.testing.assert_allclose(dv["jphi_ind"] + jbs + fx, dv["request"],
                                rtol=0, atol=1e-9 * np.max(dv["request"]))
     # one solve of the stored request IS F (shape-only normalisation)
     toy.set_targets(Ip=_IP)
@@ -390,7 +390,7 @@ def test_delivered_split_sums_to_the_normalised_request_and_resolves_to_F(toy):
     np.testing.assert_allclose(toy.achieved, F.achieved, rtol=1e-12)
     # the standard route's achieved-convention mean + offset = the request
     assert n_fl == 0
-    mean_t = dv["j_inductive"] - off
+    mean_t = dv["jphi_ind"] - off
     np.testing.assert_allclose(mean_t + jbs + fx + off, dv["request"],
                                rtol=1e-12)
     np.testing.assert_allclose(mean_t + jbs + fx, dv["achieved"], rtol=1e-12)
@@ -428,7 +428,7 @@ def test_r2_scale_is_one_on_the_normalised_split_in_the_same_measure(toy):
     req, jbs, fx = _reconstruct(toy, kappa_short=0.965)
     dv, off, _n = _delivered(toy, req, jbs, fx)
     aip = _AnchorIpRenorm(toy, _X, dv["request"], _IP, _PAD, mode="exact")
-    s = aip.solve_scale(dv["j_inductive"], jbs + fx)
+    s = aip.solve_scale(dv["jphi_ind"], jbs + fx)
     assert abs(s - 1.0) <= 1e-12
     # guard the guard: the old storage (the short total, inductive residual
     # of it) reads the shortfall on the inductive alone
@@ -437,7 +437,7 @@ def test_r2_scale_is_one_on_the_normalised_split_in_the_same_measure(toy):
     f_ind = _trap(_W * j_ind_old) / _IP
     assert s_old - 1.0 == pytest.approx((1.0 - 0.965) / f_ind, rel=1e-9)
     # the standard route's root on its achieved-convention candidate
-    a = aip.solve_scale(dv["j_inductive"] - off, jbs + fx)
+    a = aip.solve_scale(dv["jphi_ind"] - off, jbs + fx)
     assert abs(a - 1.0) <= 1e-12
 
 
@@ -576,10 +576,10 @@ def test_the_unperturbed_draw_reproduces_the_reconstruction(toy, route,
     dv, off, _n = _delivered(toy, req, jbs, fx)
     F = toy.copy_eq()
     jbs_F = _kin_redl(F)
-    j_phi = dv["request"] - (0.0 if jd is None else jd)
+    jphi_total = dv["request"] - (0.0 if jd is None else jd)
     s = _settings()
-    d = _draw(toy, route, j_phi, dv["j_inductive"], _li(F.achieved), s,
-              offset=off, j_NBI=j_nbi, jphi_diff=jd)
+    d = _draw(toy, route, jphi_total, dv["jphi_ind"], _li(F.achieved), s,
+              offset=off, jphi_nbi=j_nbi, jphi_diff=jd)
     r = _identity(toy, F, jbs_F, d, s)
     assert r["ok"], r
     if route == "ip_renorm":
@@ -606,7 +606,7 @@ def test_identity_holds_with_each_opt_in_flag_on(toy, route, flag):
     dv, off, _n = _delivered(toy, req, jbs, fx)
     F = toy.copy_eq()
     s = _settings(**{flag: True})
-    d = _draw(toy, route, dv["request"], dv["j_inductive"], _li(F.achieved),
+    d = _draw(toy, route, dv["request"], dv["jphi_ind"], _li(F.achieved),
               s, offset=off)
     r = _identity(toy, F, _kin_redl(F), d, s)
     assert r["ok"], r

@@ -69,7 +69,7 @@ def test_the_taper_refuses_the_unpinned_edge():
     from bouquet.engine import validate_engine_settings
     gc = GenerationConfig(reconstruction_engine="unified",
                           edge_pprime_pin=False,
-                          bootstrap_kwargs={"taper_edge_jBS": True})
+                          bootstrap_kwargs={"taper_edge_jphi": True})
     with pytest.raises(ValueError, match="edge_pprime_pin=False"):
         validate_engine_settings(gc)
     gc.bootstrap_kwargs = {}

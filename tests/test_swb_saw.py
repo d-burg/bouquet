@@ -1,6 +1,6 @@
 """imas_baseline="swb" sawtooth q reset (GenerationConfig.swb_saw_q): config
 guards, the jphi_fixed / jphi_saw split, the kwargs SWB receives, and the
-current accounting j_phi = j_ind + j_BS + (fixed - j_sawteeth) + j_saw.
+current accounting jphi_total = j_ind + jphi_bs + (fixed - jphi_saw) + jphi_saw_out.
 Fast suite: SWB is mocked."""
 
 import sys
@@ -99,9 +99,9 @@ class TestConfig:
 def _profiles(n=33):
     x = np.linspace(0.0, 1.0, n)
     j_ind = 1e6 * (1.0 - x ** 1.5) ** 1.5
-    j_saw = 2e4 * (np.exp(-((x - 0.05) / 0.05) ** 2) - np.exp(-((x - 0.2) / 0.05) ** 2))
-    j_fix = 3e4 * np.exp(-((x - 0.4) / 0.2) ** 2) + j_saw
-    return x, j_ind, j_fix, j_saw
+    jphi_saw_out = 2e4 * (np.exp(-((x - 0.05) / 0.05) ** 2) - np.exp(-((x - 0.2) / 0.05) ** 2))
+    j_fix = 3e4 * np.exp(-((x - 0.4) / 0.2) ** 2) + jphi_saw_out
+    return x, j_ind, j_fix, jphi_saw_out
 
 
 class TestSourceSeed:
@@ -115,20 +115,20 @@ class TestSourceSeed:
                                         {"jphi_fixed", "jphi_saw"}])  # uniform grid
     def test_split_sums_to_old_fixed(self, monkeypatch, params):
         monkeypatch.setattr(coords, "_swb_params", lambda: frozenset(params))
-        x, j_ind, j_fix, j_saw = _profiles()
+        x, j_ind, j_fix, jphi_saw_out = _profiles()
         x = x ** 1.3                                       # non-uniform run grid
         seed0, fix0 = coords.swb_source_seed(x, j_ind, j_fix)
-        seed, fix, saw = coords.swb_source_seed(x, j_ind, j_fix, j_saw)
+        seed, fix, saw = coords.swb_source_seed(x, j_ind, j_fix, jphi_saw_out)
         assert np.array_equal(seed, seed0)
-        assert np.array_equal(saw, np.interp(coords.swb_grid(x), x, j_saw))
+        assert np.array_equal(saw, np.interp(coords.swb_grid(x), x, jphi_saw_out))
         np.testing.assert_allclose(fix + saw, fix0, rtol=0,
                                    atol=1e-12 * np.max(np.abs(fix0)))
 
     def test_old_toolkit_refused(self, monkeypatch):
         monkeypatch.setattr(coords, "_swb_params", lambda: frozenset({"x", "jphi_fixed"}))
-        x, j_ind, j_fix, j_saw = _profiles()
+        x, j_ind, j_fix, jphi_saw_out = _profiles()
         with pytest.raises(RuntimeError, match="jphi_saw"):
-            coords.swb_source_seed(x, j_ind, j_fix, j_saw)
+            coords.swb_source_seed(x, j_ind, j_fix, jphi_saw_out)
 
 
 # ---- mocked SWB: kwargs, accounting, sigma=0 -------------------------------
@@ -177,8 +177,8 @@ def _dj(x):
 
 @pytest.fixture
 def fake_swb(monkeypatch, saw_oft):
-    """solve_with_bootstrap following OFT's total = a*j_ind + j_BS + jphi_fixed
-    + j_saw; like the saw toolkit it returns the saw keys even when off."""
+    """solve_with_bootstrap following OFT's total = a*j_ind + jphi_bs + jphi_fixed
+    + jphi_saw_out; like the saw toolkit it returns the saw keys even when off."""
     calls = []
 
     def swb(mygs, ne, te, ni, ti, zeff, ip, inductive_jphi, **kw):
@@ -188,10 +188,10 @@ def fake_swb(monkeypatch, saw_oft):
         j_bs = 1e5 * (1.0 - x) ** 2
         on = bool(kw.get("saw_q_s"))
         j_in = np.zeros_like(x) if kw.get("jphi_saw") is None else kw["jphi_saw"]
-        j_saw = j_in + (_dj(x) if on else 0.0)
-        return {"j_inductive": j_ind, "isolated_j_BS": j_bs,
-                "total_j_phi": j_ind + j_bs + kw["jphi_fixed"] + j_saw,
-                "j_saw": j_saw, "saw_rho_m": 0.31 if on else 0.0,
+        jphi_saw_out = j_in + (_dj(x) if on else 0.0)
+        return {"jphi_ind": j_ind, "jphi_bs": j_bs,
+                "jphi_total": j_ind + j_bs + kw["jphi_fixed"] + jphi_saw_out,
+                "jphi_saw_out": jphi_saw_out, "saw_rho_m": 0.31 if on else 0.0,
                 "saw_rho_out": 0.18 if on else 0.0, "saw_n_dips": 1 if on else 0}
 
     mod = types.ModuleType("OpenFUSIONToolkit.TokaMaker.bootstrap")
@@ -211,22 +211,23 @@ _METHODS = ("_swb_source_split", "_swb_saw_kwargs", "_swb_solve", "_swb_split", 
 
 
 def _run(**gen):
-    x, j_ind, _, j_saw = _profiles()
+    x, j_ind, _, jphi_saw_out = _profiles()
     j_nbi = 3e4 * np.exp(-((x - 0.4) / 0.2) ** 2)
     j_rf = 1e4 * np.exp(-((x - 0.5) / 0.1) ** 2)
     j_fus = 2e3 * (1.0 - x ** 2)
     j_bs = 8e4 * (1.0 - x) ** 2
     bl = types.SimpleNamespace(
-        psi_N=x, j_inductive=j_ind, j_BS=j_bs, j_NBI=j_nbi, j_RF=j_rf,
-        j_other=j_fus + j_saw, j_sawteeth=j_saw, Ip_target=1.0e6, li_metrics={},
-        j_pressure=0 * x,
-        j_phi=j_ind + j_bs + j_nbi + j_rf + j_fus + j_saw, coord="psi_n",
+        psi_N=x, jphi_ind=j_ind, jphi_bs=j_bs, jphi_nbi=j_nbi, jphi_rf=j_rf,
+        jphi_other=j_fus + jphi_saw_out, jphi_saw=jphi_saw_out, Ip_target=1.0e6, li_metrics={},
+        jphi_pd=0 * x,
+        jphi_total=j_ind + j_bs + j_nbi + j_rf + j_fus + jphi_saw_out, coord="psi_n",
         psi_N_kinetic=x, ne=1e19 + 0 * x, te=1e3 + 0 * x, ni=1e19 + 0 * x,
         ti=1e3 + 0 * x, Zeff=1.5 + 0 * x, p_fast=None)
     gen.setdefault("imas_baseline", "swb")
     ns = types.SimpleNamespace(
         baseline=bl, mygs=_GS(), _geom=types.SimpleNamespace(boundary_RZ=None),
-        config=types.SimpleNamespace(generation=GenerationConfig(**gen)),
+        config=types.SimpleNamespace(source=types.SimpleNamespace(psi_pad=1e-3),
+                                     generation=GenerationConfig(**gen)),
         _reset_solver_state=lambda: None, _seed_coil_init=lambda m: None,
         _swb_baseline_kinetics=lambda: dict(
             ne=1e19 + 0 * x, te=1e3 + 0 * x, ni=1e19 + 0 * x, ti=1e3 + 0 * x,
@@ -240,14 +241,14 @@ def _run(**gen):
 class TestMockedSWB:
     def test_kwargs_off(self, fake_swb):
         ns = _run()
-        jfix_old = ns.baseline.j_phi - ns.baseline.j_inductive - ns.baseline.j_BS
+        jfix_old = ns.baseline.jphi_total - ns.baseline.jphi_ind - ns.baseline.jphi_bs
         ns._swb_imas_baseline()
         assert len(fake_swb) == 2                          # solve A, solve B
         for kw in fake_swb:
             assert not (SAW_ARGS & set(kw))
             assert np.array_equal(kw["jphi_fixed"], jfix_old)
         bl = ns.baseline
-        assert bl.j_saw is None and bl.swb_jphi_saw is None
+        assert bl.jphi_saw_out is None and bl.jphi_saw_input is None
         assert not any(k.startswith("saw_") for k in bl.ip_closure)
         assert not (set(swb_mod._SWB_SAW_KEYS) & set(bl.swb_baseline))  # stripped though returned
 
@@ -259,9 +260,9 @@ class TestMockedSWB:
         for kw in fake_swb:
             assert {k: kw[k] for k in SAW_ARGS - {"jphi_saw"}} == dict(
                 saw_q_s=1.025, saw_dq=0.04, saw_tol=2e-4, saw_ramp=0.0, saw_rule=1)
-            assert np.array_equal(kw["jphi_saw"], bl.swb_jphi_saw)
-            assert kw["jphi_fixed"] is bl.swb_jphi_fixed
-        np.testing.assert_array_equal(bl.swb_jphi_saw, bl.j_sawteeth)
+            assert np.array_equal(kw["jphi_saw"], bl.jphi_saw_input)
+            assert kw["jphi_fixed"] is bl.jphi_fixed
+        np.testing.assert_array_equal(bl.jphi_saw_input, bl.jphi_saw)
         assert bl.ip_closure["saw_rho_m"] == 0.31 and bl.ip_closure["saw_n_dips"] == 1
         assert bl.ip_closure["saw_rho_out"] == 0.18 == bl.swb_baseline["saw_rho_out"]
         assert bl.ip_closure["saw_map_warn"] is False      # a reset: nothing to check
@@ -270,19 +271,19 @@ class TestMockedSWB:
     def test_accounting(self, fake_swb, saw_q):
         ns = _run(swb_saw_q=saw_q)
         bl = ns.baseline
-        jfix_old = bl.j_phi - bl.j_inductive - bl.j_BS
+        jfix_old = bl.jphi_total - bl.jphi_ind - bl.jphi_bs
         ns._swb_imas_baseline()
-        pk = np.max(np.abs(bl.j_phi))
+        pk = np.max(np.abs(bl.jphi_total))
         if saw_q is None:
-            assert np.array_equal(bl.swb_jphi_fixed, jfix_old)
-            other = bl.j_other
+            assert np.array_equal(bl.jphi_fixed, jfix_old)
+            other = bl.jphi_other
         else:
-            np.testing.assert_allclose(bl.swb_jphi_fixed + bl.swb_jphi_saw, jfix_old,
+            np.testing.assert_allclose(bl.jphi_fixed + bl.jphi_saw_input, jfix_old,
                                        rtol=0, atol=1e-12 * pk)
-            np.testing.assert_allclose(bl.j_saw, bl.j_sawteeth + _dj(bl.psi_N), rtol=1e-14)
-            other = bl.j_other - bl.j_sawteeth + bl.j_saw
+            np.testing.assert_allclose(bl.jphi_saw_out, bl.jphi_saw + _dj(bl.psi_N), rtol=1e-14)
+            other = bl.jphi_other - bl.jphi_saw + bl.jphi_saw_out
         np.testing.assert_allclose(
-            bl.j_inductive + bl.j_BS + bl.j_NBI + bl.j_RF + other, bl.j_phi,
+            bl.jphi_ind + bl.jphi_bs + bl.jphi_nbi + bl.jphi_rf + other, bl.jphi_total,
             rtol=0, atol=1e-12 * pk)
 
     @pytest.mark.parametrize("saw_q", [None, 1.025])
@@ -291,7 +292,7 @@ class TestMockedSWB:
         ns._swb_imas_baseline()
         out = ns._verify_sigma0_swb()
         assert out["passed"]
-        assert ("j_saw" in out["swb_dev"]) == (saw_q is not None)
+        assert ("jphi_saw_out" in out["swb_dev"]) == (saw_q is not None)
         assert ("saw_rho_m" in out["swb_dev"]) == (saw_q is not None)
         assert ("saw_rho_out" in out["swb_dev"]) == (saw_q is not None)
         # the sigma=0 draw is solve B: strong reg toward A's coils, same saw args
@@ -305,20 +306,20 @@ def _draw(res_extra):
 
     def recipe(kin, j_seed):
         j_ind = 1.01 * j_seed
-        return {"j_inductive": j_ind, "isolated_j_BS": 0 * x,
-                "total_j_phi": j_ind, **res_extra}
+        return {"jphi_ind": j_ind, "jphi_bs": 0 * x,
+                "jphi_total": j_ind, **res_extra}
     return SD.swb_draw(None, x, None, prof, prof, prof, prof, None, None, None,
                        None, None, 0.5, 0.4, 0.25, 1.5 + 0 * x, seed, recipe,
                        coord="psi_n", rng=0, p_thresh=0.05)[6]
 
 
 def test_swb_draw_records_j_saw():
-    d = _draw({"j_saw": np.ones(17), "saw_rho_m": 0.3, "saw_rho_out": 0.2,
+    d = _draw({"jphi_saw_out": np.ones(17), "saw_rho_m": 0.3, "saw_rho_out": 0.2,
                "saw_n_dips": 2, "saw_map_warn": False})
-    assert np.array_equal(d["j_saw"], np.ones(17))
+    assert np.array_equal(d["jphi_saw_out"], np.ones(17))
     assert (d["saw_rho_m"], d["saw_rho_out"], d["saw_n_dips"]) == (0.3, 0.2, 2)
     assert d["saw_map_warn"] is False
-    assert not ({"j_saw", "saw_rho_m", "saw_rho_out", "saw_n_dips", "saw_map_warn"}
+    assert not ({"jphi_saw_out", "saw_rho_m", "saw_rho_out", "saw_n_dips", "saw_map_warn"}
                 & set(_draw({})))
 
 
@@ -345,8 +346,8 @@ def test_phi_n_saw_and_fixed_share_grid(fake_swb):
     for kw in fake_swb:
         assert kw["coord"] == "phi_n" and np.array_equal(kw["x"], bl.psi_N)
         assert kw["jphi_saw"].shape == kw["jphi_fixed"].shape == bl.psi_N.shape
-        np.testing.assert_array_equal(kw["jphi_saw"], bl.swb_jphi_saw)
-    np.testing.assert_array_equal(bl.swb_jphi_saw, bl.j_sawteeth)
+        np.testing.assert_array_equal(kw["jphi_saw"], bl.jphi_saw_input)
+    np.testing.assert_array_equal(bl.jphi_saw_input, bl.jphi_saw)
 
 
 def _taper(x, x0=0.9):
@@ -354,7 +355,7 @@ def _taper(x, x0=0.9):
 
 
 def test_saw_taper_identity(fake_swb):
-    """OFT tapers every channel at the edge: j_fixed and j_saw come back tapered."""
+    """OFT tapers every channel at the edge: j_fixed and jphi_saw_out come back tapered."""
     def swb(mygs, ne, te, ni, ti, zeff, ip, inductive_jphi, **kw):
         fake_swb.append(kw)
         x = kw["x"]
@@ -362,9 +363,9 @@ def test_saw_taper_identity(fake_swb):
         j_ind = f * 1.0123 * np.asarray(inductive_jphi)
         j_bs = f * 1e5 * (1.0 - x) ** 2
         j_fix = f * kw["jphi_fixed"]
-        j_saw = f * kw["jphi_saw"] + _dj(x)
-        return {"j_inductive": j_ind, "isolated_j_BS": j_bs, "j_fixed": j_fix,
-                "total_j_phi": j_ind + j_bs + j_fix + j_saw, "j_saw": j_saw,
+        jphi_saw_out = f * kw["jphi_saw"] + _dj(x)
+        return {"jphi_ind": j_ind, "jphi_bs": j_bs, "j_fixed": j_fix,
+                "jphi_total": j_ind + j_bs + j_fix + jphi_saw_out, "jphi_saw_out": jphi_saw_out,
                 "saw_rho_m": 0.31, "saw_rho_out": 0.18, "saw_n_dips": 1}
     _swap_swb(swb)
     ns = _run(swb_saw_q=1.025)
@@ -372,21 +373,21 @@ def test_saw_taper_identity(fake_swb):
     ns._swb_imas_baseline()
     f = _taper(bl.psi_N)
     assert np.any(f < 1.0)
-    np.testing.assert_allclose(bl.j_saw, f * bl.swb_jphi_saw + _dj(bl.psi_N), rtol=1e-14)
-    pk = np.max(np.abs(bl.j_phi))
+    np.testing.assert_allclose(bl.jphi_saw_out, f * bl.jphi_saw_input + _dj(bl.psi_N), rtol=1e-14)
+    pk = np.max(np.abs(bl.jphi_total))
     np.testing.assert_allclose(
-        bl.j_inductive + bl.j_BS + bl.j_NBI + bl.j_RF + (bl.j_other - bl.j_sawteeth)
-        + bl.j_saw, bl.j_phi, rtol=0, atol=1e-12 * pk)
+        bl.jphi_ind + bl.jphi_bs + bl.jphi_nbi + bl.jphi_rf + (bl.jphi_other - bl.jphi_saw)
+        + bl.jphi_saw_out, bl.jphi_total, rtol=0, atol=1e-12 * pk)
 
 
-@pytest.mark.parametrize("key", ["j_saw", "saw_rho_m", "saw_rho_out"])
+@pytest.mark.parametrize("key", ["jphi_saw_out", "saw_rho_m", "saw_rho_out"])
 def test_sigma0_fails_on_saw_mismatch(fake_swb, key):
     swb0 = sys.modules["OpenFUSIONToolkit.TokaMaker.bootstrap"].solve_with_bootstrap
 
     def swb(*a, **kw):
         res = swb0(*a, **kw)
         if len(fake_swb) > 2:                   # the sigma=0 draw
-            res[key] = res[key] + (1.0 if key == "j_saw" else 1e-3)
+            res[key] = res[key] + (1.0 if key == "jphi_saw_out" else 1e-3)
         return res
     _swap_swb(swb)
     ns = _run(swb_saw_q=1.025)
@@ -398,15 +399,15 @@ def test_sigma0_fails_on_saw_mismatch(fake_swb, key):
 
 @pytest.mark.parametrize("scale", [1.0, 2.0])
 def test_no_reset_jphi_saw_map_check(fake_swb, capsys, scale):
-    """saw_n_dips 0: j_saw must be jphi_saw; a mis-mapped one warns, never raises."""
+    """saw_n_dips 0: jphi_saw_out must be jphi_saw; a mis-mapped one warns, never raises."""
     def swb(mygs, ne, te, ni, ti, zeff, ip, inductive_jphi, **kw):
         fake_swb.append(kw)
         x = kw["x"]
         j_ind = 1.0123 * np.asarray(inductive_jphi)
         j_bs = 1e5 * (1.0 - x) ** 2
-        j_saw = scale * kw["jphi_saw"]
-        return {"j_inductive": j_ind, "isolated_j_BS": j_bs,
-                "total_j_phi": j_ind + j_bs + kw["jphi_fixed"] + j_saw, "j_saw": j_saw,
+        jphi_saw_out = scale * kw["jphi_saw"]
+        return {"jphi_ind": j_ind, "jphi_bs": j_bs,
+                "jphi_total": j_ind + j_bs + kw["jphi_fixed"] + jphi_saw_out, "jphi_saw_out": jphi_saw_out,
                 "saw_rho_m": 0.0, "saw_rho_out": 0.0, "saw_n_dips": 0}
     _swap_swb(swb)
     ns = _run(swb_saw_q=1.025)
@@ -423,12 +424,12 @@ def test_saw_map_check_taper():
     jsaw_in = 3e4 * (1.0 - 0.5 * x)               # finite at the edge: the taper shows
     jf_in = 2e4 + 0 * x
     jf_in[-1] = 0.0                              # factor unknown on the last node
-    res = {"j_saw": f * jsaw_in, "j_fixed": f * jf_in, "saw_n_dips": 0,
-           "total_j_phi": 1e6 * (1.0 - x ** 2) + 1e5}
+    res = {"jphi_saw_out": f * jsaw_in, "j_fixed": f * jf_in, "saw_n_dips": 0,
+           "jphi_total": 1e6 * (1.0 - x ** 2) + 1e5}
     dev, warn = swb_mod._swb_saw_map_check(res, jsaw_in, jf_in)
     assert dev < 1e-14 and not warn
     assert swb_mod._swb_saw_map_check(res, jsaw_in)[1]          # taper ignored: trips
-    res["j_saw"] = jsaw_in
+    res["jphi_saw_out"] = jsaw_in
     assert swb_mod._swb_saw_map_check(res, jsaw_in, jf_in)[1]
     assert swb_mod._swb_saw_map_check(dict(res, saw_n_dips=2), jsaw_in, jf_in) == (None, False)
 
@@ -470,7 +471,7 @@ class _PGS(_GS):
 
 def test_the_split_takes_the_pressure_term_off_a_toroidal_swb(fake_swb):
     """A toolkit whose SWB takes x (TokaMaker-jphi output, kappa<j.B> + p'G):
-    the archived j_BS is SWB's minus p'G, j_pressure is p'G, and the split
+    the archived jphi_bs is SWB's minus p'G, jphi_pd is p'G, and the split
     still sums to SWB's total exactly (D2)."""
     from bouquet.physics import swb_pressure_term
     ns = _run()
@@ -480,23 +481,46 @@ def test_the_split_takes_the_pressure_term_off_a_toroidal_swb(fake_swb):
     x = bl.psi_N
     P = swb_pressure_term(ns.mygs, x.size, 1e-3, x)
     assert np.max(np.abs(P)) > 1e3
-    np.testing.assert_allclose(bl.j_pressure, P, rtol=1e-14)
-    raw_bs = 1e5 * (1.0 - x) ** 2                      # the fake's isolated_j_BS
-    np.testing.assert_allclose(bl.j_BS, raw_bs - P, rtol=1e-12, atol=1e-9)
-    pk = np.max(np.abs(bl.j_phi))
+    np.testing.assert_allclose(bl.jphi_pd, P, rtol=1e-14)
+    raw_bs = 1e5 * (1.0 - x) ** 2                      # the fake's jphi_bs
+    np.testing.assert_allclose(bl.jphi_bs, raw_bs - P, rtol=1e-12, atol=1e-9)
+    pk = np.max(np.abs(bl.jphi_total))
     np.testing.assert_allclose(
-        bl.j_inductive + bl.j_BS + bl.j_pressure + bl.j_NBI + bl.j_RF
-        + bl.j_other, bl.j_phi, rtol=0, atol=1e-12 * pk)
-    assert bl.swb_baseline["j_pressure"] is not None
-    # the sigma=0 draw repeats it, j_pressure included
+        bl.jphi_ind + bl.jphi_bs + bl.jphi_pd + bl.jphi_nbi + bl.jphi_rf
+        + bl.jphi_other, bl.jphi_total, rtol=0, atol=1e-12 * pk)
+    assert bl.swb_baseline["jphi_pd"] is not None
+    # the sigma=0 draw repeats it, jphi_pd included
     out = ns._verify_sigma0_swb()
-    assert out["passed"] and out["swb_dev"]["j_pressure"] == 0.0
+    assert out["passed"] and out["swb_dev"]["jphi_pd"] == 0.0
 
 
 def test_isolate_edge_is_refused_with_a_toroidal_swb(fake_swb):
-    ns = _run(isolate_edge_jBS=True)
-    with pytest.raises(RuntimeError, match="isolate_edge_jBS"):
+    ns = _run(isolate_edge_jbs=True)
+    with pytest.raises(RuntimeError, match="isolate_edge_jbs"):
         ns._swb_imas_baseline()
+
+
+def test_a_toolkit_reporting_p_g_apart_is_split_as_it_reports(fake_swb):
+    """OFT a9d0c32+: jphi_bs field-aligned, jphi_pd the p'G, jphi_total counts both. Its split is
+    bouquet's as returned (SWB's own inductive), the isolated spike included."""
+    def swb(mygs, ne, te, ni, ti, zeff, ip, inductive_jphi, **kw):
+        fake_swb.append(kw)
+        x = kw["x"]
+        j_ind = 1.0123 * np.asarray(inductive_jphi)
+        j_bs, pd = 1e5 * (1.0 - x) ** 2, 2e4 * x * (1.0 - x)
+        return {"jphi_ind": j_ind, "jphi_bs": j_bs, "jphi_pd": pd,
+                "jphi_total": j_ind + j_bs + pd + kw["jphi_fixed"]}
+    _swap_swb(swb)
+    ns = _run(isolate_edge_jbs=True)
+    ns._swb_imas_baseline()
+    bl = ns.baseline
+    x = bl.psi_N
+    np.testing.assert_array_equal(bl.jphi_bs, 1e5 * (1.0 - x) ** 2)
+    np.testing.assert_array_equal(bl.jphi_pd, 2e4 * x * (1.0 - x))
+    np.testing.assert_array_equal(bl.jphi_ind, 1.0123 * bl.swb_seed_profile)
+    np.testing.assert_allclose(
+        bl.jphi_ind + bl.jphi_bs + bl.jphi_pd + bl.jphi_nbi + bl.jphi_rf + bl.jphi_other, bl.jphi_total,
+        rtol=0, atol=1e-12 * np.max(np.abs(bl.jphi_total)))
 
 
 def test_a_negative_seed_redraw_refuses_the_draw():
@@ -510,8 +534,8 @@ def test_a_negative_seed_redraw_refuses_the_draw():
 
     def recipe(kin, j_seed):
         calls.append(j_seed)
-        return {"j_inductive": j_seed, "isolated_j_BS": 0 * x,
-                "total_j_phi": j_seed}
+        return {"jphi_ind": j_seed, "jphi_bs": 0 * x,
+                "jphi_total": j_seed}
     with pytest.raises(SD.SwbSeedRedrawRefused, match="refused") as ei:
         SD.swb_draw(None, x, None, prof, prof, prof, prof, None, None, None,
                     None, 1e-3 * seed, 0.5, 0.4, 0.25, 1.5 + 0 * x, seed,
@@ -534,12 +558,12 @@ def test_the_swb_split_is_archived_as_the_third_bucket(tmp_path):
         hf.create_group("scan/k/_baseline")
         hf.create_group("scan/k/3")
     P = np.linspace(1.0, 2.0, 5)
-    m = SD.SwbDraws(lambda k, s: None, np.ones(5), np.zeros(5), j_pressure=P)
+    m = SD.SwbDraws(lambda k, s: None, np.ones(5), np.zeros(5), jphi_pd=P)
     m.store_baseline(hdr, "k", None)
-    m.store_draw(hdr, 3, "k", {"j_pressure": 2 * P, "swb_ip_rel_err": 1e-5})
+    m.store_draw(hdr, 3, "k", {"jphi_pd": 2 * P, "swb_ip_rel_err": 1e-5})
     with h5py.File(hdr + ".h5", "r") as hf:
         for path, exp in (("scan/k/_baseline", P), ("scan/k/3", 2 * P)):
             g = hf[path]
             assert g.attrs[CURRENT_SPLIT_CONVENTION_ATTR] == SPLIT_PRESSURE_SEPARATE
-            np.testing.assert_array_equal(g["j_pressure"][()], exp)
+            np.testing.assert_array_equal(g["jphi_pd"][()], exp)
         assert hf["scan/k/3"].attrs["swb_ip_rel_err"] == 1e-5

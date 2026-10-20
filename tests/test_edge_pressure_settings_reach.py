@@ -405,7 +405,7 @@ def test_the_draw_loop_redo_receives_the_draws_settings(monkeypatch, sep,
     import contextlib
     import io
     with contextlib.redirect_stdout(io.StringIO()):
-        SI._draw(toy, "standard", dv["request"], dv["j_inductive"],
+        SI._draw(toy, "standard", dv["request"], dv["jphi_ind"],
                  SI._li(toy.copy_eq().achieved), SI._settings(), offset=off)
     redo = seen[1:]                    # [0]: the candidate's first solve
     assert redo, "the loop took no redo pass: the site was not executed"

@@ -17,7 +17,7 @@ def _corrective_jphi_iteration(mygs, psi_N, target_jphi, pp_prof,
                                 min_iters=2, max_iters=8,
                                 rtol=0.05, verbose=True,
                                 damping=1.0, protect_state=False):
-    r"""Iterate TokaMaker input j_phi until the output matches a target.
+    r"""Iterate TokaMaker input jphi_total until the output matches a target.
 
     Uses Newton correction: ``input += (target - output)`` each step.
     Starts with *min_iters*, then checks whether the edge spike RMS
@@ -31,7 +31,7 @@ def _corrective_jphi_iteration(mygs, psi_N, target_jphi, pp_prof,
     psi_N : ndarray
         Normalised flux grid.
     target_jphi : ndarray
-        Target j_phi profile [A/m²] (e.g. j_inductive + spike_profile).
+        Target jphi_total profile [A/m²] (e.g. jphi_ind + spike_profile).
     pp_prof : dict
         Pressure gradient profile dict for ``set_profiles``.
     Ip_target : float
@@ -52,8 +52,8 @@ def _corrective_jphi_iteration(mygs, psi_N, target_jphi, pp_prof,
 
     Returns
     -------
-    j_phi_output : ndarray
-        Converged GS output j_phi [A/m²].
+    jphi_total_output : ndarray
+        Converged GS output jphi_total [A/m²].
     n_iters : int
         Number of iterations performed.
     edge_rms_history : list of float
@@ -63,7 +63,7 @@ def _corrective_jphi_iteration(mygs, psi_N, target_jphi, pp_prof,
 
     npsi = len(psi_N)
     edge_mask = psi_N > 0.9
-    j_phi_input = target_jphi.copy()
+    jphi_total_input = target_jphi.copy()
     edge_rms_history = []
     # keep-best bookkeeping (protect_state=True): the imas anchor target comes
     # from ANOTHER code's flux geometry and may not be exactly achievable, so
@@ -81,7 +81,7 @@ def _corrective_jphi_iteration(mygs, psi_N, target_jphi, pp_prof,
     best = {"rms": np.inf, "eq": None, "out": None}
     full_rms_history = []
     # Seed the output with the UNCORRECTED input.  If the very first solve
-    # raises, the handler below breaks out before `j_phi_output` is ever
+    # raises, the handler below breaks out before `jphi_total_output` is ever
     # assigned, and the return statement then raised NameError -- masking a
     # solve failure behind an unrelated-looking crash.  Seeding it means that
     # case degrades to "no correction was applied", which is the truthful
@@ -89,11 +89,11 @@ def _corrective_jphi_iteration(mygs, psi_N, target_jphi, pp_prof,
     # `edge_rms_history` and the warning below tell the caller it happened.
     # (A later-iteration failure is unaffected: it keeps the last good
     # iterate, exactly as before.)
-    j_phi_output = j_phi_input.copy()
+    jphi_total_output = jphi_total_input.copy()
     it = -1
 
     for it in range(max_iters):
-        ffp = {"type": "jphi-linterp", "y": j_phi_input.copy(), "x": psi_N}
+        ffp = {"type": "jphi-linterp", "y": jphi_total_input.copy(), "x": psi_N}
         mygs.set_targets(Ip=Ip_target, pax=pax_target)
         mygs.set_profiles(pp_prof=pp_prof, ffp_prof=ffp)
         _snap = mygs.copy_eq() if _can_snap else None
@@ -108,7 +108,7 @@ def _corrective_jphi_iteration(mygs, psi_N, target_jphi, pp_prof,
                 # That is a materially different result from a converged one and
                 # must not be inferable only from an empty RMS history.
                 print(f"  [jphi_corr] WARNING: the FIRST corrective solve "
-                      f"failed ({e}); returning the uncorrected input j_phi "
+                      f"failed ({e}); returning the uncorrected input jphi_total "
                       f"-- no corrective iteration was applied")
             if _snap is not None:
                 mygs.replace_eq(source_eq=_snap)   # do not leave the diverged state
@@ -116,9 +116,9 @@ def _corrective_jphi_iteration(mygs, psi_N, target_jphi, pp_prof,
 
         _, f, fp, _, pp = mygs.get_profiles(npsi=npsi, psi_pad=psi_pad)
         _, _, ravgs, _, _, _ = mygs.get_q(npsi=npsi, psi_pad=psi_pad)
-        j_phi_output = get_jphi_from_GS(f * fp, pp, q_ravg(ravgs, "<R>"), q_ravg(ravgs, "<1/R>"))
+        jphi_total_output = get_jphi_from_GS(f * fp, pp, q_ravg(ravgs, "<R>"), q_ravg(ravgs, "<1/R>"))
 
-        diff = j_phi_output - target_jphi
+        diff = jphi_total_output - target_jphi
         rms_edge = float(np.sqrt(np.mean(diff[edge_mask]**2)))
         edge_rms_history.append(rms_edge)
         _kept = None
@@ -127,7 +127,7 @@ def _corrective_jphi_iteration(mygs, psi_N, target_jphi, pp_prof,
             full_rms_history.append(rms_full)
             _kept = rms_full < best["rms"]
             if _kept:
-                best.update(rms=rms_full, eq=mygs.copy_eq(), out=j_phi_output.copy())
+                best.update(rms=rms_full, eq=mygs.copy_eq(), out=jphi_total_output.copy())
 
         if verbose:
             # Report the FULL-domain RMS too when keep-best is on: the stopping
@@ -155,12 +155,12 @@ def _corrective_jphi_iteration(mygs, psi_N, target_jphi, pp_prof,
                     break
 
         # Newton correction (optionally damped)
-        j_phi_input = j_phi_input + damping * (target_jphi - j_phi_output)
-        j_phi_input = np.maximum(j_phi_input, 0.0)
+        jphi_total_input = jphi_total_input + damping * (target_jphi - jphi_total_output)
+        jphi_total_input = np.maximum(jphi_total_input, 0.0)
 
     if _can_snap and best["eq"] is not None:
         mygs.replace_eq(source_eq=best["eq"])      # land on the best state seen
-        j_phi_output = best["out"]
+        jphi_total_output = best["out"]
         if verbose:
             # The kept-RMS sequence is monotone non-increasing BY CONSTRUCTION;
             # printing it is what lets a run be checked rather than trusted.
@@ -171,4 +171,4 @@ def _corrective_jphi_iteration(mygs, psi_N, target_jphi, pp_prof,
                   + "; kept "
                   + " -> ".join(f"{r/1e6:.6f}" for r in _kept_traj) + ")")
 
-    return j_phi_output, it + 1, edge_rms_history
+    return jphi_total_output, it + 1, edge_rms_history

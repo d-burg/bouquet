@@ -151,7 +151,7 @@ def check(install):
     has_fsa, has_eps = (w == "True" for w in r.stdout.split()[:2])
     if not has_fsa:
         sys.exit("this OFT build has no TokaMaker.get_fsa (v26.6+): bouquet's "
-                 "evaluate_jBS cannot compute its default epsilon "
+                 "evaluate_jbs cannot compute its default epsilon "
                  "(R_max - R_min)/(R_max + R_min) on it (only "
                  "eps_definition='a_over_R' would run)")
     print("epsilon route: get_fsa"

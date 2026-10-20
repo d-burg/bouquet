@@ -3,7 +3,7 @@
 bouquet solves every TokaMaker anchor to ``|Ip|`` with ``F0 = |r0*b0|`` -- a
 positive-current frame -- so every bootstrap it recomputes on the anchor (the
 legacy ``solve_with_bootstrap`` path and the self-consistent loop's
-``evaluate_jBS``) is positive.  A dd written for a reversed-current discharge
+``evaluate_jbs``) is positive.  A dd written for a reversed-current discharge
 (``ip < 0`` in the dd's own COCOS) carries NEGATIVE current profiles.  The
 reader used to keep that sign, so the inductive and fixed currents stayed
 negative while the recomputed bootstrap was positive: the bootstrap was added
@@ -20,13 +20,13 @@ it WITHOUT a solver:
     the original's.  Bitwise, not approximate: the normalisation is a
     multiplication by +-1 (exact in IEEE arithmetic) and every operation the
     reader applies to a current afterwards (the ratio conversion
-    ``j_tor/j_total``, the residual ``j_phi - j_BS - j_NBI - j_RF``, the
+    ``j_tor/j_total``, the residual ``jphi_total - jphi_bs - jphi_nbi - jphi_rf``, the
     ``jphi_diff`` difference) is odd in it, so there is no rounding to allow for;
   * the reader records the sign, logs it for a reversed source, and leaves an
     ``ip > 0`` read exactly as it was;
   * everything downstream that meets a recomputed (positive) bootstrap -- the
     closure's current-direction pairing, ``close_ip``, the q0 target, the
-    FUSE-total error, the SWB/FUSE peak ratio, the ``floor_j_BS`` clip and
+    FUSE-total error, the SWB/FUSE peak ratio, the ``floor_jbs`` clip and
     ``floor_inductive_split`` -- sees identical inputs for every orientation,
     with a witness that the pre-fix (dd-frame) inputs did not.
 
@@ -48,7 +48,7 @@ from test_imas_p_fast_convention import _minimal_dd
 
 
 #: Every array field of the Baseline the IMAS reader fills.
-_ARRAYS = ("psi_N", "j_phi", "j_inductive", "j_BS", "j_NBI", "j_RF",
+_ARRAYS = ("psi_N", "jphi_total", "jphi_ind", "jphi_bs", "jphi_nbi", "jphi_rf",
            "jphi_diff", "psi_N_kinetic", "ne", "te", "ni", "ti", "Zeff",
            "p_fast", "z_fast", "p_equilibrium", "p_diff")
 _SCALARS = ("Ip_target", "l_i_target", "Z_imp", "provenance", "p_fast_meta",
@@ -125,10 +125,10 @@ class TestMirroredReadIsBitIdentical:
         dd = mdd.mirror_dd(_example(), -1.0, 1.0)
         bl = _read(_write(tmp_path, dd, "rev.json"))
         psi = np.asarray(bl.psi_N)
-        assert trapezoid(bl.j_phi, psi) > 0.0
-        assert trapezoid(bl.j_inductive, psi) > 0.0
-        assert trapezoid(bl.j_BS, psi) > 0.0
-        assert float(np.min(bl.j_BS)) >= 0.0   # the example's bootstrap is >= 0
+        assert trapezoid(bl.jphi_total, psi) > 0.0
+        assert trapezoid(bl.jphi_ind, psi) > 0.0
+        assert trapezoid(bl.jphi_bs, psi) > 0.0
+        assert float(np.min(bl.jphi_bs)) >= 0.0   # the example's bootstrap is >= 0
 
     @pytest.mark.parametrize("orient", mdd.ORIENTATIONS,
                              ids=[mdd.tag(*o) for o in mdd.ORIENTATIONS])
@@ -145,20 +145,20 @@ class TestMirroredReadIsBitIdentical:
         psi_fc = np.linspace(0.0, 1.0, 21)
         jnbi = 2.0e5 * (1.0 - psi_fc ** 2)
         jrf = 5.0e4 * np.exp(-((psi_fc - 0.3) / 0.1) ** 2)
-        fc = FixedComponentsConfig(j_NBI=jnbi, j_RF=jrf, psi_N=psi_fc)
+        fc = FixedComponentsConfig(jphi_nbi=jnbi, jphi_rf=jrf, psi_N=psi_fc)
         ref = _read(_write(tmp_path, dd, "ref.json"), fixed=fc)
         bl = _read(_write(tmp_path, mdd.mirror_dd(dd, *orient), "m.json"),
                    fixed=fc)
         _assert_same_baseline(ref, bl, mdd.tag(*orient))
         # used as given: co-current stays positive, and equals the g-file
         # path's treatment of the same array on the same grid
-        for f, arr in (("j_NBI", jnbi), ("j_RF", jrf)):
+        for f, arr in (("jphi_nbi", jnbi), ("jphi_rf", jrf)):
             got = getattr(bl, f)
             assert np.array_equal(got, _resolve_fixed(arr, psi_fc, bl.psi_N)), f
             assert float(np.min(got)) >= 0.0, f
         # and the inductive residual carries it with the co-Ip sign
-        assert np.array_equal(bl.j_inductive,
-                              bl.j_phi - bl.j_BS - bl.j_NBI - bl.j_RF)
+        assert np.array_equal(bl.jphi_ind,
+                              bl.jphi_total - bl.jphi_bs - bl.jphi_nbi - bl.jphi_rf)
 
     def test_reversed_source_does_not_flip_user_currents(self, tmp_path):
         """Witness for the frame choice: on a reversed-Ip source the user
@@ -168,9 +168,9 @@ class TestMirroredReadIsBitIdentical:
         psi_fc = np.linspace(0.0, 1.0, 21)
         jnbi = 2.0e5 * (1.0 - psi_fc ** 2)
         bl = _read(_write(tmp_path, dd, "rev.json"),
-                   fixed=FixedComponentsConfig(j_NBI=jnbi, psi_N=psi_fc))
+                   fixed=FixedComponentsConfig(jphi_nbi=jnbi, psi_N=psi_fc))
         assert bl.source_current_sign == -1.0
-        assert np.array_equal(bl.j_NBI, np.interp(bl.psi_N, psi_fc, jnbi))
+        assert np.array_equal(bl.jphi_nbi, np.interp(bl.psi_N, psi_fc, jnbi))
 
 
 def _rich_dd():
@@ -355,20 +355,20 @@ class TestSignIsRecorded:
         jtor = np.asarray(cp["j_tor"], float)
         geom, _ = _paired_current_geometry(eq, cp, float(cps["time"][ic]),
                                            jtot, jtor)
-        j_phi = jtor_imas_to_jphi_tokamaker(jtor, geom)
+        jphi_total = jtor_imas_to_jphi_tokamaker(jtor, geom)
         # the bootstrap is field-aligned only; p'G is the third bucket (D2)
         j_bs = jpar_to_jphi_tokamaker(np.asarray(cp["j_bootstrap"], float), geom)
-        assert np.array_equal(bl.j_pressure, jphi_tokamaker_pressure_term(geom))
+        assert np.array_equal(bl.jphi_pd, jphi_tokamaker_pressure_term(geom))
         jnbi_par = np.zeros_like(jtor)
         for s in dd["core_sources"]["source"]:
             if s["identifier"]["index"] == 2:
                 jnbi_par = jnbi_par + np.asarray(s["profiles_1d"][ic]["j_parallel"], float)
         j_nbi = jpar_to_jphi_tokamaker(jnbi_par, geom)
         assert bl.source_current_sign == 1.0
-        assert np.array_equal(bl.j_phi, j_phi)
-        assert np.array_equal(bl.j_BS, j_bs)
-        assert np.array_equal(bl.j_NBI, j_nbi)
-        assert np.array_equal(bl.j_inductive, j_phi - j_bs - j_nbi - np.zeros_like(jtor))
+        assert np.array_equal(bl.jphi_total, jphi_total)
+        assert np.array_equal(bl.jphi_bs, j_bs)
+        assert np.array_equal(bl.jphi_nbi, j_nbi)
+        assert np.array_equal(bl.jphi_ind, jphi_total - j_bs - j_nbi - np.zeros_like(jtor))
 
     def test_dd_whose_currents_oppose_its_own_ip_is_refused(self, tmp_path):
         """No sign convention can repair a dd whose core_profiles total opposes
@@ -390,13 +390,13 @@ class TestSignIsRecorded:
 def _closure_inputs(bl, j_bs_recomputed):
     """The pieces the ohmic-mode closure forms, on a synthetic positive measure:
     the reader's inductive/fixed currents and a bootstrap recomputed on the
-    positive anchor (stood in for by the ORIGINAL orientation's j_BS)."""
+    positive anchor (stood in for by the ORIGINAL orientation's jphi_bs)."""
     psi = np.asarray(bl.psi_N, float)
     w = 1.0 + 0.5 * psi                     # positive FSA weights (any will do)
     lin = lambda j: float(trapezoid(w * np.asarray(j, float), psi))
-    j_fixed = np.asarray(bl.j_phi) - np.asarray(bl.j_inductive) - np.asarray(bl.j_BS)
+    j_fixed = np.asarray(bl.jphi_total) - np.asarray(bl.jphi_ind) - np.asarray(bl.jphi_bs)
     c = 0.03 * bl.Ip_target                 # the anchor's positive P' constant
-    return lin(bl.j_inductive), lin(j_bs_recomputed), lin(j_fixed), c
+    return lin(bl.jphi_ind), lin(j_bs_recomputed), lin(j_fixed), c
 
 
 class TestDownstreamSeesOneFrame:
@@ -411,7 +411,7 @@ class TestDownstreamSeesOneFrame:
         from bouquet.utils import close_ip, closure_sign_convention
 
         ref, rev = pair
-        swb = np.asarray(ref.j_BS)          # recomputed on the positive anchor
+        swb = np.asarray(ref.jphi_bs)          # recomputed on the positive anchor
         out = []
         for bl in (ref, rev):
             ii, ib, ifx, c = _closure_inputs(bl, swb)
@@ -430,7 +430,7 @@ class TestDownstreamSeesOneFrame:
         from bouquet.utils import close_ip, closure_sign_convention
 
         ref, _ = pair
-        swb = np.asarray(ref.j_BS)
+        swb = np.asarray(ref.jphi_bs)
         ii, ib, ifx, c = _closure_inputs(ref, swb)
         sgn, tgt, cs = closure_sign_convention(ii, ib, ifx, c, ref.Ip_target)
         good = close_ip("bootstrap", tgt, cs, ii, ib, ifx, scale_bounds=(-1e9, 1e9))
@@ -447,47 +447,47 @@ class TestDownstreamSeesOneFrame:
         from bouquet.utils import unrenormalise_q0
 
         ref, rev = pair
-        q0_anchor, j_ach0 = 0.98, 1.05 * float(ref.j_phi[0])
-        q = [unrenormalise_q0(q0_anchor, j_ach0, float(bl.j_phi[0]))
+        q0_anchor, j_ach0 = 0.98, 1.05 * float(ref.jphi_total[0])
+        q = [unrenormalise_q0(q0_anchor, j_ach0, float(bl.jphi_total[0]))
              for bl in (ref, rev)]
         assert q[0] == q[1] > 0.0
         # witness: the dd-frame axis current gave a negative target
-        assert unrenormalise_q0(q0_anchor, j_ach0, -float(ref.j_phi[0])) < 0.0
+        assert unrenormalise_q0(q0_anchor, j_ach0, -float(ref.jphi_total[0])) < 0.0
 
     def test_fuse_total_error_and_peak_ratio_are_identical(self, pair):
         """``fuse_total_err_pct`` (|lin + c| vs Ip) and
-        ``swb_over_fuse_jBS_peak`` (SWB peak / max(FUSE peak, 1)) read the
+        ``swb_over_fuse_jbs_peak`` (SWB peak / max(FUSE peak, 1)) read the
         source total and bootstrap: identical, and the ratio is O(1)."""
         ref, rev = pair
-        swb = np.asarray(ref.j_BS)
+        swb = np.asarray(ref.jphi_bs)
         res = []
         for bl in (ref, rev):
             psi = np.asarray(bl.psi_N, float)
             w = 1.0 + 0.5 * psi
-            tot = float(trapezoid(w * np.asarray(bl.j_phi), psi)) + 0.03 * bl.Ip_target
+            tot = float(trapezoid(w * np.asarray(bl.jphi_total), psi)) + 0.03 * bl.Ip_target
             err = 100.0 * (abs(tot) - bl.Ip_target) / bl.Ip_target
-            ratio = swb.max() / max(np.asarray(bl.j_BS).max(), 1.0)
+            ratio = swb.max() / max(np.asarray(bl.jphi_bs).max(), 1.0)
             res.append((err, ratio))
         assert res[0] == res[1]
         assert res[0][1] == pytest.approx(1.0)
         # witness: the dd-frame bootstrap peak is <= 0 and floored at 1 A/m^2
-        assert swb.max() / max((-np.asarray(ref.j_BS)).max(), 1.0) > 1e3
+        assert swb.max() / max((-np.asarray(ref.jphi_bs)).max(), 1.0) > 1e3
 
-    def test_floor_j_BS_and_inductive_floor_are_identical(self, pair):
-        """The ``floor_j_BS`` clip (>= 0) and ``floor_inductive_split``
-        (j_inductive >= 0) both assume the positive frame.  On the reader's
+    def test_floor_jphi_bs_and_inductive_floor_are_identical(self, pair):
+        """The ``floor_jbs`` clip (>= 0) and ``floor_inductive_split``
+        (jphi_ind >= 0) both assume the positive frame.  On the reader's
         output they act identically for a mirrored source -- before the fix
         the clip would have ZEROED a dd-frame bootstrap and the inductive floor
-        would have moved the whole (negative) inductive into j_BS."""
+        would have moved the whole (negative) inductive into jphi_bs."""
         from bouquet.baseline import floor_inductive_split
 
         ref, rev = pair
-        for fn in (lambda bl: np.clip(np.asarray(bl.j_BS), 0.0, None),
-                   lambda bl: floor_inductive_split(bl.j_inductive, bl.j_BS)[0],
-                   lambda bl: floor_inductive_split(bl.j_inductive, bl.j_BS)[1]):
+        for fn in (lambda bl: np.clip(np.asarray(bl.jphi_bs), 0.0, None),
+                   lambda bl: floor_inductive_split(bl.jphi_ind, bl.jphi_bs)[0],
+                   lambda bl: floor_inductive_split(bl.jphi_ind, bl.jphi_bs)[1]):
             assert np.array_equal(fn(ref), fn(rev))
         # witness: on the dd-frame arrays the clip empties the bootstrap
-        assert not np.any(np.clip(-np.asarray(ref.j_BS), 0.0, None))
+        assert not np.any(np.clip(-np.asarray(ref.jphi_bs), 0.0, None))
 
 
 # ---------------------------------------------------------------------------

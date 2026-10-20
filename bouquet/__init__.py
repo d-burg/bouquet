@@ -97,6 +97,7 @@ from .utils import (
     load_equilibrium,
     load_equilibrium_by_path,
     load_eq_fsa,
+    load_dd_sources,
     store_baseline_profiles,
     load_baseline_profiles,
     discover_scan_keys,
@@ -149,7 +150,8 @@ from .paths import add_oft_to_path, find_mesh, find_ida
 from .io.ida import read_ida, read_ida_cer, IDAProfiles, IDACERProfiles
 from .io.imas import (read_imas_baseline, read_imas_geometry,
                       write_imas_draw, export_imas_drawset,
-                      detect_p_fast_convention, resolve_p_fast_reduction)
+                      detect_p_fast_convention, resolve_p_fast_reduction,
+                      consistent_pairs, IdaTimeNotSimulated)
 from .run import Bouquet
 from .archive import BouquetArchive, ScanView, DrawView, BaselineView
 from .stats import (draw_band, draw_bands, draw_scalars, BandRecord,
@@ -161,7 +163,7 @@ from .parallel import (parallel_generate, run_shard, merge_archives,
 # Curated public surface.  Everything imported above remains importable
 # (``bq.store_equilibrium`` etc. still work for advanced users), but ``import
 # *``, tab-completion, and the docs advertise only the supported API.  Low-level
-# archive writers and j_phi/Ip diagnostic helpers are intentionally omitted.
+# archive writers and jphi_total/Ip diagnostic helpers are intentionally omitted.
 __all__ = [
     "__version__",
     # ---- class-based orchestrator (the primary entry point) ----
@@ -177,13 +179,13 @@ __all__ = [
     # ---- I/O: sources and IMAS write-back ----
     "GEQDSKEquilibrium", "read_geqdsk", "find_lcfs_xpoints", "PFile", "read_pfile",
     "read_ida", "read_ida_cer", "IDAProfiles", "IDACERProfiles",
-    "read_imas_baseline", "read_imas_geometry",
+    "read_imas_baseline", "read_imas_geometry", "consistent_pairs", "IdaTimeNotSimulated",
     "write_imas_draw", "export_imas_drawset",
     "detect_p_fast_convention", "resolve_p_fast_reduction",
     "read_eqdsk_from_bytes",
     # ---- archive readers ----
     "initialize_equilibrium_database",
-    "load_equilibrium", "load_equilibrium_by_path", "load_eq_fsa",
+    "load_equilibrium", "load_equilibrium_by_path", "load_eq_fsa", "load_dd_sources",
     "load_baseline_profiles",
     "discover_scan_keys", "count_equilibria", "list_equilibrium_indices",
     "write_provenance", "write_refused_scan", "load_config",

@@ -41,7 +41,7 @@ ORIENTATIONS = [(1, 1), (1, -1), (-1, 1), (-1, -1)]   # (Ip, B_t) factors
 _IDS = ["normal", "Bt-reversed", "Ip-reversed", "both-reversed"]
 #: the reader traces the negated psi_RZ to surfaces that differ at this
 #: relative level (a property of the contour tracing, measured 3.4e-6 on
-#: <j.B> and 5.0e-6 on |<j_phi>|); every Ip-even quantity is exact
+#: <j.B> and 5.0e-6 on |<jphi_total>|); every Ip-even quantity is exact
 _TRACE = 1e-5
 
 
@@ -127,7 +127,7 @@ def test_every_orientation_reads_the_same_contract(mirrors, o):
         <= tol * ref.rows["l_i"]["target"]
     assert np.all(c.anchor_request >= 0.0)
     assert _rel(c.anchor_request, ref.anchor_request) <= tol
-    # the composition on the file's own surfaces is its own |<j_phi>|
+    # the composition on the file's own surfaces is its own |<jphi_total>|
     g = dict(F=parts["F"], R_avg=parts["R_avg"], inv_R=parts["inv_R"],
              B2=parts["B2"], pprime=parts["pprime"])
     J, _ = compose(g, 0.7 * jB, 0.3 * jB, 0.0 * jB)

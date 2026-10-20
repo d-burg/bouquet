@@ -43,21 +43,21 @@ class TestArchiveGolden:
         assert d.eqdsk_bytes is not None                  # suffix scan finds it
 
     def test_profile_attr_on_draw_group(self, tmp_path):
-        # swb_saw_q stamps the draw's j_saw profile as a group attr: attrs keep it as an
+        # swb_saw_q stamps the draw's jphi_saw_out profile as a group attr: attrs keep it as an
         # array and the scalar readers (spread) still work
         import shutil
         p = str(tmp_path / "saw.h5")
         shutil.copy(_GOLDEN, p)
         c = bq.BouquetArchive(p)["0"].indices[0]
         with h5py.File(p, "a") as hf:
-            hf[f"scan/0/{c}"].attrs["swb_j_saw"] = np.linspace(0.0, 1.0, 257)
+            hf[f"scan/0/{c}"].attrs["jphi_saw_out"] = np.linspace(0.0, 1.0, 257)
         sc = bq.BouquetArchive(p)["0"]
         d = sc[c]
-        assert d.attrs["swb_j_saw"].shape == (257,) and isinstance(d.li1, float)
+        assert d.attrs["jphi_saw_out"].shape == (257,) and isinstance(d.li1, float)
         assert sc.spread(selection="all")["l_i(1)"]["n"] == len(sc.all)
         import json
         doc = json.loads(json.dumps(d.profiles_doc()))          # profiles JSON export
-        assert len(doc["profiles"]["swb_j_saw"]) == 257 and "swb_j_saw" not in doc["scalars"]
+        assert len(doc["profiles"]["jphi_saw_out"]) == 257 and "jphi_saw_out" not in doc["scalars"]
         assert "profiles" in d.extract(str(tmp_path / "x"), formats=("profiles",))
 
     def test_equilibrium_parse(self):
@@ -104,7 +104,7 @@ class TestSuffixScan:
         with h5py.File(path, "w") as hf:
             g = hf.require_group("scan/4400/0")
             g["psi_N"] = np.linspace(0, 1, 5)
-            g["j_phi"] = np.ones(5)
+            g["jphi_total"] = np.ones(5)
             g.attrs["l_i(1)"] = 1.05
             g.attrs["l_i(3)"] = 0.85
             g.attrs["selected"] = True
@@ -129,7 +129,7 @@ class TestBinarySourceDedup:
     (the new IDA-database files are ~190 MB -> a 20-draw archive hit ~4 GB).
     Text p-files stay per-draw (they carry the draw's perturbed kinetics)."""
 
-    def _store(self, path, pfile_bytes):
+    def _store(self, path, pfile_bytes, compress=False):
         from bouquet.utils import store_equilibrium, store_baseline_profiles
         stem = os.path.splitext(path)[0]
         psi = np.linspace(0, 1, 9)
@@ -141,13 +141,15 @@ class TestBinarySourceDedup:
             stem, psi, one, one, one, one, one, one,          # ne te ni ti p jphi
             one, one, one, one, one,                          # 5 sigmas
             1e6, 1.0, scan_key="900",
-            eqdsk_bytes=b"GEQDSK-BYTES", pfile_bytes=pfile_bytes)
+            eqdsk_bytes=b"GEQDSK-BYTES", pfile_bytes=pfile_bytes,
+            compress_file_bytes=compress)
         for c in range(2):
             store_equilibrium(
                 stem, c, eq_path, psi,
-                one, one, one,                                 # j_phi j_BS j_ind
+                one, one, one,                                 # jphi_total jphi_bs j_ind
                 one, one, one, one, one,                       # ne Te ni Ti wExB
-                1.0, 0.8, scan_key="900", pfile_bytes=pfile_bytes)
+                1.0, 0.8, scan_key="900", pfile_bytes=pfile_bytes,
+                compress_file_bytes=compress)
 
     def test_binary_cdf_stored_once_with_reader_fallback(self, tmp_path):
         fake_cdf = b"\x89HDF\r\n\x1a\n" + b"x" * 4096   # netCDF4/HDF5 magic
@@ -171,6 +173,49 @@ class TestBinarySourceDedup:
             for c in ("0", "1"):
                 assert "pfile" in hf[f"scan/900/{c}"]            # per-draw kept
 
+
+
+class TestCompressedBlobs:
+    """compress_file_bytes: the g-file / p-file bytes are written gzip-compressed
+    (else opaque) and read back unchanged."""
+    _store = TestBinarySourceDedup._store
+
+    @pytest.mark.parametrize("compress", [False, True])
+    def test_blobs_are_stored_as_asked_and_read_back(self, tmp_path, compress):
+        text_pf = b"5 psinorm ne(10^20/m^3) dne/dpsiN\n 0.0 1.0 0.0\n"
+        p = str(tmp_path / "gz.h5")
+        self._store(p, text_pf, compress=compress)
+        with h5py.File(p, "r") as hf:
+            for g in ("_baseline", "0"):
+                for name in ("eqdsk", "pfile"):
+                    ds = hf[f"scan/900/{g}/{name}"]
+                    if compress:
+                        assert ds.compression == "gzip" and ds.dtype == np.uint8
+                    else:
+                        assert ds.compression is None and ds.dtype.kind == "V"
+        d = bq.BouquetArchive(p)["900"][0]
+        assert d.eqdsk_bytes == b"GEQDSK-BYTES" and d.pfile_bytes == text_pf
+        rec = bq.load_equilibrium(os.path.splitext(p)[0], count=0, scan_key="900")
+        assert rec["pfile_bytes"] == text_pf
+
+
+def test_export_filtered_holds_only_the_kept_draws(tmp_path):
+    from bouquet.filtering import export_filtered
+    src, out = str(tmp_path / "all.h5"), str(tmp_path / "sel.h5")
+    blob = np.random.default_rng(0).integers(0, 256, 2 ** 20, dtype=np.uint8)
+    with h5py.File(src, "w") as hf:
+        hf.attrs["schema_version"] = 4
+        hf.require_group("scan/900/_baseline")["psi_N"] = np.linspace(0, 1, 5)
+        for c in range(4):
+            g = hf.require_group(f"scan/900/{c}")
+            g["eqdsk"] = blob
+            g.attrs["selected"] = c == 2
+    assert export_filtered(src, out) == 1
+    assert os.path.getsize(out) < 0.4 * os.path.getsize(src)
+    with h5py.File(out, "r") as hf:
+        assert sorted(hf["scan/900"]) == ["2", "_baseline"]
+        assert hf.attrs["schema_version"] == 4 and hf["scan/900/2"].attrs["selected"]
+        np.testing.assert_array_equal(hf["scan/900/2/eqdsk"][()], blob)
 
 class TestDethread:
     """Phase 3: readers accept a run/archive; bad scan_key raises (F1)."""
@@ -282,7 +327,7 @@ class TestJbsLoopBlockSchemaV3:
 
     def test_version_is_3_and_the_block_is_named_in_the_schema(self):
         from bouquet import schema
-        assert schema.SCHEMA_VERSION == 3
+        assert schema.SCHEMA_VERSION == 4
         assert schema.JBS_LOOP_ATTRS == ("jbs_converged", "jbs_n_passes",
                                          "jbs_loop_json")
         assert schema.JBS_LOOP_SINCE_SCHEMA == 3
@@ -292,7 +337,7 @@ class TestJbsLoopBlockSchemaV3:
         stem = self._store(str(tmp_path / "v3.h5"), self._REC, None,
                            dict(self._REC, n_passes_total=None))
         with h5py.File(stem + ".h5", "r") as hf:
-            assert hf.attrs["schema_version"] == 3
+            assert hf.attrs["schema_version"] == 4
             a0 = hf["scan/7/0"].attrs
             assert bool(a0["jbs_converged"]) is True
             assert int(a0["jbs_n_passes"]) == 5      # all loops of the draw

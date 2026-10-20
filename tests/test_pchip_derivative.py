@@ -69,7 +69,7 @@ class TestDuplicateX:
         x = np.linspace(0.0, 1.0, 101)
         y = 2.0 * x + 1.0
         # duplicate one interior point (as if two draws' psi_N grids got
-        # concatenated with an overlap -- the suspected j_BS stepwise-artifact
+        # concatenated with an overlap -- the suspected jphi_bs stepwise-artifact
         # trigger this guard exists for)
         x_dup = np.insert(x, 51, x[50])
         y_dup = np.insert(y, 51, y[50])

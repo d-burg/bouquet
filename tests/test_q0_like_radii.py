@@ -52,7 +52,7 @@ class _Src:
 def _metrics():
     import bouquet.baseline as bl
     result = {"Ip_tokamaker": 1.4e6,
-              "j_phi_fit": np.linspace(1e6, 0.0, len(_PSI)),
+              "jphi_total_fit": np.linspace(1e6, 0.0, len(_PSI)),
               "eqdsk_jtor": np.linspace(1e6, 0.0, len(_PSI)),
               "quality": {}}
     return bl._reconstruction_metrics(_GS(), _Eqdsk(), result, _Src(),

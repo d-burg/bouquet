@@ -39,7 +39,7 @@ import numpy as np
 import h5py
 from scipy.spatial import cKDTree as _cKDTree
 
-from .schema import find_bytes_dataset
+from .schema import IFILE_DS, find_bytes_dataset
 from .utils import (
     list_equilibrium_indices,
     discover_scan_keys,
@@ -68,6 +68,7 @@ __all__ = [
     "InspecBands",
     "resolve_inspec_bands",
     "refilter_inspec",
+    "core_current_metrics",
     "read_inspec_rule",
     "read_inspec_record",
     "in_spec_fields",
@@ -87,7 +88,59 @@ _FILTER_FLAGS = ("passes_coil_filter", "passes_boundary_filter",
 #: The opt-in bands' own per-draw verdicts (their AND is
 #: ``passes_draw_band``): reported by :func:`read_filter_flags`, not ANDed
 #: into ``selected`` a second time.
-_BAND_FLAGS = ("passes_l_i_band", "passes_beta_p_band", "passes_q0_gate")
+_BAND_FLAGS = ("passes_l_i_band", "passes_beta_p_band", "passes_q0_gate",
+               "passes_jphi_band", "passes_core_gradient")
+
+
+class _Polyline:
+    """A closed polyline's segments ``a[i] -> a[i+1]``, and a KD-tree of samples along them at most
+    ``s`` apart: the larger of the median and the mean segment length, so a few long segments among
+    dense points add few samples."""
+
+    def __init__(self, contour):
+        a = np.asarray(contour, dtype=float)
+        ab = np.roll(a, -1, axis=0) - a
+        seg_len = np.linalg.norm(ab, axis=1)
+        # rows ax, ay, abx, aby, 1/|ab|^2: one gather per row in distance()
+        self.segments = np.vstack([a.T, ab.T, 1.0 / np.maximum(seg_len ** 2, 1e-300)])
+        total = seg_len.sum()
+        self.s = max(np.median(seg_len[seg_len > 0]), total / len(a)) if total > 0 else 1.0
+        n_sub = np.maximum(np.ceil(seg_len / self.s).astype(int), 1)
+        self.owner = np.repeat(np.arange(len(a)), n_sub)    # the segment each sample lies on
+        frac = (np.arange(len(self.owner)) - np.repeat(np.cumsum(n_sub) - n_sub, n_sub) + 0.5) / n_sub[self.owner]
+        self.tree = _cKDTree(a[self.owner] + frac[:, None] * ab[self.owner])
+
+    def distance(self, p, j):
+        """Distance from points ``p`` (m, 2) to segments ``j`` (m,) or (m, k)."""
+        px, py = (p[:, c].reshape((-1,) + (1,) * (j.ndim - 1)) for c in (0, 1))
+        ax, ay, bx, by, inv = self.segments[:, j]
+        dx, dy = px - ax, py - ay
+        t = np.clip((dx * bx + dy * by) * inv, 0.0, 1.0)
+        return np.hypot(dx - t * bx, dy - t * by)
+
+
+def contour_distance(pts, contour, k=8):
+    """Distance from each of ``pts`` to the closed polyline through ``contour``, exactly.
+
+    Measured to the segments, not the vertices: OFT's cut-cell ``trace_surf`` spaces its points ~5 mm
+    apart, which a nearest-vertex distance would read as boundary deviation.  Each point is measured to
+    the segments of its ``k`` nearest samples (:class:`_Polyline`, spacing ``s``).  Any other segment
+    has every sample at least the k-th sample's distance ``r_k`` away, so it is at least ``r_k - s/2``
+    away; the few points nearer than that bound are re-measured against every segment with a sample
+    within their distance + ``s/2``."""
+    pts = np.asarray(pts, dtype=float)
+    line = _Polyline(contour)
+    k = min(k, line.tree.n)
+    r, idx = line.tree.query(pts, k=k)
+    r, idx = np.reshape(r, (len(pts), k)), np.reshape(idx, (len(pts), k))
+    d = line.distance(pts, line.owner[idx]).min(axis=1)
+    unsure = np.flatnonzero(d > r[:, -1] - 0.5 * line.s) if k < line.tree.n else []
+    if len(unsure):
+        near = line.tree.query_ball_point(pts[unsure], (d[unsure] + 0.5 * line.s) * (1 + 1e-9))
+        n_near = np.fromiter(map(len, near), dtype=int, count=len(unsure))
+        dn = line.distance(pts[np.repeat(unsure, n_near)], line.owner[np.concatenate(near).astype(int)])
+        d[unsure] = np.minimum.reduceat(dn, np.cumsum(n_near) - n_near)
+    return d
 
 
 # --------------------------------------------------------------------------
@@ -110,9 +163,9 @@ _BAND_FLAGS = ("passes_l_i_band", "passes_beta_p_band", "passes_q0_gate")
 def boundary_deviation_mm(baseline_boundary, perturbed_boundary):
     """``(rms_mm, max_mm)`` of a perturbed LCFS vs the baseline contour.
 
-    Nearest-neighbour distance **from each baseline point to the perturbed
-    contour** -- the direction ``plot_traces`` and the boundary filter both
-    report. Returns ``(nan, nan)`` when either contour is missing or too
+    Distance **from each baseline point to the perturbed contour**
+    (:func:`contour_distance`) -- the direction ``plot_traces`` and the
+    boundary filter both report. Returns ``(nan, nan)`` when either contour is missing or too
     short to build a tree from (fewer than 2 points), which the callers
     treat as "no verdict" rather than as a pass.
     """
@@ -123,7 +176,7 @@ def boundary_deviation_mm(baseline_boundary, perturbed_boundary):
     if bl.ndim != 2 or pt.ndim != 2 or len(bl) < 2 or len(pt) < 2:
         return (np.nan, np.nan)
     try:
-        devs, _ = _cKDTree(pt).query(bl)
+        devs = contour_distance(bl, pt)
         return (float(np.sqrt(np.mean(devs ** 2)) * 1e3),
                 float(np.max(devs) * 1e3))
     except Exception:
@@ -378,6 +431,11 @@ COIL_DRIFT_IN_SPEC_ATTR = "coil_drift_in_spec"
 L_I_BAND_FLAG = "passes_l_i_band"
 BETA_P_BAND_FLAG = "passes_beta_p_band"
 Q0_GATE_FLAG = "passes_q0_gate"
+JPHI_BAND_FLAG = "passes_jphi_band"
+CORE_GRADIENT_FLAG = "passes_core_gradient"
+#: Per-draw stored numbers of the core-current checks (:func:`core_current_metrics`).
+JPHI_BAND_Z_ATTR = "jphi_band_z"
+CORE_GRADIENT_RATIO_ATTR = "core_gradient_ratio"
 #: Per-draw (and ``_baseline``) stored scalars: beta_p and Lambda.
 BETA_P_ATTR = "beta_p"
 LAMBDA_ATTR = "Lambda"
@@ -444,6 +502,35 @@ def _positive(name, v, allow_none=True):
     return float(v)
 
 
+def pedestal_top(x, jphi_ref):
+    """The run-grid coordinate inside which the core-current checks act: the
+    minimum of the baseline *jphi_ref* between ``x = 0.5`` and its maximum on
+    ``x >= 0.5`` (the edge bootstrap peak); ``x = 0.5`` without an edge peak."""
+    x, j = np.asarray(x, dtype=float), np.asarray(jphi_ref, dtype=float)
+    idx = np.flatnonzero(x >= 0.5)
+    seg = idx[idx <= idx[np.argmax(j[idx])]]
+    return float(x[seg[np.argmin(j[seg])]])
+
+
+def core_current_metrics(x, jphi, jphi_ref, sigma_ref):
+    """``(z, gradient_ratio, x_ped)`` of a draw's *jphi* inside the pedestal
+    top (:func:`pedestal_top` of the baseline *jphi_ref*): the largest
+    ``|jphi - jphi_ref| / sigma_ref`` there, and the largest ``|d jphi /
+    d sqrt(x)|`` there over the baseline's.  NaN when not computable."""
+    x = np.asarray(x, dtype=float)
+    j, jr = np.asarray(jphi, dtype=float), np.asarray(jphi_ref, dtype=float)
+    sg = np.asarray(sigma_ref, dtype=float)
+    xp = pedestal_top(x, jr)
+    core = x <= xp
+    ok = core & (sg > 0)
+    z = float(np.max(np.abs(j - jr)[ok] / sg[ok])) if ok.any() else float("nan")
+    rho = np.sqrt(np.clip(x, 0.0, None))
+    g_ref = np.max(np.abs(np.gradient(jr, rho)[core]))
+    ratio = (float(np.max(np.abs(np.gradient(j, rho)[core])) / g_ref)
+             if g_ref > 0 else float("nan"))
+    return z, ratio, xp
+
+
 class InspecBands:
     """The opt-in bands of the in-spec rule (everything beyond the
     magnetics).  Built by :func:`resolve_inspec_bands` from a
@@ -460,17 +547,24 @@ class InspecBands:
       as in :data:`LAMBDA_DEFINITION`; both or neither;
     * ``nsigma`` -- the half-width of a sigma band, in sigma;
     * ``constrain_sawteeth`` -- the q0 >= 1 gate (``GenerationConfig.
-      constrain_sawteeth``), carried here because it is judged with them.
+      constrain_sawteeth``), carried here because it is judged with them;
+    * ``jphi_band_nsigma`` -- the draw's ``jphi_total`` inside the pedestal
+      top within this many of the baseline's ``sigma_jphi`` of the baseline's
+      (:func:`core_current_metrics`);
+    * ``core_gradient_ratio`` -- the draw's steepest ``d jphi_total / d
+      sqrt(x)`` inside the pedestal top at most this times the baseline's.
 
     A draw whose banded quantity is missing or non-finite FAILS that band.
     """
 
     __slots__ = ("l_i_tolerance", "l_i_sigma", "beta_p_target",
-                 "beta_p_sigma", "nsigma", "constrain_sawteeth")
+                 "beta_p_sigma", "nsigma", "constrain_sawteeth",
+                 "jphi_band_nsigma", "core_gradient_ratio")
 
     def __init__(self, l_i_tolerance=None, l_i_sigma=None, beta_p_target=None,
                  beta_p_sigma=None, nsigma=DEFAULT_BAND_NSIGMA,
-                 constrain_sawteeth=False):
+                 constrain_sawteeth=False, jphi_band_nsigma=None,
+                 core_gradient_ratio=None):
         import math
         import numbers
         self.l_i_tolerance = _positive("l_i_tolerance", l_i_tolerance)
@@ -494,6 +588,9 @@ class InspecBands:
         self.beta_p_sigma = _positive("beta_p_sigma", beta_p_sigma)
         self.nsigma = _positive("inspec_band_nsigma", nsigma, allow_none=False)
         self.constrain_sawteeth = bool(constrain_sawteeth)
+        self.jphi_band_nsigma = _positive("jphi_band_nsigma", jphi_band_nsigma)
+        self.core_gradient_ratio = _positive("core_gradient_ratio",
+                                             core_gradient_ratio)
 
     # ---- what is on ---------------------------------------------------
     @property
@@ -505,14 +602,23 @@ class InspecBands:
         return self.beta_p_target is not None
 
     @property
+    def core_on(self) -> bool:
+        """A core-current check is on (judged on the draw's jphi_total)."""
+        return (self.jphi_band_nsigma is not None
+                or self.core_gradient_ratio is not None)
+
+    @property
     def any_on(self) -> bool:
-        return self.l_i_on or self.beta_p_on or self.constrain_sawteeth
+        return (self.l_i_on or self.beta_p_on or self.constrain_sawteeth
+                or self.core_on)
 
     def rule(self) -> str:
         """The in-spec rule's name (:data:`INSPEC_RULE_ATTR`)."""
         return ("magnetics" + ("+li" if self.l_i_on else "")
                 + ("+beta_p" if self.beta_p_on else "")
-                + ("+q0" if self.constrain_sawteeth else ""))
+                + ("+q0" if self.constrain_sawteeth else "")
+                + ("+jphi" if self.jphi_band_nsigma is not None else "")
+                + ("+jgrad" if self.core_gradient_ratio is not None else ""))
 
     def record(self) -> dict:
         """JSON-able record of the settings (:data:`INSPEC_BANDS_ATTR`)."""
@@ -520,7 +626,9 @@ class InspecBands:
                     l_i_sigma=self.l_i_sigma,
                     beta_p_target=self.beta_p_target,
                     beta_p_sigma=self.beta_p_sigma, nsigma=self.nsigma,
-                    constrain_sawteeth=self.constrain_sawteeth)
+                    constrain_sawteeth=self.constrain_sawteeth,
+                    jphi_band_nsigma=self.jphi_band_nsigma,
+                    core_gradient_ratio=self.core_gradient_ratio)
 
     @classmethod
     def from_record(cls, rec):
@@ -530,7 +638,9 @@ class InspecBands:
                    beta_p_target=rec.get("beta_p_target"),
                    beta_p_sigma=rec.get("beta_p_sigma"),
                    nsigma=rec.get("nsigma", DEFAULT_BAND_NSIGMA),
-                   constrain_sawteeth=rec.get("constrain_sawteeth", False))
+                   constrain_sawteeth=rec.get("constrain_sawteeth", False),
+                   jphi_band_nsigma=rec.get("jphi_band_nsigma"),
+                   core_gradient_ratio=rec.get("core_gradient_ratio"))
 
     def same_as(self, other) -> bool:
         return other is not None and self.record() == other.record()
@@ -546,7 +656,8 @@ class InspecBands:
 
     # ---- the verdict --------------------------------------------------
     def verdicts(self, *, l_i=None, l_i_reference=None, beta_p=None,
-                 q0=None, q0_psi_N=None) -> dict:
+                 q0=None, q0_psi_N=None, jphi_z=None,
+                 gradient_ratio=None) -> dict:
         """The opt-in bands' verdicts for one draw.
 
         Returns ``l_i_in_band`` / ``beta_p_in_band`` / ``q0_ok`` (``None``
@@ -554,7 +665,9 @@ class InspecBands:
         ``l_i_reference``, ``l_i_rel``, ``l_i_half_width``, ``beta_p``,
         ``beta_p_z``, ``q0``), ``Lambda`` (reported, never judged),
         ``in_band`` (the AND of the bands that are on; True with none on),
-        ``reasons`` and ``rule``."""
+        ``reasons`` and ``rule``.  The core-current checks judge *jphi_z* and
+        *gradient_ratio* (:func:`core_current_metrics`): ``jphi_in_band`` /
+        ``core_gradient_ok``."""
         def _f(v):
             try:
                 return float(v)
@@ -572,7 +685,11 @@ class InspecBands:
                    beta_p_sigma=self.beta_p_sigma, nsigma=self.nsigma,
                    constrain_sawteeth=self.constrain_sawteeth,
                    l_i_in_band=None, beta_p_in_band=None, q0_ok=None,
-                   l_i_half_width=None, beta_p_z=None, q0=_f(q0))
+                   l_i_half_width=None, beta_p_z=None, q0=_f(q0),
+                   jphi_band_nsigma=self.jphi_band_nsigma,
+                   core_gradient_ratio=self.core_gradient_ratio,
+                   jphi_z=_f(jphi_z), gradient_ratio=_f(gradient_ratio),
+                   jphi_in_band=None, core_gradient_ok=None)
         reasons = []
         if self.l_i_on:
             if self.l_i_tolerance is not None:
@@ -605,9 +722,27 @@ class InspecBands:
                 reasons.append(f"constrain_sawteeth: q0 = {q:.4f} < 1"
                                + ("" if q0_psi_N is None
                                   else f" at psi_N {float(q0_psi_N):g}"))
+        if self.jphi_band_nsigma is not None:
+            z = out["jphi_z"]
+            ok = bool(np.isfinite(z) and z <= self.jphi_band_nsigma)
+            out["jphi_in_band"] = ok
+            if not ok:
+                reasons.append(f"jphi band: |jphi - jphi*| reaches {z:.2f} "
+                               f"sigma_jphi inside the pedestal top (<= "
+                               f"{self.jphi_band_nsigma:g})")
+        if self.core_gradient_ratio is not None:
+            r = out["gradient_ratio"]
+            ok = bool(np.isfinite(r) and r <= self.core_gradient_ratio)
+            out["core_gradient_ok"] = ok
+            if not ok:
+                reasons.append(f"core gradient: steepest d jphi/d sqrt(x) "
+                               f"inside the pedestal top is {r:.2f} x the "
+                               f"baseline's (<= {self.core_gradient_ratio:g})")
         out["in_band"] = bool(all(v for v in (out["l_i_in_band"],
                                               out["beta_p_in_band"],
-                                              out["q0_ok"]) if v is not None))
+                                              out["q0_ok"], out["jphi_in_band"],
+                                              out["core_gradient_ok"])
+                                  if v is not None))
         out["reasons"] = reasons
         return out
 
@@ -621,6 +756,10 @@ class InspecBands:
             out[BETA_P_BAND_FLAG] = bool(verdicts["beta_p_in_band"])
         if verdicts.get("q0_ok") is not None:
             out[Q0_GATE_FLAG] = bool(verdicts["q0_ok"])
+        if verdicts.get("jphi_in_band") is not None:
+            out[JPHI_BAND_FLAG] = bool(verdicts["jphi_in_band"])
+        if verdicts.get("core_gradient_ok") is not None:
+            out[CORE_GRADIENT_FLAG] = bool(verdicts["core_gradient_ok"])
         out["passes_draw_band"] = bool(verdicts["in_band"])
         return out
 
@@ -628,15 +767,18 @@ class InspecBands:
 def resolve_inspec_bands(gc) -> InspecBands:
     """The :class:`InspecBands` of a :class:`~bouquet.config.GenerationConfig`
     (``l_i_tolerance``, ``l_i_sigma``, ``beta_p_target``, ``beta_p_sigma``,
-    ``inspec_band_nsigma``, ``constrain_sawteeth``).  Validates; a field a
-    stand-in config does not carry is off."""
+    ``inspec_band_nsigma``, ``constrain_sawteeth``, ``jphi_band_nsigma``,
+    ``core_gradient_ratio``).  Validates; a field a stand-in config does not
+    carry is off."""
     return InspecBands(
         l_i_tolerance=getattr(gc, "l_i_tolerance", None),
         l_i_sigma=getattr(gc, "l_i_sigma", None),
         beta_p_target=getattr(gc, "beta_p_target", None),
         beta_p_sigma=getattr(gc, "beta_p_sigma", None),
         nsigma=getattr(gc, "inspec_band_nsigma", DEFAULT_BAND_NSIGMA),
-        constrain_sawteeth=bool(getattr(gc, "constrain_sawteeth", False)))
+        constrain_sawteeth=bool(getattr(gc, "constrain_sawteeth", False)),
+        jphi_band_nsigma=getattr(gc, "jphi_band_nsigma", None),
+        core_gradient_ratio=getattr(gc, "core_gradient_ratio", None))
 
 
 def in_spec_fields(attrs) -> dict:
@@ -821,6 +963,22 @@ def _draw_scalars_for_rule(grp, l_i_reference):
 ENGINE_RECORD_SOURCE = "engine post_hoc record"
 
 
+_JPHI = "jphi_total"
+
+
+def _core_reference(hf, bl_path):
+    """``(x, jphi_ref, sigma_ref)`` of a scan's baseline for the core-current
+    checks; None when the baseline lacks one of them."""
+    from .schema import stored_name
+    if bl_path not in hf:
+        return None
+    g = hf[bl_path]
+    names = ("psi_N", stored_name(g, _JPHI), "sigma_jphi")
+    if not all(n in g for n in names):
+        return None
+    return tuple(np.asarray(g[n][()], dtype=float) for n in names)
+
+
 def refilter_inspec(h5path_or_header, bands=None, scan_key=None, *,
                     verbose=True):
     """Re-judge the opt-in bands of an archive under *bands* (an
@@ -829,7 +987,8 @@ def refilter_inspec(h5path_or_header, bands=None, scan_key=None, *,
     is re-run.
 
     For every archived draw: the band flags that are on are (re)written
-    (:data:`L_I_BAND_FLAG`, :data:`BETA_P_BAND_FLAG`, :data:`Q0_GATE_FLAG`),
+    (:data:`L_I_BAND_FLAG`, :data:`BETA_P_BAND_FLAG`, :data:`Q0_GATE_FLAG`,
+    :data:`JPHI_BAND_FLAG`, :data:`CORE_GRADIENT_FLAG`),
     those that are off are REMOVED, ``passes_draw_band`` is the AND of the
     ones on (written whenever a band is on or the draw already carried the
     flag -- every engine draw; removed from another draw when no band is
@@ -844,7 +1003,9 @@ def refilter_inspec(h5path_or_header, bands=None, scan_key=None, *,
     the archived ``l_i(3)`` against the baseline's ``l_i_target`` and the
     archived ``beta_p`` (else the edge-pressure record's full-frame
     beta_pol / 100).  The q0 gate is judged on engine draws only (a legacy
-    draw records no q0 at the gate's radius; its flag is left absent).
+    draw records no q0 at the gate's radius; its flag is left absent).  The
+    core-current checks are recomputed from the archived ``jphi_total`` and
+    the baseline's ``jphi_total`` / ``sigma_jphi`` (:func:`core_current_metrics`).
 
     This is how an archive made before the 2026-10-14 rule is re-filtered:
     its engine draws carry ``passes_draw_band`` from the old unconditional
@@ -873,6 +1034,7 @@ def refilter_inspec(h5path_or_header, bands=None, scan_key=None, *,
             ref = (float(hf[bl_path].attrs["l_i_target"])
                    if bl_path in hf and "l_i_target" in hf[bl_path].attrs
                    else np.nan)
+            core_ref = _core_reference(hf, bl_path) if bands.core_on else None
             for i in idxs:
                 gp = _group_path(sv, i)
                 if gp not in hf:
@@ -881,11 +1043,19 @@ def refilter_inspec(h5path_or_header, bands=None, scan_key=None, *,
                 li, li_ref, bp, q0, q0_psi, src = _draw_scalars_for_rule(g, ref)
                 b = (bands if src == ENGINE_RECORD_SOURCE
                      or not bands.constrain_sawteeth else no_q0)
+                jz = gr = None
+                if core_ref is not None and _JPHI in g:
+                    from .schema import stored_name
+                    jz, gr, _ = core_current_metrics(
+                        core_ref[0], g[stored_name(g, _JPHI)][()], *core_ref[1:])
+                    g.attrs[JPHI_BAND_Z_ATTR] = float(jz)
+                    g.attrs[CORE_GRADIENT_RATIO_ATTR] = float(gr)
                 v = b.verdicts(l_i=li, l_i_reference=li_ref, beta_p=bp, q0=q0,
-                               q0_psi_N=q0_psi)
+                               q0_psi_N=q0_psi, jphi_z=jz, gradient_ratio=gr)
                 v["rule"], v["source"] = bands.rule(), src
                 fl = b.flags(v)
-                for name in (L_I_BAND_FLAG, BETA_P_BAND_FLAG, Q0_GATE_FLAG):
+                for name in (L_I_BAND_FLAG, BETA_P_BAND_FLAG, Q0_GATE_FLAG,
+                             JPHI_BAND_FLAG, CORE_GRADIENT_FLAG):
                     if name in fl:
                         g.attrs[name] = fl[name]
                     elif name in g.attrs:
@@ -1577,31 +1747,70 @@ def export_filtered(h5path_or_header, out_path, scan_key=None,
     """Write a pruned copy of the database keeping only ``selection`` draws.
 
     Baseline groups and all top-level metadata are preserved; only the
-    excluded per-draw groups are removed.  Indices are NOT renumbered, so
+    excluded per-draw groups are left out.  Indices are NOT renumbered, so
     the surviving draws keep their original labels (gaps are expected).
-    The source file is never modified.
+    The copy holds only what it keeps (a deleted HDF5 group would leave its
+    space in the file).  The source file is never modified.
 
     Returns the number of draws kept (summed over scan values).
     """
-    import shutil
     src = _resolve(h5path_or_header)
     out = os.path.abspath(out_path)
     if os.path.exists(out) and not overwrite:
         raise FileExistsError(
             f"{out} exists; pass overwrite=True to replace it")
-    shutil.copy(src, out)
-    kept = 0
-    with h5py.File(out, "a") as hf:
-        for sv in _iter_scan_keys(out, scan_key):
-            keep = set(select_indices(out, scan_key=sv, selection=selection))
-            for i in list_equilibrium_indices(out, scan_key=sv):
-                if i in keep:
-                    kept += 1
-                else:
-                    gp = _group_path(sv, i)
-                    if gp in hf:
-                        del hf[gp]
+    kept, drop = 0, set()
+    for sv in _iter_scan_keys(src, scan_key):
+        keep = set(select_indices(src, scan_key=sv, selection=selection))
+        for i in list_equilibrium_indices(src, scan_key=sv):
+            if i in keep:
+                kept += 1
+            else:
+                drop.add("/" + _group_path(sv, i).strip("/"))
+    above = {p.rsplit("/", k)[0] for p in drop for k in range(1, p.count("/"))}
+
+    def _copy(g_src, g_dst):
+        g_dst.attrs.update(g_src.attrs)
+        for name, obj in g_src.items():
+            if obj.name in drop:
+                continue
+            if obj.name in above:
+                _copy(obj, g_dst.create_group(name))
+            else:
+                g_src.copy(obj, g_dst, name=name)
+
+    with h5py.File(src, "r") as hs, h5py.File(out, "w") as hd:
+        _copy(hs, hd)
     return kept
+
+
+def drop_file_blobs(h5path_or_header, names=(IFILE_DS,)):
+    """Rewrite the archive without the byte blobs ``names`` (default the
+    i-files, once they are used; also ``EQDSK_DS``, the g-files:
+    ``GenerationConfig.store_tokamaker_state`` keeps the state both can be
+    rebuilt from, ``DrawView.rebuild_ifile`` / ``rebuild_eqdsk``).
+    Everything else is copied unchanged; the file is replaced atomically (a
+    deleted HDF5 dataset would leave its space in the file).  Returns the
+    number of blobs dropped."""
+    src = _resolve(h5path_or_header)
+    tmp = src + ".dropping"
+    n = 0
+
+    def _copy(g_src, g_dst):
+        nonlocal n
+        g_dst.attrs.update(g_src.attrs)
+        for name, obj in g_src.items():
+            if isinstance(obj, h5py.Group):
+                _copy(obj, g_dst.create_group(name))
+            elif name in names:
+                n += 1
+            else:
+                g_src.copy(obj, g_dst, name=name)
+
+    with h5py.File(src, "r") as hs, h5py.File(tmp, "w") as hd:
+        _copy(hs, hd)
+    os.replace(tmp, src)
+    return n
 
 
 # --------------------------------------------------------------------------

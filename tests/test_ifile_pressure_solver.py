@@ -63,6 +63,8 @@ def _probe(out):
     if legacy:
         g.jbs_self_consistent = False
     g.write_ifile = True
+    # seeded: about 1 in 4 unseeded draws of this example fail the homotopy
+    g.seed = 12345
     b.setup_solver()
     bl = b.prepare_baseline()
     p_sep = float(bl.edge_pressure["p_sep_applied"])

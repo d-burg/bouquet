@@ -51,15 +51,15 @@
       "scan_key": 2000,
       "l_i_tolerance": 0.05,
       "constrain_sawteeth": false,
-      "recalculate_j_BS": true,
+      "recalculate_jbs": true,
       "single_profile_jphi": false,
-      "jBS_scale_range": [
+      "jbs_scale_range": [
         0.99,
         1.01
       ],
       "jbs_delta_mode": false,
-      "isolate_edge_jBS": false,
-      "jBS_baseline_mode": "diff",
+      "isolate_edge_jbs": false,
+      "jbs_baseline_mode": "diff",
       "accept_anchor_inband": false,
       "perturb_jind_in_anchor": true,
       "allow_unsafe_workflow": false,
@@ -69,7 +69,7 @@
       "kinetic_source": "fuse",
       "anchor_pressure_to_equilibrium": false,
       "imas_corrective_jphi": false,
-      "floor_j_BS": false,
+      "floor_jbs": false,
       "bootstrap_kwargs": {},
       "coil_drift": 0.01,
       "coil_drift_hard_factor": null,
@@ -99,8 +99,8 @@
     },
     "fixed_components": {
       "p_fast": null,
-      "j_NBI": null,
-      "j_RF": null,
+      "jphi_nbi": null,
+      "jphi_rf": null,
       "psi_N": null,
       "p_fast_reduction": "trace"
     },

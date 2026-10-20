@@ -696,7 +696,7 @@ true
 "bs_scale": {
 "__f__": "0x1.046158779633ap+0"
 },
-"j_BS": {
+"jphi_bs": {
 "__sum__": {
 "n": 201,
 "shape": [
@@ -713,7 +713,7 @@ true
 ]
 }
 },
-"j_inductive": {
+"jphi_ind": {
 "__sum__": {
 "n": 201,
 "shape": [
@@ -730,7 +730,7 @@ true
 ]
 }
 },
-"j_phi": {
+"jphi_total": {
 "__sum__": {
 "n": 201,
 "shape": [
@@ -1070,7 +1070,7 @@ true
 "bs_scale": {
 "__f__": "0x1.f6e029f60d87fp-1"
 },
-"j_BS": {
+"jphi_bs": {
 "__sum__": {
 "n": 201,
 "shape": [
@@ -1087,7 +1087,7 @@ true
 ]
 }
 },
-"j_inductive": {
+"jphi_ind": {
 "__sum__": {
 "n": 201,
 "shape": [
@@ -1104,7 +1104,7 @@ true
 ]
 }
 },
-"j_phi": {
+"jphi_total": {
 "__sum__": {
 "n": 201,
 "shape": [
@@ -1152,10 +1152,10 @@ true
 }
 }
 },
-"f_BS_closed": {
+"f_bs_closed": {
 "__f__": "0x1.b24accc9ee582p-4"
 },
-"f_BS_unscaled": {
+"f_bs_unscaled": {
 "__f__": "0x1.ba2c119d45a0cp-4"
 },
 "j_bs0": {
@@ -1597,9 +1597,9 @@ true
 "ip_fix",
 "ip_ind",
 "ip_sigma",
-"j_BS_swb",
 "j_fixed",
 "j_ind",
+"jphi_bs_swb",
 "li_geom",
 "li_kind",
 "li_max_corrector_steps",
@@ -1627,7 +1627,7 @@ true
 "bs_scale": {
 "__f__": "0x1.f8e8612b5fca5p-1"
 },
-"j_BS": {
+"jphi_bs": {
 "__sum__": {
 "n": 201,
 "shape": [
@@ -1644,7 +1644,7 @@ true
 ]
 }
 },
-"j_inductive": {
+"jphi_ind": {
 "__sum__": {
 "n": 201,
 "shape": [
@@ -1661,7 +1661,7 @@ true
 ]
 }
 },
-"j_phi": {
+"jphi_total": {
 "__sum__": {
 "n": 201,
 "shape": [
@@ -1709,10 +1709,10 @@ true
 }
 }
 },
-"f_BS_closed": {
+"f_bs_closed": {
 "__f__": "0x1.b40c11399a917p-4"
 },
-"f_BS_unscaled": {
+"f_bs_unscaled": {
 "__f__": "0x1.ba2c119d45a0cp-4"
 },
 "j_bs0": {
@@ -2157,9 +2157,9 @@ true
 "ip_fix",
 "ip_ind",
 "ip_sigma",
-"j_BS_swb",
 "j_fixed",
 "j_ind",
+"jphi_bs_swb",
 "li_geom",
 "li_kind",
 "li_max_corrector_steps",
@@ -2187,7 +2187,7 @@ true
 "bs_scale": {
 "__f__": "0x1.f3bd4f97e039ep-1"
 },
-"j_BS": {
+"jphi_bs": {
 "__sum__": {
 "n": 201,
 "shape": [
@@ -2204,7 +2204,7 @@ true
 ]
 }
 },
-"j_inductive": {
+"jphi_ind": {
 "__sum__": {
 "n": 201,
 "shape": [
@@ -2221,7 +2221,7 @@ true
 ]
 }
 },
-"j_phi": {
+"jphi_total": {
 "__sum__": {
 "n": 201,
 "shape": [
@@ -2269,10 +2269,10 @@ true
 }
 }
 },
-"f_BS_closed": {
+"f_bs_closed": {
 "__f__": "0x1.af95712c3e46ap-4"
 },
-"f_BS_unscaled": {
+"f_bs_unscaled": {
 "__f__": "0x1.ba2c119d45a0cp-4"
 },
 "j_bs0": {
@@ -2687,9 +2687,9 @@ true
 "ip_fix",
 "ip_ind",
 "ip_sigma",
-"j_BS_swb",
 "j_fixed",
 "j_ind",
+"jphi_bs_swb",
 "li_geom",
 "li_kind",
 "li_max_corrector_steps",
@@ -2717,7 +2717,7 @@ true
 "bs_scale": {
 "__f__": "0x1.0277cc00b5adbp+0"
 },
-"j_BS": {
+"jphi_bs": {
 "__sum__": {
 "n": 201,
 "shape": [
@@ -2734,7 +2734,7 @@ true
 ]
 }
 },
-"j_inductive": {
+"jphi_ind": {
 "__sum__": {
 "n": 201,
 "shape": [
@@ -2751,7 +2751,7 @@ true
 ]
 }
 },
-"j_phi": {
+"jphi_total": {
 "__sum__": {
 "n": 201,
 "shape": [

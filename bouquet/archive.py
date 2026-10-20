@@ -16,8 +16,9 @@ than hand-rolling h5 tree traversal + ``.eqdsk``-suffix scanning + byte parsing
     d.li1, d.li3, d.flags, d.attrs       # scalars + filter/spec metadata
     d.jbs_loop, sc.baseline_jbs_loop     # self-consistent bootstrap records
     sc.bootstrap_model                   # "self-consistent Redl bootstrap" / legacy
-    d.profiles                           # dict of named arrays (psi_N, j_phi, ...)
-    d.equilibrium()                      # parsed GEQDSKEquilibrium (stored bytes)
+    d.profiles                           # dict of named arrays (psi_N, jphi_total, ...)
+    d.equilibrium()                      # parsed GEQDSKEquilibrium (stored or rebuilt bytes)
+    d.rebuild_eqdsk("g.geqdsk")          # g-file / i-file from the archived TokaMaker state
     d.pfile()                            # parsed PFile (None if absent)
     d.extract("out/", formats=("geqdsk", "pfile"))
 
@@ -42,7 +43,7 @@ from typing import Optional
 
 import numpy as np
 
-from .schema import (EQDSK_DS, IFILE_DS, PFILE_DS, JBS_CONVERGED_ATTR,
+from .schema import (EQDSK_DS, IFILE_DS, PFILE_DS, TOKAMAKER_STATE_DS, JBS_CONVERGED_ATTR,
                      JBS_LOOP_JSON_ATTR, find_bytes_dataset)
 from .utils import (
     _resolve_h5, _scan_key, _group_path, profile_coord,
@@ -54,7 +55,7 @@ from .filtering import (select_indices, in_spec_fields, _FILTER_FLAGS,
 
 
 # Datasets that are not perturbed-profile arrays (excluded from DrawView.profiles).
-_NON_PROFILE = {"config_json", EQDSK_DS, PFILE_DS, IFILE_DS}
+_NON_PROFILE = {"config_json", EQDSK_DS, PFILE_DS, IFILE_DS, TOKAMAKER_STATE_DS}
 
 # Attr keys surfaced by DrawView.flags (same record shape as read_filter_flags).
 _FLAG_ATTRS = (*_FILTER_FLAGS, *_BAND_FLAGS, "selected")
@@ -139,7 +140,7 @@ class DrawView:
             import h5py
             with h5py.File(self._ar.path, "r") as hf:
                 a = hf[self._gp].attrs
-                # scalars as Python values; profiles (e.g. swb_j_saw) stay arrays
+                # scalars as Python values; profiles (e.g. jphi_saw_out) stay arrays
                 self._attrs_cache = {
                     k: (a[k].item() if getattr(a[k], "size", 0) == 1 else a[k]) for k in a}
         return dict(self._attrs_cache)
@@ -194,7 +195,7 @@ class DrawView:
     # ---- profiles / bytes --------------------------------------------------
     @property
     def profiles(self) -> dict:
-        """Named 1-D arrays stored for the draw (``psi_N``, ``j_phi [..]``, …)."""
+        """Named 1-D arrays stored for the draw (``psi_N``, ``jphi_total [..]``, …)."""
         import h5py
         out = {}
         with h5py.File(self._ar.path, "r") as hf:
@@ -223,12 +224,76 @@ class DrawView:
 
     @property
     def eqdsk_bytes(self) -> Optional[bytes]:
-        return self._read_bytes(".eqdsk")[".eqdsk"]
+        """The stored g-file bytes, else the g-file rebuilt from the archived
+        TokaMaker state (:meth:`rebuild_eqdsk`; needs OpenFUSIONToolkit), else
+        ``None``."""
+        b = self._read_bytes(".eqdsk")[".eqdsk"]
+        if b is not None or self.tokamaker_state_bytes is None:
+            return b
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(self.rebuild_eqdsk(os.path.join(tmp, "g.geqdsk")), "rb") as fh:
+                return fh.read()
 
     @property
     def ifile_bytes(self) -> Optional[bytes]:
         """OFT i-file bytes (``write_ifile=True`` runs), else ``None``."""
         return self._read_bytes(".ifile")[".ifile"]
+
+    @property
+    def tokamaker_state_bytes(self) -> Optional[bytes]:
+        """The TokaMaker equilibrium this group's i-file was written from
+        (``store_tokamaker_state=True`` runs; ``save_TokaMaker`` HDF5 bytes), else ``None``."""
+        return self._read_bytes("." + TOKAMAKER_STATE_DS)["." + TOKAMAKER_STATE_DS]
+
+    def _load_state(self, mygs=None):
+        """``mygs`` (default: the process's TokaMaker on the run's mesh and FE
+        order, :func:`bouquet.utils.tokamaker_on_mesh`) holding this group's
+        archived TokaMaker state; its equilibrium is replaced."""
+        import tempfile
+        from .utils import load_config, tokamaker_on_mesh
+        state = self.tokamaker_state_bytes
+        if state is None:
+            raise ValueError(f"{self!r} has no archived TokaMaker state "
+                             "(GenerationConfig.store_tokamaker_state)")
+        if mygs is None:
+            sc = load_config(self._ar.path, scan_key=self.scan_key).solver
+            mygs = tokamaker_on_mesh(sc.mesh_path, sc.order)
+        with tempfile.NamedTemporaryFile(suffix=".tmk.h5") as fh:
+            fh.write(state)
+            fh.flush()
+            mygs.replace_eq(source_file=fh.name)
+        return mygs
+
+    def rebuild_eqdsk(self, filename, mygs=None, nr=None, nz=None):
+        """Write this group's g-file from its archived TokaMaker state, at
+        ``nr`` x ``nz`` (default: the run's ``eqdsk_nr`` x ``eqdsk_nz``) with the
+        pad and LCFS pressure of its i-file (the g-file's own).  ``mygs``: see
+        :meth:`_load_state`.  Returns ``filename``."""
+        from .edge_pressure import lcfs_kwargs
+        from .utils import load_config
+        a, mygs = self.attrs, self._load_state(mygs)
+        gc = load_config(self._ar.path, scan_key=self.scan_key).generation
+        mygs.save_eqdsk(filename, nr=int(nr or gc.eqdsk_nr), nz=int(nz or gc.eqdsk_nz),
+                        truncate_eq=True, lcfs_pad=float(a["ifile_lcfs_pad"]),
+                        **lcfs_kwargs(float(a["ifile_lcfs_pressure"])))
+        return filename
+
+    def rebuild_ifile(self, filename, mygs=None, npsi=None, ntheta=None):
+        """Write this group's i-file again from its archived TokaMaker state, at
+        ``npsi`` x ``ntheta`` (default: the archived grid) with the archived pad,
+        LCFS pressure and extended records.  ``mygs``: see :meth:`_load_state`.
+        Returns ``filename``."""
+        from .edge_pressure import lcfs_kwargs
+        a, mygs = self.attrs, self._load_state(mygs)
+        ext = {k: True for k in ("profile_derivs", "psi_bounds") if a.get(f"ifile_{k}")}
+        if a.get("ifile_axis_pack"):
+            ext["axis_pack"] = float(a["ifile_axis_pack"])
+        mygs.save_ifile(filename, npsi=int(npsi or a["ifile_npsi"]),
+                        ntheta=int(ntheta or a["ifile_ntheta"]),
+                        lcfs_pad=float(a["ifile_lcfs_pad"]),
+                        **lcfs_kwargs(float(a["ifile_lcfs_pressure"])), **ext)
+        return filename
 
     @property
     def pfile_bytes(self) -> Optional[bytes]:
@@ -253,7 +318,7 @@ class DrawView:
         return None
 
     def equilibrium(self):
-        """Parse the stored eqdsk bytes into a ``GEQDSKEquilibrium``."""
+        """Parse :attr:`eqdsk_bytes` (stored or rebuilt) into a ``GEQDSKEquilibrium``."""
         from .io.geqdsk import read_geqdsk
         b = self.eqdsk_bytes
         if b is None:
@@ -292,7 +357,7 @@ class DrawView:
         from .utils import load_eq_fsa
         prof = self.profiles
         attrs = self.attrs
-        # profile attrs (swb_j_saw) go with the profiles; scalars stay JSON-safe
+        # profile attrs (jphi_saw_out) go with the profiles; scalars stay JSON-safe
         prof.update({k: attrs.pop(k) for k in [k for k, v in attrs.items() if isinstance(v, np.ndarray)]})
         doc = {
             "scan_key": _scan_key(self.scan_key),
@@ -331,11 +396,14 @@ class DrawView:
         paths = {}
         if "geqdsk" in formats or "pfile" in formats:
             blobs = self._read_bytes(".eqdsk", ".pfile")   # one file open for both
-            if "geqdsk" in formats and blobs[".eqdsk"] is not None:
-                p = os.path.join(out_dir, stem + ".geqdsk")
-                with open(p, "wb") as fh:
-                    fh.write(blobs[".eqdsk"])
-                paths["geqdsk"] = os.path.abspath(p)
+            if "geqdsk" in formats:
+                # a dropped g-file is rebuilt from the TokaMaker state -> property fallback
+                eq = blobs[".eqdsk"] if blobs[".eqdsk"] is not None else self.eqdsk_bytes
+                if eq is not None:
+                    p = os.path.join(out_dir, stem + ".geqdsk")
+                    with open(p, "wb") as fh:
+                        fh.write(eq)
+                    paths["geqdsk"] = os.path.abspath(p)
             if "pfile" in formats:
                 # binary IDA sources live once in _baseline -> property fallback
                 pf = blobs[".pfile"] if blobs[".pfile"] is not None else self.pfile_bytes
@@ -656,7 +724,7 @@ class BouquetArchive:
                     f"{self.path} carries no schema_version attr (pre-v2 or "
                     "hand-built archive). eqdsk/pfile bytes are still "
                     "readable, but profile keys may be the old bracketed "
-                    "names (e.g. 'j_phi [A m^-2]'); regenerate the archive "
+                    "names (e.g. 'jphi_total [A m^-2]'); regenerate the archive "
                     "with the current bouquet for full v2 support.")
 
     def __repr__(self):

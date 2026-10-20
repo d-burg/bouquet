@@ -711,7 +711,7 @@ class TestConfigSurface:
                             output_header="t",
                             generation=GenerationConfig(
                                 reconstruction_engine="legacy"))
-        cfg.generation.jBS_baseline_mode = "ohmic"
+        cfg.generation.jbs_baseline_mode = "ohmic"
         cfg.generation.perturb_jind_in_anchor = True
         cfg.generation.closure_channel = "structured"
         cfg.generation.structured_ip_sigma = 1.0e4
@@ -778,7 +778,7 @@ def _probe(outdir):
     lg_dl = dict(lg, perimeter=float(lg["perimeter_get_stats_dl"]))
 
     for tag, j in (("eq_own", eq_jphi_profile(geom, "jphi-linterp", eq=snap)),
-                   ("archived", np.asarray(bl.j_phi, dtype=float))):
+                   ("archived", np.asarray(bl.jphi_total, dtype=float))):
         I_enc = cumulative_trapezoid(w_lin * np.asarray(j, float), psi_N,
                                      initial=0.0) + lg["affine_cum"]
         S = float(lg["dpsi_dpsiN"]) * float(np.trapezoid(I_enc, psi_N))
@@ -1172,7 +1172,7 @@ def _stub_corrector(monkeypatch, p_true, target, C=None, li_sigma=None,
     state = dict(
         q0_target=1.05, psi_q=np.linspace(0.0, 1.0, 5),
         psi_geom=np.linspace(0.0, 1.0, 5),
-        j_ind=np.ones(5), j_BS_swb=np.ones(5), j_fixed=np.zeros(5),
+        j_ind=np.ones(5), jphi_bs_swb=np.ones(5), j_fixed=np.zeros(5),
         axis=None, w_lin=np.ones(5), c_signed=0.0, Ip_signed=1.0e6,
         # linear Ip parts, consistent with Ip_signed so the refreshed
         # closure-health block is clean unless a case makes it dirty
@@ -1492,15 +1492,15 @@ class TestCorrectorRefusalAndHealthPaths:
         assert rec["closure_limited"] is True
         assert any("bs_scale" in str(r)
                    for r in rec["closure_limited_reasons"])
-        # f_BS_closed follows the DELIVERED bootstrap
-        assert rec["f_BS_closed"] == pytest.approx(0.41 * 3.0e5 / 1.0e6,
+        # f_bs_closed follows the DELIVERED bootstrap
+        assert rec["f_bs_closed"] == pytest.approx(0.41 * 3.0e5 / 1.0e6,
                                                    rel=1e-12)
 
     def test_the_health_block_is_refreshed_even_with_no_corrector_solve(
             self, monkeypatch):
         T = 0.9
         rec, _ = _stub_corrector(monkeypatch, 2.0, T, C=T / T ** 2.0)
-        assert rec["f_BS_closed"] == pytest.approx(3.0e5 / 1.0e6, rel=1e-12)
+        assert rec["f_bs_closed"] == pytest.approx(3.0e5 / 1.0e6, rel=1e-12)
         assert rec["raw_components_ip_mismatch_pct"] == pytest.approx(
             0.0, abs=1e-12)
 
@@ -1660,7 +1660,7 @@ class TestTheGateProductionActuallyPasses:
         post = self.IP * 1.003
         bl = _FakeBaseline()
         bl.ip_closure["structured_ip_posterior"] = post
-        bl.j_phi = np.ones(5)      # the predictor's assembly, still delivered
+        bl.jphi_total = np.ones(5)      # the predictor's assembly, still delivered
         rec, world = _stub_corrector(
             monkeypatch, 2.0, 0.9, li_sigma=0.04, soft=True,
             ip_sigma=self.SIG, ip_of=lambda j: post, bl=bl,
@@ -1678,7 +1678,7 @@ class TestTheGateProductionActuallyPasses:
         post = self.IP * 1.003
         bl = _FakeBaseline()
         bl.ip_closure["structured_ip_posterior"] = post
-        bl.j_phi = np.ones(5)      # the predictor's assembly, still delivered
+        bl.jphi_total = np.ones(5)      # the predictor's assembly, still delivered
         with pytest.raises(RuntimeError, match="algebra error"):
             _stub_corrector(
                 monkeypatch, 2.0, 0.9, li_sigma=0.04, soft=True,

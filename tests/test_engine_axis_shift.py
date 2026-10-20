@@ -84,7 +84,7 @@ def test_the_count_and_summary_text():
              # a record written before the rename: "other" = large
              dict(engine=dict(axis=dict(axis_branch="other", dZ_mm=-8.0,
                                         minor_radius_m=0.6))),
-             dict(j_phi=None)]                       # a legacy draw
+             dict(jphi_total=None)]                       # a legacy draw
     c = axis_shift_counts(diags)
     assert {k: c[k] for k in ("n_recorded", "n_large", "n_small",
                               "large_draws")} == dict(
@@ -93,7 +93,7 @@ def test_the_count_and_summary_text():
     assert axis_shift_text(c).startswith(
         "axis shift: 2 of 3 archived engine draw(s) displaced > 0.01 x a")
     assert "branch label" in axis_shift_text(c)
-    assert axis_shift_text(axis_shift_counts([dict(j_phi=None)])) == ""
+    assert axis_shift_text(axis_shift_counts([dict(jphi_total=None)])) == ""
     from bouquet.TokaMaker_interface import _rejection_summary
     assert "axis shift: 2 of 3" in _rejection_summary([], 5, 5,
                                                       diagnostics=diags)

@@ -44,7 +44,7 @@ def test_the_prior_flags_both_sides_and_never_clamps(bs, flagged, capsys):
     assert bool(prior) is flagged
     assert h["closure_limited"] is flagged
     # never clamped: the closed fraction is the scale actually used
-    assert h["f_BS_closed"] == pytest.approx(bs * 2.0e5 / IP)
+    assert h["f_bs_closed"] == pytest.approx(bs * 2.0e5 / IP)
     th = h["closure_limited_thresholds"]
     # the record's keys are unchanged (pinned by test_structured_mse_optin)
     assert set(th) == {"mismatch_max_pct", "bs_scale_min"}
@@ -142,7 +142,7 @@ def test_the_gfile_engine_baseline_records_it(tmp_path, toy_bouquet_solver,
                                          (1.4, False), (1.6, True)])
 def test_the_legacy_gfile_record_of_the_fit_scale(bs, flagged, capsys):
     """The legacy g-file path: the inductive fit's bootstrap scale
-    (rescale_j_BS) against the same prior, recorded and flagged
+    (rescale_jbs) against the same prior, recorded and flagged
     (baseline.py builds reconstruction_metrics["closure_health"] with
     utils.bootstrap_prior_record from the reconstruction's bs_scale_fit)."""
     from bouquet.utils import bootstrap_prior_record

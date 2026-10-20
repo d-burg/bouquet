@@ -235,6 +235,6 @@ def synthetic_ida_sigma(psi_N, channel):
     against the flat-top median, and it had no on-axis rise; the values at
     psi_N 0 / 0.5 / 0.9 / 1.0 were n_e 2.4 / 2.4 / 4.0 / 6.0 %, T_e 3.2 /
     5.5 / 8.6 / 12 %, T_i 5.7 / 7.1 / 7.4 / 9.6 %.  docs/CHANGES_SUMMARY.md
-    records the change.  The j_phi envelope is handled separately.
+    records the change.  The jphi_total envelope is handled separately.
     """
     return np.clip(sigma_template(psi_N, channel, "hmode_flattop"), 0.0, None)

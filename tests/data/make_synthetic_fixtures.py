@@ -451,7 +451,7 @@ def compose(mygs, x, K, sc, ip):
                                  K["zeff"], psi_pad=PSI_PAD)
     kap0 = G["F"] * G["iR"] / G["B2"]
     # <J.B>/|B0| of the bootstrap current the solve uses: evaluate_jBS smooths
-    # its toroidal current near the axis (smooth_axis), not diag["j_dot_B"]
+    # its toroidal current near the axis (smooth_axis), not diag["jdotB_bs"]
     jbs_par = np.asarray(jbs_tor, float) / (kap0 * abs(B0))
     if sc["model"] == "efit" and G_OHMIC == "sigma_neo":
         sig = sigma_neo(K["te"], K["ne"], K["zeff"], np.asarray(diag["f_T"], float),

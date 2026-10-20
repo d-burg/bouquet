@@ -201,7 +201,7 @@ are on the `eq.psi_N` grid (length `nlevels`).
 | `surface_integral` | `(what)` | 1-D array (nlevels,) | Cumulative cross-section integral: integral(V' / R * what * dpsi) / (2pi) |
 | `flux_integral` | `(psi_N_val, profile)` | float | Total volume integral of `profile` evaluated at scalar `psi_N_val` |
 
-**Example:** Total plasma current from j_phi:
+**Example:** Total plasma current from jphi_total:
 ```python
 Ip_check = eq.flux_integral(1.0, eq.j_tor_averaged)
 ```

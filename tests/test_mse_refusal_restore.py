@@ -2,7 +2,7 @@
 
 With ``structured_mse_required=False`` a refused MSE stage must deliver the
 PRE-MSE loop result.  Every chord step's ``refresh`` re-closes on the latest
-geometry and overwrites ``bl.j_phi`` / ``bl.j_BS`` / ``bl.ip_closure``, so the
+geometry and overwrites ``bl.jphi_total`` / ``bl.jphi_bs`` / ``bl.ip_closure``, so the
 fallback has to restore the state captured BEFORE the first step, re-solve the
 current the loop actually solved, and check that re-solve against the pre-MSE
 residuals -- ``converged`` is the result of that check, never assumed.
@@ -133,8 +133,8 @@ def _setup(monkeypatch, drift_on_restore=0.0, on_fail="raise"):
     j_pre = j_ind + jbs0                       # the closure's assembly
     j_solved = 0.98 * j_ind + jbs0             # what the last pass SOLVED
     bl = SimpleNamespace(
-        j_phi=j_pre.copy(), j_BS=jbs0.copy(), j_inductive=j_ind.copy(),
-        jBS_diff=None, jphi_diff=None, ohm_scale=1.0, bs_scale=1.0,
+        jphi_total=j_pre.copy(), jphi_bs=jbs0.copy(), jphi_ind=j_ind.copy(),
+        jphi_bs_diff=None, jphi_diff=None, ohm_scale=1.0, bs_scale=1.0,
         ip_closure=dict(closure_limited=False,
                         closure_limited_reasons=("pre-MSE reason",),
                         marker="pre-MSE"))
@@ -142,15 +142,15 @@ def _setup(monkeypatch, drift_on_restore=0.0, on_fail="raise"):
     state = dict(mse=_chords(),
                  mse_required=False, soft=False, psi_geom=_X, basis=None,
                  free=np.array([True, True]), x_pred=[0.0, 0.0],
-                 F_pred=0.0, j_ind=j_ind, j_BS_swb=jbs0,
+                 F_pred=0.0, j_ind=j_ind, jphi_bs_swb=jbs0,
                  j_fixed=np.zeros_like(_X), w_lin=_W, c_signed=0.0,
                  Ip_signed=_IP, weights=None)
     caller = dict(restored=0)
 
     def refresh(jbs, k):
         # what _refresh_structured does: a NEW closure on the latest geometry
-        bl.j_phi = 1.3 * j_pre
-        bl.j_BS = 1.3 * jbs0
+        bl.jphi_total = 1.3 * j_pre
+        bl.jphi_bs = 1.3 * jbs0
         bl.ohm_scale = 1.7
         bl.ip_closure = dict(closure_limited=True,
                              closure_limited_reasons=("refresh reason",),
@@ -198,8 +198,8 @@ def test_refusal_restores_the_pre_mse_state_and_verifies_it(monkeypatch):
     # the refresh DID overwrite the baseline mid-chord (the bug's premise) ...
     assert len(eq.solved) >= 2
     # ... and the fallback put back the pre-MSE state, exactly
-    np.testing.assert_array_equal(bl.j_phi, t["j_pre"])
-    np.testing.assert_array_equal(bl.j_BS, t["jbs0"])
+    np.testing.assert_array_equal(bl.jphi_total, t["j_pre"])
+    np.testing.assert_array_equal(bl.jphi_bs, t["jbs0"])
     assert bl.ohm_scale == 1.0
     assert bl.ip_closure["marker"] == "pre-MSE"
     # reasons: the restored record's own + the refusal, not the refresh's
@@ -242,10 +242,10 @@ def test_a_restore_that_does_not_reproduce_is_recorded_not_converged(
 def test_without_the_callers_snapshot_the_closure_current_is_resolved(
         monkeypatch):
     """No ``pre_mse`` (a direct caller): the stage still restores its own
-    snapshot and re-solves the restored ``bl.j_phi`` -- and the check then
+    snapshot and re-solves the restored ``bl.jphi_total`` -- and the check then
     reports honestly that this is not the solved pre-MSE state."""
     t = _setup(monkeypatch, on_fail="flag")
     nl, st, srec = t["run"](pre_mse=False)
     np.testing.assert_array_equal(t["eq"].solved[-1], t["j_pre"])
-    assert srec["restore_check"]["solved"].startswith("bl.j_phi")
+    assert srec["restore_check"]["solved"].startswith("bl.jphi_total")
     assert srec["converged"] is False

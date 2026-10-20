@@ -155,3 +155,51 @@ def test_clear_dd_cache_releases_the_parse(dd_path):
     assert imas._cached_dd.cache_info().currsize == 0
     imas._load_dd(dd_path)
     assert imas._cached_dd.cache_info().misses == 1
+
+
+# ---------------------------------------------------------------------------
+#  lean read: given a time, the time-sliced lists are whole only near it
+# ---------------------------------------------------------------------------
+def _sliced_dd(path, ensure_ascii=True):
+    ts = (0.0, 1.0, 2.0, 3.0, 4.0)
+    dd = {"equilibrium": {"time": list(ts), "time_slice": [
+              {"time": t, "boundary": {"r": [t] * 3}} for t in ts]},
+          "core_sources": {"time": list(ts), "source": [{"identifier": {"index": 2},
+              "profiles_1d": [{"time": t, "j_parallel": [t, 0.0], "torque": [1.0]}
+                              for t in ts]}]},
+          "summary": {"code": {"name": "FUSE é"}}}
+    with open(path, "w") as fh:
+        json.dump(dd, fh, ensure_ascii=ensure_ascii)
+    return dd
+
+
+def test_a_time_keeps_its_slices_whole_and_cuts_the_rest(tmp_path):
+    p = str(tmp_path / "dd_sim.json")
+    whole = _sliced_dd(p)
+    lean = imas._load_dd(p, 2.4)       # nearest 2.0, outside the window
+    eq, src = lean["equilibrium"]["time_slice"], lean["core_sources"]["source"][0]
+    assert eq[1:4] == whole["equilibrium"]["time_slice"][1:4]   # with its neighbours
+    assert (eq[0], eq[4]) == ({"time": 0.0}, {"time": 4.0})
+    assert src["profiles_1d"][0] == {"time": 0.0, "j_parallel": [0.0, 0.0]}
+    assert lean["summary"] == whole["summary"]
+    imas.clear_dd_cache()
+
+
+def test_a_non_ascii_dd_and_lean_dd_off_read_it_whole(tmp_path):
+    p = str(tmp_path / "dd_sim.json")
+    whole = _sliced_dd(p, ensure_ascii=False)
+    assert imas._load_dd(p, 1.0) == whole
+    assert imas._source_dd(ImasSource(ids_path=p, time=1.0)) == whole
+    assert imas._source_dd(ImasSource(ids_path=p, time=1.0, lean_dd=True)) is \
+        imas._load_dd(p, 1.0)
+    imas.clear_dd_cache()
+
+
+def test_a_time_far_from_every_core_profiles_slice_reads_it_whole(tmp_path):
+    p = str(tmp_path / "dd_sim.json")
+    whole = _sliced_dd(p)
+    whole["core_profiles"] = {"time": [0.0], "profiles_1d": [{"time": 0.0}]}
+    with open(p, "w") as fh:
+        json.dump(whole, fh)
+    assert imas._load_dd(p, 2.4) == whole
+    imas.clear_dd_cache()

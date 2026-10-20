@@ -642,10 +642,10 @@ def test_a_failing_record_cannot_escape_either_call_site(monkeypatch):
 # mid-list insertion would silently shift every later positional argument
 # (e.g. an auxiliary-profile dict landing in ``core_pressure_hollow``).
 _BASELINE_FIELDS_BEFORE_HOLLOW_RECORD = (
-    "psi_N", "j_phi", "j_inductive", "j_BS", "psi_N_kinetic", "ne", "te",
+    "psi_N", "jphi_total", "jphi_ind", "jphi_bs", "psi_N_kinetic", "ne", "te",
     "ni", "ti", "Zeff", "Ip_target", "l_i_target", "provenance", "l_i_scale",
-    "j_NBI", "j_RF", "p_fast", "p_fast_meta", "bs_scale", "ohm_scale",
-    "ip_closure", "sawtooth", "jBS_diff", "p_equilibrium", "p_diff", "Z_imp",
+    "jphi_nbi", "jphi_rf", "p_fast", "p_fast_meta", "bs_scale", "ohm_scale",
+    "ip_closure", "sawtooth", "jphi_bs_diff", "p_equilibrium", "p_diff", "Z_imp",
     "z_fast", "jphi_diff", "eqdsk_bytes", "pfile_bytes", "recon",
     "li_metrics", "aux", "reconstruction_metrics", "reconstruction_log",
 )

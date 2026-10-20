@@ -397,10 +397,10 @@ class TestOffMesh:
     def test_stage_excludes_it_with_a_reason_and_matches_the_run_without_it(
             self):
         gc = GenerationConfig(closure_channel="structured",
-                              jBS_baseline_mode="ohmic")
+                              jbs_baseline_mode="ohmic")
         bl0, *_ = _run_stage(gc)
         gc = GenerationConfig(closure_channel="structured",
-                              jBS_baseline_mode="ohmic")
+                              jbs_baseline_mode="ohmic")
         bl, state, n_stage, cyl, ch = _run_stage(gc,
                                                  tamper=self._add_off_mesh_chord)
         rec = bl.ip_closure
@@ -425,7 +425,7 @@ class TestOffMesh:
 
     def test_too_few_chords_on_the_mesh_refuses_loudly(self):
         gc = GenerationConfig(closure_channel="structured",
-                              jBS_baseline_mode="ohmic")
+                              jbs_baseline_mode="ohmic")
         bl, state, n_stage, cyl, ch = _run_stage(gc, tamper=self._mostly_off)
         rec = bl.ip_closure
         assert rec["structured_mse_status"].startswith("refused")
@@ -437,7 +437,7 @@ class TestOffMesh:
 
     def test_too_few_chords_on_the_mesh_required_raises(self):
         gc = GenerationConfig(closure_channel="structured",
-                              jBS_baseline_mode="ohmic",
+                              jbs_baseline_mode="ohmic",
                               structured_mse_required=True)
         with pytest.raises(RuntimeError, match="remain on the solver mesh"):
             _run_stage(gc, tamper=self._mostly_off)
@@ -789,12 +789,12 @@ def _run_stage(gc, tamper=None, n_chords=12, solve_wrap=None):
         Bouquet._close_ip_structured_predictor(
             gc, bl, _Snap(), geom, probe, psi, j_ind, j_bs, j_fix, probe,
             1.0, abs(Ip_s), w, c, lin(j_ind), lin(j_bs), lin(j_fix))
-    bl.j_inductive, bl.j_BS = s_ind * j_ind, s_bs * j_bs
-    bl.j_phi = bl.j_inductive + bl.j_BS + j_fix
+    bl.jphi_ind, bl.jphi_bs = s_ind * j_ind, s_bs * j_bs
+    bl.jphi_total = bl.jphi_ind + bl.jphi_bs + j_fix
     bl.ohm_scale, bl.bs_scale = ohm, bs
     bl.ip_closure = dict(closure_limited=False, closure_limited_reasons=(),
                          **extra)
-    cyl.solve(bl.j_phi)                           # the common-tail solve
+    cyl.solve(bl.jphi_total)                           # the common-tail solve
     gs = _FakeGS(cyl)
     n0 = cyl.n_solves
     stage_solve = cyl.solve if solve_wrap is None else solve_wrap(cyl.solve)
@@ -814,7 +814,7 @@ def _run_stage(gc, tamper=None, n_chords=12, solve_wrap=None):
 class TestRunStage:
     def test_default_preset_end_to_end(self):
         gc = GenerationConfig(closure_channel="structured",
-                              jBS_baseline_mode="ohmic")
+                              jbs_baseline_mode="ohmic")
         bl, state, n_stage, cyl, ch = _run_stage(gc)
         rec = bl.ip_closure
         assert rec["structured_mse"] and rec["structured_mse_status"] == "applied"
@@ -861,14 +861,14 @@ class TestRunStage:
         # bl carries the delivered closure, and ip_closure describes it
         np.testing.assert_allclose(
             rec["structured_s_ind_profile"],
-            bl.j_inductive / state["j_ind"], rtol=1e-12)
+            bl.jphi_ind / state["j_ind"], rtol=1e-12)
         assert state["mse_lin"] is not None
         json.dumps(rec)                              # serialisable as is
         assert not rec["closure_limited"], rec["closure_limited_reasons"]
 
     def test_no_block_means_no_mse_anything(self):
         gc = GenerationConfig(closure_channel="structured",
-                              jBS_baseline_mode="ohmic")
+                              jbs_baseline_mode="ohmic")
         bl, state, n_stage, cyl, ch = _run_stage(
             gc, tamper=lambda g: setattr(g, "mse_data", None))
         assert state is None and n_stage == 0
@@ -876,14 +876,14 @@ class TestRunStage:
 
     def test_required_and_absent_raises(self):
         gc = GenerationConfig(closure_channel="structured",
-                              jBS_baseline_mode="ohmic",
+                              jbs_baseline_mode="ohmic",
                               structured_mse_required=True)
         with pytest.raises(MSEDataUnusable, match="structured_mse_required"):
             _run_stage(gc, tamper=lambda g: setattr(g, "mse_data", None))
 
     def test_required_and_unusable_raises(self):
         gc = GenerationConfig(closure_channel="structured",
-                              jBS_baseline_mode="ohmic",
+                              jbs_baseline_mode="ohmic",
                               structured_mse_required=True)
 
         def _few(g):
@@ -894,7 +894,7 @@ class TestRunStage:
 
     def test_unusable_not_required_is_warned_and_recorded(self):
         gc = GenerationConfig(closure_channel="structured",
-                              jBS_baseline_mode="ohmic")
+                              jbs_baseline_mode="ohmic")
 
         def _bad(g):
             g.mse_data.pop("A1")
@@ -912,7 +912,7 @@ class TestRunStage:
 
     def test_refused_stage_not_required_keeps_predictor_and_flags(self):
         gc = GenerationConfig(closure_channel="structured",
-                              jBS_baseline_mode="ohmic")
+                              jbs_baseline_mode="ohmic")
         bl, state, n_stage, cyl, ch = _run_stage(gc, tamper=self._refusing)
         rec = bl.ip_closure
         assert rec["structured_mse_status"].startswith("refused")
@@ -928,21 +928,21 @@ class TestRunStage:
         assert rec["n_extra_solves"] == 9
         assert "MSE stage refused (9 solves)" in rec["sawtooth_verdict"]
         I_kept = cyl.I.copy()
-        cyl.solve(bl.j_phi)
+        cyl.solve(bl.jphi_total)
         np.testing.assert_allclose(cyl.I, I_kept, rtol=1e-14)
         assert not state.get("mse_applied")
         assert "structured_mse_chi2_after" not in rec
 
     def test_refused_stage_required_raises(self):
         gc = GenerationConfig(closure_channel="structured",
-                              jBS_baseline_mode="ohmic",
+                              jbs_baseline_mode="ohmic",
                               structured_mse_required=True)
         with pytest.raises(RuntimeError, match="refusing to fall back"):
             _run_stage(gc, tamper=self._refusing)
 
     def test_wrongly_stated_orientation_is_flagged_and_kept(self):
         gc = GenerationConfig(closure_channel="structured",
-                              jBS_baseline_mode="ohmic")
+                              jbs_baseline_mode="ohmic")
         bl, state, n_stage, cyl, ch = _run_stage(
             gc, tamper=lambda g: g.mse_data.update(bt_sign=-_CYL_BT))
         rec = bl.ip_closure
@@ -959,14 +959,14 @@ class TestRunStage:
         looked like.  Reporting only: nothing is re-solved."""
         from bouquet.run import Bouquet
         gc = GenerationConfig(closure_channel="structured",
-                              jBS_baseline_mode="ohmic",
+                              jbs_baseline_mode="ohmic",
                               structured_preset="none")
         bl, state, n_stage, cyl, ch = _run_stage(gc)
         assert bl.ip_closure["structured_mse_delivered_worse"] is False
         # stand-in for a corrector re-solve that moved the equilibrium away
         # from what the MSE stage delivered
         n0 = cyl.n_solves
-        cyl.solve(1.6 * state["j_ind"] + state["j_BS_swb"]
+        cyl.solve(1.6 * state["j_ind"] + state["jphi_bs_swb"]
                   + state["j_fixed"])
         state["mse_corrector_resolved"] = True
         Bouquet._structured_mse_delivered(state, bl, _FakeGS(cyl))
@@ -984,7 +984,7 @@ class TestRunStage:
     def test_soft_resolved_objective_is_not_compared(self):
         from bouquet.run import Bouquet
         gc = GenerationConfig(closure_channel="structured",
-                              jBS_baseline_mode="ohmic")
+                              jbs_baseline_mode="ohmic")
         bl, state, n_stage, cyl, ch = _run_stage(gc)
         state["mse_corrector_resolved"] = True
         Bouquet._structured_mse_delivered(state, bl, _FakeGS(cyl))
@@ -996,7 +996,7 @@ class TestRunStage:
 
     def test_hard_channel_with_mse(self):
         gc = GenerationConfig(closure_channel="structured",
-                              jBS_baseline_mode="ohmic",
+                              jbs_baseline_mode="ohmic",
                               structured_preset="none")
         bl, state, n_stage, cyl, ch = _run_stage(gc)
         rec = bl.ip_closure
@@ -1016,7 +1016,7 @@ class TestRequiredReachability:
     def test_required_on_another_channel_is_refused(self):
         from bouquet.run import Bouquet
         cfg = self._cfg(structured_mse_required=True,
-                        closure_channel="bootstrap", jBS_baseline_mode="ohmic")
+                        closure_channel="bootstrap", jbs_baseline_mode="ohmic")
         with pytest.raises(ValueError, match="will not run"):
             Bouquet._check_structured_mse_reachable(cfg)
 
@@ -1024,7 +1024,7 @@ class TestRequiredReachability:
         from bouquet.run import Bouquet
         cfg = self._cfg(structured_mse_required=True,
                         closure_channel="structured",
-                        jBS_baseline_mode="ohmic", recalculate_j_BS=True)
+                        jbs_baseline_mode="ohmic", recalculate_jbs=True)
         Bouquet._check_structured_mse_reachable(cfg)
 
     def test_defaults_are_never_checked(self):
@@ -1038,12 +1038,12 @@ class TestRequiredReachability:
         return _mse_block([0.1] * 5, R, Z)
 
     @pytest.mark.parametrize("kw, match", [
-        (dict(closure_channel="bootstrap", jBS_baseline_mode="ohmic",
-              recalculate_j_BS=True), "closure_channel='bootstrap'"),
-        (dict(closure_channel="structured", jBS_baseline_mode="diff",
-              recalculate_j_BS=True), "jBS_baseline_mode='diff'"),
-        (dict(closure_channel="structured", jBS_baseline_mode="ohmic",
-              recalculate_j_BS=False), "recalculate_j_BS is off"),
+        (dict(closure_channel="bootstrap", jbs_baseline_mode="ohmic",
+              recalculate_jbs=True), "closure_channel='bootstrap'"),
+        (dict(closure_channel="structured", jbs_baseline_mode="diff",
+              recalculate_jbs=True), "jbs_baseline_mode='diff'"),
+        (dict(closure_channel="structured", jbs_baseline_mode="ohmic",
+              recalculate_jbs=False), "recalculate_jbs is off"),
     ])
     def test_unread_mse_data_is_refused(self, kw, match):
         from bouquet.run import Bouquet
@@ -1056,7 +1056,7 @@ class TestRequiredReachability:
         from bouquet.run import Bouquet
         cfg = types.SimpleNamespace(
             source=None, generation=GenerationConfig(
-                closure_channel="structured", jBS_baseline_mode="ohmic",
+                closure_channel="structured", jbs_baseline_mode="ohmic",
                 mse_data=self._block()))
         with pytest.raises(ValueError, match="not an IMAS source"):
             Bouquet._check_structured_mse_reachable(cfg)
@@ -1070,8 +1070,8 @@ class TestRequiredReachability:
     def test_single_profile_jphi_is_named_as_the_cause(self):
         from bouquet.run import Bouquet
         cfg = self._cfg(mse_data=self._block(), closure_channel="structured",
-                        jBS_baseline_mode="ohmic", single_profile_jphi=True,
-                        recalculate_j_BS=False)
+                        jbs_baseline_mode="ohmic", single_profile_jphi=True,
+                        recalculate_jbs=False)
         with pytest.raises(ValueError, match="forced off by single_profile"):
             Bouquet._check_structured_mse_reachable(cfg)
 
@@ -1093,7 +1093,7 @@ class TestRequiredReachability:
     def test_read_mse_data_passes(self):
         from bouquet.run import Bouquet
         cfg = self._cfg(mse_data=self._block(), closure_channel="structured",
-                        jBS_baseline_mode="ohmic", recalculate_j_BS=True)
+                        jbs_baseline_mode="ohmic", recalculate_jbs=True)
         Bouquet._check_structured_mse_reachable(cfg)
 
 
@@ -1175,7 +1175,7 @@ def _corrector_after_mse(monkeypatch, mse_applied):
     state = dict(
         q0_target=1.05, psi_q=np.linspace(0.0, 1.0, 5),
         psi_geom=np.linspace(0.0, 1.0, 5), j_ind=np.ones(5),
-        j_BS_swb=np.ones(5), j_fixed=np.zeros(5), axis=None,
+        jphi_bs_swb=np.ones(5), j_fixed=np.zeros(5), axis=None,
         w_lin=np.ones(5), c_signed=0.0, Ip_signed=1.0e6, ip_ind=7.0e5,
         ip_bs=3.0e5, ip_fix=0.0, basis=None, weights=None, q0_tol=0.01,
         gated=False, soft=False, ip_sigma=None, sigma_ind=None,
@@ -1222,7 +1222,7 @@ class TestArchiveSize:
 
     def _run(self, n_chords):
         gc = GenerationConfig(closure_channel="structured",
-                              jBS_baseline_mode="ohmic",
+                              jbs_baseline_mode="ohmic",
                               structured_basis=dict(self._BASIS6))
         return _run_stage(gc, n_chords=n_chords)
 
@@ -1317,14 +1317,14 @@ class TestValidation:
     def test_bad_settings_are_refused_at_config_time(self, kw, match):
         with pytest.raises(ValueError, match=match):
             GenerationConfig(closure_channel="structured",
-                             jBS_baseline_mode="ohmic", **kw)
+                             jbs_baseline_mode="ohmic", **kw)
 
     def test_unknown_block_keys_are_refused(self):
         R, Z = _chord_geometry(5)
         md = _mse_block([0.1] * 5, R, Z, gamma=[0.1] * 5)
         with pytest.raises(ValueError, match="unknown key.*gamma"):
             GenerationConfig(closure_channel="structured",
-                             jBS_baseline_mode="ohmic", mse_data=md)
+                             jbs_baseline_mode="ohmic", mse_data=md)
         with pytest.raises(MSEDataUnusable, match="unknown key.*gamma"):
             mse_chords(md)
 
@@ -1332,14 +1332,14 @@ class TestValidation:
         R, Z = _chord_geometry(5)
         with pytest.raises(ValueError, match="imas_corrective_jphi"):
             GenerationConfig(closure_channel="structured",
-                             jBS_baseline_mode="ohmic",
+                             jbs_baseline_mode="ohmic",
                              imas_corrective_jphi=True,
                              mse_data=_mse_block([0.1] * 5, R, Z))
 
     def test_a_knob_broken_after_construction_is_refused_not_fallen_back(
             self):
         gc = GenerationConfig(closure_channel="structured",
-                              jBS_baseline_mode="ohmic")
+                              jbs_baseline_mode="ohmic")
 
         def _break(g):
             g.structured_mse_steps = 0
@@ -1378,7 +1378,7 @@ class TestExclusionReasons:
 
     def test_nan_er_is_recorded_through_the_stage(self, capsys):
         gc = GenerationConfig(closure_channel="structured",
-                              jBS_baseline_mode="ohmic")
+                              jbs_baseline_mode="ohmic")
 
         def _er(g):
             n = len(g.mse_data["R"])
@@ -1415,7 +1415,7 @@ class TestNoFreedom:
 
     def test_stage_records_not_applied_and_spends_nothing(self):
         gc = GenerationConfig(closure_channel="structured",
-                              jBS_baseline_mode="ohmic",
+                              jbs_baseline_mode="ohmic",
                               structured_preset="none",
                               structured_weights=dict(self._W))
         bl, state, n_stage, cyl, ch = _run_stage(gc)
@@ -1430,7 +1430,7 @@ class TestNoFreedom:
 
     def test_required_refuses(self):
         gc = GenerationConfig(closure_channel="structured",
-                              jBS_baseline_mode="ohmic",
+                              jbs_baseline_mode="ohmic",
                               structured_preset="none",
                               structured_weights=dict(self._W),
                               structured_mse_required=True)
@@ -1454,7 +1454,7 @@ class TestSolverFailures:
 
     def test_bare_solver_exception_takes_the_refusal_path(self):
         gc = GenerationConfig(closure_channel="structured",
-                              jBS_baseline_mode="ohmic")
+                              jbs_baseline_mode="ohmic")
         bl, state, n_stage, cyl, ch = _run_stage(
             gc, solve_wrap=self._fail_on(3, Exception("GS solve did not "
                                                       "converge")))
@@ -1466,7 +1466,7 @@ class TestSolverFailures:
 
     def test_bare_solver_exception_required_raises(self):
         gc = GenerationConfig(closure_channel="structured",
-                              jBS_baseline_mode="ohmic",
+                              jbs_baseline_mode="ohmic",
                               structured_mse_required=True)
         with pytest.raises(RuntimeError, match="refusing to fall back"):
             _run_stage(gc, solve_wrap=self._fail_on(
@@ -1474,7 +1474,7 @@ class TestSolverFailures:
 
     def test_an_unrelated_error_is_not_swallowed(self):
         gc = GenerationConfig(closure_channel="structured",
-                              jBS_baseline_mode="ohmic")
+                              jbs_baseline_mode="ohmic")
         with pytest.raises(TypeError, match="a bug"):
             _run_stage(gc, solve_wrap=self._fail_on(3, TypeError("a bug")))
 
@@ -1521,7 +1521,7 @@ class TestErTerms:
 
     def test_stage_warns_and_records_the_neglect(self, capsys):
         gc = GenerationConfig(closure_channel="structured",
-                              jBS_baseline_mode="ohmic")
+                              jbs_baseline_mode="ohmic")
         bl, state, n_stage, cyl, ch = _run_stage(gc)
         out = capsys.readouterr().out
         assert "E_r is neither supplied" in out and "BIASED" in out

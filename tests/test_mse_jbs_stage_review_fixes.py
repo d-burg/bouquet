@@ -78,13 +78,13 @@ def _converging(monkeypatch, field_at=_field_at, min_chords=_NCH,
               tgamma=np.zeros(_NCH), A5=np.zeros(_NCH), Er=np.zeros(_NCH))
     state = dict(mse=ch, mse_required=False, soft=False, psi_geom=_X,
                  basis=None, free=np.array([True, True]), x_pred=[0.0, 0.0],
-                 F_pred=0.0, j_ind=j_ind, j_BS_swb=jbs0,
+                 F_pred=0.0, j_ind=j_ind, jphi_bs_swb=jbs0,
                  j_fixed=np.zeros_like(_X), w_lin=_W, c_signed=0.0,
                  Ip_signed=_IP, weights=None, ip_ind=0.7 * _IP,
                  ip_bs=0.3 * _IP, ip_fix=0.0)
     eq = _Eq(j_ind + jbs0)
-    bl = SimpleNamespace(j_phi=eq.j.copy(), j_BS=jbs0.copy(),
-                         j_inductive=j_ind.copy(), jBS_diff=None,
+    bl = SimpleNamespace(jphi_total=eq.j.copy(), jphi_bs=jbs0.copy(),
+                         jphi_ind=j_ind.copy(), jphi_bs_diff=None,
                          jphi_diff=None, ohm_scale=1.0, bs_scale=1.0,
                          ip_closure=dict(closure_limited=False,
                                          closure_limited_reasons=()))

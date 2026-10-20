@@ -36,7 +36,7 @@ def test_a_flag_mode_nonconverged_recon_baseline_is_closure_limited():
     assert m["closure_limited"] is True and m["jbs_converged"] is False
     rs = m["closure_limited_reasons"]
     assert rs[0] == "an earlier reason"
-    assert any(r.startswith("j_BS loop: did not converge") for r in rs), rs
+    assert any(r.startswith("jphi_bs loop: did not converge") for r in rs), rs
     # idempotent: a second call adds nothing
     with pytest.warns(RuntimeWarning):
         b._flag_nonconverged_recon_loop()
@@ -84,12 +84,12 @@ def _bq_for_prepare(monkeypatch, resolve, fail_in=None):
 
 def _boom(*a, **k):
     from bouquet.jbs_loop import JBSNotConverged
-    raise JBSNotConverged("self-consistent j_BS loop did not converge", {})
+    raise JBSNotConverged("self-consistent jphi_bs loop did not converge", {})
 
 
 def test_a_failure_after_the_baseline_object_exists_leaves_none(monkeypatch):
     from bouquet.jbs_loop import JBSNotConverged
-    half = SimpleNamespace(reconstruction_metrics=None, j_phi="pass-3 state")
+    half = SimpleNamespace(reconstruction_metrics=None, jphi_total="pass-3 state")
     b = _bq_for_prepare(monkeypatch, lambda cfg, gs: half,
                         fail_in="_flag_nonconverged_recon_loop")
     with pytest.raises(JBSNotConverged):

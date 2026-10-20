@@ -120,16 +120,16 @@ def _par(dd, index, t=1.0):
 def test_every_driven_source_lands_in_its_channel(tmp_path):
     dd = _dd()
     bl = _read(_write(tmp_path, dd))
-    np.testing.assert_allclose(bl.j_NBI, _tor(dd, _par(dd, 2)), rtol=1e-12)
-    np.testing.assert_allclose(bl.j_RF, _tor(dd, _par(dd, 3) + _par(dd, 5)),
+    np.testing.assert_allclose(bl.jphi_nbi, _tor(dd, _par(dd, 2)), rtol=1e-12)
+    np.testing.assert_allclose(bl.jphi_rf, _tor(dd, _par(dd, 3) + _par(dd, 5)),
                                rtol=1e-12, atol=1e-9)
-    np.testing.assert_allclose(bl.j_other, _tor(dd, _par(dd, 6) + _par(dd, 701)),
+    np.testing.assert_allclose(bl.jphi_other, _tor(dd, _par(dd, 6) + _par(dd, 701)),
                                rtol=1e-12, atol=1e-9)
-    np.testing.assert_allclose(bl.j_sawteeth, _tor(dd, _par(dd, 701)),
+    np.testing.assert_allclose(bl.jphi_saw, _tor(dd, _par(dd, 701)),
                                rtol=1e-12, atol=1e-9)
     np.testing.assert_allclose(
-        bl.j_inductive + bl.j_BS + bl.j_NBI + bl.j_RF + bl.j_other, bl.j_phi,
-        rtol=0, atol=1e-9 * np.max(np.abs(bl.j_phi)))
+        bl.jphi_ind + bl.jphi_bs + bl.jphi_nbi + bl.jphi_rf + bl.jphi_other, bl.jphi_total,
+        rtol=0, atol=1e-9 * np.max(np.abs(bl.jphi_total)))
 
 
 def test_an_aggregate_entry_is_never_added(tmp_path):
@@ -138,8 +138,8 @@ def test_an_aggregate_entry_is_never_added(tmp_path):
     dd = _dd(extra=(total,))
     bl = _read(_write(tmp_path, dd))
     ref = _read(_write(tmp_path, _dd()))
-    np.testing.assert_array_equal(bl.j_other, ref.j_other)
-    np.testing.assert_array_equal(bl.j_RF, ref.j_RF)
+    np.testing.assert_array_equal(bl.jphi_other, ref.jphi_other)
+    np.testing.assert_array_equal(bl.jphi_rf, ref.jphi_rf)
 
 
 def test_without_a_sawteeth_source(tmp_path):
@@ -147,4 +147,4 @@ def test_without_a_sawteeth_source(tmp_path):
     dd["core_sources"]["source"] = [s for s in dd["core_sources"]["source"]
                                     if s["identifier"]["index"] != 701]
     bl = _read(_write(tmp_path, dd))
-    assert bl.j_sawteeth.shape == bl.j_other.shape and not np.any(bl.j_sawteeth)
+    assert bl.jphi_saw.shape == bl.jphi_other.shape and not np.any(bl.jphi_saw)

@@ -11,7 +11,7 @@ OpenFUSIONToolkit/TokaMaker.
 
 bouquet generates families ("bouquets") of perturbed equilibria from a baseline
 kinetic equilibrium: correlated Gaussian-process perturbations of n_e, T_e,
-T_i, Z_eff-consistent densities and j_phi drawn within measured uncertainties,
+T_i, Z_eff-consistent densities and jphi_total drawn within measured uncertainties,
 a per-draw bootstrap iterated to self-consistency with each solved
 equilibrium (Redl), a free-boundary Grad–Shafranov solve per sample, and
 in-spec filtering on the magnetics (coil χ² test + boundary cut; l_i and β_p
@@ -63,9 +63,9 @@ bootstrap its ε = (R_max − R_min)/(R_max + R_min) and the `R_geo` of its ν\*
 legacy positional layouts are still supported). An
 upstream build is enough for the default paths (the unified engine and the
 legacy loop). Only two opt-ins need a toolkit with the internal Fortran
-bootstrap solve (OpenFUSIONToolkit PR #271, or a fork carrying it):
+bootstrap solve ([`LCFS_grid_pack`](https://github.com/StuartBenjamin/OpenFUSIONToolkit/tree/LCFS_grid_pack) (open OpenFUSIONToolkit [PR #365](https://github.com/OpenFUSIONToolkit/OpenFUSIONToolkit/pull/365)), which carries it):
 `imas_baseline="swb"` / `solve_method="swb"`, and the `bootstrap_kwargs` keys
-that configure that solve on the legacy path (`use_python_solve`, `djBS_tol`,
+that configure that solve on the legacy path (`use_python_solve`, `djbs_tol`,
 `taper_edge_*`, ...; refused by name on a toolkit without them). Where that
 toolkit's `sauter_fc(return_eps=True)` exists, bouquet records its ε beside
 its own `get_fsa` value as a cross-build diagnostic (they agree to ~1e-4) but
@@ -73,7 +73,8 @@ never uses it, so results do not depend on the build. OFT is installed separatel
 instructions; `tools/install_oft.py` builds upstream `main` by default, any
 other repository or branch only when named (`--repo`, `--ref`), reusing
 already built external libraries (`--libs`), and never repoints an existing
-clone's remote.
+clone's remote. The swb path and the solver suite run on `LCFS_grid_pack`:
+`python tools/install_oft.py --prefix ~/oft --repo https://github.com/StuartBenjamin/OpenFUSIONToolkit.git --ref LCFS_grid_pack`.
 Everything else — the GEQDSK/p-file/
 IDA/IMAS readers, COCOS conversion, archive reading, and all plotting — works
 without it. Python dependencies (`numpy`, `scipy`, `matplotlib`, `h5py`) are
@@ -97,7 +98,7 @@ at `github.com/d-burg/OpenFUSIONToolkit`; they are not yet part of an upstream
 release:
 
 - **jphi-update flux-surface average:** the `<1/R>` average used when a
-  `j_phi` profile is handed to the solver was read one radial node off; the
+  `jphi_total` profile is handed to the solver was read one radial node off; the
   fix uses each surface's own value.
 - **Non-finite abort:** a Grad-Shafranov solve that produces a NaN/Inf now
   stops at once with an error, instead of iterating to the iteration cap.
@@ -126,7 +127,7 @@ is in [docs/validation-provenance.md](docs/validation-provenance.md).
   below); a configuration stored before the engine existed replays as
   `"legacy"`. Legacy-only settings are refused under the engine, with that
   instruction;
-- one `<j.B>` -> `<j_phi>` conversion in the package, `F<1/R>/<B^2>` (the
+- one `<j.B>` -> `<jphi_total>` conversion in the package, `F<1/R>/<B^2>` (the
   engine's): the legacy bootstrap at the pedestal drops by ~6.4-6.8 % on the
   synthetic example (it used `<j.B>/(F<1/R>)`); not switchable;
 
@@ -209,7 +210,7 @@ The engine can be named at construction (`from_geqdsk` / `from_imas(...,
 reconstruction_engine="legacy")`) or set afterwards
 (`bq.generation.reconstruction_engine = "legacy"`): the order no longer
 matters, because the settings whose validated value depends on the engine
-(`isolate_edge_jBS`, `perturb_jind_in_anchor`) are left unset by the
+(`isolate_edge_jbs`, `perturb_jind_in_anchor`) are left unset by the
 factories and resolved when `prepare_baseline()` runs, and the archive
 records how ([engine.md](docs/engine.md)).
 
@@ -280,7 +281,7 @@ print(s.table()); s.plot()
 |---|---|---|
 | Solver | `setup_solver()` | Stand up TokaMaker from `SolverConfig`. Idempotent |
 | Baseline | `prepare()` — or `reconstruct()` on the g-file path | Resolve the baseline; `reconstruct()` also prints the reconstruction-fidelity summary |
-| Guard (optional) | `verify_sigma0_consistency()` | Confirms the *draw* pipeline reproduces the *baseline* j_BS split at σ=0 (with the default self-consistent bootstrap: an unperturbed draw, on every route the configuration can use, reproduces the one reconstruction state -- bootstrap, current, l_i -- at the loop's tolerances) — recommended on a new machine or OFT build, before spending draw compute |
+| Guard (optional) | `verify_sigma0_consistency()` | Confirms the *draw* pipeline reproduces the *baseline* jphi_bs split at σ=0 (with the default self-consistent bootstrap: an unperturbed draw, on every route the configuration can use, reproduces the one reconstruction state -- bootstrap, current, l_i -- at the loop's tolerances) — recommended on a new machine or OFT build, before spending draw compute |
 | Draws | `generate()` | Sample, condition, solve, archive to `{header}.h5` |
 | Selection | `filter()` | Coil-drift + boundary-RMS filters, written as non-destructive flags |
 | Export | `export()` / `export_bundle()` / `export_ids()` | Pruned HDF5, per-draw g-file/p-file/profiles-JSON bundle, or one IMAS/OMAS IDS per draw |

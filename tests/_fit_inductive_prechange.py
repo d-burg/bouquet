@@ -17,17 +17,17 @@ def calc_cylindrical_li_proxy(*a, **k):
     return _TI.calc_cylindrical_li_proxy(*a, **k)
 
 
-def fit_inductive_profile(mygs, eqdsk_jtor, j_BS_isolated, psi_N, psi_pad,
+def fit_inductive_profile(mygs, eqdsk_jtor, jphi_bs_isolated, psi_N, psi_pad,
                             baseline_li_proxy,
                             k=3, psi_bridge=0.99,
-                            rescale_j_BS=False,
+                            rescale_jbs=False,
                             shelf_psi_N=0.0,
                             core_exact_psi=0.30):
     r"""Fit a smooth inductive current profile and scale it to match
     a target cylindrical :math:`l_i` proxy.
 
     Fits a ``scipy.interpolate.UnivariateSpline`` to
-    ``eqdsk_jtor - j_BS_isolated``, enforcing a zero edge anchor and
+    ``eqdsk_jtor - jphi_bs_isolated``, enforcing a zero edge anchor and
     optionally bridging over the edge region with *psi_bridge*.  Scales
     the resulting inductive basis profile (and optionally the bootstrap
     current) so that the total :math:`j_\phi` reproduces
@@ -39,7 +39,7 @@ def fit_inductive_profile(mygs, eqdsk_jtor, j_BS_isolated, psi_N, psi_pad,
         TokaMaker Grad-Shafranov solver object.
     eqdsk_jtor : ndarray
         1-D target total :math:`j_{\rm tor}` from the geqdsk [A m\ :sup:`-2`].
-    j_BS_isolated : ndarray
+    jphi_bs_isolated : ndarray
         1-D isolated bootstrap current profile [A m\ :sup:`-2`].
     psi_N : ndarray
         1-D normalised poloidal flux grid.
@@ -52,17 +52,17 @@ def fit_inductive_profile(mygs, eqdsk_jtor, j_BS_isolated, psi_N, psi_pad,
     psi_bridge : float
         :math:`\hat{\psi}` above which data are replaced by the edge
         anchor point (default 0.99).
-    rescale_j_BS : bool
+    rescale_jbs : bool
         If ``True``, jointly optimise a bootstrap rescaling factor to
         minimise the RMS residual against *eqdsk_jtor*.
         ``False`` (default) scales the inductive profile only.
     shelf_psi_N : float
-        If > 0, apply a flat shelf to *j_BS_isolated* for
+        If > 0, apply a flat shelf to *jphi_bs_isolated* for
         :math:`\hat{\psi} <` *shelf_psi_N*, using the value of
-        *j_BS_isolated* at that location.  ``0`` disables the shelf.
+        *jphi_bs_isolated* at that location.  ``0`` disables the shelf.
     core_exact_psi : float
         For :math:`\hat{\psi} <` *core_exact_psi*, take the inductive
-        basis from the RAW residual ``eqdsk_jtor - j_BS`` (dense
+        basis from the RAW residual ``eqdsk_jtor - jphi_bs`` (dense
         subsample, smooth blend to the smoothing spline at the seam)
         instead of the globally-smoothed spline.  The core residual is
         smooth (both inputs are), but its anti-hump -- the mirror of the
@@ -74,37 +74,37 @@ def fit_inductive_profile(mygs, eqdsk_jtor, j_BS_isolated, psi_N, psi_pad,
     Returns
     -------
     dict
-        ``'j_inductive_fit'`` -- fitted inductive profile (scaled)
+        ``'jphi_ind_fit'`` -- fitted inductive profile (scaled)
             [A m\ :sup:`-2`].
-        ``'j_phi_fit'`` -- total :math:`j_\phi = j_{\rm ind} + b_{\rm scale}\,j_{\rm BS}`
+        ``'jphi_total_fit'`` -- total :math:`j_\phi = j_{\rm ind} + b_{\rm scale}\,j_{\rm BS}`
             [A m\ :sup:`-2`].
-        ``'fit_li'`` -- :math:`l_i` proxy of ``j_phi_fit``.
+        ``'fit_li'`` -- :math:`l_i` proxy of ``jphi_total_fit``.
         ``'ind_scale'`` -- inductive scaling factor applied.
         ``'bs_scale'`` -- bootstrap scaling factor (1.0 when
-            ``rescale_j_BS=False``).
-        ``'j_BS_used'`` -- *j_BS_isolated* after optional shelving.
+            ``rescale_jbs=False``).
+        ``'jphi_bs_used'`` -- *jphi_bs_isolated* after optional shelving.
         ``'spline'`` -- the fitted ``UnivariateSpline`` object.
     """
     from scipy.interpolate import UnivariateSpline
     from scipy.optimize import brentq, minimize_scalar
 
-    j_BS_work = j_BS_isolated.copy()
+    jphi_bs_work = jphi_bs_isolated.copy()
 
-    # ---- Optional shelf on j_BS_isolated ----
+    # ---- Optional shelf on jphi_bs_isolated ----
     if shelf_psi_N > 0.0:
         shelf_idx = np.searchsorted(psi_N, shelf_psi_N)
         shelf_idx = min(shelf_idx, len(psi_N) - 1)
-        shelf_val = j_BS_work[shelf_idx]
-        j_BS_work[:shelf_idx] = shelf_val
+        shelf_val = jphi_bs_work[shelf_idx]
+        jphi_bs_work[:shelf_idx] = shelf_val
 
     # ---- Build the spline basis (at bs_scale = 1) ----
-    residual = eqdsk_jtor - j_BS_work
+    residual = eqdsk_jtor - jphi_bs_work
     mask_core = psi_N <= psi_bridge
 
-    edge_target = eqdsk_jtor[-1] - j_BS_work[-1]  # used when rescale_j_BS
+    edge_target = eqdsk_jtor[-1] - jphi_bs_work[-1]  # used when rescale_jbs
     psi_trusted = np.concatenate([psi_N[mask_core], [1.0]])
     res_trusted = np.concatenate([residual[mask_core],
-                                    [edge_target if rescale_j_BS else 0.0]])
+                                    [edge_target if rescale_jbs else 0.0]])
 
     # Use a smoothing spline followed by PCHIP to eliminate ringing.
     # Step 1: smooth the residual with a generous smoothing factor
@@ -126,7 +126,7 @@ def fit_inductive_profile(mygs, eqdsk_jtor, j_BS_isolated, psi_N, psi_pad,
         # Densify the core and take its values from the raw residual: the
         # heavy global smoothing exists for pedestal/edge noise, but in the
         # core it flattens the (smooth, well-resolved) anti-hump that must
-        # mirror the Sauter j_BS bump, leaving an S-wiggle in the total.
+        # mirror the Sauter jphi_bs bump, leaving an S-wiggle in the total.
         # Blend raw -> spline over the outer ~third of the core window so
         # the PCHIP sees no seam.
         _psi_core = np.linspace(psi_N[0], core_exact_psi, 16)
@@ -141,14 +141,14 @@ def fit_inductive_profile(mygs, eqdsk_jtor, j_BS_isolated, psi_N, psi_pad,
     _res_sub = np.maximum(_res_sub, 0.0)
 
     _pchip = PchipInterpolator(_psi_sub, _res_sub)
-    j_inductive_basis = _pchip(psi_N)
-    j_inductive_basis = np.maximum(j_inductive_basis, 0.0)
+    jphi_ind_basis = _pchip(psi_N)
+    jphi_ind_basis = np.maximum(jphi_ind_basis, 0.0)
 
     # ---- Helper: solve ind_scale for a given bs_scale via brentq ----
     def _solve_ind_scale(bs_scale):
         def _li_residual(scale):
-            j_phi = scale * j_inductive_basis + bs_scale * j_BS_work
-            return calc_cylindrical_li_proxy(mygs, j_phi, psi_pad) - baseline_li_proxy
+            jphi_total = scale * jphi_ind_basis + bs_scale * jphi_bs_work
+            return calc_cylindrical_li_proxy(mygs, jphi_total, psi_pad) - baseline_li_proxy
 
         s_lo, s_hi = 0.5, 2.0
         f_lo, f_hi = _li_residual(s_lo), _li_residual(s_hi)
@@ -164,7 +164,7 @@ def fit_inductive_profile(mygs, eqdsk_jtor, j_BS_isolated, psi_N, psi_pad,
         else:
             return 1.0  # fallback
 
-    if not rescale_j_BS:
+    if not rescale_jbs:
         # ---- v1: scale inductive profile only ----
         ind_scale = _solve_ind_scale(1.0)
         bs_scale_out = 1.0
@@ -172,24 +172,24 @@ def fit_inductive_profile(mygs, eqdsk_jtor, j_BS_isolated, psi_N, psi_pad,
         # ---- v2: jointly optimise bs_scale and ind_scale ----
         def _rms_for_bs_scale(bs_scale):
             isc = _solve_ind_scale(bs_scale)
-            j_phi = isc * j_inductive_basis + bs_scale * j_BS_work
-            return np.sqrt(np.mean((j_phi - eqdsk_jtor)**2))
+            jphi_total = isc * jphi_ind_basis + bs_scale * jphi_bs_work
+            return np.sqrt(np.mean((jphi_total - eqdsk_jtor)**2))
 
         result = minimize_scalar(_rms_for_bs_scale, bounds=(0.0, 4.0),
                                     method='bounded', options={'xatol': 1e-4})
         bs_scale_out = result.x
         ind_scale = _solve_ind_scale(bs_scale_out)
 
-    j_inductive_fit = ind_scale * j_inductive_basis
-    j_phi_fit = j_inductive_fit + bs_scale_out * j_BS_work
-    fit_li = calc_cylindrical_li_proxy(mygs, j_phi_fit, psi_pad)
+    jphi_ind_fit = ind_scale * jphi_ind_basis
+    jphi_total_fit = jphi_ind_fit + bs_scale_out * jphi_bs_work
+    fit_li = calc_cylindrical_li_proxy(mygs, jphi_total_fit, psi_pad)
 
     return {
-        'j_inductive_fit': j_inductive_fit,
-        'j_phi_fit': j_phi_fit,
+        'jphi_ind_fit': jphi_ind_fit,
+        'jphi_total_fit': jphi_total_fit,
         'fit_li': fit_li,
         'ind_scale': ind_scale,
         'bs_scale': bs_scale_out,
-        'j_BS_used': j_BS_work,
+        'jphi_bs_used': jphi_bs_work,
         'spline': _pchip,
     }

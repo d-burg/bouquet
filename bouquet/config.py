@@ -3,13 +3,13 @@
 The configuration is split along two independent axes so the same generation
 machinery serves multiple input pipelines:
 
-  * **Baseline source** -- where the baseline current density (j_phi / j_ohmic /
-    j_BS), the targets (Ip, l_i) and the baseline kinetic profiles come from.
+  * **Baseline source** -- where the baseline current density (jphi_total / j_ohmic /
+    jphi_bs), the targets (Ip, l_i) and the baseline kinetic profiles come from.
     Either reconstruct them from a g-file (:class:`ReconstructionSource`) or read
     them pre-separated from a FUSE IMAS/OMAS IDS (:class:`ImasSource`).
 
   * **Uncertainty envelope** (:class:`UncertaintyConfig`) -- the kinetic sigma
-    profiles and the j_phi sigma, plus the GPR correlation lengths that define
+    profiles and the jphi_total sigma, plus the GPR correlation lengths that define
     how profiles are perturbed. Orthogonal to the baseline source.
 
 Pass a fully-populated :class:`BouquetConfig` to ``bq.Bouquet(config)``.
@@ -24,6 +24,8 @@ from __future__ import annotations
 import contextvars
 from dataclasses import dataclass, field
 from typing import Any, Optional, Union, TYPE_CHECKING
+
+from ._renamed import add_attribute_aliases
 
 if TYPE_CHECKING:
     import numpy as np
@@ -70,6 +72,8 @@ class SolverConfig:
     # slice, each BLAS-pinned (VECLIB_MAXIMUM_THREADS=1 etc.), NOT nthreads>1.
     nthreads: int = 1
     order: int = 3
+    # TokaMaker's Picard tolerance (settings.nl_tol) for every solve; None: OpenFUSIONToolkit's default (1e-6).
+    nl_tol: Optional[float] = None
     F0: Optional[float] = None                       # vacuum R*Bt; default from g-file/IDS
     isoflux_pts: Optional["np.ndarray"] = None       # (N, 2) boundary constraints
     isoflux_weights: Optional["np.ndarray"] = None   # (N,); None: per unit length (see below)
@@ -182,13 +186,14 @@ class SolverConfig:
 # ---------------------------------------------------------------------------
 # Baseline sources (discriminated union via `BouquetConfig.source`)
 # ---------------------------------------------------------------------------
+@add_attribute_aliases
 @dataclass
 class ReconstructionSource:
     """Baseline obtained by reconstructing a GS equilibrium from a g-file.
 
     Runs :func:`reconstruct_equilibrium`: fits a smooth inductive profile and
     matches l_i(1) via secant iteration, producing the separated
-    j_phi / j_inductive / j_BS that generation needs.
+    jphi_total / jphi_ind / jphi_bs that generation needs.
 
     Baseline kinetic profiles come from ``profiles_path``. The reader dispatches
     on file type -- an IDA ``.cdf`` is used if given (and is then also the
@@ -234,25 +239,33 @@ class ReconstructionSource:
     ni_source: str = "standard"
     profile_overrides: dict = field(default_factory=dict)  # name -> array, manual override
     # reconstruction knobs
-    psi_pad: float = 1e-3
+    psi_pad: float = 1e-3              # LCFS pad in psi_N (see ImasSource.psi_pad)
     n_k: int = 5                       # inductive-spline knots
     psi_bridge: float = 0.99          # Hermite edge-bridge location
-    rescale_j_BS: bool = False
+    rescale_jbs: bool = False
     shelf_psi_N: float = 0.0
     # Radial coordinate of the run (bouquet.coords): "psi_n", "phi_n" (profiles,
     # envelopes and solver inputs on normalised toroidal flux, mapped at read
     # with the g-file's own q), or "rho_tor" (read as phi_n = rho_tor**2).
     coord: str = "psi_n"
-    # guess_jinductive is derived from the g-file j_phi when None
+    # guess_jinductive is derived from the g-file jphi_total when None
 
     def __post_init__(self):
         from .coords import run_coord
         run_coord(self.coord)
         _check_ni_source(self.ni_source, "ReconstructionSource")
+        _check_psi_pad(self.psi_pad, "ReconstructionSource")
 
 
 #: ImasSource.ida_timing: the reviewed window rule, or IDA_fuse's own pairing.
 IDA_TIMINGS = ("window", "ida_fuse")
+
+
+def _check_psi_pad(v, who):
+    import math
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not (
+            math.isfinite(v) and 0.0 <= v < 1.0):
+        raise ValueError(f"{who}.psi_pad={v!r} must be a number in [0, 1)")
 
 
 def _check_ni_source(v, who, allowed=None):
@@ -266,7 +279,7 @@ def _check_ni_source(v, who, allowed=None):
 class ImasSource:
     """Baseline read directly from a FUSE IMAS/OMAS IDS -- no reconstruction.
 
-    The IDS already carries j_ohmic and j_BS separated (j_phi = j_ohmic + j_BS),
+    The IDS already carries j_ohmic and jphi_bs separated (jphi_total = j_ohmic + jphi_bs),
     along with the equilibrium (Ip, l_i) and core_profiles (ne/Te/ni/Ti/Zeff),
     so the reconstruction step is skipped entirely. This is expected to become
     the primary input pipeline.
@@ -274,6 +287,9 @@ class ImasSource:
 
     ids_path: str                      # IMAS/OMAS file (FUSE output)
     time: Optional[float] = None       # time slice [s]; None -> single/first slice
+    # Read the dd's time slices whole only near `time` (io.imas._load_dd: a fraction of a
+    # whole parse's ~3.5x the file size); False: the whole dd, shared across slices.
+    lean_dd: bool = False
     # IDA-lite slice [s] for ida_hybrid ONLY (refused otherwise); None -> `time`. `time`
     # then picks only the dd slices (equilibrium, core_profiles, core_sources).  The IDA
     # slice is the file's own nearest slice within half its local step, never
@@ -359,13 +375,13 @@ class ImasSource:
     # dd's core_profiles grid.rho_tor_norm**2), or "rho_tor" (same run).
     coord: str = "psi_n"
     # Hold the dd's sawteeth core_sources entry (IMAS identifier 701) fixed
-    # as a driven current (True, the default): its j_parallel goes to j_other
-    # (its share also to j_sawteeth), like every other driven entry and as
+    # as a driven current (True, the default): its j_parallel goes to jphi_other
+    # (its share also to jphi_saw), like every other driven entry and as
     # the unified engine does.  FUSE's j_ohmic EXCLUDES that source
     # (j_total - j_bootstrap - beams - sawteeth = j_ohmic to rounding on the
     # synthetic FUSE fixture), so without the hold the legacy inductive
     # carries it.  False opts out: the entry is not held, its current stays
-    # in the residual j_inductive (the legacy split before the hold) and it
+    # in the residual jphi_ind (the legacy split before the hold) and it
     # is read only as the sawtooth gate's flag.  Legacy reader only: the
     # unified engine always holds it and refuses False.  Stamped in
     # Baseline.source_time_match["sawteeth_hold"] (archived with li_metrics).
@@ -394,10 +410,14 @@ class ImasSource:
     # p_fast (both True, the default) or inside the IDA n_i (both False); the reader
     # warns otherwise.
     include_pfast: bool = True
+    # LCFS pad in psi_N: every surface trace and statistic stops at psi_N = 1 - psi_pad, and the
+    # archived g-files and i-files end there (save_eqdsk / save_ifile lcfs_pad).
+    psi_pad: float = 1e-3
 
     def __post_init__(self):
         from .coords import run_coord
         run_coord(self.coord)
+        _check_psi_pad(self.psi_pad, "ImasSource")
         if not isinstance(self.hold_sawteeth, bool):
             raise ValueError(f"hold_sawteeth={self.hold_sawteeth!r}: must be "
                              "True or False")
@@ -619,6 +639,7 @@ class ImasTimeslices(ParallelSource):
 # ---------------------------------------------------------------------------
 # Fixed additive components (NEVER perturbed by GPR draws)
 # ---------------------------------------------------------------------------
+@add_attribute_aliases
 @dataclass
 class FixedComponentsConfig:
     """Externally-driven current + fast-ion pressure, held fixed across draws.
@@ -626,7 +647,7 @@ class FixedComponentsConfig:
     These are summed into the baseline *and* every perturbed equilibrium,
     untouched by the GPR perturbation::
 
-        j_phi_total = j_inductive + j_BS + j_NBI + j_RF + j_other
+        jphi_total = jphi_ind + jphi_bs + jphi_nbi + jphi_rf + jphi_other
         p_total     = p_thermal(perturbed) + p_fast
 
     Any component may simply be handed in as a 1-D array over ``psi_N`` -- this is
@@ -641,18 +662,18 @@ class FixedComponentsConfig:
         2026-10-17) and defaults to zero otherwise (an IDA file).  Either way
         an explicit array here wins (e.g. from TRANSP/ONETWO); a p-file with
         ``pb`` beside an explicit array is warned about once.
-      * ``j_NBI`` -- :class:`ImasSource` sums beam-source ``j_parallel``;
+      * ``jphi_nbi`` -- :class:`ImasSource` sums beam-source ``j_parallel``;
         :class:`ReconstructionSource` defaults to zero. Explicit array wins.
-      * ``j_RF`` -- :class:`ImasSource` sums EC/LH/IC ``j_parallel``;
+      * ``jphi_rf`` -- :class:`ImasSource` sums EC/LH/IC ``j_parallel``;
         :class:`ReconstructionSource` defaults to zero. Explicit array wins.
-      * ``j_other`` -- :class:`ImasSource` sums fusion, runaways, sawteeth and
+      * ``jphi_other`` -- :class:`ImasSource` sums fusion, runaways, sawteeth and
         unknown-index ``j_parallel``; zero elsewhere. Explicit array wins.
 
     All arrays are on ``psi_N`` (kinetic grid, in the run coordinate --
     Φ_N in a ``coord="phi_n"`` run, unless ``coord="psi_n"``), SI units,
     toroidal current convention for j_*. ``None`` -> zeros.
 
-    Current orientation: ``j_NBI`` / ``j_RF`` are given in bouquet's
+    Current orientation: ``jphi_nbi`` / ``jphi_rf`` are given in bouquet's
     POSITIVE-Ip frame -- co-current drive is positive, counter-current drive
     negative -- whatever the orientation of the source.  They are used exactly
     as given on both source paths: the IMAS reader does NOT multiply them by
@@ -663,9 +684,9 @@ class FixedComponentsConfig:
     """
 
     p_fast: Optional["np.ndarray"] = None   # fast/beam pressure
-    j_NBI: Optional["np.ndarray"] = None    # beam-driven TOROIDAL current density [A/m^2], co-Ip > 0
-    j_RF: Optional["np.ndarray"] = None     # RF-driven TOROIDAL current density [A/m^2], co-Ip > 0
-    j_other: Optional["np.ndarray"] = None  # other fixed driven TOROIDAL current [A/m^2]
+    jphi_nbi: Optional["np.ndarray"] = None    # beam-driven TOROIDAL current density [A/m^2], co-Ip > 0
+    jphi_rf: Optional["np.ndarray"] = None     # RF-driven TOROIDAL current density [A/m^2], co-Ip > 0
+    jphi_other: Optional["np.ndarray"] = None  # other fixed driven TOROIDAL current [A/m^2]
     psi_N: Optional["np.ndarray"] = None    # grid for the above (if arrays given)
     # Coordinate of ``psi_N``: "run" (the run's), or "psi_n" (mapped to the
     # run coordinate through the source equilibrium's psi_N -> Phi_N map).
@@ -706,7 +727,7 @@ class FixedComponentsConfig:
 # ---------------------------------------------------------------------------
 @dataclass
 class UncertaintyConfig:
-    """Kinetic sigma profiles + j_phi sigma + GPR correlation lengths.
+    """Kinetic sigma profiles + jphi_total sigma + GPR correlation lengths.
 
     Kinetic sigmas are sourced from an IDA ``.cdf`` (``ida_path``). Two modes
     match the operational notebook:
@@ -788,7 +809,7 @@ class UncertaintyConfig:
     # silent win can invert the meaning of a run, so this defaults ON.
     log_sigma_sources: bool = True
 
-    # j_phi uncertainty: flat fractional envelope on |j_phi_baseline|
+    # jphi_total uncertainty: flat fractional envelope on |jphi_total_baseline|
     jphi_scalar_sigma: float = 0.10
 
     # Z_eff uncertainty: flat fractional envelope that ENABLES the zeff channel
@@ -892,6 +913,7 @@ SWB_SAW_RULES = {"fuse": 1, "local": 2}
 # ---------------------------------------------------------------------------
 # Generation + filtering
 # ---------------------------------------------------------------------------
+@add_attribute_aliases
 @dataclass
 class GenerationConfig:
     """Perturbed-bouquet sampling over the uncertainty neighborhood."""
@@ -927,8 +949,8 @@ class GenerationConfig:
     max_total_draws: Optional[int] = None
     # The run's ONE random seed. It is consumed into a single
     # numpy.random.Generator (sampling.make_rng) that is threaded explicitly
-    # into every draw site -- the GPR kinetic/aux/j_phi draws, the per-draw
-    # scale_jBS sample and the per-draw l_i target sample -- so two runs with
+    # into every draw site -- the GPR kinetic/aux/jphi_total draws, the per-draw
+    # scale_jbs sample and the per-draw l_i target sample -- so two runs with
     # the same seed, inputs and solver produce bitwise-identical archives
     # ON ONE MACHINE. Across machines the draws agree to ~1e-9, not bitwise:
     # the GP kernel is factorised by a fixed-order Cholesky, which leaves a
@@ -974,16 +996,24 @@ class GenerationConfig:
     # half-width of a sigma band (l_i_sigma, beta_p_sigma) in sigma
     inspec_band_nsigma: float = 2.0
     constrain_sawteeth: bool = False
+    # Core-current checks (swb only; None = off), judged on each draw's solved
+    # jphi_total inside the pedestal top (filtering.core_current_metrics):
+    # jphi_band_nsigma -- within this many of the baseline's sigma_jphi of the
+    # baseline's jphi_total; core_gradient_ratio -- the steepest
+    # d jphi_total / d sqrt(x) at most this times the baseline's.  They remove
+    # the swb draws whose sawtooth reset leaves an unrelaxed current step.
+    jphi_band_nsigma: Optional[float] = None
+    core_gradient_ratio: Optional[float] = None
     # When True, recompute bootstrap each draw via TokaMaker solve_with_bootstrap
-    # (its j_BS converted to the field-aligned kappa <j.B> for the installed
+    # (its jphi_bs converted to the field-aligned kappa <j.B> for the installed
     # toolkit's output convention: TokaMaker_interface.swb_result_toroidal),
-    # overriding the baseline/FUSE j_BS. When False, keep the baseline j_BS.
-    recalculate_j_BS: bool = True
-    # Treat j_phi as ONE profile: no inductive/bootstrap decomposition anywhere.
+    # overriding the baseline/FUSE jphi_bs. When False, keep the baseline jphi_bs.
+    recalculate_jbs: bool = True
+    # Treat jphi_total as ONE profile: no inductive/bootstrap decomposition anywhere.
     # The baseline total is taken straight from the source (the g-file's j_tor on
     # the reconstruction path, equilibrium.j_tor on the IMAS path), collapsed to
-    # j_inductive = j_phi with j_BS = j_NBI = j_RF = 0, and the GPR perturbs that
-    # total directly. Implies recalculate_j_BS=False, so no Sauter/Redl
+    # jphi_ind = jphi_total with jphi_bs = jphi_nbi = jphi_rf = 0, and the GPR perturbs that
+    # total directly. Implies recalculate_jbs=False, so no Sauter/Redl
     # solve_with_bootstrap call runs per draw.
     #
     # For L-mode, where the bootstrap is negligible and the Sauter edge-spike
@@ -1006,7 +1036,7 @@ class GenerationConfig:
     # SCOPE: this removes the per-draw Sauter calls (the N-times cost). On the
     # g-file path the bootstrap is still computed ONCE during reconstruction,
     # and that is not removable by simply skipping the solve: fit_inductive_profile
-    # matches l_i by scaling the inductive against a FIXED j_BS, and with j_BS = 0
+    # matches l_i by scaling the inductive against a FIXED jphi_bs, and with jphi_bs = 0
     # the cylindrical l_i proxy is scale-invariant (scaling j scales B_p, so the
     # proxy's numerator and denominator both go as k^2). The residual then never
     # brackets, _solve_ind_scale silently falls back to ind_scale = 1.0, and the
@@ -1014,10 +1044,10 @@ class GenerationConfig:
     # Verified 2026-08-03. Making the skip work needs a different l_i strategy for
     # this mode, not just an early return.
     single_profile_jphi: bool = False
-    jBS_scale_range: tuple = (0.99, 1.01)  # bootstrap multiplicative spread
+    jbs_scale_range: tuple = (0.99, 1.01)  # bootstrap multiplicative spread
     # Delta composition of the per-draw bootstrap (alternative to sharing the
     # near-axis smoothing): each draw's spike is built as
-    #   baseline_j_BS + (SWB(perturbed) - SWB(sigma=0)),
+    #   baseline_jphi_bs + (SWB(perturbed) - SWB(sigma=0)),
     # both SWB terms RAW (no smoothing of perturbed profiles).  Any common-mode
     # evaluation artifact (e.g. the collapsed innermost-surface point) cancels
     # exactly, and the per-draw Sauter response passes through unfiltered.
@@ -1035,10 +1065,10 @@ class GenerationConfig:
     # decomposition, both input types), True under "unified" (which never
     # reads it).  An explicit value is kept; one contradicting the engine's
     # validated value warns (and is refused under "unified").
-    isolate_edge_jBS: Optional[bool] = None
+    isolate_edge_jbs: Optional[bool] = None
     # How the SWB bootstrap is reconciled with the FUSE baseline on the IMAS
     # path (see run._forward_solve_imas_baseline):
-    #   "diff"    : keep FUSE total; add fixed correction diff = FUSE_jBS - SWB
+    #   "diff"    : keep FUSE total; add fixed correction diff = FUSE_jbs - SWB
     #               to baseline and every draw (anchors to FUSE; risks edge
     #               misalignment when the perturbed pedestal moves).
     #   "rescale" : keep FUSE ohmic; rescale SWB by a single factor so l_i
@@ -1046,7 +1076,7 @@ class GenerationConfig:
     #   "ohmic"   : HYBRID. SWB bootstrap (from the kinetic source, e.g. IDA)
     #               and FUSE NBI/RF taken as-is; Ip closed on the channel
     #               named by ``closure_channel`` (default "bootstrap": rescale
-    #               j_BS, factor recorded as Baseline.bs_scale; the
+    #               jphi_bs, factor recorded as Baseline.bs_scale; the
     #               deprecated "ohmic" channel rescales FUSE j_ohmic instead,
     #               Baseline.ohm_scale; "sawtooth_bootstrap" and "structured"
     #               are documented on ``closure_channel``). The jphi_diff
@@ -1057,13 +1087,13 @@ class GenerationConfig:
     #               workflow="custom" (the draw-path sigma=0 reproduction of
     #               an ohmic-closed baseline is unverified).
     #   ``closure_channel`` is read ONLY in this mode (and only with
-    #   recalculate_j_BS=True); on "diff"/"rescale" a non-default channel is
+    #   recalculate_jbs=True); on "diff"/"rescale" a non-default channel is
     #   refused rather than silently ignored.
-    jBS_baseline_mode: str = "diff"
-    #: Which channel absorbs the Ip closure in jBS_baseline_mode="ohmic":
-    #: "bootstrap" (default) keeps j_inductive exactly as the source diffused it
-    #: and rescales j_BS; "ohmic" is DEPRECATED (diagnostic bracket only; emits a
-    #: DeprecationWarning): rescaling j_inductive alone hollows the core, lifts
+    jbs_baseline_mode: str = "diff"
+    #: Which channel absorbs the Ip closure in jbs_baseline_mode="ohmic":
+    #: "bootstrap" (default) keeps jphi_ind exactly as the source diffused it
+    #: and rescales jphi_bs; "ohmic" is DEPRECATED (diagnostic bracket only; emits a
+    #: DeprecationWarning): rescaling jphi_ind alone hollows the core, lifts
     #: q0 far above the source's, loses the q=1 surface on most sawtoothing
     #: slices and yields implausible Delta' -- never feed it to a stability code.
     #: RECOMMENDED for sawtoothing discharges: "sawtooth_bootstrap" (below) --
@@ -1075,7 +1105,7 @@ class GenerationConfig:
     #: "bootstrap" until a mid-radius constraint exists for the high-beta_p
     #: regime (both channels flag closure_limited there -- see ip_closure).
     #: Every channel records a closure-health block in Baseline.ip_closure
-    #: (raw_components_ip_mismatch_pct, f_BS_unscaled/closed, closure_limited +
+    #: (raw_components_ip_mismatch_pct, f_bs_unscaled/closed, closure_limited +
     #: reasons): a slice is closure-limited when the raw components miss Ip by
     #: >10 % or the bootstrap is scaled below 0.5 -- treat its current split, and
     #: any Delta' built on it, as unvalidated regardless of channel.
@@ -1365,8 +1395,8 @@ class GenerationConfig:
     #: weights are an ABSOLUTE ``sigma^-2`` prior (see ``structured_weights``:
     #: their overall scale now matters, and a uniform ladder is sigma = 1).
     #: On any configuration that never runs the structured closure (another
-    #: channel, a g-file source, jBS_baseline_mode != "ohmic",
-    #: recalculate_j_BS off) a supplied block -- or any non-default
+    #: channel, a g-file source, jbs_baseline_mode != "ohmic",
+    #: recalculate_jbs off) a supplied block -- or any non-default
     #: ``structured_mse_*`` knob -- is REFUSED at prepare_baseline() rather
     #: than silently ignored; ``workflow='custom'`` downgrades that to a WARN.
     mse_data: Optional[dict] = None
@@ -1412,7 +1442,7 @@ class GenerationConfig:
     #: source carries no axis q (recorded as q0_gate_basis).
     q0_gate: float = 1.1
     #: Absolute q0 acceptance for closure_channel="sawtooth_bootstrap".  The
-    #: predictor is first-order (q0 ~ 1/j_phi(0) at frozen geometry); if the
+    #: predictor is first-order (q0 ~ 1/jphi_total(0) at frozen geometry); if the
     #: solved q0 lands further than this from q0_ref, ONE analytic Newton step
     #: along the Ip-closed manifold is taken and its result accepted whatever it
     #: gives.  There is no iteration loop -- the cost ceiling is the point.
@@ -1426,9 +1456,9 @@ class GenerationConfig:
     accept_anchor_inband: bool = False
     # Fix C: GPR-perturb the inductive in the recon-anchor itself (then accept).
     # This is an ALTERNATIVE to the standard flagship l_i loop, which ALREADY
-    # GPR-perturbs j_inductive (rejection sampling, TokaMaker_interface.py ~1842);
+    # GPR-perturbs jphi_ind (rejection sampling, TokaMaker_interface.py ~1842);
     # BOTH consume sigma_jphi/j_ls and BOTH satisfy the "perturb all profiles incl.
-    # j_inductive" rule. Difference: Fix C accepts the perturbed-in-anchor draw and
+    # jphi_ind" rule. Difference: Fix C accepts the perturbed-in-anchor draw and
     # skips find_optimal_scale + the corrective (which can homogenize draws).
     # Default False = the standard flagship loop -- the mechanism geqdsks used
     # successfully (high draw completion). Set True for FUSE/IMAS diff mode (avoids
@@ -1448,7 +1478,7 @@ class GenerationConfig:
     # from_imas/from_geqdsk auto-apply their validated workflow (IMAS=diff+C,
     # geqdsk=standard l_i loop) and generate() raises on a known-bad combo
     # (geqdsk+Fix C, IMAS without Fix C, or jphi_scalar_sigma<=0 which freezes
-    # j_inductive). Set True ONLY for deliberate backend tests / experiments to
+    # jphi_ind). Set True ONLY for deliberate backend tests / experiments to
     # bypass the guard (it will warn instead of raise).
     allow_unsafe_workflow: bool = False
     # Named workflow preset -- a clearer facade over the per-path flag combos the
@@ -1465,11 +1495,11 @@ class GenerationConfig:
     # missing component + magnitude; the diff anchor then absorbs only the small
     # residual. Set True ONLY for backend tests to bypass (warns instead).
     allow_incomplete_pressure: bool = False
-    # Anchor the total j_phi to equilibrium.profiles_1d.j_tor (the GS-consistent
+    # Anchor the total jphi_total to equilibrium.profiles_1d.j_tor (the GS-consistent
     # current GPEC reads, carrying the pedestal current) instead of
     # core_profiles.j_tor (the transport parallel-current sum, which differs from
     # ~q=2 outward). Adds a FIXED jphi_diff = equilibrium.j_tor - core_profiles.j_tor
-    # to the baseline AND every draw (mirroring jBS_diff/p_diff); the SWB bootstrap
+    # to the baseline AND every draw (mirroring jphi_bs_diff/p_diff); the SWB bootstrap
     # + perturbed j_ind ride underneath so the edge current still carries Sauter UQ.
     # IMAS path only (geqdsk reads its total from the g-file). Default True.
     anchor_jtor_to_equilibrium: bool = True
@@ -1487,21 +1517,21 @@ class GenerationConfig:
     # which we do NOT want -- so default False. When False, p_diff is None and the
     # solve pressure is e(ne*Te+ni*Ti) + impurity + p_fast with no equilibrium anchor.
     anchor_pressure_to_equilibrium: bool = False
-    # Corrective j_phi iteration on the IMAS baseline forward solve. The single
-    # jphi-linterp solve imposes the requested j_phi(psi_N) with pre-solve
-    # geometry, so the ACHIEVED FSA j_phi drifts from the request once psi
+    # Corrective jphi_total iteration on the IMAS baseline forward solve. The single
+    # jphi-linterp solve imposes the requested jphi_total(psi_N) with pre-solve
+    # geometry, so the ACHIEVED FSA jphi_total drifts from the request once psi
     # converges (measured +3.2-3.4% over psi_N 0.2-0.9 on the reference DIII-D
     # case, appearing as l_i +3.4% and q(psi_N) -5% vs the equilibrium IDS).
     # True re-uses the recon path's _corrective_jphi_iteration to drive the
     # achieved profile onto the anchor target. Opt-in while being validated.
     imas_corrective_jphi: bool = False
     # Floor the SWB bootstrap at 0 (drop unphysical negative excursions) before
-    # it enters j_phi, in both the baseline and every draw. Default False: only
-    # needed for the isolate_edge_jBS=False full-profile mode (which carries an
-    # inner negative lobe). With isolate_edge_jBS=True the spike is
+    # it enters jphi_total, in both the baseline and every draw. Default False: only
+    # needed for the isolate_edge_jbs=False full-profile mode (which carries an
+    # inner negative lobe). With isolate_edge_jbs=True the spike is
     # already ~clean, so flooring is redundant -- and it REGRESSED a stiff
     # high-l_i case (clipping its isolate-edge spike drove yield to 0).
-    floor_j_BS: bool = False
+    floor_jbs: bool = False
     # Keyword options forwarded to every solve_with_bootstrap call
     # (validate_bootstrap_kwargs: an explicit allow-list,
     # BOOTSTRAP_KWARGS_ALLOWED, so a typo is refused with or without
@@ -1515,7 +1545,7 @@ class GenerationConfig:
     bootstrap_kwargs: dict = field(default_factory=dict)
     # Opt-in for the bootstrap keys that change a CONVERGENCE criterion of the
     # toolkit's internal bootstrap solve (BOOTSTRAP_CONVERGENCE_KWARGS:
-    # djBS_tol, the j_BS freeze threshold; saw_relax).  False: such a key in
+    # djbs_tol, the jphi_bs freeze threshold; saw_relax).  False: such a key in
     # bootstrap_kwargs is refused.  True: accepted with a warning, and the
     # config_json of every archive carries both this flag and the values.
     # Legacy paths only (the unified engine never runs solve_with_bootstrap
@@ -1524,7 +1554,7 @@ class GenerationConfig:
     bootstrap_convergence_override: bool = False
     # The inverse aspect ratio of the Redl collisionalities, and the major
     # radius R that goes with it in nu_e* / nu_i* (Sauter 1999 Eqs. 18b/18c),
-    # at EVERY bouquet Redl evaluation (physics.evaluate_jBS: the unified
+    # at EVERY bouquet Redl evaluation (physics.evaluate_jbs: the unified
     # engine's reconstruction and draws, the legacy self-consistent loop, the
     # IMAS baseline loop, the delta-cache references); engine-independent.
     # "r_over_R_geo" (default, owner decision E7 2026-10-09): eps = (R_max -
@@ -1566,7 +1596,7 @@ class GenerationConfig:
     draw_solve_retry_urf: tuple = ()
     draw_solve_loose_tol: Optional[float] = None
     # SWB inputs on the IMAS path (baseline split, draws, sigma=0 check):
-    # "source" seeds SWB with the source's j_inductive and holds the rest of
+    # "source" seeds SWB with the source's jphi_ind and holds the rest of
     # its current (NBI + RF + other) fixed via jphi_fixed; "generic" uses the
     # (1 - s^1.5)^1.5 seed and no fixed current.  None (the default) is
     # resolved at prepare_baseline(): "source" when the installed
@@ -1595,14 +1625,21 @@ class GenerationConfig:
     # solve A's coils (#VSC toward 0 at 1.0); 1e4 can send SWB to a wrong
     # equilibrium.
     swb_coil_reg_weight: float = 1.0e3
-    # swb only.  Taper j_phi to 0 from this psi_N to the LCFS in every SWB
-    # solve (OFT taper_edge_jBS): finite edge current next to a
+    # swb only.  Taper jphi_total to 0 from this psi_N to the LCFS in every SWB
+    # solve (OFT taper_edge_jphi): finite edge current next to a
     # near-degenerate second null can leave the Picard on a 2-cycle.  OPT-IN
     # (owner decision D4, 2026-10-09; was 0.999): None is off, and is sent to
-    # the toolkit as taper_edge_jBS=False where it has the option, because a
+    # the toolkit as taper_edge_jphi=False where it has the option, because a
     # toolkit whose own default is taper-on keeps it on otherwise
     # (swb_bootstrap_kwargs).
     swb_edge_taper_psi0: Optional[float] = None
+    # swb only, with swb_edge_taper_psi0 set.  The read-in SWB currents
+    # (inductive seed, jphi_fixed, sawteeth input) are zeroed on the LCFS node,
+    # where the taper's weight is 0 (the solve discards them there: unchanged),
+    # and any negative node left in the inductive seed is clipped to 0 (warned,
+    # stamped); each draw's seed redraw is clipped to 0 too (swb_jind_clipped)
+    # instead of redrawn.
+    swb_taper_source: bool = False
     # swb only.  Largest |Ip/Ip_target - 1| an swb solve (solve A, solve B,
     # every draw) is accepted at; beyond it the solve raises.  Stamped on
     # _baseline (swb_ip_tol) with each solve's own error (swb_ip_rel_err);
@@ -1611,7 +1648,7 @@ class GenerationConfig:
     # own solver test measures <= 8e-6).
     swb_ip_tol: float = 5.0e-3
     # imas_baseline="swb" sawtooth q reset inside SWB (OFT saw_q_s; None = off):
-    # Baseline.j_sawteeth becomes SWB's jphi_saw input.  swb_saw_dq / _tol /
+    # Baseline.jphi_saw becomes SWB's jphi_saw input.  swb_saw_dq / _tol /
     # _ramp map onto OFT's saw_dq / saw_tol / saw_ramp, swb_saw_rule onto
     # saw_rule ("local": each dip below swb_saw_q; "fuse": axis to the mixing
     # radius).  saw_relax goes via bootstrap_kwargs.
@@ -1621,11 +1658,11 @@ class GenerationConfig:
     swb_saw_ramp: float = 0.01
     swb_saw_rule: str = "local"
     # --- self-consistent bootstrap loop (bouquet.jbs_loop) -------------------
-    # True (default): j_BS is re-evaluated (physics.evaluate_jBS: Redl on the
+    # True (default): jphi_bs is re-evaluated (physics.evaluate_jbs: Redl on the
     # caller's own psi_N grid and the CURRENT equilibrium's geometry) inside a
     # relaxed outer loop closure <-> GS solve <-> Redl, in every path that
-    # builds a j_phi containing a bootstrap (the IMAS baseline in every
-    # jBS_baseline_mode and closure channel incl. the structured/MSE closures,
+    # builds a jphi_total containing a bootstrap (the IMAS baseline in every
+    # jbs_baseline_mode and closure channel incl. the structured/MSE closures,
     # every draw incl. Fix C and the standard l_i loop, the sigma=0 check and
     # the geqdsk reconstruction), until the residuals below hold on TWO
     # CONSECUTIVE passes.  See docs/physics-notes.md, "Self-consistent
@@ -1633,20 +1670,20 @@ class GenerationConfig:
     # False: the LEGACY frozen bootstrap -- computed once
     # (solve_with_bootstrap on its own auxiliary equilibrium) and then only
     # rescaled; byte-identical to every run made before these fields existed.
-    # Required with single_profile_jphi=True or recalculate_j_BS=False (no
+    # Required with single_profile_jphi=True or recalculate_jbs=False (no
     # bootstrap to iterate; the combination is refused, never silently
     # downgraded).  A stored config that predates the field (an old archive's
     # config_json) loads with False -- the behaviour it was produced with; see
     # BouquetConfig.from_dict.
     jbs_self_consistent: bool = True
-    # Initial guess of the loop: "anchor" = evaluate_jBS on the anchor
+    # Initial guess of the loop: "anchor" = evaluate_jbs on the anchor
     # equilibrium (the source's own total current and full pressure); "swb" =
     # the legacy solve_with_bootstrap result (A/B only).  The fixed point does
     # not depend on it.  (Only a seed of the Redl loop: not solve_method="swb".)
     jbs_init: str = "anchor"
     # Convergence tolerances (all active ones must hold on two consecutive
     # passes):
-    #   jbs_rtol_j  -- current-weighted L2 residual of the j_BS profile
+    #   jbs_rtol_j  -- current-weighted L2 residual of the jphi_bs profile
     #   jbs_rtol_Ip -- residual of the bootstrap current integral, over Ip
     #   jbs_tol_li  -- absolute change of the solved l_i between passes
     #   jbs_tol_q0  -- absolute change of the solved q0 between passes (only
@@ -1679,7 +1716,7 @@ class GenerationConfig:
     jbs_max_passes: int = 12
     jbs_max_passes_draw: int = 12
     jbs_max_passes_post_homotopy: int = 6
-    # Under-relaxation omega of the bootstrap: j_BS <- (1-omega) j_BS + omega
+    # Under-relaxation omega of the bootstrap: jphi_bs <- (1-omega) jphi_bs + omega
     # Redl.  Held fixed, and halved (floor jbs_loop.JBS_RELAX_FLOOR = 0.25)
     # only on SUSTAINED growth of r_j: growth on jbs_relax_halve_on
     # consecutive passes (1 = halve on every growth).  A single growth event
@@ -1689,15 +1726,15 @@ class GenerationConfig:
     jbs_relax: float = 0.7
     jbs_relax_halve_on: int = 3
     # Under-relaxation beta of the SOLVED current: from the second pass on the
-    # equilibrium is solved with (1-beta) x the previous pass's solved j_phi +
-    # beta x the closure's new j_phi.  Each pass closes on the previous
+    # equilibrium is solved with (1-beta) x the previous pass's solved jphi_total +
+    # beta x the closure's new jphi_total.  Each pass closes on the previous
     # equilibrium's geometry, so closure and geometry form an oscillating mode
     # (l_i swings back by a fraction g ~ -0.5 per pass) that omega does not act
     # on; beta ~ 1/(1-g) damps it.  1 = no relaxation.  Path only: at the fixed
     # point the solved and the closure current agree, and the loop record
     # carries beta and the per-pass gap ||j_solved - j_closure|| / ||j_closure||
-    # (recorded, not gated).  Applied where a pass solves one assembled j_phi:
-    # the IMAS baseline loop (every jBS_baseline_mode / closure channel), the
+    # (recorded, not gated).  Applied where a pass solves one assembled jphi_total:
+    # the IMAS baseline loop (every jbs_baseline_mode / closure channel), the
     # sigma=0 check and the draws' anchor loops (Fix C, standard anchor,
     # post-homotopy).  NOT applied (the record says so) in the standard
     # draw's l_i-match coupling and the geqdsk reconstruction, whose passes
@@ -1728,7 +1765,7 @@ class GenerationConfig:
     jbs_loop_on_fail: str = "raise"
     # The on-axis safety-factor pin under the loop (closure_channel=
     # "sawtooth_bootstrap", or "structured" with the sawtooth gate admitting
-    # the axis row; the IMAS baseline in jBS_baseline_mode="ohmic").
+    # the axis row; the IMAS baseline in jbs_baseline_mode="ohmic").
     # False (default): record-only, bit for bit the behaviour before the
     # field existed -- every pass closes with the axis row held at the
     # anchor's requested axis current, no Newton step is taken, and the q0
@@ -1827,7 +1864,7 @@ class GenerationConfig:
     # no warning); a source without j_total / j_bootstrap is refused.
     # Evidence: on self-consistent sources residual and j_ohmic are
     # indistinguishable (|dl_i| <= 1.8e-3); on locally inconsistent ones the
-    # residual is closer to the source's own <j_phi>.  Explicit options:
+    # residual is closer to the source's own <jphi_total>.  Explicit options:
     # "j_ohmic" (the source's, warning when it misses the residual by more
     # than the adapter's 2 % tolerance) and "auto" (j_ohmic, or the residual
     # with a warning when j_ohmic is absent or misses by more than 2 %).
@@ -1932,7 +1969,7 @@ class GenerationConfig:
     # the P' and FF' terms and un-zeroes the pressure-driven current at the
     # boundary (a PHYSICS change: edge current and q95 move).  Measured on
     # the synthetic g-file example (unified engine): pressure-driven current
-    # at the boundary 0.006 -> 0.018 MA/m^2, <j_phi> at the last node 0.076
+    # at the boundary 0.006 -> 0.018 MA/m^2, <jphi_total> at the last node 0.076
     # -> 0.115 MA/m^2 with the FF' term changing sign there, q95 +0.002;
     # l_i, the core and the iteration counts unchanged.
     edge_pprime_pin: bool = True
@@ -1962,6 +1999,12 @@ class GenerationConfig:
     homotopy_passes: list = field(
         default_factory=lambda: [(0.05, 0.10), (0.02, 0.05), (0.01, 0.01)]
     )
+    # Legacy draws' iso-update: the isoflux constraint on the perturbed LCFS has the strength
+    # of this many evenly spaced points at weight 200, spread per unit length of the traced
+    # LCFS (TokaMaker_interface.ISO_UPDATE_REF_POINTS, the field-line tracer's ~9000 points),
+    # whatever trace_surf's sampling.  None: weight 200 per traced point (before the cut-cell
+    # trace, whose 1000 points weakened the constraint ~9x).
+    iso_update_ref_points: Optional[int] = 9000
     diagnostic_plots: bool = False
 
     # Live-equilibrium capture for exact IMAS/OMAS export. When True (default),
@@ -1988,6 +2031,32 @@ class GenerationConfig:
     write_ifile: bool = False
     ifile_npsi: int = 129
     ifile_ntheta: int = 257
+    # OFT save_ifile's extended records (readers of the standard format stop before them), stamped
+    # ifile_profile_derivs / ifile_psi_bounds: FF' and p' after Z (GPEC profile_source "integrate",
+    # Julia GPEC "derivatives"), and the unpadded [psi_axis, psi_LCFS] last (GPEC and Julia GPEC then
+    # normalize psi_N to the true LCFS).  A save_ifile without them fails the baseline i-file, which
+    # refuses the run.
+    ifile_profile_derivs: bool = False
+    ifile_psi_bounds: bool = False
+    # OFT save_ifile's axis zone: psi_N of the innermost surface (0: none, today's file), the spacing
+    # growing outward until it joins the packed grid; the zone's surfaces count in ifile_npsi.
+    # Stamped ifile_axis_pack.  Needs an OFT with save_ifile(axis_pack=).
+    ifile_axis_pack: float = 0.0
+    # Also archive the TokaMaker equilibrium each i-file is written from (save_TokaMaker; ~0.9 MB
+    # per group on the D3D mesh), so any i-file can be rebuilt later (DrawView.rebuild_ifile) and
+    # the archived i-files can be dropped once used (filtering.drop_file_blobs).  Only with
+    # write_ifile.
+    store_tokamaker_state: bool = False
+    # Archive each group's g-file.  False (needs write_ifile + store_tokamaker_state): none is
+    # stored, the run still writes and uses it, and DrawView.eqdsk_bytes rebuilds it from the state.
+    store_eqdsk: bool = True
+    # The archived g-files' R x Z grid (TokaMaker.save_eqdsk nr / nz; the 1-D profiles come on nr
+    # uniform psi_N points), for the baseline and every draw.  Integers >= 2.
+    eqdsk_nr: int = 257
+    eqdsk_nz: int = 257
+    # Store each group's g-file / p-file / i-file bytes as a gzip-compressed uint8 array
+    # (the g-file ~2.7x smaller) instead of opaque np.void; bytes(ds[()]) reads either.
+    compress_file_bytes: bool = False
 
     #: Set from the ``swb_saw_*`` fields, never from ``bootstrap_kwargs``.
     _SAW_RESERVED = frozenset(
@@ -2078,6 +2147,9 @@ class GenerationConfig:
         _t = self.swb_ip_tol
         if isinstance(_t, bool) or not (float(_t) > 0.0 and float(_t) < 1.0):
             raise ValueError(f"swb_ip_tol={_t!r} must be in (0, 1)")
+        _n = self.iso_update_ref_points
+        if _n is not None and (isinstance(_n, bool) or int(_n) != _n or _n < 1):
+            raise ValueError(f"iso_update_ref_points={_n!r} must be a positive integer or None")
         from .physics import check_eps_definition
         check_eps_definition(self.eps_definition)
         solve_method_of(self)      # refuses a contradiction; writes nothing
@@ -2089,7 +2161,10 @@ class GenerationConfig:
         validate_edge_pressure_settings(self.edge_pprime_pin,
                                         self.separatrix_pressure)
         import numbers
-        for _n in ("ifile_npsi", "ifile_ntheta"):
+        if not self.store_eqdsk and not (self.write_ifile and self.store_tokamaker_state):
+            raise ValueError("store_eqdsk=False needs write_ifile and store_tokamaker_state: the "
+                             "archive would keep no equilibrium to rebuild the g-file from")
+        for _n in ("ifile_npsi", "ifile_ntheta", "eqdsk_nr", "eqdsk_nz"):
             _v = getattr(self, _n)
             # the OFT sampler divides by n - 1
             if isinstance(_v, bool) or not isinstance(
@@ -2211,8 +2286,8 @@ def validate_structured_mse_settings(gc) -> None:
 #: the toolkit's ``solve_with_bootstrap`` passes them to ``solve_bootstrap``
 #: itself, so a user value would be a duplicate keyword in every call.
 _BOOTSTRAP_RESERVED = frozenset(
-    "mygs ne Te ni Ti Zeff Ip_target inductive_jphi scale_jBS "
-    "isolate_edge_jBS verbose diagnostic_plots psi_pad psi_N x coord "
+    "mygs ne Te ni Ti Zeff Ip_target inductive_jphi scale_jbs "
+    "isolate_edge_jbs verbose diagnostic_plots psi_pad psi_N x coord "
     "ffp_prof ne_prof te_prof ni_prof ti_prof "
     "jphi_fixed_prof p_fixed_prof jphi_saw_prof pres_prof F0".split()
 )
@@ -2226,16 +2301,16 @@ BOOTSTRAP_KWARGS_ALLOWED = {
     # solve_with_bootstrap, OpenFUSIONToolkit main and later
     "Zis": "solve_with_bootstrap",
     "iterations": "solve_with_bootstrap (Python solve passes)",
-    "parameterize_jBS": "solve_with_bootstrap",
+    "parameterize_jbs": "solve_with_bootstrap",
     "use_OMFIT_sauter": "solve_with_bootstrap",
     # builds with the internal Fortran bootstrap solve (OpenFUSIONToolkit
     # PR #271 / the bouquet_dev fork) only
     "use_sauter_eps": "solve_with_bootstrap (internal-solve builds)",
     "use_python_solve": "solve_with_bootstrap (internal-solve builds)",
     "diagnose_bs": "set_boot_ops (internal-solve builds)",
-    "djBS_tol": "set_boot_ops (internal-solve builds; CONVERGENCE)",
+    "djbs_tol": "set_boot_ops (internal-solve builds; CONVERGENCE)",
     "saw_relax": "set_boot_ops (internal-solve builds; CONVERGENCE)",
-    "taper_edge_jBS": "set_boot_ops (internal-solve builds); the unified "
+    "taper_edge_jphi": "set_boot_ops (internal-solve builds); the unified "
                       "engine implements it itself",
     "taper_edge_psi0": "set_boot_ops (internal-solve builds); the unified "
                        "engine implements it itself",
@@ -2247,7 +2322,7 @@ BOOTSTRAP_KWARGS_ALLOWED = {
 #: internal bootstrap solve: refused unless
 #: ``GenerationConfig.bootstrap_convergence_override`` (``saw_tol`` is set from
 #: ``swb_saw_tol`` and reserved).
-BOOTSTRAP_CONVERGENCE_KWARGS = frozenset({"djBS_tol", "saw_relax"})
+BOOTSTRAP_CONVERGENCE_KWARGS = frozenset({"djbs_tol", "saw_relax"})
 
 #: True while :meth:`BouquetConfig.from_dict` rebuilds a STORED config: a
 #: bootstrap option the installed toolkit lacks is then warned about, not
@@ -2255,42 +2330,14 @@ BOOTSTRAP_CONVERGENCE_KWARGS = frozenset({"djBS_tol", "saw_relax"})
 _LOADING_STORED_CONFIG = contextvars.ContextVar(
     "bouquet_loading_stored_config", default=False)
 
-_BOOTSTRAP_NAMES_CACHE: dict = {}
-
-
 def _bootstrap_kwarg_names():
     """Every keyword the INSTALLED toolkit's bootstrap entry points accept
-    (introspected).  ``None`` when OpenFUSIONToolkit is not importable, which
-    skips the capability check (the allow-list still applies).  A successful
-    introspection is cached per process; a failed one is not, so a config
-    built before ``add_oft_to_path()`` does not switch the check off for the
-    whole process.
-    """
-    if "names" in _BOOTSTRAP_NAMES_CACHE:
-        return _BOOTSTRAP_NAMES_CACHE["names"]
-    try:
-        import inspect
-
-        from OpenFUSIONToolkit.TokaMaker._core import TokaMaker
-        from OpenFUSIONToolkit.TokaMaker.bootstrap import solve_with_bootstrap
-
-        # Only the entry points this toolkit has: on one without the
-        # internal solve, the accepted set is solve_with_bootstrap's own
-        # arguments, which is what it accepts there.
-        names = set()
-        for fn in (solve_with_bootstrap,
-                   getattr(TokaMaker, "solve_bootstrap", None),
-                   getattr(TokaMaker, "set_boot_ops", None)):
-            if fn is None:
-                continue
-            names |= {prm.name for prm in inspect.signature(fn).parameters.values()
-                      if prm.kind in (prm.POSITIONAL_OR_KEYWORD, prm.KEYWORD_ONLY)}
-        _BOOTSTRAP_NAMES_CACHE["names"] = frozenset(names) - {"self"}
-        return _BOOTSTRAP_NAMES_CACHE["names"]
-    except Exception:
-        # No OFT (unit tests, a docs build): cannot introspect, so do not
-        # guess; a wrong key then surfaces at the call.
-        return None
+    (:func:`bouquet.oft_bootstrap.toolkit_options`).  ``None`` when
+    OpenFUSIONToolkit is not importable, which skips the capability check (the
+    allow-list still applies).  bouquet's option names are matched through
+    :func:`bouquet.oft_bootstrap.toolkit_name`."""
+    from .oft_bootstrap import toolkit_options
+    return toolkit_options()
 
 
 #: The internal solve methods (GenerationConfig.solve_method).
@@ -2427,8 +2474,8 @@ def swb_config_problems(config):
                  "anchor_pressure_to_equilibrium"):
         if getattr(gc, name, False):
             p.append(f"{name}=True")
-    if not gc.recalculate_j_BS:
-        p.append("recalculate_j_BS=False (SWB re-solves j_BS by construction)")
+    if not gc.recalculate_jbs:
+        p.append("recalculate_jbs=False (SWB re-solves jphi_bs by construction)")
     if str(gc.closure_channel) != "bootstrap":
         p.append(f"closure_channel={gc.closure_channel!r} is never read: SWB's alpha "
                  "(ohmic channel) is the closure; leave it at 'bootstrap'")
@@ -2445,11 +2492,13 @@ def swb_config_problems(config):
     if str(getattr(gc, "separatrix_pressure", "offset")) != "offset":
         p.append(f"separatrix_pressure={gc.separatrix_pressure!r} (OFT's SWB "
                  "always solves with pax = p_axis - p_sep)")
-    if {"taper_edge_jBS", "taper_edge_psi0"} & set(gc.bootstrap_kwargs):
+    if {"taper_edge_jphi", "taper_edge_psi0"} & set(gc.bootstrap_kwargs):
         p.append("bootstrap_kwargs taper_edge_*: set swb_edge_taper_psi0 instead")
     t = gc.swb_edge_taper_psi0
     if t is not None and not 0.0 < float(t) < 1.0:
         p.append(f"swb_edge_taper_psi0={t!r} must be in (0, 1) or None")
+    if gc.swb_taper_source and t is None:
+        p.append("swb_taper_source needs the edge taper (swb_edge_taper_psi0)")
     for env in ("DIFF_BS", "PIN_JPHI"):
         if os.environ.get(env, "0") == "1":
             p.append(f"{env}=1")
@@ -2461,10 +2510,10 @@ def swb_config_problems(config):
     if (gc.swb_saw_q is not None and isinstance(config.source, ImasSource)
             and not bool(getattr(config.source, "hold_sawteeth", True))):
         # review PR70 (C.md item 4): the sawtooth reset reads the held
-        # sawteeth channel (j_sawteeth); with the hold off it is zero, so
+        # sawteeth channel (jphi_saw); with the hold off it is zero, so
         # jphi_saw would be silently 0
         p.append("swb_saw_q with ImasSource.hold_sawteeth=False: the reset "
-                 "needs the held sawteeth current (j_sawteeth), which the "
+                 "needs the held sawteeth current (jphi_saw), which the "
                  "opt-out leaves at zero -- jphi_saw would silently be 0")
     return p
 
@@ -2473,19 +2522,20 @@ def swb_bootstrap_kwargs(gc, known=None):
     """``bootstrap_kwargs`` for an ``imas_baseline="swb"`` solve: the user's,
     plus the edge taper from ``swb_edge_taper_psi0``.
 
-    Off (``None``, the default) is sent EXPLICITLY as ``taper_edge_jBS=False``
+    Off (``None``, the default) is sent EXPLICITLY as ``taper_edge_jphi=False``
     to a toolkit that has the option (``known``: the accepted keyword names,
     default :func:`_bootstrap_kwarg_names`): its own default may be taper-on,
     and a solver keeps the last ``set_boot_ops`` state (review PR69 B2).  A
     toolkit without the option has no taper, and gets no key."""
     kw = dict(gc.bootstrap_kwargs)
     if gc.swb_edge_taper_psi0 is not None:
-        kw.update(taper_edge_jBS=True, taper_edge_psi0=float(gc.swb_edge_taper_psi0))
+        kw.update(taper_edge_jphi=True, taper_edge_psi0=float(gc.swb_edge_taper_psi0))
     else:
         if known is None:
             known = _bootstrap_kwarg_names()
-        if known is not None and "taper_edge_jBS" in known:
-            kw["taper_edge_jBS"] = False
+        from .oft_bootstrap import toolkit_name
+        if known is not None and toolkit_name("taper_edge_jphi", known) in known:
+            kw["taper_edge_jphi"] = False
     return kw
 
 
@@ -2550,6 +2600,11 @@ def validate_bootstrap_kwargs(bootstrap_kwargs, reserved=_BOOTSTRAP_RESERVED,
     if "swb_iterations" in keys:
         raise ValueError(
             "bootstrap_kwargs: 'swb_iterations' is now 'iterations'.")
+    old = sorted(keys & set(RENAMED_OPTIONS))
+    if old:
+        raise ValueError("bootstrap_kwargs: renamed " + ", ".join(
+            f"{k!r} to " + (f"generation.{RENAMED_OPTIONS[k]}" if RENAMED_OPTIONS[k] in reserved
+                            else repr(RENAMED_OPTIONS[k])) for k in old) + ".")
 
     allowed = set(BOOTSTRAP_KWARGS_ALLOWED) - set(reserved)
     unknown = sorted(keys - allowed)
@@ -2564,7 +2619,7 @@ def validate_bootstrap_kwargs(bootstrap_kwargs, reserved=_BOOTSTRAP_RESERVED,
         if not convergence_override:
             raise ValueError(
                 f"bootstrap_kwargs {conv} change a convergence criterion of "
-                "the toolkit's bootstrap solve (djBS_tol: the j_BS freeze "
+                "the toolkit's bootstrap solve (djbs_tol: the jphi_bs freeze "
                 "threshold; saw_relax: the sawtooth reset relaxation).  "
                 "Refused unless generation.bootstrap_convergence_override="
                 "True, which is recorded in the archive's config_json with "
@@ -2588,7 +2643,8 @@ def validate_bootstrap_kwargs(bootstrap_kwargs, reserved=_BOOTSTRAP_RESERVED,
         known = _bootstrap_kwarg_names()
     if known is None:
         return
-    missing = sorted(to_check - set(known))
+    from .oft_bootstrap import toolkit_name
+    missing = sorted(k for k in to_check if toolkit_name(k, known) not in known)
     if missing:
         msg = (f"bootstrap_kwargs {missing}: the installed OpenFUSIONToolkit's "
                "solve_with_bootstrap / set_boot_ops do not take "
@@ -3084,7 +3140,8 @@ class BouquetConfig:
                 generation=_build(GenerationConfig, gend),
                 filtering=_build(FilterConfig, d.get("filtering", {})),
                 fixed_components=_build(FixedComponentsConfig,
-                                        d.get("fixed_components", {})),
+                                        _renamed_fields(d.get("fixed_components", {}),
+                                                        "fixed_components")),
                 verbose=bool(d.get("verbose", False)),
             )
         finally:
@@ -3194,9 +3251,9 @@ FIELD_PRE_INTRODUCTION = {
     # older changed defaults (2026-06): not knowable from the config alone
     "l_i_tolerance": (None, "default 0.01 -> 0.05 on 2026-06-04, then the "
                             "band off (None) on 2026-10-14"),
-    "jBS_scale_range": (None, "default None -> (0.99, 1.01) on 2026-06-04"),
+    "jbs_scale_range": (None, "default None -> (0.99, 1.01) on 2026-06-04"),
     "homotopy_passes": (None, "default None -> three passes on 2026-06-04"),
-    "floor_j_BS": (None, "default True -> False on 2026-06-24"),
+    "floor_jbs": (None, "default True -> False on 2026-06-24"),
     "jbs_max_passes_draw": (None, "default 6 -> 12 on 2026-09-27"),
 }
 
@@ -3221,7 +3278,7 @@ _LOOP_PRE_INTRODUCTION = ("jbs_max_passes_post_homotopy", "jbs_relax_current",
 #: Kept for reference; the stored-load rule (c) of
 #: :func:`_stored_config_compat` now covers EVERY entry of
 #: ``ENGINE_UNREAD_LEGACY_FIELDS`` (2026-10-06), of which these are two.
-STORED_UNIFIED_UNREAD_FIELDS = ("isolate_edge_jBS", "perturb_jind_in_anchor")
+STORED_UNIFIED_UNREAD_FIELDS = ("isolate_edge_jbs", "perturb_jind_in_anchor")
 
 
 def _stored_unified_unread_fields():
@@ -3318,7 +3375,7 @@ def _stored_config_compat(gend: dict) -> None:
     the default, with a warning naming the field: the engine ignored the
     value, so the default reproduces what the stored config actually ran.
     Refused since 2026-10-04 (3779b51) for a NEW config; until 2026-10-06
-    only ``isolate_edge_jBS`` / ``perturb_jind_in_anchor`` had this
+    only ``isolate_edge_jbs`` / ``perturb_jind_in_anchor`` had this
     stored-load rule (6e052d0), and a stored config carrying one of the
     other 20 could not be loaded."""
     import warnings
@@ -3409,7 +3466,7 @@ def _stored_config_compat(gend: dict) -> None:
         gend["draw_solve_maxits"] = None
     # (c) every legacy-path field the engine never reads: the engine
     # ignored a stored non-default value (the factories set
-    # isolate_edge_jBS / perturb_jind_in_anchor for the legacy path
+    # isolate_edge_jbs / perturb_jind_in_anchor for the legacy path
     # whatever the engine until 2026-10-05; the other 20 were accepted and
     # ignored until 3779b51), and refuses one on a NEW config since -- a
     # stored unified config carrying one is loaded at the default (the run
@@ -3526,6 +3583,52 @@ def _field_default(name):
             else f.default_factory())
 
 
+#: bouquet's option names before the OpenFUSIONToolkit PSFC_dev spelling (``*_jbs``; the edge
+#: taper acts on all of jphi_total, hence ``taper_edge_jphi``): a stored config (``generation``
+#: field or ``bootstrap_kwargs`` key) loads under the new name; a new one is refused, naming it.
+RENAMED_OPTIONS = {"isolate_edge_jBS": "isolate_edge_jbs", "taper_edge_jBS": "taper_edge_jphi",
+                   "taper_edge_jbs": "taper_edge_jphi", "djBS_tol": "djbs_tol",
+                   "parameterize_jBS": "parameterize_jbs", "recalculate_j_BS": "recalculate_jbs",
+                   "floor_j_BS": "floor_jbs", "jBS_scale_range": "jbs_scale_range",
+                   "jBS_baseline_mode": "jbs_baseline_mode"}
+
+#: The same for the other config sections: a stored config loads the old field names under the new ones.
+RENAMED_FIELDS = {"source": {"rescale_j_BS": "rescale_jbs"},
+                  "fixed_components": {"j_NBI": "jphi_nbi", "j_RF": "jphi_rf", "j_other": "jphi_other"}}
+
+
+def _renamed_fields(d: dict, section: str) -> dict:
+    """``d`` (one config section) with :data:`RENAMED_FIELDS` ``[section]`` moved to the new names."""
+    ren = {o: n for o, n in RENAMED_FIELDS[section].items() if o in d}
+    if not ren:
+        return d
+    d = dict(d)
+    for old, new in ren.items():
+        if new in d and d[new] is not None and d[new] != d[old]:
+            raise ValueError(f"config {section}: both {old!r} and {new!r}")
+        d[new] = d.pop(old)
+    return d
+
+
+def _renamed_options(gend: dict) -> dict:
+    """``gend`` with :data:`RENAMED_OPTIONS` moved to their new names (a field and
+    ``bootstrap_kwargs`` keys); a spelling change only, so silent."""
+    bk = dict(gend.get("bootstrap_kwargs") or {})
+    if not any(k in gend or k in bk for k in RENAMED_OPTIONS):
+        return gend
+    gend = dict(gend)
+    for old, new in RENAMED_OPTIONS.items():
+        for d in (gend, bk):
+            if old in d:
+                if new in d and d[new] != d[old]:
+                    raise ValueError(f"config generation: both {old!r}={d[old]!r} and "
+                                     f"{new!r}={d[new]!r}")
+                d[new] = d.pop(old)
+    if "bootstrap_kwargs" in gend:
+        gend["bootstrap_kwargs"] = bk
+    return gend
+
+
 def _checked_generation_keys(gend: dict) -> dict:
     """Refuse an unknown ``generation`` key in a config dict.
 
@@ -3539,6 +3642,7 @@ def _checked_generation_keys(gend: dict) -> dict:
     import difflib
     import warnings
     names = {f.name for f in _dc.fields(GenerationConfig)}
+    gend = _renamed_options(gend)
     if "swb_iterations" in gend:
         # retired for bootstrap_kwargs; every stored config carries it (to_dict
         # writes all fields), so the default is dropped silently and any
@@ -3567,7 +3671,7 @@ def _checked_generation_keys(gend: dict) -> dict:
                 "reconstruction and IMAS frozen-baseline SWB, the DIFF_BS / "
                 "jBS-delta caches, jbs_init='swb' and the sigma=0 check -- "
                 "which ran the toolkit's default iterations=3 before.  The "
-                "replay's BASELINE j_BS can therefore differ from the stored "
+                "replay's BASELINE jphi_bs can therefore differ from the stored "
                 "run's (on toolkits with the internal Fortran bootstrap "
                 "solve, 'iterations' only acts with use_python_solve=True).",
                 UserWarning, stacklevel=3)
@@ -3606,7 +3710,7 @@ def _encode_source(src) -> dict:
 def _decode_source(d) -> "BaselineSource":
     """Rebuild a :func:`_encode_source` dict (already :func:`_decode`-d); without the discriminator the
     type is inferred from ``geqdsk_path``."""
-    d = dict(d)
+    d = _renamed_fields(dict(d), "source")
     stype = d.pop("source_type", None) or ("reconstruction" if "geqdsk_path" in d else "imas")
     return _build(ReconstructionSource if stype == "reconstruction" else ImasSource, d)
 

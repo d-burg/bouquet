@@ -426,7 +426,7 @@ def test_the_sampler_draws_the_legacy_kinetic_stream(recon, zeff_primary,
                k["ti"], ctx.request, unc["sigma_ne"], unc["sigma_te"],
                unc["sigma_ni"], unc["sigma_ti"], unc["sigma_jphi"], 0.3,
                0.3, 0.25, 1.2e6, LI0, eng.c.kinetics["zeff"], PSI.size,
-               input_jinductive=0.6 * ctx.request, p_thresh=0.05, rng=r1,
+               jphi_ind_input=0.6 * ctx.request, p_thresh=0.05, rng=r1,
                jbs_loop=jbs_settings(g, draw=True),
                aux_sigmas=unc["aux_sigmas"],
                aux_baselines=unc["aux_baselines"],
@@ -696,10 +696,10 @@ def _generate(tmp_path, monkeypatch, *, n=3, l_i_tolerance=0.05,
         k["ni"], k["ti"], unc["sigma_ne"], unc["sigma_te"], unc["sigma_ni"],
         unc["sigma_ti"], unc["sigma_jphi"], 0.3, 0.3, 0.25,
         float(eng.c.Ip), ctx.ref["l_i"], eng.c.kinetics["zeff"],
-        input_jinductive=0.5 * ctx.request,
-        baseline_j_BS=0.1 * ctx.request, l_i_tolerance=l_i_tolerance,
-        psi_pad=T.PAD, constrain_sawteeth=False, isolate_edge_jBS=False,
-        jBS_scale_range=(0.99, 1.01), coil_drift=0.01,
+        jphi_ind_input=0.5 * ctx.request,
+        baseline_jphi_bs=0.1 * ctx.request, l_i_tolerance=l_i_tolerance,
+        psi_pad=T.PAD, constrain_sawteeth=False, isolate_edge_jbs=False,
+        jbs_scale_range=(0.99, 1.01), coil_drift=0.01,
         homotopy_passes=[(0.05, 0.1), (0.01, 0.01)], seed=seed,
         capture_live_eq=False, store_achieved_jphi=True,
         jbs_loop=G.loop_settings, rejection_log=rej, draw_method=G,
@@ -1090,7 +1090,7 @@ def test_the_probe_draw_mode_runs_on_the_toy(tmp_path, toy_bouquet_solver):
 def _counting(b):
     """A backend copy that counts solves and bootstrap evaluations."""
     b2 = copy.deepcopy(b)
-    n = dict(solve=0, redl=0)
+    n = dict(solve=0, jdotB_bs=0)
     _solve, _redl = b2.solve, b2.redl
 
     def solve(*a, **k):
@@ -1098,7 +1098,7 @@ def _counting(b):
         return _solve(*a, **k)
 
     def redl(*a, **k):
-        n["redl"] += 1
+        n["jdotB_bs"] += 1
         return _redl(*a, **k)
     b2.solve, b2.redl = solve, redl
     return b2, n
@@ -1122,7 +1122,7 @@ def test_nonphysical_drawn_kinetics_have_their_own_code(recon, name, value,
     with pytest.raises(ED.DrawKineticsNonPhysical) as ei:
         _quiet(ED.run_draw, ctx, b2, inp)
     # found BEFORE any solve and before the first bootstrap evaluation
-    assert n == dict(solve=0, redl=0)
+    assert n == dict(solve=0, jdotB_bs=0)
     assert not isinstance(ei.value, DrawAnchorSolveFailed)
     info = ei.value.info
     assert info["quantity"] == name and info["rule"] == rule
@@ -1150,13 +1150,13 @@ def test_a_non_finite_drawn_profile_is_the_same_code(recon):
     b2, n = _counting(b)
     with pytest.raises(ED.DrawKineticsNonPhysical) as ei:
         _quiet(ED.run_draw, ctx, b2, inp)
-    assert n == dict(solve=0, redl=0)
+    assert n == dict(solve=0, jdotB_bs=0)
     assert ei.value.info["quantity"] == "te"
     assert ei.value.info["rule"] == "finite"
 
 
 def test_the_first_quantity_is_the_bootstrap_evaluations_order(recon):
-    """ne, ni, te, ti, zeff -- the order evaluate_jBS checks them, so the
+    """ne, ni, te, ti, zeff -- the order evaluate_jbs checks them, so the
     quantity named is the one that evaluation named."""
     eng, res, _rec, b = recon
     ctx = _ctx(eng, res)
@@ -1172,9 +1172,9 @@ def test_the_first_quantity_is_the_bootstrap_evaluations_order(recon):
 
 
 def test_the_check_is_the_bootstrap_evaluations_own_domain():
-    """Same verdict as evaluate_jBS's input checks on the same arrays: the
+    """Same verdict as evaluate_jbs's input checks on the same arrays: the
     draws rejected are the ones that evaluation refused -- no more."""
-    from bouquet.physics import JBSEvaluationError, evaluate_jBS
+    from bouquet.physics import JBSEvaluationError, evaluate_jbs
     n = 17
     psi = np.linspace(0.0, 1.0, n)
     good = dict(ne=np.full(n, 3e19), te=np.full(n, 1e3),
@@ -1189,7 +1189,7 @@ def test_the_check_is_the_bootstrap_evaluations_own_domain():
         k[name][4] = v
         try:
             # the input checks run before the equilibrium is touched
-            evaluate_jBS(None, psi, k["ne"], k["te"], k["ni"], k["ti"],
+            evaluate_jbs(None, psi, k["ne"], k["te"], k["ni"], k["ti"],
                          k["zeff"], psi_pad=1e-3)
             refused = None
         except JBSEvaluationError as e:
@@ -1215,16 +1215,16 @@ def test_physical_draws_are_untouched(recon):
 
 
 def _spy_store(monkeypatch):
-    """Capture what store_equilibrium archives per draw (j_phi, j_BS,
-    j_inductive: positional arguments 4-6)."""
+    """Capture what store_equilibrium archives per draw (jphi_total, jphi_bs,
+    jphi_ind: positional arguments 4-6)."""
     import bouquet.TokaMaker_interface as TI
     stored = []
     real = TI.store_equilibrium
 
     def spy(header, count, full_path, psi_N, jphi, jbs, jind, *a, **k):
-        stored.append(dict(count=count, j_phi=np.array(jphi, dtype=float),
-                           j_BS=np.array(jbs, dtype=float),
-                           j_inductive=np.array(jind, dtype=float)))
+        stored.append(dict(count=count, jphi_total=np.array(jphi, dtype=float),
+                           jphi_bs=np.array(jbs, dtype=float),
+                           jphi_ind=np.array(jind, dtype=float)))
         return real(header, count, full_path, psi_N, jphi, jbs, jind,
                     *a, **k)
     monkeypatch.setattr(TI, "store_equilibrium", spy)
@@ -1233,9 +1233,9 @@ def _spy_store(monkeypatch):
 
 def test_the_archived_split_is_on_the_archived_state_and_never_clipped(
         tmp_path, monkeypatch):
-    """An engine draw archives j_BS and the fixed parts evaluated on its
-    ARCHIVED equilibrium and j_inductive as the exact residual against the
-    archived j_phi -- no clip, no sliver moved into j_BS; the record says
+    """An engine draw archives jphi_bs and the fixed parts evaluated on its
+    ARCHIVED equilibrium and jphi_ind as the exact residual against the
+    archived jphi_total -- no clip, no sliver moved into jphi_bs; the record says
     so (archived.split), including the negative-inductive count."""
     stored = _spy_store(monkeypatch)
     diags, rej, h, G = _generate(tmp_path, monkeypatch, n=2)
@@ -1246,44 +1246,44 @@ def test_the_archived_split_is_on_the_archived_state_and_never_clipped(
     from bouquet.utils import _group_path, _resolve_h5
     for d, st in zip(diags, stored):
         sp = d["engine"]["archived"]["split"]
-        jn, jr = np.asarray(sp["j_NBI"]), np.asarray(sp["j_RF"])
-        # p'G is its own bucket (owner decision D2), archived as j_pressure
-        jp = np.asarray(d["j_pressure"], dtype=float)
+        jn, jr = np.asarray(sp["jphi_nbi"]), np.asarray(sp["jphi_rf"])
+        # p'G is its own bucket (owner decision D2), archived as jphi_pd
+        jp = np.asarray(d["jphi_pd"], dtype=float)
         np.testing.assert_array_equal(
-            st["j_inductive"], st["j_phi"] - st["j_BS"] - jn - jr - jp)
+            st["jphi_ind"], st["jphi_total"] - st["jphi_bs"] - jn - jr - jp)
         with h5py.File(_resolve_h5(h), "r") as hf:
             g = hf[_group_path(None, st["count"])]
-            np.testing.assert_array_equal(g["j_pressure"][()], jp)
+            np.testing.assert_array_equal(g["jphi_pd"][()], jp)
             assert g.attrs[CURRENT_SPLIT_CONVENTION_ATTR] == \
                 SPLIT_PRESSURE_SEPARATE
             # the held-fixed channels are archived (review PR70 B10), so
             # the archived split closes from the group alone
-            np.testing.assert_array_equal(g["j_NBI"][()], jn)
-            np.testing.assert_array_equal(g["j_RF"][()], jr)
+            np.testing.assert_array_equal(g["jphi_nbi"][()], jn)
+            np.testing.assert_array_equal(g["jphi_rf"][()], jr)
             np.testing.assert_allclose(
-                g["j_inductive"][()] + g["j_BS"][()] + g["j_NBI"][()]
-                + g["j_RF"][()] + g["j_pressure"][()], g["j_phi"][()],
-                rtol=0, atol=1e-12 * np.max(np.abs(g["j_phi"][()])))
+                g["jphi_ind"][()] + g["jphi_bs"][()] + g["jphi_nbi"][()]
+                + g["jphi_rf"][()] + g["jphi_pd"][()], g["jphi_total"][()],
+                rtol=0, atol=1e-12 * np.max(np.abs(g["jphi_total"][()])))
         assert sp["n_negative_inductive"] == int(np.sum(
-            st["j_inductive"] < 0.0))
-        assert sp["min_inductive"] == float(np.min(st["j_inductive"]))
+            st["jphi_ind"] < 0.0))
+        assert sp["min_inductive"] == float(np.min(st["jphi_ind"]))
         assert "never clipped" in sp["convention"]
 
 
 def test_the_archive_carries_the_parallel_parts_of_the_split(
         tmp_path, monkeypatch):
-    """Every engine draw group carries ``jB_parallel/`` (schema): the
-    <j.B> parts of its archived split, with j_phi = kappa (jB_inductive +
-    jB_BS + jB_NBI + jB_RF) + j_pressure to round-off, jB_BS = j_BS /
-    kappa (p'G is the archived j_pressure, owner decision D2) and
-    jB_inductive = j_inductive / kappa -- the
+    """Every engine draw group carries ``jdotB/`` (schema): the
+    <j.B> parts of its archived split, with jphi_total = kappa (jdotB_ind +
+    jdotB_bs + jdotB_nbi + jdotB_rf) + jphi_pd to round-off, jdotB_bs = jphi_bs /
+    kappa (p'G is the archived jphi_pd, owner decision D2) and
+    jdotB_ind = jphi_ind / kappa -- the
     field-aligned parts only (the IDS exporter writes these, so no
     exported parallel current carries the pressure-driven term).  The
     archived state's <B^2> is moved by 3 % so kappa(archived) differs from
     the reconstruction's."""
     import h5py
     from bouquet.engine import conversion_factor, pressure_term
-    from bouquet.schema import read_jB_parallel
+    from bouquet.schema import read_jdotB
     from bouquet.utils import _group_path, _resolve_h5
     stored = _spy_store(monkeypatch)
     fins = _final_measures(monkeypatch, geom_scale={"B2": 1.03})
@@ -1291,29 +1291,29 @@ def test_the_archive_carries_the_parallel_parts_of_the_split(
     assert len(diags) == 1 and rej == [] and len(stored) == 1
     fin, st = fins[-1], stored[0]
     with h5py.File(_resolve_h5(h), "r") as hf:
-        par = read_jB_parallel(hf[_group_path(None, st["count"])])
+        par = read_jdotB(hf[_group_path(None, st["count"])])
     assert par is not None
     kap = conversion_factor(fin["geom"])
     P = pressure_term(fin["geom"])
     assert np.max(np.abs(P)) > 0.0
     np.testing.assert_allclose(par["kappa"], kap, rtol=1e-15, atol=0.0)
-    np.testing.assert_allclose(par["j_pressure"], P, rtol=1e-15, atol=0.0)
-    # j_BS is the field-aligned part alone; p'G is the archived j_pressure
+    np.testing.assert_allclose(par["jphi_pd"], P, rtol=1e-15, atol=0.0)
+    # jphi_bs is the field-aligned part alone; p'G is the archived jphi_pd
     # (owner decision D2)
-    np.testing.assert_allclose(par["jB_BS"] * kap, st["j_BS"],
+    np.testing.assert_allclose(par["jdotB_bs"] * kap, st["jphi_bs"],
                                rtol=1e-12, atol=0.0)
     with h5py.File(_resolve_h5(h), "r") as hf:
         np.testing.assert_allclose(
-            hf[_group_path(None, st["count"])]["j_pressure"][()], P,
+            hf[_group_path(None, st["count"])]["jphi_pd"][()], P,
             rtol=1e-15, atol=0.0)
     np.testing.assert_allclose(
-        par["jB_inductive"], st["j_inductive"] / kap, rtol=1e-12, atol=0.0)
-    comp = kap * (par["jB_inductive"] + par["jB_BS"] + par["jB_NBI"]
-                  + par["jB_RF"]) + P
-    np.testing.assert_allclose(comp, st["j_phi"], rtol=1e-12,
-                               atol=1e-12 * np.max(np.abs(st["j_phi"])))
+        par["jdotB_ind"], st["jphi_ind"] / kap, rtol=1e-12, atol=0.0)
+    comp = kap * (par["jdotB_ind"] + par["jdotB_bs"] + par["jdotB_nbi"]
+                  + par["jdotB_rf"]) + P
+    np.testing.assert_allclose(comp, st["jphi_total"], rtol=1e-12,
+                               atol=1e-12 * np.max(np.abs(st["jphi_total"])))
     fx = G.ctx.c.jB_fix_parts
-    np.testing.assert_array_equal(par["jB_NBI"], np.asarray(fx["nbi"]))
+    np.testing.assert_array_equal(par["jdotB_nbi"], np.asarray(fx["nbi"]))
 
 
 def _final_measures(monkeypatch, geom_scale=None):
@@ -1347,8 +1347,8 @@ def test_the_archived_split_uses_the_archived_states_kappa_and_redl(
     converted with that same factor.  Pins the claim of 41e9682 that the
     2026-10-06 review found untested (mutants D2: the reconstruction's
     kappa; D4: the bootstrap off by 1 %): the archived state's <B^2> is moved
-    by 3 % so the two conversion factors differ, and the archived j_BS,
-    j_NBI and j_RF are compared with the definition at 1e-12."""
+    by 3 % so the two conversion factors differ, and the archived jphi_bs,
+    jphi_nbi and jphi_rf are compared with the definition at 1e-12."""
     from bouquet.engine import conversion_factor
     stored = _spy_store(monkeypatch)
     fins = _final_measures(monkeypatch, geom_scale={"B2": 1.03})
@@ -1362,22 +1362,22 @@ def test_the_archived_split_uses_the_archived_states_kappa_and_redl(
     assert np.min(np.abs(kap / kap_recon - 1.0)) > 0.02
     dpl = cur["draw"].get("passes_post_homotopy") or cur["draw"]["passes"]
     amp = (1.0 + float(dpl.last["amp"].get("d_bs", 0.0))) * G.ctx.s_bs         * float(cur["draw"]["inputs"].scale)
-    # (the pressure-driven p'G is its own bucket, j_pressure: D2)
-    want_bs = amp * kap * np.asarray(fin["redl"], dtype=float)
-    np.testing.assert_allclose(st["j_BS"], want_bs, rtol=1e-12, atol=0.0)
+    # (the pressure-driven p'G is its own bucket, jphi_pd: D2)
+    want_bs = amp * kap * np.asarray(fin["jdotB_bs"], dtype=float)
+    np.testing.assert_allclose(st["jphi_bs"], want_bs, rtol=1e-12, atol=0.0)
     fx = G.ctx.c.jB_fix_parts
     sp = diags[0]["engine"]["archived"]["split"]
-    np.testing.assert_allclose(sp["j_NBI"], kap * np.asarray(fx["nbi"]),
+    np.testing.assert_allclose(sp["jphi_nbi"], kap * np.asarray(fx["nbi"]),
                                rtol=1e-12, atol=0.0)
     np.testing.assert_allclose(
-        sp["j_RF"], kap * (np.asarray(fx["rf"])
+        sp["jphi_rf"], kap * (np.asarray(fx["rf"])
                            + np.asarray(fx.get("other", 0.0))),
         rtol=1e-12, atol=0.0)
     # and a 1 % error in either input is far outside that
-    assert np.max(np.abs(1.01 * want_bs - st["j_BS"])) \
+    assert np.max(np.abs(1.01 * want_bs - st["jphi_bs"])) \
         > 1e-3 * np.max(np.abs(want_bs))
-    assert np.max(np.abs(amp * kap_recon * np.asarray(fin["redl"])
-                         - st["j_BS"])) > 1e-2 * np.max(np.abs(want_bs))
+    assert np.max(np.abs(amp * kap_recon * np.asarray(fin["jdotB_bs"])
+                         - st["jphi_bs"])) > 1e-2 * np.max(np.abs(want_bs))
 
 
 def test_a_negative_residual_inductive_is_recorded_not_clipped(
@@ -1385,7 +1385,7 @@ def test_a_negative_residual_inductive_is_recorded_not_clipped(
     """Force the archived bootstrap above the archived current near the
     edge: the residual inductive goes negative there and is ARCHIVED
     negative (the legacy archival would floor it at zero and move the
-    sliver into j_BS); count, minimum and psi_N range are recorded and a
+    sliver into jphi_bs); count, minimum and psi_N range are recorded and a
     console note printed."""
     stored = _spy_store(monkeypatch)
     real = ED.GenerateEngineDraws.post_hoc
@@ -1393,29 +1393,29 @@ def test_a_negative_residual_inductive_is_recorded_not_clipped(
     def post_hoc(self, *a, **k):
         out = real(self, *a, **k)
         sp = self._cur["final_split"]
-        bump = np.zeros_like(sp["j_BS"])
-        bump[-3:] = 1.0e9                       # far above any j_phi
-        sp["j_BS"] = sp["j_BS"] + bump
+        bump = np.zeros_like(sp["jphi_bs"])
+        bump[-3:] = 1.0e9                       # far above any jphi_total
+        sp["jphi_bs"] = sp["jphi_bs"] + bump
         return out
     monkeypatch.setattr(ED.GenerateEngineDraws, "post_hoc", post_hoc)
     diags, rej, h, G = _generate(tmp_path, monkeypatch, n=1)
     st, sp = stored[0], diags[0]["engine"]["archived"]["split"]
-    assert np.all(st["j_inductive"][-3:] < 0.0)
+    assert np.all(st["jphi_ind"][-3:] < 0.0)
     assert sp["n_negative_inductive"] >= 3
-    assert sp["min_inductive"] == float(np.min(st["j_inductive"])) < 0.0
+    assert sp["min_inductive"] == float(np.min(st["jphi_ind"])) < 0.0
     lo, hi = sp["negative_inductive_psi_N"]
     assert lo <= float(PSI[-3]) and hi == pytest.approx(float(PSI[-1]))
     np.testing.assert_array_equal(
-        st["j_inductive"], st["j_phi"] - st["j_BS"]
-        - np.asarray(sp["j_NBI"]) - np.asarray(sp["j_RF"])
-        - np.asarray(diags[0]["j_pressure"]))
+        st["jphi_ind"], st["jphi_total"] - st["jphi_bs"]
+        - np.asarray(sp["jphi_nbi"]) - np.asarray(sp["jphi_rf"])
+        - np.asarray(diags[0]["jphi_pd"]))
 
 
 def test_the_post_homotopy_resplit_branch_uses_the_draws_own_fixed_parts(
         tmp_path, monkeypatch):
     """The post-homotopy check fails ONCE (a stand-in check), so the draw
     re-solves at the tight coil stage and generate_bouquet re-derives its
-    split in the engine branch: j_inductive = j_phi - j_BS - the draw's own
+    split in the engine branch: jphi_ind = jphi_total - jphi_bs - the draw's own
     solved fixed parts, unclipped (not the legacy decomposition at the
     reconstruction's fixed parts) -- and the archival then re-splits on
     the archived state."""
@@ -1468,9 +1468,9 @@ def test_the_post_homotopy_resplit_branch_uses_the_draws_own_fixed_parts(
     # archived on the archived state, the residual exact
     st, sp = stored[0], diags[0]["engine"]["archived"]["split"]
     np.testing.assert_array_equal(
-        st["j_inductive"], st["j_phi"] - st["j_BS"]
-        - np.asarray(sp["j_NBI"]) - np.asarray(sp["j_RF"])
-        - np.asarray(diags[0]["j_pressure"]))
+        st["jphi_ind"], st["jphi_total"] - st["jphi_bs"]
+        - np.asarray(sp["jphi_nbi"]) - np.asarray(sp["jphi_rf"])
+        - np.asarray(diags[0]["jphi_pd"]))
 
 
 def test_generate_records_the_quantity_and_psi_n(tmp_path, monkeypatch,
@@ -1505,7 +1505,7 @@ def test_generate_records_the_quantity_and_psi_n(tmp_path, monkeypatch,
     assert "ti" in r["message"] and "psi_N" in r["message"]
     # attempts 1 and 3 are the reference batch's draws 1 and 3, bit for bit
     for mine, theirs in ((diags[0], ref[0]), (diags[1], ref[2])):
-        np.testing.assert_array_equal(mine["j_BS"], theirs["j_BS"])
+        np.testing.assert_array_equal(mine["jphi_bs"], theirs["jphi_bs"])
         assert mine["engine"]["delivered"]["l_i_3"] \
             == theirs["engine"]["delivered"]["l_i_3"]
 
@@ -1530,7 +1530,7 @@ def test_the_sigma0_check_runs_the_generate_route(tmp_path,
 
     def spy(mygs, psi_N, n_equils, header, *a, **k):
         calls.append(dict(n=n_equils, header=header,
-                          scale=k.get("jBS_scale_range"),
+                          scale=k.get("jbs_scale_range"),
                           engine=k.get("draw_method")))
         return real(mygs, psi_N, n_equils, header, *a, **k)
 
@@ -1595,10 +1595,10 @@ def test_the_engine_sigma0_check_runs_without_openfusiontoolkit(
     route's sigma=0 check (generate() on the toy solver) must not import it:
     ``verify_sigma0_consistency`` takes OpenFUSIONToolkit only on the legacy
     route, the one that calls ``solve_with_bootstrap``.  Likewise
-    ``evaluate_jBS``'s input refusals (the domain
+    ``evaluate_jbs``'s input refusals (the domain
     ``engine_draws.check_draw_kinetics`` mirrors) come before its
     OpenFUSIONToolkit import."""
-    from bouquet.physics import JBSEvaluationError, evaluate_jBS
+    from bouquet.physics import JBSEvaluationError, evaluate_jbs
     b = _bq(tmp_path)
     b.setup_solver()
     _quiet(b.prepare_baseline)
@@ -1609,12 +1609,12 @@ def test_the_engine_sigma0_check_runs_without_openfusiontoolkit(
     ne = np.full(n, 3e19)
     ne[4] = 0.0
     with pytest.raises(JBSEvaluationError) as ei:
-        evaluate_jBS(None, psi, ne, np.full(n, 1e3), np.full(n, 2.5e19),
+        evaluate_jbs(None, psi, ne, np.full(n, 1e3), np.full(n, 2.5e19),
                      np.full(n, 1.2e3), np.full(n, 1.8), psi_pad=1e-3)
     assert ei.value.quantity == "ne"
     # past the input checks the evaluation does need OpenFUSIONToolkit
     with pytest.raises(ImportError):
-        evaluate_jBS(None, psi, np.full(n, 3e19), np.full(n, 1e3),
+        evaluate_jbs(None, psi, np.full(n, 3e19), np.full(n, 1e3),
                      np.full(n, 2.5e19), np.full(n, 1.2e3), np.full(n, 1.8),
                      psi_pad=1e-3)
 
@@ -1778,7 +1778,7 @@ def test_an_archived_stage_miss_fails_the_sigma0_check(tmp_path,
     """The archived-stage gate of the sigma=0 check (ac74b62; the 2026-10-06
     review's mutant Z3 deleted it with every test green): the LOOP stage
     passes and the draw is not rejected, but the state the draw ARCHIVES
-    misses the reconstruction -- its bootstrap 1 % off lambda_BS* (r_j
+    misses the reconstruction -- its bootstrap 1 % off lambda_bs* (r_j
     1e-3), or its l_i off by twice tol_li -- so the check FAILS."""
     b = _bq(tmp_path)
     b.setup_solver()
@@ -1806,14 +1806,14 @@ def test_an_archived_stage_miss_fails_the_sigma0_check(tmp_path,
     assert _quiet(b.verify_sigma0_consistency)["passed"] is True
 
 
-def test_a_legacy_split_is_archived_with_p_g_as_j_pressure(tmp_path,
+def test_a_legacy_split_is_archived_with_p_g_as_jphi_pd(tmp_path,
                                                           monkeypatch):
     """Owner decision D2 on the LEGACY archive writers (integration hook,
     B.md item 3): a draw whose method keeps p'G inside its in-memory
-    inductive (the legacy convention: no diagnostics["j_pressure"]) is
+    inductive (the legacy convention: no diagnostics["jphi_pd"]) is
     archived with p'G -- evaluated on the archived state
-    (TokaMaker_interface.archived_pressure_term) -- taken off j_inductive
-    and stored as j_pressure + current_split_convention; the _baseline the
+    (TokaMaker_interface.archived_pressure_term) -- taken off jphi_ind
+    and stored as jphi_pd + current_split_convention; the _baseline the
     same way.  The engine method stands in for the legacy one (its split
     handed back in the legacy form); the evaluation is a known profile."""
     import h5py
@@ -1831,10 +1831,10 @@ def test_a_legacy_split_is_archived_with_p_g_as_j_pressure(tmp_path,
     real = ED.GenerateEngineDraws.archived_split
     legacy_ind = []
 
-    def legacy_like(self, diagnostics, j_phi, default=None):
-        j_bs, j_ind = real(self, diagnostics, j_phi, default)
+    def legacy_like(self, diagnostics, jphi_total, default=None):
+        j_bs, j_ind = real(self, diagnostics, jphi_total, default)
         diagnostics.pop("fixed_currents")     # the legacy draws hand none
-        P = diagnostics.pop("j_pressure")
+        P = diagnostics.pop("jphi_pd")
         legacy_ind.append(j_ind + P)          # p'G in the inductive
         return j_bs, legacy_ind[-1]
     monkeypatch.setattr(ED.GenerateEngineDraws, "archived_split",
@@ -1843,26 +1843,26 @@ def test_a_legacy_split_is_archived_with_p_g_as_j_pressure(tmp_path,
     j_oth = 2.0e3 * np.exp(-0.5 * ((PSI - 0.2) / 0.1) ** 2)
     diags, rej, h, G = _generate(
         tmp_path, monkeypatch, n=1,
-        baseline_split=dict(j_pressure=None,
+        baseline_split=dict(jphi_pd=None,
                             inductive_includes_pressure=True),
-        j_other=j_oth, j_sawteeth=0.5 * j_oth)
+        jphi_other=j_oth, jphi_saw=0.5 * j_oth)
     assert len(diags) == 1 and rej == [] and len(stored) == 1
     assert calls == ["baseline archive", "draw 0 archive"]
     st = stored[0]
-    np.testing.assert_array_equal(st["j_inductive"], legacy_ind[0] - Pk)
+    np.testing.assert_array_equal(st["jphi_ind"], legacy_ind[0] - Pk)
     with h5py.File(_resolve_h5(h), "r") as hf:
         for path in (_group_path(None, st["count"]), "_baseline"):
             g = hf[path]
-            np.testing.assert_array_equal(g["j_pressure"][()], Pk)
+            np.testing.assert_array_equal(g["jphi_pd"][()], Pk)
             # the baseline's held-fixed channels on both (review PR70 B10)
-            np.testing.assert_array_equal(g["j_other"][()], j_oth)
-            np.testing.assert_array_equal(g["j_sawteeth"][()], 0.5 * j_oth)
+            np.testing.assert_array_equal(g["jphi_other"][()], j_oth)
+            np.testing.assert_array_equal(g["jphi_saw"][()], 0.5 * j_oth)
             assert g.attrs[CURRENT_SPLIT_CONVENTION_ATTR] == \
                 SPLIT_PRESSURE_SEPARATE
         # the baseline's inductive (this stand-in archives the target split:
-        # input_jinductive = 0.5 x the request, which carries p'G by
+        # jphi_ind_input = 0.5 x the request, which carries p'G by
         # inductive_includes_pressure=True), minus p'G
-        np.testing.assert_array_equal(hf["_baseline"]["j_inductive"][()],
+        np.testing.assert_array_equal(hf["_baseline"]["jphi_ind"][()],
                                       0.5 * G.ctx.request - Pk)
 
 
@@ -1877,9 +1877,9 @@ def test_without_the_run_convention_a_direct_call_archives_as_before(
                         lambda *a, **k: calls.append(1))
     real = ED.GenerateEngineDraws.archived_split
 
-    def legacy_like(self, diagnostics, j_phi, default=None):
-        out = real(self, diagnostics, j_phi, default)
-        diagnostics.pop("j_pressure")
+    def legacy_like(self, diagnostics, jphi_total, default=None):
+        out = real(self, diagnostics, jphi_total, default)
+        diagnostics.pop("jphi_pd")
         return out
     monkeypatch.setattr(ED.GenerateEngineDraws, "archived_split",
                         legacy_like)

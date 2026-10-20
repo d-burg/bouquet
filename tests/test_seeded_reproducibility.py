@@ -4,9 +4,9 @@ Two things can only be checked with the real GS solver:
 
   * **The seed contract end to end.** Two seeded ensembles built from the same
     config must produce bitwise-identical archives -- every drawn profile,
-    ``j_BS``, ``j_inductive`` and scalar.  ``jBS_scale_range`` and
+    ``jphi_bs``, ``jphi_ind`` and scalar.  ``jbs_scale_range`` and
     ``l_i_uncertainty`` are both switched on so the two streams that WERE
-    seeded before this work (``np.random.uniform`` for ``scale_jBS``,
+    seeded before this work (``np.random.uniform`` for ``scale_jbs``,
     ``np.random.normal`` for the per-draw ``l_i`` target) are exercised
     alongside the GPR and cannot regress while the GPR is fixed.
 
@@ -150,13 +150,13 @@ _N_DRAWS = 2                 # each draw is a full solve + SWB + homotopy
 # is a 10x stricter statement than any draw is held to.
 _LI_REL = 0.005              # l_i(3)/'iter' vs recon step-6 target ; measured
                              # -0.117% (exact)
-_JBS_FRAC = 0.02             # sigma0 j_BS vs baseline split, fraction of peak
+_JBS_FRAC = 0.02             # sigma0 jphi_bs vs baseline split, fraction of peak
                              # (the sigma0-guard bar) ; measured 0.279%
 
 # The 'exact' measure (BOUQUET_R2_IP_MODE=exact, the default and -- since the
 # ratio retirement, issue #35 -- the SOLE accepted measure) is not an identity
 # at sigma=0: it sees the two ways the archived split fails to be the anchor --
-# the reconstruction's own j_phi residual (+0.193% of Ip at the R2 state
+# the reconstruction's own jphi_total residual (+0.193% of Ip at the R2 state
 # anchor, i.e. -0.25% of inductive amplitude) and the sigma=0 SWB residual
 # (-0.085%).  That sensitivity is exactly why it survived #35's decomposition
 # and ratio did not.  This bar may not be loosened: a miss is a regression to
@@ -165,7 +165,7 @@ _JBS_FRAC = 0.02             # sigma0 j_BS vs baseline split, fraction of peak
 # WHAT IS BOUNDED, AND WHY IT IS NOT |s-1| (issue #23; APPROVED CHANGE).
 #
 # The budget above is quoted in Ip space -- percentages OF Ip.  `s` is not:
-# route R2 charges the whole Ip miss to the inductive amplitude alone (j_BS is
+# route R2 charges the whole Ip miss to the inductive amplitude alone (jphi_bs is
 # held fixed, by design), so for an affine measure
 #
 #     s - 1 = -Delta / int(w * j_ind)          Delta = Ip[split] - Ip_demand
@@ -256,7 +256,7 @@ def _generate_one_ensemble(header):
     cannot switch it on.  Everything else mirrors what ``Bouquet.generate()``
     passes, in particular the production coil-drift / homotopy schedule: the
     bare ``generate_bouquet`` defaults are a single +/-1 % pass, which this
-    case cannot meet under a 5 % j_phi envelope, and every draw is then
+    case cannot meet under a 5 % jphi_total envelope, and every draw is then
     discarded as infeasible.
 
     Writes ``<header>.h5`` and ``<header>_diag.json`` (the per-draw sampler
@@ -286,16 +286,16 @@ def _generate_one_ensemble(header):
     initialize_equilibrium_database(header)
     diags = generate_bouquet(
         b.mygs, psi_N, _N_DRAWS, header,
-        np.asarray(bl.j_phi, dtype=float),
+        np.asarray(bl.jphi_total, dtype=float),
         bl.ne, bl.te, bl.ni, bl.ti,
         env["sigma_ne"], env["sigma_te"], env["sigma_ni"], env["sigma_ti"],
         env["sigma_jphi"], env["n_ls"], env["t_ls"], env["j_ls"],
         float(bl.Ip_target), float(bl.l_i_target), Zeff_eq,
-        input_jinductive=np.asarray(bl.j_inductive, dtype=float),
+        jphi_ind_input=np.asarray(bl.jphi_ind, dtype=float),
         l_i_tolerance=gc.l_i_tolerance,
         psi_pad=float(getattr(b.config.source, "psi_pad", 1e-3)),
-        constrain_sawteeth=gc.constrain_sawteeth, recalculate_j_BS=True,
-        isolate_edge_jBS=gc.isolate_edge_jBS, floor_j_BS=gc.floor_j_BS,
+        constrain_sawteeth=gc.constrain_sawteeth, recalculate_jbs=True,
+        isolate_edge_jbs=gc.isolate_edge_jbs, floor_jbs=gc.floor_jbs,
         scan_key=0,
         psi_N_kinetic=np.asarray(bl.psi_N_kinetic, dtype=float),
         # production coil schedule (what Bouquet.generate() passes)
@@ -304,11 +304,11 @@ def _generate_one_ensemble(header):
         homotopy_passes=gc.homotopy_passes,
         inspec_F_max=fc.inspec_F_max, inspec_VSC_max=fc.inspec_VSC_max,
         # both previously-seeded streams ON, alongside the GPR
-        jBS_scale_range=(0.97, 1.03), l_i_uncertainty=0.05,
+        jbs_scale_range=(0.97, 1.03), l_i_uncertainty=0.05,
         diagnostic_plots=False, seed=_SEED,
     )
     with open(header + "_diag.json", "w") as fh:
-        json.dump([{k: float(d[k]) for k in ("scale_jBS", "l_i_target_used")}
+        json.dump([{k: float(d[k]) for k in ("scale_jbs", "l_i_target_used")}
                    for d in diags], fh)
 
 
@@ -354,7 +354,7 @@ def test_same_seed_reproduces_the_drawn_kinetics_and_currents(twin_runs):
     """Name the datasets that matter, so a silent rename cannot hollow out the
     test above into a no-op."""
     (a, _), (b, _) = twin_runs
-    required = ("n_e", "T_e", "n_i", "T_i", "j_phi", "j_inductive", "j_BS")
+    required = ("n_e", "T_e", "n_i", "T_i", "jphi_total", "jphi_ind", "jphi_bs")
     for key in sorted(a):
         missing = sorted(set(required) - set(a[key]))
         assert not missing, f"draw {key}: missing {missing}"
@@ -364,13 +364,13 @@ def test_same_seed_reproduces_the_drawn_kinetics_and_currents(twin_runs):
 
 
 def test_same_seed_reproduces_the_previously_seeded_streams(twin_runs):
-    """scale_jBS and the per-draw l_i target were the ONLY seeded pieces before
+    """scale_jbs and the per-draw l_i target were the ONLY seeded pieces before
     the GPR was fixed; migrating them onto the Generator must not regress them.
     """
     (a, da), (b, db) = twin_runs
     assert len(da) == len(db) and da, "no per-draw diagnostics returned"
     for i, (x, y) in enumerate(zip(da, db)):
-        for k in ("scale_jBS", "l_i_target_used"):
+        for k in ("scale_jbs", "l_i_target_used"):
             assert x[k] == y[k], \
                 f"draw {i}: {k} is not reproducible ({x[k]} vs {y[k]})"
     for key in sorted(a):
@@ -381,13 +381,13 @@ def test_same_seed_reproduces_the_previously_seeded_streams(twin_runs):
 
 
 def test_the_previously_seeded_streams_actually_varied(twin_runs):
-    """Guard the guard: if jBS_scale_range/l_i_uncertainty had collapsed to a
+    """Guard the guard: if jbs_scale_range/l_i_uncertainty had collapsed to a
     constant, the reproducibility assertions above would be vacuous."""
     (_a, da), _b = twin_runs
     if len(da) < 2:
         pytest.skip("only one draw completed; nothing to compare")
-    assert len({d["scale_jBS"] for d in da}) > 1, \
-        "scale_jBS is constant across draws -- the uniform draw is not firing"
+    assert len({d["scale_jbs"] for d in da}) > 1, \
+        "scale_jbs is constant across draws -- the uniform draw is not firing"
     assert len({d["l_i_target_used"] for d in da}) > 1, \
         "l_i target is constant across draws -- the normal draw is not firing"
 
@@ -450,15 +450,15 @@ def _run_r2_probe(outdir):
         b.mygs.replace_eq(source_eq=snapshot)
         out = perturb_kinetic_equilibrium(
             b.mygs, psi_N, pressure,
-            bl.ne, bl.te, bl.ni, bl.ti, np.asarray(bl.j_phi, dtype=float),
+            bl.ne, bl.te, bl.ni, bl.ti, np.asarray(bl.jphi_total, dtype=float),
             zk, zk, zk, zk, zj,                     # sigma = 0 everywhere
             0.5, 0.4, 0.25,
             float(bl.Ip_target), float(bl.l_i_target), Zeff_eq, len(psi_N),
-            input_jinductive=np.asarray(bl.j_inductive, dtype=float),
+            jphi_ind_input=np.asarray(bl.jphi_ind, dtype=float),
             l_i_tolerance=gc.l_i_tolerance, psi_pad=psi_pad,
-            constrain_sawteeth=False, recalculate_j_BS=True,
-            isolate_edge_jBS=gc.isolate_edge_jBS, floor_j_BS=gc.floor_j_BS,
-            scale_jBS=float(getattr(bl, "bs_scale", 1.0)),
+            constrain_sawteeth=False, recalculate_jbs=True,
+            isolate_edge_jbs=gc.isolate_edge_jbs, floor_jbs=gc.floor_jbs,
+            scale_jbs=float(getattr(bl, "bs_scale", 1.0)),
             perturb_jind_in_anchor=True, accept_anchor_inband=False,
             psi_N_kinetic=psi_kin, p_thresh=0.05, rng=_SEED,
         )
@@ -477,8 +477,8 @@ def _run_r2_probe(outdir):
                 # Issue #20 -- estimator consistency, not a tolerance change.
                 float(b.mygs.get_stats(lcfs_pad=psi_pad,
                                        li_normalization="iter")["l_i"]),
-                np.asarray(d["j_BS"], dtype=float),
-                np.asarray(d["j_inductive"], dtype=float))
+                np.asarray(d["jphi_bs"], dtype=float),
+                np.asarray(d["jphi_ind"], dtype=float))
 
     s_ex1, f_ex1, li_ex1, jbs_ex1, jind_ex1 = _once("exact")
     s_ex2, f_ex2, li_ex2, jbs_ex2, jind_ex2 = _once("exact")
@@ -494,7 +494,7 @@ def _run_r2_probe(outdir):
         f_ind_fsa=np.array([f_fsa]), jbs_fsa=jbs_fsa,
         s_legacy=np.array([s_leg]), li_legacy=np.array([li_leg]),
         f_ind_legacy=np.array([f_leg]),
-        jbs_baseline=np.asarray(bl.j_BS, dtype=float),
+        jbs_baseline=np.asarray(bl.jphi_bs, dtype=float),
         l_i_target=np.array([float(bl.l_i_target)]),
     )
 
@@ -543,7 +543,7 @@ def test_sigma0_r2_reproduces_the_baseline_jbs(sigma0_anchor):
     dev = float(np.max(np.abs(
         np.asarray(sigma0_anchor["jbs_exact1"], dtype=float) - jbs_bl)))
     assert dev / peak <= _JBS_FRAC, (
-        f"sigma=0 j_BS is {100 * dev / peak:.3f}% of peak from the baseline "
+        f"sigma=0 jphi_bs is {100 * dev / peak:.3f}% of peak from the baseline "
         f"split (bar {100 * _JBS_FRAC:.1f}%)")
 
 
@@ -554,7 +554,7 @@ def test_sigma0_r2_exact_measure_lands_in_its_own_budget(sigma0_anchor):
 
     It does not land AT 1.000 -- 3.04e-3 here -- and that is the expected,
     understood result: the measure charges the draw for the reconstruction's
-    own j_phi residual (+0.193% of Ip at the R2 state anchor) on top of the
+    own jphi_total residual (+0.193% of Ip at the R2 state anchor) on top of the
     sigma=0 SWB residual (-0.085%).  -0.335% of inductive amplitude
     predicted, -0.325% measured.  That sensitivity is the reason this is the
     measure that survived #35: on real archives it correctly reports the
@@ -631,7 +631,7 @@ def test_sigma0_r2_exact_measure_is_bit_reproducible(sigma0_anchor):
 
 
 def test_sigma0_r2_exact_measure_leaves_the_bootstrap_alone(sigma0_anchor):
-    """Changing the measure must not move j_BS: route R2 holds the bootstrap
+    """Changing the measure must not move jphi_bs: route R2 holds the bootstrap
     fixed and moves only the ohmic drive.  (Compared exact-vs-ratio until the
     ratio retirement, issue #35; exact-vs-fsa makes the same claim -- the two
     surviving measures differ only in the Ip weights, which must not touch
@@ -700,15 +700,15 @@ def _run_r2_probe_loop(outdir):
         b.mygs.replace_eq(source_eq=snapshot)
         out = perturb_kinetic_equilibrium(
             b.mygs, psi_N, pressure,
-            bl.ne, bl.te, bl.ni, bl.ti, np.asarray(bl.j_phi, dtype=float),
+            bl.ne, bl.te, bl.ni, bl.ti, np.asarray(bl.jphi_total, dtype=float),
             zk, zk, zk, zk, zj,                     # sigma = 0 everywhere
             0.5, 0.4, 0.25,
             float(bl.Ip_target), float(bl.l_i_target), Zeff_eq, len(psi_N),
-            input_jinductive=np.asarray(bl.j_inductive, dtype=float),
+            jphi_ind_input=np.asarray(bl.jphi_ind, dtype=float),
             l_i_tolerance=gc.l_i_tolerance, psi_pad=psi_pad,
-            constrain_sawteeth=False, recalculate_j_BS=True,
-            isolate_edge_jBS=gc.isolate_edge_jBS, floor_j_BS=gc.floor_j_BS,
-            scale_jBS=float(getattr(bl, "bs_scale", 1.0)),
+            constrain_sawteeth=False, recalculate_jbs=True,
+            isolate_edge_jbs=gc.isolate_edge_jbs, floor_jbs=gc.floor_jbs,
+            scale_jbs=float(getattr(bl, "bs_scale", 1.0)),
             perturb_jind_in_anchor=True, accept_anchor_inband=False,
             psi_N_kinetic=psi_kin, p_thresh=0.05, rng=_SEED,
             jbs_loop=settings,
@@ -721,8 +721,8 @@ def _run_r2_probe_loop(outdir):
                 float("nan") if _f is None else float(_f),
                 float(b.mygs.get_stats(lcfs_pad=psi_pad,
                                        li_normalization="iter")["l_i"]),
-                np.asarray(d["j_BS"], dtype=float),
-                np.asarray(d["j_inductive"], dtype=float),
+                np.asarray(d["jphi_bs"], dtype=float),
+                np.asarray(d["jphi_ind"], dtype=float),
                 np.asarray(w, dtype=float),
                 bool((d.get("jbs_loop") or {}).get("converged", False)))
 
@@ -744,7 +744,7 @@ def _run_r2_probe_loop(outdir):
         f_ind_fsa=np.array([f_fsa]), jbs_fsa=jbs_fsa,
         converged_fsa=np.array([c_fsa]),
         psi_N=psi_N, Ip=np.array([float(bl.Ip_target)]),
-        jbs_baseline=np.asarray(bl.j_BS, dtype=float),
+        jbs_baseline=np.asarray(bl.jphi_bs, dtype=float),
         l_i_target=np.array([float(bl.l_i_target)]),
     )
 
@@ -774,7 +774,7 @@ def test_sigma0_r2_reproduces_the_baseline_jbs_loop_on(sigma0_anchor_loop):
     dev = float(np.max(np.abs(
         np.asarray(d["jbs_exact1"], dtype=float) - jbs_bl)))
     assert dev / peak <= _JBS_FRAC, (
-        f"loop-ON sigma=0 j_BS is {100 * dev / peak:.3f}% of peak from the "
+        f"loop-ON sigma=0 jphi_bs is {100 * dev / peak:.3f}% of peak from the "
         f"baseline split (bar {100 * _JBS_FRAC:.1f}%)")
 
 
@@ -826,7 +826,7 @@ def test_sigma0_r2_exact_measure_is_bit_reproducible_loop_on(
 
 def test_sigma0_r2_exact_measure_leaves_the_bootstrap_alone_loop_on(
         sigma0_anchor_loop):
-    """Loop-ON twin of "the Ip measure must not move j_BS".
+    """Loop-ON twin of "the Ip measure must not move jphi_bs".
 
     The legacy claim is bitwise exact-vs-fsa because the legacy bootstrap is
     computed BEFORE the amplitude root and never sees it.  Under the loop the
@@ -860,15 +860,15 @@ def test_sigma0_r2_exact_measure_leaves_the_bootstrap_alone_loop_on(
 # none loosened.  What each claim reads on the engine:
 #   * "s" is the draw's inductive amplitude a_ind (= 1 + d_ind; x* held, so
 #     a zero-perturbation draw should need none), and f_ind the inductive
-#     share of Ip of the draw's j_inductive in the reconstruction's own
+#     share of Ip of the draw's jphi_ind in the reconstruction's own
 #     weights (the delivered state the check starts from) -- the Ip-space
 #     product |a_ind - 1| * f_ind is the R2 bar's quantity;
-#   * j_BS is the draw's (archived-state) bootstrap against the
-#     reconstruction's Baseline.j_BS, max deviation over peak (_JBS_FRAC);
+#   * jphi_bs is the draw's (archived-state) bootstrap against the
+#     reconstruction's Baseline.jphi_bs, max deviation over peak (_JBS_FRAC);
 #   * l_i is the archived state's l_i(3) against l_i_target (_LI_REL);
 #   * "leaves the bootstrap alone" is the loop-ON twin's form: the archived
 #     bootstrap within jbs_rtol_j (current-weighted) of the reconstruction's
-#     lambda_BS* on the archived geometry (the check's archived-stage r_j).
+#     lambda_bs* on the archived geometry (the check's archived-stage r_j).
 def _run_sigma0_probe_engine(outdir):
     """The engine's zero-perturbation draw (generate() route), twice, on the
     unified engine's g-file reconstruction.  Every number lands in
@@ -905,13 +905,13 @@ def _run_sigma0_probe_engine(outdir):
         if d0 is None:
             raise RuntimeError("the engine's zero-perturbation draw was not "
                                f"archived: {rec.get('rejection')}")
-        jind = np.asarray(d0["j_inductive"], dtype=float)
+        jind = np.asarray(d0["jphi_ind"], dtype=float)
         runs.append(dict(
             passed=bool(rec["passed"]), a_ind=float(rec["amplitude"]),
             f_ind=_trap(w * jind, psi_N) / Ip,
             dl_i=float(rec["dl_i"]), r_j=float(rec["r_j"]),
             r_I=float(rec["r_I"]),
-            jbs=np.asarray(d0["j_BS"], dtype=float), jind=jind))
+            jbs=np.asarray(d0["jphi_bs"], dtype=float), jind=jind))
     r1, r2 = runs
     np.savez(
         os.path.join(outdir, "r2engine.npz"),
@@ -926,7 +926,7 @@ def _run_sigma0_probe_engine(outdir):
         jbs_exact1=r1["jbs"], jbs_exact2=r2["jbs"],
         jind_exact1=r1["jind"], jind_exact2=r2["jind"],
         psi_N=psi_N, Ip=np.array([Ip]),
-        jbs_baseline=np.asarray(bl.j_BS, dtype=float),
+        jbs_baseline=np.asarray(bl.jphi_bs, dtype=float),
         l_i_target=np.array([float(bl.l_i_target)]),
     )
 
@@ -955,10 +955,10 @@ def test_sigma0_reproduces_the_baseline_jbs_unified(sigma0_anchor_engine):
     peak = float(np.max(np.abs(jbs_bl)))
     dev = float(np.max(np.abs(
         np.asarray(d["jbs_exact1"], dtype=float) - jbs_bl)))
-    print(f"[sigma0 unified] j_BS max dev {100 * dev / peak:.4f} % of peak; "
+    print(f"[sigma0 unified] jphi_bs max dev {100 * dev / peak:.4f} % of peak; "
           f"check passed={bool(d['passed'][0])}")
     assert dev / peak <= _JBS_FRAC, (
-        f"engine sigma=0 j_BS is {100 * dev / peak:.3f}% of peak from the "
+        f"engine sigma=0 jphi_bs is {100 * dev / peak:.3f}% of peak from the "
         f"baseline split (bar {100 * _JBS_FRAC:.1f}%)")
 
 

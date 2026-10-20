@@ -3,7 +3,7 @@
 
 A draw starts from the reconstruction's DELIVERED state
 (:class:`bouquet.engine.EngineState`): its geometry snapshot ``G*``, the
-closure coefficients ``x*``, the relaxed bootstrap ``lambda_BS*`` and (when
+closure coefficients ``x*``, the relaxed bootstrap ``lambda_bs*`` and (when
 on) the delivery correction ``Delta*``.  It
 
 * perturbs the kinetics exactly as today's sampler does (the pressure-matched
@@ -13,7 +13,7 @@ on) the delivery correction ``Delta*``.  It
   bootstrap scale the run drew for it;
 * composes the current with ``x*`` HELD::
 
-      J = s_ind(x*) F<1/R>/<B^2> lambda_ind + s_bs(x*) F<1/R>/<B^2> lambda_BS
+      J = s_ind(x*) F<1/R>/<B^2> lambda_ind + s_bs(x*) F<1/R>/<B^2> lambda_bs
           + F<1/R>/<B^2> lambda_fix + p'(<R> - F^2<1/R>/<B^2>)
 
   on the latest solved geometry, the pressure term from the DRAW's own
@@ -45,7 +45,7 @@ on) the delivery correction ``Delta*``.  It
 **Zero-perturbation identity by construction.**  Every perturbed quantity is
 formed as ``base + (drawn - base)`` (kinetics, pressure, inductive, aux) so
 a zero perturbation is exactly the base; the first pass composes on ``G*``
-with ``x*`` and ``lambda_BS*`` (the pressure term's ``p'`` shifted by the
+with ``x*`` and ``lambda_bs*`` (the pressure term's ``p'`` shifted by the
 draw's pressure change, zero at identity) and the Ip amplitude's increment
 is formed from differences that vanish exactly -- so the first request IS
 the stored request, bit for bit (:class:`EngineDrawContext` refuses to run
@@ -83,7 +83,7 @@ RNG_STREAM = (
 #: What an engine draw's loop restarts from after its first solve
 #: (``engine_draw_bootstrap_refresh=True``).
 REFRESH_SOURCE = (
-    "scale x [lambda_BS* + Redl(the draw's kinetics) on the FIRST SOLVED "
+    "scale x [lambda_bs* + Redl(the draw's kinetics) on the FIRST SOLVED "
     "equilibrium (the draw's pressure) - Redl(the reconstruction's kinetics) "
     "on the starting equilibrium]: the anchor with its draw-kinetics Redl "
     "moved from G* to the geometry the first solve produced; pass 1's own "
@@ -155,7 +155,7 @@ class DrawKineticsNonPhysical(ValueError):
 
 
 #: the physical domain of the Redl inputs, in the order
-#: :func:`bouquet.physics.evaluate_jBS` checks them: (name, unit, rule,
+#: :func:`bouquet.physics.evaluate_jbs` checks them: (name, unit, rule,
 #: ``bad(array)``)
 _KINETIC_DOMAIN = (
     ("ne", "m^-3", "strictly positive", lambda a: ~(a > 0.0)),
@@ -169,7 +169,7 @@ _KINETIC_DOMAIN = (
 def check_draw_kinetics(kinetics, psi_N, label="engine draw"):
     """Refuse non-physical DRAWN kinetics before anything is solved.
 
-    Exactly the input domain :func:`bouquet.physics.evaluate_jBS` enforces
+    Exactly the input domain :func:`bouquet.physics.evaluate_jbs` enforces
     on the same arrays (every node finite; ``ne, ni, te, ti > 0``;
     ``zeff >= 1``), so the draws rejected are the ones that evaluation
     refused at the draw's first bootstrap evaluation -- which was reported
@@ -306,7 +306,7 @@ class EngineDrawContext:
             d = float(np.max(np.abs(R - self.request)))
             raise EngineDrawRefused(
                 f"{self.label}: composing on the stored geometry with x* and "
-                f"lambda_BS* does not reproduce the stored request (max "
+                f"lambda_bs* does not reproduce the stored request (max "
                 f"|diff| {d:.3e}); the zero-perturbation identity would not "
                 "hold -- refusing to draw from this state")
         self.J_star = J
@@ -805,7 +805,7 @@ class _DrawPasses:
             n_solves=int(self.b.n_solves)))
         self.geom = g1
         meas = dict(w=g1["w_lin"] * conversion_factor(g1), x=g1["psi_N"],
-                    li=m["li"], redl=m["redl"])
+                    li=m["li"], jdotB_bs=m["jdotB_bs"])
         if self.pin is not None:
             meas["q0"] = m["q_row"]
             meas["axis_current_solved"] = float(np.interp(
@@ -893,7 +893,7 @@ def run_draw(ctx, backend, inputs, *, label=None, coil_guard=None,
     start computed on ``G*``.  Zero extra solves and zero extra Redl
     evaluations (pass 1's Redl is the loop's own); the first request, every
     criterion and the fixed point are unchanged -- the path only.  At zero
-    perturbation the refreshed bootstrap is ``lambda_BS*`` plus the change
+    perturbation the refreshed bootstrap is ``lambda_bs*`` plus the change
     of Redl between the stored and the RE-SOLVED equilibrium -- rounding on
     the toy stand-in; on the live solver the re-solve reproduces the stored
     state only to its own convergence (measured on the g-file example:
@@ -918,7 +918,7 @@ def run_draw(ctx, backend, inputs, *, label=None, coil_guard=None,
     backend.set_inputs(pressure=inputs.pressure, kinetics=inputs.kinetics)
     scale = float(inputs.scale)
     # ---- anchor stage (no solve): the kinetic response of Redl on the
-    # state the draw starts from, as an increment on lambda_BS*
+    # state the draw starts from, as an increment on lambda_bs*
     clock.start("anchor")
     try:
         r_d = np.asarray(backend.redl(inputs.kinetics), dtype=float)
@@ -936,11 +936,11 @@ def run_draw(ctx, backend, inputs, *, label=None, coil_guard=None,
     if bootstrap_refresh:
         def start_refresh(J, meas):
             # the anchor's increment with Redl(draw kinetics) taken on the
-            # FIRST SOLVED geometry instead of G* (meas["redl"]: the loop's
+            # FIRST SOLVED geometry instead of G* (meas["jdotB_bs"]: the loop's
             # own pass-1 Redl, the draw's kinetics, solved at the draw's
-            # pressure); exactly the anchor's form, so lambda_BS* at zero
+            # pressure); exactly the anchor's form, so lambda_bs* at zero
             # perturbation up to the re-solve's reproduction of G*
-            return scale * (ctx.lam + (np.asarray(meas["redl"], dtype=float)
+            return scale * (ctx.lam + (np.asarray(meas["jdotB_bs"], dtype=float)
                                        - r_0))
     clock.start("loop")
     pin = None
@@ -952,15 +952,15 @@ def run_draw(ctx, backend, inputs, *, label=None, coil_guard=None,
                      delta=ctx.delta, coil_guard=coil_guard,
                      on_solve=lambda n: clock.add("loop", passes=1))
     res = run_jbs_loop(
-        jbs0, dp.step, lambda m: scale * np.asarray(m["redl"], dtype=float),
+        jbs0, dp.step, lambda m: scale * np.asarray(m["jdotB_bs"], dtype=float),
         ctx.loop, Ip=float(ctx.c.Ip),
         meas0=dict(li=ctx.ref["l_i"],
                    q0=(ctx.ref["q_row"] if pin is not None else None)),
         gate_li=True, gate_q0=pin is not None, label=label,
-        init_source=("the reconstruction's lambda_BS* + (Redl with the "
+        init_source=("the reconstruction's lambda_bs* + (Redl with the "
                      "draw's kinetics - Redl with the reconstruction's) on "
                      "the starting equilibrium, times the draw's bootstrap "
-                     "scale (exactly lambda_BS* at zero perturbation)"),
+                     "scale (exactly lambda_bs* at zero perturbation)"),
         on_pass=dp.on_pass, q0_pin=pin, raise_on_fail=True,
         start_refresh=start_refresh)
     if start_refresh is not None:
@@ -1053,13 +1053,13 @@ def _finish(ctx, backend, inputs, dp, res, m_fin, pin, label):
         solves=dict(loop=int(backend.n_solves)))
     return dict(record=jsonable(rec), jbs_used=jbs_used, passes=dp,
                 inputs=inputs, pin=pin, measure=m_fin,
-                split=dict(j_phi=np.asarray(last["jint"], dtype=float),
-                           j_BS=j_bs_tor,
-                           j_NBI=kap * np.asarray(
+                split=dict(jphi_total=np.asarray(last["jint"], dtype=float),
+                           jphi_bs=j_bs_tor,
+                           jphi_nbi=kap * np.asarray(
                                ctx.c.jB_fix_parts["nbi"], dtype=float),
                            # the rf part plus any other driven source entry
                            # (as engine._split), so the split sums exactly
-                           j_RF=kap * (np.asarray(
+                           jphi_rf=kap * (np.asarray(
                                ctx.c.jB_fix_parts["rf"], dtype=float)
                                + np.asarray(ctx.c.jB_fix_parts.get(
                                    "other", 0.0), dtype=float))))
@@ -1076,7 +1076,7 @@ def post_homotopy(ctx, backend, draw, settings, *, coil_guard=None,
     (``x*`` held, the Ip amplitude, the draw's pressure), each checked by
     *coil_guard* (the homotopy's saturation criterion at those bounds).
     Raises :class:`~bouquet.jbs_loop.JBSNotConverged` when that fails.
-    Returns ``(record, jbs_used, j_BS_toroidal, j_phi)`` -- the last two
+    Returns ``(record, jbs_used, jphi_bs_toroidal, jphi_total)`` -- the last two
     ``None`` when the draw was kept as is."""
     from .engine import complete_geometry, conversion_factor
     from .jbs_loop import (JBS_POST_HOMOTOPY_PASSES, check_delivered,
@@ -1091,7 +1091,7 @@ def post_homotopy(ctx, backend, draw, settings, *, coil_guard=None,
     m = backend.measure()
     g = complete_geometry(m["geom"])
     w = g["w_lin"] * conversion_factor(g)
-    J = scale * np.asarray(m["redl"], dtype=float)
+    J = scale * np.asarray(m["jdotB_bs"], dtype=float)
     chk = check_delivered(J, jbs_used, w, g["psi_N"], float(ctx.c.Ip),
                           settings)
     rec = dict(check=jsonable(dict(chk)),
@@ -1123,7 +1123,7 @@ def post_homotopy(ctx, backend, draw, settings, *, coil_guard=None,
                                (lambda n: clock.add("post_homotopy",
                                                     passes=1))))
     res = run_jbs_loop(
-        jbs0, dp.step, lambda mm: scale * np.asarray(mm["redl"], dtype=float),
+        jbs0, dp.step, lambda mm: scale * np.asarray(mm["jdotB_bs"], dtype=float),
         settings, Ip=float(ctx.c.Ip), meas0=dict(
             li=m["li"], q0=(m["q_row"] if dp.pin is not None else None)),
         gate_li=True, gate_q0=dp.pin is not None, label=label,
@@ -1297,7 +1297,7 @@ class GenerateEngineDraws(DrawMethod):
         self.q_psi = q_psi
         self.maxits = maxits
         self.homotopy = bool(homotopy)
-        #: jBS_scale_range handed to the draws (set by Bouquet._draw_method)
+        #: jbs_scale_range handed to the draws (set by Bouquet._draw_method)
         self.scale_range = None
         #: the opt-in bands of the in-spec rule (bouquet.filtering.
         #: InspecBands): *bands*, else an l_i band from an explicit
@@ -1424,7 +1424,7 @@ class GenerateEngineDraws(DrawMethod):
         return self.ctx.edge.p_offset(cur["draw"]["inputs"].pressure)
 
     def validate(self, *, pin_jphi, jbs_delta_mode, l_i_uncertainty,
-                 recalculate_j_BS, jbs_loop):
+                 recalculate_jbs, jbs_loop):
         import os
         bad = []
         if bool(pin_jphi) or os.environ.get("PIN_JPHI", "0") == "1":
@@ -1435,8 +1435,8 @@ class GenerateEngineDraws(DrawMethod):
             bad.append("jbs_delta_mode=True")
         if float(l_i_uncertainty or 0.0) > 0.0:
             bad.append("l_i_uncertainty > 0 (engine draws match no l_i)")
-        if not recalculate_j_BS:
-            bad.append("recalculate_j_BS=False")
+        if not recalculate_jbs:
+            bad.append("recalculate_jbs=False")
         if not (jbs_loop and jbs_loop.get("enabled")):
             bad.append("no self-consistent loop settings")
         if bad:
@@ -1672,7 +1672,7 @@ class GenerateEngineDraws(DrawMethod):
     # ---- one draw ---------------------------------------------------------
     def draw(self, mygs, rng, scale, count, *, coil_guard=None,
              bnd_diag=None, solve_guard=None, inputs=None, legacy=None):
-        """The legacy 7-tuple ``(ne, te, ni, ti, w_ExB, j_phi,
+        """The legacy 7-tuple ``(ne, te, ni, ti, w_ExB, jphi_total,
         diagnostics)`` of one engine draw (kinetic-grid profiles)."""
         ctx = self.ctx
         self.uncap_solver(mygs)             # (a previous draw's, if any)
@@ -1703,23 +1703,23 @@ class GenerateEngineDraws(DrawMethod):
             self.sigma0_probe["loop"] = zero_perturbation_loop_verdict(ctx,
                                                                        out)
         sp = out["split"]
-        jfix = sp["j_NBI"] + sp["j_RF"]
+        jfix = sp["jphi_nbi"] + sp["jphi_rf"]
         rec = out["record"]
         rec["coil_reg"] = dict(self._cur["coil_reg"])
         diag = dict(
             j0_scales=[], Ip_scales=[],
             iteration_l_is=[rec["delivered"]["l_i_3"]],
             iteration_Ips=[rec["delivered"]["Ip"]],
-            j_inductive=sp["j_phi"] - sp["j_BS"] - jfix, j_BS=sp["j_BS"],
-            j_BS_edge=None, proxy_bias_observed=None, r2_ip_scale=None,
+            jphi_ind=sp["jphi_total"] - sp["jphi_bs"] - jfix, jphi_bs=sp["jphi_bs"],
+            jphi_bs_edge=None, proxy_bias_observed=None, r2_ip_scale=None,
             r2_f_ind=None, aux=dict(inputs.aux),
             jbs_loop=_jbs_block(rec["loop"]),
             engine=rec,
             _jbs_ctx=dict(kind="engine", engine=self,
-                          isolate_edge_jBS=False))
+                          isolate_edge_jbs=False))
         nat = inputs.kinetics_native
         return (nat["ne"], nat["te"], nat["ni"], nat["ti"],
-                np.zeros_like(ctx.psi), sp["j_phi"], diag)
+                np.zeros_like(ctx.psi), sp["jphi_total"], diag)
 
     def post_homotopy(self, settings, coil_guard=None):
         """``_post_homotopy_jbs``'s engine branch."""
@@ -1738,10 +1738,10 @@ class GenerateEngineDraws(DrawMethod):
         """The post-homotopy bootstrap check: the engine draw's own passes."""
         return self.post_homotopy(settings, coil_guard=coil_guard)
 
-    def post_homotopy_split(self, j_phi, spike, full, legacy=None):
+    def post_homotopy_split(self, jphi_total, spike, full, legacy=None):
         """The re-solved draw's split: the engine draw's own fixed parts, no
         clip (archival re-splits on the archived state)."""
-        return j_phi - full - self.solved_fixed(), full, None
+        return jphi_total - full - self.solved_fixed(), full, None
 
     def drift_without_homotopy(self, mygs, baseline_coils, coil_drift, *,
                                ip_aligned, skip_hard):
@@ -1761,43 +1761,43 @@ class GenerateEngineDraws(DrawMethod):
         dp = d.get("passes_post_homotopy") or d["passes"]
         return np.asarray(dp.last["parts"]["driven"], dtype=float)
 
-    def archived_split(self, diagnostics, j_phi, default=None):
-        """``(j_BS, j_inductive)`` of the archived draw against its archived
-        *j_phi*: the bootstrap and fixed parts of :meth:`post_hoc` (the
+    def archived_split(self, diagnostics, jphi_total, default=None):
+        """``(jphi_bs, jphi_ind)`` of the archived draw against its archived
+        *jphi_total*: the bootstrap and fixed parts of :meth:`post_hoc` (the
         archived equilibrium's), the inductive the residual -- NEVER
         clipped; a negative inductive is recorded, not altered."""
         sp = self._cur["final_split"]
-        j_phi = np.asarray(j_phi, dtype=float)
-        P = np.asarray(sp["j_pressure"], dtype=float)
+        jphi_total = np.asarray(jphi_total, dtype=float)
+        P = np.asarray(sp["jphi_pd"], dtype=float)
         # the pressure-driven P = p'(<R> - F^2<1/R>/<B^2>) is its own
-        # bucket, j_pressure (owner decision D2): neither j_BS nor the
+        # bucket, jphi_pd (owner decision D2): neither jphi_bs nor the
         # residual inductive carries it
-        j_ind = j_phi - sp["j_BS"] - sp["j_NBI"] - sp["j_RF"] - P
+        j_ind = jphi_total - sp["jphi_bs"] - sp["jphi_nbi"] - sp["jphi_rf"] - P
         # the PARALLEL parts of the archived split (schema: the draw's
-        # ``jB_parallel/`` subgroup; docs/archive-schema.md): the bootstrap
+        # ``jdotB/`` subgroup; docs/archive-schema.md): the bootstrap
         # and fixed <j.B> the toroidal parts were converted from, and the
-        # field-aligned inductive <j.B> = j_inductive / kappa -- so j_phi =
-        # kappa (jB_inductive + jB_BS + jB_NBI + jB_RF) + P exactly, and an
+        # field-aligned inductive <j.B> = jphi_ind / kappa -- so jphi_total =
+        # kappa (jdotB_ind + jdotB_bs + jdotB_nbi + jdotB_rf) + P exactly, and an
         # IDS export carries no pressure-driven current in any parallel
         # field (io.imas.write_imas_draw)
         kap = np.asarray(sp["kappa"], dtype=float)
         self._cur["parallel"] = dict(
             psi_N=np.asarray(self.ctx.psi, dtype=float).copy(),
-            jB_inductive=j_ind / kap,
-            jB_BS=np.asarray(sp["jB_BS"], dtype=float).copy(),
-            jB_NBI=np.asarray(sp["jB_NBI"], dtype=float).copy(),
-            jB_RF=np.asarray(sp["jB_RF"], dtype=float).copy(),
-            kappa=kap.copy(), j_pressure=P.copy())
+            jdotB_ind=j_ind / kap,
+            jdotB_bs=np.asarray(sp["jdotB_bs"], dtype=float).copy(),
+            jdotB_nbi=np.asarray(sp["jdotB_nbi"], dtype=float).copy(),
+            jdotB_rf=np.asarray(sp["jdotB_rf"], dtype=float).copy(),
+            kappa=kap.copy(), jphi_pd=P.copy())
         neg = j_ind < 0.0
         diagnostics["engine"]["archived"]["split"] = dict(
-            convention=("j_phi: the archived equilibrium's achieved FSA "
-                        "current; j_BS: s_bs (1 + d_bs) scale Redl times "
-                        "F<1/R>/<B^2>; j_pressure: the pressure-driven p'G "
-                        "(its own bucket, owner decision D2); j_NBI/j_RF: "
+            convention=("jphi_total: the archived equilibrium's achieved FSA "
+                        "current; jphi_bs: s_bs (1 + d_bs) scale Redl times "
+                        "F<1/R>/<B^2>; jphi_pd: the pressure-driven p'G "
+                        "(its own bucket, owner decision D2); jphi_nbi/jphi_rf: "
                         "the fixed <j.B> times F<1/R>/<B^2>, of the archived "
-                        "equilibrium; j_inductive: the residual, never "
+                        "equilibrium; jphi_ind: the residual, never "
                         "clipped"),
-            j_NBI=sp["j_NBI"].tolist(), j_RF=sp["j_RF"].tolist(),
+            jphi_nbi=sp["jphi_nbi"].tolist(), jphi_rf=sp["jphi_rf"].tolist(),
             n_negative_inductive=int(np.sum(neg)),
             min_inductive=float(np.min(j_ind)),
             negative_inductive_psi_N=(
@@ -1810,16 +1810,16 @@ class GenerateEngineDraws(DrawMethod):
                   f"{float(np.min(j_ind)):.3e} A/m^2); recorded, not "
                   "clipped", flush=True)
         # the draw's returned diagnostics carry the archived split too, with
-        # p'G as j_pressure (as the baseline's); generate_bouquet archives
+        # p'G as jphi_pd (as the baseline's); generate_bouquet archives
         # it (schema.write_current_split)
-        diagnostics["j_BS"] = np.asarray(sp["j_BS"], dtype=float).copy()
-        diagnostics["j_inductive"] = j_ind.copy()
-        diagnostics["j_pressure"] = P.copy()
-        # the fixed parts on the archived state (j_RF: rf + other driven)
+        diagnostics["jphi_bs"] = np.asarray(sp["jphi_bs"], dtype=float).copy()
+        diagnostics["jphi_ind"] = j_ind.copy()
+        diagnostics["jphi_pd"] = P.copy()
+        # the fixed parts on the archived state (jphi_rf: rf + other driven)
         diagnostics["fixed_currents"] = dict(
-            j_NBI=np.asarray(sp["j_NBI"], dtype=float).copy(),
-            j_RF=np.asarray(sp["j_RF"], dtype=float).copy())
-        return np.asarray(sp["j_BS"], dtype=float).copy(), j_ind
+            jphi_nbi=np.asarray(sp["jphi_nbi"], dtype=float).copy(),
+            jphi_rf=np.asarray(sp["jphi_rf"], dtype=float).copy())
+        return np.asarray(sp["jphi_bs"], dtype=float).copy(), j_ind
 
     def mark(self, stage):
         if self._cur is not None:
@@ -1870,7 +1870,7 @@ class GenerateEngineDraws(DrawMethod):
         # the archived split ON the archived equilibrium: the draw's
         # bootstrap model (x* held: s_bs (1 + d_bs) x scale x Redl) and its
         # fixed parts, both converted with THIS state's F<1/R>/<B^2>; the
-        # residual against the archived j_phi is :meth:`archived_split`'s
+        # residual against the archived jphi_total is :meth:`archived_split`'s
         from .engine import composed_factor, split_pressure_term
         kap = composed_factor(fin["geom"])
         P = split_pressure_term(fin["geom"])
@@ -1878,18 +1878,18 @@ class GenerateEngineDraws(DrawMethod):
         fx = self.ctx.c.jB_fix_parts
         _amp = 1.0 + float(dpl.last["amp"].get("d_bs", 0.0))
         _scale = float(cur["draw"]["inputs"].scale)
-        jB_BS = (_amp * self.ctx.s_bs * _scale
-                 * np.asarray(fin["redl"], dtype=float))
-        jB_NBI = np.asarray(fx["nbi"], dtype=float)
-        jB_RF = (np.asarray(fx["rf"], dtype=float)
+        jdotB_bs = (_amp * self.ctx.s_bs * _scale
+                 * np.asarray(fin["jdotB_bs"], dtype=float))
+        jdotB_nbi = np.asarray(fx["nbi"], dtype=float)
+        jdotB_rf = (np.asarray(fx["rf"], dtype=float)
                  + np.asarray(fx.get("other", 0.0), dtype=float))
         cur["final_split"] = dict(
-            j_BS=(_amp * self.ctx.s_bs * kap * _scale
-                  * np.asarray(fin["redl"], dtype=float)),
-            j_NBI=kap * jB_NBI, j_RF=kap * jB_RF,
-            jB_BS=jB_BS, jB_NBI=jB_NBI * np.ones_like(kap),
-            jB_RF=jB_RF * np.ones_like(kap), kappa=kap,
-            j_pressure=P)
+            jphi_bs=(_amp * self.ctx.s_bs * kap * _scale
+                  * np.asarray(fin["jdotB_bs"], dtype=float)),
+            jphi_nbi=kap * jdotB_nbi, jphi_rf=kap * jdotB_rf,
+            jdotB_bs=jdotB_bs, jdotB_nbi=jdotB_nbi * np.ones_like(kap),
+            jdotB_rf=jdotB_rf * np.ones_like(kap), kappa=kap,
+            jphi_pd=P)
         rec["archived"]["deltas"] = dict(
             l_i_3=float(fin["li"]) - float(self.ctx.ref["l_i"]),
             l_i_1=(None if (rec["archived"]["l_i_1"] is None
@@ -2352,7 +2352,7 @@ def _write_draw_block(header, count, scan_key, record, band, parallel=None,
                       attrs=None):
     import h5py
     from .engine import write_engine_json
-    from .schema import write_jB_parallel
+    from .schema import write_jdotB
     from .utils import _group_path, _resolve_h5
     with h5py.File(_resolve_h5(header), "a") as hf:
         gp = _group_path(scan_key, count)
@@ -2365,7 +2365,7 @@ def _write_draw_block(header, count, scan_key, record, band, parallel=None,
         for k, v in (attrs or {}).items():
             grp.attrs[k] = v
         if parallel is not None:
-            write_jB_parallel(grp, parallel)
+            write_jdotB(grp, parallel)
 
 
 def read_draw_engine(header, count, scan_key=None):
@@ -2461,7 +2461,7 @@ def zero_perturbation_loop_verdict(ctx, d):
     """The zero-perturbation verdict of a draw's LOOP stage (the delivered
     loop state of :func:`run_draw` output *d*, before any homotopy): the
     request identity, convergence, ``r_j`` / ``r_I`` of the draw's bootstrap
-    against ``lambda_BS*`` (the draw's final parallel weights), ``dl_i``,
+    against ``lambda_bs*`` (the draw's final parallel weights), ``dl_i``,
     ``dq0`` (row radius and the solver's q0 radius), ``dq95``; ``passed``:
     the request bit-identical, the loop converged and every entry of
     ``gates`` -- ``r_j <= jbs_rtol_j``, ``r_I <= jbs_rtol_Ip``, ``|dl_i| <=
@@ -2507,7 +2507,7 @@ def zero_perturbation_archived_verdict(ctx, jbs_carried, fin):
     """The zero-perturbation verdict of a draw's ARCHIVED state (after the
     homotopy and the post-homotopy passes): *fin* is the backend's final
     measurement of that state, *jbs_carried* the bootstrap the draw carries
-    there.  ``r_j`` / ``r_I`` of that bootstrap against ``lambda_BS*`` on the
+    there.  ``r_j`` / ``r_I`` of that bootstrap against ``lambda_bs*`` on the
     archived geometry, ``dl_i``, ``dq0`` at the row radius, ``dq95``, the
     flux-range change; ``passed``: every entry of ``gates`` (``r_j``,
     ``r_I``, ``|dl_i|``, ``|dq0|`` at the same loop tolerances, each with

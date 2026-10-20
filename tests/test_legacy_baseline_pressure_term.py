@@ -1,11 +1,11 @@
 """The legacy baseline archives the p'G of its OWN archived state as
-``j_pressure`` (review of #78, B2; owner decision: the schema's "p'G of the
+``jphi_pd`` (review of #78, B2; owner decision: the schema's "p'G of the
 archived state", consistent with the draws).
 
 Before, the legacy IMAS baseline archived the dd source's p'G (the reader's
-``Baseline.j_pressure``, on the dd's geometry and pressure) while every
+``Baseline.jphi_pd``, on the dd's geometry and pressure) while every
 legacy draw archived its own state's, so a sigma = 0 draw split
-``j_inductive`` / ``j_pressure`` differently from its baseline.
+``jphi_ind`` / ``jphi_pd`` differently from its baseline.
 
 ``generate_bouquet`` runs end to end on the mock solver of
 ``tests/test_draw_rejections.py``; the mock has no flux-surface geometry, so
@@ -28,22 +28,22 @@ _P_TM = 5.0e4 * _X ** 3            # the archived state's own p'G
 
 def _imas_like_baseline():
     return SimpleNamespace(
-        j_pressure=_P_DD, j_pressure_source=_P_DD,
+        jphi_pd=_P_DD, jphi_pd_source=_P_DD,
         current_split_convention=sc.SPLIT_PRESSURE_IN_INDUCTIVE)
 
 
 def test_the_legacy_method_hands_no_source_pressure_term_to_the_archive():
     bl = _imas_like_baseline()
     leg = _archive_baseline_split(bl, "legacy")
-    assert leg["j_pressure"] is None          # evaluated on the state
+    assert leg["jphi_pd"] is None          # evaluated on the state
     assert leg["inductive_includes_pressure"] is True
     # the dd's value is kept, under its own name, on the baseline
-    np.testing.assert_array_equal(bl.j_pressure_source, _P_DD)
+    np.testing.assert_array_equal(bl.jphi_pd_source, _P_DD)
     # engine and swb hand their solved state's own p'G through
     for m in ("engine", "swb"):
         np.testing.assert_array_equal(
-            _archive_baseline_split(bl, m)["j_pressure"], _P_DD)
-    sep = SimpleNamespace(j_pressure=_P_TM, current_split_convention=sc.
+            _archive_baseline_split(bl, m)["jphi_pd"], _P_DD)
+    sep = SimpleNamespace(jphi_pd=_P_TM, current_split_convention=sc.
                           SPLIT_PRESSURE_SEPARATE)
     assert _archive_baseline_split(sep, "engine")[
         "inductive_includes_pressure"] is False
@@ -66,10 +66,10 @@ def test_the_legacy_baseline_archives_its_own_states_pressure_term(
     groups = {}
     with h5py.File(f"{header}.h5", "r") as hf:
         def _grab(name, obj):
-            if isinstance(obj, h5py.Group) and "j_pressure" in obj:
-                groups[name] = (obj["j_pressure"][()],
-                                obj["j_inductive"][()]
-                                if "j_inductive" in obj else None,
+            if isinstance(obj, h5py.Group) and "jphi_pd" in obj:
+                groups[name] = (obj["jphi_pd"][()],
+                                obj["jphi_ind"][()]
+                                if "jphi_ind" in obj else None,
                                 sc.read_current_split_convention(obj))
         hf.visititems(_grab)
     bl = [k for k in groups if k.endswith("_baseline")]
@@ -78,7 +78,7 @@ def test_the_legacy_baseline_archives_its_own_states_pressure_term(
     np.testing.assert_array_equal(jp, _P_TM)       # the state's, not the dd's
     assert not np.array_equal(jp, _P_DD)
     assert conv == sc.SPLIT_PRESSURE_SEPARATE
-    # the archived inductive excludes the SAME p'G: j_phi - j_BS - P_TM
+    # the archived inductive excludes the SAME p'G: jphi_total - jphi_bs - P_TM
     Jb = 1.0e5 * (1 - _X)
     jphi = 1.0e6 * (1 - _X ** 2) + Jb
     np.testing.assert_allclose(jind, jphi - Jb - _P_TM, rtol=0, atol=1e-6)

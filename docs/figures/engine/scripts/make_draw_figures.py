@@ -120,7 +120,7 @@ def fig_draws(rows, sg="0.05"):
     if not srcs:
         print("no draw profiles")
         return
-    keys = [("j_phi", r"$\langle j_\phi\rangle$ [MA/m$^2$]", 1e-6),
+    keys = [("jphi_total", r"$\langle j_\phi\rangle$ [MA/m$^2$]", 1e-6),
             ("q", "q", 1.0), ("pressure", "p [kPa]", 1e-3)]
     fig, ax = plt.subplots(len(srcs), 3, figsize=(13, 3.7 * len(srcs)), squeeze=False)
     for r, s in enumerate(srcs):
@@ -134,7 +134,7 @@ def fig_draws(rows, sg="0.05"):
                 continue
             x = np.asarray(have[0]["profiles"][xk], float)
             Y = [np.interp(x, d["profiles"][xk], d["profiles"][k]) for d in have]
-            Yabs = np.abs(Y) if k in ("j_phi", "q") else np.asarray(Y)
+            Yabs = np.abs(Y) if k in ("jphi_total", "q") else np.asarray(Y)
             _band(a, x, np.asarray(Yabs) * f, W["blue"], f"all archived (n={len(have)})")
             ins = [y for y, d in zip(Yabs, have) if bool(d["flags"].get("in_spec", False))]
             if len(ins) >= 2:
@@ -143,7 +143,7 @@ def fig_draws(rows, sg="0.05"):
                 a.plot(x, np.asarray(ins[0]) * f, color=W["verm"], lw=1.4,
                        label="in spec (n=1)")
             if k in bl and xk in bl:
-                yb = np.abs(bl[k]) if k in ("j_phi", "q") else np.asarray(bl[k])
+                yb = np.abs(bl[k]) if k in ("jphi_total", "q") else np.asarray(bl[k])
                 a.plot(bl[xk], np.asarray(yb) * f, color=W["black"], ls="--", lw=1.4,
                        label="reconstruction")
             a.set(xlabel=r"$\psi_N$", ylabel=yl,
@@ -345,7 +345,7 @@ def fig_revip():
             for m in R["modes"]:
                 r = R["rows"][f"{m}|{o}"]
                 v.append(max(r[k]["max_abs_diff_of_magnitudes"] / max(r[k]["scale"], 1e-300)
-                             for k in ("bl_j_phi", "bl_j_BS", "bl_j_inductive", "eq_q")))
+                             for k in ("bl_jphi_total", "bl_jphi_bs", "bl_jphi_ind", "eq_q")))
             mx += v
             a.bar(np.arange(len(v)) + (i - 1) * 0.27, np.maximum(v, 1e-17), 0.27,
                   color=[W["verm"], W["green"], W["pink"]][i], label=f"{o} vs ip+_b0+")
@@ -364,7 +364,7 @@ def fig_revip():
     if E:
         a = ax[1]
         ors = [o for o in E if not o.startswith("_") and o != "ip+1_bt+1"]
-        ks = ("j_phi", "j_inductive", "j_BS", "l_i_rel")
+        ks = ("jphi_total", "jphi_ind", "jphi_bs", "l_i_rel")
         for j, k in enumerate(ks):
             v = [E[o].get(k, 0.0) for o in ors]
             xs = np.arange(len(ors)) + (j - 1.5) * 0.15

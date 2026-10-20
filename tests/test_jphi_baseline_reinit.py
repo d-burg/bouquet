@@ -259,7 +259,7 @@ def _run_block(stub, capsys=None, edge="pre_change", method=None):
                                     if edge == "pre_change" else None),
         initial_Ip_target=1.0e6,
         pressure_solve=1.0e4 * (1.0 - psi_N ** 2) + _P_EDGE,
-        input_j_phi=1.0e6 * (1.0 - psi_N ** 2),
+        jphi_total_input=1.0e6 * (1.0 - psi_N ** 2),
         jphi_diff=None,
         recon_lcfs_ref=None,
         _baseline_li3=0.65,

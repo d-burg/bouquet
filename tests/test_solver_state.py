@@ -253,14 +253,9 @@ def test_an_absent_stash_stays_absent_and_a_present_one_is_put_back():
     assert m._weak_coil_reg == [("F1A", 0.0, 1.0)]
 
 
-def test_setup_solver_enters_the_bounded_mode_once_before_any_solve(
-        monkeypatch, tmp_path):
-    """The real ``Bouquet.setup_solver`` (OpenFUSIONToolkit replaced by a
-    recording stand-in): the coil solve is put in the bounded mode ONCE,
-    after the VSC and the coil regularisation are installed (the bounds
-    array is sized by the virtual coils) and before the clean-equilibrium
-    snapshot and any solve, with no constraint (``None`` = +/-1e98); a second
-    ``setup_solver`` is a no-op."""
+def _real_setup_solver(monkeypatch, tmp_path, **solver):
+    """The real ``Bouquet.setup_solver`` on the D3D-like example, with
+    OpenFUSIONToolkit replaced by a recording stand-in: (bouquet, calls)."""
     import os
     import sys
     import types
@@ -309,7 +304,20 @@ def test_setup_solver_enters_the_bounded_mode_once_before_any_solve(
         profiles=os.path.join(ex, "D3Dlike_Hmode_baseline.peqdsk"),
         mesh=os.path.join(ex, "DIIID_mesh.h5"), n_draws=1,
         header=str(tmp_path / "bq"))
+    for k, v in solver.items():
+        setattr(b.config.solver, k, v)
     b.setup_solver()
+    return b, calls
+
+
+def test_setup_solver_enters_the_bounded_mode_once_before_any_solve(
+        monkeypatch, tmp_path):
+    """The real ``Bouquet.setup_solver``: the coil solve is put in the
+    bounded mode ONCE, after the VSC and the coil regularisation are
+    installed (the bounds array is sized by the virtual coils) and before
+    the clean-equilibrium snapshot and any solve, with no constraint
+    (``None`` = +/-1e98); a second ``setup_solver`` is a no-op."""
+    b, calls = _real_setup_solver(monkeypatch, tmp_path)
     names = [c if isinstance(c, str) else c[0] for c in calls]
     assert calls.count(("set_coil_bounds", None)) == 1
     assert names.count("set_coil_bounds") == 1
@@ -322,3 +330,10 @@ def test_setup_solver_enters_the_bounded_mode_once_before_any_solve(
     n = len(calls)
     b.setup_solver()
     assert len(calls) == n
+
+
+def test_setup_solver_sets_nl_tol_only_when_given(monkeypatch, tmp_path):
+    b, _ = _real_setup_solver(monkeypatch, tmp_path)
+    assert not hasattr(b.mygs.settings, "nl_tol")         # OpenFUSIONToolkit's default kept
+    b, _ = _real_setup_solver(monkeypatch, tmp_path / "tight", nl_tol=1e-8)
+    assert b.mygs.settings.nl_tol == 1e-8

@@ -189,7 +189,7 @@ gives one call for "g-file + profiles for every selected draw."
 kinetics/current profiles bundle; per-draw capture; on-demand + optional eager
 export; selection-aware (selected/all).
 
-**Out (v1):** `core_sources` beam/RF detail beyond the existing `j_NBI`/`j_RF`
+**Out (v1):** `core_sources` beam/RF detail beyond the existing `jphi_nbi`/`jphi_rf`
 carry-over; `pressure_fast` anisotropy round-trip; MSE / diagnostic synthetics;
 multi-time-slice IDS assembly (one IDS per draw per slice, as today); writing
 back into a live IMAS database (JSON/OMAS files only).

@@ -30,7 +30,7 @@ def _make_archive(path):
             g.attrs["l_i(3)"] = 0.84
             g.attrs["selected"] = (i == 0)          # only draw 0 in-spec
             g.create_dataset("psi_N", data=_PEQ)
-            g.create_dataset("j_phi", data=(1 + i) * np.ones_like(_PEQ))
+            g.create_dataset("jphi_total", data=(1 + i) * np.ones_like(_PEQ))
             g.create_dataset("n_e", data=np.linspace(5, 1, 20))
             g.create_dataset("eqdsk", data=np.void(raw))
             g.create_dataset("coil_currents", data=np.array([1.0e4, -1.0e4]))
@@ -54,12 +54,12 @@ class TestBundleExport:
         # profiles JSON is self-describing and carries the draw state
         doc = json.load(open(paths["profiles"]))
         assert doc["count"] == 0 and doc["scan_key"] == "0"
-        assert "j_phi" in doc["profiles"] and "psi_N" in doc["profiles"]
-        assert doc["units"]["j_phi"] == "A m^-2"
+        assert "jphi_total" in doc["profiles"] and "psi_N" in doc["profiles"]
+        assert doc["units"]["jphi_total"] == "A m^-2"
         assert doc["scalars"]["l_i(1)"] == 1.05
         assert doc["coil_currents_A"] == {"F9A": 1.0e4, "F9B": -1.0e4}
         assert "eq_fsa" in doc and "avg_inv_R2" in doc["eq_fsa"]
-        assert np.allclose(doc["profiles"]["j_phi"], 1.0)
+        assert np.allclose(doc["profiles"]["jphi_total"], 1.0)
 
     def test_scan_extract_honours_selection(self, tmp_path):
         arc = str(tmp_path / "run.h5"); _make_archive(arc)
@@ -73,9 +73,9 @@ class TestBundleExport:
                           selection="all")
         assert sorted(alld) == [0, 1]
         assert all("geqdsk" in v and "profiles" in v for v in alld.values())
-        # per-draw j_phi differs in the exported profiles (draws are distinct)
-        j0 = json.load(open(alld[0]["profiles"]))["profiles"]["j_phi"]
-        j1 = json.load(open(alld[1]["profiles"]))["profiles"]["j_phi"]
+        # per-draw jphi_total differs in the exported profiles (draws are distinct)
+        j0 = json.load(open(alld[0]["profiles"]))["profiles"]["jphi_total"]
+        j1 = json.load(open(alld[1]["profiles"]))["profiles"]["jphi_total"]
         assert not np.allclose(j0, j1)
 
     def test_pfile_skipped_when_absent(self, tmp_path):

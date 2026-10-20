@@ -4,8 +4,8 @@ Defect 1 of #35: `perturb_kinetic_equilibrium` assembled `pres_tmp` (thermal
 + p_fast + impurity + p_diff) and used it at every solve site EXCEPT the
 state anchor, which anchored at the thermal-only `pressure` argument.  The
 anchor was therefore a genuinely different equilibrium from the
-reconstruction that produced its own `input_j_phi` -- on a 27 kPa-p_fast
-case the archived j_phi integrated +4.1 % of Ip high on the anchor
+reconstruction that produced its own `jphi_total_input` -- on a 27 kPa-p_fast
+case the archived jphi_total integrated +4.1 % of Ip high on the anchor
 geometry, and the sigma=0 R2 invariant read 1058 % of its bar.  A fifth
 instance of the same class sat in `generate_bouquet`'s jBS-delta cache
 anchor.  Measured with the fix, the four p_fast demo archives collapse from

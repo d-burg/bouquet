@@ -142,13 +142,13 @@ def _run(tmp_path, monkeypatch, gs):
     Jb = 1.0e5 * (1 - _X)
     post = []
 
-    def _perturb(mygs, psi_N, pressure, ne, te, ni, ti, input_j_phi, *a,
+    def _perturb(mygs, psi_N, pressure, ne, te, ni, ti, jphi_total_input, *a,
                  **k):
-        diag = dict(j_BS=Jb, j_inductive=input_j_phi - Jb, j_BS_edge=None,
+        diag = dict(jphi_bs=Jb, jphi_ind=jphi_total_input - Jb, jphi_bs_edge=None,
                     jbs_loop=dict(enabled=True, converged=True),
                     _jbs_ctx=dict(kind="standard"), r2_ip_scale=None,
                     r2_f_ind=None, aux=None, proxy_bias_observed=None)
-        return ne, te, ni, ti, None, np.asarray(input_j_phi, float), diag
+        return ne, te, ni, ti, None, np.asarray(jphi_total_input, float), diag
 
     def _post_homotopy(mygs, ctx, settings, psi_N, psi_pad, Ip,
                        coil_guard=None):
@@ -166,7 +166,7 @@ def _run(tmp_path, monkeypatch, gs):
         gs, _X, 1, header, jphi, ne, te, 0.9 * ne, te,
         0.05 * ne, 0.05 * te, 0.05 * ne, 0.05 * te, 0.05 * jphi,
         0.4, 0.4, 0.25, 1.0e6, 0.8, 1.5 * np.ones(_N),
-        input_jinductive=jphi - Jb, baseline_j_BS=Jb, psi_N_kinetic=None,
+        jphi_ind_input=jphi - Jb, baseline_jphi_bs=Jb, psi_N_kinetic=None,
         diagnostic_plots=False, seed=3,
         jbs_loop=jbs_settings(_GC(), draw=True),
         homotopy_passes=[(0.05, 0.10), (0.01, 0.01)],

@@ -57,7 +57,7 @@ def test_distance_ids_uses_the_source_time(tmp_path, monkeypatch, t, li3):
                         lambda src: (1.0, np.zeros((4, 2))))
     b = SimpleNamespace(mygs=_GS(), config=SimpleNamespace(
         source=SimpleNamespace(ids_path=path, time=t)))
-    bl = SimpleNamespace(psi_N=psi, j_phi=1e6 * (1 - psi ** 2))
+    bl = SimpleNamespace(psi_N=psi, jphi_total=1e6 * (1 - psi ** 2))
     out = ME._distance_ids(b, bl, 1e-3)
     assert out["li3"]["input"] == pytest.approx(li3)
     assert out["slice"]["time_requested"] == t

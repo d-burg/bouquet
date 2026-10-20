@@ -402,9 +402,10 @@ def _store_slice(header, key, n_draws, tmp_path):
             g.attrs["val"] = float(c)
 
 
-def _slice_bouquet(tmp_path, monkeypatch, refuse_at):
-    """A Bouquet whose solver stages are stubbed: prepare_baseline raises for
-    the times in *refuse_at*; generate writes 5 draws through the writers."""
+def _slice_bouquet(tmp_path, monkeypatch, refuse_at, exc=None):
+    """A Bouquet whose solver stages are stubbed: prepare_baseline raises
+    *exc* (a closure refusal by default) for the times in *refuse_at*;
+    generate writes 5 draws through the writers."""
     from types import SimpleNamespace
     from bouquet.run import Bouquet
     b = Bouquet(_cfg(tmp_path))
@@ -415,7 +416,7 @@ def _slice_bouquet(tmp_path, monkeypatch, refuse_at):
 
     def prep():
         if state["t"] in refuse_at:
-            raise RuntimeError("closure gate: scale out of bounds")
+            raise exc or RuntimeError("closure gate: scale out of bounds")
         b.baseline = SimpleNamespace(l_i_target=1.0, Ip_target=1e6)
 
     monkeypatch.setattr(b, "prepare_baseline", prep)
@@ -450,6 +451,20 @@ def test_run_slices_raise_still_raises_but_the_refusal_is_on_disk(tmp_path, monk
         assert "closure gate" in hf["scan/2000"].attrs["refused_reason"]
     with pytest.raises(ValueError, match="on_refusal"):
         b.run_slices([1.0], on_refusal="skip")
+
+
+def test_an_ida_slice_never_simulated_is_not_attempted(tmp_path, monkeypatch):
+    """IdaTimeNotSimulated (the FUSE run stopped before the slice's steps) is
+    not a refusal: nothing archived, ``not_attempted`` in the summary, and
+    on_refusal="raise" carries on."""
+    from bouquet.io.imas import IdaTimeNotSimulated
+    b = _slice_bouquet(tmp_path, monkeypatch, refuse_at={2.0},
+                       exc=IdaTimeNotSimulated("never simulated"))
+    res = b.run_slices([1.0, 2.0, 3.0], on_refusal="raise")
+    assert "never simulated" in res[2000]["not_attempted"]
+    assert "refused" not in res[2000] and res[3000]["n_all"] == 5
+    with h5py.File(b.config.output_header + ".h5", "r") as hf:
+        assert sorted(hf["scan"]) == ["1000", "3000"]
 
 
 def test_run_slices_records_by_default_and_summarises(tmp_path, monkeypatch,

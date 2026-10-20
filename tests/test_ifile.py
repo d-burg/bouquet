@@ -1,5 +1,6 @@
 """OFT i-file archiving (GenerationConfig.write_ifile): storage, reader, snapshot-wrapped save."""
 import os
+import shutil
 import h5py
 import numpy as np
 
@@ -102,8 +103,8 @@ class _RecordingGS:
         _write_ifile(filename, kw["npsi"], 4, kw.get("lcfs_pressure", 0.0))
 
 
-def _write_ifile(path, npsi, ntheta, p_add):
-    """A Fortran sequential-unformatted i-file in OFT's layout."""
+def _write_ifile(path, npsi, ntheta, p_add, extra=()):
+    """A Fortran sequential-unformatted i-file in OFT's layout (+ ``extra`` records)."""
     import struct
 
     def rec(b):
@@ -115,6 +116,8 @@ def _write_ifile(path, npsi, ntheta, p_add):
         body += rec(np.asarray(col, "<f8").tobytes())
     for _ in range(2):
         body += rec(np.zeros(npsi * ntheta, "<f8").tobytes())
+    for col in extra:
+        body += rec(np.asarray(col, "<f8").tobytes())
     with open(path, "wb") as fh:
         fh.write(body)
 
@@ -144,6 +147,29 @@ def test_the_ifile_gets_the_gfiles_lcfs_pressure_and_pad(tmp_path):
             d = read_ifile(fh.read())
         assert (d["npsi"], d["ntheta"]) == (9, 4)
         np.testing.assert_allclose(d["p"], 1e4 * d["psi"] + p_sep)
+
+
+def test_the_extended_records_reach_the_save_and_the_reader(tmp_path):
+    from bouquet.utils import read_ifile, save_state_ifile
+    gs = _RecordingGS()
+    for on in (False, True):
+        gs.calls.clear()
+        _, rec = save_state_ifile(gs, str(tmp_path / f"{on}.ifile"), npsi=9, ntheta=4,
+                                  psi_pad=1e-3, p_sep=0.0, profile_derivs=on, psi_bounds=on)
+        kw = gs.calls[0][1]
+        assert (kw.get("profile_derivs"), kw.get("psi_bounds")) == ((True, True) if on else (None, None))
+        assert rec["ifile_profile_derivs"] is on and rec["ifile_psi_bounds"] is on
+        assert rec["ifile_axis_pack"] == 0.0 and "axis_pack" not in kw
+    gs.calls.clear()
+    _, rec = save_state_ifile(gs, str(tmp_path / "ax.ifile"), npsi=9, ntheta=4, psi_pad=1e-3,
+                              p_sep=0.0, axis_pack=1e-5)
+    assert gs.calls[0][1]["axis_pack"] == 1e-5 == rec["ifile_axis_pack"]
+    path = str(tmp_path / "ext.ifile")
+    _write_ifile(path, 9, 4, 0.0, extra=(np.full(9, 2.0), np.full(9, 3.0), (1.0, 0.0)))
+    d = read_ifile(open(path, "rb").read())
+    assert d["ffp"].tolist() == [2.0] * 9 and d["pp"].tolist() == [3.0] * 9
+    assert d["psi_bounds"].tolist() == [1.0, 0.0]
+    assert not {"ffp", "pp", "psi_bounds"} & set(read_ifile(open(str(tmp_path / "False.ifile"), "rb").read()))
 
 
 def test_a_failed_save_is_stamped_and_warned(tmp_path):
@@ -233,3 +259,190 @@ def test_generate_refuses_write_ifile_on_a_solver_without_save_ifile(tmp_path):
             0.9 * ne, te, 0.05 * ne, 0.05 * te, 0.05 * ne, 0.05 * te,
             0.05 * jphi, 0.4, 0.4, 0.25, 1.0e6, 0.8, 1.5 * np.ones(_N),
             diagnostic_plots=False, seed=3, write_ifile=True)
+
+
+
+def _ifile_gs(R, fail_from):
+    """The rejection tests' mock with a g-file save and an i-file save that
+    fails from call *fail_from* on (0: the baseline's)."""
+    class _GS(R._FakeGS):
+        n_ifile = 0
+
+        def save_eqdsk(self, filename, *a, **k):
+            shutil.copy(os.path.join(os.path.dirname(__file__), "data",
+                                     "g_synthetic.geqdsk"), filename)
+
+        def save_ifile(self, filename, *a, **k):
+            type(self).n_ifile += 1
+            if type(self).n_ifile > fail_from:
+                raise RuntimeError("trace failed")
+            with open(filename, "w") as fh:
+                fh.write("i")
+    return _GS
+
+
+def test_a_draw_whose_ifile_save_fails_is_rejected(tmp_path, monkeypatch):
+    """write_ifile hands the i-file on: a draw without one is not archived."""
+    import test_draw_rejections as R
+    monkeypatch.setattr(R, "_FakeGS", _ifile_gs(R, 1))
+    out, rej, header = R._run(tmp_path, monkeypatch, ["ok"], write_ifile=True)
+    assert [r["reason"] for r in rej] == ["ifile_save_failed"]
+    assert "trace failed" in rej[0]["message"] and out == []
+    assert R._draw_groups(header) == []
+
+
+def test_a_baseline_without_an_ifile_refuses_the_run(tmp_path, monkeypatch):
+    import pytest
+    import test_draw_rejections as R
+    monkeypatch.setattr(R, "_FakeGS", _ifile_gs(R, 0))
+    with pytest.raises(RuntimeError, match="baseline has no i-file: .*trace failed"):
+        R._run(tmp_path, monkeypatch, ["ok"], write_ifile=True)
+
+
+def test_compress_file_bytes_reaches_every_blob(tmp_path, monkeypatch):
+    import test_draw_rejections as R
+    monkeypatch.setattr(R, "_FakeGS", _ifile_gs(R, 9))
+    out, rej, header = R._run(tmp_path, monkeypatch, ["ok"], write_ifile=True,
+                              compress_file_bytes=True)
+    assert rej == [] and len(out) == 1
+    blobs = []
+    with h5py.File(header + ".h5", "r") as hf:
+        hf.visititems(lambda n, o: blobs.append((n.split("/")[-2], n.split("/")[-1],
+                                                 o.compression, o.dtype))
+                      if n.split("/")[-1] in ("eqdsk", "ifile") else None)
+    assert sorted(b[:2] for b in blobs) == [("0", "eqdsk"), ("0", "ifile"),
+                                            ("_baseline", "eqdsk"), ("_baseline", "ifile")]
+    assert all(c == "gzip" and t == np.uint8 for *_, c, t in blobs)
+
+
+def test_the_gfile_grid_reaches_every_save(tmp_path, monkeypatch):
+    import pytest
+    import test_draw_rejections as R
+    grids = []
+
+    class _GS(_ifile_gs(R, 9)):
+        def save_eqdsk(self, filename, *a, **k):
+            grids.append((k.get("nr"), k.get("nz")))
+            super().save_eqdsk(filename, *a, **k)
+    monkeypatch.setattr(R, "_FakeGS", _GS)
+    out, rej, _ = R._run(tmp_path, monkeypatch, ["ok"], write_ifile=True,
+                         eqdsk_nr=129, eqdsk_nz=193)
+    assert rej == [] and len(out) == 1
+    assert len(grids) == 2 and set(grids) == {(129, 193)}      # baseline + draw
+    with pytest.raises(ValueError, match="eqdsk_nr"):
+        GenerationConfig(eqdsk_nr=1)
+    assert GenerationConfig().eqdsk_nr == GenerationConfig().eqdsk_nz == 257
+
+
+class _State(dict):
+    """A copy_eq() snapshot that can save itself (TokaMaker_equilibrium.save_TokaMaker)."""
+    fail = False
+
+    def save_TokaMaker(self, path):
+        with open(path, "wb") as fh:
+            fh.write(b"STATE")
+        if self.fail:
+            raise RuntimeError("h5 write failed")
+
+
+def test_the_tokamaker_state_is_saved_beside_the_ifile(tmp_path):
+    from bouquet.utils import save_state_ifile
+
+    class _GS(_RecordingGS):
+        def copy_eq(self):
+            return _State()
+    kw = dict(npsi=9, ntheta=4, psi_pad=1e-3, p_sep=0.0)
+    path, rec = save_state_ifile(_GS(), str(tmp_path / "a.ifile"),
+                                 state_path=str(tmp_path / "a.tmk.h5"), **kw)
+    assert path and rec["tokamaker_state_written"]
+    assert open(tmp_path / "a.tmk.h5", "rb").read() == b"STATE"
+    _State.fail = True
+    try:
+        path, rec = save_state_ifile(_GS(), str(tmp_path / "b.ifile"),
+                                     state_path=str(tmp_path / "b.tmk.h5"), **kw)
+    finally:
+        _State.fail = False
+    assert path is None and not rec["ifile_written"] and not rec["tokamaker_state_written"]
+    assert "save_TokaMaker failed" in rec["ifile_error"]
+    assert not (tmp_path / "b.ifile").exists() and not (tmp_path / "b.tmk.h5").exists()
+
+
+def test_the_archived_state_rebuilds_the_files_and_they_can_be_dropped(tmp_path, monkeypatch):
+    import test_draw_rejections as R
+    from bouquet.filtering import drop_file_blobs
+
+    class _GS(_ifile_gs(R, 9)):
+        def copy_eq(self):
+            return _State(super().copy_eq())
+    monkeypatch.setattr(R, "_FakeGS", _GS)
+    out, rej, header = R._run(tmp_path, monkeypatch, ["ok"], write_ifile=True,
+                              store_tokamaker_state=True)
+    assert rej == [] and len(out) == 1 and not list(tmp_path.rglob("*.tmk.h5"))
+    ar = bq.BouquetArchive(header + ".h5")
+    d = ar[ar.scan_keys[0]][0]
+    assert d.tokamaker_state_bytes == b"STATE" and d.attrs["tokamaker_state_written"]
+    states = {}
+    with h5py.File(header + ".h5", "r") as hf:
+        hf.visititems(lambda n, o: states.update({n.split("/")[-2]: bytes(o[()])})
+                      if n.split("/")[-1] == "tokamaker_state" else None)
+    assert states == {"0": b"STATE", "_baseline": b"STATE"}
+
+    calls = []
+
+    class _Loader:
+        def replace_eq(self, source_file=None):
+            calls.append(open(source_file, "rb").read())
+
+        def save_ifile(self, filename, **kw):
+            calls.append(kw)
+
+        def save_eqdsk(self, filename, **kw):
+            calls.append(kw)
+            with open(filename, "wb") as fh:
+                fh.write(b"REBUILT")
+    d.rebuild_ifile(str(tmp_path / "re.ifile"), _Loader(), npsi=513)
+    assert calls[0] == b"STATE"
+    assert (calls[1]["npsi"], calls[1]["ntheta"]) == (513, 257)
+    assert calls[1]["lcfs_pad"] == d.attrs["ifile_lcfs_pad"]
+
+    eq_before = d.eqdsk_bytes
+    assert drop_file_blobs(header + ".h5") == 2                    # baseline + draw
+    d = bq.BouquetArchive(header + ".h5")[ar.scan_keys[0]][0]
+    assert d.ifile_bytes is None and d.eqdsk_bytes == eq_before
+    assert d.tokamaker_state_bytes == b"STATE"
+    # dropped g-files: eqdsk_bytes rebuilds one on the run's mesh (the process's solver)
+    import bouquet.utils as U
+    from bouquet.schema import EQDSK_DS
+    from types import SimpleNamespace
+    from bouquet.config import GenerationConfig
+    monkeypatch.setattr(U, "tokamaker_on_mesh", lambda mesh, order: _Loader())
+    monkeypatch.setattr(U, "load_config", lambda path, scan_key=None: SimpleNamespace(   # this toy run stores none
+        solver=SimpleNamespace(mesh_path="mesh.h5", order=3), generation=GenerationConfig()))
+    assert drop_file_blobs(header + ".h5", names=(EQDSK_DS,)) == 2
+    d = bq.BouquetArchive(header + ".h5")[ar.scan_keys[0]][0]
+    assert d.eqdsk_bytes == b"REBUILT" and calls[-2] == b"STATE"
+    assert (calls[-1]["nr"], calls[-1]["lcfs_pad"]) == (257, d.attrs["ifile_lcfs_pad"])
+
+
+def test_store_eqdsk_off_archives_the_state_and_no_gfile(tmp_path, monkeypatch):
+    import pytest
+    import test_draw_rejections as R
+
+    class _GS(_ifile_gs(R, 9)):
+        def copy_eq(self):
+            return _State(super().copy_eq())
+    monkeypatch.setattr(R, "_FakeGS", _GS)
+    out, rej, header = R._run(tmp_path, monkeypatch, ["ok"], write_ifile=True,
+                              store_tokamaker_state=True, store_eqdsk=False)
+    assert rej == [] and len(out) == 1
+    blobs = {}
+    with h5py.File(header + ".h5", "r") as hf:
+        hf.visititems(lambda n, o: blobs.setdefault(n.split("/")[-2], set()).add(n.split("/")[-1])
+                      if isinstance(o, h5py.Dataset) else None)
+    for g in ("0", "_baseline"):
+        assert "tokamaker_state" in blobs[g] and "eqdsk" not in blobs[g]
+    for kw in (dict(write_ifile=True, store_tokamaker_state=False),
+               dict(write_ifile=False, store_tokamaker_state=True)):
+        with pytest.raises(ValueError, match="store_tokamaker_state"):
+            GenerationConfig(store_eqdsk=False, **kw)
+

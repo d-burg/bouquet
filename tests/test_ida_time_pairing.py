@@ -22,8 +22,9 @@ import pytest
 h5py = pytest.importorskip("h5py")
 
 from bouquet.config import ImasSource
-from bouquet.io.imas import (IMAS_SINGLE_TIME_WINDOW_S, _check_replay_pairing,
-                             _hybrid_timing, match_ida_slice, read_imas_baseline)
+from bouquet.io.imas import (IMAS_SINGLE_TIME_WINDOW_S, IdaTimeNotSimulated,
+                             _check_replay_pairing, consistent_pairs, _hybrid_timing, match_ida_slice,
+                             read_imas_baseline)
 from _imas_geometry import eq_geometry, jtor_from_jtotal
 
 N = 33
@@ -277,7 +278,7 @@ def test_the_reader_reads_the_kinetics_at_ida_time_and_the_currents_at_time(file
     at_t = _read(ddp, cdf)
     at_ida = _read(ddp, cdf, ida_time=1.01)
     np.testing.assert_allclose(at_ida.ne, 1.3 * at_t.ne, rtol=1e-12)
-    for k in ("j_BS", "Ip_target"):
+    for k in ("jphi_bs", "Ip_target"):
         np.testing.assert_array_equal(getattr(at_ida, k), getattr(at_t, k))
     m = at_ida.li_metrics["ida_time_match"]
     assert m["ida_time_used"] == 1.01 and m["fuse_time_cp"] == 1.0
@@ -290,6 +291,70 @@ def test_the_reader_refuses_an_ida_time_off_the_ida_file(files):
     ddp, cdf = files
     with pytest.raises(ValueError, match="no IDA slice within"):
         _read(ddp, cdf, ida_time=1.3)
+
+
+def test_a_dd_step_the_run_never_simulated_is_not_attempted(files):
+    """A run that stopped early (time_grid.json reached < t1): the dd step paired
+    with the IDA time must be a simulated step, t0 < t <= reached (reached sits
+    1 us below the first step not completed), else IdaTimeNotSimulated, raised
+    before the timing refusals and only on ida_hybrid."""
+    ddp, cdf = files
+    with open(ddp.replace("dd_sim.json", "time_grid.json"), "w") as fh:
+        json.dump({"t0": 0.98, "t1": 1.1, "dt": 0.02, "reached": 1.04 - 1e-6}, fh)
+    _read(ddp, cdf, time=1.02, ida_time=1.01)
+    _read(ddp, cdf, time=1.0, ida_time=1.01)
+    for kw in (dict(time=1.04, ida_time=1.01), dict(time=1.06), dict(time=0.98, ida_time=1.0)):
+        with pytest.raises(IdaTimeNotSimulated, match="never simulated"):
+            _read(ddp, cdf, **kw)
+    _read(ddp, cdf, time=1.06, ks="fuse")              # FUSE kinetics: unchanged
+
+
+_GRID = {"t0": 0.98, "Nt": 6, "dt": 0.02, "reached": 1.08, "kinetic_source": "ida"}
+_ROWS = [(1.0, 0.99), (1.02, 1.01), (1.04, 1.01), (1.06, None), (1.08, 1.0), (1.1, 1.01)]
+
+
+def _replay(run_dir, grid=_GRID, rows=_ROWS, ida_file="/elsewhere/ida.cdf"):
+    (run_dir / "time_grid.json").write_text(json.dumps(grid))
+    (run_dir / "ida_provenance.json").write_text(json.dumps({
+        "ida_file": ida_file, "replay_pairing": [
+            {"t_sim": 0.98 + 0.02 * k, "ida_time": tau,
+             "outcome": "ida" if tau is not None else "fit_out_of_band"}
+            for k, (_, tau) in enumerate(rows, start=1)]}))
+    return str(run_dir / "ida_provenance.json")
+
+
+def test_consistent_pairs(tmp_path):
+    """Each slice a reached step replayed, with the nearest such step; t0 and the
+    steps past reached are out; a reached step without a row raises."""
+    prov = _replay(tmp_path)
+    got = consistent_pairs(prov)
+    assert list(got) == [0.99, 1.0, 1.01]
+    np.testing.assert_allclose(list(got.values()), [1.0, 1.08, 1.02])
+    assert consistent_pairs(prov, grid=dict(_GRID, reached=1.06)) == pytest.approx({0.99: 1.0, 1.01: 1.02})
+    assert consistent_pairs(prov, grid=dict(_GRID, kinetic_source="fit")) == {}
+    with pytest.raises(ValueError, match="no row"):
+        consistent_pairs(_replay(tmp_path, rows=_ROWS[:3]))
+
+
+def test_ida_fuse_runs_only_consistent_pairs(files):
+    """ida_timing='ida_fuse': (dd step, IDA slice read) must be a consistent pair
+    of the FUSE run, else not attempted; the window rule and a table naming
+    another IDA file are unchanged."""
+    ddp, cdf = files
+    import pathlib
+    _replay(pathlib.Path(ddp).parent)
+    fuse = dict(ida_timing="ida_fuse")
+    bl = _read(ddp, cdf, time=1.02, ida_time=1.01, **fuse)
+    assert bl.li_metrics["ida_time_match"]["consistent_pair"] == "checked"
+    _read(ddp, cdf, time=1.0, ida_time=0.9905, **fuse)    # reads the 0.99 slice
+    for kw in (dict(time=1.02, ida_time=0.99), dict(time=1.0)):   # 1.0 alone reads the 1.0 slice (pair: 1.08)
+        with pytest.raises(IdaTimeNotSimulated, match="not a consistent pair"):
+            _read(ddp, cdf, **kw, **fuse)
+    _read(ddp, cdf, time=1.02, ida_time=0.99, ida_timing="window")
+    _replay(pathlib.Path(ddp).parent, ida_file="/elsewhere/other.cdf")
+    with pytest.warns(UserWarning, match="names another IDA file"):
+        read_imas_baseline(ImasSource(ids_path=ddp, time=1.02, ida_time=0.99, ida_path=cdf,
+                                      impurity_Z=Z_IMP, **fuse), kinetic_source="ida_hybrid")
 
 
 def test_ida_time_outside_ida_hybrid_is_refused(files):

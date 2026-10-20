@@ -5,7 +5,7 @@ fragile innermost-surface point: it must (a) lift a collapsed axis point
 toward its neighbours, (b) leave everything beyond the +/-10-index transition
 window bit-untouched, (c) preserve a flat shelf exactly, and -- the reason it
 exists as a shared helper at all -- (d) give identical output for identical
-input regardless of caller, so the recon j_BS/j_inductive split and every
+input regardless of caller, so the recon jphi_bs/jphi_ind split and every
 per-draw spike stay sigma=0-consistent (the 2026-07 hollow-core/q0-offset bug
 was the recon applying this smoothing while the draw path did not).
 """
@@ -16,7 +16,7 @@ from bouquet.TokaMaker_interface import smooth_jbs_transition
 
 
 def _sauter_like_profile(npsi=129, axis_collapse=0.55):
-    """Sauter-hump-shaped j_BS with a collapsed first point (the SWB axis
+    """Sauter-hump-shaped jphi_bs with a collapsed first point (the SWB axis
     artifact: ~2x below its neighbours), core hump near psi_N~0.05 and an
     edge spike."""
     psi = np.linspace(0.0, 1.0, npsi)
@@ -53,7 +53,7 @@ def test_flat_shelf_preserved():
     j[:40] = 2.0e5                                            # exact flat shelf
     out = smooth_jbs_transition(j)
     # a flat shelf Gaussian-filters to itself: shelf values survive exactly
-    # (this is the isolate_edge_jBS+shelf recon configuration)
+    # (this is the isolate_edge_jbs+shelf recon configuration)
     np.testing.assert_allclose(out[:30], 2.0e5, rtol=1e-12)
 
 
@@ -136,7 +136,7 @@ def test_pchip_regrid_removes_staircase():
     (2) clamps to endpoint values outside the source range,
     (3) its derivative is dramatically smoother than the linear regrid's --
     the linear version's slope kinks at every kinetic knot are what Sauter
-    inherited as the stepped j_BS on a real weak-pedestal discharge."""
+    inherited as the stepped jphi_bs on a real weak-pedestal discharge."""
     from bouquet.utils import pchip_interp
     from scipy.interpolate import PchipInterpolator
 

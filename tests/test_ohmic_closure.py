@@ -1,4 +1,4 @@
-"""jBS_baseline_mode='ohmic': the FSA current measure and the workflow guard.
+"""jbs_baseline_mode='ohmic': the FSA current measure and the workflow guard.
 
 Solve-free coverage of the machinery the ohmic Ip closure is built on:
 
@@ -163,9 +163,9 @@ class TestClosureAlgebra:
 
     def test_zero_divisor_refusals(self):
         from bouquet.utils import close_ip
-        with pytest.raises(RuntimeError, match="j_BS integrates"):
+        with pytest.raises(RuntimeError, match="jphi_bs integrates"):
             close_ip("bootstrap", 1.2e6, 0.0, 1.0e6, 0.0, 1e5)
-        with pytest.raises(RuntimeError, match="j_inductive integrates"):
+        with pytest.raises(RuntimeError, match="jphi_ind integrates"):
             close_ip("ohmic", 1.2e6, 0.0, 0.0, 2e5, 1e5)
 
     def test_out_of_bounds_scale_refused(self):
@@ -355,7 +355,7 @@ class TestSawtoothBootstrapPredictor:
     def test_reduces_to_bootstrap_when_the_bootstrap_has_no_core(self):
         """The plan's central prediction, and what the REQUESTED reference
         makes the common case: the target axis current is the source's own
-        (j_ind0 + j_BS_src0 + j_fix0), so with no core bootstrap on either
+        (j_ind0 + jphi_bs_src0 + j_fix0), so with no core bootstrap on either
         side the axis row pins s_ohm = 1 exactly and the Ip row hands the
         whole deficit to s_bs -- i.e. close_ip('bootstrap'), at zero cost."""
         from bouquet.utils import close_ip, close_ip_q0
@@ -378,7 +378,7 @@ class TestQ0TargetUnrenormalisation:
     The anchor is a solve of the source total renormalised to Ip_target, so
     its q0 belongs to a current the source never claimed.  The target is that
     q0 mapped back onto the source's OWN current, to first order in
-    q0 ~ 1/j_phi(0).
+    q0 ~ 1/jphi_total(0).
     """
 
     def test_ratio_formula(self):
@@ -437,18 +437,18 @@ class _FakeBaseline:
     """Just enough of Baseline for the corrector: the scales, the profiles it
     reassembles, and the ip_closure record it refreshes."""
 
-    def __init__(self, ohm_scale, bs_scale, j_ind, j_BS, j_fixed, ip_closure):
+    def __init__(self, ohm_scale, bs_scale, j_ind, jphi_bs, j_fixed, ip_closure):
         self.ohm_scale = float(ohm_scale)
         self.bs_scale = float(bs_scale)
-        self.j_inductive = ohm_scale * j_ind
-        self.j_BS = bs_scale * j_BS
-        self.j_phi = self.j_inductive + self.j_BS + j_fixed
+        self.jphi_ind = ohm_scale * j_ind
+        self.jphi_bs = bs_scale * jphi_bs
+        self.jphi_total = self.jphi_ind + self.jphi_bs + j_fixed
         self.ip_closure = ip_closure
 
 
 class _FakeGS:
     """A solver whose q0 follows the SHIPPED first-order model exactly:
-    ``q0 = K / j_phi(0)`` at frozen geometry, read off the baseline's current
+    ``q0 = K / jphi_total(0)`` at frozen geometry, read off the baseline's current
     scales.  ``q0_override`` forces a value (a non-finite read, say)."""
 
     def __init__(self, bl, j_ind0, j_bs0, j_fix0, K, q0_override=None):
@@ -493,17 +493,17 @@ class TestQ0Corrector:
         w, c = Ip_fsa_weights(g, convention="jphi-linterp")
         psi = g["psi_N"]
         j_ind = 8.0e5 * (1.0 - psi) ** 1.5
-        j_BS = 3.0e5 * np.exp(-((psi - 0.9) / 0.06) ** 2) \
+        jphi_bs = 3.0e5 * np.exp(-((psi - 0.9) / 0.06) ** 2) \
             + 1.2e5 * (1.0 - psi) ** 2
         j_fix = 1.0e5 * (1.0 - psi) ** 3
         lin = lambda j: float(trapezoid(w * j, psi))
-        ip_ind, ip_bs_lin, ip_fix = lin(j_ind), lin(j_BS), lin(j_fix)
+        ip_ind, ip_bs_lin, ip_fix = lin(j_ind), lin(jphi_bs), lin(j_fix)
         if ip_bs is not None:
             # A3: a bootstrap that carries core current (j_bs0 != 0, so
             # close_ip_q0's determinant clears its floor) but ~none in the Ip
-            # measure -- a sign-changing j_BS whose net FSA integral cancels.
+            # measure -- a sign-changing jphi_bs whose net FSA integral cancels.
             ip_bs_lin = float(ip_bs)
-        j_ind0, j_bs0, j_fix0 = j_ind[0], j_BS[0], j_fix[0]
+        j_ind0, j_bs0, j_fix0 = j_ind[0], jphi_bs[0], j_fix[0]
         # Ip_t consistent with the predictor's own scales -> the manifold the
         # corrector steps along is the real one and Ip stays exact on it.
         Ip_t = ohm_scale * ip_ind + bs_scale * ip_bs_lin + ip_fix + c
@@ -518,13 +518,13 @@ class TestQ0Corrector:
                 dq0ds = -q0_now * dj0 / j0
                 q0_target = q0_now + (float(s_ohm_new) - ohm_scale) * dq0ds
         ip_closure = dict(closure_channel="sawtooth_bootstrap",
-                          f_BS_closed=abs(bs_scale * ip_bs_lin) / abs(Ip_t),
+                          f_bs_closed=abs(bs_scale * ip_bs_lin) / abs(Ip_t),
                           closure_limited=False, closure_limited_reasons=(),
                           ohm_scale=float(ohm_scale), bs_scale=float(bs_scale),
                           Ip_hybrid=float(Ip_t))
-        bl = _FakeBaseline(ohm_scale, bs_scale, j_ind, j_BS, j_fix, ip_closure)
+        bl = _FakeBaseline(ohm_scale, bs_scale, j_ind, jphi_bs, j_fix, ip_closure)
         state = dict(q0_target=float(q0_target), psi_q=psi.copy(),
-                     j_ind=j_ind, j_BS_swb=j_BS, j_fixed=j_fix,
+                     j_ind=j_ind, jphi_bs_swb=jphi_bs, j_fixed=j_fix,
                      j_ind0=float(j_ind0), j_bs0=float(j_bs0),
                      j_fix0=float(j_fix0), ip_ind=float(ip_ind),
                      ip_bs=float(ip_bs_lin), ohm_scale=float(ohm_scale),
@@ -558,11 +558,11 @@ class TestQ0Corrector:
         assert rec["bs_scale"] == pytest.approx(bl.bs_scale)
         assert rec["closure_limited"] is True
         assert any("bs_scale" in r for r in rec["closure_limited_reasons"])
-        # f_BS_closed follows the DELIVERED bootstrap, not the predictor's
-        assert rec["f_BS_closed"] == pytest.approx(
+        # f_bs_closed follows the DELIVERED bootstrap, not the predictor's
+        assert rec["f_bs_closed"] == pytest.approx(
             abs(bl.bs_scale * state["ip_bs"]) / state["Ip_t"])
         # ... and Ip_hybrid is re-taken on the reassembled profile
-        assert rec["Ip_hybrid"] == pytest.approx(ip_of(bl.j_phi), rel=1e-12)
+        assert rec["Ip_hybrid"] == pytest.approx(ip_of(bl.jphi_total), rel=1e-12)
         assert rec["Ip_hybrid"] == pytest.approx(
             state["sgn"] * state["Ip_t"], rel=1e-9)    # manifold keeps Ip
 
@@ -617,7 +617,7 @@ class TestQ0Corrector:
                                            ip_bs=0.0)
         nl, solves, rec = self._run(state, bl, gs, ip_of=ip_of)
         assert nl is None and solves == []
-        assert "j_BS integrates to ~0" in rec["sawtooth_verdict"]
+        assert "jphi_bs integrates to ~0" in rec["sawtooth_verdict"]
         assert rec["q0_residual"] == pytest.approx(0.5)
         assert rec["closure_limited"] is True
         assert bl.ohm_scale == state["ohm_scale"]
@@ -705,7 +705,7 @@ class TestWorkflowGuard:
                             output_header="t",
                             generation=GenerationConfig(
                                 reconstruction_engine="legacy"))
-        cfg.generation.jBS_baseline_mode = mode
+        cfg.generation.jbs_baseline_mode = mode
         cfg.generation.perturb_jind_in_anchor = True     # diff+C baseline rule
         cfg.generation.workflow = workflow
         return cfg
@@ -719,7 +719,7 @@ class TestWorkflowGuard:
             self._validate(self._config(mode))
 
     def test_unknown_mode_is_refused(self):
-        with pytest.raises(ValueError, match="jBS_baseline_mode"):
+        with pytest.raises(ValueError, match="jbs_baseline_mode"):
             self._validate(self._config("hybrid"))
 
     def test_ohmic_mode_refuses_generate(self):
@@ -794,8 +794,8 @@ class TestClosureHealth:
         h = self._h()          # raw sum 1.2e6 -> 0.0 % mismatch
         assert h["closure_limited"] is False and h["closure_limited_reasons"] == ()
         assert h["raw_components_ip_mismatch_pct"] == pytest.approx(0.0, abs=1e-9)
-        assert h["f_BS_unscaled"] == pytest.approx(2.5e5 / 1.2e6)
-        assert h["f_BS_closed"] == pytest.approx(0.9 * 2.5e5 / 1.2e6)
+        assert h["f_bs_unscaled"] == pytest.approx(2.5e5 / 1.2e6)
+        assert h["f_bs_closed"] == pytest.approx(0.9 * 2.5e5 / 1.2e6)
 
     def test_large_raw_mismatch_flags(self):
         h = self._h(ip_bs=4.5e5)                 # raw sum +16.7 % over Ip

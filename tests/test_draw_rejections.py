@@ -1,7 +1,7 @@
 """Rejected draws are visible: rejected, not archived, not counted.
 
 ``generate_bouquet`` runs end to end on a mock solver (no OFT) with the draw
-function mocked: every attempt is rejected by the self-consistent j_BS loop --
+function mocked: every attempt is rejected by the self-consistent jphi_bs loop --
 in the draw's own loop (``JBSNotConverged``), in its loop under the hard coil
 bounds (``CoilSaturated``) or in the post-homotopy stage (both kinds).  Each
 rejection must carry its OWN reason code in the per-attempt records and the
@@ -120,21 +120,21 @@ def _run(tmp_path, monkeypatch, outcomes, **kw):
     seq = list(outcomes)
     Jb = 1.0e5 * (1 - _X)
 
-    def _perturb(mygs, psi_N, pressure, ne, te, ni, ti, input_j_phi, *a,
+    def _perturb(mygs, psi_N, pressure, ne, te, ni, ti, jphi_total_input, *a,
                  **k):
         what = seq.pop(0)
         if what == "loop":
-            raise JBSNotConverged("self-consistent j_BS loop [draw anchor] "
+            raise JBSNotConverged("self-consistent jphi_bs loop [draw anchor] "
                                   "did not converge: pass ceiling 12",
                                   dict(n_passes=12))
         if what == "loop_sat":
-            raise TI.CoilSaturated("coil saturation after draw j_BS loop "
+            raise TI.CoilSaturated("coil saturation after draw jphi_bs loop "
                                    "solve 3", dict(stage="hard bounds"))
-        diag = dict(j_BS=Jb, j_inductive=input_j_phi - Jb, j_BS_edge=None,
+        diag = dict(jphi_bs=Jb, jphi_ind=jphi_total_input - Jb, jphi_bs_edge=None,
                     jbs_loop=dict(enabled=True, converged=True),
                     _jbs_ctx=dict(kind="standard"), r2_ip_scale=None,
                     r2_f_ind=None, aux=None, proxy_bias_observed=None)
-        return ne, te, ni, ti, None, np.asarray(input_j_phi, float), diag
+        return ne, te, ni, ti, None, np.asarray(jphi_total_input, float), diag
 
     def _post_homotopy(mygs, ctx, settings, psi_N, psi_pad, Ip,
                        coil_guard=None):
@@ -143,11 +143,11 @@ def _run(tmp_path, monkeypatch, outcomes, **kw):
             # an accepted draw: Redl on the delivered state is inside the
             # loop tolerances, no passes (the real function's early return)
             return (dict(check={}, accepted_without_passes=True),
-                    ctx.get("spike_used"), None, ctx.get("j_phi_request"))
+                    ctx.get("spike_used"), None, ctx.get("jphi_total_request"))
         if what == "ph_sat":
             raise TI.CoilSaturated("coil saturation after post-homotopy "
                                    "pass 1", dict(stage="post-homotopy"))
-        raise JBSNotConverged("self-consistent j_BS loop [draw "
+        raise JBSNotConverged("self-consistent jphi_bs loop [draw "
                               "post-homotopy] did not converge", {})
 
     # the post-homotopy stage is reached by the draws the mock accepts
@@ -164,7 +164,7 @@ def _run(tmp_path, monkeypatch, outcomes, **kw):
         _FakeGS(), _X, len(outcomes), header, jphi, ne, te, 0.9 * ne, te,
         0.05 * ne, 0.05 * te, 0.05 * ne, 0.05 * te, 0.05 * jphi,
         0.4, 0.4, 0.25, 1.0e6, 0.8, 1.5 * np.ones(_N),
-        input_jinductive=jphi - Jb, baseline_j_BS=Jb, psi_N_kinetic=None,
+        jphi_ind_input=jphi - Jb, baseline_jphi_bs=Jb, psi_N_kinetic=None,
         diagnostic_plots=False, seed=3, jbs_loop=jbs_settings(_GC(),
                                                               draw=True),
         homotopy_passes=[(0.05, 0.10), (0.01, 0.01)],

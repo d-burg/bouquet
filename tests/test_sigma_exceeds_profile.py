@@ -88,7 +88,7 @@ def test_resolve_uncertainty_reports_and_returns_the_same_sigmas(
     from bouquet.config import (BouquetConfig, ReconstructionSource,
                                 SolverConfig, UncertaintyConfig)
     j = 1e6 * (1 - X ** 2)
-    bl = Baseline(psi_N=X, j_phi=j, j_inductive=0.85 * j, j_BS=0.15 * j,
+    bl = Baseline(psi_N=X, jphi_total=j, jphi_ind=0.85 * j, jphi_bs=0.15 * j,
                   psi_N_kinetic=X, Zeff=np.full(X.size, 1.8),
                   Ip_target=1.2e6, l_i_target=0.85,
                   provenance="reconstruction", **PROF)

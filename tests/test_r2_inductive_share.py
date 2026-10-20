@@ -1,7 +1,7 @@
 r"""The inductive share ``f_ind`` and the algebra the sigma=0 bound rests on.
 
 Route R2 charges the whole :math:`I_p` miss to the inductive amplitude alone
-(``j_BS`` is held fixed, by design), so the scale ``s`` that
+(``jphi_bs`` is held fixed, by design), so the scale ``s`` that
 ``_AnchorIpRenorm.solve_scale`` returns is the Ip-space residual DIVIDED by the
 inductive share:
 
@@ -171,7 +171,7 @@ def test_f_ind_is_the_share_of_the_demand_the_inductive_profile_carries():
 
 
 def test_f_ind_scales_with_the_inductive_amplitude_not_the_bootstrap():
-    """Doubling j_ind doubles f_ind; changing j_other does not move it.
+    """Doubling j_ind doubles f_ind; changing jphi_other does not move it.
 
     The physical content: f_ind is the inductive SHARE, which is why the same
     Ip-space residual reads larger in s-space on a high-bootstrap archive.
@@ -182,7 +182,7 @@ def test_f_ind_scales_with_the_inductive_amplitude_not_the_bootstrap():
                           mode="exact")
     f1 = air.inductive_share(j_ind)
     assert air.inductive_share(2.0 * j_ind) == pytest.approx(2.0 * f1, rel=1e-12)
-    # j_other is not an argument at all -- state the contract explicitly so a
+    # jphi_other is not an argument at all -- state the contract explicitly so a
     # future signature change that starts consuming it fails here.
     assert air.inductive_share(j_ind) == pytest.approx(f1, rel=0, abs=0)
 
@@ -202,7 +202,7 @@ def test_low_inductive_share_inflates_s_for_the_same_residual():
         j_ind, j_oth = _split(psi_N, ind_frac=frac)
         air = _AnchorIpRenorm(_StubGS(Ip=Ip_target), psi_N, j_ind + j_oth,
                               Ip_target, 1e-3, mode="exact")
-        # Trim j_other by a flat offset until the split carries exactly
+        # Trim jphi_other by a flat offset until the split carries exactly
         # demand + resid_target.  The measure is affine, so the offset is
         # closed-form; nothing about j_ind (hence f_ind) moves.
         total = j_ind + j_oth

@@ -13,10 +13,10 @@ from test_sigma0_identity_stages import toy  # noqa: F401  (fixture)
                                 TI.generate_bouquet,
                                 TI.reconstruct_equilibrium])
 def test_a_mistyped_keyword_raises_at_the_call(fn):
-    with pytest.raises(TypeError, match="isolate_edge_jbs|unexpected"):
+    with pytest.raises(TypeError, match="isolate_edge_jBS|unexpected"):
         fn(None, None, None, None, None, None, None, None, None, None,
            None, None, None, None, None, None, None, None, None, None,
-           None, None, None, None, None, isolate_edge_jbs=True)
+           None, None, None, None, None, isolate_edge_jBS=True)
 
 
 def test_the_options_reach_every_solve_with_bootstrap_call(toy, monkeypatch):
@@ -44,9 +44,9 @@ def test_the_options_reach_every_solve_with_bootstrap_call(toy, monkeypatch):
     d = TI.perturb_kinetic_equilibrium(
         toy, _X, _EC * (_NE * _TE + _NI * _TI), _NE, _TE, _NI, _TI,
         req, z, z, z, z, z, 0.5, 0.4, 0.25, _IP, _li(toy.achieved), _ZEFF,
-        _N, input_jinductive=0.6 * req, l_i_tolerance=0.05, psi_pad=_PAD,
-        constrain_sawteeth=False, recalculate_j_BS=True,
-        isolate_edge_jBS=False, scale_jBS=1.0, floor_j_BS=False,
+        _N, jphi_ind_input=0.6 * req, l_i_tolerance=0.05, psi_pad=_PAD,
+        constrain_sawteeth=False, recalculate_jbs=True,
+        isolate_edge_jbs=False, scale_jbs=1.0, floor_jbs=False,
         max_proxy_draws=5, p_thresh=0.05, rng=make_rng(7),
         bootstrap_kwargs=bk)[6]
     assert seen and all(k.get("iterations") == 3 for k in seen)

@@ -306,6 +306,29 @@ class TestTurnsConventionIsCheckedAgainstTheMesh:
             by = self._run(spec, sets={"F1A": {"net_turns": 58.0}})
         assert by["F1A"]["target"] == 0.0
 
+    def test_load_mesh_puts_the_device_turn_table_coils_in_ampere_turns(self, monkeypatch):
+        """OFT #268's DIII-D mesh carries the F-coil turns (58 / 55): load_mesh folds
+        them into the current (nturns 1, the shipped convention, so the factor is
+        confirmed again); the E coils keep the mesh's turns; another device's mesh
+        is untouched."""
+        import sys
+        import types
+        from bouquet.devices import get_device
+        from bouquet.utils import load_mesh
+        d3d = get_device("DIII-D")
+        coils = {n: {"coil_set": n, "nturns": 58.0} for n in d3d.coil_signature if n[0] == "F"}
+        coils.update({f"{e}_{i}": {"coil_set": e, "nturns": 3.05} for e in ("ECOILA", "ECOILB")
+                      for i in range(20)})
+        other = {"PF1": {"coil_set": "PF1", "nturns": 40.0}}
+        me = types.ModuleType("OpenFUSIONToolkit.TokaMaker.meshing")
+        me.load_gs_mesh = lambda path: (None, None, None, {k: dict(v) for k, v in
+                                        (coils if path == "d3d" else other).items()}, {})
+        monkeypatch.setitem(sys.modules, "OpenFUSIONToolkit.TokaMaker.meshing", me)
+        c = load_mesh("d3d")[3]
+        assert all(c[n]["nturns"] == 1.0 for n in d3d.turns)
+        assert c["ECOILA_0"]["nturns"] == 3.05
+        assert load_mesh("other")[3]["PF1"]["nturns"] == 40.0
+
     def test_a_mesh_that_cannot_report_net_turns_is_unconfirmed(self):
         spec = coil_reg_from_measured({"F1A": 1000.0}, **D3D)
         with pytest.warns(UserWarning, match="does not report net_turns"):

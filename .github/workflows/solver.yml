@@ -9,9 +9,10 @@ name: tests (solver / comprehensive)
 # pre-merge step -- run `pytest -m solver` (locally or on a box with the OFT
 # fork built) and note the result in the PR before merging.  See docs/CI.md.
 #
-# It needs the OFT fork built (the jphi-linterp Ip fixes the solver tests
-# depend on) + the scientific Python env.  When run on a self-hosted runner,
-# set the repo variable OFT_PYTHONPATH to the OFT python dir; otherwise the
+# It needs OFT built from StuartBenjamin/OpenFUSIONToolkit branch LCFS_grid_pack
+# (open OpenFUSIONToolkit PR #365; the swb path needs its internal bootstrap
+# solve) + the scientific Python env.  When run on a self-hosted runner, set
+# the repo variable OFT_PYTHONPATH to that build's python dir; otherwise the
 # test falls back to a sibling OpenFUSIONToolkit/ checkout.
 #
 # FUTURE (once OFT is on PyPI with the Ip fixes merged upstream): switch
@@ -30,7 +31,7 @@ jobs:
     runs-on: [self-hosted, feynman]
     timeout-minutes: 60
     env:
-      # Path to the OFT fork's python on feynman (build_release/python).
+      # Path to the LCFS_grid_pack OFT build's python on feynman (build_release/python).
       # The solver tests also fall back to a sibling OpenFUSIONToolkit checkout.
       OFT_PYTHONPATH: ${{ vars.OFT_PYTHONPATH }}
     steps:

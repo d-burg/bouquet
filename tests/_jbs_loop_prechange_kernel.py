@@ -85,7 +85,7 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         settings' own).
     init_source : str or None
         What ``jbs0`` actually is, in words, recorded as
-        ``record["init_source"]`` (e.g. a draw's "evaluate_jBS on the draw's
+        ``record["init_source"]`` (e.g. a draw's "evaluate_jbs on the draw's
         anchor equilibrium with the draw's own perturbed kinetics").  Record
         only: the fixed point does not depend on the initial iterate.
     max_passes : int or None
@@ -122,8 +122,8 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         criteria=dict(r_j=True, r_I=True, dl_i=bool(gate_li),
                       dq0=bool(gate_q0)),
         n_passes=0, converged=False, stop_reason=None,
-        omega=[], r_j=[], r_I=[], dl_i=[], dq0=[], I_BS=[], I_BS_used=[],
-        jBS_peak=[], jBS_peak_psiN=[], li=[], q0=[], pass_ok=[],
+        omega=[], r_j=[], r_I=[], dl_i=[], dq0=[], I_BS=[], I_bs_used=[],
+        jbs_peak=[], jbs_peak_psiN=[], li=[], q0=[], pass_ok=[],
         wall_s=None,
         relax_current=(beta if takes_relax else None),
         current_relaxation=(
@@ -146,13 +146,13 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
     if track_solved:
         rec.update(
             residual_definition=RESIDUAL_SOLVED_DEFINITION,
-            r_j_iterate=[], r_I_iterate=[], I_BS_used_iterate=[],
+            r_j_iterate=[], r_I_iterate=[], I_bs_used_iterate=[],
             bootstrap_blended=[])
     try:
         from bouquet.physics import EVALUATE_JBS_VERSION
-        rec["evaluate_jBS_version"] = EVALUATE_JBS_VERSION
+        rec["evaluate_jbs_version"] = EVALUATE_JBS_VERSION
     except Exception:
-        rec["evaluate_jBS_version"] = None
+        rec["evaluate_jbs_version"] = None
     rec["oft_build"] = oft_build_info()
 
     def _nonfinite(k, what, arr, grid):
@@ -166,7 +166,7 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         where = (f"index {i}" + ("" if psi is None else f", psi_N={psi:.6g}")
                  + f"; {int(bad.sum())} of {bad.size} node(s)")
         when = "before pass 1" if k < 0 else f"on pass {k + 1}/{K}"
-        msg = (f"self-consistent j_BS loop"
+        msg = (f"self-consistent jphi_bs loop"
                f"{(' [' + label + ']') if label else ''}: {what} is "
                f"non-finite {when} ({where}) -- refusing to blend it into "
                "the next iterate or hand it to a GS solve")
@@ -240,9 +240,9 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         rec["dl_i"].append(dl_i)
         rec["dq0"].append(dq0)
         rec["I_BS"].append(res["I_BS"])
-        rec["I_BS_used"].append(res["I_BS_used"])
-        rec["jBS_peak"].append(res["jBS_peak"])
-        rec["jBS_peak_psiN"].append(res["jBS_peak_psiN"])
+        rec["I_bs_used"].append(res["I_bs_used"])
+        rec["jbs_peak"].append(res["jbs_peak"])
+        rec["jbs_peak_psiN"].append(res["jbs_peak_psiN"])
         rec["li"].append(li_new)
         rec["q0"].append(q0_new)
         rec["pass_ok"].append(ok)
@@ -260,7 +260,7 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
         if track_solved:
             rec["r_j_iterate"].append(res_it["r_j"])
             rec["r_I_iterate"].append(res_it["r_I"])
-            rec["I_BS_used_iterate"].append(res_it["I_BS_used"])
+            rec["I_bs_used_iterate"].append(res_it["I_bs_used"])
             rec["bootstrap_blended"].append(_bs_blended)
         rec["n_passes"] = k + 1
         entry = dict(k=k, ok=ok, dl_i=dl_i, dq0=dq0,
@@ -366,7 +366,7 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
                J_final=(None if J is None else np.asarray(J, dtype=float)),
                meas_final=meas, converged=bool(rec["converged"]), record=rec)
     if not rec["converged"]:
-        msg = (f"self-consistent j_BS loop{(' [' + label + ']') if label else ''}"
+        msg = (f"self-consistent jphi_bs loop{(' [' + label + ']') if label else ''}"
                f" did not converge: {rec['stop_reason']}; residual history "
                f"r_j={_fmt_hist(rec['r_j'])} r_I={_fmt_hist(rec['r_I'])}"
                + ("" if not gate_li else f" dl_i={_fmt_hist(rec['dl_i'])}")

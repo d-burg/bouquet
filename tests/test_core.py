@@ -211,7 +211,7 @@ class TestHDF5RoundTrip:
         store_baseline_profiles(
             header, psi_N,
             ne=ones, te=ones * 2, ni=ones * 3, ti=ones * 4,
-            pressure=ones * 5, j_phi=ones * 6,
+            pressure=ones * 5, jphi_total=ones * 6,
             sigma_ne=ones * 0.1, sigma_te=ones * 0.2,
             sigma_ni=ones * 0.3, sigma_ti=ones * 0.4,
             sigma_jphi=ones * 0.5,
@@ -235,7 +235,7 @@ class TestHDF5RoundTrip:
 
         store_equilibrium(
             header, count=0, eqdsk_filepath=eqdsk_path,
-            psi_N=psi_N, j_phi=ones, j_BS=ones, j_inductive=ones,
+            psi_N=psi_N, jphi_total=ones, jphi_bs=ones, jphi_ind=ones,
             n_e=ones, T_e=ones, n_i=ones, T_i=ones, w_ExB=ones,
             li1=0.5, li3=0.7,
         )
@@ -263,7 +263,7 @@ class TestHDF5RoundTrip:
         for i in range(3):
             store_equilibrium(
                 header, count=i, eqdsk_filepath=eqdsk_path,
-                psi_N=psi_N, j_phi=ones, j_BS=ones, j_inductive=ones,
+                psi_N=psi_N, jphi_total=ones, jphi_bs=ones, jphi_ind=ones,
                 n_e=ones, T_e=ones, n_i=ones, T_i=ones, w_ExB=ones,
                 li1=0.5, li3=0.7,
             )

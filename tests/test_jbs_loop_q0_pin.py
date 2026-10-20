@@ -59,11 +59,11 @@ def test_the_flag_defaults_off_and_is_validated_as_a_bool():
 #  flag OFF: the kernel without the pin, bit for bit
 # ---------------------------------------------------------------------------
 _PRE_KEYS = sorted([
-    "I_BS", "I_BS_used", "converged", "criteria", "current_blended",
+    "I_BS", "I_bs_used", "converged", "criteria", "current_blended",
     "current_gap", "current_relaxation", "current_residual_unrelaxed",
     "current_residual_unrelaxed_definition", "dl_i", "dq0", "enabled",
-    "evaluate_jBS_version", "final", "grid", "init", "init_source",
-    "jBS_peak", "jBS_peak_psiN", "jbs_converged", "label", "li", "n_passes",
+    "evaluate_jbs_version", "final", "grid", "init", "init_source",
+    "jbs_peak", "jbs_peak_psiN", "jbs_converged", "label", "li", "n_passes",
     "oft_build", "omega", "omega_halved_at_pass", "pass_ok", "q0", "r_I",
     "r_j", "relax_current", "relax_halve_on", "stop_reason", "tolerances",
     "wall_s"])
@@ -72,7 +72,7 @@ _PRE_FINAL = sorted(["I_BS", "current_gap", "current_residual_unrelaxed",
 #: what a loop that relaxes the current at beta < 1 adds since 2026-10-06
 #: (r_j / r_I measured against the bootstrap the pass SOLVED; the iterate
 #: residual kept beside it) -- the two-state reference runs at beta = 0.7
-_SOLVED_KEYS = ["I_BS_used_iterate", "bootstrap_blended",
+_SOLVED_KEYS = ["I_bs_used_iterate", "bootstrap_blended",
                 "r_I_iterate", "r_j_iterate", "residual_definition"]
 _SOLVED_FINAL = ["r_I_iterate", "r_j_iterate"]
 
@@ -352,7 +352,7 @@ def test_flag_on_unreachable_target_is_flagged_never_delivered_as_converged():
     rec = out["record"]
     assert rec["jbs_converged"] is False and rec["n_passes"] == 8
     why = flag_reason(rec)
-    assert why.startswith("j_BS loop: did not converge")
+    assert why.startswith("jphi_bs loop: did not converge")
     assert "q0-q0_target=4.00e-01" in why and "q0_tol 1.00e-02" in why
 
 
@@ -369,7 +369,7 @@ def test_the_legacy_path_never_reads_the_flag():
     assert "jbs_loop_q0_corrector" not in legacy_src
     ohmic = loop_src.split("# ================= ohmic", 1)[1]
     assert "jbs_loop_q0_corrector" in ohmic
-    assert "_ohmic_close(\n                        _anchor, j_BS_swb, ratio)" \
+    assert "_ohmic_close(\n                        _anchor, jphi_bs_swb, ratio)" \
         in legacy_src
     for fn in (Bouquet._close_ip_q0_corrector,
                Bouquet._close_ip_structured_corrector,
@@ -463,15 +463,15 @@ def _mse_stage(monkeypatch, q0_target, q0_floor=None, on_fail="raise"):
                     mse_required=False, soft=False, psi_geom=X, basis=None,
                     free=np.array([True, True]), x_pred=[0.0, 0.0],
                     F_pred=0.0, j_ind=j_ind * (row - jbs0[0]) / j_ind[0],
-                    j_BS_swb=jbs0, j_fixed=np.zeros_like(X), w_lin=W,
+                    jphi_bs_swb=jbs0, j_fixed=np.zeros_like(X), w_lin=W,
                     c_signed=0.0, Ip_signed=IP, weights=None,
                     ip_ind=0.7 * IP, ip_bs=0.3 * IP, ip_fix=0.0,
                     axis=dict(j_ref0=row))
 
     cur = {"st": mkstate(row0)}
     eq = _Eq(cur["st"]["j_ind"] + jbs0)
-    bl = SimpleNamespace(j_phi=eq.j.copy(), j_BS=jbs0.copy(),
-                         j_inductive=j_ind.copy(), jBS_diff=None,
+    bl = SimpleNamespace(jphi_total=eq.j.copy(), jphi_bs=jbs0.copy(),
+                         jphi_ind=j_ind.copy(), jphi_bs_diff=None,
                          jphi_diff=None, ohm_scale=1.0, bs_scale=1.0,
                          ip_closure=dict(closure_limited=False,
                                          closure_limited_reasons=()))

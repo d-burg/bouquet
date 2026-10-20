@@ -222,8 +222,8 @@ class TestIpIsExactByConstruction:
         assert closed == pytest.approx(Ip_s, rel=1e-12)
         h = closure_health(out["ohm_scale_eff"], out["bs_scale_eff"], Ip_s, c,
                            lin(j_ind), lin(j_bs), lin(j_fix))
-        assert set(h) >= {"closure_limited", "f_BS_closed", "f_BS_unscaled"}
-        assert h["f_BS_closed"] == pytest.approx(
+        assert set(h) >= {"closure_limited", "f_bs_closed", "f_bs_unscaled"}
+        assert h["f_bs_closed"] == pytest.approx(
             abs(lin(out["s_bs"] * j_bs)) / abs(Ip_s), rel=1e-12)
 
     def test_axis_row_is_matched_exactly(self):
@@ -312,7 +312,7 @@ class TestItIsTheNormMinimiser:
                                    weights=STRUCTURED_WEIGHTS_UNIFORM)
         # innermost coefficient: the physics prior lets j_ind move LESS
         assert abs(phys["a"][0]) < abs(unif["a"][0])
-        # outermost coefficient: the physics prior lets j_BS move LESS
+        # outermost coefficient: the physics prior lets jphi_bs move LESS
         assert abs(phys["b"][-1]) < abs(unif["b"][-1])
 
 
@@ -437,7 +437,7 @@ class TestKKTScaling:
     @pytest.mark.parametrize("ratio", [1.0, 1.0e4, 1.0e10])
     def test_genuinely_degenerate_rows_are_still_refused_at_any_range(self,
                                                                       ratio):
-        """The case the refusal is FOR: j_BS == j_ind makes the Ip row and the
+        """The case the refusal is FOR: jphi_bs == j_ind makes the Ip row and the
         axis row read the same combination.  A wide prior must not rescue it
         and a narrow one must not be needed to catch it."""
         psi, w, c, j_ind, j_bs, j_fix, lin, Ip_s = _parts()
@@ -489,7 +489,7 @@ class TestRefusals:
             close_ip_structured(psi, w, c, 6.0 * raw, j_ind, j_bs, j_fix)
 
     def test_refuses_a_degenerate_constraint_pair(self):
-        """Ip row and axis row proportional: with j_BS == j_ind the two rows
+        """Ip row and axis row proportional: with jphi_bs == j_ind the two rows
         both read 'move the same combination', and no (Ip, q0) split exists."""
         psi, w, c, j_ind, j_bs, j_fix, lin, Ip_s = _parts()
         j2 = j_ind.copy()
@@ -500,8 +500,8 @@ class TestRefusals:
                                 weights=dict(name="u", ind=(1.0,), bs=(1.0,)))
 
     def test_refuses_a_constraint_row_the_free_coefficients_cannot_move(self):
-        """j_BS carries no current and only the bs coefficient is free: the Ip
-        row is identically zero.  This is close_ip's 'j_BS integrates to ~0'
+        """jphi_bs carries no current and only the bs coefficient is free: the Ip
+        row is identically zero.  This is close_ip's 'jphi_bs integrates to ~0'
         refusal, reached through the structured machinery."""
         psi, w, c, j_ind, j_bs, j_fix, lin, Ip_s = _parts()
         with pytest.raises(RuntimeError, match="identically zero"):
@@ -605,7 +605,7 @@ class TestWorkflowWhitelists:
                             output_header="t",
                             generation=GenerationConfig(
                                 reconstruction_engine="legacy"))
-        cfg.generation.jBS_baseline_mode = "ohmic"
+        cfg.generation.jbs_baseline_mode = "ohmic"
         cfg.generation.perturb_jind_in_anchor = True
         cfg.generation.workflow = "custom"      # downgrade baseline-only refusal
         cfg.generation.closure_channel = channel
@@ -788,7 +788,7 @@ class TestIpRoundtripGate:
     def test_closure_health_flags_a_non_finite_input(self, kw):
         """Same hole, same shape: every test in closure_health is
         ``abs(x) > threshold``, so a NaN scale gave closure_limited=False with
-        f_BS_closed=nan and an EMPTY reason tuple."""
+        f_bs_closed=nan and an EMPTY reason tuple."""
         from bouquet.utils import closure_health
 
         base = dict(ohm_scale=1.0, bs_scale=1.0, Ip_target_signed=self.IP,

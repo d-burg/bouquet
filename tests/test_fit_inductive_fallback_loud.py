@@ -25,9 +25,9 @@ _PSI = np.linspace(0.0, 1.0, 121)
 
 
 def _profiles():
-    j_BS = 3.0e5 * np.exp(-0.5 * ((_PSI - 0.94) / 0.025) ** 2)
+    jphi_bs = 3.0e5 * np.exp(-0.5 * ((_PSI - 0.94) / 0.025) ** 2)
     j_ind = 1.2e6 * (1.0 - _PSI ** 1.6) ** 1.3
-    return j_ind + j_BS, j_BS
+    return j_ind + jphi_bs, jphi_bs
 
 
 def _proxy(mygs, j, psi_pad, x=None, coord="psi_n"):
@@ -42,12 +42,12 @@ def _run(fn, target, rescale, monkeypatch, proxy=_proxy):
     jtor, jbs = _profiles()
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        out = fn(None, jtor, jbs, _PSI, 1e-3, target, rescale_j_BS=rescale)
+        out = fn(None, jtor, jbs, _PSI, 1e-3, target, rescale_jbs=rescale)
     return out, buf.getvalue()
 
 
 def _assert_bit_identical(new, old):
-    for k in ("j_inductive_fit", "j_phi_fit", "j_BS_used"):
+    for k in ("jphi_ind_fit", "jphi_total_fit", "jphi_bs_used"):
         np.testing.assert_array_equal(new[k], old[k])
     for k in ("fit_li", "ind_scale", "bs_scale"):
         assert new[k] == old[k] or (np.isnan(new[k]) and np.isnan(old[k])), k
@@ -144,7 +144,7 @@ def _metrics_with_quality(bl, quality):
     in tests/test_corrective_iteration_package.py)."""
     result = {
         "Ip_tokamaker": 1.4e6,
-        "j_phi_fit": np.linspace(1e6, 0.0, 51),
+        "jphi_total_fit": np.linspace(1e6, 0.0, 51),
         "eqdsk_jtor": np.linspace(1e6, 0.0, 51),
         "quality": dict(quality),
     }

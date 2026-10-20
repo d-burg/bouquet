@@ -1,8 +1,9 @@
-# The bouquet HDF5 archive — schema v3
+# The bouquet HDF5 archive — schema v4
 
 Authoritative description of the on-disk layout written by bouquet ≥ 1.0.0
 (schema v2 first shipped in the 1.0.0 release; v3 adds the self-consistent
-bootstrap record — see [v2 → v3](#v2--v3-the-self-consistent-bootstrap-record)).
+bootstrap record — see [v2 → v3](#v2--v3-the-self-consistent-bootstrap-record);
+v4 renames the current components — see [v3 → v4](#v3--v4-the-current-component-names)).
 The single source of truth in code is [`bouquet/schema.py`](../bouquet/schema.py)
 (`SCHEMA_VERSION`, `PROFILE_UNITS`, fixed dataset names, `write_profile` /
 `find_bytes_dataset`); this document mirrors it for human readers. Prefer
@@ -14,7 +15,7 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
 ## Layout
 
 ```
-{header}.h5                            file attrs: schema_version (=3),
+{header}.h5                            file attrs: schema_version (=4),
 │                                      bouquet_version, created, updated
 ├── config_json                        JSON dump of the run BouquetConfig
 │                                      (root copy = most recent write; the
@@ -61,13 +62,17 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │                                  [refused_reason_superseded]
     ├── _baseline/                     written once per scan point
     │   ├── eqdsk, [pfile]             raw byte-perfect g-file / p-file
+    │   ├── [dd_sources/]              IMAS sources only: FUSE's core_sources at the dd step,
+    │   │                              summed (rho_tor_norm, Q_e, Q_i, Gamma_e; attrs P_net,
+    │   │                              P_rad, b0, r0, sources_json (each source's edge
+    │   │                              P_e / P_i [W]), skipped_json, rule)
     │   ├── psi_N, psi_N_kinetic         run grids, in the `profile_coord` coordinate
     │   ├── n_e, T_e, n_i, T_i         kinetic profiles
     │   ├── pressure[, pressure_thermal]
-    │   ├── j_phi[, j_BS, j_inductive] separated toroidal currents
-    │   ├── [j_NBI, j_RF, j_other, j_sawteeth]  held-fixed driven channels
+    │   ├── jphi_total[, jphi_bs, jphi_ind] separated toroidal currents
+    │   ├── [jphi_nbi, jphi_rf, jphi_other, jphi_saw]  held-fixed driven channels
     │   │                              (2026-10-09; as on each draw)
-    │   ├── [j_pressure]               the pressure-driven p'G, its own bucket
+    │   ├── [jphi_pd]               the pressure-driven p'G, its own bucket
     │   │                              (owner decision D2, 2026-10-09; with the
     │   │                              attr current_split_convention -- see
     │   │                              "The current split" below)
@@ -90,7 +95,7 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │              since 2026-10-06; utils.load_coil_solve_mode, read back
     │              and checked by load_config),
     │              [engine_resolved_defaults_json]   how the engine-dependent
-    │              settings (isolate_edge_jBS, perturb_jind_in_anchor) were
+    │              settings (isolate_edge_jbs, perturb_jind_in_anchor) were
     │              resolved: field -> {value, origin "resolved from
     │              engine=<x>" | "explicit"[, engine_validated]} (since
     │              2026-10-07; utils.load_engine_resolved_defaults),
@@ -122,7 +127,7 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │               swb_ip_rel_err_solve_A, swb_edge_taper_psi0,
     │               swb_jbs_convention, swb_jbs_conversion, swb_alpha*,
     │               swb_li_3_solve_A, coil_reg_target_*, swb_saw_*,
-    │               swb_j_saw, swb_jphi_saw]   solve_method="swb" baselines
+    │               jphi_saw_out, jphi_saw_input]   solve_method="swb" baselines
     │              [jbs_converged, jbs_n_passes, jbs_loop_json]
     │                                  ← the baseline's jbs_loop block (v3)
     │              [delivered_state_json]
@@ -138,30 +143,33 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
         │                              (integer; gaps = rejected draws)
         ├── eqdsk, [pfile]             raw bytes, fixed names
         ├── psi_N[, psi_N_kinetic]       run grids, in `profile_coord`
-        ├── j_phi, j_BS, j_inductive[, j_BS,edge]
-        ├── [j_pressure]               p'G, its own bucket (owner decision D2;
+        ├── jphi_total, jphi_bs, jphi_ind[, jphi_bs,edge]
+        ├── [jphi_pd]               p'G, its own bucket (owner decision D2;
         │                              with current_split_convention)
-        ├── [j_NBI, j_RF, j_other, j_sawteeth]  the held-fixed driven channels
+        ├── [jphi_nbi, jphi_rf, jphi_other, jphi_saw]  the held-fixed driven channels
         │                              (2026-10-09; engine: its own on the
-        │                              archived state, j_RF = rf + other;
+        │                              archived state, jphi_rf = rf + other;
         │                              legacy / swb: the baseline's) -- so
-        │                              j_phi = j_inductive + j_BS + j_NBI +
-        │                              j_RF + j_other (+ j_pressure); j_sawteeth
-        │                              is the sawteeth share OF j_other
+        │                              jphi_total = jphi_ind + jphi_bs + jphi_nbi +
+        │                              jphi_rf + jphi_other (+ jphi_pd); jphi_saw
+        │                              is the sawteeth share OF jphi_other
         ├── n_e, T_e, n_i, T_i, w_ExB[, Zeff]
         ├── [pressure, pressure_thermal]
         ├── [aux_<name>]               perturbed switchboard channels
         ├── [coil_currents, coil_names]
         ├── [perturbed_lcfs_ref], [x_points]
+        ├── [chi_perp_e, chi_perp_i]   IMAS sources only: power-balance chi_perp (m^2/s);
+        │                              attrs tau_E_th, tau_E, tau_98, H_98, tau_DS03, W_th,
+        │                              W_fast, P_net (also on _baseline; see below)
         ├── [eq_fsa/]                  live-equilibrium flux-surface averages
         │   ├── psi_N                  always ψ_N (subgroup; see below)
         │   ├── F, avg_inv_R, avg_inv_R2, avg_B2
         │   └── q, dV_dpsi, f_trap, B_avg
-        ├── [jB_parallel/]             engine draws (added 2026-10-06): the
+        ├── [jdotB/]             engine draws (added 2026-10-06): the
         │   ├── psi_N                  <j.B> parts of the archived split
-        │   ├── jB_inductive, jB_BS    (see "The current split of an
-        │   ├── jB_NBI, jB_RF          engine draw group" below)
-        │   └── kappa, j_pressure
+        │   ├── jdotB_ind, jdotB_bs    (see "The current split of an
+        │   ├── jdotB_nbi, jdotB_rf          engine draw group" below)
+        │   └── kappa, jphi_pd
         ├── [engine_json]              engine draw record as a string DATASET
         │                              when too large for an attribute
         └── attrs: l_i(1), l_i(3), count, profile_coord, homotopy_*, max_F_drift_pct,
@@ -174,8 +182,12 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
                    [jbs_converged, jbs_n_passes, jbs_loop_json]
                                        ← the draw's jbs_loop block (v3)
                    [engine_json, passes_draw_band]
-                                       ← engine draws only (added; see below)
-                   [passes_l_i_band, passes_beta_p_band, passes_q0_gate]
+                                       ← engine draws only (added; see below);
+                                         passes_draw_band also on swb draws
+                                         with a core-current check on
+                   [passes_l_i_band, passes_beta_p_band, passes_q0_gate,
+                    passes_jphi_band, passes_core_gradient, jphi_band_z,
+                    core_gradient_ratio]
                                        ← the opt-in bands' own verdicts, only
                                          while that band is on (their AND is
                                          passes_draw_band)
@@ -191,8 +203,8 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
                                        in engine_json's inputs)
                    [swb_jbs_convention, swb_jbs_conversion]  draws whose
                                        bootstrap came from solve_with_bootstrap
-                   [swb_alpha, swb_ip_rel_err, swb_jind_resamples,
-                    swb_j_saw, swb_saw_*]  solve_method="swb" draws
+                   [swb_alpha, swb_ip_rel_err, swb_jind_resamples, swb_jind_clipped,
+                    jphi_saw_out, swb_saw_*]  solve_method="swb" draws
                    [edge_pressure_json] ← the draw's edge-pressure record
                                        (added): its own p_sep, the offset
                                        applied, beta / W_MHD in both
@@ -224,12 +236,15 @@ pressure + that equilibrium's `p_sep`).
 ## Conventions
 
 - **Bare dataset names, units in attrs.** Profile datasets carry plain names
-  (`j_phi`, `n_e`, …) with the unit string in `ds.attrs["units"]`
+  (`jphi_total`, `n_e`, …) with the unit string in `ds.attrs["units"]`
   (`PROFILE_UNITS` in `schema.py`). v1 archives embedded units in the name
-  (`"j_phi [A m^-2]"`).
+  (`"jphi_total [A m^-2]"`).
 - **Fixed byte-blob names.** The g-file / p-file bytes are stored as `eqdsk` /
-  `pfile` inside each group — the group path carries the coordinates. Bytes
-  are stored opaque (`np.void`) and round-trip bit-perfect.
+  `pfile` (and `ifile`, `tokamaker_state`) inside each group — the group path carries the
+  coordinates. The bytes round-trip bit-perfect: opaque (`np.void`), or with
+  `GenerationConfig.compress_file_bytes` a gzip-compressed uint8 array
+  (`schema.write_bytes`; the g-file is ~2.7× smaller). HDF5 decompresses on
+  read; `bytes(ds[()])` reads either.
 - **Always `scan/<key>/`.** The scan key is a user-chosen label
   (`GenerationConfig.scan_key`, default `0`) — a time in ms, a beta value, …
   Several bouquets can share one file under different keys.
@@ -282,6 +297,20 @@ pressure + that equilibrium's `p_sep`).
   (`write_imas_draw(..., fidelity="exact")`); read it back with
   `bq.load_eq_fsa`.
 
+- **Transport (`chi_perp_*`, `tau_*`; 2026-10-16).** IMAS sources only (the
+  reader found `core_sources`): FUSE's sources at the dd step, summed as
+  IMAS.jl `total_sources` (`retain_source`; radiation as negative sources), are
+  stored once as `_baseline/dd_sources/` (`bq.load_dd_sources`). Every
+  equilibrium (`_baseline` and each draw) then gets `chi_perp_e`, `chi_perp_i`
+  (m² s⁻¹, on its `psi_N_kinetic` nodes) and the attrs `tau_E_th` = W_th/P_net,
+  `tau_E` = (W_th + W_fast)/P_net (W = 3/2∫p dV), `tau_98` (IPB98(y,2)), `H_98`,
+  `tau_DS03`, `W_th`, `W_fast` (J), `P_net` (W), from that equilibrium's own
+  profiles and TokaMaker geometry (`get_fsa`) and the same sources
+  (`bouquet.transport`). χ_⊥ is power balance, conduction only, as IMAS.jl
+  `calculate_diffusivities` (7.4), main ions included: n_i = n_e/Z_eff and
+  Γ_i = Γ_e/Z_eff (derived, not stored), with the equilibrium's own Z_eff.
+  τ = inf where P_net = 0.
+
 - **Self-consistent bootstrap record (`jbs_loop` block, schema v3).** When
   the bootstrap came from the self-consistent loop
   (`GenerationConfig.jbs_self_consistent`, **the default**) every draw group
@@ -326,12 +355,12 @@ pressure + that equilibrium's `p_sep`).
   `li_step6_matched` and `li_input`, `how`, then `l_i_target`,
   `baseline_resolve` (`l_i`, `q0`, `q95`, `Ip` of the run's baseline re-solve
   and their differences from the recorded values) and
-  `archived_j_phi_rel_l2_vs_delivered` (the archived `j_phi` against the
+  `archived_jphi_total_rel_l2_vs_delivered` (the archived `jphi_total` against the
   delivered state's achieved current). Absent with
   `jbs_self_consistent=False` (legacy archives are unchanged bit for bit).
-  With the loop on, `_baseline/j_phi` is the delivered state's ACHIEVED FSA
-  current (as before: `store_achieved_jphi`), `j_BS` the draws' σ=0
-  bootstrap composition on it (+ `jBS_diff`) and `j_inductive` their
+  With the loop on, `_baseline/jphi_total` is the delivered state's ACHIEVED FSA
+  current (as before: `store_achieved_jphi`), `jphi_bs` the draws' σ=0
+  bootstrap composition on it (+ `jphi_bs_diff`) and `jphi_ind` their
   residual; the in-memory `Baseline` split the draws consume is the
   Ip-normalised jphi-linterp REQUEST of the same state (one solve of it is
   the state), with `Baseline.jphi_request_offset` = request − achieved
@@ -396,40 +425,40 @@ pressure + that equilibrium's `p_sep`).
     and `Lambda`), `homotopy`, `post_homotopy`, and `cost` (solves, passes and
     wall time for the stages `anchor`, `loop`, `homotopy`, `post_homotopy`,
     `filters`, `archive`, and their `total`).
-  - **The current split of an engine draw group** (`j_phi`, `j_BS`,
-    `j_inductive`) is evaluated on the draw's own ARCHIVED (final,
-    post-homotopy) equilibrium: `j_phi` its achieved FSA current; `j_BS`
+  - **The current split of an engine draw group** (`jphi_total`, `jphi_bs`,
+    `jphi_ind`) is evaluated on the draw's own ARCHIVED (final,
+    post-homotopy) equilibrium: `jphi_total` its achieved FSA current; `jphi_bs`
     the draw's bootstrap model on that state, `s_bs (1 + d_bs) x scale x
     Redl(final) x F<1/R>/<B^2>(final)`; the fixed beam / RF parts the
     contract's `<j.B>` times the same final-state factor (recorded in
-    `archived.split.j_NBI` / `j_RF`); `j_inductive` the residual `j_phi -
-    j_BS - j_NBI - j_RF - j_pressure` (since 2026-10-09 the pressure-driven
-    term is the separate `j_pressure`, owner decision D2) and NEVER
+    `archived.split.jphi_nbi` / `jphi_rf`); `jphi_ind` the residual `jphi_total -
+    jphi_bs - jphi_nbi - jphi_rf - jphi_pd` (since 2026-10-09 the pressure-driven
+    term is the separate `jphi_pd`, owner decision D2) and NEVER
     clipped -- a negative value is recorded in `archived.split`
     (`n_negative_inductive`, `min_inductive`, `negative_inductive_psi_N`)
     and printed, never altered or filtered. (Legacy draws keep their split:
-    the residual floored at zero with the sliver moved into `j_BS`.)
-  - **`jB_parallel/`** (engine draws, added 2026-10-06; keys and units
+    the residual floored at zero with the sliver moved into `jphi_bs`.)
+  - **`jdotB/`** (engine draws, added 2026-10-06; keys and units
     `JB_PARALLEL_GROUP` / `JB_PARALLEL_UNITS` in `schema.py`, read with
-    `bouquet.schema.read_jB_parallel(group)`): the PARALLEL parts the
+    `bouquet.schema.read_jdotB(group)`): the PARALLEL parts the
     toroidal split above was converted from, raw `<j.B>` [T A m⁻²] in the
     positive frame on the subgroup's `psi_N` (the draw's grid) --
-    `jB_BS` (the bootstrap model on the archived state), `jB_NBI`,
-    `jB_RF` (rf + other driven), and `jB_inductive` the FIELD-ALIGNED
+    `jdotB_bs` (the bootstrap model on the archived state), `jdotB_nbi`,
+    `jdotB_rf` (rf + other driven), and `jdotB_ind` the FIELD-ALIGNED
     inductive only; with `kappa =
-    F<1/R>/<B^2>` and `j_pressure = p'(<R> - F^2<1/R>/<B^2>)` [A m⁻²] of
-    the archived state, `j_phi = kappa (jB_inductive + jB_BS + jB_NBI +
-    jB_RF) + j_pressure` to round-off. Neither the toroidal `j_BS` nor
-    any parallel part carries `j_pressure` (it is the group's own
-    `j_pressure` dataset since 2026-10-09). The IDS
+    F<1/R>/<B^2>` and `jphi_pd = p'(<R> - F^2<1/R>/<B^2>)` [A m⁻²] of
+    the archived state, `jphi_total = kappa (jdotB_ind + jdotB_bs + jdotB_nbi +
+    jdotB_rf) + jphi_pd` to round-off. Neither the toroidal `jphi_bs` nor
+    any parallel part carries `jphi_pd` (it is the group's own
+    `jphi_pd` dataset since 2026-10-09). The IDS
     exporter (`write_imas_draw`) writes these parts as they are, so no
     exported parallel current (`j_ohmic`, `j_bootstrap`, `j_total`)
     carries the pressure-driven term and export -> `IdsAdapter.read`
-    returns the archived `<j.B>` parts and `<j_phi>`. For draws without
+    returns the archived `<j.B>` parts and `<jphi_total>`. For draws without
     the subgroup (every legacy draw; engine draws archived before
-    2026-10-06) the exporter subtracts `j_pressure` computed from the
+    2026-10-06) the exporter subtracts `jphi_pd` computed from the
     archived eqdsk's own flux surfaces (`io.imas.archived_pressure_term`,
-    COCOS 7) from `j_BS` before converting with the `eq_fsa` geometry.
+    COCOS 7) from `jphi_bs` before converting with the `eq_fsa` geometry.
   - `passes_draw_band` (bool attr, engine draws only): the post-hoc band
     verdict -- the AND of the OPT-IN bands of the in-spec rule (True when
     none is on, the default since 2026-10-14; before, the unconditional
@@ -440,10 +469,10 @@ pressure + that equilibrium's `p_sep`).
     band, kept now as `coil_drift_in_spec`).
   - **Fields whose MEANING differs on an engine archive** (names and units
     unchanged; a reader that predates the engine reads them without error
-    but must not assume the legacy meaning): `j_inductive` / `j_BS` -- the
-    engine's split is NOT floored (`j_inductive` is the residual and may be
+    but must not assume the legacy meaning): `jphi_ind` / `jphi_bs` -- the
+    engine's split is NOT floored (`jphi_ind` is the residual and may be
     negative; legacy draws floor it at zero and move the sliver into
-    `j_BS`); `in_spec` -- the in-spec rule's verdict (configured coil test
+    `jphi_bs`); `in_spec` -- the in-spec rule's verdict (configured coil test
     AND boundary cut AND, on an engine draw, the post-hoc band
     `passes_draw_band`), stamped `in_spec_source="inspec_rule"`; on an
     archive without `in_spec_source` it is the legacy drift verdict (AND the
@@ -623,8 +652,8 @@ and `resolve_uncertainty()["zeff_sigma_tier"]` (the Z_eff σ tier, with
 
 ## The current split: where the pressure-driven `p′G` sits (2026-10-09)
 
-The toroidal split of every group satisfies `j_phi = j_inductive + j_BS +
-j_NBI + j_RF [+ j_other] (+ j_pressure)`, where `j_pressure = p′(⟨R⟩ −
+The toroidal split of every group satisfies `jphi_total = jphi_ind + jphi_bs +
+jphi_nbi + jphi_rf [+ jphi_other] (+ jphi_pd)`, where `jphi_pd = p′(⟨R⟩ −
 F²⟨1/R⟩/⟨B²⟩)` (A7 of docs/current-conventions.md) is the pressure-driven
 current, whose `⟨j·B⟩` is zero. The group attr `current_split_convention`
 (`schema.CURRENT_SPLIT_CONVENTION_ATTR`, read with
@@ -632,27 +661,42 @@ current, whose `⟨j·B⟩` is zero. The group attr `current_split_convention`
 is:
 
 - `"pressure_separate"` (owner decision D2; every path since 2026-10-09):
-  the `j_pressure` dataset; neither `j_BS` nor `j_inductive` carries it.
+  the `jphi_pd` dataset; neither `jphi_bs` nor `jphi_ind` carries it.
   Engine draws and baselines take it from their own composition; swb from
   the SWB split; legacy draws evaluate it on the archived state
   (`TokaMaker_interface.archived_pressure_term`) and the archive writer
-  takes it off the legacy in-memory `j_inductive`.
-- `"pressure_in_inductive"`: the residual `j_inductive` carries it -- every
-  archive before PR #64, and any group without the attr or a `j_pressure`
+  takes it off the legacy in-memory `jphi_ind`.
+- `"pressure_in_inductive"`: the residual `jphi_ind` carries it -- every
+  archive before PR #64, and any group without the attr or a `jphi_pd`
   dataset (also a legacy group whose state could not be evaluated, warned).
-- `"pressure_in_bootstrap"`: `j_BS` carries it -- PR #64's evaluator
-  (`evaluate_jBS/3`, never on main), inferred from a `/3` loop record.
+- `"pressure_in_bootstrap"`: `jphi_bs` carries it -- PR #64's evaluator
+  (`evaluate_jbs/3`, never on main), inferred from a `/3` loop record.
 
 The IDS exporter takes `p′G` off whichever bucket carries it before it
 converts to parallel currents (and groups it with the non-inductive
 currents, never `j_ohmic`).
+
+## v3 → v4: the current-component names
+
+Schema v4 stores the current components under OpenFUSIONToolkit's `boot_profs`
+names: `j_phi` → `jphi_total`, `j_inductive` → `jphi_ind`, `j_BS` → `jphi_bs`,
+`j_pressure` → `jphi_pd`, `j_NBI` / `j_RF` / `j_other` → `jphi_nbi` / `jphi_rf` /
+`jphi_other`, `j_sawteeth` → `jphi_saw`, `swb_j_saw` → `jphi_saw_out`, `jBS_diff`
+→ `jphi_bs_diff`, the `jB_parallel/` group → `jdotB/` (`schema.LEGACY_NAMES`).
+
+- **Readers accept both.** `schema.stored_name(group, name)` finds a v4 name or its
+  v3 spelling; the package readers use it, so a v3 archive reads unchanged.
+- **Migration is optional.** `schema.migrate_names(h5)` renames a v3 archive's
+  datasets in place.
+- **Also added in v4:** the transport records (`chi_perp_e` / `chi_perp_i`, the
+  τ / W / P scalars, `_baseline/dd_sources`; see above), additive.
 
 ## v2 → v3: the self-consistent bootstrap record
 
 Schema v3 is **additive in its names**: it adds the `jbs_loop` block above
 and renames or removes no v2 dataset or attr. It is NOT free of changes of
 meaning on the default path of this release: the engine's unfloored
-`j_inductive` / `j_BS` split, `in_spec` = coil AND band on engine draws, and
+`jphi_ind` / `jphi_bs` split, `in_spec` = coil AND band on engine draws, and
 `PRES` + `p_sep` in the stored g-files under `separatrix_pressure="offset"`
 (see "The unified engine's records" above). The schema version does not
 encode these; the engine record (`engine_json`) and the edge-pressure record

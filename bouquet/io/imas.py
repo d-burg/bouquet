@@ -21,16 +21,16 @@ Field mapping (verified against a D3D FUSE run)::
     core_profiles.profiles_1d[t].{electrons,ion[*]}.pressure_fast_{perpendicular,parallel}
     core_profiles.profiles_1d[t].{electrons,ion[main]}.{density_thermal,temperature}_error_upper,
                                  .zeff_error_upper            -> sigma envelopes (read_imas_sigmas)
-    core_sources.source[*].profiles_1d[t].j_parallel          -> j_NBI (beam), j_RF (EC/LH/IC),
-                                                                 j_other (fusion, runaways, sawteeth)
+    core_sources.source[*].profiles_1d[t].j_parallel          -> jphi_nbi (beam), jphi_rf (EC/LH/IC),
+                                                                 jphi_other (fusion, runaways, sawteeth)
 
-Currents are converted exactly to TokaMaker ``jphi`` = <j_phi> (bouquet's
+Currents are converted exactly to TokaMaker ``jphi`` = <jphi_total> (bouquet's
 convention; :mod:`bouquet.physics` docstring, ``docs/current-conventions.md``)
 with the geometry of the equilibrium slice FUSE paired with the core_profiles
 slice: the total from IMAS ``j_tor`` (A5), the bootstrap and each driven source
 as their field-aligned parts (A7).  The pressure term p'G (A7) is recorded as
-``Baseline.j_pressure`` (owner decision D2; None on the ratio fallback); the inductive component is the
-residual ``j_phi - j_BS - j_NBI - j_RF - j_other`` (so it carries p'G in
+``Baseline.jphi_pd`` (owner decision D2; None on the ratio fallback); the inductive component is the
+residual ``jphi_total - jphi_bs - jphi_nbi - jphi_rf - jphi_other`` (so it carries p'G in
 memory) and the decomposition sums exactly.
 Fast pressure is isotropized (see :func:`bouquet.physics.isotropize_fast_pressure`).
 
@@ -48,8 +48,8 @@ positive recomputed bootstrap adds the bootstrap AGAINST the inductive current.
 :attr:`~bouquet.baseline.Baseline.source_current_sign`.  For ``ip > 0`` the
 factor is ``+1.0`` and the read is bit-identical to what it was.  Everything
 that is not a current (kinetics, pressure, rotation, E_r, the dd's own q) is
-read unchanged, and so is a user-supplied ``FixedComponentsConfig.j_NBI`` /
-``j_RF``: those are defined in bouquet's positive-Ip frame (co-current
+read unchanged, and so is a user-supplied ``FixedComponentsConfig.jphi_nbi`` /
+``jphi_rf``: those are defined in bouquet's positive-Ip frame (co-current
 positive) on both source paths.  A dd whose net (area-weighted) ``core_profiles.j_tor`` -- or
 the equilibrium ``j_tor`` the jphi anchor uses -- disagrees in sign with that
 factor is REFUSED (ValueError): its currents and its ip were written in
@@ -58,21 +58,23 @@ different orientations and no single factor puts it in one frame.
 a user who knows the file's convention (default ``"auto"``); the factor's
 origin is recorded as ``Baseline.source_current_sign_origin``.
 
-Note: ``j_BS`` read here is the FUSE bootstrap baseline, but it is *overridden*
-when ``GenerationConfig.recalculate_j_BS`` is True -- bouquet then recomputes
+Note: ``jphi_bs`` read here is the FUSE bootstrap baseline, but it is *overridden*
+when ``GenerationConfig.recalculate_jbs`` is True -- bouquet then recomputes
 bootstrap per draw via TokaMaker ``solve_with_bootstrap``, whose output
 :func:`bouquet.physics._swb_jbs_to_toroidal` converts to the field-aligned
 ``kappa <j.B>`` (the toolkit's own convention is identified, never assumed).
 
 The pressure-driven ``p'G`` (A7) is its own bucket (owner decision D2,
-2026-10-09): never in ``j_BS``; the read records it as ``Baseline.j_pressure``.
+2026-10-09): never in ``jphi_bs``; the read records it as ``Baseline.jphi_pd``.
 """
 
 from __future__ import annotations
 
 import functools
 import json
+import mmap
 import os
+import re
 from typing import Optional, TYPE_CHECKING
 
 import numpy as np
@@ -87,7 +89,7 @@ from ..physics import (fast_ion_density_equivalent, impurity_pressure,
                        jtor_imas_to_jphi_tokamaker,
                        main_ion_density_from_zeff, parallel_to_toroidal)
 from ..schema import (SPLIT_PRESSURE_IN_BOOTSTRAP, SPLIT_PRESSURE_IN_INDUCTIVE,
-                      SPLIT_PRESSURE_SEPARATE)
+                      SPLIT_PRESSURE_SEPARATE, stored_name)
 
 from ..physics import ELEMENTARY_CHARGE as _EC  # p = e * sum_s(n_s * T_s)
 
@@ -96,11 +98,88 @@ if TYPE_CHECKING:
     from ..baseline import Baseline
 
 
+#: The time-sliced lists (each element carries its own ``time``) that
+#: :func:`_load_dd` given a time keeps whole only near it -- by far the largest
+#: part of a dd (core_sources alone is ~70 % of a FUSE dd_sim.json) -- with the
+#: keys every far element keeps: the readers scan whole histories for ``time``
+#: and for whether a source carries ``j_parallel``.
+_DD_TIME_SLICES = {"equilibrium": {"time_slice": ("time",)},
+                   "core_profiles": {"profiles_1d": ("time",)},
+                   "core_sources": {"source": [{"profiles_1d": ("time",
+                                                                "j_parallel")}]}}
+#: Half-width [s] of the window of whole time slices kept around that time.
+DD_TIME_WINDOW = 0.05
+_JSON_WS = re.compile(rb"[ \t\n\r]*")
+_JSON = json.JSONDecoder()
+
+
+def _json_value(b, i: int):
+    """``(value, end)`` of the JSON value at offset ``i`` of the ASCII buffer
+    ``b``, decoding a window that grows until the value ends inside it (a value
+    ending on the window's edge could be a cut number)."""
+    w = 1 << 16
+    while True:
+        s = b[i:i + w].decode("ascii")
+        try:
+            v, n = _JSON.raw_decode(s)
+        except ValueError:
+            if i + w >= len(b):
+                raise
+        else:
+            if n < len(s) or i + w >= len(b):
+                return v, i + n
+        w *= 4
+
+
+def _json_sliced(b, i: int, spec, time: float):
+    """``(value, end)`` of the JSON value at offset ``i`` of ``b``, as
+    :func:`json.loads` gives it, except in the lists ``spec`` marks with a
+    tuple of keys: there an element more than :data:`DD_TIME_WINDOW` from
+    ``time`` keeps only those keys, unless it is the one nearest ``time`` or
+    next to it (the readers pair a slice with its neighbours).  Elements are
+    decoded one at a time, so a whole list never exists."""
+    c = b[i:i + 1]
+    if not (c == b"{" and isinstance(spec, dict)
+            or c == b"[" and isinstance(spec, (list, tuple))):
+        return _json_value(b, i)
+    out, i = ({} if c == b"{" else []), _JSON_WS.match(b, i + 1).end()
+    near, prev = (np.inf, None, {}), None   # (distance, index, {index: element})
+    while b[i:i + 1] not in b"}]":
+        if c == b"{":
+            k, i = _json_value(b, i)
+            i = _JSON_WS.match(b, _JSON_WS.match(b, i).end() + 1).end()
+            out[k], i = _json_sliced(b, i, spec.get(k), time)
+        elif isinstance(spec, tuple):
+            v, i = _json_value(b, i)
+            k = len(out)
+            if isinstance(v, dict) and "time" in v:
+                d = abs(float(v["time"]) - time)
+                if d < near[0]:
+                    near = (d, k, {k - 1: prev, k: v})
+                elif k == near[1] + 1:
+                    near[2][k] = v
+                out.append(v if d <= DD_TIME_WINDOW else
+                           {key: v[key] for key in spec if key in v})
+            else:
+                out.append(v)
+            prev = v
+        else:
+            v, i = _json_sliced(b, i, spec[0], time)
+            out.append(v)
+        i = _JSON_WS.match(b, i).end()
+        if b[i:i + 1] == b",":
+            i = _JSON_WS.match(b, i + 1).end()
+    for k, v in near[2].items():
+        if 0 <= k < len(out):
+            out[k] = v
+    return out, i + 1
+
+
 @functools.lru_cache(maxsize=2)
 def _cached_dd(ids_path: str, _mtime_ns: int, _size: int,
-               _ino: int = 0) -> dict:
-    """Parsed ``dd_sim.json`` (up to ~1 GB), cached per (real path, mtime,
-    size, inode): a slice sweep reads one file once.
+               _ino: int = 0, time: Optional[float] = None) -> dict:
+    """Parsed ``dd_sim.json`` (up to ~3 GB), cached per (real path, mtime,
+    size, inode, time): a slice sweep without a time reads one file once.
 
     READ-ONLY CONTRACT: the cache hands out the SAME parsed object to every
     caller (the legacy reader, the unified engine's ``IdsAdapter.read``,
@@ -109,25 +188,48 @@ def _cached_dd(ids_path: str, _mtime_ns: int, _size: int,
     ``write_imas_draw``) must work on its own fresh ``json.load`` or a deep
     copy.  ``tests/test_imas_dd_cache.py`` pins this by digest.
 
-    MEMORY: up to two parsed files (about 2x the file size each, so ~2 GB
-    for a 1 GB dd) stay resident for the life of the process -- in a
-    ``run_parallel`` pool, in every worker for the whole of ``generate()``.
+    MEMORY: a whole parse takes about 3.5x the file size, and up to two stay
+    resident for the life of the process.  Given ``time``, an ASCII file
+    whose core_profiles has a slice at that time (a FUSE macro step, as the
+    study's units ask) is read through a memory map with only the time slices
+    near it whole (:func:`_json_sliced`): a small fraction of that.
     :func:`clear_dd_cache` releases them."""
     with open(ids_path, "rb") as fh:
+        if time is not None:
+            try:                    # file pages, not a copy of the text
+                with mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as b:
+                    dd = _json_sliced(b, _JSON_WS.match(b).end(),
+                                      _DD_TIME_SLICES, float(time))[0]
+                # the readers anchor the other IDSs on the core_profiles slice
+                t_cp = dd.get("core_profiles", {}).get("time") or [time]
+                tol = 1e-9 * max(1.0, abs(time))
+                if min(abs(float(t) - time) for t in t_cp) <= tol:
+                    return dd
+            except UnicodeDecodeError:  # not ASCII: offsets are not characters
+                pass
+            fh.seek(0)
         return json.loads(fh.read())
 
 
-def _load_dd(ids_path) -> dict:
+def _load_dd(ids_path, time: Optional[float] = None) -> dict:
     """``dd_sim.json`` at ``ids_path``, via :func:`_cached_dd` (shared,
-    read-only).  Keyed on the real path (``"dd.json"``, its absolute path
-    and a ``Path`` share one entry), mtime_ns, size and inode (a file
-    replaced by rename is re-read).  Limitation: a same-size rewrite within
+    read-only); given ``time``, with its time slices whole only near ``time``
+    (:data:`_DD_TIME_SLICES`).  Keyed on the real path (``"dd.json"``, its absolute path
+    and a ``Path`` share one entry), mtime_ns, size, inode (a file replaced by
+    rename is re-read) and ``time``.  Limitation: a same-size rewrite within
     the filesystem's mtime granule, or one seen through a stale NFS
     attribute cache, is served from the cache -- call
     :func:`clear_dd_cache` after rewriting a dd in place."""
     path = os.path.realpath(os.fspath(ids_path))
     st = os.stat(path)
-    return _cached_dd(path, st.st_mtime_ns, st.st_size, st.st_ino)
+    return _cached_dd(path, st.st_mtime_ns, st.st_size, st.st_ino, time)
+
+
+def _source_dd(source: "ImasSource") -> dict:
+    """The dd of ``source`` (:func:`_load_dd`), whole only near ``source.time``
+    when ``source.lean_dd``."""
+    return _load_dd(source.ids_path,
+                    source.time if getattr(source, "lean_dd", False) else None)
 
 
 def clear_dd_cache() -> None:
@@ -135,10 +237,10 @@ def clear_dd_cache() -> None:
     _cached_dd.cache_clear()
 
 # Core-source identifier index for neutral-beam current drive.
-NBI_SOURCE_INDEX = 2          # neutral beam injection -> summed into j_NBI
+NBI_SOURCE_INDEX = 2          # neutral beam injection -> summed into jphi_nbi
 # Core-source identifier index for the sawtooth model (IMAS core_sources
-# identifier enumeration).  Its current is held fixed in j_other (share also in
-# j_sawteeth), and it is read as a slice-level FLAG for the
+# identifier enumeration).  Its current is held fixed in jphi_other (share also in
+# jphi_saw), and it is read as a slice-level FLAG for the
 # closure_channel="sawtooth_bootstrap" gate, which pins q0 only where sawteeth
 # make q0 ~ 1 a physical fact rather than a model artefact.
 SAWTOOTH_SOURCE_INDEX = 701
@@ -492,6 +594,87 @@ def core_sources_slice(src_ids, cp_times, ic, T=None, who="IMAS reader"):
             "reading the driven currents at another time (owner decision "
             "2026-10-06)")
     return isrc, t_src, rec
+
+
+#: core_sources radiation indices (IMAS.jl radiation_losses).
+RADIATION_SOURCE_INDICES = (8, 9, 10, 200, 201, 202, 203)
+
+
+def _retain_source(index, all_indices):
+    """IMAS.jl ``retain_source`` (default call): whether an entry counts in a total."""
+    if index == 0:
+        return False
+    if index == 1 and any(i > 1 for i in all_indices):
+        return False
+    if 100 <= index <= 107 and any(i < 5 for i in all_indices):
+        return False
+    if index == 200 and any(200 < i < 300 for i in all_indices):
+        return False
+    return True
+
+
+def dd_source_totals(src_ids, isrc, n_time, t_slice, rho_cp, *, t_cp=None,
+                     cp_half=None):
+    """FUSE's ``core_sources`` at the dd step, summed as IMAS.jl ``total_sources``:
+    ``Q_e`` / ``Q_i`` [W] (electrons.power_inside, total_ion_power_inside),
+    ``Gamma_e`` [1/s] (electrons.particles_inside) on the core_profiles nodes
+    *rho_cp* (rho_tor_norm), ``P_net`` = max(0, Q_e + Q_i at the edge) and
+    ``P_rad`` [W]; entries by :func:`_retain_source`, each at its own slice
+    (:func:`_source_slice_at`, the currents' rule), listed in ``sources`` with
+    their own edge ``P_e`` / ``P_i`` [W].  None when nothing is read."""
+    rho_cp = np.asarray(rho_cp, dtype=float)
+    srcs = src_ids.get("source", []) or []
+    idx = [int((s.get("identifier") or {}).get("index", 0) or 0) for s in srcs]
+    tot = {k: np.zeros(rho_cp.size) for k in ("Q_e", "Q_i", "Gamma_e")}
+    used, skipped, p_rad = [], [], 0.0
+    pairs = (("Q_e", "electrons", "power_inside", "energy"),
+             ("Q_i", None, "total_ion_power_inside", "total_ion_energy"),
+             ("Gamma_e", "electrons", "particles_inside", "particles"))
+    for s, i in zip(srcs, idx):
+        name = (s.get("identifier") or {}).get("name")
+        if not _retain_source(i, idx):
+            continue
+        try:
+            pr, how = _source_slice_at(s, isrc, t_slice, n_time, t_cp=t_cp,
+                                       cp_half=cp_half)
+        except ValueError as exc:
+            pr, how = None, str(exc)
+        if pr is None:
+            skipped.append(dict(index=i, name=name, why=how))
+            continue
+        grid = pr.get("grid") or {}
+        rho = grid.get("rho_tor_norm")
+        vol = grid.get("volume")
+        got = {}
+        for key, part, inside, density in pairs:
+            d = pr.get(part, {}) if part else pr
+            y = d.get(inside)
+            if y is None and d.get(density) is not None and vol is not None:
+                from scipy.integrate import cumulative_trapezoid
+                y = cumulative_trapezoid(np.asarray(d[density], float),
+                                         np.asarray(vol, float), initial=0.0)
+            if y is None:
+                continue
+            y = np.asarray(y, dtype=float)
+            if rho is not None and len(rho) == y.size:
+                y = np.interp(rho_cp, np.asarray(rho, float), y)
+            elif y.size != rho_cp.size:
+                continue
+            got[key] = y
+            tot[key] += y
+        if not got:
+            continue
+        used.append(dict(index=i, name=name, time=pr.get("time"),
+                         **{f"P_{k[2]}": float(got[k][-1]) for k in ("Q_e", "Q_i") if k in got}))
+        if i in RADIATION_SOURCE_INDICES and "Q_e" in got:
+            p_rad += float(got["Q_e"][-1])
+    if not used:
+        return None
+    return dict(rho_tor_norm=rho_cp, **tot,
+                P_net=max(0.0, float(tot["Q_e"][-1] + tot["Q_i"][-1])),
+                P_rad=-p_rad, sources=used, skipped=skipped,
+                rule="IMAS.jl total_sources/retain_source; radiation enters "
+                     "as negative sources; P_net = max(0, Q_e + Q_i at the edge)")
 
 
 def _source_slice_at(s, isrc, t_slice, n_time, base_times=None, *,
@@ -1395,7 +1578,7 @@ def read_imas_geometry(source: "ImasSource"):
     :meth:`Bouquet.setup_solver` when the source is an :class:`ImasSource`
     (replacing the g-file that the reconstruction path reads F0/boundary from).
     """
-    dd = _load_dd(source.ids_path)
+    dd = _source_dd(source)
     eq = dd["equilibrium"]
     ie = _nearest_index(eq["time"], source.time, "equilibrium")
     vtf = eq["vacuum_toroidal_field"]
@@ -1561,8 +1744,9 @@ NI_FAST_RTOL = 1e-2
 PSI_RHO_GATE_RHO = (0.2, 0.4, 0.6, 0.8, 0.9)
 
 #: Largest |psi_N_dd - psi_N_g| at :data:`PSI_RHO_GATE_RHO` before the reader
-#: warns.  Advisory only.
-PSI_RHO_DRIFT_TOL = 2e-2
+#: warns.  Advisory only: a FUSE run evolves its own current, so its equilibrium
+#: legitimately moves psi_N at fixed rho by a few 1e-2 from the g-file's.
+PSI_RHO_DRIFT_TOL = 5e-2
 
 
 def _psi_rho_drift(psi_N, rho, gfile):
@@ -2115,6 +2299,109 @@ def _hybrid_timing(source, T, t_eq, t_cp, aux, tol=1e-6, *, cp_times=None,
     return t_used
 
 
+class IdaTimeNotSimulated(ValueError):
+    """The dd step paired with the IDA time lies outside the window the FUSE
+    run simulated.  Not attempted, so :meth:`~bouquet.Bouquet.run` /
+    ``run_slices`` do not record it as refused."""
+
+
+def _check_simulated(ids_path, t_dd, t_ida):
+    """Raise :class:`IdaTimeNotSimulated` when the dd step *t_dd* paired with
+    IDA time *t_ida* is not a simulated step, ``t0 < t_dd <= reached`` (to
+    1e-9 s; ``time_grid.json`` beside the dd): a run that stopped early still
+    lists its planned steps in ``ida_provenance.json``; ``reached`` sits 1 us
+    below the first step not completed, and step ``t0`` is not in the dd."""
+    import json
+    path = os.path.join(os.path.dirname(os.path.abspath(ids_path)), "time_grid.json")
+    try:
+        with open(path) as fh:
+            g = json.load(fh)
+        t0, reached = float(g["t0"]), float(g["reached"])
+    except (OSError, ValueError, TypeError, KeyError):
+        return
+    if t_dd is not None and not t0 < t_dd <= reached + 1e-9:
+        raise IdaTimeNotSimulated(
+            f"ida_hybrid: IDA time {t_ida:.9g} s is paired with dd step {t_dd:.9g} s, "
+            f"outside the simulated steps ({t0:.9g}, {reached:.9g}] s (time_grid.json "
+            "t0, reached): never simulated, not attempted")
+
+
+def _macro_steps(t0, Nt, dt, reached):
+    """dd_sim macro steps t0 < t <= reached, in FUSE's literal instant arithmetic (sim_instants[::2])."""
+    d = (Nt * dt) / Nt
+    steps = (t0 + kk * (d / 2) for kk in range(0, 2 * Nt + 1, 2))
+    return [t for t in steps if t0 < t <= reached + 1e-9]
+
+
+def consistent_pairs(provenance_path, grid=None):
+    """``{ida_time: dd_sim_time}``, ascending: each IDA-lite slice some reached
+    macro step (t0 < t <= reached) replayed, with the nearest such step (earlier
+    on a tie); slices absent have no consistent dd_sim time.  *provenance_path*:
+    ``fuseruns/<shot>/ida_provenance.json``; *grid*: its ``time_grid.json`` dict
+    (default: the file beside it).  ``{}`` for a run without IDA kinetics; a
+    reached step without a ``replay_pairing`` row raises ``ValueError``.
+    (omega/ida_consistent_pairs.py, validated against FUSE's replay.)"""
+    import json
+    with open(provenance_path) as fh:
+        prov = json.load(fh)
+    if grid is None:
+        with open(os.path.join(os.path.dirname(os.path.abspath(provenance_path)), "time_grid.json")) as fh:
+            grid = json.load(fh)
+    if grid.get("kinetic_source", "ida") != "ida":
+        return {}
+    rows = {round(float(r["t_sim"]), 6): r for r in prov["replay_pairing"]}
+    best = {}   # round(ida_time) -> (ida_time, t_sim)
+    for t in _macro_steps(float(grid["t0"]), int(grid["Nt"]), float(grid["dt"]), float(grid["reached"])):
+        r = rows.get(round(t, 6))
+        if r is None:
+            raise ValueError(f"{provenance_path}: replay_pairing has no row for macro step {t!r}")
+        if r["ida_time"] is None:
+            continue
+        tau = float(r["ida_time"])
+        k = round(tau, 6)
+        if k not in best or abs(t - tau) < abs(best[k][1] - tau):   # strict: a tie keeps the earlier step
+            best[k] = (tau, t)
+    return dict(sorted(best.values()))
+
+
+def _check_consistent_pair(source, T, tol=1e-6):
+    """``ImasSource.ida_timing="ida_fuse"``: the dd step *T* and the IDA slice
+    that will be read (the file's nearest to ``ida_time``, else *T*) must be one
+    of :func:`consistent_pairs`' pairs, else :class:`IdaTimeNotSimulated` (not
+    attempted).  Returns the check's status: ``"checked"``, or why it was not
+    made (no ``ida_provenance.json`` / ``time_grid.json`` beside the dd, or a
+    table naming another IDA file)."""
+    import json
+    import warnings
+    run = os.path.dirname(os.path.abspath(source.ids_path))
+    prov_path = os.path.join(run, "ida_provenance.json")
+    if T is None or not all(os.path.isfile(os.path.join(run, f))
+                            for f in ("ida_provenance.json", "time_grid.json")):
+        return "absent"
+    try:
+        with open(prov_path) as fh:
+            ida_file = json.load(fh).get("ida_file")
+    except (OSError, ValueError):
+        return "unreadable"
+    if ida_file is None or os.path.basename(str(ida_file)) != os.path.basename(str(source.ida_path)):
+        warnings.warn(f"ida_hybrid: {prov_path} names another IDA file ({ida_file!r}); "
+                      "the consistent-pair rule of ida_timing='ida_fuse' is not applied")
+        return "not bound"
+    from .ida import ida_time_base
+    tt = np.asarray(ida_time_base(source.ida_path), dtype=float).ravel()
+    t_req = T if getattr(source, "ida_time", None) is None else float(source.ida_time)
+    t_ida = float(tt[np.argmin(np.abs(tt - t_req))])
+    pairs = consistent_pairs(prov_path)
+    t_pair = next((t for tau, t in pairs.items() if abs(tau - t_ida) <= tol), None)
+    if t_pair is None or abs(t_pair - float(T)) > tol:
+        raise IdaTimeNotSimulated(
+            f"ida_hybrid (ida_timing='ida_fuse'): IDA slice {t_ida:.9g} s and dd step "
+            f"{float(T):.9g} s are not a consistent pair of the FUSE run ("
+            + ("no reached step replayed that slice" if t_pair is None else
+               f"its consistent dd step is {t_pair:.9g} s") + "): not attempted")
+    return "checked"
+
+
 def _check_replay_pairing(ids_path, aux, tol=1e-6, *, ida_path=None):
     """``aux['pairing_consistent']``: whether FUSE's own replay_pairing
     (``ida_provenance.json`` beside ``ids_path``, written by the external
@@ -2415,14 +2702,20 @@ def read_imas_baseline(
 
     Every driven ``core_sources`` current is held fixed, classified as the
     engine's IDS adapter does (:func:`bouquet.adapters._ids_driven_currents`):
-    beams in ``j_NBI``, EC/LH/IC in ``j_RF``, fusion, runaways, sawteeth and
-    unknown indices in ``j_other`` (its sawteeth share also in ``j_sawteeth``).
+    beams in ``jphi_nbi``, EC/LH/IC in ``jphi_rf``, fusion, runaways, sawteeth and
+    unknown indices in ``jphi_other`` (its sawteeth share also in ``jphi_saw``).
     Aggregate and bootstrap-like entries are never added.
     """
     from ..baseline import Baseline
 
-    dd = _load_dd(source.ids_path)
     T = source.time
+    if kinetic_source == "ida_hybrid" and getattr(source, "ida_path", None):
+        _ida_t = getattr(source, "ida_time", None)
+        _check_simulated(source.ids_path, T, T if _ida_t is None else _ida_t)
+    _pair_status = (_check_consistent_pair(source, T)
+                    if kinetic_source == "ida_hybrid" and getattr(source, "ida_path", None)
+                    and getattr(source, "ida_timing", "window") == "ida_fuse" else None)
+    dd = _source_dd(source)
 
     # Which fast-pressure convention this dd was written in (factor of 3).
     # The metadata is resolved eagerly -- the reduction rule is needed to read the
@@ -2516,7 +2809,7 @@ def read_imas_baseline(
             "IMAS reader: the exact IMAS -> TokaMaker current conversion "
             f"(A5-A7) is unavailable ({_geom_exc}); FALLING BACK to the "
             "per-surface ratio c = j_tor/j_total of the pre-PR #64 reader "
-            "(j_phi = core_profiles.j_tor, no p'G split).  Recorded as "
+            "(jphi_total = core_profiles.j_tor, no p'G split).  Recorded as "
             "li_metrics['imas_current_conversion'].", stacklevel=2)
     j_total = _m * np.asarray(cp["j_total"], dtype=float)     # total <J.B>/B0
     j_tor = _m * np.asarray(cp["j_tor"], dtype=float)         # total IMAS j_tor
@@ -2526,7 +2819,7 @@ def read_imas_baseline(
         # Exact conversions to TokaMaker jphi on the geometry FUSE used for
         # this core_profiles slice (see _paired_current_geometry).  The
         # pressure-driven p'G is its own bucket (owner decision D2): never in
-        # j_BS; recorded as Baseline.j_pressure.
+        # jphi_bs; recorded as Baseline.jphi_pd.
         p_term = jphi_tokamaker_pressure_term(cur_geom)
 
         def to_jphi(j_par):
@@ -2537,7 +2830,7 @@ def read_imas_baseline(
         def to_jphi(j_par):
             return parallel_to_toroidal(j_par, j_parallel_total=j_total,
                                         j_tor_total=j_tor)
-    j_BS = to_jphi(j_boot)
+    jphi_bs = to_jphi(j_boot)
 
     # --- driven currents: every core_sources entry, then convert ---
     # Each driven entry is read at the core_sources slice TIME, not at its list
@@ -2591,7 +2884,7 @@ def read_imas_baseline(
     _parts, _used, _ignored = _ids_driven_currents(
         _held, isrc, n, 1.0, _cpt, off=_off,
         matches=source_time_match["entries"], **_rule_kw)
-    # the sawteeth share of j_other (already matched, refused or stamped
+    # the sawteeth share of jphi_other (already matched, refused or stamped
     # above: no records, no second announcement)
     _saw = (_ids_driven_currents(dict(src_ids, source=[
         s for s in src_ids.get("source", []) if _is_saw(s)]),
@@ -2601,15 +2894,24 @@ def read_imas_baseline(
                              off_sources=_off)
     source_time_match["sawteeth_hold"] = dict(
         held=hold_saw, setting="ImasSource.hold_sawteeth",
-        how=("the sawteeth entry's j_parallel is held fixed in j_other "
-             "(its share in j_sawteeth): FUSE's j_ohmic excludes it"
+        how=("the sawteeth entry's j_parallel is held fixed in jphi_other "
+             "(its share in jphi_saw): FUSE's j_ohmic excludes it"
              if hold_saw else
              "opted out: the sawteeth entry is not held; its current stays "
-             "in the residual j_inductive (the pre-#70 legacy split)"))
-    j_NBI = s_ip * to_jphi(_m * _parts["nbi"])
-    j_RF = s_ip * to_jphi(_m * _parts["rf"])
-    j_other = s_ip * to_jphi(_m * _parts["other"])
-    j_sawteeth = s_ip * to_jphi(_m * _saw)
+             "in the residual jphi_ind (the pre-#70 legacy split)"))
+    jphi_nbi = s_ip * to_jphi(_m * _parts["nbi"])
+    jphi_rf = s_ip * to_jphi(_m * _parts["rf"])
+    jphi_other = s_ip * to_jphi(_m * _parts["other"])
+    jphi_saw = s_ip * to_jphi(_m * _saw)
+    # FUSE's heating, radiation and particle sources at this step, summed, for
+    # the per-draw chi_perp and tau_E (bouquet.transport)
+    _rho_cp = cp.get("grid", {}).get("rho_tor_norm")
+    dd_sources = (None if _rho_cp is None else dd_source_totals(
+        src_ids, isrc, _src_nt, _src_t, _rho_cp, t_cp=_t_cp, cp_half=_cp_half))
+    if dd_sources is not None:
+        _vtf = eq.get("vacuum_toroidal_field", {})
+        dd_sources.update(b0=abs(_slice_b0(eq, ie)), r0=float(_vtf.get("r0", np.nan)),
+                          core_profiles_time=_t_cp)
 
     # --- sawtooth model presence/amplitude at this slice (gate input only) ----
     # Read here, from the same parsed dd as the currents above (the cached,
@@ -2919,6 +3221,7 @@ def read_imas_baseline(
     if use_ida:
         T_ida = _hybrid_timing(source, T, eq["time"][ie], cp_ids["time"][ic], aux,
                                cp_times=_cp_time_grid(cp_ids))
+        aux["ida_time_match"]["consistent_pair"] = _pair_status
         (ne, te, ti, ni, Zeff, _omega,
          sigma_ne_ida, sigma_te_ida, sigma_ni_ida, sigma_ti_ida,
          _ida_read, _ni_fast_meta, _ida_map) = _merge_ida_kinetics(
@@ -3050,13 +3353,13 @@ def read_imas_baseline(
         # taken it in (baseline._resolve_fixed) -- so it is NOT multiplied by
         # the dd's orientation factor: the same array means the same physics
         # on both source paths and for either orientation of the source.
-        if fixed.j_NBI is not None:
-            j_NBI = _override(fixed.j_NBI, _fx, x_run)
-        if fixed.j_RF is not None:
-            j_RF = _override(fixed.j_RF, _fx, x_run)
-        if getattr(fixed, "j_other", None) is not None:
-            j_other = _override(fixed.j_other, _fx, x_run)
-            j_sawteeth = np.zeros_like(j_other)   # no longer a known part of it
+        if fixed.jphi_nbi is not None:
+            jphi_nbi = _override(fixed.jphi_nbi, _fx, x_run)
+        if fixed.jphi_rf is not None:
+            jphi_rf = _override(fixed.jphi_rf, _fx, x_run)
+        if getattr(fixed, "jphi_other", None) is not None:
+            jphi_other = _override(fixed.jphi_other, _fx, x_run)
+            jphi_saw = np.zeros_like(jphi_other)   # no longer a known part of it
 
     # The deferred factor-of-3 warning: the convention was undeterminable AND the
     # fast pressure it scales is non-zero AND it came from the dd (a user-supplied
@@ -3072,24 +3375,24 @@ def read_imas_baseline(
     # are then put into bouquet's positive-current frame by s_ip (A5 and A7
     # are odd in a whole-dd reversal, so this is exact).
     if cur_geom is not None:
-        j_phi_dd = jtor_imas_to_jphi_tokamaker(j_tor, cur_geom)
-        _pk = float(np.max(np.abs(j_phi_dd)))
+        jphi_total_dd = jtor_imas_to_jphi_tokamaker(j_tor, cur_geom)
+        _pk = float(np.max(np.abs(jphi_total_dd)))
         _closure = float(np.max(np.abs(to_jphi(j_total) + p_term
-                                       - j_phi_dd))) / _pk
+                                       - jphi_total_dd))) / _pk
     else:                       # the ratio fallback: j_tor as TokaMaker jphi
-        j_phi_dd = j_tor.copy()
-        _pk = float(np.max(np.abs(j_phi_dd)))
+        jphi_total_dd = j_tor.copy()
+        _pk = float(np.max(np.abs(jphi_total_dd)))
         _closure = float("nan")
-    _dconv = (j_phi_dd - j_tor) / _pk
-    j_phi = s_ip * j_phi_dd
-    j_BS = s_ip * j_BS
+    _dconv = (jphi_total_dd - j_tor) / _pk
+    jphi_total = s_ip * jphi_total_dd
+    jphi_bs = s_ip * jphi_bs
     # The solve split carries p'G in the residual inductive (the solver needs
-    # the total; the pre-PR #64 convention).  j_pressure records it as its
-    # own bucket: the archive writes j_inductive - j_pressure and j_pressure
+    # the total; the pre-PR #64 convention).  jphi_pd records it as its
+    # own bucket: the archive writes jphi_ind - jphi_pd and jphi_pd
     # (schema.write_current_split), the IDS exporter groups it with the
     # non-inductive currents.
-    j_pressure = None if p_term is None else s_ip * p_term
-    j_inductive = j_phi - j_BS - j_NBI - j_RF - j_other
+    jphi_pd = None if p_term is None else s_ip * p_term
+    jphi_ind = jphi_total - jphi_bs - jphi_nbi - jphi_rf - jphi_other
     if cur_geom is not None:
         # which equilibrium slice the currents were converted on (the
         # pairing, _paired_current_geometry) and how well it reproduced
@@ -3099,13 +3402,13 @@ def read_imas_baseline(
                         core_profiles_time=float(cur_meta["t_core_profiles"]),
                         jtor_mismatch=float(cur_meta["jtor_mismatch"]))
     cur_conv.update(
-        pressure=("j_pressure (p'G) carried by j_inductive in the solve split"
-                  if j_pressure is not None else
+        pressure=("jphi_pd (p'G) carried by jphi_ind in the solve split"
+                  if jphi_pd is not None else
                   "no p'G split (ratio fallback): carried by every component"),
         current_split_convention=SPLIT_PRESSURE_IN_INDUCTIVE)
     if cur_geom is None:
         print("  [imas] currents -> TokaMaker jphi by the RATIO FALLBACK "
-              "c = j_tor/j_total (no equilibrium geometry; j_phi = j_tor)")
+              "c = j_tor/j_total (no equilibrium geometry; jphi_total = j_tor)")
     else:
         print(f"  [imas] currents -> TokaMaker jphi on equilibrium t="
               f"{cur_meta['time']:.4f} s (core_profiles t="
@@ -3130,7 +3433,7 @@ def read_imas_baseline(
               "converted in the dd's own frame) multiplied by -1 "
               "into bouquet's positive-current frame (Baseline."
               "source_current_sign = -1); user-supplied FixedComponentsConfig "
-              "j_NBI/j_RF are already co-Ip positive and are not", flush=True)
+              "jphi_nbi/jphi_rf are already co-Ip positive and are not", flush=True)
     elif cur_origin == ORIENTATION_ORIGIN_OVERRIDE and ip_signed < 0.0:
         print(f"[imas] ImasSource.current_orientation = +1 (override): dd "
               f"currents kept as stored although source ip = "
@@ -3140,7 +3443,7 @@ def read_imas_baseline(
     # The authoritative dd equilibrium pressure (GS-consistent total, incl.
     # thermal impurity + isotropized fast) interpolated onto psi_N. The solve
     # builds e*(ne*Te + ni*Ti) + impurity(nz*Ti) + p_fast; p_diff anchors that to
-    # FUSE exactly (mirrors jBS_diff) so the per-draw kinetics perturb the thermal
+    # FUSE exactly (mirrors jphi_bs_diff) so the per-draw kinetics perturb the thermal
     # while the carbon/fast/GS residual rides as a fixed offset. Z_imp is the
     # single effective impurity charge (one-Zeff single-impurity model).
     eqp1 = eq["time_slice"][ie]["profiles_1d"]
@@ -3193,13 +3496,13 @@ def read_imas_baseline(
                                         p_fast_meta=p_fast_meta)
 
     # --- total-current anchor: equilibrium.j_tor vs core_profiles.j_tor --------
-    # core_profiles.j_tor (-> j_phi here) is the transport parallel-current sum
+    # core_profiles.j_tor (-> jphi_total here) is the transport parallel-current sum
     # (QED-diffused ohmic + Sauter bootstrap + NBI) converted to toroidal; it
     # differs from the GS-consistent equilibrium.j_tor (which GPEC reads) from
     # ~q=2 outward (the equilibrium carries more pedestal current). jphi_diff
-    # anchors the total to the equilibrium as a FIXED offset (mirrors jBS_diff):
+    # anchors the total to the equilibrium as a FIXED offset (mirrors jphi_bs_diff):
     # added to the baseline + every draw while the SWB bootstrap / perturbed
-    # j_inductive ride underneath. jphi_diff integrates to ~0 (both totals carry
+    # jphi_ind ride underneath. jphi_diff integrates to ~0 (both totals carry
     # the same Ip), so it redistributes rather than adds net current.
     jphi_diff = None
     if anchor_jtor_to_equilibrium:
@@ -3211,12 +3514,12 @@ def read_imas_baseline(
             eq_jphi = jtor_imas_to_jphi_tokamaker(
                 eq_jphi, _fuse_current_geometry(eq, ie))
         eq_jtor = s_ip * np.interp(x_at, x_eq, eq_jphi[_o])
-        jphi_diff = eq_jtor - j_phi
+        jphi_diff = eq_jtor - jphi_total
 
     # --- orientation consistency: REFUSE a mixed-sign source ---------------
     # Every toroidal current bouquet USES must carry, after the factor, the
     # sign of the positive frame: core_profiles.j_tor (the authoritative total
-    # j_phi) always, and the equilibrium j_tor when the jphi anchor uses it.
+    # jphi_total) always, and the equilibrium j_tor when the jphi anchor uses it.
     # The test is on the NET current -- the area-weighted integral (see
     # _area_measure for the weighting actually available on the file and its
     # fallbacks), taken on each quantity's own grid -- so a profile with a
@@ -3242,9 +3545,9 @@ def read_imas_baseline(
 
     bl = Baseline(
         psi_N=x_run,
-        j_phi=j_phi,
-        j_inductive=j_inductive,
-        j_BS=j_BS,
+        jphi_total=jphi_total,
+        jphi_ind=jphi_ind,
+        jphi_bs=jphi_bs,
         psi_N_kinetic=x_run,
         coord=coord,
         # IDA sigmas follow the IDA fits: through the file's own map when the
@@ -3255,10 +3558,10 @@ def read_imas_baseline(
         Ip_target=Ip_target,
         l_i_target=l_i_target,
         provenance="imas",
-        j_NBI=j_NBI,
-        j_RF=j_RF,
-        j_other=j_other,
-        j_sawteeth=j_sawteeth,
+        jphi_nbi=jphi_nbi,
+        jphi_rf=jphi_rf,
+        jphi_other=jphi_other,
+        jphi_saw=jphi_saw,
         p_fast=p_fast,
         z_fast=(z_fast if np.any(z_fast) else None),
         z2_fast=(z2_fast if np.any(z_fast) else None),
@@ -3316,16 +3619,17 @@ def read_imas_baseline(
         source_current_sign_origin=cur_origin,
         source_b0_sign=b0_sign,
         source_time_match=source_time_match,
+        dd_sources=dd_sources,
     )
     # the third current bucket (owner decision D2), beside the solve split
-    # (which carries it in j_inductive; li_metrics["imas_current_conversion"])
-    bl.j_pressure = j_pressure
+    # (which carries it in jphi_ind; li_metrics["imas_current_conversion"])
+    bl.jphi_pd = jphi_pd
     # the dd SOURCE's p'G (its geometry and pressure), kept under its own
     # name: the legacy forward solve replaces the state, and the archive
     # stores the solved state's own p'G (run._archive_baseline_split; review
-    # of #78, B2); engine and swb overwrite j_pressure with their state's
-    bl.j_pressure_source = j_pressure
-    # the in-memory split keeps p'G in the residual j_inductive (the archive
+    # of #78, B2); engine and swb overwrite jphi_pd with their state's
+    bl.jphi_pd_source = jphi_pd
+    # the in-memory split keeps p'G in the residual jphi_ind (the archive
     # writer takes it off: TokaMaker_interface.generate_bouquet)
     bl.current_split_convention = SPLIT_PRESSURE_IN_INDUCTIVE
     return bl
@@ -3402,15 +3706,15 @@ _P_TERM_CACHE = {}
 
 
 def archived_pressure_term(eqdsk_bytes, psi_N):
-    """The pressure-driven ``<j_phi>`` part ``p'(<R> - F^2<1/R>/<B^2>)``
+    """The pressure-driven ``<jphi_total>`` part ``p'(<R> - F^2<1/R>/<B^2>)``
     (:func:`bouquet.engine.pressure_term`) of an ARCHIVED draw eqdsk, in the
     archive's positive frame, interpolated onto *psi_N*.
 
     ``p'``, ``F``, ``<R>``, ``<1/R>``, ``<B^2>`` come from the eqdsk's own
     traced flux surfaces read as :data:`ARCHIVE_EQDSK_COCOS`
     (:func:`bouquet.adapters.gfile_parallel_current`, which refuses an
-    eqdsk whose ``<j_phi>`` does not carry its own Ip's sign).  The archived
-    ``j_BS`` carries this term; the IDS exporter subtracts it before
+    eqdsk whose ``<jphi_total>`` does not carry its own Ip's sign).  The archived
+    ``jphi_bs`` carries this term; the IDS exporter subtracts it before
     converting to ``<j.B>``.  Cached per
     eqdsk content (the trace takes ~2 s)."""
     import hashlib
@@ -3933,8 +4237,51 @@ def _write_draw_ion_species(cp, ni_t, ti_t, ne_t, z_fast_t, Z_imp):
     return rec
 
 
+def _export_template(template_ids_path, time=None, fidelity="auto"):
+    """``(out, tmpl_geom, tmpl_pair)``: :func:`write_imas_draw`'s template, a fresh
+    parse cut to the exported slice, with its paired current geometry (for
+    ``fidelity != "exact"``).  Depends only on the template, ``time`` and
+    ``fidelity``, so :func:`export_imas_drawset` builds it once per scan."""
+    import json
+    # a FRESH parse: _slice_in_time cuts this object in place, so it must
+    # never be the shared cached dd of _load_dd (#72 B5)
+    with open(template_ids_path) as fh:
+        out = json.load(fh)
+
+    eq_ids = out["equilibrium"]
+    ie = _nearest_index(eq_ids["time"], time, "equilibrium")
+    _nearest_index(out["core_profiles"]["time"], time, "core_profiles")  # validates time
+    # Only the exported slice is written: every IDS is cut at the
+    # core_profiles slice nearest the time, core_sources by the reader's rule
+    # with its windows recorded (#71).  The cut first keeps every equilibrium
+    # slice the reader reads there (the template's currents are paired with
+    # one of them: _paired_current_geometry), so the template-geometry
+    # conversion uses the slice the template's currents belong to; the
+    # equilibrium is then cut to the ONE slice the draw is written into (a
+    # draw is one equilibrium, and its currents are written on its own
+    # geometry, so a re-read pairs them with it).
+    t_cp = _slice_in_time(out, eq_ids["time"][ie] if time is None else time)
+    cp = out["core_profiles"]["profiles_1d"][0]
+    tmpl_geom, tmpl_pair = None, None
+    if fidelity != "exact" and t_cp is not None:
+        try:
+            tmpl_geom, tmpl_pair = _paired_current_geometry(
+                eq_ids, cp, t_cp, cp.get("j_total"), cp.get("j_tor"))
+        except (KeyError, TypeError, ValueError):
+            tmpl_geom = None
+    _cut_ids(eq_ids, t_cp)
+    _set_export_window(eq_ids, dict(
+        core_profiles_time=t_cp, kept_times=[float(x) for x in eq_ids["time"]],
+        rule=("write_imas_draw: the draw's own equilibrium, the one slice "
+              "kept (nearest the core_profiles time); the exported currents "
+              "are written on its geometry"),
+        template_current_pairing_time=(None if tmpl_pair is None
+                                       else tmpl_pair["time"])))
+    return out, tmpl_geom, tmpl_pair
+
+
 def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
-                    scan_key=None, time=None, fidelity="auto"):
+                    scan_key=None, time=None, fidelity="auto", template=None):
     """Reconstruct a perturbed IMAS/OMAS IDS for one draw from the bouquet HDF5.
 
     Orientation: the exported file is in the SOURCE's frame throughout.  The
@@ -3997,10 +4344,10 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
     ``j_bootstrap`` as ``<J.B>/B0`` (A7; see the :mod:`bouquet.physics`
     docstring).  No exported parallel current carries the pressure-driven
     ``p'G`` (its ``<j.B>`` is zero): an engine draw's stored ``<j.B>`` parts
-    (``jB_parallel/``) are written as they are; otherwise ``p'G`` comes off
+    (``jdotB/``) are written as they are; otherwise ``p'G`` comes off
     the bucket the archive keeps it in (``schema.read_current_split_convention``:
-    its own ``j_pressure`` since owner decision D2, ``j_BS`` in a PR #64
-    archive, the residual ``j_inductive`` in every earlier one).  ``j_tor``
+    its own ``jphi_pd`` since owner decision D2, ``jphi_bs`` in a PR #64
+    archive, the residual ``jphi_ind`` in every earlier one).  ``j_tor``
     (A5 of the total) includes it; so, per FUSE (IMAS.jl ``Jpar_2_Jtor``,
     ``includes_bootstrap=true``), does the toroidal image of the
     non-inductive/bootstrap group, never the ohmic one.
@@ -4036,6 +4383,9 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
         more than one scan.
     time : float, optional
         Time slice [s]; defaults to the template's nearest single slice.
+    template : tuple, optional
+        ``_export_template(template_ids_path, time, fidelity)`` built once by
+        the caller (:func:`export_imas_drawset`); deep-copied, never mutated.
 
     Returns
     -------
@@ -4052,42 +4402,11 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
         raise ValueError(
             f"fidelity must be 'auto'|'exact'|'reconstruct', got {fidelity!r}")
 
-    # a FRESH parse: _slice_in_time cuts this object in place, so it must
-    # never be the shared cached dd of _load_dd (#72 B5)
-    with open(template_ids_path) as fh:
-        out = json.load(fh)
-
-    eq_ids = out["equilibrium"]
-    ie = _nearest_index(eq_ids["time"], time, "equilibrium")
-    cp_ids = out["core_profiles"]
-    ic = _nearest_index(cp_ids["time"], time, "core_profiles")
-    # Only the exported slice is written: every IDS is cut at the
-    # core_profiles slice nearest the time, core_sources by the reader's rule
-    # with its windows recorded (#71).  The cut first keeps every equilibrium
-    # slice the reader reads there (the template's currents are paired with
-    # one of them: _paired_current_geometry), so the template-geometry
-    # conversion below uses the slice the template's currents belong to;
-    # the equilibrium is then cut to the ONE slice the draw is written into
-    # (a draw is one equilibrium, and its currents are written on its own
-    # geometry, so a re-read pairs them with it).  This MUST stay before
-    # ie = ic = 0: every index below addresses the one kept slice.
-    t_cp = _slice_in_time(out, eq_ids["time"][ie] if time is None else time)
+    out, tmpl_geom, tmpl_pair = (
+        _export_template(template_ids_path, time, fidelity) if template is None
+        else copy.deepcopy(template))
+    eq_ids, cp_ids = out["equilibrium"], out["core_profiles"]
     cp = cp_ids["profiles_1d"][0]
-    tmpl_geom, tmpl_pair = None, None
-    if fidelity != "exact" and t_cp is not None:
-        try:
-            tmpl_geom, tmpl_pair = _paired_current_geometry(
-                eq_ids, cp, t_cp, cp.get("j_total"), cp.get("j_tor"))
-        except (KeyError, TypeError, ValueError):
-            tmpl_geom = None
-    _cut_ids(eq_ids, t_cp)
-    _set_export_window(eq_ids, dict(
-        core_profiles_time=t_cp, kept_times=[float(x) for x in eq_ids["time"]],
-        rule=("write_imas_draw: the draw's own equilibrium, the one slice "
-              "kept (nearest the core_profiles time); the exported currents "
-              "are written on its geometry"),
-        template_current_pairing_time=(None if tmpl_pair is None
-                                       else tmpl_pair["time"])))
     ie = ic = 0
 
     h5 = _resolve_h5(h5path_or_header)
@@ -4114,9 +4433,9 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
         ne = np.asarray(g["n_e"][()]); te = np.asarray(g["T_e"][()])
         ni = np.asarray(g["n_i"][()]); ti = np.asarray(g["T_i"][()])
         pkin = np.asarray(g["psi_N_kinetic"][()]); peq = np.asarray(g["psi_N"][()])
-        j_tor = np.asarray(g["j_phi"][()])
-        j_ind = np.asarray(g["j_inductive"][()])
-        j_bs = np.asarray(g["j_BS"][()])
+        j_tor = np.asarray(g[stored_name(g, "jphi_total")][()])
+        j_ind = np.asarray(g[stored_name(g, "jphi_ind")][()])
+        j_bs = np.asarray(g[stored_name(g, "jphi_bs")][()])
         zeff = np.asarray(g["aux_zeff"][()]) if "aux_zeff" in g else None
         # the solve's species model (per draw, else the baseline's): the
         # effective impurity charge and the fast-ion charge density it was
@@ -4132,18 +4451,22 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
         li1 = float(g.attrs.get("l_i(1)", np.nan))
         li3 = float(g.attrs.get("l_i(3)", np.nan))
         from ..schema import (find_bytes_dataset, EQ_FSA_GROUP,
-                              read_jB_parallel)
+                              read_jdotB)
         eqk = find_bytes_dataset(g)
-        if eqk is None:
-            raise KeyError(f"draw {draw_index} has no archived eqdsk")
-        eq_bytes = bytes(g[eqk][()])
+        if eqk is not None:
+            eq_bytes = bytes(g[eqk][()])
+        else:                       # rebuilt from the archived TokaMaker state
+            from ..archive import BouquetArchive, DrawView
+            eq_bytes = DrawView(BouquetArchive(h5), scan_key, draw_index).eqdsk_bytes
+            if eq_bytes is None:
+                raise KeyError(f"draw {draw_index} has no archived eqdsk or TokaMaker state")
         geq = read_eqdsk_from_bytes(eq_bytes, read_geqdsk)
-        # the engine draw's stored PARALLEL parts (schema jB_parallel/)
-        jB_par = read_jB_parallel(g)
+        # the engine draw's stored PARALLEL parts (schema jdotB/)
+        jB_par = read_jdotB(g)
         # where the archived split keeps p'G (schema; absent = pre-PR #64)
         from ..schema import read_current_split_convention, read_profile
         split_conv = read_current_split_convention(g, stamp)
-        j_press = read_profile(g, "j_pressure")
+        j_press = read_profile(g, "jphi_pd")
         # optional captured live-equilibrium FSA block (exact conversion)
         eq_fsa = None
         if EQ_FSA_GROUP in g:
@@ -4296,13 +4619,13 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
         src = np.asarray(jB_par.get("psi_N", peq), dtype=float)
         b0 = _imas_b0(out, ie, ic)
         ohm, bs, drv = (to_t(np.asarray(jB_par[k], dtype=float), src) / b0
-                        for k in ("jB_inductive", "jB_BS", "jB_NBI"))
-        drv = drv + to_t(np.asarray(jB_par["jB_RF"], dtype=float), src) / b0
+                        for k in ("jdotB_ind", "jdotB_bs", "jdotB_nbi"))
+        drv = drv + to_t(np.asarray(jB_par["jdotB_rf"], dtype=float), src) / b0
     else:
         jt_ind, jt_bs = to_t(j_ind, peq), to_t(j_bs, peq)
         # p'G has zero <j.B>: it comes off the bucket that carries it
         # (schema.read_current_split_convention) before the parallel
-        # conversion -- the archived j_pressure when the split stores it,
+        # conversion -- the archived jphi_pd when the split stores it,
         # else the archived eqdsk's own (what a reader of this IDS recovers)
         if split_conv == SPLIT_PRESSURE_SEPARATE and j_press is not None:
             P_t = to_t(j_press, peq)
@@ -4316,7 +4639,7 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
             ohm = jphi_tokamaker_to_jpar(jt_ind, geom)
             bs = jphi_tokamaker_to_jpar(jt_bs - P_t, geom)
             drv = jphi_tokamaker_to_jpar(jphi_t - jt_ind - jt_bs, geom)
-        else:                                   # pre-PR #64: in j_inductive
+        else:                                   # pre-PR #64: in jphi_ind
             ohm = jphi_tokamaker_to_jpar(jt_ind - P_t, geom)
             bs = jphi_tokamaker_to_jpar(jt_bs, geom)
             drv = jphi_tokamaker_to_jpar(jphi_t - jt_ind - jt_bs, geom)
@@ -4370,10 +4693,13 @@ def export_imas_drawset(h5path_or_header, template_ids_path, out_dir,
                 f"{h5} holds {len(idxs)} scans {sorted(idxs)}; pass an "
                 "explicit scan_key to export_imas_drawset().")
         scan_key, idxs = next(iter(idxs.items()))
+    # every draw of the scan is written at the same time: parse and cut the
+    # template once
+    tmpl = _export_template(template_ids_path, time, fidelity) if idxs else None
     paths = []
     for i in idxs:
         out = os.path.join(out_dir, f"{base}_draw{i}.json")
         paths.append(write_imas_draw(h5, i, template_ids_path, out,
                                      scan_key=scan_key, time=time,
-                                     fidelity=fidelity))
+                                     fidelity=fidelity, template=tmpl))
     return paths

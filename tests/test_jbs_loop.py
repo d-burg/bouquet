@@ -12,15 +12,15 @@ Two things are tested here without a live solver:
   same fixed point, (e) non-convergence raises (default) and is recorded in
   "flag" mode.
 
-* **The evaluator** (:func:`bouquet.physics.evaluate_jBS`) on a mock
+* **The evaluator** (:func:`bouquet.physics.evaluate_jbs`) on a mock
   equilibrium with analytic flux-surface geometry: that the geometry is
   sampled on the CALLER'S surfaces (distinct clipped values only, never a
   repeated surface, psi_pad unchanged), that gradients are taken on the true
   grid, and -- the defect-A regression -- that the same physical profiles
   sampled on a uniform and on a strongly non-uniform psi_N grid give the same
-  j_BS(psi_N) to interpolation accuracy, while the legacy "evenly sampled"
+  jphi_bs(psi_N) to interpolation accuracy, while the legacy "evenly sampled"
   reading of the non-uniform array does not.  The tests that evaluate
-  j_BS need OFT's pure-Python ``bootstrap`` module (Redl) and are skipped
+  jphi_bs need OFT's pure-Python ``bootstrap`` module (Redl) and are skipped
   with a reason when OFT is absent (the ``oft_bootstrap`` fixture); the
   kernel tests, the input refusals and the mocked-solver tests do not.
 
@@ -202,7 +202,7 @@ def test_legacy_flag_round_trips():
 
 @pytest.mark.parametrize("kw, match", [
     (dict(single_profile_jphi=True), "single_profile_jphi"),
-    (dict(recalculate_j_BS=False), "recalculate_j_BS"),
+    (dict(recalculate_jbs=False), "recalculate_jbs"),
 ])
 def test_modes_without_a_bootstrap_to_iterate_are_refused_under_the_default(
         kw, match):
@@ -264,8 +264,8 @@ def test_contraction_converges_on_two_consecutive_passing_passes():
     rj = jsonable(rec)
     for key in ("enabled", "init", "grid", "n_passes", "converged",
                 "tolerances", "omega", "r_j", "r_I", "dl_i", "dq0", "I_BS",
-                "jBS_peak_psiN", "jBS_peak", "wall_s",
-                "evaluate_jBS_version", "oft_build"):
+                "jbs_peak_psiN", "jbs_peak", "wall_s",
+                "evaluate_jbs_version", "oft_build"):
         assert key in rj, key
     import json
     json.dumps(rj)
@@ -358,8 +358,8 @@ def test_draw_init_from_own_kinetics_and_from_the_baseline_reach_one_fixed_point
     outs = {}
     for tag in ("old", "new"):
         p = _draw_problem(a_draw=1.06)
-        src = ("baseline j_BS (counterfactual)" if tag == "old" else
-               "evaluate_jBS at the draw's anchor, draw's own kinetics")
+        src = ("baseline jphi_bs (counterfactual)" if tag == "old" else
+               "evaluate_jbs at the draw's anchor, draw's own kinetics")
         o = run_jbs_loop(p[f"{tag}_init"], p["step"], p["evaluate"], s,
                          Ip=_IP, meas0=dict(li=p["L_anchor"]), gate_li=True,
                          init_source=src)
@@ -666,12 +666,12 @@ def test_the_first_pass_without_a_previous_l_i_cannot_pass():
 def oft_bootstrap():
     """OFT's pure-Python ``bootstrap`` module (Redl), or a skip.
 
-    Only the tests that evaluate j_BS past the input checks need it; the
+    Only the tests that evaluate jphi_bs past the input checks need it; the
     kernel tests above and the refusal / mocked-solver tests below run
     without OFT (the fast CI suite has none)."""
     return pytest.importorskip(
         "OpenFUSIONToolkit.TokaMaker.bootstrap",
-        reason="evaluate_jBS wraps OFT's pure-Python Redl implementation; "
+        reason="evaluate_jbs wraps OFT's pure-Python Redl implementation; "
                "OpenFUSIONToolkit is not importable here")
 
 
@@ -695,7 +695,7 @@ class _MockEq:
     ``nu*`` radii (``R_geo``; ``<R>``) are all distinguishable.
     ``fork=False`` (default) is OpenFUSIONToolkit main: ``sauter_fc`` ignores
     ``return_eps`` and ``R_min``/``R_max`` come from ``get_fsa``;
-    ``fork=True`` also returns ``(R_max - R_min)/(2<R>)`` from
+    ``fork=True`` also returns ``(R_max - R_min)/(R_max + R_min)`` from
     ``sauter_fc(return_eps=True)`` (the fork's 5-tuple), off by
     ``FORK_EPS_OFFSET`` relative -- as the real fork's cut-cell ``<R>`` is
     (~1.4e-4) -- so a test sees that the evaluation never uses it.
@@ -735,7 +735,8 @@ class _MockEq:
         if self.legacy:
             rav = np.vstack([rav["<R>"], rav["<1/R>"], rav["<a>"]])
         if self.fork and kw.get("return_eps"):
-            return (psi, fc, rav, modb, self.HALF_WIDTH * r / R
+            R_geo = R * (1.0 + self.RGEO_SHIFT * psi)
+            return (psi, fc, rav, modb, self.HALF_WIDTH * r / R_geo
                     * (1.0 + self.FORK_EPS_OFFSET))
         return (psi, fc, rav, modb)
 
@@ -775,7 +776,7 @@ def test_geometry_is_sampled_on_the_callers_surfaces_without_repeats():
     surfaces inside psi_pad = 1e-3: they must NOT be merged or dropped (each
     keeps its own profile value and gradient) and psi_pad must NOT change;
     only their geometry is looked up at psi_pad -- once."""
-    from bouquet.physics import evaluate_jBS
+    from bouquet.physics import evaluate_jbs
     # uniform in a rho-like label: psi_N = (k/76)^2 -> [0, 1.73e-4, 6.92e-4,
     # 1.558e-3, 2.77e-3, ...]
     psi = (np.arange(77) / 76.0) ** 2
@@ -783,7 +784,7 @@ def test_geometry_is_sampled_on_the_callers_surfaces_without_repeats():
                                rtol=2e-3)
     assert np.all(np.diff(psi) > 0)
     eq = _MockEq()
-    j, d = evaluate_jBS(eq, psi, *_kin(psi), psi_pad=1e-3, smooth_axis=False)
+    j, d = evaluate_jbs(eq, psi, *_kin(psi), psi_pad=1e-3, smooth_axis=False)
     assert j.shape == psi.shape and np.all(np.isfinite(j))
     assert d["psi_pad"] == 1e-3
     for name, arr in eq.calls:
@@ -795,17 +796,17 @@ def test_geometry_is_sampled_on_the_callers_surfaces_without_repeats():
     assert d["psi_eval"][3] == psi[3]
     # ... but each keeps its own profile values and TRUE-grid gradient, so
     # their Redl drives stay distinct (no surface was merged)
-    assert len(np.unique(d["j_dot_B"][:3])) == 3
+    assert len(np.unique(d["jdotB_bs"][:3])) == 3
 
 
 @pytest.mark.usefixtures("oft_bootstrap")
 def test_gradients_are_on_the_true_grid_and_the_current_flux_range():
-    from bouquet.physics import evaluate_jBS
+    from bouquet.physics import evaluate_jbs
     x = np.linspace(0, 1, 201)
     eq1 = _MockEq(psi_bounds=(-0.9, 0.1))
     eq2 = _MockEq(psi_bounds=(-1.9, 0.1))          # twice the flux range
-    j1, _ = evaluate_jBS(eq1, x, *_kin(x), smooth_axis=False)
-    j2, _ = evaluate_jBS(eq2, x, *_kin(x), smooth_axis=False)
+    j1, _ = evaluate_jbs(eq1, x, *_kin(x), smooth_axis=False)
+    j2, _ = evaluate_jbs(eq2, x, *_kin(x), smooth_axis=False)
     # the Redl drive is linear in d/dpsi = (d/dpsi_N)/Delta_psi; collisional
     # terms do not depend on Delta_psi, so j scales exactly as 1/Delta_psi
     np.testing.assert_allclose(j2, 0.5 * j1, rtol=1e-12, atol=1e-9)
@@ -813,33 +814,33 @@ def test_gradients_are_on_the_true_grid_and_the_current_flux_range():
 
 @pytest.mark.usefixtures("oft_bootstrap")
 def test_legacy_array_layout_gives_the_same_answer():
-    from bouquet.physics import evaluate_jBS
+    from bouquet.physics import evaluate_jbs
     x = np.linspace(0, 1, 151)
-    ja, _ = evaluate_jBS(_MockEq(), x, *_kin(x))
-    jb, _ = evaluate_jBS(_MockEq(legacy=True), x, *_kin(x))
+    ja, _ = evaluate_jbs(_MockEq(), x, *_kin(x))
+    jb, _ = evaluate_jbs(_MockEq(legacy=True), x, *_kin(x))
     np.testing.assert_array_equal(ja, jb)
 
 
 @pytest.mark.usefixtures("oft_bootstrap")
 def test_b_uniform_and_non_uniform_grids_agree_defect_A_regression():
     """(b): the same physical profiles on a uniform and on a rho-uniform
-    (strongly non-uniform) psi_N grid give the same j_BS(psi_N) to
+    (strongly non-uniform) psi_N grid give the same jphi_bs(psi_N) to
     interpolation accuracy.  The legacy reading -- the non-uniform array
     differentiated as if evenly sampled (``solve_with_bootstrap`` without
     ``psi_N=``, defect A) -- misses by an order of magnitude more."""
-    from bouquet.physics import evaluate_jBS
+    from bouquet.physics import evaluate_jbs
     xu = np.linspace(0.0, 1.0, 1001)
-    ju, _ = evaluate_jBS(_MockEq(), xu, *_kin(xu), smooth_axis=False)
+    ju, _ = evaluate_jbs(_MockEq(), xu, *_kin(xu), smooth_axis=False)
     # uniform in a rho-like label; fine enough to resolve the pedestal, so
     # what is measured is the GRID MAPPING, not the finite-difference
     # resolution of either grid
     rho = np.linspace(0.0, 1.0, 801)
     xn = rho ** 2 * (0.5 + 0.5 * rho)
-    jn, _ = evaluate_jBS(_MockEq(), xn, *_kin(xn), smooth_axis=False)
+    jn, _ = evaluate_jbs(_MockEq(), xn, *_kin(xn), smooth_axis=False)
     # legacy: the non-uniform ARRAYS read as if on an even grid
     xl = np.linspace(0.0, 1.0, xn.size)
     kin_n = _kin(xn)
-    jl, _ = evaluate_jBS(_MockEq(), xl, *kin_n, smooth_axis=False)
+    jl, _ = evaluate_jbs(_MockEq(), xl, *kin_n, smooth_axis=False)
     # compare on the reference (uniform) grid, current-weighted, away from
     # the tracer-clipped axis and separatrix samples
     sel = (xu > 0.02) & (xu < 0.995)
@@ -854,29 +855,29 @@ def test_b_uniform_and_non_uniform_grids_agree_defect_A_regression():
 
 
 def test_evaluate_refuses_bad_grids_by_name():
-    from bouquet.physics import evaluate_jBS
+    from bouquet.physics import evaluate_jbs
     x = np.linspace(0, 1, 11)
     k = _kin(x)
     with pytest.raises(ValueError, match="strictly increasing"):
-        evaluate_jBS(_MockEq(), x[::-1], *k)
+        evaluate_jbs(_MockEq(), x[::-1], *k)
     with pytest.raises(ValueError, match=r"\[0, 1\]"):
-        evaluate_jBS(_MockEq(), x * 1.1, *k)
+        evaluate_jbs(_MockEq(), x * 1.1, *k)
     with pytest.raises(ValueError, match="ne has shape"):
-        evaluate_jBS(_MockEq(), x, k[0][:-1], *k[1:])
+        evaluate_jbs(_MockEq(), x, k[0][:-1], *k[1:])
     with pytest.raises(ValueError, match="psi_pad"):
-        evaluate_jBS(_MockEq(), x, *k, psi_pad=0.0)
+        evaluate_jbs(_MockEq(), x, *k, psi_pad=0.0)
 
 
 @pytest.mark.usefixtures("oft_bootstrap")
 def test_draw_composer_reproduces_the_legacy_composition_rules():
     """The per-draw composition: scale on the (isolated) spike only, floor,
-    jBS_diff outside delta mode; delta mode = baseline + (scale*raw - ref)."""
-    from bouquet.physics import evaluate_jBS
+    jphi_bs_diff outside delta mode; delta mode = baseline + (scale*raw - ref)."""
+    from bouquet.physics import evaluate_jbs
     from bouquet.TokaMaker_interface import (_draw_jbs_composer,
                                              smooth_jbs_transition)
     x = np.linspace(0, 1, 129)
     k = _kin(x)
-    base, d = evaluate_jBS(_MockEq(), x, *k)
+    base, d = evaluate_jbs(_MockEq(), x, *k)
     diff = 1e3 * np.sin(3 * x)
     comp = _draw_jbs_composer(x, *k, 1e-3, False, 0.9, False, diff, None,
                               None)
@@ -886,7 +887,7 @@ def test_draw_composer_reproduces_the_legacy_composition_rules():
         full, smooth_jbs_transition(d["j_tor_full_raw"]), rtol=1e-13)
     # delta mode: at sigma=0 (same state, ref at the same scale) the spike IS
     # the baseline split, whatever the evaluator's common-mode artifacts
-    raw, _ = evaluate_jBS(_MockEq(), x, *k, smooth_axis=False)
+    raw, _ = evaluate_jbs(_MockEq(), x, *k, smooth_axis=False)
     bl = 2e5 + 0 * x
     comp_d = _draw_jbs_composer(x, *k, 1e-3, False, 0.9, False, diff,
                                 0.9 * raw, bl)
@@ -951,16 +952,16 @@ def _ph_setup(monkeypatch, kind):
                                                 None),
                spike_used=1.0015 * Jstar, cand=j_ind.copy(),
                j_ind_used=j_ind.copy(), j_fixed_eff=np.zeros_like(x),
-               pres_tmp=1e4 * (1.0 - x ** 2) + 10.0, input_j_phi=j_ind + Jstar,
-               r2_mode="legacy", j_phi_request=j_ind + Jstar,
-               isolate_edge_jBS=False)
+               pres_tmp=1e4 * (1.0 - x ** 2) + 10.0, jphi_total_input=j_ind + Jstar,
+               r2_mode="legacy", jphi_total_request=j_ind + Jstar,
+               isolate_edge_jbs=False)
     s = jbs_settings(_GC(), draw=True)
     return TI, x, Jstar, ctx, calls, s
 
 
 def test_post_homotopy_standard_draw_reaches_the_total_by_corrective_iteration(
         monkeypatch):
-    """A standard draw's stored j_phi is the ACHIEVED current of its
+    """A standard draw's stored jphi_total is the ACHIEVED current of its
     corrective iteration; the post-homotopy passes must reach the new total
     the same way (target renormalised to Ip + corrective iteration), never by
     handing that achieved profile back to one jphi-linterp solve."""

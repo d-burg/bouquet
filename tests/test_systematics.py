@@ -6,7 +6,7 @@ Instead of re-running the (slow) reconstruction + GPR sampling, this test
 ``reconstruction_engine="legacy"``) through the legacy perturbation->solve->
 ``solve_with_bootstrap``->coil-homotopy pipeline and checks the outputs.  It
 loads the pre-reconstructed jphi-linterp baseline (re-solved once from the
-golden baseline j_phi -- *not* a full ``reconstruct_equilibrium``) and then,
+golden baseline jphi_total -- *not* a full ``reconstruct_equilibrium``) and then,
 for each stored draw, feeds that draw's stored profiles back with sigma=0 so
 there is no resampling and no l_i iteration -- the only thing exercised is the
 deterministic solve path.
@@ -139,27 +139,27 @@ def _record_split_convention(rec):
     """Where a legacy-record group (baseline or replay draw) keeps the
     pressure-driven ``p'G``: its stored ``current_split_convention``, else
     inferred as :func:`bouquet.schema.read_current_split_convention` does
-    for an archive group -- a ``j_pressure`` profile means separate, nothing
-    means the pre-#64 record (``p'G`` inside ``j_inductive``)."""
+    for an archive group -- a ``jphi_pd`` profile means separate, nothing
+    means the pre-#64 record (``p'G`` inside ``jphi_ind``)."""
     from bouquet.schema import (CURRENT_SPLIT_CONVENTIONS,
                                 SPLIT_PRESSURE_IN_INDUCTIVE,
                                 SPLIT_PRESSURE_SEPARATE)
     v = rec.get("current_split_convention")
     if v is None:
-        v = (SPLIT_PRESSURE_SEPARATE if "j_pressure" in rec["profiles"]
+        v = (SPLIT_PRESSURE_SEPARATE if "jphi_pd" in rec["profiles"]
              else SPLIT_PRESSURE_IN_INDUCTIVE)
     assert v in CURRENT_SPLIT_CONVENTIONS, v
     return v
 
 
 def _legacy_input_inductive(rec):
-    """The ``input_jinductive`` the legacy functional path takes for an
+    """The ``jphi_ind_input`` the legacy functional path takes for an
     archived draw: the legacy IN-MEMORY inductive, which carries the
     pressure-driven ``p'G`` (``generate_bouquet``'s ``baseline_split``
     ``inductive_includes_pressure``, the convention mode 3 replays under).
     A record written under owner decision D2 (``current_split_convention =
-    "pressure_separate"``) archives that current as its own ``j_pressure``
-    beside a ``j_inductive`` that does NOT carry it, so the two are put back
+    "pressure_separate"``) archives that current as its own ``jphi_pd``
+    beside a ``jphi_ind`` that does NOT carry it, so the two are put back
     together here; a pre-#64 record stored the carried form as is.  Without
     this the replay is short the pedestal's ``p'G`` (~8 % of the peak
     current on the earlier D3D-like example golden) and lands ~6 % high in
@@ -168,10 +168,10 @@ def _legacy_input_inductive(rec):
     from bouquet.schema import (SPLIT_PRESSURE_IN_INDUCTIVE,
                                 SPLIT_PRESSURE_SEPARATE)
     p = rec["profiles"]
-    jind = np.asarray(p["j_inductive"], dtype=float)
+    jind = np.asarray(p["jphi_ind"], dtype=float)
     conv = _record_split_convention(rec)
     if conv == SPLIT_PRESSURE_SEPARATE:
-        return jind + np.asarray(p["j_pressure"], dtype=float)
+        return jind + np.asarray(p["jphi_pd"], dtype=float)
     if conv == SPLIT_PRESSURE_IN_INDUCTIVE:
         return jind
     raise ValueError(
@@ -191,7 +191,7 @@ def _load_golden():
         te=np.asarray(pr["T_e"], dtype=float),
         ni=np.asarray(pr["n_i"], dtype=float),
         ti=np.asarray(pr["T_i"], dtype=float),
-        jphi=np.asarray(pr["j_phi"], dtype=float),
+        jphi=np.asarray(pr["jphi_total"], dtype=float),
         pressure=np.asarray(pr["pressure"], dtype=float),
         # the uniform subsample of the reconstruction's LCFS trace
         recon_lcfs=np.asarray(bl["recon_lcfs_ref"]["points"], dtype=float),
@@ -213,7 +213,7 @@ def _load_golden():
             te=np.asarray(p["T_e"], dtype=float),
             ni=np.asarray(p["n_i"], dtype=float),
             ti=np.asarray(p["T_i"], dtype=float),
-            jphi=np.asarray(p["j_phi"], dtype=float),
+            jphi=np.asarray(p["jphi_total"], dtype=float),
             # the carried (in-memory legacy) inductive, whatever split the
             # record archives
             jind=_legacy_input_inductive(gi),
@@ -249,10 +249,10 @@ def _load_golden():
 #: (impurity / fast pressure, diff anchors, NBI / RF current).  Per-draw
 #: quantities (Z_eff, the bootstrap scale) are the draw's own, below.
 _GENERATOR_MODEL_KWARGS = (
-    "baseline_j_BS", "isolate_edge_jBS", "floor_j_BS",
-    "jBS_diff", "jbs_delta_mode", "accept_anchor_inband",
+    "baseline_jphi_bs", "isolate_edge_jbs", "floor_jbs",
+    "jphi_bs_diff", "jbs_delta_mode", "accept_anchor_inband",
     "perturb_jind_in_anchor", "p_fast", "z_fast", "Z_imp", "p_diff",
-    "jphi_diff", "j_NBI", "j_RF",
+    "jphi_diff", "jphi_nbi", "jphi_rf",
 )
 
 
@@ -285,7 +285,7 @@ def _generator_call(run):
     return dict(bound.arguments)
 
 
-def _draw_jBS_scale(gen_golden, jBS_scale_range, count):
+def _draw_jbs_scale(gen_golden, jbs_scale_range, count):
     """The bootstrap scale the generator drew for draw ``count``.
 
     ``generate_bouquet`` draws the whole batch's scales as the FIRST
@@ -294,10 +294,10 @@ def _draw_jBS_scale(gen_golden, jBS_scale_range, count):
     that block's ``count``-th element under the golden's own seed and
     ``n_equils``.  ``None`` range -> 1.0, as in the generator.
     """
-    if jBS_scale_range is None:
+    if jbs_scale_range is None:
         return 1.0
     from bouquet.sampling import make_rng
-    lo, hi = (float(v) for v in jBS_scale_range)
+    lo, hi = (float(v) for v in jbs_scale_range)
     n = int(gen_golden.n_equils)
     assert gen_golden.n_inspec_target is None and 0 <= count < n, (
         "the scale block is only the first n_equils values of the stream "
@@ -306,8 +306,10 @@ def _draw_jBS_scale(gen_golden, jBS_scale_range, count):
 
 
 def _bnd_rms_mm(ref, pts):
-    from scipy.spatial import cKDTree
-    d, _ = cKDTree(np.asarray(pts)).query(np.asarray(ref))
+    """RMS distance [mm] of the ``ref`` points to the polyline through ``pts``
+    (a cut-cell trace's ~5 mm spacing would read as deviation to its vertices)."""
+    from bouquet.filtering import contour_distance
+    d = contour_distance(np.asarray(ref), np.asarray(pts))
     return float(np.sqrt((d ** 2).mean()) * 1e3)
 
 
@@ -387,17 +389,17 @@ def replay(tmp_path_factory):
     # model and fixed components are the ones generate() passes, read off
     # generate()'s own call on this reconstruction -- not the function
     # defaults.  Before this, mode 3 solved with Z_eff = 1 (generate: the
-    # baseline / per-draw Z_eff, 1.76-1.92 here), isolate_edge_jBS=True
-    # (generate: the geqdsk workflow's False), floor_j_BS=True, and no
-    # baseline_j_BS or bootstrap scale, i.e. a different bootstrap (I_BS
+    # baseline / per-draw Z_eff, 1.76-1.92 here), isolate_edge_jbs=True
+    # (generate: the geqdsk workflow's False), floor_jbs=True, and no
+    # baseline_jphi_bs or bootstrap scale, i.e. a different bootstrap (I_BS
     # ~219-233 kA against the golden draw loops' ~295-312 kA).
     _gen_kw = _generator_call(run)
     if iso is not None:                  # generate() restored the same set
         mygs.set_isoflux(iso, weights=isow)
     gen_model = {k: _gen_kw[k] for k in _GENERATOR_MODEL_KWARGS
                  if k in _gen_kw}
-    # _run passes recalculate_j_BS=True itself (all modes); generate()'s agrees
-    assert _gen_kw.get("recalculate_j_BS", True) is True
+    # _run passes recalculate_jbs=True itself (all modes); generate()'s agrees
+    assert _gen_kw.get("recalculate_jbs", True) is True
 
     def _short(v):
         if v is None or np.isscalar(v) or isinstance(v, (tuple, list)):
@@ -407,7 +409,7 @@ def replay(tmp_path_factory):
     print("[replay mode3] from generate(): " + ", ".join(
         f"{k}={_short(v)}" for k, v in sorted(
             dict(gen_model, Zeff=_gen_kw.get("Zeff"),
-                 jBS_scale_range=_gen_kw.get("jBS_scale_range")).items())))
+                 jbs_scale_range=_gen_kw.get("jbs_scale_range")).items())))
 
     def _zeff_eq(zeff_kin):
         # generate_bouquet's own kin->eq regrid + floor for the drawn Z_eff
@@ -455,9 +457,9 @@ def replay(tmp_path_factory):
             ne, te, ni, ti, z, z, z, z, zj,
             0.5, 0.4, 0.25, base["Ip_target"], l_i_target,
             Zeff if Zeff_run is None else Zeff_run,
-            input_jinductive=input_jind,
+            jphi_ind_input=input_jind,
             l_i_tolerance=0.05, psi_pad=pad,
-            constrain_sawteeth=False, recalculate_j_BS=True,
+            constrain_sawteeth=False, recalculate_jbs=True,
             pfile_bytes=pf_raw, baseline_eqdsk_bytes=geq_raw,
             baseline_pfile_bytes=pf_bl_raw,
             diagnostic_plots=False, scan_key=0, psi_N_kinetic=psi_pf,
@@ -484,7 +486,7 @@ def replay(tmp_path_factory):
                                np.asarray(gi["coil_currents"][()]))),
             )
 
-    gen_model_range = _gen_kw.get("jBS_scale_range")
+    gen_model_range = _gen_kw.get("jbs_scale_range")
     work = str(tmp_path_factory.mktemp("replay"))
     results = {"base": base, "draws": draws, "mode1": None,
                "mode2": {}, "mode3": {}}
@@ -499,8 +501,8 @@ def replay(tmp_path_factory):
             base["jphi"], base["jphi"], base["l_i_target"], pin_jphi=True)
         # Mode 3: the draw's own Z_eff (else generate()'s baseline Z_eff)
         # and its own bootstrap scale (a (s, s) range draws exactly s).
-        _s = _draw_jBS_scale(_gen_golden, gen_model_range, d["count"])
-        print(f"[replay mode3] draw {i}: scale_jBS={_s:.6f}, Z_eff "
+        _s = _draw_jbs_scale(_gen_golden, gen_model_range, d["count"])
+        print(f"[replay mode3] draw {i}: scale_jbs={_s:.6f}, Z_eff "
               + (_short(_zeff_eq(d["zeff"])) if d["zeff"] is not None
                  else "generate()'s baseline"))
         results["mode3"][i] = _run(
@@ -508,7 +510,7 @@ def replay(tmp_path_factory):
             d["jphi"], d["jind"], d["li3"], pin_jphi=False,
             Zeff_run=(_zeff_eq(d["zeff"]) if d["zeff"] is not None
                       else np.asarray(_gen_kw["Zeff"], dtype=float)),
-            jBS_scale_range=(_s, _s), **gen_model)
+            jbs_scale_range=(_s, _s), **gen_model)
     return results
 
 
@@ -538,7 +540,7 @@ def test_mode1_pinned_baseline_reproduces_baseline(replay):
 
 
 def test_mode2_pinned_pressure_no_systematic(replay):
-    """Pressure-only (j_phi pinned): bounded shift, signed-mean ~0 (no bias)."""
+    """Pressure-only (jphi_total pinned): bounded shift, signed-mean ~0 (no bias)."""
     base = replay["base"]
     devs = []
     with _golden_comparison():
@@ -564,7 +566,7 @@ def test_mode3_production_reproduces_golden(replay):
     live code against a live solver, the golden is a recording, and a change in
     either reads the same from here.  The fixture's provenance is therefore
     printed on every assertion below -- an l_i(1) miss with l_i(3) and the
-    boundary intact is the signature of an edge-localised j_BS change, which is
+    boundary intact is the signature of an edge-localised jphi_bs change, which is
     a SOLVER-build difference far more often than a bouquet one.
     """
     base = replay["base"]
@@ -597,7 +599,7 @@ def test_mode3_production_reproduces_golden(replay):
                 f"{d['li1']:.6f} ({100 * abs(r['li1'] - d['li1']) / d['li1']:.2f} "
                 f"%, bar {100 * _MODE3_LI_REL:.0f} %).  l_i(3) moved "
                 f"{100 * abs(r['li3'] - d['li3']) / d['li3']:.2f} % -- an l_i(1)-"
-                "only miss is edge-localised, so suspect the j_BS/solver build "
+                "only miss is edge-localised, so suspect the jphi_bs/solver build "
                 f"before suspecting a bouquet change.\n{prov}")
             if np.isfinite(d["Ip"]) and np.isfinite(r["Ip"]):
                 assert abs(r["Ip"] - d["Ip"]) / abs(d["Ip"]) < _MODE3_IP_REL, (

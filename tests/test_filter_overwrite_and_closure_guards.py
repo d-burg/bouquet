@@ -6,7 +6,7 @@
    once chi2 became the default.  It now warns and relabels the scan-level
    ``coil_filter`` attr, and ``apply=False`` leaves everything alone.
 2. A non-default ``closure_channel`` outside the IMAS hybrid split
-   (``jBS_baseline_mode="ohmic"`` + ``recalculate_j_BS=True``) was resolved,
+   (``jbs_baseline_mode="ohmic"`` + ``recalculate_jbs=True``) was resolved,
    announced, and then never read.  The workflow guard now refuses it.
 3. ``Baseline.li_metrics`` (with the ``ip_closure`` health record and its
    ``closure_limited`` verdict) is archived on ``_baseline`` and decoded by
@@ -123,7 +123,7 @@ def _cfg(source_kind):
 def test_channel_on_diff_mode_is_refused(channel):
     from bouquet.run import Bouquet
     cfg = _cfg("imas")
-    assert cfg.generation.jBS_baseline_mode == "diff"
+    assert cfg.generation.jbs_baseline_mode == "diff"
     cfg.generation.closure_channel = channel
     with pytest.raises(ValueError, match="silently ignored"):
         Bouquet(cfg)._validate_workflow()
@@ -140,15 +140,15 @@ def test_channel_on_a_gfile_source_is_refused():
 def test_channel_without_recalculate_jbs_is_refused():
     from bouquet.run import Bouquet
     cfg = _cfg("imas")
-    cfg.generation.jBS_baseline_mode = "ohmic"
-    cfg.generation.recalculate_j_BS = False
-    # recalculate_j_BS=False is only a valid setting with the self-consistent
+    cfg.generation.jbs_baseline_mode = "ohmic"
+    cfg.generation.recalculate_jbs = False
+    # recalculate_jbs=False is only a valid setting with the self-consistent
     # bootstrap loop off (the loop's own guard refuses the pair outright,
     # before the workflow problems are collected); the subject here is the
     # closure_channel refusal, so construct an otherwise-valid config.
     cfg.generation.jbs_self_consistent = False
     cfg.generation.closure_channel = "structured"
-    with pytest.raises(ValueError, match="recalculate_j_BS=True"):
+    with pytest.raises(ValueError, match="recalculate_jbs=True"):
         Bouquet(cfg)._validate_workflow()
 
 
@@ -181,7 +181,7 @@ def test_baseline_time_refusal_honours_the_custom_downgrade():
     from bouquet.run import Bouquet
     src = inspect.getsource(Bouquet._forward_solve_imas_baseline)
     blk = src.split("Same refusal as _validate_workflow", 1)[1]
-    blk = blk.split("if self.config.generation.recalculate_j_BS:", 1)[0]
+    blk = blk.split("if self.config.generation.recalculate_jbs:", 1)[0]
     assert '== "custom"' in blk and "allow_unsafe_workflow" in blk
     assert blk.index('print("WARN: "') < blk.index("raise ValueError(_msg0)")
 
@@ -196,10 +196,10 @@ def test_baseline_meta_is_the_last_generate_bouquet_parameter():
     # every parameter added since 1.3.1 sits after the positional-capable
     # options, in the order it was added (bootstrap_kwargs replaced the
     # trailing **kwargs, review PR60 B5; then the D2 split convention and
-    # the sawteeth share of j_other, 2026-10-09)
-    assert params[-6:] == ["baseline_meta", "on_inspec", "stop_check",
+    # the sawteeth share of jphi_other, 2026-10-09; then the iso-update weights)
+    assert params[-7:] == ["baseline_meta", "on_inspec", "stop_check",
                            "bootstrap_kwargs", "baseline_split",
-                           "j_sawteeth"]
+                           "jphi_saw", "iso_update_ref_points"]
 
 
 # ---------------------------------------------------------------------------
@@ -220,7 +220,7 @@ def _store(tmp_path, meta):
 
 def test_li_metrics_and_ip_closure_round_trip(tmp_path):
     meta = {
-        "tokamaker_li_1": 0.91, "jBS_baseline_mode": "ohmic",
+        "tokamaker_li_1": 0.91, "jbs_baseline_mode": "ohmic",
         "bs_scale": np.float64(0.83),                 # numpy scalar
         "ip_closure": {
             "closure_channel": "structured",

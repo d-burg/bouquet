@@ -58,8 +58,8 @@ def _bouquet(monkeypatch, li_draw, perturb_jind_in_anchor=False,
         psi_N_kinetic=_XK, ne=np.full(_XK.size, 5e19), te=np.full(_XK.size,
                                                                  2e3),
         ni=np.full(_XK.size, 4.5e19), ti=np.full(_XK.size, 2e3),
-        j_phi=2.0e6 * (1 - _X) ** 2 + _jbs(), j_inductive=2.0e6 * (1 - _X) ** 2,
-        j_BS=_jbs(), jBS_diff=None, p_fast=None, j_NBI=None, j_RF=None)
+        jphi_total=2.0e6 * (1 - _X) ** 2 + _jbs(), jphi_ind=2.0e6 * (1 - _X) ** 2,
+        jphi_bs=_jbs(), jphi_bs_diff=None, p_fast=None, jphi_nbi=None, jphi_rf=None)
     b = Bouquet.__new__(Bouquet)
     b.baseline = bl
     b.mygs = _Eq(li_draw)
@@ -75,7 +75,7 @@ def _bouquet(monkeypatch, li_draw, perturb_jind_in_anchor=False,
 
     def _perturb(*a, **k):
         calls.append((a, k))
-        d = dict(j_BS=_jbs(), j_BS_edge=None, r2_ip_scale=(
+        d = dict(jphi_bs=_jbs(), jphi_bs_edge=None, r2_ip_scale=(
             1.0004 if k["perturb_jind_in_anchor"] else None),
             r2_f_ind=0.7, j0_scales=[1.001],
             jbs_loop=dict(converged=converged, n_loops=1, n_passes_total=3),
@@ -93,7 +93,7 @@ def _run(b, routes=None):
         s, ("entry", 0), np.full(_X.size, 1e4), np.full(_X.size, 5e19),
         np.full(_X.size, 2e3), np.full(_X.size, 4.5e19),
         np.full(_X.size, 2e3), np.full(_X.size, 1.5), _X, 1e-3,
-        np.asarray(b.baseline.j_BS, float), 0.803,
+        np.asarray(b.baseline.jphi_bs, float), 0.803,
         "reconstruction li_realized_post_corrective", routes=routes)
 
 
@@ -104,7 +104,7 @@ def test_the_draw_route_is_perturb_kinetic_equilibrium_at_zero_sigma(
     blk = _run(b)
     assert len(calls) == 1
     a, k = calls[0]
-    # every sigma zero: kinetic (kinetic grid), j_phi (equilibrium grid), aux
+    # every sigma zero: kinetic (kinetic grid), jphi_total (equilibrium grid), aux
     for arr in a[8:12]:
         assert arr.shape == _XK.shape and not np.any(arr)
     assert a[12].shape == _X.shape and not np.any(a[12])
@@ -113,13 +113,13 @@ def test_the_draw_route_is_perturb_kinetic_equilibrium_at_zero_sigma(
     # the loop settings, a seeded Generator, the baseline inductive
     assert k["perturb_jind_in_anchor"] is False
     gc = b.config.generation
-    assert k["scale_jBS"] == pytest.approx(sigma0_reference_scale(
-        (gc.jBS_scale_range[0] * 1.02, gc.jBS_scale_range[1] * 1.02)))
+    assert k["scale_jbs"] == pytest.approx(sigma0_reference_scale(
+        (gc.jbs_scale_range[0] * 1.02, gc.jbs_scale_range[1] * 1.02)))
     assert k["p_thresh"] == 0.05 and k["max_proxy_draws"] == 500
     assert k["jbs_loop"]["enabled"] and isinstance(k["rng"],
                                                    np.random.Generator)
-    np.testing.assert_array_equal(k["input_jinductive"],
-                                  b.baseline.j_inductive)
+    np.testing.assert_array_equal(k["jphi_ind_input"],
+                                  b.baseline.jphi_ind)
     # the replay started from the state the check was handed
     assert b.mygs.replaced and b.mygs.replaced[0] == ("entry", 0)
     rr = blk["routes"]["standard"]

@@ -49,7 +49,7 @@ def _captured_pressure(tmp_path, monkeypatch, jbs_loop, kin_grid):
             R._FakeGS(), X, 1, os.path.join(str(tmp_path), "ab"), jphi,
             ne, te, ni, ti, 0.05 * ne, 0.05 * te, 0.05 * ni, 0.05 * ti,
             0.05 * jphi, 0.4, 0.4, 0.25, 1.0e6, 0.8, 1.5 * np.ones(len(X)),
-            input_jinductive=jphi - Jb, baseline_j_BS=Jb, psi_N_kinetic=kin,
+            jphi_ind_input=jphi - Jb, baseline_jphi_bs=Jb, psi_N_kinetic=kin,
             diagnostic_plots=False, seed=3, jbs_loop=jbs_loop,
             homotopy_passes=[(0.05, 0.10), (0.01, 0.01)], rejection_log=[])
     if kin is None:

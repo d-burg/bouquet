@@ -73,8 +73,8 @@ depends on where the baseline came from:
 assumption catalogue):
 
 * **Toroidal-current authority**: the IDS `j_tor` (converted to TokaMaker
-  `jphi`) is taken as the total `j_phi`; the inductive component is the
-  residual `j_phi − j_BS − j_NBI − j_RF`, so the decomposition sums exactly.
+  `jphi`) is taken as the total `jphi_total`; the inductive component is the
+  residual `jphi_total − jphi_bs − jphi_nbi − jphi_rf`, so the decomposition sums exactly.
 * **Current conventions** (`docs/current-conventions.md`): bouquet arrays are
   TokaMaker `jphi = ⟨j_φ⟩`; IMAS `j_tor = ⟨j_φ/R⟩/⟨1/R⟩` and its parallel
   currents are `⟨J·B⟩/B0`. The reader converts exactly with the FUSE
@@ -295,9 +295,9 @@ three-stage process designed to make the pipeline behave as a true
 forward operator (sigma -> 0 reproduces the reconstructed equilibrium):
 
 1. **Recon-anchor solve (NEW).**  After `solve_with_bootstrap` (SWB)
-   recomputes `j_BS` and `isolated_j_BS` from the perturbed kinetics,
-   we drop SWB's `matched_j_inductive` and substitute recon's converged
-   `j_inductive_fit` (passed via `input_jinductive`).  SWB seeds with
+   recomputes `jphi_bs` and `jphi_bs` from the perturbed kinetics,
+   we drop SWB's `matched_jphi_ind` and substitute recon's converged
+   `jphi_ind_fit` (passed via `jphi_ind_input`).  SWB seeds with
    `create_power_flux_fun(1.5, 1.5)` (broad shape) and alpha-scales to
    match Ip, but the resulting inductive has a fundamentally different
    *shape* than recon's eqdsk-fit inductive (typical recon/SWB ratio
@@ -359,7 +359,7 @@ rejected equilibria still cost a TokaMaker call.
 |----------|-----------|-------|
 | ne, Te, ni, Ti | Yes | Drawn from GPR posterior |
 | Total pressure (ptot) | Yes | Recomputed from perturbed kinetics |
-| Bootstrap current (j_BS) | Yes (optional) | Recomputed from Sauter model if `recalculate_j_BS=True` |
+| Bootstrap current (jphi_bs) | Yes (optional) | Recomputed from Sauter model if `recalculate_jbs=True` |
 | Inductive current (j_ind) | Yes | Scaled to match li |
 | Coil currents | Yes | Adjusted by TokaMaker to match Ip |
 | nz1 (impurity density) | **No** | Kept from baseline; see [Section 4](#4-quasi-neutrality-and-impurity-handling) |
@@ -434,7 +434,7 @@ Because baseline nz1 is preserved:
 
 ### 5.1 Bootstrap Current
 
-The bootstrap current density `j_BS` is computed using the Sauter
+The bootstrap current density `jphi_bs` is computed using the Sauter
 model [O. Sauter, C. Angioni, and Y.R. Lin-Liu, Physics of Plasmas
 **6** (1999) 2834], which is the standard analytic model used by most
 transport codes.
@@ -451,7 +451,7 @@ It can be less accurate for:
 **Implementation note.** bouquet evaluates the bootstrap with the Redl et al.
 (2021) fit (OFT's `redl_bootstrap`, `formula_form='jboot1'`), the successor of
 the Sauter fit with the same inputs. Default
-(`GenerationConfig.jbs_self_consistent=True`): `physics.evaluate_jBS` on the
+(`GenerationConfig.jbs_self_consistent=True`): `physics.evaluate_jbs` on the
 delivered equilibrium and the caller's own ψ_N grid, iterated to
 self-consistency with the closure and the GS solve (`bouquet/jbs_loop.py`;
 joint under-relaxation of the bootstrap and the solved current, convergence on
@@ -469,7 +469,7 @@ while the current redistributes; the Redl drive is main-ion + electron only.
 The inductive current `j_ind` is defined as the residual:
 
 ```
-j_ind = j_total - j_BS
+j_ind = j_total - jphi_bs
 ```
 
 It is fitted with a `scipy.interpolate.UnivariateSpline` using a
@@ -486,7 +486,7 @@ psi_N < shelf_psi_N (i.e. in the core), using the value at the shelf
 location.  This separates core and edge bootstrap contributions and
 can be useful when the Sauter model produces unphysical core structure.
 
-**Caveat:** The shelf introduces a discontinuity in the j_BS derivative
+**Caveat:** The shelf introduces a discontinuity in the jphi_bs derivative
 at psi_N = shelf_psi_N.
 
 ---
@@ -726,7 +726,7 @@ to the boundary.  A sign-protection clip prevents the extrapolation
 from reversing sign.
 
 **Caveat:** This creates artificial structure at the plasma edge and
-may distort the near-edge j_phi and pressure gradient profiles.
+may distort the near-edge jphi_total and pressure gradient profiles.
 Users working on pedestal physics should consider disabling this
 feature.
 
@@ -781,8 +781,8 @@ header.h5
 |   |   +-- 0/
 |   |   |   +-- {header}_{sv}_{0}.eqdsk # raw geqdsk bytes
 |   |   |   +-- {header}_{sv}_{0}.pfile # raw p-file bytes (optional)
-|   |   |   +-- psi_N, j_phi, ne, te, ni, ti [...]
-|   |   |   +-- j_BS, j_BS,edge, j_inductive, pressure, w_ExB
+|   |   |   +-- psi_N, jphi_total, ne, te, ni, ti [...]
+|   |   |   +-- jphi_bs, jphi_bs,edge, jphi_ind, pressure, w_ExB
 |   |   |   +-- coil_currents [A]       # this draw's converged coils
 |   |   |   ^-- attrs: count, scan_val, l_i(1), l_i(3), coil_names,
 |   |   |       homotopy_pass, homotopy_F_lim, homotopy_VSC_lim,

@@ -510,7 +510,7 @@ def _case_archive(dirpath, idx, group, scan_key, n_draws=2):
         for i in range(n_draws):
             d = g.create_group(str(i))
             d.attrs["count"] = i
-            d.create_dataset("j_phi", data=np.arange(4.0) + i)
+            d.create_dataset("jphi_total", data=np.arange(4.0) + i)
     return dict(idx=idx, path=os.path.abspath(stem + ".h5"), group=group,
                 scan_key=scan_key, n_all=n_draws, n_sel=n_draws)
 

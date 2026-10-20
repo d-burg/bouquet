@@ -72,7 +72,7 @@ def _bl(psi, ne, zeff):
     from bouquet.baseline import Baseline
     psi_N = np.linspace(0.0, 1.0, 33)
     j = 8e5 * (1 - psi_N ** 2)
-    return Baseline(psi_N=psi_N, j_phi=j, j_inductive=0.85 * j, j_BS=0.15 * j,
+    return Baseline(psi_N=psi_N, jphi_total=j, jphi_ind=0.85 * j, jphi_bs=0.15 * j,
                     psi_N_kinetic=psi, ne=ne, te=ne * 0 + 1e3,
                     ni=main_ion_density_from_zeff(ne, zeff, Z), ti=ne * 0 + 1e3,
                     Zeff=zeff, Ip_target=1.2e6, l_i_target=0.85,
@@ -204,7 +204,7 @@ def _draws(r, zeff_dne, n=600, seed=3):
                     sl(r.ni), sl(r.ti), np.ones(conf.sum()),
                     sl(r.sigma_ne), sl(r.sigma_te), sl(r.sigma_ni), sl(r.sigma_ti),
                     np.zeros(conf.sum()), 0.5, 0.4, 0.25, 1e6, 0.9, sl(r.Zeff), 65,
-                    p_thresh=1e9, Z_imp=Z, input_jinductive=np.zeros(conf.sum()),
+                    p_thresh=1e9, Z_imp=Z, jphi_ind_input=np.zeros(conf.sum()),
                     aux_sigmas={"zeff": sl(r.sigma_Zeff)},
                     aux_baselines={"zeff": sl(r.Zeff)},
                     aux_length_scales={"zeff": 0.5},

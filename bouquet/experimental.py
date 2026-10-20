@@ -124,12 +124,12 @@ REGISTRY = {
         description=(
             "Accept the bootstrap_kwargs keys that change a convergence "
             "criterion of the toolkit's internal bootstrap solve "
-            "(BOOTSTRAP_CONVERGENCE_KWARGS: djBS_tol, saw_relax).  Legacy "
+            "(BOOTSTRAP_CONVERGENCE_KWARGS: djbs_tol, saw_relax).  Legacy "
             "and swb paths only; the unified engine refuses it."),
         enabled_by=["GenerationConfig.bootstrap_convergence_override=True"],
         introduced="PR #60, 1.4.0",
         validation_todo=[
-            "for each key, the converged j_BS, l_i and q0 against the "
+            "for each key, the converged jphi_bs, l_i and q0 against the "
             "toolkit's default criterion on >= 5 real slices; a value that "
             "changes a converged result beyond the default criterion's own "
             "residual is a loosened criterion and must be flagged",

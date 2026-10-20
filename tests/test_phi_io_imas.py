@@ -68,7 +68,7 @@ class TestReadPhi:
         bp, bf = _read(ddp, "psi_n"), _read(ddp, "phi_n")
         np.testing.assert_array_equal(bp.psi_N, PSI)
         np.testing.assert_allclose(bf.psi_N, _norm(RHO ** 2), rtol=0, atol=1e-15)
-        for k in ("ne", "te", "ni", "ti", "j_phi", "j_BS"):
+        for k in ("ne", "te", "ni", "ti", "jphi_total", "jphi_bs"):
             np.testing.assert_array_equal(getattr(bf, k), getattr(bp, k))
 
     def test_the_equilibrium_is_placed_by_its_own_rho(self, tmp_path):
@@ -81,7 +81,7 @@ class TestReadPhi:
             _fuse_current_geometry(json.load(open(ddp))["equilibrium"], 0))
         exp_j = np.interp(bf.psi_N, phi_eq, eq_jphi)
         np.testing.assert_allclose(bf.p_equilibrium, exp_p, rtol=1e-12)
-        np.testing.assert_allclose(bf.jphi_diff + bf.j_phi, exp_j, rtol=1e-12)
+        np.testing.assert_allclose(bf.jphi_diff + bf.jphi_total, exp_j, rtol=1e-12)
         # psi_n keeps the psi_N placement, which differs here
         np.testing.assert_allclose(
             bp.p_equilibrium, np.interp(PSI, PSI_EQ, eqp["pressure"]), rtol=1e-12)
@@ -91,7 +91,7 @@ class TestReadPhi:
         ddp, _ = _write_dd(tmp_path)
         bf, br = _read(ddp, "phi_n"), _read(ddp, "rho_tor")
         assert br.coord == "phi_n"
-        for k in ("psi_N", "ne", "j_phi", "p_equilibrium", "jphi_diff"):
+        for k in ("psi_N", "ne", "jphi_total", "p_equilibrium", "jphi_diff"):
             np.testing.assert_array_equal(getattr(br, k), getattr(bf, k))
 
     @pytest.mark.parametrize("which", ["cp", "eq"])
@@ -128,14 +128,14 @@ class TestReadPhi:
         g = np.linspace(0.0, 1.0, 17)
         j = 1e5 * (1.0 - g ** 2)
         src = ImasSource(ids_path=ddp, time=1.0, coord="phi_n")
-        run_ = read_imas_baseline(src, fixed=FixedComponentsConfig(j_NBI=j, psi_N=g),
+        run_ = read_imas_baseline(src, fixed=FixedComponentsConfig(jphi_nbi=j, psi_N=g),
                                   allow_incomplete_pressure=True)
         psi_ = read_imas_baseline(src, fixed=FixedComponentsConfig(
-            j_NBI=j, psi_N=g, coord="psi_n"), allow_incomplete_pressure=True)
+            jphi_nbi=j, psi_N=g, coord="psi_n"), allow_incomplete_pressure=True)
         x = run_.psi_N
-        np.testing.assert_allclose(run_.j_NBI, np.interp(x, g, j), rtol=1e-12)
+        np.testing.assert_allclose(run_.jphi_nbi, np.interp(x, g, j), rtol=1e-12)
         np.testing.assert_allclose(
-            psi_.j_NBI, np.interp(x, np.interp(g, PSI, x), j), rtol=1e-12)
+            psi_.jphi_nbi, np.interp(x, np.interp(g, PSI, x), j), rtol=1e-12)
 
     def test_a_rho_grid_off_0_to_1_is_renormalised(self, tmp_path):
         rho, rho_eq = 0.02 + 0.97 * RHO, 0.01 + 0.98 * RHO_EQ

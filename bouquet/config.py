@@ -1900,7 +1900,8 @@ class GenerationConfig:
     # a rejection reason, its sub-steps are not charged to the draw's wall
     # budget and a failure inside it keeps the unguarded state, so a draw's
     # acceptance is the same on or off except when "held" replaces the
-    # jumped state (never in validation).  It is NOT a
+    # jumped state (never in validation) and when a jumped state cannot be
+    # restored (the stage then fails under the homotopy's own rule).  It is NOT a
     # fix: on the validated bistable case the draws leave the
     # reconstruction's branch earlier, in the bootstrap loop, which it does
     # not watch; there it stamped 7 of 28 draws and changed none ("held"

@@ -1187,8 +1187,7 @@ the engine only, refused under `"legacy"` and with
   occurred on any validated case. On two single-solution slices it flagged 5
   of 62 draws, all continuous moves of 1.0-1.6 % of a (`"legitimate"`, two
   extra solves each), and left them unchanged; on the reversed-I_p control
-  case it never fired. Cost: only firing draws pay, +2 solves per
-  legitimate firing there, 23 extra solves over the 7 firings of the
+  case it never fired. Cost: only firing draws pay, +2 solves per legitimate firing on the single-solution slices (2-4 on the bistable case) there, 23 extra solves over the 7 firings of the
   bistable case, at most 10 per stage. Every guarded archive's numeric
   datasets and attrs were bit-identical to the unguarded one's (the engine
   record's cost and timing differ). With the flag off no solve, RNG draw,

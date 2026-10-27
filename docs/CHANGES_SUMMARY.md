@@ -82,7 +82,9 @@ changed code, or reach it bit for bit).
   enters the in-spec rule or a rejection reason, its sub-steps are not
   charged to the draw's wall budget, and a failure inside it keeps the
   unguarded state: a draw's acceptance is the same on or off except when
-  `"held"` replaces the jumped state (which never occurred in validation).
+  `"held"` replaces the jumped state (which never occurred in validation)
+  and when a jumped state cannot be restored, which fails the stage under
+  the homotopy's own rule.
   Below the threshold it only reads the solver. Stamped per
   draw (`engine["bistability_guard"]`; attrs `bistability_guard_armed` /
   `_fired` / `_action`) and per scan (`n_bistability_guard_armed` /
@@ -97,8 +99,7 @@ changed code, or reach it bit for bit).
   occurred). On two
   single-solution slices it flagged 5 of 62 draws, all continuous moves of
   1.0-1.6 % of a, and left them unchanged; on the reversed-I_p control case
-  it never fired. Cost: only firing draws pay, +2 solves per legitimate
-  firing; up to 10 per stage; the bistable case took 23 extra solves over 7
+  it never fired. Cost: only firing draws pay, +2 solves per legitimate firing on the single-solution slices (2-4 on the bistable case); up to 10 per stage; the bistable case took 23 extra solves over 7
   firings. Use it to locate where a draw leaves its branch, not as a fix;
   the loop stage is #87's next target. With the setting off no solve, RNG
   draw, solver-state change or archived number changes (`config_json` gains

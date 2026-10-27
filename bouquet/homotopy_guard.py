@@ -65,7 +65,9 @@ becomes the new starting state.  Then:
 
 Nothing is accepted, refused or relabeled by the guard: every state it
 leaves the stage in is judged by the stage's own saturation test, the
-post-homotopy check and the in-spec rule, as an unguarded draw's is.  No
+post-homotopy check and the in-spec rule, as an unguarded draw's is (the
+one state it cannot hand back is a jumped state that fails to restore; the
+stage then fails under the homotopy's own rule).  No
 tolerance, criterion or acceptance changes; ``GUARD_AXIS_FRAC`` and
 ``GUARD_MIN_STEP`` decide only which states the stage's solve starts from.
 """

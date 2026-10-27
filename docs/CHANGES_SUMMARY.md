@@ -68,6 +68,22 @@ changed code, or reach it bit for bit).
   (`Bouquet.from_imas` sets it). It now says so, naming the channels that
   fell back and the assumed sigma each got, once per `generate()`; what is
   resolved is unchanged.
+- **IMAS export: `equilibrium.time_slice[].profiles_2d.psi` is written
+  dim1 (R) first (#101). This changes the exported bytes.** The data
+  dictionary indexes the rectangular `psi` as `[i_R][i_Z]` under
+  `grid.dim1 = R`, `grid.dim2 = Z`. `write_imas_draw` (and so
+  `export_imas_drawset`) wrote the g-file's `[Z][R]` array unchanged under
+  that grid, so **every `profiles_2d.psi` exported before 1.4.1 is
+  transposed**. On the shipped square grids the shape gave no error, but an
+  external reader got the R and Z indices swapped. Any
+  consumer that read `profiles_2d` from such an export has to **re-export**
+  with 1.4.1. The 1-D profiles, `global_quantities`, `boundary` and the
+  flux-surface averages (`gm*`) were right before and are unchanged.
+  bouquet's own reader expects the DD layout and still applies `.T`, so
+  export → re-read gives the g-file array back exactly. It now refuses a
+  `psi` whose shape is not `(len(dim1), len(dim2))`, i.e. a transposed
+  array on a non-square grid. The template's other `profiles_2d` fields are
+  not carried, so `psi` is the only 2-D field written.
 - **Docs:** known-limitations.md drops the #95 entry.
 
 ## 1.4.0 — the unified engine, the magnetics as the in-spec rule, one Z_eff rule (2026-10-18)

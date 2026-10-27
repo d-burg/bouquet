@@ -1176,6 +1176,12 @@ def _fsa_from_profiles_2d(ts, nlevels=257):
     for name, x in (("dim1", R), ("dim2", Z)):
         if not np.allclose(np.diff(x), x[1] - x[0], rtol=1e-6, atol=0):
             raise ValueError(f"profiles_2d grid {name} is not uniform")
+    if np.shape(p2["psi"]) != (R.size, Z.size):
+        raise ValueError(
+            f"profiles_2d.psi has shape {np.shape(p2['psi'])}, not (len(dim1), "
+            f"len(dim2)) = ({R.size}, {Z.size}): the data dictionary indexes it "
+            "dim1 (R) first.  (bouquet exports before 1.4.1 wrote it "
+            "transposed, #101: re-export them.)")
     # traced with psi rising from axis to edge: a mirrored slice traces the
     # same arrays (the averages do not depend on the psi sign)
     sg = -1.0 if float(p1["psi"][-1]) < float(p1["psi"][0]) else 1.0
@@ -1198,7 +1204,8 @@ def _fsa_from_profiles_2d(ts, nlevels=257):
                FPOL=on_u("f"), PRES=on_u("pressure"),
                PPRIME=on_u("dpressure_dpsi", sg), FFPRIM=on_u("f_df_dpsi", sg),
                QPSI=on_u("q"),
-               PSIRZ=sg * np.asarray(p2["psi"], dtype=float).T,  # [R][Z] -> [Z][R]
+               # the DD's psi[i_R][i_Z] (dim1 = R) -> the g-file's [Z][R]
+               PSIRZ=sg * np.asarray(p2["psi"], dtype=float).T,
                RBBBS=rb, ZBBBS=zb, RLIM=rb, ZLIM=zb,
                CURRENT=0.0, RCENTR=float(ax["r"]), BCENTR=0.0)
     avg = GEQDSKEquilibrium.from_raw(raw, cocos=11, nlevels=nlevels).averages
@@ -4259,8 +4266,15 @@ def write_imas_draw(h5path_or_header, draw_index, template_ids_path, out_path,
     ts["profiles_2d"] = [{
         "grid_type": {"name": "rectangular", "index": 1},
         "grid": {"dim1": geq.R_grid.tolist(), "dim2": geq.Z_grid.tolist()},
-        # psi_RZ is indexed [R][Z], matching IMAS dim1=R, dim2=Z
-        "psi": (s_I * c11 * np.asarray(geq.psi_RZ, dtype=float)).tolist(),
+        # The data dictionary indexes a rectangular 2-D field dim1 first:
+        # psi[i_R][i_Z] with dim1 = R, dim2 = Z.  The g-file array psi_RZ is
+        # [Z][R] (PSIRZ = flat.reshape((NH, NW)), io/geqdsk.py), so it is
+        # TRANSPOSED here (#101: before 1.4.1 it was written [Z][R] under
+        # this grid).  _fsa_from_profiles_2d reads it back with .T, so an
+        # export re-read by bouquet is the g-file array again.  Every 2-D
+        # field written into profiles_2d must follow the same rule; psi is
+        # the only one (this block replaces the template's profiles_2d).
+        "psi": (s_I * c11 * np.asarray(geq.psi_RZ, dtype=float).T).tolist(),
     }]
     gq = dict(ts.get("global_quantities", {}))
     gq.update(

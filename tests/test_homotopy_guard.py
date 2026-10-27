@@ -330,6 +330,166 @@ def test_the_first_stage_blends_the_regularisation_and_records_the_entry():
     assert g.record["entry_axis"]["displacement_mm"] == pytest.approx(0.0)
 
 
+# ---------------------------------------------------------------------------
+#  review of #102: the wall budget (F1) and failures inside the guard (F2)
+# ---------------------------------------------------------------------------
+class _FakeClock:
+    """``perf_counter`` the solver double advances (as in
+    tests/test_draw_wall_budget.py); everything else is the real module."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def perf_counter(self):
+        return self.now
+
+    def __getattr__(self, name):
+        import time
+        return getattr(time, name)
+
+
+class _TimedGS(_GS):
+    """The stand-in solver; every solve takes *dt* of the fake clock."""
+
+    class settings:
+        maxits = 100
+
+    def __init__(self, model, clock, dt):
+        super().__init__(model)
+        self.clock, self.dt = clock, dt
+
+    def solve(self):
+        self.clock.now += self.dt
+        super().solve()
+
+    def update_settings(self):
+        pass
+
+
+def _budgeted(monkeypatch, model, budget_s, dt, elapsed=0.0):
+    import bouquet.TokaMaker_interface as TI
+    clock = _FakeClock()
+    monkeypatch.setattr(TI, "time", clock)
+    gs = _TimedGS(model, clock, dt)
+    gs.set_coil_bounds(_STAGE)
+    sg = TI.DrawSolveGuard(gs, maxits=None, wall_budget_s=budget_s)
+    sg.__enter__()
+    sg.begin_draw(0)
+    clock.now += elapsed
+    g = H.HomotopyBranchGuard(
+        reference_axis=dict(R=R0, Z=0.0, minor_radius_m=A), budget=sg)
+    return gs, sg, g, clock
+
+
+def test_a_firing_guard_does_not_consume_the_wall_budget(monkeypatch):
+    """F1: the stage's own solve is charged (0.3 s); the continuation's five
+    sub-steps (1.5 s more on the clock) are not, so a 1.0 s budget is still
+    unspent and the next solve starts."""
+    gs, sg, g, clock = _budgeted(monkeypatch, _Branches(), 1.0, 0.3)
+    st = g.solve_stage(gs, 1, "homotopy pass 2/3", _STAGE, prev_bounds=_PREV)
+    assert st["action"] == "held" and st["n_extra_solves"] == 5
+    assert gs.n_solve == 6 and clock.now == pytest.approx(1.8)
+    assert not sg.check_wall_budget() and 0 not in sg.over_budget
+    gs.solve()                                    # charged: 0.6 s of 1.0
+    assert not sg.check_wall_budget()
+    sg.__exit__(None, None, None)
+
+
+def test_a_spent_budget_runs_no_continuation(monkeypatch):
+    """F1: when the stage's own solve spends the budget, the guard does not
+    walk; the draw goes on as unguarded (the next solve is refused by the
+    budget, exactly as without the guard)."""
+    from bouquet.TokaMaker_interface import DrawWallBudgetExceeded
+    gs, sg, g, clock = _budgeted(monkeypatch, _Branches(), 1.0, 0.3,
+                                 elapsed=0.9)
+    st = g.solve_stage(gs, 1, "homotopy pass 2/3", _STAGE, prev_bounds=_PREV)
+    assert st["action"] == "failed" and "wall budget" in st["reason"]
+    assert gs.n_solve == 1 and gs.eq.branch == "B"   # the jumped state
+    with pytest.raises(DrawWallBudgetExceeded):
+        gs.solve()
+    sg.__exit__(None, None, None)
+
+
+def test_a_budget_overrun_inside_the_walk_propagates():
+    """F1: the draw's wall-budget exception is never stamped as a sub-step
+    that did not solve."""
+    from bouquet.TokaMaker_interface import DrawWallBudgetExceeded
+
+    def solve_from(state, s):
+        raise DrawWallBudgetExceeded("draw 0: budget spent")
+    with pytest.raises(DrawWallBudgetExceeded):
+        H.continue_in_halves(solve_from, dict(_START), (R0, 0.0), A)
+
+
+def test_a_programming_error_in_the_walk_propagates():
+    def solve_from(state, s):
+        raise KeyError("a bug")
+    with pytest.raises(KeyError):
+        H.continue_in_halves(solve_from, dict(_START), (R0, 0.0), A)
+
+
+class _FailingGS(_GS):
+    """The stand-in solver whose n-th ``replace_eq`` / ``copy_eq`` raises
+    the toolkit's plain ``Exception``."""
+
+    def __init__(self, model, *, fail_replace=None, fail_copy=None,
+                 exc=Exception):
+        super().__init__(model)
+        self.fail_replace, self.fail_copy, self.exc = (fail_replace,
+                                                       fail_copy, exc)
+
+    def copy_eq(self):
+        if self.fail_copy is not None and self.n_copy + 1 == self.fail_copy:
+            self.n_copy += 1
+            raise self.exc("copy failed")
+        return super().copy_eq()
+
+    def replace_eq(self, source_eq=None):
+        if (self.fail_replace is not None
+                and self.n_replace + 1 == self.fail_replace):
+            self.n_replace += 1
+            raise self.exc("replace failed")
+        super().replace_eq(source_eq=source_eq)
+
+
+@pytest.mark.parametrize("kw, why", [
+    (dict(fail_copy=2), "jumped state could not be copied"),
+    (dict(fail_replace=1), "starting state could not be re-installed")])
+def test_a_toolkit_failure_inside_the_guard_keeps_the_unguarded_state(kw,
+                                                                       why):
+    """F2: the stage solved; a failing toolkit call inside the guard leaves
+    the draw on the jumped (unguarded) state under the stage's own bounds,
+    stamped "failed" with the reason -- never a stage failure."""
+    gs = _FailingGS(_Branches(), **kw)
+    gs.set_coil_bounds(_STAGE)
+    g = _guard()
+    st = g.solve_stage(gs, 1, "homotopy pass 2/3", _STAGE, prev_bounds=_PREV)
+    assert st["action"] == "failed" and why in st["reason"]
+    assert gs.eq.branch == "B" and gs.eq.z == pytest.approx(-17e-3)
+    assert gs.bounds == _STAGE and g.record["action"] == "failed"
+
+
+def test_a_programming_error_inside_the_guard_propagates():
+    gs = _FailingGS(_Branches(), fail_copy=2, exc=KeyError)
+    gs.set_coil_bounds(_STAGE)
+    with pytest.raises(KeyError):
+        _guard().solve_stage(gs, 1, "homotopy pass 2/3", _STAGE,
+                             prev_bounds=_PREV)
+
+
+def test_an_unrestorable_jumped_state_fails_the_stage():
+    """The one case the guard cannot undo: the walk ran and the jumped
+    state cannot be put back, so the stage fails under the homotopy's own
+    rule (a RuntimeError), stamped with the restore error."""
+    gs = _FailingGS(_Branches(s_fold=0.6), fail_replace=7)  # 1 + 5 sub-steps, then the restore
+    gs.set_coil_bounds(_STAGE)
+    g = _guard()
+    with pytest.raises(RuntimeError, match="could not be restored"):
+        g.solve_stage(gs, 1, "homotopy pass 2/3", _STAGE, prev_bounds=_PREV)
+    st = g.record["stages"][-1]
+    assert st["action"] == "failed" and "replace failed" in st["restore_error"]
+
+
 def test_counts_and_text():
     recs = [dict(armed=True, fired=False, action="none"),
             dict(armed=True, fired=True, action="held", n_extra_solves=5),
@@ -488,3 +648,22 @@ def test_the_stamps_on_and_none_off(tmp_path, toy_bouquet_solver):
         assert set(ds_on) == set(ds_off)
         for k in ds_off:
             np.testing.assert_array_equal(ds_on[k], ds_off[k], err_msg=k)
+
+
+def test_the_sigma0_check_keeps_the_ensembles_record_and_an_off_run_clears_it(
+        tmp_path, toy_bouquet_solver):
+    """F5: verify_sigma0_consistency() after an ensemble leaves the
+    ensemble's guard record in place; a later guard-off generate() leaves
+    none from the earlier run."""
+    b = _prepared(tmp_path, True)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        _quiet(b.generate)
+        rec = dict(b.engine_bistability_guard)
+        assert rec["n_armed"] == 2
+        _quiet(b.verify_sigma0_consistency)
+        assert b.engine_bistability_guard["n_armed"] == 2
+        assert b.engine_bistability_guard["records"] == rec["records"]
+        b.config.generation.guard_bistability = False
+        _quiet(b.generate)
+    assert not hasattr(b, "engine_bistability_guard")

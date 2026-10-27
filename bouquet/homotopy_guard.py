@@ -71,6 +71,7 @@ tolerance, criterion or acceptance changes; ``GUARD_AXIS_FRAC`` and
 """
 from __future__ import annotations
 
+import contextlib
 import time
 
 import numpy as np
@@ -113,6 +114,33 @@ GUARD_ACTION_MEANING = {
 }
 
 
+#: The exception types a toolkit call inside the guard is expected to raise
+#: when it fails (OpenFUSIONToolkit raises a plain ``Exception`` from its
+#: error buffer, ``ValueError`` for an exceeded iteration cap).  Anything
+#: else -- a programming error -- propagates; so does the draw's wall-budget
+#: exception (:class:`bouquet.TokaMaker_interface.DrawWallBudgetExceeded`).
+TOOLKIT_ERRORS = (ValueError, RuntimeError, OSError, ArithmeticError,
+                  MemoryError)
+
+
+def _is_budget(exc) -> bool:
+    from .TokaMaker_interface import DrawWallBudgetExceeded
+    return isinstance(exc, DrawWallBudgetExceeded)
+
+
+def is_toolkit_error(exc) -> bool:
+    """Whether *exc* is a solver / toolkit failure the guard handles (the
+    toolkit's plain ``Exception``, or one of :data:`TOOLKIT_ERRORS`), not a
+    programming error or the draw's wall-budget exception."""
+    if _is_budget(exc):
+        return False
+    return type(exc) is Exception or isinstance(exc, TOOLKIT_ERRORS)
+
+
+def _err(exc) -> str:
+    return f"{type(exc).__name__}: {str(exc).strip()[:200]}"
+
+
 def step_displacement_frac(axis_from, axis_to, minor_radius_m):
     """``|axis_to - axis_from| / a`` (two ``(R, Z)`` [m], a [m]); ``None``
     when either axis or a is unknown."""
@@ -146,9 +174,12 @@ def continue_in_halves(solve_from, start_state, start_axis, minor_radius_m,
     ``threshold x a`` from the state it started from is rejected and retried
     at half the step; below *min_step* the jump PERSISTS.  A sub-step that
     raises (does not solve) is retried at half the step likewise; below
-    *min_step* the walk FAILED.  The step never
-    grows again after a halving, so the walk takes at most
-    ``log2(first_step/min_step) + 1/min_step`` solves (11 at the defaults).
+    *min_step* the walk FAILED; only a toolkit failure
+    (:func:`is_toolkit_error`) counts as one -- the draw's wall-budget
+    exception and programming errors propagate.  The step never grows again
+    after a halving, so the walk takes at most
+    ``log2(first_step/min_step) + 1/min_step`` solves (10 at the defaults;
+    11 with the stage's own solve).
 
     Returns ``dict(outcome, s_reached, state, axis, steps, n_solves)``:
     ``outcome`` ``"completed"`` (``s_reached == 1``, *state* / *axis* the
@@ -162,12 +193,14 @@ def continue_in_halves(solve_from, start_state, start_axis, minor_radius_m,
         try:
             new_state, new_axis = solve_from(state, s)
         except Exception as exc:                    # noqa: BLE001
+            if not is_toolkit_error(exc):
+                # the draw's wall budget, a programming error: never
+                # stamped as a sub-step that did not solve
+                raise
             # a sub-step that does not solve (the iteration cap) is backed
             # off like a jump: retried at half the step, down to min_step
             steps.append(dict(s_from=s_done, s=s, displacement_frac_a=None,
-                              accepted=False,
-                              error=f"{type(exc).__name__}: "
-                                    f"{str(exc).strip()[:200]}"))
+                              accepted=False, error=_err(exc)))
             if ds / 2.0 < float(min_step) - 1e-12:
                 return dict(outcome="failed", s_reached=s_done, state=state,
                             axis=axis, steps=steps, n_solves=len(steps))
@@ -314,17 +347,17 @@ class HomotopyBranchGuard:
     "bistability_guard"]``."""
 
     def __init__(self, *, reference_axis, strong_reg_terms=None,
-                 entry_bounds=None,
                  vsc_pair=None, baseline_coils=None,
-                 reconstruction_bistable=None, threshold=GUARD_AXIS_FRAC,
-                 min_step=GUARD_MIN_STEP):
+                 reconstruction_bistability=None, budget=None,
+                 threshold=GUARD_AXIS_FRAC, min_step=GUARD_MIN_STEP):
         ref = dict(reference_axis or {})
         self.reference = ref
         self.a = ref.get("minor_radius_m")
         self.strong_reg_terms = (None if strong_reg_terms is None
                                  else list(strong_reg_terms))
-        self.entry_bounds = (None if entry_bounds is None
-                             else {k: list(v) for k, v in entry_bounds.items()})
+        #: the draw's wall-budget clock (``DrawSolveGuard``, or ``None``):
+        #: the continuation runs with it paused (:meth:`solve_stage`)
+        self.budget = budget
         self.vsc_pair = tuple(vsc_pair or ())
         self.baseline_coils = dict(baseline_coils or {})
         self.threshold = float(threshold)
@@ -334,7 +367,7 @@ class HomotopyBranchGuard:
             threshold_frac_a=self.threshold, min_step=self.min_step,
             first_step=GUARD_FIRST_STEP,
             minor_radius_m=(None if self.a is None else float(self.a)),
-            reconstruction_bistable=reconstruction_bistable,
+            reconstruction_bistability=reconstruction_bistability,
             reg_blend=self.strong_reg_terms is not None,
             entry_axis=None, stages=[], fired=False, action="none",
             path=None, n_extra_solves=0, seconds=0.0,
@@ -342,8 +375,10 @@ class HomotopyBranchGuard:
             rule=("a homotopy stage's solve that moves the magnetic axis "
                   "more than threshold_frac_a x a from the stage's starting "
                   "state is re-solved by continuation from that state "
-                  "(sub-steps 1/2, 1/4, 1/8 of the stage); only the stage's "
-                  "starting state changes, never an acceptance"))
+                  "(sub-steps 1/2, 1/4, 1/8 of the stage) and stamped; only "
+                  "'held' keeps a different state; the guard's verdict never "
+                  "enters the in-spec rule or a rejection reason, and its "
+                  "sub-steps are not charged to the draw's wall budget"))
 
     # ---- the stage --------------------------------------------------------
     def _vsc_magnitude(self, cur):
@@ -360,12 +395,17 @@ class HomotopyBranchGuard:
 
     def _start_bounds(self, mygs, bounds, prev_bounds):
         """The ``s = 0`` bounds: the previous stage's (or the loop's hard
-        ones), else the stage's widened to contain the starting state."""
+        ones), else the stage's widened to contain the starting state -- an
+        approximation: the coil-set currents read here may include the
+        ``#VSC`` contribution the toolkit bounds separately, and ``#VSC``
+        itself is estimated by the pair's anti-series drift."""
         if prev_bounds is not None:
             return {k: list(v) for k, v in prev_bounds.items()}
         try:
             cur, _ = mygs.get_coil_currents()
-        except Exception:                           # noqa: BLE001
+        except Exception as exc:                    # noqa: BLE001
+            if not is_toolkit_error(exc):
+                raise
             return {k: list(v) for k, v in bounds.items()}
         vals = {k: cur[k] for k in bounds if k in cur}
         vm = self._vsc_magnitude(cur)
@@ -389,7 +429,9 @@ class HomotopyBranchGuard:
             rec["entry_axis"] = axis_shift_record(ax0, self.reference)
         try:
             pre = mygs.copy_eq() if hasattr(mygs, "copy_eq") else None
-        except Exception:                           # noqa: BLE001
+        except Exception as exc:                    # noqa: BLE001
+            if not is_toolkit_error(exc):
+                raise
             pre = None
         mygs.solve()
         ax1 = state_axis(mygs)
@@ -416,15 +458,98 @@ class HomotopyBranchGuard:
         t0 = time.perf_counter()
         st["fired"] = True
         rec["fired"] = True
-        jump = mygs.copy_eq()
+        budget = self.budget
+        if budget is not None and budget.check_wall_budget():
+            # the draw's wall budget was spent by the stage's own solve: no
+            # continuation; the draw goes on exactly as unguarded
+            return self._finish(st, d, label, t0, action="failed",
+                                reason=("the draw's wall budget was spent "
+                                        "when the stage jumped: no "
+                                        "continuation was run"))
+        pause = (budget.budget_paused() if callable(
+            getattr(budget, "budget_paused", None))
+            else contextlib.nullcontext())
+        with pause:
+            return self._continue(mygs, st, d, label, t0, pre, ax0, ax1,
+                                  bounds, prev_bounds, first)
+
+    def _back_to_jump(self, mygs, jump, blend, bounds):
+        """Put the solver back on the jumped (unguarded) state and the
+        stage's own objective; the toolkit error, or ``None``."""
+        try:
+            if jump is not None:
+                mygs.replace_eq(source_eq=jump)
+            if blend and self.strong_reg_terms is not None:
+                mygs.set_coil_reg(reg_terms=list(self.strong_reg_terms))
+            mygs.set_coil_bounds(bounds)
+        except Exception as exc:                    # noqa: BLE001
+            if not is_toolkit_error(exc):
+                raise
+            return exc
+        return None
+
+    def _finish(self, st, d, label, t0, *, action, walk=None, sep=None,
+                ax0=None, ax_end=None, blend=False, reason=None):
+        rec = self.record
+        st.update(action=action, reg_blended=blend,
+                  seconds=float(time.perf_counter() - t0))
+        if reason is not None:
+            st["reason"] = str(reason)
+        n = 0
+        if walk is not None:
+            n = int(walk["n_solves"])
+            st.update(walk_outcome=walk["outcome"],
+                      s_reached=float(walk["s_reached"]),
+                      substeps=[dict(x) for x in walk["steps"]],
+                      endpoint_separation_frac_a=sep)
+        st["n_extra_solves"] = n
+        st["final_step_displacement_frac_a"] = (
+            None if ax_end is None
+            else step_displacement_frac(ax0, ax_end, self.a))
+        rec["n_extra_solves"] += n
+        rec["seconds"] += st["seconds"]
+        rec["action"] = summary_action([x.get("action")
+                                        for x in rec["stages"]])
+        if action == "crossed":
+            rec["path"] = "crossed"
+        print(f"  [bistability guard] {label}: the axis moved {d:.4f} a "
+              f"(> {self.threshold:g} a) -> "
+              + (f"continuation {walk['outcome']} at "
+                 f"s={walk['s_reached']:.3f} in {n} solve(s): "
+                 if walk is not None else "")
+              + action + (f" ({reason})" if reason else ""), flush=True)
+        return st
+
+    def _continue(self, mygs, st, d, label, t0, pre, ax0, ax1, bounds,
+                  prev_bounds, first):
+        from .engine import state_axis
+        rec = self.record
         blend = bool(first and rec["reg_blend"])
-        mygs.replace_eq(source_eq=pre)
-        b0 = self._start_bounds(mygs, bounds, prev_bounds)
         strong = self.strong_reg_terms
         try:
+            jump = mygs.copy_eq()
+        except Exception as exc:                    # noqa: BLE001
+            if not is_toolkit_error(exc):
+                raise
+            # nothing was changed: the solver holds the jumped state
+            return self._finish(st, d, label, t0, action="failed",
+                                reason="the jumped state could not be "
+                                       "copied: " + _err(exc))
+        try:
+            mygs.replace_eq(source_eq=pre)
+            b0 = self._start_bounds(mygs, bounds, prev_bounds)
             cur0 = dict(mygs.get_coil_currents()[0])
-        except Exception:                           # noqa: BLE001
-            cur0 = {}
+        except Exception as exc:                    # noqa: BLE001
+            if not is_toolkit_error(exc):
+                raise
+            back = self._back_to_jump(mygs, jump, blend, bounds)
+            if back is not None:
+                raise RuntimeError("bistability guard: the jumped state "
+                                   f"could not be restored ({back})") from exc
+            return self._finish(st, d, label, t0, action="failed",
+                                reason="the starting state could not be "
+                                       "re-installed: " + _err(exc),
+                                ax0=ax0, ax_end=state_axis(mygs))
 
         def solve_from(state, s):
             mygs.replace_eq(source_eq=state)
@@ -435,49 +560,42 @@ class HomotopyBranchGuard:
             mygs.solve()
             return mygs.copy_eq(), state_axis(mygs)
 
-        walk = continue_in_halves(solve_from, pre, ax0, self.a,
-                                  threshold=self.threshold,
-                                  min_step=self.min_step)
-        action, sep = classify(walk, ax1, self.a, self.threshold)
         try:
-            if action == "held":
-                # the continuous state at s = 1: the stage's own objective
+            walk = continue_in_halves(solve_from, pre, ax0, self.a,
+                                      threshold=self.threshold,
+                                      min_step=self.min_step)
+        except Exception:
+            # the draw's wall budget or a programming error: the solver is
+            # put back on the jumped state first, then it propagates
+            self._back_to_jump(mygs, jump, blend, bounds)
+            raise
+        action, sep = classify(walk, ax1, self.a, self.threshold)
+        reason = None
+        if action == "held":
+            try:
                 mygs.replace_eq(source_eq=walk["state"])
-            else:
-                mygs.replace_eq(source_eq=jump)
-            if blend and strong is not None:
-                mygs.set_coil_reg(reg_terms=list(strong))
-            mygs.set_coil_bounds(bounds)
-        except Exception as exc:                    # noqa: BLE001
-            # the stage's objective could not be put back: a failed stage
-            # (the homotopy's own rule: roll back, or reject), recorded
-            st.update(action="failed", restore_error=(
-                f"{type(exc).__name__}: {str(exc).strip()[:200]}"))
-            rec["action"] = summary_action([x.get("action")
-                                            for x in rec["stages"]])
-            raise RuntimeError("bistability guard: the stage's state could "
-                               f"not be restored ({exc})") from exc
-        ax_end = state_axis(mygs)
-        st.update(action=action, walk_outcome=walk["outcome"],
-                  s_reached=float(walk["s_reached"]),
-                  substeps=[dict(x) for x in walk["steps"]],
-                  n_extra_solves=int(walk["n_solves"]),
-                  endpoint_separation_frac_a=sep,
-                  final_step_displacement_frac_a=step_displacement_frac(
-                      ax0, ax_end, self.a),
-                  reg_blended=blend,
-                  seconds=float(time.perf_counter() - t0))
-        rec["n_extra_solves"] += int(walk["n_solves"])
-        rec["seconds"] += st["seconds"]
-        rec["action"] = summary_action([x.get("action")
-                                        for x in rec["stages"]])
-        if action == "crossed":
-            rec["path"] = "crossed"
-        print(f"  [bistability guard] {label}: the axis moved "
-              f"{d:.4f} a (> {self.threshold:g} a) -> continuation "
-              f"{walk['outcome']} at s={walk['s_reached']:.3f} in "
-              f"{walk['n_solves']} solve(s): {action}", flush=True)
-        return st
+                if blend and strong is not None:
+                    mygs.set_coil_reg(reg_terms=list(strong))
+                mygs.set_coil_bounds(bounds)
+            except Exception as exc:                # noqa: BLE001
+                if not is_toolkit_error(exc):
+                    raise
+                action = "failed"
+                reason = ("the continuous state could not be installed; "
+                          "the jumped state was kept: " + _err(exc))
+        if action != "held":
+            back = self._back_to_jump(mygs, jump, blend, bounds)
+            if back is not None:
+                # the one case the guard cannot undo: the solver's state is
+                # unknown, so the stage fails under the homotopy's own rule
+                st.update(action="failed", restore_error=_err(back))
+                rec["action"] = summary_action([x.get("action")
+                                                for x in rec["stages"]])
+                raise RuntimeError("bistability guard: the jumped state "
+                                   f"could not be restored ({back})")
+        return self._finish(st, d, label, t0, action=action, walk=walk,
+                            sep=sep, ax0=ax0, ax_end=state_axis(mygs),
+                            blend=blend, reason=reason)
 
 
 def unarmed_record(reason) -> dict:
@@ -570,6 +688,7 @@ def stamp_guard_scan(h5path_or_header, scan_key=None):
             g.attrs[GUARD_FIRED_SCAN_ATTR] = int(c["n_fired"])
             g.attrs[GUARD_COUNTS_SCAN_ATTR] = json.dumps(dict(
                 c, version=GUARD_VERSION,
-                note=("archived draws only; every attempt's records are "
+                note=("archived draws only; the record of every attempt "
+                      "that reached the homotopy is on "
                       "Bouquet.engine_bistability_guard")))
     return c

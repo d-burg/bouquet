@@ -1421,14 +1421,18 @@ class GenerateEngineDraws(DrawMethod):
             g = HomotopyBranchGuard(
                 reference_axis=ref,
                 strong_reg_terms=getattr(mygs, "_strong_coil_reg", None),
-                entry_bounds=getattr(mygs, "_coil_drift_bounds", None),
                 vsc_pair=vsc_pair, baseline_coils=baseline_coils,
-                reconstruction_bistable=self.reconstruction_bistability)
+                reconstruction_bistability=self.reconstruction_bistability,
+                budget=self._cur.get("solve_guard"))
             rec = g.record
+            rec["draw"] = int(self._cur["count"])
+            self._cur["bistability_guard"] = rec
+            self.guard_records.append(rec)
+            return g
         rec["draw"] = int(self._cur["count"])
         self._cur["bistability_guard"] = rec
         self.guard_records.append(rec)
-        return g if rec.get("armed") else None
+        return None
 
     def _guard_record(self):
         """The current draw's guard record (``None`` with the setting off);
@@ -1735,7 +1739,8 @@ class GenerateEngineDraws(DrawMethod):
         clock = _Clock((lambda: int(b.n_solves)) if solve_guard is None
                        else (lambda: int(solve_guard.n_solves)))
         clock.guarded = solve_guard is not None
-        self._cur = dict(count=int(count), clock=clock, backend=b)
+        self._cur = dict(count=int(count), clock=clock, backend=b,
+                         solve_guard=solve_guard)
         # the loop solves under the RECONSTRUCTION's own coil
         # regularisation: a draw is the reconstruction's closure perturbed
         # in its inputs, not re-regularised (generate_bouquet puts its
@@ -2100,15 +2105,18 @@ class GenerateEngineDraws(DrawMethod):
         bq.engine_axis_shift = axis_shift_counts(
             getattr(bq, "diagnostics", None) or [])
         bq.engine_draw_cap_events = [dict(e) for e in self.cap_events]
-        if getattr(self, "bistability_guard", False):
+        if not getattr(self, "bistability_guard", False):
+            # a guard-off generate() leaves no record of an earlier one
+            bq.__dict__.pop("engine_bistability_guard", None)
+        else:
             from .homotopy_guard import guard_counts, guard_text
             _gc = guard_counts(self.guard_records)
             bq.engine_bistability_guard = dict(
                 _gc, records=[dict(r) for r in self.guard_records])
             print("[generate] " + (guard_text(_gc) or
                                    "bistability guard: no draw armed")
-                  + " (every attempt; per-draw records: "
-                  "Bouquet.engine_bistability_guard)", flush=True)
+                  + " (every attempt that reached the homotopy; per-draw "
+                  "records: Bouquet.engine_bistability_guard)", flush=True)
         if self.cap_events:
             from collections import Counter as _Ctr
             _by = _Ctr((e["stage"], e["outcome"]) for e in self.cap_events)

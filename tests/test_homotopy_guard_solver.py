@@ -251,6 +251,9 @@ def test_a_kept_jump_leaves_the_draw_bit_identical_to_off(off, forced):
     kept = {r["draw"] for r in forced["live_records"]
             if r and r["fired"] and r["action"] != "held"}
     by_off = {d["index"]: d for d in off["draws"]}
+    # the archive index is the attempt count: both probes archived the same
+    # attempts (neither rejected one), or the pairing below would be wrong
+    assert sorted(by_off) == sorted(d["index"] for d in forced["draws"])
     n = 0
     for d in forced["draws"]:
         if d["index"] not in kept or d["index"] not in by_off:
@@ -262,9 +265,12 @@ def test_a_kept_jump_leaves_the_draw_bit_identical_to_off(off, forced):
         for k in o["attrs"]:
             assert o["attrs"][k] == d["attrs"].get(k), (d["index"], k)
         n += 1
-    if not n:
-        pytest.skip("no forced firing kept the jumped state on an archived "
-                    "draw (every firing held the branch)")
+    # the forced probe is deterministic (the 6 um threshold fires on every
+    # stage-1 solve, and every sub-step jumps too: "crossed"), so the
+    # evidence for "a restore is exact" must be there: never a vacuous pass
+    assert n >= 1, ("no forced firing kept the jumped state on an archived "
+                    f"draw (kept: {sorted(kept)}; archived forced: "
+                    f"{[d['index'] for d in forced['draws']]})")
 
 
 if __name__ == "__main__":

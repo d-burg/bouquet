@@ -18,6 +18,7 @@ Provides:
     via secant iteration.
 """
 
+import contextlib
 import os
 import tempfile
 import time
@@ -297,6 +298,9 @@ class DrawSolveGuard:
         self.wall_budget_s = (None if wall_budget_s is None
                               else float(wall_budget_s))
         self._draw_t0 = None
+        #: while :meth:`budget_paused` is active: the clock reading at the
+        #: pause (the budget reads the elapsed time as of then)
+        self._paused_at = None
         #: the draws whose budget ran out: {draw: elapsed s when found}
         self.over_budget = {}
         if isinstance(maxits, bool) or (maxits is not None
@@ -474,11 +478,33 @@ class DrawSolveGuard:
             return False
         if self.draw in self.over_budget:
             return True
-        el = time.perf_counter() - self._draw_t0
+        now = (time.perf_counter() if self._paused_at is None
+               else self._paused_at)
+        el = now - self._draw_t0
         if el > self.wall_budget_s:
             self.over_budget[self.draw] = float(el)
             return True
         return False
+
+    @contextlib.contextmanager
+    def budget_paused(self):
+        """Exclude the time spent inside the block from the current draw's
+        wall budget: the budget reads the elapsed time as of the pause while
+        it lasts, and the draw's clock is moved forward by the block's
+        duration on exit (the opt-in homotopy branch guard's continuation
+        sub-steps, a diagnostic, are not charged to the draw).  Nested
+        pauses are one pause."""
+        if self._paused_at is not None or self._draw_t0 is None:
+            yield
+            return
+        t0 = time.perf_counter()
+        self._paused_at = t0
+        try:
+            yield
+        finally:
+            self._paused_at = None
+            if self._draw_t0 is not None:
+                self._draw_t0 += time.perf_counter() - t0
 
     def failures(self, draw):
         """This draw's failed solves, recovered or not (list of dicts)."""

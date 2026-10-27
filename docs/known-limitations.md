@@ -7,27 +7,26 @@ closed by loosening a bar. The measurements behind them are in
 
 ## Solver and reconstruction
 
-- **Bistable equilibria: the continuity guard is opt-in since 1.4.1;
-  default-on pending the false-positive exercise (#87).** A near-double-null
-  case can have two neighbouring free-boundary solutions for the same
-  inputs; the bistability check stamps such a reconstruction and the
-  per-scan stamp marks an axis-bimodal ensemble. `guard_bistability=True`
-  (experimental `bistability_guard`) keeps a draw's coil homotopy on the
-  branch each stage starts from: a stage that moves the axis more than 1 %
-  of a is re-solved by continuation, and the continuous state is kept when
-  the jump was branch hopping. It does not guard the draw's bootstrap loop:
-  on the known reversed-I_p case 22 of 28 archived draws already sat
-  16.5-17.6 mm below the reconstruction's axis when they entered the
-  homotopy, so that ensemble stays bimodal with the guard on. There it
-  fired on 7 of 28 archived draws: three continuous responses (kept), and
-  four crossings between the two solutions in the first stage (two each
-  way) that persisted down to 1/8 of the stage or whose sub-steps did not
-  solve -- the starting branch ends inside the stage, so the guard keeps
-  and stamps them; it changed no draw. On two single-solution slices it
-  fired on 3 of 30 and 2 of 32 draws, each a continuous response of
-  1.0-1.6 % of a, kept unchanged at two extra solves each; on the
-  reversed-I_p control case it never fired. Until a loop-stage guard exists,
-  read an ensemble's `axis_shift` record and bimodality stamp before
+- **Bistable equilibria: the continuity guard promised for 1.4.1 is not met
+  yet (#87, open).** A near-double-null case can have two neighboring
+  free-boundary solutions for the same inputs; the bistability check stamps
+  such a reconstruction and the per-scan stamp marks an axis-bimodal
+  ensemble, but nothing keeps a draw on the reconstruction's branch. 1.4.1
+  ships an opt-in, experimental DIAGNOSTIC, `guard_bistability=True`
+  (default off): it watches the coil-homotopy stages only, re-solves a stage
+  that moves the magnetic axis more than 1 % of a in sub-steps, and stamps
+  what it found. It is not the fix, for a measured reason: on the validated
+  bistable case (a reversed-I_p slice) the branch change happens earlier, in
+  the draw's bootstrap loop -- 22 of 28 archived draws entered the homotopy
+  already 16.5-17.6 mm below the reconstruction's axis -- so the ensemble
+  stays bimodal with the guard on. There it stamped 7 of 28 draws (three
+  continuous moves; four first-stage crossings between the two solutions,
+  two each way, that persisted at 1/8 of the stage) and changed none: the
+  outcome that would change a draw ("held") never occurred. On two
+  single-solution slices it flagged 5 of 62 draws, all continuous moves of
+  1.0-1.6 % of a, and left them unchanged. Use it to locate where a draw
+  leaves its branch. The next target of #87 is the bootstrap loop. Until
+  then, read an ensemble's `axis_shift` record and bimodality stamp before
   quoting its bands.
 - **MSE-stage runtime (#88).** Reconstructions with the structured MSE stage
   take 149–213 s (legacy route 178–192 s), against the 90–120 s

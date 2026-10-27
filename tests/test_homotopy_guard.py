@@ -1,4 +1,4 @@
-"""The homotopy continuity guard for bistable equilibria (#87, opt-in
+"""The homotopy branch guard, a diagnostic for bistable equilibria (#87, opt-in
 ``GenerationConfig.guard_bistability``): the detector and the continuation
 on synthetic iterates, the stage's objective at s, the guard on a stand-in
 solver, the setting's validation and the per-draw / per-scan stamps on the

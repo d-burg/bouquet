@@ -189,7 +189,7 @@ ENGINE_FIELD_DEFAULTS = {
     # default is unset or False (the value it resolves to there), and only
     # an explicit True is refused
     "check_bistability": None,
-    # the homotopy continuity guard for bistable equilibria (#87; opt-in,
+    # the homotopy branch guard, a diagnostic for bistable equilibria (#87; opt-in,
     # bouquet.homotopy_guard): False = the guard does not exist
     "guard_bistability": False,
 }

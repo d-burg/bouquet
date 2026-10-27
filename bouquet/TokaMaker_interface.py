@@ -8292,7 +8292,7 @@ def generate_bouquet(
                     _passes = (homotopy_passes if homotopy_passes is not None
                                else [(coil_drift, coil_drift)])
                     _m.cap_solver(mygs)
-                    # the continuity guard of the stages (opt-in,
+                    # the branch guard of the stages (opt-in diagnostic,
                     # guard_bistability, #87; bouquet.homotopy_guard): None
                     # -- every method by default -- solves each stage with
                     # one plain mygs.solve(), as before the setting existed

@@ -58,7 +58,7 @@ class DrawMethod:
         return None
 
     def homotopy_guard(self, mygs, *, baseline_coils=None, vsc_pair=None):
-        """The continuity guard of the draw's coil homotopy
+        """The branch guard (an experimental diagnostic) of the draw's coil homotopy
         (:class:`bouquet.homotopy_guard.HomotopyBranchGuard`, issue #87), or
         ``None`` (legacy, swb, the setting off): each stage is one plain
         ``mygs.solve()``."""

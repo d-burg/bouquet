@@ -1266,7 +1266,7 @@ class GenerateEngineDraws(DrawMethod):
                  recon_isoflux=None, bands=None, delivered_axis=None,
                  bistability_guard=False, reconstruction_bistability=None):
         self.ctx = ctx
-        #: the homotopy continuity guard (``GenerationConfig.
+        #: the homotopy branch guard, a diagnostic (``GenerationConfig.
         #: guard_bistability``, opt-in, issue #87; :meth:`homotopy_guard`)
         self.bistability_guard = bool(bistability_guard)
         #: the reconstruction's bistability outcome (``Baseline.engine[
@@ -1400,7 +1400,7 @@ class GenerateEngineDraws(DrawMethod):
             self._cur["homotopy_isoflux"] = out["stamp"]
         return out
 
-    # ---- the continuity guard of the draw's homotopy (#87) --------------
+    # ---- the branch guard of the draw's homotopy (#87, a diagnostic) ----
     def homotopy_guard(self, mygs, *, baseline_coils=None, vsc_pair=None):
         """The draw's :class:`bouquet.homotopy_guard.HomotopyBranchGuard`
         (``guard_bistability=True``), or ``None`` (off: the guard does not
@@ -1986,7 +1986,7 @@ class GenerateEngineDraws(DrawMethod):
             _fl[AXIS_DR_ATTR] = float(_ax["dR_mm"])
             _fl[AXIS_DZ_ATTR] = float(_ax["dZ_mm"])
             _fl[AXIS_MINOR_RADIUS_ATTR] = float(_ax["minor_radius_m"])
-        # the homotopy continuity guard (opt-in, #87): armed / fired / what
+        # the homotopy branch guard (opt-in diagnostic, #87): armed / fired / what
         # it did, on the group (reported, never a filter)
         _gr = self._guard_record()
         if _gr is not None:

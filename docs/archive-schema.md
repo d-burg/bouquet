@@ -55,7 +55,7 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │           axis_bimodal_json]    engine scans: the draws' axis record and the
     │                                  per-scan bimodality stamp (1.4.0)
     │          [n_bistability_guard_armed, n_bistability_guard_fired,
-    │           bistability_guard_counts_json]  the opt-in continuity guard's
+    │           bistability_guard_counts_json]  the opt-in branch guard's
     │                                  per-scan count (guard_bistability, 1.4.1)
     │          [parallel_manifest_json] process-parallel runs: per-worker record
     │          [refused_reason]        a slice refused before any draw (write_refused_scan;
@@ -172,7 +172,7 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
                     axis_minor_radius_m]  ← engine draws: the axis record (1.4.0)
                    [bistability_guard_armed, bistability_guard_fired,
                     bistability_guard_action]  ← engine draws with the opt-in
-                                         continuity guard (guard_bistability, 1.4.1)
+                                         branch guard (guard_bistability, 1.4.1)
                    max_VSC_drift_pct, in_spec, coil_drift_in_spec, in_spec_source,
                    inspec_*, l_i_target_used, [jbs_delta_active],
                    [diverted], [passes_coil_filter, passes_boundary_filter,
@@ -569,8 +569,9 @@ budgets and sums the rejections.
   had not said bistable; a restamp that no longer supports it removes it.
   Absent `bistability`: the check was off (legacy route, or an explicit
   `False`) or the archive predates it.
-- The homotopy continuity guard (opt-in `GenerationConfig.guard_bistability`,
-  1.4.1, #87; `bouquet.homotopy_guard`; absent everywhere when off). Engine
+- The homotopy branch guard, an experimental diagnostic (opt-in
+  `GenerationConfig.guard_bistability`, 1.4.1, #87; `bouquet.homotopy_guard`;
+  absent everywhere when off). Engine
   draw attrs: `bistability_guard_armed`, `bistability_guard_fired` (bools)
   and `bistability_guard_action` (str: `"none"`, `"legitimate"`, `"held"`,
   `"crossed"`, `"failed"` -- the most significant of the draw's stages).

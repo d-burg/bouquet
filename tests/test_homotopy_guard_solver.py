@@ -1,4 +1,4 @@
-"""The homotopy continuity guard (#87, opt-in ``guard_bistability``) on the
+"""The homotopy branch guard (#87, opt-in ``guard_bistability``) on the
 live solver (``pytest -m solver``).
 
 Three seeded runs of the same two-draw engine ensemble on the synthetic

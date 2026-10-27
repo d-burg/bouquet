@@ -1,15 +1,25 @@
-"""The homotopy continuity guard for bistable equilibria (issue #87; opt-in,
-``GenerationConfig.guard_bistability``, default ``False``).
+"""The homotopy branch guard: an opt-in EXPERIMENTAL DIAGNOSTIC for bistable
+equilibria (issue #87, still open; ``GenerationConfig.guard_bistability``,
+default ``False``).
+
+Status (1.4.1 validation).  It watches the coil-homotopy stages only.  On
+the validated bistable case the draws leave the reconstruction's branch
+earlier, in the draw's bootstrap loop, which it does not watch: it stamped 7
+of 28 draws there and changed none ("held" never occurred).  On two
+single-solution slices it flagged 5 of 62 draws, all continuous moves of
+1.0-1.6 % of a, and left them unchanged.  Use it to locate where a draw
+leaves its branch, not as a fix; the loop stage is #87's next target.
 
 On a near-double-null slice the free-boundary problem can have two
-neighbouring solutions of the same inputs (docs/workflows.md, "Bistable
+neighboring solutions of the same inputs (docs/workflows.md, "Bistable
 equilibria").  A draw's coil homotopy changes the objective the solver
-iterates on -- the loop's coil regularisation is replaced by the strong one
+iterates on -- the loop's coil regularization is replaced by the strong one
 and the coil bounds are installed (stage 1), then tightened (stages 2, 3) --
 and ONE Picard solve from the previous state can land on the other solution
 although the previous state's own solution persists under the new objective
-(numerical branch hopping).  The guard keeps such a draw on the branch it
-entered the stage on, by continuation, and acts only when a jump is seen.
+(numerical branch hopping).  The guard re-solves such a stage by
+continuation from the state it started from, and acts only when a jump is
+seen.
 
 What "branch" means operationally.  The state a homotopy stage starts from
 (the loop's last state for stage 1, the previous stage's for the others) is
@@ -28,8 +38,8 @@ axis reads and one ``copy_eq`` snapshot), so the iterate path is the
 unguarded one bit for bit.
 
 The action (:func:`continue_in_halves`, only when the detector fires).  The
-stage's objective is parametrised by ``s`` in [0, 1] (:func:`blend_reg`,
-:func:`blend_bounds`): in stage 1, which installs the strong regularisation,
+stage's objective is parametrized by ``s`` in [0, 1] (:func:`blend_reg`,
+:func:`blend_bounds`): in stage 1, which installs the strong regularization,
 every strong term keeps its weight while its target moves linearly from the
 starting state's coil currents to its own (the coils are walked from where
 the loop left them to the reconstruction's); each coil bound moves linearly
@@ -53,7 +63,7 @@ becomes the new starting state.  Then:
   off like a jump; one that still fails at the smallest sub-step: the jumped
   state is restored (``"failed"``).
 
-Nothing is accepted, refused or relabelled by the guard: every state it
+Nothing is accepted, refused or relabeled by the guard: every state it
 leaves the stage in is judged by the stage's own saturation test, the
 post-homotopy check and the in-spec rule, as an unguarded draw's is.  No
 tolerance, criterion or acceptance changes; ``GUARD_AXIS_FRAC`` and
@@ -204,10 +214,10 @@ def summary_action(actions) -> str:
 
 
 # ---------------------------------------------------------------------------
-#  the stage's objective at s (the solver's coil regularisation and bounds)
+#  the stage's objective at s (the solver's coil regularization and bounds)
 # ---------------------------------------------------------------------------
 def _term_parts(t):
-    """``(coffs, target, weight)`` of a solver regularisation term (the
+    """``(coffs, target, weight)`` of a solver regularization term (the
     toolkit's ``coil_reg_term`` namedtuple, or a plain 3-tuple)."""
     if hasattr(t, "coffs"):
         return dict(t.coffs), float(t.target), float(t.weight)
@@ -216,7 +226,7 @@ def _term_parts(t):
 
 
 def term_value(coffs, currents):
-    """``sum_i alpha_i I_i`` of a regularisation term's coefficients
+    """``sum_i alpha_i I_i`` of a regularization term's coefficients
     *coffs* over the coil *currents*; ``None`` when a coil (or a virtual
     channel such as ``#VSC``, whose current the toolkit does not report) is
     missing."""
@@ -234,8 +244,8 @@ def term_value(coffs, currents):
 
 
 def blend_reg(make_term, strong_terms, start_currents, s):
-    """The coil-regularisation terms at objective *s* of the FIRST stage
-    (the one that installs the strong regularisation): every strong term at
+    """The coil-regularization terms at objective *s* of the FIRST stage
+    (the one that installs the strong regularization): every strong term at
     its own weight, its TARGET moved linearly from the starting state's
     value of the term (:func:`term_value` over *start_currents*) to its own;
     a term whose starting value is unknown (the ``#VSC`` channel) keeps its
@@ -295,7 +305,7 @@ def blend_bounds(previous, target, s):
 #  the guard of one draw's homotopy (TokaMaker)
 # ---------------------------------------------------------------------------
 class HomotopyBranchGuard:
-    """The continuity guard of ONE draw's coil homotopy on a TokaMaker
+    """The branch guard of ONE draw's coil homotopy on a TokaMaker
     solver (built per draw by
     :meth:`bouquet.engine_draws.GenerateEngineDraws.homotopy_guard`).
 
@@ -366,10 +376,10 @@ class HomotopyBranchGuard:
     def solve_stage(self, mygs, stage_index, label, bounds, prev_bounds=None,
                     first=False):
         """Solve homotopy stage *stage_index* (its bounds *bounds* already
-        installed, as is its regularisation) under the guard.  *prev_bounds*:
+        installed, as is its regularization) under the guard.  *prev_bounds*:
         the bounds the starting state was solved under (``None``: none);
         *first*: the stage whose starting state is the loop's (its objective
-        also swaps the loop's regularisation for the strong one).  The
+        also swaps the loop's regularization for the strong one).  The
         stage's own failure (an exception of its solve) propagates
         untouched."""
         from .engine import axis_shift_record, state_axis

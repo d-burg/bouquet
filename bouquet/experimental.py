@@ -164,26 +164,33 @@ REGISTRY = {
         status="experimental"),
     "bistability_guard": dict(
         description=(
-            "The homotopy continuity guard for bistable equilibria (#87, "
-            "bouquet.homotopy_guard): a unified-engine draw's coil-homotopy "
-            "stage whose solve moves the magnetic axis more than "
-            "engine.AXIS_BRANCH_FRAC x a from the stage's starting state is "
-            "re-solved by continuation from that state (sub-steps 1/2, 1/4, "
-            "1/8 of the stage's change of coil regularisation and bounds); "
-            "the continuous state is kept only when it ends away from the "
-            "jumped one (branch hopping undone), a jump that persists at "
-            "1/8 is stamped a crossing.  It changes a draw's iterate path "
-            "only when it fires and never an acceptance; stamped per draw "
-            "and counted per scan."),
+            "A DIAGNOSTIC for bistable equilibria (#87, still open; "
+            "bouquet.homotopy_guard), default off.  It watches the coil-"
+            "homotopy stages of unified-engine draws only: a stage whose "
+            "solve moves the magnetic axis more than engine.AXIS_BRANCH_FRAC "
+            "(1 %) x a from the stage's starting state is re-solved from "
+            "that state in sub-steps of 1/2, 1/4 and 1/8, and the draw is "
+            "stamped with what was found (legitimate: a continuous move; "
+            "crossed: the jump persists at 1/8; failed: a sub-step did not "
+            "solve; held: the full step had hopped branches, and only then "
+            "is the continuous state kept).  It never changes an acceptance.  "
+            "Validated: on the known bistable case the branch change "
+            "happens earlier, in the draw's bootstrap loop, which it does "
+            "not watch; it stamped 7 of 28 draws there and changed none "
+            "(held never occurred); on two single-solution slices it "
+            "flagged 5 of 62 draws, all continuous moves of 1.0-1.6 % of a, "
+            "and left them unchanged.  Use it to locate where a draw leaves "
+            "its branch, not as a fix."),
         enabled_by=["GenerationConfig.guard_bistability=True"],
         introduced="#87, 1.4.1",
         validation_todo=[
-            "the false-positive exercise: the guard's firing rate on the "
-            "non-bistable ladder cases (a firing on a case with no second "
-            "solution is a false positive) and its cost in solves and wall "
-            "time per draw",
-            "on the bistable cases: the sigma=0 draw and the ensemble's "
-            "axis bimodality with the guard on and off, same seeds",
+            "the bootstrap-loop stage, where the validated bistable case's "
+            "draws leave the reconstruction's branch (#87's next target): "
+            "not watched by this guard",
+            "a case on which the guard holds a draw on its branch: none so "
+            "far (held never occurred on the four validated cases)",
+            "the false-positive rate on more single-solution cases (5 of 62 "
+            "draws flagged so far at the 1 % threshold, all left unchanged)",
         ],
         status="experimental"),
 }

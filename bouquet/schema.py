@@ -75,7 +75,7 @@ AXIS_OTHER_SCAN_ATTR_LEGACY = "n_axis_other"
 #: draws' axis positions are bimodal.
 BISTABILITY_SOURCE_ATTR = "bistability_source"
 
-# ---- the homotopy continuity guard (opt-in, #87; additive) ----------------
+# ---- the homotopy branch guard (opt-in diagnostic, #87; additive) ---------
 #: Draw-group attrs of an engine draw generated with
 #: ``GenerationConfig.guard_bistability=True`` (``bouquet.homotopy_guard``):
 #: whether the guard was armed, whether it fired on any homotopy stage, and

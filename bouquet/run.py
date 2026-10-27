@@ -8428,7 +8428,7 @@ class Bouquet(SwbBaseline):
             # a filter
             _axs = stamp_axis_scan(header, gc.scan_key)
             self._note_axis_scan(_axs)
-            # the homotopy continuity guard's per-scan count (opt-in, #87;
+            # the homotopy branch guard's per-scan count (opt-in diagnostic, #87;
             # nothing is written with the setting off)
             from .homotopy_guard import stamp_guard_scan
             stamp_guard_scan(header, gc.scan_key)

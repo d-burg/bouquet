@@ -20,8 +20,9 @@ closed by loosening a bar. The measurements behind them are in
   the draw's bootstrap loop -- 22 of 28 archived draws entered the homotopy
   already 16.5-17.6 mm below the reconstruction's axis -- so the ensemble
   stays bimodal with the guard on. There it stamped 7 of 28 draws (three
-  continuous moves; four first-stage crossings between the two solutions,
-  two each way, that persisted at 1/8 of the stage) and changed none: the
+  continuous moves; four first-stage moves between the two solutions, two
+  each way: two persisted at 1/8 of the stage ("crossed"), two stopped at
+  the iteration cap ("failed")) and changed none: the
   outcome that would change a draw ("held") never occurred. On two
   single-solution slices it flagged 5 of 62 draws, all continuous moves of
   1.0-1.6 % of a, and left them unchanged. Use it to locate where a draw

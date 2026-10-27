@@ -578,14 +578,18 @@ budgets and sums the rejections.
   The draw's engine record carries `bistability_guard`: `version`
   (`bistability_guard/1`), `armed` (and `reason` when not), `threshold_frac_a`
   (= `engine.AXIS_BRANCH_FRAC`), `first_step`, `min_step`, `minor_radius_m`,
-  `reconstruction_bistable` (the reconstruction's bistability `outcome`),
+  `reconstruction_bistability` (the reconstruction's bistability `outcome`),
   `reg_blend`, `entry_axis` (the homotopy's starting axis against the
   reconstruction's, an `axis_shift_record`), `stages` (per stage: `stage`,
-  `label`, `step_displacement_frac_a`, `step_dR_mm`, `step_dZ_mm`, `fired`,
-  `action`; when fired also `walk_outcome`, `s_reached`, `substeps` (`s_from`,
-  `s`, `displacement_frac_a`, `accepted`, `error`), `n_extra_solves`,
-  `endpoint_separation_frac_a`, `final_step_displacement_frac_a`,
-  `reg_blended`, `seconds`), `fired`, `action`, `path` (`"continuous"` /
+  `label`, `step_displacement_frac_a`, `step_dR_mm`, `step_dZ_mm`, `fired`
+  (`null`: a jump was seen but the solver cannot snapshot its state, with a
+  `note`), `action`; when fired also `n_extra_solves`, `seconds`,
+  `reg_blended`, `final_step_displacement_frac_a`, and `walk_outcome`,
+  `s_reached`, `substeps` (`s_from`, `s`, `displacement_frac_a`, `accepted`,
+  `error`), `endpoint_separation_frac_a` when a walk ran; `reason` when the
+  guard could not walk or install a state (`"failed"`: the wall budget was
+  spent, a toolkit call failed); `restore_error` when the jumped state could
+  not be restored), `fired`, `action`, `path` (`"continuous"` /
   `"crossed"` / null), `n_extra_solves`, `seconds`, `actions` (the meaning of
   each action), `rule`, `draw`, `archived`. `scan/<key>` attrs, recounted
   from the archive after `generate()` and `merge_archives`

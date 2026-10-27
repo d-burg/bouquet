@@ -1896,7 +1896,11 @@ class GenerationConfig:
     # (bouquet.homotopy_guard), and the draw is stamped with what was found
     # (engine["bistability_guard"], group attrs bistability_guard_*; counted
     # per scan).  Only the outcome "held" (the full step hopped branches)
-    # keeps a different state; it never changes an acceptance.  It is NOT a
+    # keeps a different state.  Its verdict never enters the in-spec rule or
+    # a rejection reason, its sub-steps are not charged to the draw's wall
+    # budget and a failure inside it keeps the unguarded state, so a draw's
+    # acceptance is the same on or off except when "held" replaces the
+    # jumped state (never in validation).  It is NOT a
     # fix: on the validated bistable case the draws leave the
     # reconstruction's branch earlier, in the bootstrap loop, which it does
     # not watch; there it stamped 7 of 28 draws and changed none ("held"

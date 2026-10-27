@@ -1092,6 +1092,110 @@ written with the earlier per-draw `axis_branch` / scan `n_axis_other` names
 are read (`schema.read_axis_entry`, `schema.read_scan_axis_counts`) and
 migrated when re-stamped.
 
+**Locating where a draw leaves its branch (`guard_bistability`, an opt-in
+experimental diagnostic since 1.4.1; #87 stays open).** The bistability stamp
+and the bimodality test report two solutions, but nothing keeps a draw on
+the reconstruction's branch yet. `GenerationConfig.guard_bistability=True`
+(default `False`) watches ONE place where a draw can change branch, the coil
+homotopy, where one Picard solve could hop to the other solution although
+the starting state's own solution persists under the stage's objective. It
+does not watch the draw's bootstrap loop, and on the validated bistable case
+that is where the branch changes (Status, below): so use it to locate where
+a draw leaves its branch, not as a fix. Off (the default) it does not exist
+and every stage is one plain solve. On, each stage is solved by
+`homotopy_guard.HomotopyBranchGuard.solve_stage` (`DrawMethod.homotopy_guard`;
+the engine only, refused under `"legacy"` and with
+`engine_draw_homotopy=False`):
+
+- **Branch, operationally.** The state a stage starts from -- the loop's
+  last state for stage 1, the previous stage's for the others -- is the
+  draw's branch. No position is pinned: kinetic draws move the axis by
+  several % of a, and the guard judges steps, not displacements from the
+  reconstruction.
+- **The detector.** The stage is solved exactly as unguarded; when the solve
+  moved the magnetic axis (the solver's o-point) more than
+  `homotopy_guard.GUARD_AXIS_FRAC` = `engine.AXIS_BRANCH_FRAC` (0.01) x a (the
+  reconstruction's minor radius) from the starting state, the guard fires.
+  The threshold is the MSE stage's one-step branch discriminator; the known
+  pair of solutions sits 2.8 % of a apart. Below it the guard has only read
+  the solver (two axis reads and one `copy_eq` snapshot): the iterate path is
+  the unguarded one bit for bit.
+- **The action (only when fired).** The stage's change of objective is
+  parametrized by s in [0, 1]: in stage 1 (which installs the strong
+  regularization) every strong term keeps its weight while its target moves
+  linearly from the starting state's coil currents to its own, so the coils
+  are walked from where the loop left them to the reconstruction's
+  (`blend_reg`; the `#VSC` term, whose current the toolkit does not report,
+  keeps its target), and every coil bound moves linearly from
+  the previous stage's interval (stage 1 without hard bounds: the stage's
+  widened just enough to contain the starting state; the `#VSC` channel by
+  the homotopy's own anti-series measure, an approximation: the toolkit
+  bounds the coil-set and `#VSC` variables separately) to the stage's
+  (`blend_bounds`); a stage-1 isoflux change, if any, is not walked;
+  s = 1 is exactly the stage's objective. From the starting state the
+  guard re-solves at s = 1/2; a sub-step that again moves the axis beyond
+  the threshold is retried at half the step (1/4, then
+  `GUARD_MIN_STEP` = 1/8); an accepted sub-step is the next start
+  (`continue_in_halves`; at most 10 sub-step solves per stage, 11 with
+  the stage's own). The walk's end
+  decides: within the threshold of the jumped state -- a continuous
+  response, the jumped state is restored (`"legitimate"`); away from it --
+  branch hopping, the continuous state is kept (`"held"`, the ONE outcome
+  that changes a draw); a jump that persists at 1/8 -- the branch ends
+  inside the stage, the jumped state is restored and the path is stamped
+  `"crossed"`. A sub-step that does not solve (the iteration cap) is backed
+  off like a jump; one that still fails at 1/8 -- the jumped state is
+  restored (`"failed"`). A restore is exact: on the live solver a firing
+  that keeps the jumped state leaves the archived draw bit-identical to the
+  unguarded one (`tests/test_homotopy_guard_solver.py`).
+- **What it does to acceptance.** The guard's verdict never enters the
+  in-spec rule or a rejection reason: the state a stage leaves is judged by
+  the stage's own saturation test, the post-homotopy bootstrap check and the
+  in-spec rule exactly as an unguarded draw's, and no tolerance, criterion,
+  cap or bound changes. Its sub-steps are not charged to the draw's wall
+  budget (`DrawSolveGuard.budget_paused`; when the stage's own solve has
+  already spent the budget, no walk is run), and a toolkit failure inside
+  the guard after the stage solved keeps the jumped (unguarded) state,
+  stamped `"failed"` with the reason. So a draw's acceptance is the same
+  with the guard on or off except when `"held"` replaces the jumped state
+  (which never occurred in validation), and in the one case the guard
+  cannot undo: a jumped state that cannot be restored after a walk fails
+  the stage under the homotopy's own rule. The wall-budget exception and
+  programming errors are never stamped as a sub-step that did not solve;
+  they propagate. The loop and the post-homotopy passes are not guarded.
+- **Stamps.** Per draw `engine["bistability_guard"]` and the group attrs
+  `bistability_guard_armed` / `_fired` / `_action`; per scan
+  `n_bistability_guard_armed` / `_fired` and `bistability_guard_counts_json`
+  (recounted by `merge_archives`); the record of every attempt that
+  reached the homotopy (archived or rejected; an attempt rejected earlier
+  has none) on `Bouquet.engine_bistability_guard` with a `[generate]` line
+  (kept across `verify_sigma0_consistency()`, cleared by a guard-off
+  `generate()`);
+  the baseline engine record's `draws.bistability_guard`
+  ([archive-schema.md](archive-schema.md#the-magnetic-axis-and-bistability)).
+  With no delivered axis or minor radius on record the draw is stamped not
+  armed, with the reason.
+- **Status: validated, and not a fix (1.4.1).** Production route, until 24
+  in spec, the same seeds with the guard on and off. On the validated
+  bistable case (a reversed-I_p slice) 22 of 28 archived draws entered the
+  homotopy already 16.5-17.6 mm below the reconstruction's axis: the branch
+  changes in the draw's bootstrap loop, which the guard does not watch, and
+  the ensemble stays bimodal with it on. There it stamped 7 of 28 draws
+  (three `"legitimate"` continuous moves; four first-stage crossings between
+  the two solutions, two each way, `"crossed"` / `"failed"`) and changed
+  none; `"held"`, the one outcome that keeps a different state, never
+  occurred on any validated case. On two single-solution slices it flagged 5
+  of 62 draws, all continuous moves of 1.0-1.6 % of a (`"legitimate"`, two
+  extra solves each), and left them unchanged; on the reversed-I_p control
+  case it never fired. Cost: only firing draws pay, +2 solves per legitimate firing on the single-solution slices (2-4 on the bistable case) there, 23 extra solves over the 7 firings of the
+  bistable case, at most 10 per stage. Every guarded archive's numeric
+  datasets and attrs were bit-identical to the unguarded one's (the engine
+  record's cost and timing differ). With the flag off no solve, RNG draw,
+  solver-state change or archived number changes; `config_json` gains the
+  flag. Registered as the experimental feature `bistability_guard`
+  (one `ExperimentalFeatureWarning` per run); default off. The bootstrap
+  loop is #87's next target ([known limitations](known-limitations.md)).
+
 `verify_sigma0_consistency()` under the engine runs ONE draw through the
 route `generate()` runs -- it calls `generate(n=1)` itself, with every
 perturbation zero and the bootstrap scale 1.0, archiving into a temporary

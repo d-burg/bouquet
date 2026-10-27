@@ -7,13 +7,28 @@ closed by loosening a bar. The measurements behind them are in
 
 ## Solver and reconstruction
 
-- **Bistable equilibria: no continuity guard (#87).** A near-double-null case
-  can have two neighbouring free-boundary solutions for the same inputs; the
-  bistability check stamps such a reconstruction, and the per-scan stamp marks
-  an axis-bimodal ensemble, but nothing keeps a draw's homotopy on the
-  reconstruction's branch. An ensemble on such a case can mix branches, so
-  read its `axis_shift` record and bimodality stamp before quoting its bands.
-  Planned for 1.4.1.
+- **Bistable equilibria: the continuity guard promised for 1.4.1 is not met
+  yet (#87, open).** A near-double-null case can have two neighboring
+  free-boundary solutions for the same inputs; the bistability check stamps
+  such a reconstruction and the per-scan stamp marks an axis-bimodal
+  ensemble, but nothing keeps a draw on the reconstruction's branch. 1.4.1
+  ships an opt-in, experimental DIAGNOSTIC, `guard_bistability=True`
+  (default off): it watches the coil-homotopy stages only, re-solves a stage
+  that moves the magnetic axis more than 1 % of a in sub-steps, and stamps
+  what it found. It is not the fix, for a measured reason: on the validated
+  bistable case (a reversed-I_p slice) the branch change happens earlier, in
+  the draw's bootstrap loop -- 22 of 28 archived draws entered the homotopy
+  already 16.5-17.6 mm below the reconstruction's axis -- so the ensemble
+  stays bimodal with the guard on. There it stamped 7 of 28 draws (three
+  continuous moves; four first-stage moves between the two solutions, two
+  each way: two persisted at 1/8 of the stage ("crossed"), two stopped at
+  the iteration cap ("failed")) and changed none: the
+  outcome that would change a draw ("held") never occurred. On two
+  single-solution slices it flagged 5 of 62 draws, all continuous moves of
+  1.0-1.6 % of a, and left them unchanged. Use it to locate where a draw
+  leaves its branch. The next target of #87 is the bootstrap loop. Until
+  then, read an ensemble's `axis_shift` record and bimodality stamp before
+  quoting its bands.
 - **MSE-stage runtime (#88).** Reconstructions with the structured MSE stage
   take 149–213 s (legacy route 178–192 s), against the 90–120 s
   target; without MSE they take 41–103 s. A study that needs MSE on many

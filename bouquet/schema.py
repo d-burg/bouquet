@@ -75,6 +75,24 @@ AXIS_OTHER_SCAN_ATTR_LEGACY = "n_axis_other"
 #: draws' axis positions are bimodal.
 BISTABILITY_SOURCE_ATTR = "bistability_source"
 
+# ---- the homotopy branch guard (opt-in diagnostic, #87; additive) ---------
+#: Draw-group attrs of an engine draw generated with
+#: ``GenerationConfig.guard_bistability=True`` (``bouquet.homotopy_guard``):
+#: whether the guard was armed, whether it fired on any homotopy stage, and
+#: what it did (``"none"`` / ``"legitimate"`` / ``"held"`` / ``"crossed"`` /
+#: ``"failed"``; the full record is the draw's ``engine["bistability_guard"]``).
+#: Absent: the setting was off.  Reported, never a filter.
+GUARD_ARMED_ATTR = "bistability_guard_armed"
+GUARD_FIRED_ATTR = "bistability_guard_fired"
+GUARD_ACTION_ATTR = "bistability_guard_action"
+#: Scan-group attrs, recounted from the archive
+#: (``bouquet.homotopy_guard.stamp_guard_scan``): how many archived draws
+#: carry an armed guard and on how many it fired, and the counts by action
+#: (JSON).  Absent: no archived draw carries a guard record.
+GUARD_ARMED_SCAN_ATTR = "n_bistability_guard_armed"
+GUARD_FIRED_SCAN_ATTR = "n_bistability_guard_fired"
+GUARD_COUNTS_SCAN_ATTR = "bistability_guard_counts_json"
+
 
 def _attr_str(v):
     return v.decode() if isinstance(v, bytes) else str(v)

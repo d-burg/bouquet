@@ -2,7 +2,8 @@
 
 ## Unreleased (1.4.1)
 
-A patch on 1.4.0: bug fixes and a warning. No default moves, and the
+A patch on 1.4.0: bug fixes, a warning and an opt-in experimental
+diagnostic. No default moves, and the
 goldens are bit-identical to 1.4.0 (the shipped fixtures never reach the
 changed code, or reach it bit for bit).
 
@@ -68,7 +69,44 @@ changed code, or reach it bit for bit).
   (`Bouquet.from_imas` sets it). It now says so, naming the channels that
   fell back and the assumed sigma each got, once per `generate()`; what is
   resolved is unchanged.
-- **Docs:** known-limitations.md drops the #95 entry.
+- **An experimental, opt-in diagnostic for bistable equilibria: the
+  homotopy branch guard (#87 stays open).** `GenerationConfig.guard_bistability`
+  (default `False`; unified engine only; the experimental feature
+  `bistability_guard`). It watches each coil-homotopy stage of an engine
+  draw: a stage whose solve moves the magnetic axis more than 1 % of the
+  minor radius (`engine.AXIS_BRANCH_FRAC`) is re-solved from the stage's
+  starting state in sub-steps of 1/2, 1/4 and 1/8, and the draw records what
+  it found (`"legitimate"`: a continuous move; `"crossed"`: the jump persists
+  at 1/8; `"failed"`: a sub-step did not solve; `"held"`: the full step had
+  hopped branches and the continuous state is kept). Its verdict never
+  enters the in-spec rule or a rejection reason, its sub-steps are not
+  charged to the draw's wall budget, and a failure inside it keeps the
+  unguarded state: a draw's acceptance is the same on or off except when
+  `"held"` replaces the jumped state (which never occurred in validation)
+  and when a jumped state cannot be restored, which fails the stage under
+  the homotopy's own rule.
+  Below the threshold it only reads the solver. Stamped per
+  draw (`engine["bistability_guard"]`; attrs `bistability_guard_armed` /
+  `_fired` / `_action`) and per scan (`n_bistability_guard_armed` /
+  `_fired`, `bistability_guard_counts_json`). **What the validation showed:**
+  it does not fix the known bistable case. On that reversed-I_p slice the
+  draws leave the reconstruction's branch earlier, in the draw's bootstrap
+  loop (22 of 28 archived draws entered the homotopy 16.5-17.6 mm below the
+  reconstruction's axis), which the guard does not watch; it stamped 7 of
+  the 28 draws (three continuous moves; four first-stage moves between the
+  solutions, two each way: two persisted at 1/8, `"crossed"`, two stopped
+  at the iteration cap, `"failed"`) and changed none (`"held"` never
+  occurred). On two
+  single-solution slices it flagged 5 of 62 draws, all continuous moves of
+  1.0-1.6 % of a, and left them unchanged; on the reversed-I_p control case
+  it never fired. Cost: only firing draws pay, +2 solves per legitimate firing on the single-solution slices (2-4 on the bistable case); up to 10 per stage; the bistable case took 23 extra solves over 7
+  firings. Use it to locate where a draw leaves its branch, not as a fix;
+  the loop stage is #87's next target. With the setting off no solve, RNG
+  draw, solver-state change or archived number changes (`config_json` gains
+  the flag): both h5 goldens regenerated with numerically identical
+  manifests (only the provenance differs).
+- **Docs:** known-limitations.md drops the #95 entry and rewrites the #87
+  entry (the promised continuity guard is not met yet; see above).
 
 ## 1.4.0 — the unified engine, the magnetics as the in-spec rule, one Z_eff rule (2026-10-18)
 

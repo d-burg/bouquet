@@ -1888,6 +1888,29 @@ class GenerationConfig:
     # not exist there; an explicit True is refused).  An explicit value --
     # a stored config's included -- is kept.
     check_bistability: Optional[bool] = None
+    # An opt-in EXPERIMENTAL DIAGNOSTIC for bistable equilibria (#87, still
+    # open; unified engine draws only; default False).  It watches the coil-
+    # homotopy stages ONLY: a stage whose solve moves the magnetic axis more
+    # than engine.AXIS_BRANCH_FRAC x a from the stage's starting state is
+    # re-solved from that state in sub-steps of 1/2, 1/4, 1/8 of the stage
+    # (bouquet.homotopy_guard), and the draw is stamped with what was found
+    # (engine["bistability_guard"], group attrs bistability_guard_*; counted
+    # per scan).  Only the outcome "held" (the full step hopped branches)
+    # keeps a different state.  Its verdict never enters the in-spec rule or
+    # a rejection reason, its sub-steps are not charged to the draw's wall
+    # budget and a failure inside it keeps the unguarded state, so a draw's
+    # acceptance is the same on or off except when "held" replaces the
+    # jumped state (never in validation) and when a jumped state cannot be
+    # restored (the stage then fails under the homotopy's own rule).  It is NOT a
+    # fix: on the validated bistable case the draws leave the
+    # reconstruction's branch earlier, in the bootstrap loop, which it does
+    # not watch; there it stamped 7 of 28 draws and changed none ("held"
+    # never occurred), and on two single-solution slices it flagged 5 of 62
+    # draws (continuous moves of 1.0-1.6 % of a) and left them unchanged.
+    # Use it to locate where a draw leaves its branch.  False: it does not
+    # exist (bit for bit the draws without it).  True is refused under
+    # "legacy" and with engine_draw_homotopy=False (no homotopy to watch).
+    guard_bistability: bool = False
     # The Grad-Shafranov iteration cap on EVERY solve inside an engine draw:
     # the loop (its anchor and passes), each coil-homotopy stage, a
     # homotopy rollback re-solve and the post-homotopy bootstrap passes (and

@@ -18,6 +18,7 @@ Provides:
     via secant iteration.
 """
 
+import contextlib
 import os
 import tempfile
 import time
@@ -297,6 +298,9 @@ class DrawSolveGuard:
         self.wall_budget_s = (None if wall_budget_s is None
                               else float(wall_budget_s))
         self._draw_t0 = None
+        #: while :meth:`budget_paused` is active: the clock reading at the
+        #: pause (the budget reads the elapsed time as of then)
+        self._paused_at = None
         #: the draws whose budget ran out: {draw: elapsed s when found}
         self.over_budget = {}
         if isinstance(maxits, bool) or (maxits is not None
@@ -474,11 +478,33 @@ class DrawSolveGuard:
             return False
         if self.draw in self.over_budget:
             return True
-        el = time.perf_counter() - self._draw_t0
+        now = (time.perf_counter() if self._paused_at is None
+               else self._paused_at)
+        el = now - self._draw_t0
         if el > self.wall_budget_s:
             self.over_budget[self.draw] = float(el)
             return True
         return False
+
+    @contextlib.contextmanager
+    def budget_paused(self):
+        """Exclude the time spent inside the block from the current draw's
+        wall budget: the budget reads the elapsed time as of the pause while
+        it lasts, and the draw's clock is moved forward by the block's
+        duration on exit (the opt-in homotopy branch guard's continuation
+        sub-steps, a diagnostic, are not charged to the draw).  Nested
+        pauses are one pause."""
+        if self._paused_at is not None or self._draw_t0 is None:
+            yield
+            return
+        t0 = time.perf_counter()
+        self._paused_at = t0
+        try:
+            yield
+        finally:
+            self._paused_at = None
+            if self._draw_t0 is not None:
+                self._draw_t0 += time.perf_counter() - t0
 
     def failures(self, draw):
         """This draw's failed solves, recovered or not (list of dicts)."""
@@ -8292,6 +8318,13 @@ def generate_bouquet(
                     _passes = (homotopy_passes if homotopy_passes is not None
                                else [(coil_drift, coil_drift)])
                     _m.cap_solver(mygs)
+                    # the branch guard of the stages (opt-in diagnostic,
+                    # guard_bistability, #87; bouquet.homotopy_guard): None
+                    # -- every method by default -- solves each stage with
+                    # one plain mygs.solve(), as before the setting existed
+                    _hguard = _m.homotopy_guard(
+                        mygs, baseline_coils=_baseline_coils,
+                        vsc_pair=_vsc_in_set)
                     _last_good_psi   = mygs.get_psi(False).copy()
                     _last_good_coils = dict(_baseline_coils)  # fallback only
                     # Full snapshot of the last good pass (psi, coils, profile
@@ -8348,7 +8381,22 @@ def generate_bouquet(
                         _label = (f"pass {_p_idx+1}/{len(_passes)}"
                                    if len(_passes) > 1 else "single-pass")
                         try:
-                            mygs.solve()
+                            if _hguard is None:
+                                mygs.solve()
+                            else:
+                                # the stage's starting state was solved
+                                # under the last good stage's bounds (stage
+                                # 1: the loop's, its hard bounds if any)
+                                _hguard.solve_stage(
+                                    mygs, _p_idx, f"homotopy {_label}",
+                                    _bounds_p,
+                                    prev_bounds=(
+                                        _build_bounds(
+                                            *_passes[_final_pass_idx])
+                                        if _final_pass_idx >= 0 else
+                                        getattr(mygs, '_coil_drift_bounds',
+                                                None)),
+                                    first=(_p_idx == 0))
                             # Snapshot success
                             _cur, _ = mygs.get_coil_currents()
                             _all_drifts = _coil_drift_pct(

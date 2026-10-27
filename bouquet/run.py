@@ -7052,6 +7052,7 @@ class Bouquet(SwbBaseline):
         _guard = SolverState.capture(mygs)
         keep_attrs = ("diagnostics", "generation_log", "draw_rejections",
                       "solve_failures", "engine_draw_cap_events",
+                      "engine_bistability_guard",
                       "_resolved_uncertainty", "_sigma0_route")
         saved = {k: self.__dict__[k] for k in keep_attrs
                  if k in self.__dict__}
@@ -8428,6 +8429,11 @@ class Bouquet(SwbBaseline):
             # a filter
             _axs = stamp_axis_scan(header, gc.scan_key)
             self._note_axis_scan(_axs)
+            # the homotopy branch guard's per-scan count (opt-in diagnostic, #87;
+            # nothing is written with the setting off)
+            if getattr(gc, "guard_bistability", False):
+                from .homotopy_guard import stamp_guard_scan
+                stamp_guard_scan(header, gc.scan_key)
         except (OSError, KeyError) as _exc:
             import warnings as _w
             _w.warn(f"the in-spec rule ({_inspec_bands.rule()}) could not be "

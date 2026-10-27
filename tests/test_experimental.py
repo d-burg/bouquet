@@ -56,7 +56,8 @@ def test_every_record_is_complete():
 def test_the_registered_features():
     assert list(X.REGISTRY) == [
         "fuse_zeff_fast_ions", "swb_solve_method",
-        "bootstrap_convergence_override", "ida_fuse_timing"]
+        "bootstrap_convergence_override", "ida_fuse_timing",
+        "bistability_guard"]
     # the measured IDA route, the beam subtraction and the sampler clips left the registry
     # (owner decision 2026-10: the ida_hybrid default), their open items
     # kept as known limitations

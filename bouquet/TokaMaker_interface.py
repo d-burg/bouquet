@@ -2833,6 +2833,121 @@ def strong_coil_reg(mygs, targets, soft_reg_weight=1.0e4,
     return rt
 
 
+def generate_entry_snapshot(mygs):
+    """What :func:`generate_exit_teardown` needs from the entry of
+    :func:`generate_bouquet` (review of #100, F7): a copy of the caller's
+    equilibrium object when the solver carries NO record of the
+    reconstruction's coil regularisation (``_recon_coil_reg``; a functional
+    caller that did not go through ``Bouquet.setup_solver``).  The coil
+    regularisation lives in that object (OpenFUSIONToolkit's ``copy_eq``
+    copies its matrix, targets and weights), and there is no other way to
+    read back what the caller installed.  ``None`` when the record exists
+    (the teardown re-installs it) or the solver cannot copy its equilibrium.
+    Never raises."""
+    if getattr(mygs, "__dict__", {}).get("_recon_coil_reg") is not None:
+        return None
+    if not (hasattr(mygs, "copy_eq") and hasattr(mygs, "replace_eq")):
+        return None
+    try:
+        return mygs.copy_eq()
+    except Exception:
+        return None
+
+
+def generate_exit_teardown(mygs, entry_eq=None):
+    """Put back the solver state ``generate_bouquet`` changed for its draws
+    (issue #13); run on every exit of :func:`generate_bouquet`, an
+    exception included.  Returns a record of what was done.
+
+    The draw phase installs a strong coil regularisation (stashed as
+    ``mygs._strong_coil_reg``) and, with ``coil_drift_hard_factor``, hard
+    coil bounds (stashed as ``mygs._coil_drift_bounds``).  Left in place,
+    a second run in the same process (a direct functional caller, or two
+    ``generate()`` calls on one prepared baseline) starts under them.  On
+    exit:
+
+    * the coil regularisation is the reconstruction's own term list
+      (``mygs._recon_coil_reg``, published by ``Bouquet._apply_coil_reg``);
+      the equilibrium is then not touched (the next run's entry restores
+      its own starting state);
+    * with no such record (a functional caller), the CALLER'S
+      regularisation, whatever it was: the equilibrium object copied at
+      entry (*entry_eq*, :func:`generate_entry_snapshot`) is restored, and
+      it carries the caller's coil regularisation.  The solver is therefore
+      left at the caller's entry equilibrium (psi, coil currents,
+      constraints and targets as they were), not at the last draw;
+    * only when neither is available (no record and no entry copy) and
+      this run left the strong regularisation installed, the toward-zero
+      default ``setup_solver`` installs without a configured ``coil_reg``
+      (every coil at weight 1, the #VSC at 1e-2), recorded as a guess;
+    * the coil bounds are released (``set_coil_bounds(None)``, +/-1e98),
+      on a solver already in the bounded coil mode or with bounds on
+      record only (the mode is one-way; see
+      :mod:`bouquet.solver_state`);
+    * the ``_coil_drift_bounds`` and ``_strong_coil_reg`` stashes are
+      removed.
+
+    A failure is printed and recorded, never raised (this runs in a
+    ``finally``)."""
+    from .solver_state import COIL_SOLVE_BOUNDED, coil_solve_mode
+    rec = dict(coil_reg=None, bounds_released=False, stashes_cleared=[])
+    d = getattr(mygs, "__dict__", {})
+    try:
+        terms = d.get("_recon_coil_reg")
+        if terms is not None:
+            mygs.set_coil_reg(reg_terms=list(terms))
+            rec["coil_reg"] = "reconstruction"
+        elif entry_eq is not None:
+            mygs.replace_eq(source_eq=entry_eq)
+            rec["coil_reg"] = ("the caller's (the entry equilibrium "
+                               "restored)")
+        elif d.get("_strong_coil_reg") is not None:
+            dflt = [mygs.coil_reg_term({name: 1.0}, target=0.0, weight=1.0)
+                    for name in mygs.coil_sets]
+            dflt.append(mygs.coil_reg_term({'#VSC': 1.0}, target=0.0,
+                                           weight=1e-2))
+            mygs.set_coil_reg(reg_terms=dflt)
+            rec["coil_reg"] = ("default (neither the reconstruction's nor "
+                               "the caller's is on record)")
+            print("  [teardown] no record of the coil regularisation the "
+                  "run started under: the toward-zero default is installed")
+    except Exception as exc:
+        rec["coil_reg_error"] = f"{type(exc).__name__}: {exc}"
+        print(f"  [teardown] coil-regularisation restore failed ({exc})")
+    try:
+        if (hasattr(mygs, "set_coil_bounds")
+                and (d.get("_coil_drift_bounds") is not None
+                     or coil_solve_mode(mygs) == COIL_SOLVE_BOUNDED)):
+            mygs.set_coil_bounds(None)
+            rec["bounds_released"] = True
+    except Exception as exc:
+        rec["bounds_error"] = f"{type(exc).__name__}: {exc}"
+        print(f"  [teardown] coil-bound release failed ({exc})")
+    for k in ("_coil_drift_bounds", "_strong_coil_reg"):
+        if k in d:
+            try:
+                delattr(mygs, k)
+                rec["stashes_cleared"].append(k)
+            except Exception:
+                pass
+    return rec
+
+
+def _with_exit_teardown(fn):
+    """Run :func:`generate_exit_teardown` on every exit of *fn* (#13), with
+    the entry snapshot :func:`generate_entry_snapshot` takes."""
+    import functools
+
+    @functools.wraps(fn)
+    def generate_bouquet(mygs, *args, **kwargs):
+        entry_eq = generate_entry_snapshot(mygs)
+        try:
+            return fn(mygs, *args, **kwargs)
+        finally:
+            generate_exit_teardown(mygs, entry_eq=entry_eq)
+    return generate_bouquet
+
+
 def _install_weak_swb_coil_reg(mygs):
     """Swap the strong coil reg for the weak SWB one (see the SWB hygiene
     block in :func:`perturb_kinetic_equilibrium`); return the strong reg to
@@ -5582,6 +5697,7 @@ def _extend_scale_block(scales, rng, scale_range, chunk):
                             size=int(chunk))])
 
 
+@_with_exit_teardown
 def generate_bouquet(
     mygs,
     psi_N,
@@ -6153,6 +6269,36 @@ def generate_bouquet(
     # coil bounds (built below only when those bounds are installed)
     _hard_sat_guard = None
 
+    # ---- names the per-draw loop reads, bound before the coil branch -----
+    # (#95) With coil handling off (coil_drift=None) the branch below never
+    # runs, and the loop read these names unbound (UnboundLocalError before
+    # any draw was archived).  Bound here to their "nothing captured" values;
+    # the branch overwrites them exactly as before when coil handling is on.
+    #
+    # SKIP_HARD / SKIP_ISO / SKIP_HOMOTOPY env-var reads at function scope so
+    # the per-draw loop's pre-solve coil-pin block can reference them (it runs
+    # BEFORE the Step-3 homotopy block where these were originally defined).
+    # Reading them once gives a consistent view across all draws -- if a user
+    # toggles an env var mid-run we use the value captured here, not a
+    # per-draw race.
+    _skip_hard = os.environ.get('SKIP_HARD', '0') == '1'
+    _skip_iso  = os.environ.get('SKIP_ISO',  '0') == '1'
+    _skip_homotopy = os.environ.get('SKIP_HOMOTOPY', '0') == '1'
+    # the warm-start snapshot of the reconstruction state: none captured
+    # (each draw then starts from the solver's state as the draw method
+    # leaves it)
+    _warmstart_eq_snap = None
+    _warmstart_psi = None
+    _warmstart_coils = None
+    _warmstart_iso_pts = None
+    _warmstart_iso_w = None
+    _warmstart_captured = False
+
+    def _report_bnd(stage):
+        """The boundary-deviation diagnostic: a no-op unless the coil
+        branch below installs its reference LCFS (it rebinds this name)."""
+        return None
+
     # ---- the reconstruction's delivered state, restored FIRST (review F6)
     # The q0 sawtooth check, the strong-reg / drift reference coils
     # (_initial_coils) and the Ip every draw is aligned to (_recon_Ip) are
@@ -6552,16 +6698,8 @@ def generate_bouquet(
         _baseline_psi = mygs.get_psi(False).copy()
         _baseline_coils = dict(_initial_coils)
 
-        # Hoist SKIP_HARD / SKIP_ISO / SKIP_HOMOTOPY env-var reads
-        # to function scope so the per-draw loop's pre-solve coil-pin
-        # block can reference them (it runs BEFORE the Step-3 homotopy
-        # block where these were originally defined).  Reading at
-        # function entry also gives a consistent view across all
-        # draws -- if a user toggles an env var mid-run we use the
-        # value captured here, not a per-draw race.
-        _skip_hard = os.environ.get('SKIP_HARD', '0') == '1'
-        _skip_iso  = os.environ.get('SKIP_ISO',  '0') == '1'
-        _skip_homotopy = os.environ.get('SKIP_HOMOTOPY', '0') == '1'
+        # (SKIP_HARD / SKIP_ISO / SKIP_HOMOTOPY are read at function scope,
+        # before the coil-handling branch: see "coil handling off" above.)
 
         # Warm-start snapshot for per-draw state restoration.
         # Captured AT THE END of the first successful draw (not at

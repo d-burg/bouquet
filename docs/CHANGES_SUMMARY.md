@@ -1,5 +1,75 @@
 # Bouquet — change summaries
 
+## Unreleased (1.4.1)
+
+A patch on 1.4.0: bug fixes and a warning. No default moves, and the
+goldens are bit-identical to 1.4.0 (the shipped fixtures never reach the
+changed code, or reach it bit for bit).
+
+- **`generate_bouquet(coil_drift=None)` archives its draws (#95).** With
+  coil handling off the per-draw loop read names only the coil-handling
+  block bound, and every run raised `UnboundLocalError` before archiving.
+  They are bound before the branch now. A coil-off draw is stamped
+  `homotopy_pass` -1 with NaN coil drifts, so the legacy drift verdict
+  `coil_drift_in_spec` is False. Its `in_spec` is the in-spec rule's
+  verdict with the configured coil filter: always False under the legacy
+  filter; under the default χ² filter its coil currents are judged like
+  any draw's. (Under the legacy filter a coil-off run with
+  `n_inspec_target` set therefore cannot reach its target.)
+- **p-file ion species roles by charge, mass and `nb` (#19).**
+  `PFile.compute_zeff` read the main ion as `Z[-2]`, which on a two-entry
+  `[impurity, main]` block is the impurity (a carbon plasma came out at
+  Z_eff ~ 30). `PFile.ion_roles()` identifies the beam (the last species,
+  only with a non-zero `nb`), the main ion (the first hydrogenic species,
+  Z = 1 and 0.5 ≤ A ≤ 3.5) and the impurity (the first other one). A block
+  with no non-hydrogenic species (`[D, D]`, `[D, T]`: a clean plasma)
+  loads as in 1.4.0, Z_eff = 1. It raises when a role is ambiguous (a
+  two-entry `[C, D]` block with a non-zero `nb`, in `compute_zeff`) and
+  when a non-hydrogenic species lighter than the impurity could be the main
+  ion, i.e. no hydrogenic species precedes the last one (`[C, He, D]`): a
+  non-hydrogenic main ion is not supported. Multi-impurity blocks with a D
+  main ion (`[C, He, D, D]`, `[Ne, C, D, D]`) read as in 1.4.0. The
+  shipped three-entry p-files read bit-identically.
+- **`generate_bouquet` exit teardown (#13).** On every exit, an exception
+  included, it re-installs the reconstruction's coil regularisation (with
+  none on record, a functional caller's own: the equilibrium object copied
+  at entry, which carries it, is restored), releases the coil bounds and
+  removes the `_strong_coil_reg` / `_coil_drift_bounds` stashes, so a
+  second run in the same process does not start under the first one's
+  draw-phase state. A direct `generate_bouquet` caller with no
+  reconstruction reg on record therefore gets its solver back at the
+  equilibrium it passed in (ψ, coil currents, targets, isoflux), not at the
+  last draw. Through the class API the solver was already
+  restored on entry in 1.4.0, so two sequential σ=0 `generate()` calls
+  were identical before and are guarded now; the direct functional path
+  is what the fix changes.
+- **`read_ida_cer` returns B_θ with the force balance's sign.** IDA's
+  `Bpol_midplane` is B_Z at the outboard midplane; `read_ida_cer` now returns
+  B_θ = −B_Z (a geometric identity, for either I_p / B_T direction), so E_r
+  from `radial_field_from_impurity_force_balance` has IDA's own sign (the
+  v_φ B_θ term had the wrong sign). Public API only; the library does not
+  consume it internally. An E_r built with 1.4.0 or earlier from this
+  reader (for example an `e_r` auxiliary channel) has the wrong sign. The
+  agreement with IDA's E_r was checked on normal-orientation cases only;
+  take B_φ from the input (lab-frame) g-file. From #81, by @StuartBenjamin.
+- **The experimental Z_eff classification follows the stored-Z_eff check's
+  rule.** With `ImasSource.zeff_fast_ions=True`, `_dd_zeff` checks a stored
+  `core_profiles.zeff` on every node with n_e > 0 (it was ψ_N ≤ 0.8) and
+  weighs each ion by its charge state `ion[].z_ion` when present, as the
+  default route's check does since 1.4.0; the worst node is stamped and the
+  "matches neither" warning goes through the run's collector. The choice
+  between the two numerators stays on the core ψ_N ≤ 0.8, where the beam
+  makes them differ, so an edge misfit cannot flip it. Experimental route
+  only; dds without `z_ion` whose stored zeff fits on every node read
+  bit-identically.
+- **IDA-hybrid `ni_source="standard"`: the template fallback warns.** A
+  hand-built config without `UncertaintyConfig.ida_path` gets the assumed σ
+  templates on that sub-route although the run's IDA file is in play
+  (`Bouquet.from_imas` sets it). It now says so, naming the channels that
+  fell back and the assumed sigma each got, once per `generate()`; what is
+  resolved is unchanged.
+- **Docs:** known-limitations.md drops the #95 entry.
+
 ## 1.4.0 — the unified engine, the magnetics as the in-spec rule, one Z_eff rule (2026-10-18)
 
 This is the summary of everything since 1.3.1. The detailed account is in

@@ -573,6 +573,121 @@ class PFile:
             "A": np.asarray(A, dtype=float),
         }
 
+    def ion_roles(self, need=("impurity", "main")):
+        """The roles of the ``"N Z A"`` species: impurity, main ion, beam.
+
+        Identified by charge and mass and by whether the file carries a beam
+        density, never by position alone (issue #19: a two-entry
+        ``[impurity, main]`` block read with the three-entry positions put
+        the impurity's charge on the main ion: a carbon plasma's Z_eff came out
+        ~30):
+
+        * **beam**: only when the file carries a non-zero ``nb``; then it is
+          the LAST species (the OMFIT order: impurities, main ion, beam ion
+          last), whatever its charge (the per-draw writer stores the fast
+          ions' effective charge there);
+        * **main ion**: the first hydrogenic species (Z = 1,
+          0.5 <= A <= 3.5: H, D or T) among the others;
+        * **impurity**: the first non-hydrogenic species among the rest
+          (``nz1`` is the first impurity's density).  A block with NO
+          non-hydrogenic species at all (``[D, D]``, ``[D, T]``, ``[D]``: a
+          clean plasma) has none: the quasineutrality residual is then
+          carried at charge 1 (``Z_imp`` 1.0, ``impurity`` None,
+          ``impurity_hydrogenic_residual`` True), which gives Z_eff = 1 as
+          1.4.0 did, bit for bit.
+
+        Parameters
+        ----------
+        need : iterable of str
+            The roles the caller needs (``"impurity"``, ``"main"``).  A
+            needed role that cannot be identified raises ``ValueError``;
+            when the species read as the beam would itself qualify for it
+            (e.g. a two-entry ``[impurity, D]`` block with a non-zero ``nb``:
+            is D the main ion or the beam?) the message says the block is
+            ambiguous.  A non-hydrogenic species lighter than the impurity
+            with no hydrogenic species before the last one (``[C, He, D]``:
+            a helium main ion, or helium ash beside a D main ion?) is refused
+            whatever is needed: a non-hydrogenic main ion is not supported,
+            and a trailing hydrogenic species is never silently promoted to
+            main ion past it.  With a hydrogenic species before the last one
+            (``[C, He, D, D]``, ``[Ne, C, D, D]``) the light species is a
+            second impurity and the block reads as in 1.4.0 (``nz1`` the
+            first impurity's).
+
+        Returns
+        -------
+        dict
+            ``impurity``, ``main``, ``beam`` (indices into the block, None
+            when absent; ``beam`` is None without a beam density),
+            ``Z_imp``, ``Z_main`` (None when absent), ``Z_beam`` (1.0 when
+            there is no beam density: its term is then zero) and
+            ``impurity_hydrogenic_residual``.
+        """
+        nza = self._raw.get("N Z A")
+        if nza is None:
+            raise ValueError("Ion species (N Z A) block required")
+        Z = np.atleast_1d(np.asarray(nza["Z"], dtype=float))
+        A = np.atleast_1d(np.asarray(nza["A"], dtype=float))
+        n = len(Z)
+        nb = self._get_data("nb")
+        has_beam = (n > 0 and nb is not None
+                    and bool(np.any(np.asarray(nb) != 0.0)))
+        beam = n - 1 if has_beam else None
+        rest = [i for i in range(n) if i != beam]
+
+        def _hydrogenic(i):
+            return abs(Z[i] - 1.0) < 1e-6 and 0.5 <= A[i] <= 3.5
+
+        listed = ", ".join(f"(Z={z:g}, A={a:g})" for z, a in zip(Z, A))
+        mains = [i for i in rest if _hydrogenic(i)]
+        main = mains[0] if mains else None
+        imps = [i for i in rest if i != main and not _hydrogenic(i)]
+        imp = imps[0] if imps else None
+        lighter = ([i for i in imps[1:] if Z[i] < Z[imp]]
+                   if imp is not None else [])
+        # The light species could be the MAIN ion only when no hydrogenic
+        # species precedes the last one (the beam's slot with nb, or the
+        # slot a beam would take without it): [C, He, D] is refused, while
+        # [C, He, D, D] / [Ne, C, D, D] (a D main ion before the last
+        # species) are read as 1.4.0 read them (review of #100, N1).
+        h_before_last = any(_hydrogenic(i) for i in range(n - 1))
+        if lighter and not h_before_last:
+            k = lighter[0]
+            raise ValueError(
+                f"p-file N Z A block [{listed}] lists a non-hydrogenic "
+                f"species (Z={Z[k]:g}, A={A[k]:g}) lighter than the impurity "
+                f"(Z={Z[imp]:g}): it may be the main ion (e.g. a helium "
+                "plasma) or a second impurity, and a non-hydrogenic main ion "
+                "is not supported.  Give a block whose main ion is H, D or T "
+                "(OMFIT order: impurities, main ion, beam ion last).")
+        residual = (imp is None
+                    and not any(not _hydrogenic(i) for i in range(n)))
+        for role, idx, what in (
+                ("main", main, "hydrogenic main ion (Z = 1, 0.5 <= A <= 3.5;"
+                               " a non-hydrogenic main ion is not "
+                               "supported)"),
+                ("impurity", imp, "impurity species (not hydrogenic)")):
+            if role not in need or idx is not None:
+                continue
+            if role == "impurity" and residual:
+                continue
+            if beam is not None and (_hydrogenic(beam) == (role == "main")):
+                raise ValueError(
+                    f"p-file N Z A block is ambiguous [{listed}]: the file "
+                    "carries a non-zero beam density nb, so its last species "
+                    "is read as the beam ion, and no other species is a "
+                    f"{what}; the last species could be either.  List both "
+                    "(OMFIT order: impurities, main ion, beam ion last).")
+            raise ValueError(
+                f"p-file N Z A block names no {what} [{listed}]; cannot "
+                "identify the ion roles.")
+        return dict(impurity=imp, main=main, beam=beam,
+                    Z_imp=(float(Z[imp]) if imp is not None
+                           else (1.0 if residual else None)),
+                    Z_main=None if main is None else float(Z[main]),
+                    Z_beam=(float(Z[beam]) if beam is not None else 1.0),
+                    impurity_hydrogenic_residual=bool(residual))
+
     def compute_derivatives(self):
         """Recompute d(data)/d(psinorm) for all profiles in place."""
         for key, val in self._raw.items():
@@ -613,17 +728,18 @@ class PFile:
         ``nz1 = (ne - ni - Z_beam nb) / Z_impurity``
 
         ``nb`` is a particle density (as in :meth:`compute_zeff`), weighted
-        by the beam charge ``Z_beam`` (the last ``N Z A`` species).
+        by the beam charge ``Z_beam``.  The species roles are those of
+        :meth:`ion_roles` (by charge, mass and the presence of ``nb``; it
+        raises when the impurity cannot be identified).  ``ni`` is given, so
+        the main ion's identity is not needed here.
 
         Requires ``ne``, ``ni`` on the same grid and a ``"N Z A"`` block
         with at least one impurity species.  ``nb`` defaults to zero if
         absent.
         """
-        nza = self._raw.get("N Z A")
-        if nza is None:
-            raise ValueError("Ion species (N Z A) block required")
-        Z_imp = nza["Z"][0]
-        Z_beam = float(nza["Z"][-1]) if len(nza["Z"]) > 2 else 1.0
+        roles = self.ion_roles(need=("impurity",))
+        Z_imp = roles["Z_imp"]
+        Z_beam = roles["Z_beam"]
 
         psinorm = self._raw["ne"]["psinorm"]
         ne = self._raw["ne"]["data"]
@@ -655,8 +771,12 @@ class PFile:
                    + n_{z1} Z_{\\mathrm{imp}}^2
                    + n_b Z_{\\mathrm{beam}}^2}{n_e}
 
-        Charge states are read from the ``"N Z A"`` block (OMFIT
-        convention: impurities first, then main ion, beam ion last).
+        Charge states are read from the ``"N Z A"`` block, each species'
+        role identified by :meth:`ion_roles` (by charge, mass and the
+        presence of ``nb``, not by position; it raises when the roles are
+        ambiguous).  The OMFIT order is impurities first, then main ion,
+        beam ion last; a two-entry ``[impurity, main]`` block is read as
+        such (issue #19).
 
         Requires ``ne``, ``ni`` on the same grid and an ``"N Z A"`` block.
         ``nz1`` and ``nb`` default to zero if absent.
@@ -673,12 +793,10 @@ class PFile:
         This is intentionally **not** written into the p-file (Zeff is
         not a standard p-file key) to preserve OMFIT compatibility.
         """
-        nza = self._raw.get("N Z A")
-        if nza is None:
-            raise ValueError("Ion species (N Z A) block required")
-        Z_imp = nza["Z"][0]
-        Z_main = nza["Z"][-2]
-        Z_beam = nza["Z"][-1]
+        roles = self.ion_roles()
+        Z_imp = roles["Z_imp"]
+        Z_main = roles["Z_main"]
+        Z_beam = roles["Z_beam"]
 
         psinorm = self._raw["ne"]["psinorm"]
         ne = self._raw["ne"]["data"]
@@ -744,10 +862,8 @@ class PFile:
         else:
             TI = np.asarray(TI, dtype=float)
 
-        nza = self._raw.get("N Z A")
-        if nza is None:
-            raise ValueError("Ion species (N Z A) block required")
-        Z_imp = nza["Z"][0]
+        # the impurity by role, as compute_zeff (not the position Z[0])
+        Z_imp = self.ion_roles(need=("impurity",))["Z_imp"]
 
         # Floor |dpsi| to avoid division-by-zero spikes near the axis
         # where psi is nearly flat.  The floor is set at 1e-4 × max|dpsi|

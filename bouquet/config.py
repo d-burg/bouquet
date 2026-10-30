@@ -232,6 +232,10 @@ class ReconstructionSource:
     impurity_Z: float = 6.0            # effective impurity charge (carbon); set per machine
     # IDA path: "standard" | measured "Zeff" | "CER" | "all" (see above)
     ni_source: str = "standard"
+    # IDA path, ni_source="all": fold the VB-vs-CER disagreement into the
+    # envelopes only at psi_N <= this value (None: everywhere; see
+    # io.ida.read_ida and ImasSource.ida_route_disagreement_psi_max)
+    ida_route_disagreement_psi_max: Optional[float] = None
     profile_overrides: dict = field(default_factory=dict)  # name -> array, manual override
     # reconstruction knobs
     psi_pad: float = 1e-3
@@ -249,10 +253,23 @@ class ReconstructionSource:
         from .coords import run_coord
         run_coord(self.coord)
         _check_ni_source(self.ni_source, "ReconstructionSource")
+        _check_route_disagreement_psi_max(self.ida_route_disagreement_psi_max,
+                                          "ReconstructionSource")
 
 
 #: ImasSource.ida_timing: the reviewed window rule, or IDA_fuse's own pairing.
 IDA_TIMINGS = ("window", "ida_fuse")
+
+
+def _check_route_disagreement_psi_max(v, who):
+    if v is None:
+        return
+    import math
+    if isinstance(v, bool) or not isinstance(v, (int, float)) \
+            or not math.isfinite(float(v)) or float(v) <= 0.0:
+        raise ValueError(f"{who}.ida_route_disagreement_psi_max={v!r}: must be "
+                         "None (fold the route disagreement at every radius) "
+                         "or a positive finite psi_N")
 
 
 def _check_ni_source(v, who, allowed=None):
@@ -328,6 +345,12 @@ class ImasSource:
     # (a measured Z_eff), so Baseline.zeff_includes_fast is True.  Under
     # ni_source="standard" the Z_eff is the dd's either way.
     zeff_from_fuse: bool = False
+    # OPTIONAL, measured routes with both VB and CER live (ni_source "all" /
+    # the ida_hybrid default): fold the VB-vs-CER disagreement into the
+    # sigma_ni / sigma_Zeff envelopes only at psi_N <= this value; outside
+    # it the envelopes are the routes' own propagated widths.  None
+    # (default) folds it at every radius.  See io.ida.read_ida.
+    ida_route_disagreement_psi_max: Optional[float] = None
     # OPTIONAL. A gEQDSK whose LCFS replaces the dd boundary outline as the
     # isoflux separatrix target. Leave None to use the source's own boundary.
     # Supply one when you have a more accurate separatrix for the slice than the
@@ -415,6 +438,8 @@ class ImasSource:
             raise ValueError(f"ImasSource.ni_subtract_fast="
                              f"{self.ni_subtract_fast!r}: must be None (auto), "
                              "True or False")
+        _check_route_disagreement_psi_max(self.ida_route_disagreement_psi_max,
+                                          "ImasSource")
         if self.ni_subtract_fast is True and self.ni_source == "standard":
             raise ValueError(
                 "ImasSource.ni_subtract_fast=True subtracts the beam density "

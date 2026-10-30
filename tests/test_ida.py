@@ -358,3 +358,74 @@ def test_the_route_clip_is_counted_not_changed(tmp_path):
     assert r.zeff_provenance["n_clipped_vb"] == 3
     assert r.zeff_provenance["n_clipped_cer"] == 0
     np.testing.assert_array_equal(r.Zeff[:3], 1.0)
+
+
+class TestRouteDisagreementPsiMax:
+    """``route_disagreement_psi_max``: the VB-vs-CER fold is radially limited, the tension report is not."""
+
+    def test_default_none_is_unchanged(self, tmp_path):
+        p = tmp_path / "bad.cdf"
+        _write_consistent(str(p), nc_scale=1.5)
+        a = read_ida(str(p), time=3.0, ni_source="all")
+        b = read_ida(str(p), time=3.0, ni_source="all", route_disagreement_psi_max=None)
+        assert np.array_equal(a.sigma_ni, b.sigma_ni)
+        assert np.array_equal(a.sigma_Zeff, b.sigma_Zeff)
+        assert a.zeff_provenance["route_disagreement_psi_max"] is None
+        assert a.zeff_provenance["n_nodes_disagreement_dropped"] == 0
+
+    def test_fold_only_inside_the_limit(self, tmp_path):
+        p = tmp_path / "bad.cdf"
+        _write_consistent(str(p), nc_scale=1.5)            # routes disagree everywhere
+        full = read_ida(str(p), time=3.0, ni_source="all")
+        lim = read_ida(str(p), time=3.0, ni_source="all", route_disagreement_psi_max=0.8)
+        inside = lim.psi_N <= 0.8
+        # inside: identical to the full fold
+        assert np.array_equal(lim.sigma_ni[inside], full.sigma_ni[inside])
+        assert np.array_equal(lim.sigma_Zeff[inside], full.sigma_Zeff[inside])
+        # outside: the routes' own propagated widths, i.e. narrower than the full fold
+        # and equal to the plain propagation
+        plain = _plain_sigma_ni(str(p))
+        assert np.all(lim.sigma_ni[~inside] < full.sigma_ni[~inside])
+        assert np.allclose(lim.sigma_ni[~inside], plain[~inside], rtol=0.05)
+        assert np.all(lim.sigma_Zeff[~inside] < full.sigma_Zeff[~inside])
+        # the value and the tension report are untouched
+        assert np.array_equal(lim.Zeff, full.Zeff) and np.array_equal(lim.ni, full.ni)
+        assert np.array_equal(lim.zeff_route_chi, full.zeff_route_chi)
+        assert np.array_equal(lim.ni_route_chi, full.ni_route_chi)
+        assert lim.zeff_provenance["route_disagreement_psi_max"] == 0.8
+        assert lim.zeff_provenance["n_nodes_disagreement_dropped"] == int(np.count_nonzero(~inside))
+
+    def test_limit_beyond_the_grid_is_the_full_fold(self, tmp_path):
+        p = tmp_path / "bad.cdf"
+        _write_consistent(str(p), nc_scale=1.5)
+        full = read_ida(str(p), time=3.0, ni_source="all")
+        lim = read_ida(str(p), time=3.0, ni_source="all", route_disagreement_psi_max=5.0)
+        assert np.array_equal(lim.sigma_ni, full.sigma_ni)
+        assert lim.zeff_provenance["n_nodes_disagreement_dropped"] == 0
+
+    @pytest.mark.parametrize("bad", [0.0, -0.5, float("inf"), float("nan")])
+    def test_invalid_limit_is_refused(self, tmp_path, bad):
+        p = tmp_path / "bad.cdf"
+        _write_consistent(str(p), nc_scale=1.5)
+        with pytest.raises(ValueError, match="route_disagreement_psi_max"):
+            read_ida(str(p), time=3.0, ni_source="all", route_disagreement_psi_max=bad)
+
+    def test_single_route_file_ignores_the_limit(self, tmp_path):
+        p = tmp_path / "direct.cdf"
+        _write_direct(str(p))                                # VB only: nothing to fold
+        a = read_ida(str(p), time=3.0, ni_source="standard")
+        b = read_ida(str(p), time=3.0, ni_source="standard", route_disagreement_psi_max=0.8)
+        assert np.array_equal(a.sigma_ni, b.sigma_ni)
+
+    def test_config_fields_validate(self):
+        from bouquet.config import ImasSource, ReconstructionSource
+        s = ImasSource(ids_path="dd.json", ida_path="i.cdf", ida_route_disagreement_psi_max=0.8)
+        assert s.ida_route_disagreement_psi_max == 0.8
+        assert ImasSource(ids_path="dd.json").ida_route_disagreement_psi_max is None
+        r = ReconstructionSource(geqdsk_path="g", profiles_path="p.cdf", ida_route_disagreement_psi_max=0.9)
+        assert r.ida_route_disagreement_psi_max == 0.9
+        for bad in (0.0, -1.0, True, "0.8"):
+            with pytest.raises(ValueError, match="ida_route_disagreement_psi_max"):
+                ImasSource(ids_path="dd.json", ida_route_disagreement_psi_max=bad)
+            with pytest.raises(ValueError, match="ida_route_disagreement_psi_max"):
+                ReconstructionSource(geqdsk_path="g", profiles_path="p.cdf", ida_route_disagreement_psi_max=bad)

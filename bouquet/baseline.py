@@ -1117,6 +1117,10 @@ def resolve_uncertainty(config, baseline) -> dict:
                 # Z-sensitive; the kinetics loader already passes this, and
                 # omitting it here silently pinned the sigma math to carbon
                 impurity_Z=float(getattr(src, "impurity_Z", 6.0)),
+                # the same radial limit on the VB-vs-CER fold as the
+                # kinetics read, so the envelope the draws use matches
+                route_disagreement_psi_max=getattr(
+                    src, "ida_route_disagreement_psi_max", None),
             )
             if _sig_match is not None and abs(
                     float(ida.time) - _sig_match["ida_time_used"]) > 1e-9:
@@ -1662,7 +1666,9 @@ def _load_kinetic_profiles(source) -> dict:
     if path.endswith(".cdf"):
         from .io.ida import read_ida
         ida = read_ida(path, time=source.time, impurity_Z=source.impurity_Z,
-                       ni_source=getattr(source, "ni_source", "standard"))
+                       ni_source=getattr(source, "ni_source", "standard"),
+                       route_disagreement_psi_max=getattr(
+                           source, "ida_route_disagreement_psi_max", None))
         return dict(
             psi_N=np.asarray(ida.psi_N, dtype=float),
             ne=np.asarray(ida.ne, dtype=float),

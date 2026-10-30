@@ -1,11 +1,13 @@
 # Bouquet — change summaries
 
-## Unreleased (1.4.1)
+## 1.4.1 — bug fixes, a template-fallback warning, an opt-in branch-guard diagnostic (2026-10-30)
 
 A patch on 1.4.0: bug fixes, a warning and an opt-in experimental
-diagnostic. No default moves, and the
-goldens are bit-identical to 1.4.0 (the shipped fixtures never reach the
-changed code, or reach it bit for bit).
+diagnostic. No default moves. The goldens' numbers are identical to 1.4.0
+(the shipped fixtures never reach the changed code, or reach it bit for
+bit; the two h5 goldens were regenerated and differ only in provenance).
+One fix changes output bytes on purpose: the IMAS export's
+`profiles_2d.psi` is no longer transposed (#101, below).
 
 - **`generate_bouquet(coil_drift=None)` archives its draws (#95).** With
   coil handling off the per-draw loop read names only the coil-handling

@@ -7,9 +7,9 @@ authors:
     given-names: Daniel
   - family-names: Hansen
     given-names: Chris
-version: 1.4.0
+version: 1.4.1
 doi: 10.5281/zenodo.19398541
-date-released: 2026-10-18
+date-released: 2026-10-30
 license: LGPL-3.0
 repository-code: "https://github.com/d-burg/bouquet"
 url: "https://d-burg.github.io/bouquet/"

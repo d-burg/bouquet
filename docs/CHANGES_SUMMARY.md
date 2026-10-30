@@ -9,6 +9,20 @@ bit; the two h5 goldens were regenerated and differ only in provenance).
 One fix changes output bytes on purpose: the IMAS export's
 `profiles_2d.psi` is no longer transposed (#101, below).
 
+- **Radial limit on the VB-vs-CER fold: `ida_route_disagreement_psi_max`
+  (opt-in, `ImasSource` and `ReconstructionSource`).** With both measured
+  IDA routes live (`ni_source="all"`, the `ida_hybrid` default), the
+  disagreement term that widens σ_ni / σ_Zeff is now folded only at
+  ψ_N ≤ the limit; outside it the envelopes are the routes' own propagated
+  widths. `None` (default) keeps the fold at every radius, bit for bit.
+  Motivation: on DIII-D the CER carbon density is not credible at the
+  pedestal (its implied Z_eff reaches 5-6 at ψ_N > 0.85 against a VB of
+  2-3), so the mean's width there was 30-40 % of Z_eff and the derived
+  n_i of the draws swung by ±0.4 n_e, feeding the pedestal bootstrap
+  current. The tension report (`ni_route_chi`, `zeff_route_chi`) stays
+  full-range; `zeff_provenance` gains `route_disagreement_psi_max` and
+  `n_nodes_disagreement_dropped`. The value (the mean) is untouched.
+
 - **`generate_bouquet(coil_drift=None)` archives its draws (#95).** With
   coil handling off the per-draw loop read names only the coil-handling
   block bound, and every run raised `UnboundLocalError` before archiving.

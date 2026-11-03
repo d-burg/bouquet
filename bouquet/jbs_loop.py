@@ -369,6 +369,13 @@ def jbs_settings(gc, *, draw: bool = False) -> dict:
         # carried to every loop evaluation and record; only present when
         # not the default, so the default settings dict keeps its keys
         out["eps_definition"] = eps_def
+    from .physics import BOOTSTRAP_MODEL_DEFAULT, check_bootstrap_model
+    model = check_bootstrap_model(getattr(gc, "bootstrap_model",
+                                          BOOTSTRAP_MODEL_DEFAULT))
+    if model != BOOTSTRAP_MODEL_DEFAULT:
+        # the coefficient-fit opt-in (GenerationConfig.bootstrap_model), on
+        # the same rule: only present when not the default
+        out["bootstrap_model"] = model
     return out
 
 
@@ -1147,11 +1154,14 @@ def run_jbs_loop(jbs0, step: Callable, evaluate: Callable, settings: dict, *,
             requested=True, applied=False, after_pass=1,
             definition=START_REFRESH_DEFINITION)
     try:
-        from .physics import evaluate_jbs_version, EPS_DEFINITION_DEFAULT
+        from .physics import (BOOTSTRAP_MODEL_DEFAULT, EPS_DEFINITION_DEFAULT,
+                              evaluate_jbs_version)
         # the version of the definition the loop evaluates with (the
-        # settings carry a non-default GenerationConfig.eps_definition)
+        # settings carry a non-default GenerationConfig.eps_definition /
+        # bootstrap_model)
         rec["evaluate_jBS_version"] = evaluate_jbs_version(
-            settings.get("eps_definition", EPS_DEFINITION_DEFAULT))
+            settings.get("eps_definition", EPS_DEFINITION_DEFAULT),
+            settings.get("bootstrap_model", BOOTSTRAP_MODEL_DEFAULT))
     except Exception:
         rec["evaluate_jBS_version"] = None
     rec["oft_build"] = oft_build_info()

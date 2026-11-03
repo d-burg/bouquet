@@ -1,5 +1,23 @@
 # Bouquet — change summaries
 
+## Unreleased
+
+- **Opt-in Sauter bootstrap model (`GenerationConfig.bootstrap_model`).**
+  `"redl"` (default) is the evaluator from before the setting, bit for bit;
+  `"sauter"` swaps the coefficient fit in `physics.evaluate_jBS` for
+  `physics.sauter_bootstrap` (Sauter 1999 with the 2002 erratum, TORAX's
+  fit), with ν\*, ε, f_T, the κ conversion and p′G unchanged. It reaches every
+  path that already reads `eps_definition`: the unified engine and its draws,
+  the legacy self-consistent loop, the IMAS baseline loop and the delta-cache
+  references. It is recorded in every `evaluate_jBS_version` and, for the opt-in, in
+  `bootstrap_eps` (`bootstrap_model`, `bootstrap_model_formula`; a default
+  record keeps its keys). The swb and
+  frozen legacy routes take their bootstrap from the toolkit's
+  `solve_with_bootstrap`, which is Redl only, so they refuse `"sauter"`.
+  Checked against OMFIT's `sauter_bootstrap(version="jboot1")` (frozen
+  reference `tests/data/sauter_omfit_reference.json`; physics notes,
+  "The coefficient fit").
+
 ## 1.4.1 — bug fixes, a template-fallback warning, an opt-in branch-guard diagnostic (2026-10-30)
 
 A patch on 1.4.0: bug fixes, a warning and an opt-in experimental

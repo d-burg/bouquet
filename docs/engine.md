@@ -536,14 +536,21 @@ the engine never read it, so the stored run is unchanged.
 | `engine_preset` | basis / prior | rows admitted |
 |---|---|---|
 | `"structured"` (default) | 4 Gaussians (ψ_N 0.15/0.45/0.75/0.95, width 0.20), `li_soft_onesided` σ ladders | Ip, l_i, q0, MSE |
-| `"bootstrap_scalar"` | constant basis, `s_ind` pinned | Ip |
 | `"structured_uniform"` | the same 4 Gaussians under `utils.STRUCTURED_WEIGHTS_UNIFORM` (σ = 1 on every coefficient, no one-sided up-ladder) | Ip, l_i, q0, MSE |
 | `"bootstrap_scalar"` | constant basis, `s_ind` pinned | Ip |
+| `"inductive_scalar"` | constant basis, `s_bs` pinned (the bootstrap model's own current) | Ip |
 | `"sawtooth_two_scalar"` | constant basis, two scalars | Ip, q0 (falls back to `"bootstrap_scalar"` with a notice when the gate rejects q0, as the legacy sawtooth channel) |
 | `"two_scalar_li"` | constant basis, two scalars | Ip, l_i (both required) |
 
 The scalar presets reduce exactly to `close_ip("bootstrap")` and
 `close_ip_q0` (tested).
+
+**`"inductive_scalar"`** is `"bootstrap_scalar"` with the roles swapped: the
+bootstrap is the evaluator's own (`s_bs = 1`, pinned by an infinite weight)
+and one scalar on the inductive current meets Ip exactly. It is the closure
+for comparing bootstrap models (`bootstrap_model`, docs/physics-notes.md):
+under `"structured"` the bootstrap's own coefficients move with the Ip row,
+so part of the difference between two models would be fitted away.
 
 **`"two_scalar_li"`** is the legacy secant's l_i family as a named closure:
 one scalar on the inductive and one on the bootstrap, rows Ip + l_i. With

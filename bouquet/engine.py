@@ -63,7 +63,7 @@ ENGINE_VERSION = "unified-engine/2 (Stage 3: reconstruction and draws)"
 ENGINE_CHOICES = ("legacy", "unified")
 #: ``GenerationConfig.engine_preset`` values (docs/engine.md, "Presets").
 ENGINE_PRESETS = ("structured", "structured_uniform", "bootstrap_scalar",
-                  "sawtooth_two_scalar", "two_scalar_li")
+                  "inductive_scalar", "sawtooth_two_scalar", "two_scalar_li")
 #: The measurement rows the engine knows.
 ENGINE_ROWS = ("Ip", "l_i", "q0", "mse")
 #: ``GenerationConfig.engine_mse_jacobian`` values.
@@ -250,6 +250,7 @@ PRESET_ROWS = {
     "structured": frozenset(("Ip", "l_i", "q0", "mse")),
     "structured_uniform": frozenset(("Ip", "l_i", "q0", "mse")),
     "bootstrap_scalar": frozenset(("Ip",)),
+    "inductive_scalar": frozenset(("Ip",)),
     "sawtooth_two_scalar": frozenset(("Ip", "q0")),
     "two_scalar_li": frozenset(("Ip", "l_i")),
 }
@@ -1433,6 +1434,17 @@ class UnifiedEngine:
             self.sigma_bs = np.array([1.0])
             self.sigma_up = None
             self.prior_name = "constant basis, s_ind pinned (bootstrap)"
+        elif self.preset == "inductive_scalar":
+            # the bootstrap_scalar closure with the roles swapped: the
+            # bootstrap is the model's own (s_bs = 1, pinned) and ONE scalar
+            # on the inductive carries Ip, imposed exactly.  What a
+            # comparison of bootstrap models needs: no closure coefficient
+            # can absorb the difference between them.
+            self.basis = dict(kind="constant")
+            self.sigma_ind = np.array([1.0])
+            self.sigma_bs = np.array([0.0])       # pinned: s_bs = 1
+            self.sigma_up = None
+            self.prior_name = "constant basis, s_bs pinned (inductive)"
         else:
             self.basis = dict(kind="constant")
             self.sigma_ind = np.array([1.0])

@@ -1785,7 +1785,8 @@ class GenerationConfig:
     # "structured" (4-Gaussian basis, li_soft_onesided priors; the default),
     # "structured_uniform" (the same basis and rows under the documented
     # uniform ladder utils.STRUCTURED_WEIGHTS_UNIFORM: the prior-sensitivity
-    # run), "bootstrap_scalar" (s_bs constant; rows Ip),
+    # run), "bootstrap_scalar" (s_bs constant; rows Ip), "inductive_scalar"
+    # (s_ind constant, s_bs pinned at 1: the model's bootstrap as is; rows Ip),
     # "sawtooth_two_scalar" (s_ind, s_bs constants; rows Ip, q0) or
     # "two_scalar_li" (s_ind, s_bs constants; rows Ip, l_i: the legacy
     # secant's two-scalar l_i family as a named closure).

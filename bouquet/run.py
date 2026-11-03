@@ -943,6 +943,11 @@ class Bouquet(SwbBaseline):
         from .config import ImasSource, resolve_solve_method
         # (called on the class: test stand-ins pass a namespace as self)
         Bouquet._warn_legacy_route(self, resolve_solve_method(self.config.generation))
+        # a non-default bootstrap_model is refused where the bootstrap is
+        # the toolkit's (Redl-only) solve_with_bootstrap; checked again here
+        # because the fields can be edited after construction
+        from .config import check_bootstrap_model_route
+        check_bootstrap_model_route(self.config.generation)
         # EXPERIMENTAL features (bouquet.experimental.REGISTRY): one
         # ExperimentalFeatureWarning each, naming its validation TODO; the
         # list goes on the baseline record and into the archive
@@ -5410,12 +5415,17 @@ class Bouquet(SwbBaseline):
                                        residual_weights, run_jbs_loop,
                                        oft_build_info)
                 from .utils import li_achieved, ip_roundtrip_gate as _gate_fn
-                from .physics import (EPS_DEFINITION_DEFAULT,
+                from .physics import (BOOTSTRAP_MODEL_DEFAULT,
+                                      EPS_DEFINITION_DEFAULT,
                                       evaluate_jbs_version)
-                # the Redl eps / nu* R (GenerationConfig.eps_definition)
+                # the Redl eps / nu* R (GenerationConfig.eps_definition) and
+                # the coefficient fit (GenerationConfig.bootstrap_model)
                 _eps_def = getattr(gc, "eps_definition",
                                    EPS_DEFINITION_DEFAULT)
-                EVALUATE_JBS_VERSION = evaluate_jbs_version(_eps_def)
+                _bs_model = getattr(gc, "bootstrap_model",
+                                    BOOTSTRAP_MODEL_DEFAULT)
+                EVALUATE_JBS_VERSION = evaluate_jbs_version(_eps_def,
+                                                            _bs_model)
 
                 Ip_abs = abs(float(bl.Ip_target))
                 _init = str(_jbs["init"])
@@ -5425,7 +5435,8 @@ class Bouquet(SwbBaseline):
                     j, d = evaluate_jBS(eq, psi_N, ne, te, ni, ti, Zeff,
                                         psi_pad=psi_pad, isolate_edge=iso,
                                         smooth_axis=True, coord=coord,
-                                        eps_definition=_eps_def)
+                                        eps_definition=_eps_def,
+                                        bootstrap_model=_bs_model)
                     if gc.floor_j_BS:
                         j = np.clip(j, 0.0, None)
                     return j, d
@@ -6391,7 +6402,8 @@ class Bouquet(SwbBaseline):
                 psi_N, ne, te, ni, ti, Zeff, psi_pad,
                 bool(gc.isolate_edge_jBS), float(getattr(bl, "bs_scale", 1.0)),
                 bool(gc.floor_j_BS), jdiff, None, None, coord=coord,
-                eps_definition=getattr(gc, "eps_definition", None))
+                eps_definition=getattr(gc, "eps_definition", None),
+                bootstrap_model=getattr(gc, "bootstrap_model", None))
             j_bs0 = np.asarray(comp(mygs.copy_eq())[0], dtype=float)
             bl.j_BS = j_bs0 - (0.0 if jdiff is None else jdiff)
         # every channel the draws hold fixed, once each (the draws' _jfix =
@@ -7337,7 +7349,8 @@ class Bouquet(SwbBaseline):
             psi_N, ne_eq, te_eq, ni_eq, ti_eq, Zeff_eq, psi_pad,
             bool(gc.isolate_edge_jBS), float(getattr(bl, "bs_scale", 1.0)),
             bool(gc.floor_j_BS), jdiff, None, None, coord=coord,
-            eps_definition=getattr(gc, "eps_definition", None))
+            eps_definition=getattr(gc, "eps_definition", None),
+            bootstrap_model=getattr(gc, "bootstrap_model", None))
         j_ind = np.asarray(bl.j_inductive, dtype=float)
         # the fixed current the draws hold (j_NBI + j_RF + j_other), not the
         # stored split's residual: a residual is self-consistent with a
@@ -7640,7 +7653,9 @@ class Bouquet(SwbBaseline):
                                     isolate_edge=bool(gc.isolate_edge_jBS),
                                     smooth_axis=False, coord=coord,
                                     eps_definition=getattr(
-                                        gc, "eps_definition", None))
+                                        gc, "eps_definition", None),
+                                    bootstrap_model=getattr(
+                                        gc, "bootstrap_model", None))
             dref = scale0 * np.asarray(_sel, dtype=float)
             dbase = np.asarray(ref, dtype=float)
             blk["delta_mode"] = True
@@ -8455,8 +8470,9 @@ class Bouquet(SwbBaseline):
         from .utils import stamp_bootstrap_eps
         _be = getattr(bl, "bootstrap_eps", None)
         stamp_bootstrap_eps(header, scan_key=gc.scan_key,
-                            record=(eps_record(getattr(
-                                gc, "eps_definition", None))
+                            record=(eps_record(
+                                getattr(gc, "eps_definition", None),
+                                getattr(gc, "bootstrap_model", None))
                                     if _be is None else _be))
         # how the engine-dependent settings were resolved (both paths)
         from .utils import (stamp_engine_resolved_defaults,

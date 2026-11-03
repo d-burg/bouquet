@@ -178,14 +178,17 @@ class ToyGS:
 
 def _toy_redl(eq, psi_N, ne, te, ni, ti, Zeff, psi_pad=1e-3,
               isolate_edge=False, smooth_axis=True, coord="psi_n",
-              eps_definition=None):
+              eps_definition=None, bootstrap_model=None):
     """Bootstrap that depends on the kinetics AND on the equilibrium.
-    ``eps_definition`` (GenerationConfig.eps_definition, passed at every
-    call site) is checked like the real evaluator does; the toy's bootstrap
-    does not depend on it."""
+    ``eps_definition`` and ``bootstrap_model`` (GenerationConfig, passed at
+    every call site) are checked like the real evaluator does; the toy's
+    bootstrap does not depend on them."""
     if eps_definition is not None:
         from bouquet.physics import check_eps_definition
         check_eps_definition(eps_definition)
+    if bootstrap_model is not None:
+        from bouquet.physics import check_bootstrap_model
+        check_bootstrap_model(bootstrap_model)
     kin = (np.asarray(ne, float) * np.asarray(te, float)) / (
         np.asarray(ne, float)[0] * np.asarray(te, float)[0])
     base = (3.0e5 * np.exp(-0.5 * ((psi_N - 0.92) / 0.04) ** 2)

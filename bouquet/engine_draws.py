@@ -1237,18 +1237,19 @@ def engine_rejection_reason(exc, stage):
 # ---------------------------------------------------------------------------
 def tokamaker_backend(mygs, contract, *, psi_pad, q_psi, maxits,
                       edge_pressure=None, edge_taper=None, coord="psi_n",
-                      eps_definition=None):
+                      eps_definition=None, bootstrap_model=None):
     """The draw's backend on a live solver (monkeypatched by the fast
-    tests).  ``edge_pressure`` / ``edge_taper`` / ``eps_definition``: the
-    reconstruction's settings (:mod:`bouquet.edge_pressure`,
-    :func:`bouquet.engine.engine_edge_taper`, ``GenerationConfig.
-    eps_definition``)."""
+    tests).  ``edge_pressure`` / ``edge_taper`` / ``eps_definition`` /
+    ``bootstrap_model``: the reconstruction's settings
+    (:mod:`bouquet.edge_pressure`, :func:`bouquet.engine.engine_edge_taper`,
+    ``GenerationConfig.eps_definition`` / ``bootstrap_model``)."""
     from .engine import TokaMakerBackend
     return TokaMakerBackend(mygs, contract, psi_pad=psi_pad, li_kind="li_3",
                             q_psi=q_psi, maxits=maxits,
                             edge_pressure=edge_pressure,
                             edge_taper=edge_taper, coord=coord,
-                            eps_definition=eps_definition)
+                            eps_definition=eps_definition,
+                            bootstrap_model=bootstrap_model)
 
 
 class GenerateEngineDraws(DrawMethod):
@@ -1470,8 +1471,11 @@ class GenerateEngineDraws(DrawMethod):
                                  edge_taper=self.ctx.eng.s.get("edge_taper"),
                                  coord=self.ctx.coord,
                                  # the reconstruction's Redl eps / nu* R
+                                 # and coefficient fit
                                  eps_definition=self.ctx.eng.s.get(
-                                     "eps_definition"))
+                                     "eps_definition"),
+                                 bootstrap_model=self.ctx.eng.s.get(
+                                     "bootstrap_model"))
 
     def lcfs_pressure(self, p_lcfs=None):
         """The separatrix pressure a written g-file of the CURRENT draw

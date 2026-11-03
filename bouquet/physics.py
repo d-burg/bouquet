@@ -936,20 +936,148 @@ def check_eps_definition(eps_definition):
     return eps_definition
 
 
-def evaluate_jbs_version(eps_definition=EPS_DEFINITION_DEFAULT):
-    """The :data:`EVALUATE_JBS_VERSION` string for an ``eps_definition``:
-    it names the epsilon AND the ``R`` in ``nu*``, so a record says which
-    definition produced its bootstrap (an opt-in is marked ``OPT-IN``)."""
+#: The neoclassical coefficient fit of every bouquet bootstrap evaluation
+#: (:func:`evaluate_jBS`), named by ``GenerationConfig.bootstrap_model``.
+#: Both fits enter the same ``jboot1`` form,
+#:
+#:     <j.B> = -F p_e [L31 p'/p_e + L32 T_e'/T_e
+#:                     + L34 alpha (1 - R_pe)/R_pe T_i'/T_i] sign(q),
+#:
+#: with the same ``nu_e*``, ``nu_i*`` (NRL / ``Zavg`` Coulomb logarithms, Koh
+#: ion charge), ``eps`` (``eps_definition``), ``f_T`` and ``kappa``
+#: conversion, so the setting changes the coefficient fit and nothing else:
+#:
+#: * ``"redl"`` (default): Redl et al., Phys. Plasmas 28, 022502 (2021),
+#:   through OpenFUSIONToolkit's ``redl_bootstrap``; what every run before
+#:   the setting existed used, bit for bit.
+#: * ``"sauter"``: Sauter, Angioni and Lin-Liu, Phys. Plasmas 6, 2834 (1999),
+#:   Eqs. 14-17, with the ``alpha`` sign correction of the erratum, Phys.
+#:   Plasmas 9, 5140 (2002) (:func:`sauter_bootstrap`): the fit TORAX and
+#:   OMFIT's ``sauter_bootstrap(version="jboot1")`` use.
+BOOTSTRAP_MODELS = {
+    "redl": "Redl 2021 jboot1",
+    "sauter": "Sauter 1999 jboot1 (2002 erratum)",
+}
+#: The default of :func:`evaluate_jBS`'s ``bootstrap_model`` (and of
+#: ``GenerationConfig.bootstrap_model``).
+BOOTSTRAP_MODEL_DEFAULT = "redl"
+
+
+def check_bootstrap_model(bootstrap_model):
+    """Validate a ``bootstrap_model`` name; returns it."""
+    if bootstrap_model not in BOOTSTRAP_MODELS:
+        raise ValueError(
+            f"bootstrap_model={bootstrap_model!r} is not one of "
+            f"{sorted(BOOTSTRAP_MODELS)} "
+            f"({'; '.join(f'{k}: {v}' for k, v in BOOTSTRAP_MODELS.items())})")
+    return bootstrap_model
+
+
+def evaluate_jbs_version(eps_definition=EPS_DEFINITION_DEFAULT,
+                         bootstrap_model=BOOTSTRAP_MODEL_DEFAULT):
+    """The :data:`EVALUATE_JBS_VERSION` string for an ``eps_definition`` and
+    a ``bootstrap_model``: it names the coefficient fit, the epsilon AND the
+    ``R`` in ``nu*``, so a record says which definition produced its
+    bootstrap (an opt-in is marked ``OPT-IN``).  The default model leaves
+    the string exactly as it was before ``bootstrap_model`` existed."""
     eps_definition = check_eps_definition(eps_definition)
+    bootstrap_model = check_bootstrap_model(
+        BOOTSTRAP_MODEL_DEFAULT if bootstrap_model is None
+        else bootstrap_model)
+    model_txt = BOOTSTRAP_MODELS[bootstrap_model]
+    if bootstrap_model != BOOTSTRAP_MODEL_DEFAULT:
+        model_txt = "OPT-IN " + model_txt
     eps_txt = f"eps = {EPS_DEFINITIONS[eps_definition].replace(' ', '')}"
     if eps_definition == "a_over_R":
         eps_txt += " (the /3 definition)"
     if eps_definition != EPS_DEFINITION_DEFAULT:
         eps_txt = "OPT-IN " + eps_txt
     eps_txt += f", nu* R = {NU_STAR_R[eps_definition]}"
-    return ("evaluate_jBS/4 (Redl 2021 jboot1, NRL/Zavg lnLambda, Koh nu_i*, "
+    return (f"evaluate_jBS/4 ({model_txt}, NRL/Zavg lnLambda, Koh nu_i*, "
             f"{eps_txt}, psi_N-native, kappa = F<1/R>/<B^2> toroidal "
             "conversion; p'G separate as j_pressure)")
+
+
+def sauter_bootstrap(*, Te, Ti, ne, ni, pe, pi, Zeff, q, fT, I_psi,
+                     dT_e_dpsi, dT_i_dpsi, dn_e_dpsi, dn_i_dpsi,
+                     nu_e_star, nu_i_star, use_sign_q=True):
+    r"""``(<j.B>, coeffs)``: the Sauter bootstrap in the ``jboot1`` form.
+
+    Sauter, Angioni and Lin-Liu, Phys. Plasmas 6, 2834 (1999), Eqs. 14-17,
+    with the erratum, Phys. Plasmas 9, 5140 (2002), which flips the sign of
+    the ``0.315 nu_i*^2 f_T^6`` term of ``alpha`` (Eq. 17a).  The drop-in
+    counterpart of OpenFUSIONToolkit's ``redl_bootstrap(formula_form=
+    'jboot1', use_sign_q=True)`` with the collisionalities given
+    (``nu_e_star_override`` / ``nu_i_star_override`` there): the same inputs,
+    units and assembly::
+
+        <j.B> = -I_psi p_e [L31 p'/p_e + L32 T_e'/T_e
+                            + L34 alpha (1 - R_pe)/R_pe T_i'/T_i] sign(q)
+
+    with ``p' = e (n_e T_e' + T_e n_e' + n_i T_i' + T_i n_i')`` and ``R_pe =
+    p_e/(p_e + p_i)``.  Only ``L31``, ``L32``, ``L34`` and ``alpha`` differ
+    from Redl.  ``Zeff`` enters the coefficients as in Sauter 1999 (and in
+    ``redl_bootstrap``); the ion charge of ``nu_i*`` is the caller's.
+
+    Temperatures in eV, densities in m^-3, pressures in Pa, derivatives with
+    respect to the unnormalized poloidal flux.  ``coeffs`` holds ``L31``,
+    ``L32``, ``L34``, ``alpha``, ``alpha0``, ``F32_ee``, ``F32_ei``,
+    ``nu_e_star``, ``nu_i_star`` and ``R_pe``.
+    """
+    Te, Ti, ne, ni, pe, pi, Zeff, q, fT, I_psi = (
+        np.asarray(a, dtype=float)
+        for a in (Te, Ti, ne, ni, pe, pi, Zeff, q, fT, I_psi))
+    nu_e = np.asarray(nu_e_star, dtype=float)
+    nu_i = np.asarray(nu_i_star, dtype=float)
+    sq_e, sq_i = np.sqrt(nu_e), np.sqrt(nu_i)
+    Z = Zeff
+
+    def F31(X):                                   # Eq. 14a (and 16a)
+        return ((1.0 + 1.4 / (Z + 1.0)) * X - 1.9 / (Z + 1.0) * X ** 2
+                + 0.3 / (Z + 1.0) * X ** 3 + 0.2 / (Z + 1.0) * X ** 4)
+
+    # L31, Eqs. 14a-b
+    f31 = fT / (1.0 + (1.0 - 0.1 * fT) * sq_e
+                + 0.5 * (1.0 - fT) * nu_e / Z)
+    L31 = F31(f31)
+    # L32 = F32_ee + F32_ei, Eqs. 15a-e
+    X = fT / (1.0 + 0.26 * (1.0 - fT) * sq_e
+              + 0.18 * (1.0 - 0.37 * fT) * nu_e / np.sqrt(Z))
+    F32_ee = ((0.05 + 0.62 * Z) / (Z * (1.0 + 0.44 * Z)) * (X - X ** 4)
+              + 1.0 / (1.0 + 0.22 * Z)
+              * (X ** 2 - X ** 4 - 1.2 * (X ** 3 - X ** 4))
+              + 1.2 / (1.0 + 0.5 * Z) * X ** 4)
+    Y = fT / (1.0 + (1.0 + 0.6 * fT) * sq_e
+              + 0.85 * (1.0 - 0.37 * fT) * nu_e * (1.0 + Z))
+    F32_ei = (-(0.56 + 1.93 * Z) / (Z * (1.0 + 0.44 * Z)) * (Y - Y ** 4)
+              + 4.95 / (1.0 + 2.48 * Z)
+              * (Y ** 2 - Y ** 4 - 0.55 * (Y ** 3 - Y ** 4))
+              - 1.2 / (1.0 + 0.5 * Z) * Y ** 4)
+    L32 = F32_ee + F32_ei
+    # L34, Eqs. 16a-b
+    f34 = fT / (1.0 + (1.0 - 0.1 * fT) * sq_e
+                + 0.5 * (1.0 - 0.5 * fT) * nu_e / Z)
+    L34 = F31(f34)
+    # alpha, Eqs. 17a-b, with the 2002 erratum's sign of the 0.315 term
+    alpha0 = -1.17 * (1.0 - fT) / (1.0 - 0.22 * fT - 0.19 * fT ** 2)
+    alpha = (((alpha0 + 0.25 * (1.0 - fT ** 2) * sq_i) / (1.0 + 0.5 * sq_i)
+              + 0.315 * nu_i ** 2 * fT ** 6)
+             / (1.0 + 0.15 * nu_i ** 2 * fT ** 6))
+
+    dp = (ne * np.asarray(dT_e_dpsi, dtype=float)
+          + Te * np.asarray(dn_e_dpsi, dtype=float)
+          + ni * np.asarray(dT_i_dpsi, dtype=float)
+          + Ti * np.asarray(dn_i_dpsi, dtype=float)) * ELEMENTARY_CHARGE
+    R_pe = pe / (pe + pi)
+    j = -I_psi * pe * (L31 * dp / pe
+                       + L32 * np.asarray(dT_e_dpsi, dtype=float) / Te
+                       + L34 * alpha * (1.0 - R_pe) / R_pe
+                       * np.asarray(dT_i_dpsi, dtype=float) / Ti)
+    if use_sign_q:
+        j = j * np.sign(q)
+    return j, dict(L31=L31, L32=L32, L34=L34, alpha=alpha, alpha0=alpha0,
+                   F32_ee=F32_ee, F32_ei=F32_ei, nu_e_star=nu_e,
+                   nu_i_star=nu_i, R_pe=R_pe)
 
 
 #: Version tag of :func:`evaluate_jBS`, recorded with every loop record so an
@@ -1161,8 +1289,9 @@ def redl_eps(mygs, psi_u, eps_definition, r_sau):
 
 def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
                  isolate_edge=False, smooth_axis=True, coord="psi_n",
-                 eps_definition=None):
-    r"""Redl bootstrap current on the CURRENT equilibrium, on the caller's grid.
+                 eps_definition=None, bootstrap_model=None):
+    r"""Redl (or Sauter) bootstrap current on the CURRENT equilibrium, on the
+    caller's grid.
 
     A faithful port of the inner physics of OpenFUSIONToolkit's
     ``solve_with_bootstrap`` (SWB) -- NRL electron / ``Zavg`` ion Coulomb
@@ -1285,6 +1414,15 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
         route, the ``nu*`` R and the version tag are in ``diag``.  ``R_avg``
         (``<R>`` from ``get_q``) still enters the pressure-driven term and the
         SWB projection under every definition: only ``nu*`` changes.
+    bootstrap_model : {"redl", "sauter"}, optional
+        The coefficient fit (:data:`BOOTSTRAP_MODELS`).  ``None`` = the
+        default :data:`BOOTSTRAP_MODEL_DEFAULT` = ``"redl"``: OFT's
+        ``redl_bootstrap``, exactly as before the option existed.
+        ``"sauter"``: :func:`sauter_bootstrap` (Sauter 1999 with the 2002
+        erratum) on the same ``nu_e*``, ``nu_i*``, ``eps``, ``f_T``,
+        gradients and ``kappa`` conversion; only ``L31``, ``L32``, ``L34``
+        and ``alpha`` change.  Recorded as ``diag["bootstrap_model"]`` and in
+        the version tag.
 
     Returns
     -------
@@ -1302,10 +1440,14 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
         ``R_nu_star`` (the ``R`` in ``nu*``), ``eps_definition``,
         ``eps_formula``, ``eps_route``, ``nu_star_R``,
         ``eps_fork_diagnostic`` (``None`` unless the build has the fork
-        option and ``get_fsa`` was traced), ``version``.
+        option and ``get_fsa`` was traced), ``bootstrap_model``,
+        ``version``.
     """
     eps_definition = check_eps_definition(
         EPS_DEFINITION_DEFAULT if eps_definition is None else eps_definition)
+    bootstrap_model = check_bootstrap_model(
+        BOOTSTRAP_MODEL_DEFAULT if bootstrap_model is None
+        else bootstrap_model)
     psi_N = np.asarray(psi_N, dtype=float)
     n = psi_N.size
     if psi_N.ndim != 1 or n < 3:
@@ -1455,15 +1597,25 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
     nu_e_star = (6.921e-18 * np.abs(q) * R_nu * ne
                  * zeff * ln_le / (te ** 2 * eps ** 1.5))
 
-    j_dot_B, _coeffs = _oft_bs.redl_bootstrap(
-        psi_N=psi_N, Te=te, Ti=ti, ne=ne, ni=ni,
-        pe=_EC * (ne * te), pi=_EC * (ni * ti),
-        Zeff=zeff, R=R_nu, q=q, eps=eps, fT=f_T, I_psi=F,
-        dT_e_dpsi=dT_e, dT_i_dpsi=dT_i,
-        dn_e_dpsi=dn_e, dn_i_dpsi=dn_i,
-        ln_lambda_e=ln_le, ln_lambda_ii=ln_lii,
-        nu_e_star_override=nu_e_star, nu_i_star_override=nu_i_star,
-        use_legacy_L34=False, use_sign_q=True, formula_form="jboot1")
+    if bootstrap_model == "sauter":
+        # the same inputs and collisionalities; only the coefficient fit
+        j_dot_B, _coeffs = sauter_bootstrap(
+            Te=te, Ti=ti, ne=ne, ni=ni,
+            pe=_EC * (ne * te), pi=_EC * (ni * ti),
+            Zeff=zeff, q=q, fT=f_T, I_psi=F,
+            dT_e_dpsi=dT_e, dT_i_dpsi=dT_i,
+            dn_e_dpsi=dn_e, dn_i_dpsi=dn_i,
+            nu_e_star=nu_e_star, nu_i_star=nu_i_star, use_sign_q=True)
+    else:
+        j_dot_B, _coeffs = _oft_bs.redl_bootstrap(
+            psi_N=psi_N, Te=te, Ti=ti, ne=ne, ni=ni,
+            pe=_EC * (ne * te), pi=_EC * (ni * ti),
+            Zeff=zeff, R=R_nu, q=q, eps=eps, fT=f_T, I_psi=F,
+            dT_e_dpsi=dT_e, dT_i_dpsi=dT_i,
+            dn_e_dpsi=dn_e, dn_i_dpsi=dn_i,
+            ln_lambda_e=ln_le, ln_lambda_ii=ln_lii,
+            nu_e_star_override=nu_e_star, nu_i_star_override=nu_i_star,
+            use_legacy_L34=False, use_sign_q=True, formula_form="jboot1")
     n_zeroed = [0]
 
     def _ends_only(y, what):
@@ -1538,7 +1690,8 @@ def evaluate_jBS(mygs, psi_N, ne, te, ni, ti, zeff, *, psi_pad=1e-3,
             eps_sauter_fc_return_eps=np.asarray(
                 eps_fork_diag["eps_sauter_fc_return_eps"])[inv],
             eps_get_fsa=np.asarray(eps_fork_diag["eps_get_fsa"])[inv])),
-        version=evaluate_jbs_version(eps_definition),
+        bootstrap_model=bootstrap_model,
+        version=evaluate_jbs_version(eps_definition, bootstrap_model),
         coord=str(coord), x=np.asarray(x_run, dtype=float), psi_N=psi_N,
     )
     return j_out, diag

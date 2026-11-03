@@ -2066,7 +2066,9 @@ def _deliver_reconstruction_state(mygs, config, source, result, psi_N, ne_eq,
                               bool(gc.floor_j_BS), None, None, None,
                               coord=coord,
                               eps_definition=getattr(gc, "eps_definition",
-                                                     None))
+                                                     None),
+                              bootstrap_model=getattr(gc, "bootstrap_model",
+                                                      None))
     j_bs0 = np.asarray(comp(mygs.copy_eq())[0], dtype=float)
     fixed = np.asarray(j_NBI, dtype=float) + np.asarray(j_RF, dtype=float)
     dv = _deliver_request_split(mygs, psi_N, psi_pad, Ip_target,

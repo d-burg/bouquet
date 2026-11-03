@@ -374,6 +374,35 @@ depends on how strongly shaped the surfaces are and how collisional the
 pedestal is: ν\* rises most in the pedestal, where the definitions differ
 most.
 
+**The coefficient fit (`bootstrap_model`).** `GenerationConfig.bootstrap_model`
+(`evaluate_jBS(..., bootstrap_model=)`, `physics.BOOTSTRAP_MODELS`) names the
+fit of `L31`, `L32`, `L34` and `α`:
+
+| `bootstrap_model` | fit | where |
+|---|---|---|
+| `"redl"` (**default**) | Redl et al., Phys. Plasmas 28, 022502 (2021) | OFT `redl_bootstrap` |
+| `"sauter"` | Sauter, Angioni & Lin-Liu (1999), Eqs. 14–17, with the `α` sign correction of the erratum, Phys. Plasmas 9, 5140 (2002) | `physics.sauter_bootstrap` |
+
+Both go into the same `jboot1` form, `⟨j·B⟩ = −F p_e [L31 p′/p_e + L32
+T_e′/T_e + L34 α (1 − R_pe)/R_pe T_i′/T_i] sign(q)`, on the same ν\*_e, ν\*_i
+(NRL / `Zavg` Coulomb logarithms, Koh ion charge), ε, f_T, gradients, κ
+conversion and p′G, so the setting moves only the fit. `"sauter"` is the fit
+of TORAX and of OMFIT's `sauter_bootstrap(version="jboot1")`; it agrees with
+the latter to 7e-16 on synthetic profiles spanning ν\*_e 0.012–110 and
+Z_eff 1.2–3.5 (`tests/test_sauter_bootstrap.py`; OMFIT forms its own ν\*,
+which this comparison feeds to both). The default is the evaluator from before
+the setting existed, bit for bit (its version string is unchanged; the opt-in
+is tagged `OPT-IN Sauter 1999 jboot1 (2002 erratum)`). Only bouquet's
+evaluator reads the setting, so the routes whose bootstrap is the toolkit's
+`solve_with_bootstrap` (the swb method, the frozen legacy route), which is
+Redl only, refuse `"sauter"` rather than run Redl under that name.
+
+*Magnitude* (the synthetic profiles of that test, same ν\*): Sauter/Redl
+`⟨j·B⟩` is 1.06–1.11 at Z_eff 1.2–1.35 in the banana regime, 0.98 at
+Z_eff 1.7, 0.80 at Z_eff 2.3 (ν\*_e 0.24) and 0.71 at Z_eff 2.8 (ν\*_e 1.4).
+Redl's refit moved `α` and `L32` most at high Z_eff and moderate ν\*, so the
+two differ most in impure, collisional pedestals.
+
 On a uniform grid it reproduces SWB's first-pass `⟨j·B⟩` **bit for bit** (on a
 build whose SWB accepts `psi_N=`, with `eps_definition="a_over_R"`, the ε and
 ν\* R of SWB; on a build with `use_sauter_eps` SWB is asked for it). Grids whose first intervals are finer than

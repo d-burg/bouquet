@@ -63,7 +63,7 @@ ENGINE_VERSION = "unified-engine/2 (Stage 3: reconstruction and draws)"
 ENGINE_CHOICES = ("legacy", "unified")
 #: ``GenerationConfig.engine_preset`` values (docs/engine.md, "Presets").
 ENGINE_PRESETS = ("structured", "structured_uniform", "bootstrap_scalar",
-                  "sawtooth_two_scalar", "two_scalar_li")
+                  "inductive_scalar", "sawtooth_two_scalar", "two_scalar_li")
 #: The measurement rows the engine knows.
 ENGINE_ROWS = ("Ip", "l_i", "q0", "mse")
 #: ``GenerationConfig.engine_mse_jacobian`` values.
@@ -250,6 +250,7 @@ PRESET_ROWS = {
     "structured": frozenset(("Ip", "l_i", "q0", "mse")),
     "structured_uniform": frozenset(("Ip", "l_i", "q0", "mse")),
     "bootstrap_scalar": frozenset(("Ip",)),
+    "inductive_scalar": frozenset(("Ip",)),
     "sawtooth_two_scalar": frozenset(("Ip", "q0")),
     "two_scalar_li": frozenset(("Ip", "l_i")),
 }
@@ -885,6 +886,8 @@ def engine_settings(gc) -> dict:
         edge_taper=engine_edge_taper(gc),
         # the Redl eps and the R of nu* (GenerationConfig.eps_definition)
         eps_definition=_eps_definition_of(gc),
+        # the coefficient fit (GenerationConfig.bootstrap_model)
+        bootstrap_model=_bootstrap_model_of(gc),
         loop=loop,
         q0_tol=float(gc.q0_tol),
         structured_li_tol=float(gc.structured_li_tol),
@@ -903,16 +906,34 @@ def _eps_definition_of(gc) -> str:
                                         EPS_DEFINITION_DEFAULT))
 
 
-def eps_record(eps_definition) -> dict:
+def _bootstrap_model_of(gc) -> str:
+    """``GenerationConfig.bootstrap_model`` (the default for an object
+    without the field), validated."""
+    from .physics import BOOTSTRAP_MODEL_DEFAULT, check_bootstrap_model
+    return check_bootstrap_model(getattr(gc, "bootstrap_model",
+                                         BOOTSTRAP_MODEL_DEFAULT))
+
+
+def eps_record(eps_definition, bootstrap_model=None) -> dict:
     """The record of the Redl epsilon a run evaluates with: name, formula,
-    the R in ``nu*`` and the ``evaluate_jBS`` version tag."""
-    from .physics import (EPS_DEFINITION_DEFAULT, EPS_DEFINITIONS, NU_STAR_R,
-                          check_eps_definition, evaluate_jbs_version)
+    the R in ``nu*``, the coefficient fit and the ``evaluate_jBS`` version
+    tag."""
+    from .physics import (BOOTSTRAP_MODEL_DEFAULT, BOOTSTRAP_MODELS,
+                          EPS_DEFINITION_DEFAULT, EPS_DEFINITIONS, NU_STAR_R,
+                          check_bootstrap_model, check_eps_definition,
+                          evaluate_jbs_version)
     d = check_eps_definition(EPS_DEFINITION_DEFAULT if eps_definition is None
                              else eps_definition)
-    return dict(eps_definition=d, eps_formula=EPS_DEFINITIONS[d],
-                nu_star_R=NU_STAR_R[d],
-                evaluate_jBS_version=evaluate_jbs_version(d))
+    m = check_bootstrap_model(BOOTSTRAP_MODEL_DEFAULT if bootstrap_model is None
+                              else bootstrap_model)
+    rec = dict(eps_definition=d, eps_formula=EPS_DEFINITIONS[d],
+               nu_star_R=NU_STAR_R[d],
+               evaluate_jBS_version=evaluate_jbs_version(d, m))
+    if m != BOOTSTRAP_MODEL_DEFAULT:
+        # only present for the opt-in, so a default record keeps its keys
+        # (the version tag names the fit either way)
+        rec.update(bootstrap_model=m, bootstrap_model_formula=BOOTSTRAP_MODELS[m])
+    return rec
 
 
 #: ``bootstrap`` of :func:`bootstrap_eps_route_record`: which evaluator
@@ -947,7 +968,7 @@ def bootstrap_eps_route_record(gc, solve_method, swb_convention=None) -> dict:
     if solve_method == "engine" or (
             solve_method == "legacy"
             and bool(getattr(gc, "jbs_self_consistent", True))):
-        rec = eps_record(gc_eps)
+        rec = eps_record(gc_eps, getattr(gc, "bootstrap_model", None))
         rec.update(bootstrap=BOOTSTRAP_EVALUATOR_BOUQUET,
                    route=("unified engine" if solve_method == "engine"
                           else "legacy self-consistent loop"))
@@ -984,6 +1005,8 @@ def bootstrap_eps_route_record(gc, solve_method, swb_convention=None) -> dict:
         basis = ("bootstrap_kwargs['use_sauter_eps'] unset: the toolkit's "
                  "default" if conv == SWB_JBS_TOROIDAL
                  else "toolkit convention not identified")
+    # (the toolkit's solve_with_bootstrap is Redl only: a non-default
+    # bootstrap_model is refused on these routes, check_bootstrap_model_route)
     return dict(eps_definition=d, eps_formula=formula, nu_star_R=nu_r,
                 evaluate_jBS_version=None,
                 bootstrap=BOOTSTRAP_EVALUATOR_SWB,
@@ -1411,6 +1434,17 @@ class UnifiedEngine:
             self.sigma_bs = np.array([1.0])
             self.sigma_up = None
             self.prior_name = "constant basis, s_ind pinned (bootstrap)"
+        elif self.preset == "inductive_scalar":
+            # the bootstrap_scalar closure with the roles swapped: the
+            # bootstrap is the model's own (s_bs = 1, pinned) and ONE scalar
+            # on the inductive carries Ip, imposed exactly.  What a
+            # comparison of bootstrap models needs: no closure coefficient
+            # can absorb the difference between them.
+            self.basis = dict(kind="constant")
+            self.sigma_ind = np.array([1.0])
+            self.sigma_bs = np.array([0.0])       # pinned: s_bs = 1
+            self.sigma_up = None
+            self.prior_name = "constant basis, s_bs pinned (inductive)"
         else:
             self.basis = dict(kind="constant")
             self.sigma_ind = np.array([1.0])
@@ -2509,12 +2543,16 @@ class TokaMakerBackend:
 
     def __init__(self, mygs, contract, *, psi_pad=1e-3, li_kind="li_3",
                  q_psi=None, chords=None, maxits=None, edge_pressure=None,
-                 edge_taper=None, coord="psi_n", eps_definition=None):
+                 edge_taper=None, coord="psi_n", eps_definition=None,
+                 bootstrap_model=None):
         self.mygs = mygs
         self.c = contract
         #: the Redl eps / nu* R of every evaluation of this backend
         #: (GenerationConfig.eps_definition; None: evaluate_jBS's default)
         self.eps_definition = eps_definition
+        #: the coefficient fit of every evaluation of this backend
+        #: (GenerationConfig.bootstrap_model; None: evaluate_jBS's default)
+        self.bootstrap_model = bootstrap_model
         #: the run grid (psi_N, or Phi_N with coord="phi_n"); every solve
         #: tags its profiles with coord and every measurement samples the
         #: geometry at the nodes' psi_N on that solve's own map
@@ -2579,7 +2617,8 @@ class TokaMakerBackend:
                              kin["te"], kin["ni"], kin["ti"], kin["zeff"],
                              psi_pad=self.psi_pad, isolate_edge=False,
                              smooth_axis=False, coord=self.coord,
-                             eps_definition=self.eps_definition)
+                             eps_definition=self.eps_definition,
+                             bootstrap_model=self.bootstrap_model)
         return smooth_jbs_transition(np.asarray(d["j_dot_B"], dtype=float))
 
     def p_sep(self) -> float:
@@ -2664,7 +2703,8 @@ class TokaMakerBackend:
                              kin["ti"], kin["zeff"], psi_pad=pad,
                              isolate_edge=False, smooth_axis=False,
                              coord=self.coord,
-                             eps_definition=self.eps_definition)
+                             eps_definition=self.eps_definition,
+                             bootstrap_model=self.bootstrap_model)
         redl = smooth_jbs_transition(np.asarray(d["j_dot_B"], dtype=float))
         geom["F"] = np.asarray(d["F"], dtype=float)
         geom["B2"] = np.asarray(d["avg_B2"], dtype=float)
@@ -2842,7 +2882,8 @@ def engine_record(eng, res, wall_s=None) -> dict:
                       ids_inductive=eng.s.get("ids_inductive", "auto"),
                       edge_pressure=eng.s.get("edge_pressure"),
                       edge_taper=eng.s.get("edge_taper"),
-                      bootstrap_eps=eps_record(eng.s.get("eps_definition")),
+                      bootstrap_eps=eps_record(eng.s.get("eps_definition"),
+                                               eng.s.get("bootstrap_model")),
                       loop=eng.s["loop"]),
         convergence=convergence_table(eng.s),
         composition=("J = F<1/R>/<B^2> [s_ind <j.B>_ind + s_bs <j.B>_BS + "
@@ -3798,6 +3839,7 @@ def prepare_engine_baseline(bq):
                     edge_taper=s["edge_taper"],
                     coord=getattr(_ad, "coord", "psi_n"),
                     eps_definition=s.get("eps_definition"),
+                    bootstrap_model=s.get("bootstrap_model"),
                     maxits=maxits)
             # the reconstruction runs under the solver's own cap
             # (engine_draw_solve_maxits caps the DRAWS only)

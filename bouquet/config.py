@@ -1539,6 +1539,19 @@ class GenerationConfig:
     # legacy frozen bootstrap, the swb method) form their own nu* and do not
     # read it.
     eps_definition: str = "r_over_R_geo"
+    # The neoclassical coefficient fit of every bouquet bootstrap evaluation
+    # (physics.evaluate_jBS; physics.BOOTSTRAP_MODELS): "redl" (default,
+    # Redl 2021 through OFT's redl_bootstrap; what every run before the
+    # setting used, so a stored config without the field replays exactly) or
+    # "sauter" (Sauter 1999 with the 2002 erratum, physics.sauter_bootstrap;
+    # TORAX's fit).  Only L31, L32, L34 and alpha change: nu*, eps, f_T and
+    # the kappa conversion are shared.  Read where eps_definition is (the
+    # unified engine and its draws, the legacy self-consistent loop, the
+    # IMAS baseline loop, the delta-cache references); a route whose
+    # bootstrap is the toolkit's solve_with_bootstrap (swb, the frozen
+    # legacy route) is Redl only and refuses "sauter"
+    # (check_bootstrap_model_route).
+    bootstrap_model: str = "redl"
     # GS iteration cap for the DRAW solves of generate()'s legacy / swb draw
     # loop (TokaMaker_interface.DrawSolveGuard): applied from the first draw
     # on, never to the cold baseline re-solve or the sigma=0 reference solve
@@ -1772,7 +1785,8 @@ class GenerationConfig:
     # "structured" (4-Gaussian basis, li_soft_onesided priors; the default),
     # "structured_uniform" (the same basis and rows under the documented
     # uniform ladder utils.STRUCTURED_WEIGHTS_UNIFORM: the prior-sensitivity
-    # run), "bootstrap_scalar" (s_bs constant; rows Ip),
+    # run), "bootstrap_scalar" (s_bs constant; rows Ip), "inductive_scalar"
+    # (s_ind constant, s_bs pinned at 1: the model's bootstrap as is; rows Ip),
     # "sawtooth_two_scalar" (s_ind, s_bs constants; rows Ip, q0) or
     # "two_scalar_li" (s_ind, s_bs constants; rows Ip, l_i: the legacy
     # secant's two-scalar l_i family as a named closure).
@@ -2103,7 +2117,7 @@ class GenerationConfig:
             raise ValueError(f"swb_ip_tol={_t!r} must be in (0, 1)")
         from .physics import check_eps_definition
         check_eps_definition(self.eps_definition)
-        solve_method_of(self)      # refuses a contradiction; writes nothing
+        check_bootstrap_model_route(self)  # also refuses a contradiction
         self._validate_bootstrap_kwargs(self.bootstrap_kwargs)
         object.__setattr__(self, "_bootstrap_kwargs_armed", True)
         resolve_structured_preset(self, stacklevel=4)
@@ -2375,6 +2389,34 @@ def solve_method_of(gc) -> str:
                          'reconstruction_engine="legacy"; set solve_method '
                          "alone")
     return sm
+
+
+def check_bootstrap_model_route(gc, solve_method=None) -> str:
+    """Validate ``gc.bootstrap_model`` and refuse it where it would be
+    ignored; returns it.
+
+    Only bouquet's ``evaluate_jBS`` reads it: the unified engine and the
+    legacy self-consistent loop (``jbs_self_consistent=True``).  The swb
+    method and the frozen legacy route take their bootstrap from the
+    toolkit's ``solve_with_bootstrap``, which is Redl only, so a non-default
+    model there is REFUSED rather than silently run as Redl.
+    *solve_method* defaults to :func:`solve_method_of` (which refuses a
+    contradicting solve-method pair)."""
+    from .physics import BOOTSTRAP_MODEL_DEFAULT, check_bootstrap_model
+    model = check_bootstrap_model(getattr(gc, "bootstrap_model",
+                                          BOOTSTRAP_MODEL_DEFAULT))
+    sm = solve_method_of(gc) if solve_method is None else solve_method
+    if model != BOOTSTRAP_MODEL_DEFAULT and not (
+            sm == "engine" or (sm == "legacy" and bool(
+                getattr(gc, "jbs_self_consistent", True)))):
+        route = ("swb" if sm == "swb"
+                 else "legacy frozen (jbs_self_consistent=False)")
+        raise ValueError(
+            f"generation.bootstrap_model={model!r} on the {route} route: its "
+            "bootstrap is the toolkit's solve_with_bootstrap, which is Redl "
+            "only and would ignore the setting.  Use the unified engine or "
+            "jbs_self_consistent=True, or bootstrap_model='redl'")
+    return model
 
 
 def resolve_solve_method(gc) -> str:

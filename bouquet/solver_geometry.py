@@ -74,6 +74,9 @@ ISOFLUX_WEIGHT_TOTAL = 2.0e5
 #: nearest one (stamped per X-point as ``xpoint_match`` = "largest turn" / "nearest").  A false
 #: detection costs nothing (one point is kept exactly); a missed one leaves the corner to the
 #: spline.
+#: A source boundary whose closing gap (last point to first) exceeds this many times its largest
+#: other spacing is an open curve, and :func:`_open_ccw` refuses it rather than close it.
+OPEN_BOUNDARY_GAP_FACTOR = 10.0
 XPOINT_TURN_DEG = 45.0
 XPOINT_WINDOW_FRAC = 0.01
 XPOINT_SADDLE_MATCH_FRAC = 0.01
@@ -169,6 +172,19 @@ def _open_ccw(boundary_RZ):
     P = P[d > 1e-12 * scale]          # drops repeated vertices and the repeated closing point
     if len(P) < 3:
         raise ValueError("the source boundary has fewer than 3 distinct points")
+    # an OPEN trace (an IMAS boundary.outline running strike point -> LCFS -> strike point) is not
+    # a closed contour: closing it puts the chord between its ends -- across the private-flux
+    # region -- into the isoflux set, a constraint no coil set meets (SPARC IDS: the first GS pass
+    # cycled with period 1/urf to maxits)
+    d = np.hypot(*np.diff(P, axis=0).T)
+    gap = float(np.hypot(*(P[-1] - P[0])))
+    if gap > OPEN_BOUNDARY_GAP_FACTOR * float(np.max(d)):
+        raise ValueError(
+            f"the source boundary is an open curve, not a closed LCFS: its ends ({P[0, 0]:.4g}, "
+            f"{P[0, 1]:.4g}) and ({P[-1, 0]:.4g}, {P[-1, 1]:.4g}) m are {gap:.3g} m apart against "
+            f"a largest spacing of {float(np.max(d)):.3g} m elsewhere (factor > "
+            f"{OPEN_BOUNDARY_GAP_FACTOR:g}); a separatrix traced leg to leg must be clipped to its "
+            "closed part at the X-point first (or give ImasSource.LCFS_geqdsk)")
     area = 0.5 * float(np.sum(P[:, 0] * np.roll(P[:, 1], -1) - np.roll(P[:, 0], -1) * P[:, 1]))
     return P if area > 0 else P[::-1].copy()
 

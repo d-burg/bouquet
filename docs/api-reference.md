@@ -102,6 +102,9 @@ route is removed in 1.5 (#90). See [engine.md](engine.md).
 | `Bouquet.engine_draw_cap_events` | After an engine `generate()`: every draw solve that stopped at `engine_draw_solve_maxits` (`draw`, `where`, `stage`, `maxits`, `iterations`, `seconds`, `outcome` = rolled back / rejected, `error`); a homotopy stage also carries `vertical_runaway` (the record of `engine.vertical_runaway_record`) and `label`. See [engine.md](engine.md#l_i-controllability) |
 | `Bouquet.engine_axis_shift` | After an engine `generate()`: the archived draws' `axis_shift_large` count and the scan's `axis_bimodality` record (`engine_draws.axis_shift_counts`) |
 
+| `engine_draws.solve_at_kinetics(bq, native, *, label, start_eq=None)` | **Profile / β scans (experimental, unreleased):** the live unified-engine reconstruction re-solved at imposed kinetics, inductive current and I_p held, bootstrap self-consistent; never an ensemble draw (docs/engine.md, "Counterfactual solves at imposed kinetics") |
+| `EngineDrawContext.inputs_from_native(native)` | The draw inputs of that solve: `zero_inputs()` with caller-supplied `ne, te, ni, ti` (bit-identical at the reconstruction's own) |
+
 ### Stamps and rejection codes
 
 | Name | Where | Meaning |

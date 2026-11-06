@@ -1,5 +1,15 @@
 # Bouquet — change summaries
 
+## Unreleased (branch `feature/solve-at-kinetics`)
+
+- **Counterfactual solves at imposed kinetics for profile and β scans
+  (experimental).** `engine_draws.solve_at_kinetics` re-solves the live
+  unified-engine reconstruction at caller-supplied kinetics, holding its
+  inductive current and I_p, with the bootstrap iterated to the unchanged
+  draw-loop tolerances; `EngineDrawContext.inputs_from_native` builds its
+  inputs. Additive only: no existing function, default or code path changes
+  (docs/engine.md, "Counterfactual solves at imposed kinetics").
+
 ## 1.4.1 — bug fixes, a template-fallback warning, an opt-in branch-guard diagnostic (2026-10-30)
 
 A patch on 1.4.0: bug fixes, a warning and an opt-in experimental

@@ -1406,7 +1406,13 @@ run.prepare_baseline()                      # unified engine, live this session
 bl = run.baseline
 native = dict(ne=bl.ne, ni=bl.ni, te=1.5 * bl.te, ti=1.5 * bl.ti)
 out = solve_at_kinetics(run, native, label="T x 1.5")
-run.mygs.save_eqdsk("scan_point.geqdsk", ...)   # the solved state is left in mygs
+# the solved state is left in run.mygs; write it in the FULL pressure frame,
+# as the archive writes every draw (a bare mygs.save_eqdsk writes the solver
+# frame, without the separatrix pressure, and understates beta)
+from bouquet.edge_pressure import save_full_pressure_eqdsk
+save_full_pressure_eqdsk(run.mygs, "scan_point.geqdsk",
+                         p_sep=out["record"]["counterfactual"]["p_sep"],
+                         nr=257, nz=257)
 ```
 
 Start state: the reconstruction's delivered equilibrium, as every draw — no

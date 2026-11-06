@@ -2725,7 +2725,11 @@ def solve_at_kinetics(bq, native, *, label="counterfactual solve",
     Not a draw: nothing is sampled, archived or filtered, and the result is
     never part of an ensemble.  Returns :func:`run_draw`'s dict (``record``
     with a ``counterfactual`` block, ``split``, ``passes``, ...); the solved
-    equilibrium is left in ``bq.mygs`` for the caller to write.  Raises what
+    equilibrium is left in ``bq.mygs`` for the caller to write -- in the
+    FULL pressure frame, ``bouquet.edge_pressure.save_full_pressure_eqdsk(
+    bq.mygs, filename, p_sep=out["record"]["counterfactual"]["p_sep"])``
+    (a bare ``mygs.save_eqdsk`` writes the solver frame, without the
+    separatrix pressure, and understates beta).  Raises what
     a draw raises (:class:`DrawKineticsNonPhysical`,
     :class:`bouquet.jbs_loop.JBSNotConverged`, ``DrawAnchorSolveFailed``).
     """
@@ -2744,11 +2748,20 @@ def solve_at_kinetics(bq, native, *, label="counterfactual solve",
     inputs = G.ctx.inputs_from_native(native)
     out = run_draw(G.ctx, b, inputs, label=label, coil_guard=None)
     from .jbs_loop import jsonable
+    # the separatrix pressure of the pressure now set (this solve's own; it
+    # moves with the imposed kinetics): a g-file of the solved state must be
+    # written in the FULL frame, edge_pressure.save_full_pressure_eqdsk(
+    # mygs, filename, p_sep=...), as the archive writes every draw -- a bare
+    # mygs.save_eqdsk writes the solver frame (PRES zero at psi_N = 1)
+    p_sep = float(b.p_sep())
     out["record"]["counterfactual"] = jsonable(dict(
         feature=COUNTERFACTUAL_FEATURE, experimental=True,
         purpose=("profile / beta scan: the reconstruction at imposed "
                  "kinetics, inductive current and I_p held"),
-        start=start, start_how=how, coil_reg=coil,
+        start=start, start_how=how, coil_reg=coil, p_sep=p_sep,
+        write_with=("bouquet.edge_pressure.save_full_pressure_eqdsk(mygs, "
+                    "filename, p_sep=record['counterfactual']['p_sep'], "
+                    "...)"),
         contract=COUNTERFACTUAL_CONTRACT))
     return out
 

@@ -1885,3 +1885,91 @@ def test_without_the_run_convention_a_direct_call_archives_as_before(
                         legacy_like)
     _generate(tmp_path, monkeypatch, n=1)
     assert calls == []
+
+
+# ---------------------------------------------------------------------------
+#  counterfactual solves at imposed kinetics (solve_at_kinetics; profile and
+#  beta scans) -- the zero-perturbation draw with the kinetics replaced
+# ---------------------------------------------------------------------------
+def _native_copy(ctx):
+    return {k: np.array(ctx.native[k], copy=True)
+            for k in ("ne", "te", "ni", "ti")}
+
+
+def test_inputs_from_native_at_the_reconstructions_kinetics_is_zero_inputs(
+        recon):
+    """Every array bit for bit; only the sampler tag differs."""
+    eng, res, rec, b = recon
+    ctx = _ctx(eng, res)
+    z, c = ctx.zero_inputs(), ctx.inputs_from_native(_native_copy(ctx))
+    for k in ("ne", "te", "ni", "ti", "zeff"):
+        np.testing.assert_array_equal(c.kinetics[k], z.kinetics[k])
+    for k in ("ne", "te", "ni", "ti"):
+        np.testing.assert_array_equal(c.kinetics_native[k],
+                                      z.kinetics_native[k])
+    np.testing.assert_array_equal(c.pressure, z.pressure)
+    np.testing.assert_array_equal(c.pressure_thermal, z.pressure_thermal)
+    np.testing.assert_array_equal(c.jB_ind, z.jB_ind)
+    assert c.scale == z.scale == 1.0
+    assert c.sampler == dict(counterfactual=True)
+    assert z.sampler == dict(zero_perturbation=True)
+
+
+def test_a_counterfactual_at_the_reconstructions_kinetics_is_the_identity(
+        recon):
+    eng, res, rec, b = recon
+    ctx = _ctx(eng, res)
+    r = _quiet(ED.run_draw, ctx, b,
+               ctx.inputs_from_native(_native_copy(ctx)))["record"]
+    assert r["identity"]["pass1_request_bit_identical"] is True
+    assert r["amplitude"]["per_pass"][0]["a_ind"] == 1.0
+    assert r["loop"]["converged"]
+
+
+def test_inputs_from_native_does_not_alias_or_touch_the_callers_arrays(recon):
+    eng, res, rec, b = recon
+    ctx = _ctx(eng, res)
+    nat = _native_copy(ctx)
+    keep = {k: v.copy() for k, v in nat.items()}
+    c = ctx.inputs_from_native(nat)
+    for k in nat:
+        assert c.kinetics_native[k] is not nat[k]
+        np.testing.assert_array_equal(nat[k], keep[k])
+    for k in ("ne", "te", "ni", "ti"):
+        np.testing.assert_array_equal(ctx.native[k], eng.c.kinetics[k])
+
+
+def test_hotter_kinetics_raise_the_thermal_pressure_and_hold_the_rest(recon):
+    """T x 1.3, n fixed: thermal pressure up by exactly the electron and ion
+    T increments (increment form), jB_ind untouched, nothing renormalized."""
+    eng, res, rec, b = recon
+    ctx = _ctx(eng, res)
+    nat = _native_copy(ctx)
+    nat["te"] = nat["te"] * 1.3
+    nat["ti"] = nat["ti"] * 1.3
+    z, c = ctx.zero_inputs(), ctx.inputs_from_native(nat)
+    np.testing.assert_array_equal(c.jB_ind, z.jB_ind)
+    np.testing.assert_array_equal(c.kinetics["ne"], z.kinetics["ne"])
+    np.testing.assert_array_equal(c.kinetics["zeff"], z.kinetics["zeff"])
+    assert np.all(c.pressure_thermal >= z.pressure_thermal)
+    assert np.max(c.pressure_thermal - z.pressure_thermal) > 0.0
+    out = _quiet(ED.run_draw, ctx, b, c)
+    r = out["record"]
+    assert r["loop"]["converged"]
+    assert r["identity"]["pass1_request_bit_identical"] is False
+
+
+@pytest.mark.parametrize("bad", ["missing", "shape", "nan"])
+def test_inputs_from_native_refuses_malformed_kinetics(recon, bad):
+    eng, res, rec, b = recon
+    ctx = _ctx(eng, res)
+    nat = _native_copy(ctx)
+    if bad == "missing":
+        nat.pop("ti")
+    elif bad == "shape":
+        nat["te"] = nat["te"][:-1]
+    else:
+        nat["ne"] = nat["ne"].copy()
+        nat["ne"][3] = np.nan
+    with pytest.raises(ValueError, match="inputs_from_native"):
+        ctx.inputs_from_native(nat)

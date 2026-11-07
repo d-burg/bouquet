@@ -1363,6 +1363,70 @@ its bound and `|dZ|` is more than `VERTICAL_RUNAWAY_AXIS_FRAC` = 0.1 a, else
 `None`; "The boundary
 constraint" above) -- a label, never a gate.
 
+## Counterfactual solves at imposed kinetics: profile and β scans (`engine_draws.solve_at_kinetics`, experimental)
+
+**Use this for any profile scan or β scan built on a reconstruction.** It
+answers: *what equilibrium does this reconstruction become if its kinetic
+profiles are replaced by these, holding its inductive current and I_p?* It is
+the supported unified-engine route for building scan points; the legacy engine
+must not be used for them (its zero-perturbation solve does not reproduce
+every reconstruction at the loop tolerances).
+
+Why neither existing route does it:
+
+- the **draw route** builds kinetics as baseline + sampled perturbation and
+  renormalizes the thermal pressure to the baseline (`sample_kinetics`), so
+  imposed kinetics are ignored or undone;
+- the **reconstruction route** forms the inductive current as the source's
+  total ⟨j·B⟩ minus Redl on the supplied kinetics (the g-file adapter), so
+  hotter kinetics only shrink the inductive part and the total current comes
+  back ≈ the source's.
+
+What it is: the engine's zero-perturbation draw (`verify_zero_perturbation`,
+the stage-3 σ = 0 identity) with the reconstruction's kinetics replaced through
+`EngineDrawContext.inputs_from_native(native)` — the same increment form and
+pressure assembly as `zero_inputs()`, bit for bit at the reconstruction's own
+kinetics. Then `run_draw`: `x*` held, the I_p row closed by one inductive
+amplitude, the Redl bootstrap iterated to the unchanged draw-loop tolerances.
+
+| held (the reconstruction's) | recomputed |
+|---|---|
+| inductive ⟨j·B⟩ shape, closure scales `x*` (`s_ind`, `s_bs`) | thermal and impurity pressure from the supplied kinetics |
+| fixed driven currents, fast-ion pressure and `z_fast`, Z_eff | Redl bootstrap, to self-consistency on each solved geometry |
+| boundary constraints, coil regularisation, edge-pressure settings, I_p | the inductive amplitude closing I_p; l_i, q, β are outputs |
+
+Not run: sampling, RNG, thermal-pressure renormalisation, coil homotopy,
+post-homotopy stage, coil drift bounds, archive write. A counterfactual is
+never an ensemble draw. Its record carries a `counterfactual` block
+(`feature="solve_at_kinetics"`, `experimental`, `start`, the contract).
+
+```python
+from bouquet.engine_draws import solve_at_kinetics
+run.prepare_baseline()                      # unified engine, live this session
+bl = run.baseline
+native = dict(ne=bl.ne, ni=bl.ni, te=1.5 * bl.te, ti=1.5 * bl.ti)
+out = solve_at_kinetics(run, native, label="T x 1.5")
+# the solved state is left in run.mygs; write it in the FULL pressure frame,
+# as the archive writes every draw (a bare mygs.save_eqdsk writes the solver
+# frame, without the separatrix pressure, and understates beta)
+from bouquet.edge_pressure import save_full_pressure_eqdsk
+save_full_pressure_eqdsk(run.mygs, "scan_point.geqdsk",
+                         p_sep=out["record"]["counterfactual"]["p_sep"],
+                         nr=257, nz=257)
+```
+
+Start state: the reconstruction's delivered equilibrium, as every draw — no
+dependence on the order points are solved. `start_eq=` (a `copy_eq` snapshot)
+is a continuation fallback for a point that does not converge from the
+reconstruction; the record then says `start="continuation"`, and the caller
+should check bistability on that point.
+
+Implications a scan inherits (state them where the scan is reported): the
+reconstruction's bootstrap correction `s_bs` multiplies a larger bootstrap; the
+fast-ion pressure does not follow the imposed temperatures; I_p is closed by
+the inductive amplitude alone, so a growing bootstrap lowers the core inductive
+current and raises q0 (the amplitude `a_ind` is in the record per pass).
+
 ## The pressure handed to the solver (`edge_pprime_pin`, `separatrix_pressure`)
 
 The backend builds every `P'` profile and axis target through one helper

@@ -467,6 +467,44 @@ class EngineDrawContext:
             jB_ind=np.asarray(self.c.jB_ind, dtype=float).copy(),
             scale=float(scale), sampler=dict(zero_perturbation=True))
 
+    def inputs_from_native(self, native, scale=1.0):
+        """The inputs of a COUNTERFACTUAL solve at caller-supplied kinetics
+        (profile and beta scans; :func:`solve_at_kinetics`).
+
+        Exactly :meth:`zero_inputs`' construction with *native* -- ``ne, te,
+        ni, ti`` on the reconstruction's kinetic grid (``self.psi_kin``, the
+        grid of ``self.native``) -- in place of the reconstruction's own
+        kinetics: the same increment form on the engine grid
+        (:meth:`eq_kinetics`), the same pressure assembly (:meth:`pressures`:
+        thermal and impurity from the supplied kinetics, the fast-ion part
+        and Z_eff held at the reconstruction's).  Nothing is sampled, clipped
+        or renormalized.  With the reconstruction's own kinetics every array
+        is :meth:`zero_inputs`' bit for bit; only the ``sampler`` tag
+        differs (``counterfactual`` instead of ``zero_perturbation``).
+        """
+        nat = {}
+        for k in ("ne", "te", "ni", "ti"):
+            if k not in native:
+                raise ValueError(f"{self.label}: inputs_from_native needs "
+                                 f"'{k}' on the reconstruction's kinetic grid")
+            a = np.array(native[k], dtype=float, copy=True)
+            if a.shape != np.shape(self.native[k]):
+                raise ValueError(
+                    f"{self.label}: inputs_from_native '{k}' has shape "
+                    f"{a.shape}, the reconstruction's kinetic grid "
+                    f"{np.shape(self.native[k])}")
+            if not np.all(np.isfinite(a)):
+                raise ValueError(f"{self.label}: inputs_from_native '{k}' "
+                                 "is not finite everywhere")
+            nat[k] = a
+        kin = self.eq_kinetics(nat)
+        p, th = self.pressures(kin)
+        return EngineDrawInputs(
+            kinetics=kin, kinetics_native=nat, pressure=p,
+            pressure_thermal=th,
+            jB_ind=np.asarray(self.c.jB_ind, dtype=float).copy(),
+            scale=float(scale), sampler=dict(counterfactual=True))
+
 
 def sigma0_clip_finding(record):
     """``(clips, finding)`` of a zero-perturbation draw's engine *record*:
@@ -2633,6 +2671,98 @@ def zero_perturbation_archived_verdict(ctx, jbs_carried, fin):
         dl_i=sigma0_gate(dli, s["tol_li"], setting="jbs_tol_li"),
         dq0=sigma0_gate(out["dq0"], s["tol_q0"], setting="jbs_tol_q0"))
     out["passed"] = _gates_pass(out["gates"])
+    return out
+
+
+#: the experimental-feature tag a counterfactual solve's record carries
+COUNTERFACTUAL_FEATURE = "solve_at_kinetics"
+
+#: what a counterfactual solve holds and what it recomputes (its record)
+COUNTERFACTUAL_CONTRACT = dict(
+    held=["inductive <j.B> shape (the reconstruction's jB_ind)",
+          "closure scales x* (s_ind, s_bs)",
+          "fixed driven currents (j_NBI, j_RF, j_other)",
+          "fast-ion pressure and z_fast; Z_eff",
+          "boundary constraints, coil regularisation, edge-pressure "
+          "settings (the reconstruction's)",
+          "I_p, the draw loop tolerances and pass budget"],
+    recomputed=["thermal and impurity pressure from the supplied kinetics",
+                "Redl bootstrap, iterated to self-consistency on each "
+                "solved geometry",
+                "the inductive amplitude (one scalar) closing the I_p row"],
+    outputs=["l_i, q profile, beta, W_MHD"],
+    not_run=["kinetic sampling / RNG", "thermal-pressure renormalisation",
+             "coil homotopy and post-homotopy stage", "coil drift bounds",
+             "archive write"])
+
+
+def solve_at_kinetics(bq, native, *, label="counterfactual solve",
+                      start_eq=None):
+    """COUNTERFACTUAL SOLVE AT IMPOSED KINETICS -- the unified-engine solve
+    for profile scans and beta scans (EXPERIMENTAL, recorded as
+    :data:`COUNTERFACTUAL_FEATURE`).
+
+    Answers: "what equilibrium does THIS reconstruction become if its
+    kinetic profiles are replaced by *native*, holding its inductive current
+    and its I_p?"  It is the engine's own zero-perturbation draw
+    (:func:`verify_zero_perturbation`, the stage-3 sigma=0 identity) with the
+    reconstruction's kinetics replaced by *native*
+    (:meth:`EngineDrawContext.inputs_from_native`): ``x*`` held, the I_p row
+    closed by one inductive amplitude, the Redl bootstrap iterated to the
+    unchanged draw-loop tolerances.  Held / recomputed:
+    :data:`COUNTERFACTUAL_CONTRACT`.  With the reconstruction's own kinetics
+    it IS the zero-perturbation draw, so its identity check is that draw's.
+
+    *bq*: a :class:`bouquet.Bouquet` whose unified-engine reconstruction
+    (``prepare_baseline()``) is live in this session.  *native*: ``ne, te,
+    ni, ti`` on the reconstruction's kinetic grid (``bq.baseline.
+    psi_N_kinetic``), SI.  *start_eq*: the equilibrium the solve starts from
+    (a ``copy_eq`` snapshot); default (``None``) the reconstruction's
+    delivered equilibrium, as every draw -- a caller that falls back to a
+    continuation start (a neighbouring counterfactual's delivered state)
+    passes it here, and the record says so.
+
+    Not a draw: nothing is sampled, archived or filtered, and the result is
+    never part of an ensemble.  Returns :func:`run_draw`'s dict (``record``
+    with a ``counterfactual`` block, ``split``, ``passes``, ...); the solved
+    equilibrium is left in ``bq.mygs`` for the caller to write -- in the
+    FULL pressure frame, ``bouquet.edge_pressure.save_full_pressure_eqdsk(
+    bq.mygs, filename, p_sep=out["record"]["counterfactual"]["p_sep"])``
+    (a bare ``mygs.save_eqdsk`` writes the solver frame, without the
+    separatrix pressure, and understates beta).  Raises what
+    a draw raises (:class:`DrawKineticsNonPhysical`,
+    :class:`bouquet.jbs_loop.JBSNotConverged`, ``DrawAnchorSolveFailed``).
+    """
+    G = build_generate_context(bq, {})
+    mygs = bq.mygs
+    if start_eq is None:
+        how = G.baseline_resolve_start(mygs)
+        start = "reconstruction"
+    else:
+        mygs.replace_eq(source_eq=start_eq)
+        how = ("continuation: started from the caller's equilibrium "
+               "snapshot (initial guess only)")
+        start = "continuation"
+    coil = G.install_coil_reg(mygs)
+    b = G.backend(mygs)
+    inputs = G.ctx.inputs_from_native(native)
+    out = run_draw(G.ctx, b, inputs, label=label, coil_guard=None)
+    from .jbs_loop import jsonable
+    # the separatrix pressure of the pressure now set (this solve's own; it
+    # moves with the imposed kinetics): a g-file of the solved state must be
+    # written in the FULL frame, edge_pressure.save_full_pressure_eqdsk(
+    # mygs, filename, p_sep=...), as the archive writes every draw -- a bare
+    # mygs.save_eqdsk writes the solver frame (PRES zero at psi_N = 1)
+    p_sep = float(b.p_sep())
+    out["record"]["counterfactual"] = jsonable(dict(
+        feature=COUNTERFACTUAL_FEATURE, experimental=True,
+        purpose=("profile / beta scan: the reconstruction at imposed "
+                 "kinetics, inductive current and I_p held"),
+        start=start, start_how=how, coil_reg=coil, p_sep=p_sep,
+        write_with=("bouquet.edge_pressure.save_full_pressure_eqdsk(mygs, "
+                    "filename, p_sep=record['counterfactual']['p_sep'], "
+                    "...)"),
+        contract=COUNTERFACTUAL_CONTRACT))
     return out
 
 

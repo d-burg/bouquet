@@ -198,7 +198,7 @@ def child(out):
     # (a) closure
     summ = chi2_summary(t0)
     rec["closure"] = {k: list(v) for k, v in summ.items()}
-    rec["excluded"] = {k: len(gr.meta.get("excluded", [])) for k, gr in t0.measurements.groups.items()}
+    rec["excluded"] = {k: len(v) for k, v in t0.excluded.items()}
     rec["n_thomson_inside"] = int(np.count_nonzero(clean.groups["thomson_ne"].valid))
 
     # (b) zero noise

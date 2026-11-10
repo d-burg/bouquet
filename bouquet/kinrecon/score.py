@@ -15,15 +15,11 @@ reconstruction error rows (``err = (val - model)*wt`` with ``wt = 1/sigma``,
 
 Channels that are valid in the measurement set but cannot be modeled (off the
 mesh, a Thomson channel outside the LCFS, a non-finite model) are removed from
-the comparison and recorded: the returned table's ``measurements`` is a copy
-of the input set whose affected groups have those channels set invalid and
-list them in ``meta['excluded']`` as ``(label, reason)``.  The input set is
-never modified.  Global notes (groups skipped, MSE E_r treatment) are in
-``table.measurements.meta['score_notes']``.
+the comparison through the table's per-group ``model_valid`` mask and listed
+in ``table.excluded[group]`` as ``(label, reason)``; table-wide notes (groups
+skipped, MSE E_r treatment) are in ``table.notes``.  The measurement set is
+neither copied nor modified: ``table.measurements`` is the input object.
 """
-
-import copy
-import dataclasses
 
 import numpy as np
 
@@ -116,8 +112,9 @@ def score(equilibrium, measurements, kinetics=None, groups=None):
     -------
     ResidualTable
         ``model[name]`` aligned with the group's channels (NaN where not
-        modeled); ``measurements`` is the effective copy described in the
-        module docstring.
+        modeled), ``model_valid[name]`` False there, ``excluded`` and
+        ``notes`` as described in the module docstring; ``measurements`` is
+        the input set itself.
     """
     if not isinstance(measurements, MeasurementSet):
         raise TypeError("score: measurements must be a MeasurementSet")
@@ -146,11 +143,7 @@ def score(equilibrium, measurements, kinetics=None, groups=None):
             continue
         todo.append(name)
 
-    eff = MeasurementSet(machine=measurements.machine, time=measurements.time,
-                         time_window=measurements.time_window,
-                         groups=dict(measurements.groups),
-                         meta=copy.deepcopy(measurements.meta))
-    model = {}
+    model, model_valid, excluded = {}, {}, {}
     for name in todo:
         group = measurements.groups[name]
         syn = _model_group(equilibrium, name, group, kinetics, notes)
@@ -158,22 +151,17 @@ def score(equilibrium, measurements, kinetics=None, groups=None):
         if value.shape != group.measured.shape:
             raise ValueError(f"score: group '{name}' modeled {value.shape} for "
                              f"{group.measured.shape} channels")
-        drop = group.valid & ~np.isfinite(value)
+        ok = np.isfinite(value)
+        drop = group.valid & ~ok
         if np.any(drop):
-            meta = copy.deepcopy(group.meta)
-            meta["excluded"] = list(meta.get("excluded", [])) + [
-                (group.labels[i], str(syn.reason[i]) or _diag.REASON_NONFINITE)
-                for i in np.nonzero(drop)[0]]
-            eff.groups[name] = dataclasses.replace(
-                group, valid=group.valid & ~drop, meta=meta,
-                measured=group.measured.copy(), sigma=group.sigma.copy(),
-                weight=group.weight.copy(), labels=list(group.labels),
-                geometry=dict(group.geometry))
+            excluded[name] = [(group.labels[i], str(syn.reason[i]) or _diag.REASON_NONFINITE)
+                              for i in np.nonzero(drop)[0]]
             notes.append(f"{name}: {int(drop.sum())} valid channel(s) not modeled, "
-                         "set invalid (see meta['excluded'])")
+                         "excluded from chi2 (see table.excluded)")
         model[name] = value
-    eff.meta["score_notes"] = notes
-    return ResidualTable(measurements=eff, model=model)
+        model_valid[name] = ok
+    return ResidualTable(measurements=measurements, model=model, model_valid=model_valid,
+                         excluded=excluded, notes=notes)
 
 
 def chi2_summary(table):

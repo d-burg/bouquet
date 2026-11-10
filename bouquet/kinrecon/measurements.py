@@ -79,6 +79,7 @@ from typing import Dict, List
 
 import numpy as np
 
+from .diagnostics import mse_from_field
 from .interfaces import ConstraintGroup, MeasurementSet
 
 SCHEMA = "kinrecon.measurements/1"
@@ -260,11 +261,17 @@ def imas_to_efit_coefficients(c):
 
 def tan_gamma_imas(c, b_r, b_z, b_phi, e_r=0.0, e_z=0.0):
     """tan(gamma) from the 9 IMAS coefficients (DD order, see
-    :func:`efit_to_imas_coefficients`) and local fields."""
+    :func:`efit_to_imas_coefficients`) and local fields.
+
+    A thin wrapper: the one MSE formula in kinrecon is
+    :func:`bouquet.kinrecon.diagnostics.mse_from_field` (see its docstring for
+    the form and source); fields are scalars or per-channel arrays.
+    """
     c = np.atleast_2d(np.asarray(c, dtype=float))
-    num = c[:, 0] * b_z + c[:, 1] * b_r + c[:, 2] * b_phi + c[:, 3] * e_r
-    den = c[:, 4] * b_z + c[:, 5] * b_r + c[:, 6] * b_phi + c[:, 7] * e_r + c[:, 8] * e_z
-    return num / den
+    n = c.shape[0]
+    B = np.column_stack([np.broadcast_to(np.asarray(x, dtype=float), (n,))
+                         for x in (b_r, b_phi, b_z)])
+    return mse_from_field(B, c, e_r=e_r, e_z=e_z, quantity="tan_polarisation_angle")
 
 
 # ---------------------------------------------------------------------------

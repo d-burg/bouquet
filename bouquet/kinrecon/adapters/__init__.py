@@ -32,10 +32,19 @@ def _absolute(values, sigma):
 
 
 def _efit_serror_bit(values, serror, bit):
-    # EFIT convention for magnetics: sigma = max(SERROR |value|, 10 * bit),
-    # with SERROR and the digitizer bit (BITMPI, PSIBIT, BITFC, BITEC, BITIP)
-    # from k-file namelist IN1.  See adapters.efit_kfile for the source.
+    # Fixed-multiplier form: sigma = max(SERROR |value|, 10 * bit), with
+    # SERROR and the digitizer bit (BITMPI, PSIBIT, BITFC, BITEC, BITIP) from
+    # k-file namelist IN1.  The 10 is the OMAS machine-mapping constant; it
+    # equals EFIT's own floor only where the k-file's VBIT is 10 (see
+    # ``efit_vbit`` and adapters.efit_kfile).
     return np.maximum(serror * np.abs(values), 10.0 * np.asarray(bit, dtype=float))
+
+
+def _efit_vbit(values, serror, bit, vbit):
+    # EFIT-aligned form: sigma = max(SERROR |value|, VBIT * bit), VBIT read
+    # from the k-file's &IN1 (10 when absent).  Reproduces the sigma arrays
+    # EFIT writes to its m-file channel by channel; see adapters.efit_kfile.
+    return np.maximum(serror * np.abs(values), float(vbit) * np.asarray(bit, dtype=float))
 
 
 #: name -> (function(values, **params), required parameter names)
@@ -45,6 +54,7 @@ SIGMA_MODELS = {
     "relative_floor": (_relative_floor, ("relative", "floor")),
     "relative_quadrature": (_relative_quadrature, ("relative", "floor")),
     "efit_serror_bit": (_efit_serror_bit, ("serror", "bit")),
+    "efit_vbit": (_efit_vbit, ("serror", "bit", "vbit")),
 }
 
 
@@ -55,8 +65,11 @@ def sigma_from_model(name, values, **params):
     ``relative``: sigma = ``relative`` |v|;
     ``relative_floor``: sigma = max(``relative`` |v|, ``floor``);
     ``relative_quadrature``: sigma = sqrt((``relative`` v)^2 + ``floor``^2);
-    ``efit_serror_bit``: sigma = max(``serror`` |v|, 10 ``bit``) (EFIT k-file
-    convention for magnetics, see :mod:`.efit_kfile`).
+    ``efit_serror_bit``: sigma = max(``serror`` |v|, 10 ``bit``) (fixed
+    10-bit floor, the OMAS mapping constant);
+    ``efit_vbit``: sigma = max(``serror`` |v|, ``vbit`` ``bit``) (EFIT k-file
+    convention for magnetics with the file's own ``VBIT``, see
+    :mod:`.efit_kfile`; the k-file adapter's default).
     """
     if name not in SIGMA_MODELS:
         raise ValueError(f"unknown sigma model {name!r}; known: {sorted(SIGMA_MODELS)}")

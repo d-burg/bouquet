@@ -224,13 +224,19 @@ def test_score_zero_noise_and_bookkeeping():
     tab = score(eq, ms, kinetics={"n_e": prof})
     for name in tab.model:
         assert np.max(np.abs(tab.residual(name))) == 0.0
-    # Thomson channels outside the circle were excluded with reasons, input untouched
-    excl = tab.measurements.groups["thomson_ne"].meta["excluded"]
+    # Thomson channels outside the circle were excluded with reasons through the
+    # table's model-valid mask; the input set is the table's set, not a copy, untouched
+    excl = tab.excluded["thomson_ne"]
     assert len(excl) > 0 and all(r == diag.REASON_OUTSIDE_LCFS for _, r in excl)
+    mv = tab.model_valid["thomson_ne"]
+    assert np.count_nonzero(~mv) == len(excl)
+    assert tab.n_valid("thomson_ne") == np.count_nonzero(ms.groups["thomson_ne"].valid & mv)
+    assert tab.measurements is ms
     for k, g in ms.groups.items():
         assert np.array_equal(g.valid, snapshot[k][0]) and np.array_equal(g.measured, snapshot[k][1])
         assert g.meta == snapshot[k][2]
-    assert any("E_R = 0" in n for n in tab.measurements.meta["score_notes"])
+    assert "score_notes" not in ms.meta
+    assert any("E_R = 0" in n for n in tab.notes)
 
 
 def test_score_skips_and_explicit_requests():
@@ -238,7 +244,7 @@ def test_score_skips_and_explicit_requests():
     ms, prof = _measurement_set(eq)
     tab = score(eq, ms)            # no kinetics: thomson skipped with a note
     assert "thomson_ne" not in tab.model
-    assert any("thomson_ne: skipped" in n for n in tab.measurements.meta["score_notes"])
+    assert any("thomson_ne: skipped" in n for n in tab.notes)
     with pytest.raises(ValueError):
         score(eq, ms, groups=["thomson_ne"])
     ms.groups["q"] = _group("q", [1.0], [0.1])
@@ -256,3 +262,43 @@ def test_score_noise_closure_fake():
     summ = chi2_summary(score(eq, ms, kinetics={"n_e": prof}))
     c, n, _ = summ["total"]
     assert abs(c / n - 1.0) < 4.0 * np.sqrt(2.0 / n)
+
+
+def test_residual_table_model_valid_mask():
+    from bouquet.kinrecon.interfaces import ResidualTable
+    g = ConstraintGroup(name="x", labels=["a", "b", "c", "d"], measured=[1.0, 2.0, 3.0, 4.0],
+                        sigma=[1.0, 1.0, 2.0, 1.0], valid=[True, True, True, False])
+    ms = MeasurementSet("synthetic", 1.0, 0.01, {"x": g})
+    model = np.array([2.0, np.nan, 5.0, 100.0])
+    # without a mask every measurement-valid channel is used (NaN propagates)
+    assert np.isnan(ResidualTable(ms, {"x": model}).chi2())
+    tab = ResidualTable(ms, {"x": model}, model_valid={"x": np.isfinite(model)},
+                        excluded={"x": [("b", "test reason")]}, notes=["n1"])
+    np.testing.assert_array_equal(tab.used("x"), [True, False, True, False])
+    np.testing.assert_array_equal(tab.residual("x"), [1.0, 1.0])
+    assert tab.chi2() == 2.0 and tab.n_valid() == 2
+    assert g.valid.tolist() == [True, True, True, False]        # set untouched
+    assert tab.notes == ["n1"] and tab.excluded["x"][0][1] == "test reason"
+
+
+def test_one_mse_formula():
+    from bouquet.kinrecon import measurements as M
+    assert M.mse_from_field is diag.mse_from_field
+    c = np.tile([-0.8, 0.1, 0.2, 1e-5, 0.03, -0.6, 0.7, 2e-6, 1e-6], (3, 1))
+    B = np.array([[0.1, -2.0, -0.3], [0.05, -1.9, 0.2], [-0.1, -2.1, 0.1]])
+    np.testing.assert_array_equal(
+        M.tan_gamma_imas(c, B[:, 0], B[:, 2], B[:, 1], 1e4, -2e3),
+        diag.mse_from_field(B, c, 1e4, -2e3, quantity="tan_polarisation_angle"))
+
+
+def test_package_reexports_score_without_oft():
+    import subprocess
+    code = ("import sys; sys.modules['OpenFUSIONToolkit'] = None\n"
+            "import bouquet.kinrecon as k\n"
+            "from bouquet.kinrecon.score import score as s\n"
+            "assert k.score is s and callable(k.chi2_summary)\n"
+            "assert 'OpenFUSIONToolkit' not in [m for m in sys.modules if sys.modules[m]]\n")
+    env = dict(os.environ, PYTHONPATH=_REPO)
+    proc = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True,
+                          timeout=120)
+    assert proc.returncode == 0, proc.stderr

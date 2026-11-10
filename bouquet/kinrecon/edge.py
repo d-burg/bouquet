@@ -28,6 +28,13 @@ iteration count, and never silent.  Project decisions (stated in neutral words):
   of I_p and of stored energy affected), and "converged" and "converged with edge taper"
   are distinct statuses.
 
+Three named variants (:data:`TAPER_VARIANTS`): ``edge_pinned`` (default, below),
+``last_node`` (exactly ``pprime[-1] = 0`` on the caller's grid, the standard TokaMaker
+practice; its width is the grid's last interval) and ``pressure_conserving`` (the ramp plus
+a compensating gradient in a band just inside it, so the pressure inside the band is
+unchanged).  The separatrix pressure p(1) is unchanged by every variant; the two pressure
+frames and the solver's axis target are defined once in :mod:`.pressure`.
+
 This module imports only numpy and the standard library and never imports a solver: the
 policy helper :func:`solve_with_edge_taper` drives a caller-supplied solve callable.
 
@@ -73,17 +80,66 @@ STATUS_FAILED = "failed"
 
 
 # ============================================================== the taper itself
+#: Taper variants (named choices; every record states which one was used).
+#:
+#: ``edge_pinned`` (default): explicit knot at ``start``, P' ramps linearly to zero at 1,
+#:     every knot inside ``start`` untouched; p(1) fixed, so the pressure inside ``start``
+#:     drops by one constant (module docstring).
+#: ``last_node``: exactly ``pprime[-1] = 0`` on the caller's own grid -- the standard
+#:     TokaMaker practice.  It is the same operation as ``edge_pinned`` with
+#:     ``start = psi_n[-2]`` (no knot inserted), so its width, and with it its strength,
+#:     is the input grid's last interval; it need not lie inside the outer layer (recorded).
+#: ``pressure_conserving``: the ``edge_pinned`` ramp plus a triangular ("hat") gradient
+#:     added on ``[start - band_width, start]`` whose integral equals the P' removed in the
+#:     layer, so p(1) AND the pressure everywhere inside ``start - band_width`` are
+#:     unchanged; P' is modified only on ``[start - band_width, 1]``.
+TAPER_VARIANTS = ("edge_pinned", "last_node", "pressure_conserving")
+#: Default band width of ``pressure_conserving`` (psi_N).  0.02: for an edge P' near its
+#: maximum the hat's peak is about (1 - start)/band_width = 1/4 of the local |P'| (0.005
+#: would double P' mid-band), while the band [0.975, 0.995] still lies outside the pedestal
+#: tops met so far (psi_N 0.91-0.97 by a half-maximum rule).  0.005 and 0.01 are allowed.
+BAND_WIDTH_DEFAULT = 0.02
+
+
 @dataclass(frozen=True)
 class EdgeTaperSpec:
-    """Where the taper starts and which domain edge it was checked against."""
+    """Taper variant, where it starts, and which domain edge it was checked against.
+
+    ``start`` is ignored for ``last_node`` (the grid sets it); ``band_width`` is used only
+    by ``pressure_conserving``."""
     start: float = TAPER_START_DEFAULT
     domain_edge: float = DOMAIN_EDGE_DEFAULT
+    variant: str = "edge_pinned"
+    band_width: Optional[float] = None
 
     def __post_init__(self):
-        _check_start(self.start, self.domain_edge)
+        if self.variant not in TAPER_VARIANTS:
+            raise ValueError(f"taper variant {self.variant!r} not in {TAPER_VARIANTS}")
+        if self.variant != "last_node":
+            _check_start(self.start, self.domain_edge)
+        if self.variant == "pressure_conserving":
+            _check_band(self.start, BAND_WIDTH_DEFAULT if self.band_width is None else self.band_width)
+        elif self.band_width is not None:
+            raise ValueError("band_width applies only to the pressure_conserving variant")
+
+    def kwargs(self):
+        """Keyword arguments of :func:`apply_edge_taper` for this spec."""
+        kw = dict(variant=self.variant, domain_edge=self.domain_edge)
+        if self.variant != "last_node":
+            kw["start"] = self.start
+        if self.variant == "pressure_conserving":
+            kw["band_width"] = self.band_width
+        return kw
 
     def as_dict(self):
-        return dict(start=float(self.start), width=float(1.0 - self.start), domain_edge=float(self.domain_edge))
+        d = dict(variant=self.variant, domain_edge=float(self.domain_edge))
+        if self.variant == "last_node":
+            d.update(start="grid (psi_n[-2])", width="grid (last interval)")
+        else:
+            d.update(start=float(self.start), width=float(1.0 - self.start))
+        if self.variant == "pressure_conserving":
+            d["band_width"] = float(BAND_WIDTH_DEFAULT if self.band_width is None else self.band_width)
+        return d
 
 
 def _check_start(start, domain_edge):
@@ -93,6 +149,11 @@ def _check_start(start, domain_edge):
     if not (domain_edge <= start < 1.0):
         raise ValueError(f"taper start {start!r} must lie at or outside the domain edge {domain_edge!r} "
                          "and below psi_N = 1")
+
+
+def _check_band(start, band_width):
+    if not (np.isfinite(band_width) and 0.0 < band_width < start):
+        raise ValueError(f"band_width {band_width!r} must be positive and leave the band inside psi_N > 0")
 
 
 @dataclass
@@ -117,53 +178,73 @@ def _cum_from_edge(y, x):
     return out
 
 
+def _insert(x, y, xi):
+    """Knots of (x, y) with xi added (if not already a knot); values on the same linear interpolant."""
+    k = int(np.searchsorted(x, xi, side="left"))
+    if k < x.size and x[k] == xi:
+        return x, y, False
+    yi = y[k - 1] + (y[k] - y[k - 1]) * (xi - x[k - 1]) / (x[k] - x[k - 1])
+    return np.insert(x, k, xi), np.insert(y, k, yi), True
+
+
 def apply_edge_taper(psi_n, pprime, pressure=None, *, start=None, domain_edge=None, psi_scale=None,
-                     psi_pedestal_top=None, volume=None, ip=None):
-    """Ramp P' linearly to zero between ``start`` and psi_N = 1; leave the interior untouched.
+                     psi_pedestal_top=None, volume=None, ip=None, variant="edge_pinned", band_width=None,
+                     r_avg=None):
+    """Taper P' to zero at psi_N = 1 by one of :data:`TAPER_VARIANTS`; leave the interior untouched.
 
     Parameters
     ----------
     psi_n, pprime : array (n,)
         Knots (strictly increasing, ``psi_n[0] == 0``, ``psi_n[-1] == 1``) and P' there.
     pressure : array (n,), optional
-        p on the same knots.  Returned shifted by the edge-pinned convention (module
-        docstring); used to infer ``psi_scale`` when that is not given.
+        p on the same knots (any frame: only differences and p(1) enter).  Returned with
+        p(1) held fixed (module docstring); used to infer ``psi_scale`` when that is not given.
     start : float, optional
         Taper start in psi_N.  ``None`` means :data:`TAPER_START_DEFAULT` and the record
-        says so.  Must satisfy ``domain_edge <= start < 1``.
+        says so.  Must satisfy ``domain_edge <= start < 1``.  Refused for ``last_node``
+        (its start is ``psi_n[-2]``).
     domain_edge : float, optional
         Diffusion-domain edge the start is checked against (``None``:
         :data:`DOMAIN_EDGE_DEFAULT`, recorded); allowed range 0.99--0.999.
     psi_scale : float, optional
         dpsi/dpsi_N (module docstring).  Needed for absolute pressure, I_p and energy numbers.
     psi_pedestal_top : float, optional
-        psi_N of the pedestal top (<= start), for the pedestal-top change.  This module
-        does not guess it; when absent the record says so (the absolute change is the same
-        at every psi_N <= start in the edge-pinned convention).
+        psi_N of the pedestal top (<= the first modified knot), for the pedestal-top change.
+        This module does not guess it; when absent the record says so.
     volume : array (n,), optional
         Enclosed volume V(psi_N) on the input knots (V[0] = 0), for the stored-energy and
-        I_p bookkeeping; linearly interpolated at the inserted knot.
+        I_p bookkeeping; linearly interpolated at inserted knots.
     ip : float, optional
         Plasma current, for the I_p fraction.
+    variant : str
+        ``edge_pinned`` (default), ``last_node`` or ``pressure_conserving`` (see
+        :data:`TAPER_VARIANTS`).
+    band_width : float, optional
+        ``pressure_conserving`` only: the band width in psi_N (``None``:
+        :data:`BAND_WIDTH_DEFAULT`, recorded).  The added gradient is the hat
+        ``h(x) = A max(0, 1 - |x - x_m| / (w/2))`` on ``[start - w, start]``, ``x_m`` its
+        middle, ``A = 2 R / w`` with ``R = int_start^1 (P'_in - P'_ramp) dpsi_N``: zero at
+        both band ends (P' stays continuous), single-signed (the sign of R), integral R.
+        Knots are inserted at ``start - w`` and ``x_m``.
+    r_avg : array (n,), optional
+        <R>(psi_N) on the input knots, for the change of the pressure-driven edge current
+        density <R> P' over the modified region.
 
     Returns
     -------
     TaperedProfile
-        ``psi_n`` = the input knots plus the taper-start knot (if it is not already a knot);
-        ``pprime`` = the input values bit-for-bit at every knot below ``start``, the
-        interpolated input value at ``start``, the linear ramp beyond, exactly 0 at 1;
-        ``pressure`` (edge-pinned; ``None`` if not given); ``record`` (always complete:
-        quantities that cannot be computed are ``None`` with the reason in ``notes``).
+        ``psi_n`` = the input knots plus any inserted knot; ``pprime`` = the input values
+        bit-for-bit at every knot below the first modified one; ``pressure`` (``None`` if not
+        given); ``record`` (always complete: quantities that cannot be computed are ``None``
+        with the reason in ``notes``).
     """
     notes: List[str] = []
-    start_source = "given"
-    if start is None:
-        start, start_source = TAPER_START_DEFAULT, "default (taper start = default domain edge)"
+    if variant not in TAPER_VARIANTS:
+        raise ValueError(f"taper variant {variant!r} not in {TAPER_VARIANTS}")
     edge_source = "given"
     if domain_edge is None:
         domain_edge, edge_source = DOMAIN_EDGE_DEFAULT, "default"
-    start, domain_edge = float(start), float(domain_edge)
-    _check_start(start, domain_edge)
+    domain_edge = float(domain_edge)
 
     x = np.asarray(psi_n, dtype=float)
     y = np.asarray(pprime, dtype=float)
@@ -181,6 +262,25 @@ def apply_edge_taper(psi_n, pprime, pressure=None, *, start=None, domain_edge=No
         if p.shape != x.shape or not np.all(np.isfinite(p)):
             raise ValueError("pressure must be finite and on the psi_n knots")
 
+    if variant == "last_node":
+        if start is not None:
+            raise ValueError("last_node takes its start from the grid (psi_n[-2]); do not pass start")
+        if x.size < 3:
+            raise ValueError("last_node needs at least 3 knots")
+        start, start_source = float(x[-2]), "grid: psi_n[-2] (last_node)"
+        if not (DOMAIN_EDGE_COARSE <= domain_edge <= DOMAIN_EDGE_MAX):
+            raise ValueError(f"domain_edge {domain_edge!r} outside [{DOMAIN_EDGE_COARSE}, {DOMAIN_EDGE_MAX}]")
+        if start < domain_edge:
+            notes.append(f"last_node: the grid's last interval starts at psi_N = {start:.6g}, inside the "
+                         f"domain edge {domain_edge:g}: this taper is not confined to the outer layer")
+    else:
+        start_source = "given"
+        if start is None:
+            start, start_source = TAPER_START_DEFAULT, "default (taper start = default domain edge)"
+        start = float(start)
+        _check_start(start, domain_edge)
+
+    # ---- the edge ramp (all variants)
     k = int(np.searchsorted(x, start, side="left"))     # knots 0..k-1 lie strictly inside start
     inserted = not (k < x.size and x[k] == start)
     if inserted:
@@ -196,28 +296,89 @@ def apply_edge_taper(psi_n, pprime, pressure=None, *, start=None, domain_edge=No
     x_new = np.concatenate((x[:k], [start], xl))
     y_new = np.concatenate((y[:k], [ys], ramp))
     y_ref = np.concatenate((y[:k], [ys], yl_orig))       # input interpolant on the new knots
+    if variant == "last_node":
+        y_new = y.copy()
+        y_new[-1] = 0.0                                  # bit for bit pprime[-1] = 0.0
+    layer_removed = _trap((y_ref - y_new)[k:], x_new[k:])   # int_start^1 (P'_in - P'_ramp)
+    k_first = k                                          # first modified (or inserted) knot
+    band = None
+    if variant == "pressure_conserving":
+        bw_source = "given"
+        if band_width is None:
+            band_width, bw_source = BAND_WIDTH_DEFAULT, f"default ({BAND_WIDTH_DEFAULT})"
+        band_width = float(band_width)
+        _check_band(start, band_width)
+        b0, bm = start - band_width, start - 0.5 * band_width
+        xs, yr = x_new, y_ref
+        ins = []
+        for xi in (b0, bm):
+            xs2, yr2, did = _insert(xs, yr, xi)
+            if did:
+                _, yn2, _ = _insert(xs, y_new, xi)
+                y_new = yn2
+            xs, yr = xs2, yr2
+            ins.append(did)
+        x_new, y_ref = xs, yr
+        amp = 2.0 * layer_removed / band_width
+        hat = amp * np.clip(1.0 - np.abs(x_new - bm) / (0.5 * band_width), 0.0, None)
+        hat[(x_new <= b0) | (x_new >= start)] = 0.0
+        y_new = y_new + hat
+        k_first = int(np.searchsorted(x_new, b0, side="left"))
+        y_new[:k_first] = y[:k_first]                    # bit for bit inside the band
+        y_ref[:k_first] = y[:k_first]
+        inband = (x_new >= b0) & (x_new <= start)
+        loc = np.abs(y_ref[inband])
+        band = dict(band_start=b0, band_width=band_width, band_width_source=bw_source,
+                    band_knots_inserted=[bool(v) for v in ins], hat_peak=float(amp),
+                    hat_peak_over_max_abs_pprime_in_band=(float(abs(amp) / loc.max()) if loc.max() > 0 else None),
+                    integral_added_in_band=_trap(hat, x_new),
+                    max_abs_dpprime_band=float(np.max(np.abs((y_new - y_ref)[inband]))),
+                    pprime_changes_sign_in_band=bool(np.any(np.sign(y_new[inband]) * np.sign(y_ref[inband]) < 0)),
+                    hat_definition="A*max(0, 1-|x-x_m|/(w/2)) on [start-w, start], A = 2R/w, "
+                                   "R = int_start^1 (P'_in - P'_ramp) dpsi_N")
+        notes.append("pressure_conserving: P' is modified on [start - band_width, start], i.e. inside the "
+                     "diffusion-domain edge (the band is not confined to the outer layer)")
 
     i_orig = _trap(y_ref, x_new)
     i_tap = _trap(y_new, x_new)
-    layer_removed = _trap((y_ref - y_new)[k:], x_new[k:])   # int_start^1 (P'_orig - P'_taper)
     ymax = float(np.max(np.abs(y))) if y.size else 0.0
     rec: Dict[str, Any] = dict(
-        applied=True, convention="edge_pinned",
+        applied=True, variant=variant,
+        convention=("pressure_conserving (p(1) and p inside the band fixed)" if variant == "pressure_conserving"
+                    else "edge_pinned"),
         start=start, start_source=start_source, width=1.0 - start,
         domain_edge=domain_edge, domain_edge_source=edge_source,
-        knot_inserted=bool(inserted), n_knots_in=int(x.size), n_knots_out=int(x_new.size),
-        n_layer_knots_replaced=int(xl.size), interior_knots_untouched=int(k),
+        within_outer_layer=bool(start >= domain_edge and variant != "pressure_conserving"),
+        knot_inserted=bool(inserted and variant != "last_node"), n_knots_in=int(x.size),
+        n_knots_out=int(x_new.size), n_layer_knots_replaced=int(xl.size), interior_knots_untouched=int(k_first),
         pprime_at_start=float(ys), pprime_edge_input=float(y[-1]),
         edge_over_max_abs_input=(float(abs(y[-1]) / ymax) if ymax > 0 else None),
         integral_pprime_dpsin_input=i_orig, integral_pprime_dpsin_tapered=i_tap,
         integral_removed_in_layer=layer_removed,
         pax_ratio=(i_tap / i_orig if i_orig != 0.0 else None),
-        removed_fraction_of_axis_to_edge_drop=(layer_removed / i_orig if i_orig != 0.0 else None),
+        removed_fraction_of_axis_to_edge_drop=((i_orig - i_tap) / i_orig if i_orig != 0.0 else None),
+        band=band,
         psi_scale=None, psi_scale_source=None, pressure_consistency_rel=None,
         dp_inside=None, p_axis_before=None, dp_axis_rel=None, p_start_before=None, dp_start_rel=None,
         psi_pedestal_top=None, p_pedestal_top_before=None, dp_pedestal_top=None, dp_pedestal_top_rel=None,
-        ip_removed=None, ip_fraction=None, stored_energy_before=None, stored_energy_after=None,
-        stored_energy_change=None, stored_energy_rel=None, notes=notes)
+        ip_removed=None, ip_removed_layer=None, ip_fraction=None, stored_energy_before=None,
+        stored_energy_after=None, stored_energy_change=None, stored_energy_rel=None,
+        edge_current=None, notes=notes)
+    if variant == "last_node":
+        rec["effective_width"] = float(1.0 - start)
+
+    if r_avg is not None:
+        ra = np.asarray(r_avg, dtype=float)
+        if ra.shape != x.shape or not np.all(np.isfinite(ra)):
+            raise ValueError("r_avg must be finite and on the psi_n knots")
+        rn = np.interp(x_new, x, ra)
+        sl = slice(k_first, None)
+        j0, j1 = rn[sl] * y_ref[sl], rn[sl] * y_new[sl]
+        m = float(np.max(np.abs(j0))) if j0.size else 0.0
+        rec["edge_current"] = dict(
+            quantity="<R> P' (pressure-driven toroidal current density, caller's P' units x m)",
+            region=[float(x_new[k_first]), 1.0], max_abs_change=float(np.max(np.abs(j1 - j0))),
+            max_abs_before=m, max_abs_change_rel=(float(np.max(np.abs(j1 - j0)) / m) if m > 0 else None))
 
     s = None
     if psi_scale is not None:
@@ -231,8 +392,11 @@ def apply_edge_taper(psi_n, pprime, pressure=None, *, start=None, domain_edge=No
 
     p_new = None
     if s is not None:
-        dp = s * layer_removed
+        dp = s * layer_removed if variant != "pressure_conserving" else s * (i_orig - i_tap)
         rec["dp_inside"] = dp
+        if variant == "pressure_conserving":
+            notes.append("pressure_conserving: dp_inside is the residual of the construction (round-off), "
+                         "not a modeled change")
         c_orig = _cum_from_edge(y_ref, x_new)              # int_x^1 P'_orig on the new knots
         c_tap = _cum_from_edge(y_new, x_new)
         if p is not None:
@@ -241,27 +405,30 @@ def apply_edge_taper(psi_n, pprime, pressure=None, *, start=None, domain_edge=No
             span = float(np.max(np.abs(p))) or 1.0
             rec["pressure_consistency_rel"] = float(np.max(np.abs(model - p)) / span)
             # input pressure on the new knots: the given values at every input knot; at an
-            # inserted start knot, the value implied by the input P' integrated from the edge
-            p_start_before = (p_edge - s * c_orig[k]) if inserted else float(p[k])
-            p_ref = np.concatenate((p[:k], [p_start_before], p[k:] if inserted else p[k + 1:]))
-            # edge-pinned: p_new(x) = p_ref(x) + psi_scale * int_x^1 (P'_orig - P'_taper)
-            # (= p_ref + dp_inside at every knot <= start; exactly p_ref at psi_N = 1)
+            # inserted knot, the value implied by the input P' integrated from the edge
+            orig = np.isin(x_new, x)
+            idx = np.searchsorted(x, x_new).clip(0, x.size - 1)
+            p_ref = np.where(orig, p[idx], p_edge - s * c_orig)
+            p_start_before = float(p_ref[int(np.searchsorted(x_new, start))])
+            # p_new(x) = p_ref(x) + psi_scale * int_x^1 (P'_orig - P'_new): one constant inside
+            # the first modified knot (dp_inside; ~0 for pressure_conserving), p_ref at psi_N = 1
             p_new = p_ref + s * (c_orig - c_tap)
-            p_new[:k] = p[:k] + dp
+            p_new[:k_first] = p[:k_first] + dp
             p_new[-1] = p_edge
             rec.update(p_axis_before=float(p[0]), dp_axis_rel=(dp / p[0] if p[0] != 0 else None),
-                       p_start_before=float(p_start_before),
-                       dp_start_rel=(dp / p_start_before if p_start_before != 0 else None))
+                       p_start_before=p_start_before,
+                       dp_start_rel=(float(p_new[int(np.searchsorted(x_new, start))] - p_start_before)
+                                     / p_start_before if p_start_before != 0 else None))
             if psi_pedestal_top is not None:
                 xp = float(psi_pedestal_top)
-                if not (0.0 <= xp <= start):
-                    raise ValueError("psi_pedestal_top must lie in [0, start]")
+                if not (0.0 <= xp <= x_new[k_first]):
+                    raise ValueError("psi_pedestal_top must lie in [0, first modified knot]")
                 pp_top = float(np.interp(xp, x, p))
                 rec.update(psi_pedestal_top=xp, p_pedestal_top_before=pp_top, dp_pedestal_top=dp,
                            dp_pedestal_top_rel=(dp / pp_top if pp_top != 0 else None))
             else:
-                notes.append("pedestal-top location not supplied: dp_inside applies at every psi_N <= start "
-                             "(edge-pinned convention); relative change given on axis and at the taper start")
+                notes.append("pedestal-top location not supplied: dp_inside applies at every psi_N inside the "
+                             "first modified knot; relative change given on axis and at the taper start")
         else:
             notes.append("no pressure given: dp_inside computed from psi_scale; relative changes need pressure")
         if volume is not None:
@@ -269,12 +436,17 @@ def apply_edge_taper(psi_n, pprime, pressure=None, *, start=None, domain_edge=No
             if v.shape != x.shape or not np.all(np.isfinite(v)):
                 raise ValueError("volume must be finite and on the psi_n knots")
             v_new = np.interp(x_new, x, v)
-            dv = np.diff(v_new[k:])
-            dpp = (y_ref - y_new)[k:]
-            ipr = s / (2.0 * np.pi) * float(np.sum(0.5 * (dpp[1:] + dpp[:-1]) * dv))
+
+            def _ip(lo):
+                dv = np.diff(v_new[lo:])
+                dpp = (y_ref - y_new)[lo:]
+                return s / (2.0 * np.pi) * float(np.sum(0.5 * (dpp[1:] + dpp[:-1]) * dv))
+            ipr = _ip(k_first)
             rec["ip_removed"] = ipr
+            rec["ip_removed_layer"] = _ip(int(np.searchsorted(x_new, start)))
             if ip is not None and ip != 0:
                 rec["ip_fraction"] = abs(ipr) / abs(float(ip))
+                rec["ip_fraction_layer"] = abs(rec["ip_removed_layer"]) / abs(float(ip))
             else:
                 notes.append("ip not supplied: I_p fraction not computed")
             if p is not None:

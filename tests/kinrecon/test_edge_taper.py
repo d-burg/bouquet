@@ -320,3 +320,97 @@ def test_policy_accepts_mapping_results():
     o = E.solve_with_edge_taper(solve)
     assert o.record["status"] == E.STATUS_CONVERGED_TAPER
     assert o.record["attempts"][1]["info"] == {"its": 7}
+
+
+# ------------------------------------------------------------------ variants: last_node
+def test_last_node_is_pprime_last_zero_and_equals_explicit_taper_at_second_to_last_node():
+    x, y, p = _hand_case()
+    t = E.apply_edge_taper(x, y, p, variant="last_node", psi_scale=2.0)
+    ref = y.copy()
+    ref[-1] = 0.0
+    assert t.pprime.tobytes() == ref.tobytes() and t.psi_n.tobytes() == x.tobytes()
+    r = t.record
+    assert r["variant"] == "last_node" and r["start"] == 0.99 and r["effective_width"] == pytest.approx(0.01)
+    assert not r["knot_inserted"] and not r["within_outer_layer"]
+    assert any("not confined to the outer layer" in n for n in r["notes"])
+    # removed = int_0.99^1 (-10 - (-10 (1-x)/0.01)) = -0.1 + 0.05 = -0.05; dp = 2 * -0.05
+    assert r["integral_removed_in_layer"] == pytest.approx(-0.05, rel=1e-12)
+    assert r["dp_inside"] == pytest.approx(-0.1, rel=1e-12)
+    e = E.apply_edge_taper(x, y, p, start=0.99, domain_edge=0.99, psi_scale=2.0)
+    np.testing.assert_array_equal(e.pprime, t.pprime)
+    for k in ("integral_removed_in_layer", "pax_ratio", "dp_inside", "dp_axis_rel"):
+        assert e.record[k] == pytest.approx(r[k], rel=1e-14), k
+    with pytest.raises(ValueError):
+        E.apply_edge_taper(x, y, variant="last_node", start=0.995)
+
+
+def test_last_node_strength_depends_on_grid_spacing():
+    removed = []
+    for n in (65, 129, 257):
+        x = np.linspace(0.0, 1.0, n)
+        removed.append(E.apply_edge_taper(x, -np.ones(n), variant="last_node").record["integral_removed_in_layer"])
+    # constant P' = -1: removed = -(last interval)/2
+    np.testing.assert_allclose(removed, [-0.5 / 64, -0.5 / 128, -0.5 / 256], rtol=1e-12)
+
+
+# ------------------------------------------------------------------ variants: pressure_conserving
+def _flat_case(n=201):
+    # P' = -10 everywhere, psi_scale = 1, p = 1 + 10 (1 - x): p_sep = 1
+    x = np.linspace(0.0, 1.0, n)
+    y = np.full(n, -10.0)
+    return x, y, 1.0 + 10.0 * (1.0 - x)
+
+
+@pytest.mark.parametrize("w", [0.005, 0.01, 0.02])
+def test_pressure_conserving_hat_and_conservation(w):
+    x, y, p = _flat_case()
+    t = E.apply_edge_taper(x, y, p, start=0.995, psi_scale=1.0, variant="pressure_conserving", band_width=w,
+                           volume=10.0 * x, ip=1.0, r_avg=np.full_like(x, 2.0), psi_pedestal_top=0.9)
+    r, b = t.record, t.record["band"]
+    # R = int_0.995^1 (-10 + 10 (1-x)/0.005) = -0.025; hat peak A = 2R/w; integral added = R
+    assert r["integral_removed_in_layer"] == pytest.approx(-0.025, rel=1e-9)
+    assert b["hat_peak"] == pytest.approx(-0.05 / w, rel=1e-9)
+    assert b["integral_added_in_band"] == pytest.approx(-0.025, rel=1e-9)
+    assert b["hat_peak_over_max_abs_pprime_in_band"] == pytest.approx((0.05 / w) / 10.0, rel=1e-9)
+    assert not b["pprime_changes_sign_in_band"]
+    b0, bm = 0.995 - w, 0.995 - w / 2
+    assert np.isclose(t.psi_n, b0).any() and np.isclose(t.psi_n, bm).any()
+    np.testing.assert_allclose(np.interp(bm, t.psi_n, t.pprime), -10.0 - 0.05 / w, rtol=1e-9)
+    # untouched inside the band, bit for bit; continuous single-signed P'
+    k = r["interior_knots_untouched"]
+    assert t.pprime[:k].tobytes() == y[:k].tobytes() and np.all(t.pprime[:-1] < 0) and t.pprime[-1] == 0.0
+    # pressure inside the band, on axis and at psi_N = 1 unchanged (to round-off); pax_ratio 1
+    assert abs(r["dp_inside"]) < 1e-12 and abs(r["dp_pedestal_top_rel"]) < 1e-12
+    assert t.pressure[-1] == p[-1] and abs(r["pax_ratio"] - 1.0) < 1e-12
+    np.testing.assert_allclose(t.pressure[:k], p[:k], rtol=0, atol=1e-12)
+    # W changes only through the band + layer: 1.5 * 10 * (R w/2 + int over the layer)
+    #   = 1.5 * 10 * (-0.0125 w - 8.333e-5); the trapezoid on the knots approximates the
+    #   piecewise-quadratic pressure change, hence the 25 % comparison (bookkeeping, not physics)
+    expect = 15.0 * (-0.0125 * w - (5 * 0.005 ** 2 - 1000 * 0.005 ** 3 / 3))
+    assert r["stored_energy_change"] == pytest.approx(expect, rel=0.25)
+    # <R> P' change: largest at psi_N = 1 (2 * 10), before |<R> P'| max 2 * 10
+    assert r["edge_current"]["max_abs_change"] == pytest.approx(20.0, rel=1e-12)
+    assert r["band"]["band_width_source"] == "given"
+
+
+def test_pressure_conserving_default_band_and_spec():
+    x, y, p = _flat_case()
+    t = E.apply_edge_taper(x, y, p, variant="pressure_conserving")
+    assert t.record["band"]["band_width"] == E.BAND_WIDTH_DEFAULT
+    assert t.record["band"]["band_width_source"].startswith("default")
+    s = E.EdgeTaperSpec(variant="pressure_conserving", band_width=0.01)
+    assert s.as_dict()["band_width"] == 0.01 and s.kwargs()["band_width"] == 0.01
+    assert E.EdgeTaperSpec(variant="last_node").as_dict()["start"].startswith("grid")
+    with pytest.raises(ValueError):
+        E.EdgeTaperSpec(band_width=0.01)                      # band only for pressure_conserving
+    with pytest.raises(ValueError):
+        E.EdgeTaperSpec(variant="bogus")
+    with pytest.raises(ValueError):
+        E.apply_edge_taper(x, y, variant="pressure_conserving", band_width=0.0)
+
+
+def test_policy_passes_the_variant_through():
+    f = FakeSolve((False, CYCLE), (True, CONV))
+    spec = E.EdgeTaperSpec(variant="pressure_conserving", band_width=0.01)
+    o = E.solve_with_edge_taper(f, E.EdgeTaperSetting("auto", spec))
+    assert f.calls[1] == spec and o.record["attempts"][1]["taper"]["variant"] == "pressure_conserving"

@@ -42,13 +42,18 @@ class FakeFM:
         return {"rms_m": 0.0}
 
 
-def _install(monkeypatch, fm, fail_calls=()):
-    calls = {"consistent": 0}
+def _install(monkeypatch, fm, fail_calls=(), fail_trials=()):
+    """``fail_calls``: consistent-solve call numbers that fail; ``fail_trials``: LM trial numbers
+    (1-based, counting only solves labeled as trials) that fail."""
+    calls = {"consistent": 0, "trial": 0}
 
-    def consistent(fm_, kin, src, params, cfg, start, z0, label, initial_profiles=None):
+    def consistent(fm_, kin, src, params, cfg, start, z0, label, initial_profiles=None, state_fn=None):
         calls["consistent"] += 1
         fm_.n_solves += 3
         ok = calls["consistent"] not in fail_calls
+        if ":trial" in label:
+            calls["trial"] += 1
+            ok = ok and calls["trial"] not in fail_trials
         if ok:
             fm_.theta_state = params["log_strength"]
         solve = SimpleNamespace(stats={"q_0": 1.0}, status="converged" if ok else "failed",
@@ -95,11 +100,10 @@ def test_lm_reaches_the_linear_map_point_and_laplace_covariance(monkeypatch):
     cfg = CM.CurrentModelSettings(r0=1.0)
     out = FIT.reconstruct(fm, kin, src, cfg, FIT.FitSettings(), params0=dict(log_strength=0.5, f=0.37))
     th, cov = _expected(FIT.PARAMETERS["log_strength"]["prior"][1])
-    assert out.status.startswith("converged"), out.status
-    # forward differences of a linear model are exact; LM stops once a step is below
-    # step_tol_sigma (0.1) posterior sigmas, so the answer is the MAP point to that accuracy
-    tol = FIT.FitSettings().step_tol_sigma * np.sqrt(cov[0, 0])
-    assert abs(out.theta[0] - th[0]) < tol
+    assert out.status == "converged", out.status
+    # forward differences of a linear model are exact, and the stopping tests are made on the
+    # UNDAMPED Gauss-Newton step at a fresh center: the MAP point is reached to round-off
+    assert abs(out.theta[0] - th[0]) < 1e-6
     assert out.covariance[0, 0] == pytest.approx(cov[0, 0], rel=1e-9)
     assert out.sigma[0] == pytest.approx(np.sqrt(cov[0, 0]), rel=1e-9)
     assert out.record["n_solves"] == fm.n_solves
@@ -107,16 +111,18 @@ def test_lm_reaches_the_linear_map_point_and_laplace_covariance(monkeypatch):
 
 def test_failed_trial_is_a_rejected_step(monkeypatch):
     fm = FakeFM()
-    calls = _install(monkeypatch, fm, fail_calls=(2,))       # call 1 = center, call 2 = first trial
+    calls = _install(monkeypatch, fm, fail_trials=(1,))      # the first LM trial fails
     kin, src = _kin()
     out = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=1.0), FIT.FitSettings(),
                           params0=dict(log_strength=0.5, f=0.37))
     trials = out.record["iterations"][0]["trials"]
     assert trials[0]["status"] == "solve_failed" and trials[0]["chi2"] is None
     assert trials[1]["status"] == "consistent"
-    assert trials[1]["lam"] == pytest.approx(10.0 * trials[0]["lam"])     # damping raised after the failure
+    # damping raised after the failure (by x10 per rejection; a capped step that does not change with
+    # lambda is not re-solved, so the next solved trial may sit several factors of 10 higher)
+    assert trials[1]["lam"] >= 10.0 * trials[0]["lam"] * (1 - 1e-12)
     th, cov = _expected(FIT.PARAMETERS["log_strength"]["prior"][1])
-    assert abs(out.theta[0] - th[0]) < FIT.FitSettings().step_tol_sigma * np.sqrt(cov[0, 0])
+    assert abs(out.theta[0] - th[0]) < 1e-6
     assert calls["consistent"] >= 3
 
 
@@ -128,7 +134,7 @@ def test_failed_center_and_too_many_failures(monkeypatch):
                           params0=dict(log_strength=0.5))
     assert out.status == "failed_initial_consistency" and np.all(np.isnan(out.sigma))
     fm = FakeFM()
-    _install(monkeypatch, fm, fail_calls=(2, 3, 4, 5))
+    _install(monkeypatch, fm, fail_trials=(1, 2, 3, 4))
     out = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=1.0), FIT.FitSettings(),
                           params0=dict(log_strength=0.5))
     assert out.status == "failed_trials"
@@ -146,8 +152,8 @@ def test_settings_record_is_complete(monkeypatch):
                 "forward", "n_solves", "wall_s", "status", "final_jacobian", "center0", "constraints",
                 "chi2_detail", "kinetics_source", "sources_source", "sources_convention"):
         assert key in rec, key
-    for key in ("max_iter", "lm_lambda0", "chi2_rel_tol", "chi2_abs_tol", "step_tol_sigma", "step_noise_factor",
-                "fit_groups", "free", "priors", "bounds"):
+    for key in ("max_iter", "lm_lambda0", "chi2_rel_tol", "grad_tol_chi2", "step_tol_sigma", "step_noise_factor",
+                "noise_factor", "lm_lambda_max", "taper_restart", "fit_groups", "free", "priors", "bounds"):
         assert key in rec["settings"], key
     spec = rec["specs"]["log_strength"]
     assert spec["prior"] == FIT.PARAMETERS["log_strength"]["prior"] and len(spec["bounds"]) == 2

@@ -1,4 +1,4 @@
-r"""The kinetic reconstruction P1: a MAP fit over a small set of physical parameters.
+r"""The kinetic reconstruction: a MAP fit over a small set of physical parameters.
 
 Model: :mod:`.current_model` (ohmic + bootstrap + driven current with the sawtooth periodic state,
 thermal + fast-ion pressure) iterated to consistency with the anchored forward solve
@@ -17,7 +17,7 @@ plus one prior row ``(theta_j - mu_j)/sigma_j`` per free parameter with a Gaussi
 is never a weight.  The objective is ``chi^2 = sum r^2`` (diagonal Gaussian likelihood
 + Gaussian priors); the MAP point is found by Levenberg-Marquardt with a forward-difference Jacobian.
 
-Parameters (:data:`PARAMETERS`; default free set: ``log_strength`` only):
+Parameters (:data:`PARAMETERS`; default free set: ``log_strength`` and the ``a_corr`` current corrections):
 
 =================  ==========================================  ======================================
 name               meaning                                     default prior / bounds
@@ -28,37 +28,52 @@ name               meaning                                     default prior / b
 ``s_pfast``        fast-ion pressure scale                     N(1, 0.15); bounds 0.2..3
 ``s_cd``           driven-current scale                        N(1, 0.20); bounds 0..3
 ``s_bs``           bootstrap multiplier                        N(1, 0.5); bounds 0..3
-``a_corr_k``       model-discrepancy current amplitude k       N(0, 0.02) (fraction of Ip); +-0.2
-                   (Gaussian shapes in rho, ``current_model``)
+``a_corr_k``       current-correction amplitude k (fraction    N(0, 0.02) (fraction of Ip); +-0.2
+                   of Ip; Gaussians on rho_tor,norm,
+                   ``current_model.correction_shapes``)
 =================  ==========================================  ======================================
 
 Every prior, bound, step rule and stopping criterion is an explicit setting recorded in the
-result (they are decisions for the user; the defaults are this package's proposals:
-A5, A9).
+result (they are decisions for the user; the defaults are this package's proposals).
 
 Algorithm (Levenberg-Marquardt, H. B. Nielsen's damping update with the diagonal scaling of
 D. W. Marquardt, J. SIAM 11, 431 (1963)):
 
-1. center = consistent solve at the initial parameters (from the supplied starting state);
-2. measured re-solve noise: one lagged solve at the center parameters gives the residual change a
-   column sees with no parameter change (``noise``);
-3. Jacobian columns by forward differences, each a LAGGED solve (geometry, conductivity and
-   bootstrap from the center) warm from the center; the step of parameter j starts at
-   ``step0_j`` and is enlarged x4 (up to 3 times) until ``|dr| >= step_noise_factor * |noise|``
-   (default 20, a rule of thumb from development checks); a step that would cross a bound is taken backwards;
-4. LM step ``(J^T J + lambda diag(J^T J)) delta = -J^T r``, shrunk as a whole so that no component
-   exceeds its trust-region cap ``max_step`` (default 0.5 in ln strength, 0.1 in f and the scales,
-   0.2 in s_bs, 0.01 in a_corr), clipped to the bounds; the trial is a
-   FULL consistent solve warm from the center; a failed trial (any solve not converged or not
-   verified, a model failure) is a rejected step (lambda x 10), never an accepted state;
-5. accept if chi^2 decreases; stop when an accepted step is below ``step_tol_sigma`` posterior
-   sigmas in every parameter, or the chi^2 decrease is below ``max(chi2_rel_tol chi^2,
-   chi2_abs_tol)``, or after ``max_iter`` iterations; the column noise of step 2 is measured once
-   (``noise_once``);
+1. center = consistent solve at the initial parameters (from the supplied starting state); the
+   channel set of the fit is fixed there (a later state that cannot model one of these channels is
+   a failed trial, never a silently smaller chi^2);
+2. Jacobian columns by forward differences, each a FULL CONSISTENT solve warm from the center (no
+   lagged inputs); the step of parameter j starts at ``step0_j`` and is enlarged x``step_growth``
+   (up to ``max_step_growths`` times) until ``|dr| >= step_noise_factor * |noise|``, where ``noise``
+   is the residual change of a consistent re-solve of the first center's parameters from another
+   state (measured once, with its chi^2 noise ``noise_chi2``); a column still below that is flagged
+   "no information"; a column whose solve fails is retried once with the opposite step
+   (``column_retry_opposite``), otherwise the fit stops as ``jacobian_failed``;
+3. stopping tests at the center, with that fresh Jacobian (:func:`stopping_tests`): converged when
+   (a) the UNDAMPED Gauss-Newton step is below ``step_tol_sigma`` posterior sigmas in every
+   parameter, or (b) the Newton decrement ``g^T A^-1 g`` (the predicted chi^2 decrease of that step)
+   is below ``max(grad_tol_chi2, noise_factor * noise_chi2)``, or (c) the last ``chi2_rel_window``
+   accepted steps each decreased chi^2 by less than ``chi2_rel_tol`` (relative) while the GN step is
+   below 1 sigma.  A single damped step is never convergence: the tests are always made at a new
+   center with a new Jacobian.  When a test holds, the undamped Gauss-Newton step it computed is
+   taken as a last trial (``final_gn_step``) and kept if chi^2 does not rise by more than the noise;
+4. LM step ``(J^T J + lambda diag(J^T J)) delta = -J^T r`` shrunk as a whole to the trust caps
+   ``max_step`` and clipped to the bounds; when the cap binds and the step does not change with
+   lambda, lambda is raised without a solve; the trial is a FULL consistent solve warm from the
+   center; a failed trial (any solve not converged or not verified, a model failure, a q-consistency
+   failure, a changed channel set) is a rejected step (lambda x ``lm_up``);
+5. a trial is accepted only if it lowers chi^2 by more than ``noise_factor * noise_chi2``; when no
+   trial does up to ``lm_lambda_max`` the fit stops as ``stalled_no_significant_descent`` (NOT
+   converged; the stopping-test values are recorded);
 6. final: the accepted center is consistent and verified by construction; the Laplace covariance
-   ``(J^T J)^-1`` (with prior rows) uses a Jacobian evaluated at the final center.
+   ``(J_a^T J_a)^-1`` (data and prior rows) uses a fresh consistent-solve Jacobian at that center.
 
-The number of forward solves, wall time and every iteration are recorded.
+Statuses: ``converged``, ``stalled_no_significant_descent``, ``max_iter``, ``failed_trials``,
+``jacobian_failed``, ``failed_initial_consistency``, ``no_free_parameters``.  The number of forward
+solves, wall time, every trial (predicted and realized chi^2 change, gain ratio) are recorded.
+
+Edge taper: the whole-reconstruction tapered restart after a limit cycle in the first center is a
+NON-DEFAULT option (``taper_restart=False`` by default); without it such a center is a failure.
 """
 
 import math
@@ -99,18 +114,20 @@ PARAMETERS = {
 @dataclass
 class FitSettings:
     """Free parameters, priors and the algorithm's settings (all recorded; all decisions)."""
-    free: Sequence[str] = ("log_strength",)
+    free: Sequence[str] = ("log_strength", "a_corr")
     priors: Dict[str, Any] = field(default_factory=dict)        # overrides: name -> (mean, sigma)
     bounds: Dict[str, Any] = field(default_factory=dict)        # overrides: name -> (lo, hi)
-    max_iter: int = 10
+    max_iter: int = 12
     lm_lambda0: float = 1.0e-2
     lm_up: float = 10.0
     lm_down: float = 0.3
-    chi2_rel_tol: float = 1.0e-3
-    chi2_abs_tol: float = 1.0e-2
-    step_tol_sigma: float = 0.1
-    noise_once: bool = True
-    reuse_final_jacobian: bool = True
+    lm_lambda_min: float = 1.0e-6
+    lm_lambda_max: float = 1.0e6
+    step_tol_sigma: float = 0.1          # (a) undamped GN step below this many posterior sigmas
+    grad_tol_chi2: float = 1.0e-2        # (b) Newton decrement floor (chi^2 units)
+    noise_factor: float = 1.0            # acceptance / (b): multiples of the measured chi^2 noise
+    chi2_rel_tol: float = 1.0e-4         # (c) relative chi^2 decrease per accepted step
+    chi2_rel_window: int = 2             # (c) number of consecutive accepted steps
     step_noise_factor: float = 20.0
     step_growth: float = 4.0
     max_step_growths: int = 3
@@ -119,6 +136,9 @@ class FitSettings:
     max_step: Dict[str, float] = field(default_factory=lambda: dict(log_strength=0.5, f=0.1, s_pfast=0.1, s_cd=0.1,
                                                                     s_bs=0.2, a_corr=0.01))
     fitted_coil_role: str = "fitted"
+    column_retry_opposite: bool = True   # a failed column solve is retried once with the opposite step
+    final_gn_step: bool = True           # take the undamped GN step of the converged test (accepted within noise)
+    taper_restart: bool = False          # NON-DEFAULT: restart the whole reconstruction tapered (module docstring)
 
     def as_dict(self):
         return asdict(self)
@@ -255,20 +275,71 @@ class FitResult:
     record: Dict[str, Any]
 
 
-def _consistent(fm, kin, src, params, cfg, start, z0, label, initial_profiles=None):
+def _consistent(fm, kin, src, params, cfg, start, z0, label, initial_profiles=None, state_fn=None):
     return _cm.consistent_solve(fm, kin, src, params, cfg, start=start, z0=z0, label=label,
-                                initial_profiles=initial_profiles)
+                                initial_profiles=initial_profiles, state_fn=state_fn)
 
 
-def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, initial_profiles=None, label="p1"):
+def _same_index(a, b):
+    return len(a) == len(b) and all(x == y for x, y in zip(a, b))
+
+
+def lm_step(A, g, lam, cap):
+    """Damped Gauss-Newton step ``(A + lam diag(A)) delta = -g`` shrunk as a whole to the trust caps.
+    Returns ``(delta, capped)``."""
+    Ad = A + lam * np.diag(np.maximum(np.diag(A), 1e-12))
+    delta = -np.linalg.solve(Ad, g)
+    scale = float(np.max(np.abs(delta) / cap)) if np.any(delta) else 0.0
+    if scale > 1.0:
+        return delta / scale, True
+    return delta, False
+
+
+def stopping_tests(A, g, settings, noise_chi2, history):
+    """The stated stopping criteria at a center with a FRESH Jacobian (module docstring).
+
+    ``A = J_a^T J_a`` (data and prior rows), ``g = J_a^T r``.  Returns a dict with the undamped
+    Gauss-Newton step in posterior sigmas, the Newton decrement ``g^T A^-1 g`` (the predicted chi^2
+    decrease of that step), the last relative chi^2 decreases, and which criterion (if any) holds."""
+    try:
+        Ainv = np.linalg.inv(A)
+        dgn = -Ainv @ g
+        post = np.sqrt(np.maximum(np.diag(Ainv), 0.0))
+        step_sig = np.abs(dgn) / np.where(post > 0, post, np.inf)
+        dec = float(g @ Ainv @ g)
+    except np.linalg.LinAlgError:
+        return dict(converged=False, reason="J^T J singular")
+    grad_floor = max(settings.grad_tol_chi2, settings.noise_factor * noise_chi2)
+    rel = [h for h in history[-settings.chi2_rel_window:]]
+    out = dict(gn_step_sigma=step_sig.tolist(), newton_decrement=dec, grad_floor=grad_floor,
+               last_rel_decreases=rel, noise_chi2=noise_chi2)
+    if np.all(step_sig < settings.step_tol_sigma):
+        out.update(converged=True, criterion=f"undamped Gauss-Newton step < {settings.step_tol_sigma} posterior "
+                                             "sigma in every parameter")
+    elif dec <= grad_floor:
+        out.update(converged=True, criterion=f"Newton decrement g^T A^-1 g = {dec:.3g} <= {grad_floor:.3g} "
+                                             f"(max(grad_tol_chi2, noise_factor x chi^2 noise))")
+    elif (len(rel) >= settings.chi2_rel_window and all(r < settings.chi2_rel_tol for r in rel)
+          and np.all(step_sig < 1.0)):
+        out.update(converged=True, criterion=f"{settings.chi2_rel_window} accepted steps each decreased chi^2 by "
+                                             f"< {settings.chi2_rel_tol:g} (relative) and the GN step is < 1 sigma")
+    else:
+        out.update(converged=False)
+    return out
+
+
+def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, initial_profiles=None, label="fit",
+                state_fn=None):
     """MAP reconstruction (module docstring).
 
     ``fm``: :class:`.forward.ForwardModel` in reconstruction mode (with the measurement set);
-    ``kin``/``src``: :class:`.current_model.KineticProfiles` / ``SourceProfiles``;
+    ``kin``/``src``: kinetic inputs (:class:`.kinetics.KineticInputs` or
+    :class:`.current_model.KineticProfiles`) and :class:`.current_model.SourceProfiles`;
     ``cfg``: :class:`.current_model.CurrentModelSettings`; ``params0``: starting parameters
     (default: the prior means of the free parameters and :data:`current_model.DEFAULT_PARAMS`
     otherwise); ``start``: starting state (snapshot or psi on nodes); ``initial_profiles``:
-    ``(x, jphi, p)`` for the first solve when ``start`` is only a guess.
+    ``(x, jphi, p)`` for the first solve when ``start`` is only a guess; ``state_fn``: a supplied
+    current state per pass (time-dependent path; the corrections then act on it).
     """
     t_all = time.perf_counter()
     settings = settings or FitSettings()
@@ -294,14 +365,17 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
     lo = np.array([_spec(n, settings)["bounds"][0] for n in names])
     hi = np.array([_spec(n, settings)["bounds"][1] for n in names])
     th = np.clip(th, lo, hi)
+    cap = np.array([settings.max_step["a_corr" if n.startswith("a_corr_") else n] for n in names])
     n0 = fm.n_solves
     log = []
     rec = dict(label=label, free=names, specs={n: _spec(n, settings) for n in names}, settings=settings.as_dict(),
                model_settings=cfg.as_dict(), fit_groups=groups, excluded_groups=excluded, iterations=log,
-               forward=None, kinetics_source=kin.source, sources_source=src.source,
-               sources_convention=dict(src.convention))
+               forward=None, kinetics_source=getattr(kin, "source", ""), sources_source=src.source,
+               sources_convention=dict(src.convention),
+               kinetics_provenance=dict(getattr(kin, "provenance", {}) or {}),
+               kinetics_record=dict(getattr(kin, "record", {}) or {}))
 
-    def finish(status, center, J=None, extra=None):
+    def finish(status, center, J=None, extra=None, jinfo=None):
         rec["status"] = status
         rec["n_solves"] = fm.n_solves - n0
         rec["wall_s"] = round(time.perf_counter() - t_all, 2)
@@ -313,30 +387,41 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
         chi = {}
         if center is not None:
             chi = center["chi2"]
-            if J is not None:
+            if J is not None and len(names):
                 Ja = np.vstack((J, _prior_jac(names, settings)))
                 try:
                     cov = np.linalg.inv(Ja.T @ Ja)
                     sig = np.sqrt(np.diag(cov))
                 except np.linalg.LinAlgError:
                     rec["covariance_note"] = "J^T J singular: covariance not available"
-        return FitResult(status=status, params=_to_params(th, names, base), free=names, theta=th.copy(), sigma=sig,
+                if jinfo is not None:
+                    info_flags = {}
+                    for col in jinfo.get("columns", []):
+                        if col.get("noise_limited"):
+                            info_flags[col["name"]] = "no information: column at the noise floor after the step growths"
+                    rec["covariance_column_flags"] = info_flags
+        return FitResult(status=status, params=_to_params(center["theta"] if center is not None else th, names, base),
+                         free=names, theta=(center["theta"] if center is not None else th).copy(), sigma=sig,
                          covariance=cov, chi2=chi, record=rec)
 
-    # ---- 1. center
-    def evaluate(theta, start_state, z0, lab, init_prof=None):
+    def evaluate(theta, start_state, z0, lab, init_prof=None, ref_index=None):
         p = _to_params(theta, names, base)
-        res = _consistent(fm, kin, src, p, cfg, start_state, z0, lab, init_prof)
+        res = _consistent(fm, kin, src, p, cfg, start_state, z0, lab, init_prof, state_fn)
         if not res.converged:
             return None, res
         r, idx, tab = residual_vector(fm, ms, groups, settings, coil_roles)
+        if ref_index is not None and not _same_index(idx, ref_index):
+            res = _cm.ConsistentResult(False, "channel_set_changed", res.passes, res.assembly, res.lag, res.solve,
+                                       dict(res.record, reason="a fit channel became unmodelable (the channel set "
+                                                               "is fixed at the first center)"), res.wall_s)
+            return None, res
         rp, lp = _prior_rows(theta, names, settings)
         full = np.concatenate((r, rp))
         all_groups = [g for g in ms.groups if g in ("flux_loop", "bpol_probe", "ip", "pf_current", "mse")]
         all_tab = score(fm.gs, ms, groups=all_groups)
         summ = {k: dict(chi2=v[0], n=v[1], chi2_per_n=v[2]) for k, v in chi2_summary(all_tab).items()}
         fit_chi = {g: float(np.sum(r[[i for i, (gg, _) in enumerate(idx) if gg == g]] ** 2)) for g in groups}
-        c = dict(theta=np.array(theta, float), params=p, res=res, r=full, r_data=r, index=idx + lp,
+        c = dict(theta=np.array(theta, float), params=p, res=res, r=full, r_data=r, index=idx, prior_index=lp,
                  chi2=dict(objective=float(full @ full), data=float(r @ r), prior=float(rp @ rp), fit_groups=fit_chi,
                            n_data=int(r.size), n_params=len(names), dof=int(r.size) - len(names), scored_all=summ,
                            scored_all_dof=dict(n_channels=summ["total"]["n"], n_params=len(names),
@@ -357,14 +442,14 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
     pc_init = fm.probe_correction.copy()
     center, res0 = evaluate(th, None, None, f"{label}:center0", initial_profiles)
     rec["center0"] = dict(status=res0.status, passes=res0.passes, wall_s=res0.wall_s,
-                          passes_record=res0.record.get("passes"), reason=res0.record.get("reason"))
-    if center is None and res0.status == "limit_cycle_untapered_lock" and \
-            fm.case.setting.mode.value == "auto" and not fm.taper_restarts:
-        # edge-taper policy 'auto': a limit cycle was detected in an untapered solve of this
-        # reconstruction before it had a consistent state -> the taper is applied to the WHOLE
-        # reconstruction (uniform within the case): restart from the starting state, tapered
+                          passes_record=res0.record.get("passes"), reason=res0.record.get("reason"),
+                          q_check=res0.record.get("q_check"))
+    if (center is None and res0.status == "limit_cycle_untapered_lock" and settings.taper_restart
+            and fm.case.setting.mode.value == "auto" and not fm.taper_restarts):
+        # NON-DEFAULT policy option (taper_restart=True): a limit cycle in an untapered solve of this
+        # reconstruction before it had a consistent state restarts the WHOLE reconstruction tapered
         fm.lock_tapered(f"limit cycle in {res0.record.get('passes', [{}])[-1].get('k')} pass of {label}:center0 "
-                        "(untapered); reconstruction restarted with the edge taper")
+                        "(untapered); reconstruction restarted with the edge taper (taper_restart=True)")
         fm.restore(snap_init)
         fm.probe_correction = pc_init.copy()
         center, res0 = evaluate(th, None, None, f"{label}:center0:tapered", initial_profiles)
@@ -373,56 +458,75 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
                                               reason=res0.record.get("reason"))
     if center is None:
         return finish("failed_initial_consistency", None)
+    ref_index = center["index"]
 
     def restore_center(c):
         fm.restore(c["snap"])
         fm.probe_correction = c["probe_correction"].copy()
 
-    # ---- 2. noise of a column evaluation (lagged solve, no parameter change)
-    def column(c, theta, lab):
-        restore_center(c)
-        p = _to_params(theta, names, base)
-        res, asm, why = _cm.lagged_solve(fm, c["res"].lag, kin, src, p, cfg, z0=c["z0"], label=lab)
-        if res is None or not res.converged:
-            restore_center(c)
-            return None, why
-        r, idx, _ = residual_vector(fm, ms, groups, settings, coil_roles)
-        restore_center(c)
-        if [i for i in idx] != [i for i in c["index"][:len(idx)]]:
-            return None, "channel set changed between the center and the column (a channel became unmodelable)"
-        return r, "ok"
+    if not names:
+        restore_center(center)
+        extra = _final_extra(center, fm, ms)
+        out = finish("no_free_parameters", center, None, extra)
+        out.record["center"] = center
+        return out
 
-    noise_state = {}
+    noise = dict(chi2=None, r=None, norm=None)
+
+    def column_solve(c, theta, lab):
+        """Consistent solve at theta warm from the center; returns the data residuals or None."""
+        restore_center(c)
+        trial, tres = evaluate(theta, c["snap"], c["z0"], lab, ref_index=ref_index)
+        state_after = fm.snapshot()
+        restore_center(c)
+        if trial is None:
+            return None, tres.status, None
+        return trial["r_data"], "ok", (state_after, trial)
+
+    def measure_noise(c, from_state):
+        """chi^2 and residual noise of a consistent re-solve: the center's parameters re-solved from a
+        different (nearby) starting state."""
+        trial, tres = evaluate(c["theta"], from_state, c["z0"], f"{label}:noise", ref_index=ref_index)
+        restore_center(c)
+        if trial is None:
+            return dict(status=tres.status)
+        dr = trial["r_data"] - c["r_data"]
+        return dict(status="ok", chi2=abs(trial["chi2"]["objective"] - c["chi2"]["objective"]), r=dr,
+                    norm=float(np.linalg.norm(dr)))
 
     def jacobian(c, lab):
-        if settings.noise_once and "nn" in noise_state:
-            nn, nrms = noise_state["nn"], noise_state["rms"]
-            r0n = c["r_data"]
-            noise_src = "measured once at the first center (noise_once)"
-        else:
-            r0n, why = column(c, c["theta"], f"{lab}:noise")
-            if r0n is None:
-                return None, dict(reason=f"noise evaluation failed: {why}")
-            noise = r0n - c["r_data"]
-            nn = float(np.linalg.norm(noise))
-            nrms = nn / max(1, noise.size) ** 0.5
-            noise_state.update(nn=nn, rms=nrms)
-            noise_src = "lagged solve at the center parameters (no parameter change)"
         J = np.zeros((c["r_data"].size, len(names)))
         cols = []
         for j, n in enumerate(names):
             h = _spec(n, settings)["step0"]
             info = dict(name=n, attempts=[])
-            for g in range(settings.max_step_growths + 1):
+            for gi in range(settings.max_step_growths + 1):
                 tj = c["theta"].copy()
                 direction = 1.0 if tj[j] + h <= hi[j] else -1.0
                 tj[j] += direction * h
-                rj, why = column(c, tj, f"{lab}:col{j}")
+                rj, why, extra_state = column_solve(c, tj, f"{lab}:col{j}")
+                if rj is None and settings.column_retry_opposite and tj[j] - 2 * direction * h >= lo[j] \
+                        and tj[j] - 2 * direction * h <= hi[j]:
+                    # the column solve failed: one retry with the opposite step (a backward difference); the
+                    # failure is recorded
+                    info["attempts"].append(dict(h=direction * h, status=why, retried_opposite=True))
+                    direction = -direction
+                    tj = c["theta"].copy()
+                    tj[j] += direction * h
+                    rj, why, extra_state = column_solve(c, tj, f"{lab}:col{j}:opp")
                 if rj is None:
-                    info["attempts"].append(dict(h=h, status=why))
+                    info["attempts"].append(dict(h=direction * h, status=why))
                     break
-                dr = rj - r0n
-                ok = np.linalg.norm(dr) >= settings.step_noise_factor * nn
+                if noise["norm"] is None:
+                    m = measure_noise(c, extra_state[0])
+                    rec["noise"] = dict(status=m["status"], chi2=m.get("chi2"), norm=m.get("norm"),
+                                        method="consistent re-solve of the first center's parameters from the "
+                                               "state of its first Jacobian column")
+                    if m["status"] != "ok":
+                        return None, dict(reason=f"noise measurement failed: {m['status']}", columns=cols)
+                    noise.update(chi2=m["chi2"], r=m["r"], norm=m["norm"])
+                dr = rj - c["r_data"]
+                ok = np.linalg.norm(dr) >= settings.step_noise_factor * noise["norm"]
                 info["attempts"].append(dict(h=direction * h, norm_dr=float(np.linalg.norm(dr)), ok=bool(ok)))
                 J[:, j] = dr / (direction * h)
                 if ok:
@@ -433,13 +537,17 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
             cols.append(info)
             if info["attempts"][-1].get("status"):
                 return None, dict(reason=f"column {n} failed: {info['attempts'][-1]['status']}", columns=cols)
-        return J, dict(noise_norm=nn, noise_rms_per_channel=nrms, noise_source=noise_src, columns=cols)
+        return J, dict(noise_norm=noise["norm"], noise_chi2=noise["chi2"],
+                       noise_source="consistent re-solve (measured once)", columns=cols,
+                       column_kind="consistent solves (no lagged inputs)")
 
     lam = settings.lm_lambda0
-    last_step_small = False
     fails = 0
     J = None
+    jinfo = None
     status = "max_iter"
+    rel_hist = []
+    stop = None
     for it in range(settings.max_iter):
         J, jinfo = jacobian(center, f"{label}:it{it}")
         entry = dict(it=it, theta=center["theta"].tolist(), chi2=center["chi2"]["objective"], jacobian=jinfo)
@@ -450,25 +558,55 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
         Ja = np.vstack((J, _prior_jac(names, settings)))
         g = Ja.T @ center["r"]
         A = Ja.T @ Ja
-        accepted = False
-        while not accepted:
-            Ad = A + lam * np.diag(np.maximum(np.diag(A), 1e-12))
+        stop = stopping_tests(A, g, settings, noise["chi2"] or 0.0, rel_hist)
+        entry["stopping_tests"] = stop
+        if stop.get("converged"):
+            status = "converged"
+            entry["stop_rule"] = stop["criterion"]
+            # final undamped Gauss-Newton step (the stopping test computed it): taken when it does not
+            # raise chi^2 by more than the measured noise; the covariance is then evaluated at the new center
             try:
-                delta = -np.linalg.solve(Ad, g)
+                dgn = -np.linalg.solve(A, g)
+            except np.linalg.LinAlgError:
+                dgn = np.zeros_like(g)
+            tt = np.clip(center["theta"] + dgn, lo, hi)
+            if settings.final_gn_step and np.any(tt != center["theta"]):
+                trial, tres = evaluate(tt, center["snap"], center["z0"], f"{label}:it{it}:final_gn",
+                                       ref_index=ref_index)
+                fin = dict(delta=(tt - center["theta"]).tolist(), status=(tres.status if trial is None else "consistent"),
+                           chi2=None if trial is None else trial["chi2"]["objective"])
+                if trial is not None and trial["chi2"]["objective"] <= center["chi2"]["objective"] + \
+                        settings.noise_factor * (noise["chi2"] or 0.0):
+                    center = trial
+                    fin["accepted"] = True
+                else:
+                    fin["accepted"] = False
+                    restore_center(center)
+                entry["final_gn_step"] = fin
+            log.append(entry)
+            break
+        accepted = False
+        last_delta = None
+        while not accepted:
+            try:
+                delta, capped = lm_step(A, g, lam, cap)
             except np.linalg.LinAlgError:
                 lam *= settings.lm_up
                 continue
-            cap = np.array([settings.max_step["a_corr" if n.startswith("a_corr_") else n] for n in names])
-            scale = float(np.max(np.abs(delta) / cap)) if np.any(delta) else 0.0
-            if scale > 1.0:
-                delta = delta / scale             # trust region: the whole step shrunk to the cap
             tt = np.clip(center["theta"] + delta, lo, hi)
-            trial, tres = evaluate(tt, center["snap"], center["z0"], f"{label}:it{it}:trial")
-            tr = dict(lam=lam, delta=(tt - center["theta"]).tolist(),
+            step = tt - center["theta"]
+            if last_delta is not None and np.allclose(step, last_delta, rtol=1e-6, atol=1e-12):
+                # the trust cap binds and the step did not change: raise lambda without a solve
+                lam *= settings.lm_up
+                if lam > settings.lm_lambda_max:
+                    break
+                continue
+            last_delta = step
+            pred = float(-(g @ step) * 2.0 - step @ A @ step)       # predicted chi^2 decrease (quadratic model)
+            trial, tres = evaluate(tt, center["snap"], center["z0"], f"{label}:it{it}:trial", ref_index=ref_index)
+            tr = dict(lam=lam, delta=step.tolist(), capped=bool(capped), predicted_dchi2=pred,
                       status=(tres.status if trial is None else "consistent"), passes=tres.passes,
-                      chi2=(None if trial is None else trial["chi2"]["objective"]), wall_s=tres.wall_s,
-                      pass_walls=[(p.get("geometry_wall_s"), p.get("assembly_wall_s"), p.get("solve_wall_s"))
-                                  for p in tres.record.get("passes", [])])
+                      chi2=(None if trial is None else trial["chi2"]["objective"]), wall_s=tres.wall_s)
             entry.setdefault("trials", []).append(tr)
             if trial is None:
                 fails += 1
@@ -476,59 +614,54 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
                 restore_center(center)
                 if fails >= settings.max_failed_trials:
                     log.append(entry)
-                    return finish("failed_trials", center, J)
+                    return finish("failed_trials", center, J, jinfo=jinfo)
                 continue
-            if trial["chi2"]["objective"] < center["chi2"]["objective"]:
-                dchi = center["chi2"]["objective"] - trial["chi2"]["objective"]
-                try:
-                    post = np.sqrt(np.diag(np.linalg.inv(A)))
-                except np.linalg.LinAlgError:
-                    post = np.full(len(names), np.inf)
-                step_sig = np.abs(tt - center["theta"]) / post
+            dchi = center["chi2"]["objective"] - trial["chi2"]["objective"]
+            tr["realized_dchi2"] = dchi
+            tr["gain_ratio"] = dchi / pred if pred > 0 else None
+            if dchi > settings.noise_factor * (noise["chi2"] or 0.0) and dchi > 0:
+                rel_hist.append(dchi / max(center["chi2"]["objective"], 1e-300))
                 center = trial
-                lam *= settings.lm_down
+                lam = max(lam * settings.lm_down, settings.lm_lambda_min)
                 accepted = True
-                entry.update(accepted=True, dchi2=dchi, step_in_sigma=step_sig.tolist())
-                small_dchi = dchi < max(settings.chi2_rel_tol * trial["chi2"]["objective"], settings.chi2_abs_tol)
-                if np.all(step_sig < settings.step_tol_sigma) or small_dchi:
-                    status = "converged"
-                    entry["stop_rule"] = ("step < %g posterior sigma" % settings.step_tol_sigma
-                                          if np.all(step_sig < settings.step_tol_sigma) else
-                                          "chi2 decrease < max(%g chi2, %g)" % (settings.chi2_rel_tol,
-                                                                                 settings.chi2_abs_tol))
-                    last_step_small = bool(np.all(step_sig < settings.step_tol_sigma))
+                entry.update(accepted=True, dchi2=dchi)
             else:
                 lam *= settings.lm_up
                 restore_center(center)
-                if lam > 1e8:
-                    entry["note"] = "lambda exceeded 1e8: no descent direction found; center is the minimum"
-                    status = "converged_no_descent"
+                if lam > settings.lm_lambda_max:
                     break
-        log.append(entry)
-        th = center["theta"].copy()
-        if status.startswith("converged"):
+        if not accepted:
+            entry["note"] = (f"no trial decreased chi^2 by more than the measured noise up to lambda = "
+                             f"{settings.lm_lambda_max:g}; stopping criteria NOT met")
+            log.append(entry)
+            status = "stalled_no_significant_descent"
             break
-    th = center["theta"].copy()
+        log.append(entry)
     restore_center(center)
-    # Laplace covariance with a Jacobian at the final center (the last one is reused when the last
-    # accepted step was below step_tol_sigma posterior sigmas: the difference is second order)
-    if settings.reuse_final_jacobian and last_step_small and J is not None:
-        Jf, jinfo = J, dict(reused="Jacobian of the last iteration (last accepted step < step_tol_sigma)")
+    # Laplace covariance from a FRESH Jacobian of consistent solves at the final, verified center (the
+    # convergence test above already computed one at this center when it stopped there)
+    if status == "converged" and J is not None and log and log[-1].get("stopping_tests") is not None \
+            and log[-1]["theta"] == center["theta"].tolist():
+        Jf, jf_info = J, dict(jinfo, reused="Jacobian computed at the final center for the stopping test")
     else:
-        Jf, jinfo = jacobian(center, f"{label}:final")
+        Jf, jf_info = jacobian(center, f"{label}:final")
     restore_center(center)
-    extra = dict(final_jacobian=jinfo, final_center=dict(passes=center["res"].passes,
-                                                         passes_record=center["res"].record.get("passes"),
-                                                         stats=center["res"].solve.stats,
-                                                         solve_status=center["res"].solve.status,
-                                                         verification=center["res"].solve.record["policy"].get(
-                                                             "verification")),
-                 assembly=dict({k: v for k, v in center["res"].assembly.items()
-                                if k not in ("orbit_z",)}),
-                 constraints=constraints_table(center["all_tab"], ms, list(center["all_tab"].model)),
-                 chi2_detail=center["chi2"], boundary=fm.boundary_distance(),
-                 excluded_channels={k: v for k, v in center["all_tab"].excluded.items()},
-                 score_notes=list(center["all_tab"].notes))
-    out = finish(status if Jf is not None else status + "_no_final_jacobian", center, Jf, extra)
+    extra = _final_extra(center, fm, ms)
+    extra["final_jacobian"] = jf_info
+    extra["final_stopping_tests"] = stop
+    out = finish(status if Jf is not None else status + "_no_final_jacobian", center, Jf, extra, jinfo=jf_info)
     out.record["center"] = center
     return out
+
+
+def _final_extra(center, fm, ms):
+    asm = center["res"].assembly
+    return dict(final_center=dict(passes=center["res"].passes, passes_record=center["res"].record.get("passes"),
+                                  stats=center["res"].solve.stats, solve_status=center["res"].solve.status,
+                                  verification=center["res"].solve.record["policy"].get("verification"),
+                                  q_check=center["res"].record.get("q_check")),
+                assembly=dict({k: v for k, v in asm.items() if k not in ("orbit_z", "state")}),
+                constraints=constraints_table(center["all_tab"], ms, list(center["all_tab"].model)),
+                chi2_detail=center["chi2"], boundary=fm.boundary_distance(),
+                excluded_channels={k: v for k, v in center["all_tab"].excluded.items()},
+                score_notes=list(center["all_tab"].notes))

@@ -915,7 +915,7 @@ class CurrentDiffusion:
         if nsteps is None:
             if dt is None:
                 raise ValueError("give dt or nsteps")
-            nsteps = int(np.ceil(span / dt - 1e-12))
+            nsteps = max(1, int(np.ceil(span / dt - 1e-12)))   # a span below 1e-12 dt is still one step
         h = span / nsteps
         t0 = state.time
         s = state

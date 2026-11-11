@@ -207,17 +207,17 @@ def child(out):
     rf = CM.consistent_solve(fm, kin, src, dict(log_strength=ls_true + 0.5, f=_F_TRUE), tight, start=truth_snap,
                              label="budget")
     rec["budget"] = dict(status=rf.status, converged=rf.converged, reason=rf.record.get("reason"))
-    fr = FIT.reconstruct(fm, kin, src, tight, FIT.FitSettings(), params0=dict(log_strength=ls_true + 0.5,
+    fr = FIT.reconstruct(fm, kin, src, tight, FIT.FitSettings(free=("log_strength",)), params0=dict(log_strength=ls_true + 0.5,
                                                                               f=_F_TRUE), start=truth_snap)
     rec["fit_budget"] = dict(status=fr.status, sigma=fr.sigma)
     # (b) zero noise
-    fz = FIT.reconstruct(fm, kin, src, cfg, FIT.FitSettings(), params0=dict(log_strength=ls_true + 0.5, f=_F_TRUE),
+    fz = FIT.reconstruct(fm, kin, src, cfg, FIT.FitSettings(free=("log_strength",)), params0=dict(log_strength=ls_true + 0.5, f=_F_TRUE),
                          start=truth_snap, label="zero")
     rec["zero"] = dict(status=fz.status, theta=fz.theta, sigma=fz.sigma, chi2=fz.chi2,
                        n_solves=fz.record["n_solves"], wall_s=fz.record["wall_s"])
     # (a) noisy
     fm.reconfigure(noisy, ref, roles, case_id="noisy")
-    fn = FIT.reconstruct(fm, kin, src, cfg, FIT.FitSettings(), params0=dict(log_strength=ls_true + 0.5, f=_F_TRUE),
+    fn = FIT.reconstruct(fm, kin, src, cfg, FIT.FitSettings(free=("log_strength",)), params0=dict(log_strength=ls_true + 0.5, f=_F_TRUE),
                          start=truth_snap, label="noisy")
     rec["noisy"] = dict(status=fn.status, theta=fn.theta, sigma=fn.sigma, chi2=fn.chi2,
                         n_solves=fn.record["n_solves"], wall_s=fn.record["wall_s"])

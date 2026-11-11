@@ -1,0 +1,452 @@
+r"""Time-dependent current evolution through a series of reconstructed time slices.
+
+The ohmic current is not assumed relaxed: the poloidal-flux state of :mod:`.current.diffusion`
+(psi on the domain's rho_tor,norm cells) is carried from slice to slice and advanced with
+
+.. code-block:: text
+
+    a dpsi/dt|_rho = d/drho (k psi') - S + a w psi'           (diffusion module, eqs. 6-7)
+
+with, on each interval ``[t_{k-1}, t_k]``,
+
+* geometry ``a, k, V', <1/R^2>, F, Phi_b`` interpolated linearly in time between the equilibria of
+  slices ``k-1`` and ``k`` (:class:`.current.diffusion.GeometrySchedule`; ``w = rho dPhi_b/dt /
+  (2 Phi_b)`` from the change of the domain's toroidal flux);
+* conductivity (Redl 2021 from the kinetic profiles AT EACH SLICE, on that slice's geometry),
+  bootstrap (Redl 2021) and driven current (provider) at both ends, linear in time;
+* the plasma current ``Ip(t)`` linear between the slices' measured values, applied at the last closed
+  surface through the lumped outer layer (its conductance and source linear in time; ``|F|`` at the
+  last closed surface fixed at the mean of the two slices' values, stated);
+* sawteeth (:mod:`.current.sawtooth`) applied by the reconnection operator, which is the identity
+  wherever q >= 1, so there is no sawtooth effect at all on a state with q >= 1 everywhere:
+  ``sawtooth="crash_times"`` uses measured crash times; ``sawtooth="periodic"`` places crashes every
+  ``1/nu`` with ``nu`` from the two parameters ``(f, ln Lambda)`` (phase: a crash at the series start,
+  stated); ``"off"``: none.  A slice reports the crash-free end state plus the sawtooth effect averaged
+  over the interval since the previous slice (the measurement window): ``psi = psi_end^(no crash) +
+  <psi^(crashes)>_window - <psi^(no crash)>_window``.  This is the instantaneous state when the operator
+  acted as the identity, is continuous in the state (a switch between averaged and instantaneous states
+  made the pass loop oscillate; measured), and carries no smooth time lag.  With a period longer than
+  the interval the window does not span a whole period (phase dependence remains; stated).
+
+Splitting and its order.  Within an interval the end-of-step equilibrium (slice ``k``) is not known
+in advance: each pass of the slice's pass-consistency loop (:func:`.current_model.consistent_solve`
+with ``state_fn``) re-advances the diffusion from the CARRIED state at ``t_{k-1}`` over the whole
+interval with the geometry, conductivity, sources and outer layer of the current pass's slice-``k``
+equilibrium at ``t_k`` (and slice ``k-1``'s at ``t_{k-1}``), assembles ``<j_phi>`` from the advanced
+state on the slice-``k`` geometry and solves the anchored equilibrium; the loop ends when the
+profiles, the state scalars and the q check are consistent (the module's criteria).  This is an
+implicit (Picard) coupling of the diffusion and the equilibrium within each step: the coefficients
+seen by the TR-BDF2 stages are linear interpolants between consistent end states, so the coupled
+step is second order in ``Delta t`` in the converged limit (the diffusion integrator itself is
+second order; the outer-layer ``|F|`` freeze is first order in its small variation).  The state
+carried to the next interval is the instantaneous end state of the last pass.
+
+Initial state (first slice):
+
+* ``"mse_fit"``: the first slice's current is fitted to magnetics and E_r-corrected MSE by
+  :func:`.fit.reconstruct` with the current-correction Gaussians on top of the relaxed model shape
+  (steady state, or the sawtooth periodic state when it is active); the fitted state (whose ohmic
+  part then carries the corrections, i.e. is NOT relaxed) starts the evolution, and the
+  corrections are not applied again;
+* ``"relaxed"``: the steady (or periodic) model state of the first slice;
+* ``"from_profile"``: a supplied current profile ``<J.B>(rho_tor,norm)`` (e.g. from a prior
+  equilibrium; controlled tests), held as a profile through the first slice's pass loop, the state
+  being the one with that current on the converged geometry.  (Holding a psi(rho) or q(rho) state
+  FIXED while the geometry iterates was tried and did not converge on the public fixture: the passes
+  drift by ~4e-4 in l_i per pass without and oscillate with Anderson mixing; not offered.)
+* ``"auto"``: ``"mse_fit"`` when the first slice has an MSE group declared E_r-corrected, else
+  ``"relaxed"`` (recorded).
+
+Fit interaction: (i) default -- the initial state is fitted once; later slices are evolved and
+SCORED with no fitting (a prediction test); (ii) ``filter=True`` -- at every later slice the
+correction amplitudes are re-fitted with the evolved state as the prior mean (corrections
+N(0, sigma) on top of it), and the corrected state (corrections absorbed into psi as their
+zero-net-current steady response) is carried forward.
+
+The vessel/eddy-current contribution through the previous slice's flux is not modeled
+(``vessel_eddy=False``; ``True`` is refused).
+"""
+
+import copy
+import time
+from dataclasses import asdict, dataclass, field
+from typing import Any, Dict, List, Optional, Sequence
+
+import numpy as np
+
+from . import current_model as _cm
+from . import fit as _fit
+from .current import sawtooth as _saw
+from .current.diffusion import CurrentDiffusion, CurrentState, GeometrySchedule, IpBoundary, OuterLayer
+from .score import chi2_report, chi2_summary, score
+
+__all__ = ["SliceData", "SeriesSettings", "run_series", "INITIAL_MODES", "SAWTOOTH_MODES"]
+
+INITIAL_MODES = ("auto", "mse_fit", "relaxed", "from_profile")
+SAWTOOTH_MODES = ("periodic", "crash_times", "off")
+
+
+@dataclass
+class SliceData:
+    """Inputs of one time slice: ``time`` [s], measurement set (with ``ip``), reference boundary
+    (anchor), kinetic inputs and sources AT THAT TIME."""
+    time: float
+    measurements: Any
+    reference_boundary: np.ndarray
+    kinetics: Any
+    sources: Any
+    label: str = ""
+    meta: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class SeriesSettings:
+    """Every setting of the series driver (recorded)."""
+    initial: str = "auto"
+    initial_profile: Optional[Any] = None                # (rho_tor_norm, <J.B> [A T/m^2]) for "from_profile"
+    initial_fit: _fit.FitSettings = field(default_factory=lambda: _fit.FitSettings(free=("a_corr",)))
+    filter: bool = False
+    filter_fit: _fit.FitSettings = field(default_factory=lambda: _fit.FitSettings(free=("a_corr",)))
+    dt_max: float = 1.0e-3                               # diffusion step [s]
+    scheme: str = "trbdf2"
+    sawtooth: str = "periodic"
+    sawtooth_f: float = _fit.PRIOR_F
+    sawtooth_log_strength: Optional[float] = None        # None: the prior mean of the fit module
+    crash_times: Optional[Sequence[float]] = None
+    vessel_eddy: bool = False
+    keep_going_after_failure: bool = False   # True: a failed slice is recorded and skipped; the next interval
+    #                                          starts from the last consistent state (recorded per slice)
+
+    def __post_init__(self):
+        if self.initial not in INITIAL_MODES:
+            raise ValueError(f"initial must be one of {INITIAL_MODES}")
+        if self.sawtooth not in SAWTOOTH_MODES:
+            raise ValueError(f"sawtooth must be one of {SAWTOOTH_MODES}")
+        if self.sawtooth == "crash_times" and not self.crash_times:
+            raise ValueError("sawtooth='crash_times' needs crash_times")
+        if self.vessel_eddy:
+            raise NotImplementedError("the vessel/eddy-current contribution is not modeled (vessel_eddy=False)")
+
+    def log_strength(self):
+        return (_fit.PARAMETERS["log_strength"]["prior"][0] if self.sawtooth_log_strength is None
+                else float(self.sawtooth_log_strength))
+
+    def as_dict(self):
+        d = {k: v for k, v in asdict(self).items() if k not in ("initial_profile",)}
+        d["initial_profile"] = None if self.initial_profile is None else "supplied (rho_tor_norm, <J.B>)"
+        d["sawtooth_log_strength_used"] = self.log_strength() if self.sawtooth == "periodic" else None
+        return d
+
+
+def _period(settings):
+    lam = float(np.exp(settings.log_strength()))
+    return 1.0 / float(_saw.rate_from_strength(lam, settings.sawtooth_f))
+
+
+def _crash_times(settings, t0, t_end):
+    if settings.sawtooth == "off":
+        return np.zeros(0)
+    if settings.sawtooth == "crash_times":
+        return np.asarray(settings.crash_times, float)
+    tau = _period(settings)
+    n = int(np.ceil((t_end - t0) / tau)) + 2
+    return t0 + tau * np.arange(1, n)
+
+
+def _layer_integrals(lag, sigma_ge, jni_ge):
+    _, sl = _cm._domain_arrays(lag, sigma_ge, log=True)
+    _, jl = _cm._domain_arrays(lag, jni_ge)
+    L = lag["layer"]
+    return float(L.integral(L.conductance_density(sl))), float(L.integral(L.source_density(jl))), float(L.fpol_lcfs)
+
+
+def _jni(lag, kin, src, params):
+    ph, ge = lag["phys"], lag["phys"]["psi_n"]
+    p = _cm.full_params(params)
+    jcd = p["s_cd"] * src.jdotb_at(ge, b2=ph["b2"], fpol=ph["F"], inv_r2=ph["inv_r2"], rho=ph["rho"])
+    return p["s_bs"] * lag["jbs"] + jcd
+
+
+def interval_solver(lag0, lag1, jni0, jni1, t0, t1, ip0, ip1):
+    """Time-dependent :class:`CurrentDiffusion` on ``[t0, t1]`` between two slices' lagged inputs
+    (module docstring)."""
+    g0, g1 = lag0["geom"], lag1["geom"]
+    if not np.array_equal(g0.rho, g1.rho):
+        g1 = g1.resample(g0.rho)
+    geos = [copy.copy(g0), copy.copy(g1)]
+    for g in geos:
+        g.dphib_dt = 0.0
+    sched = GeometrySchedule([t0, t1], geos)
+    rho = g0.rho
+    s0, _ = _cm._domain_arrays(lag0, lag0["sigma"], log=True)
+    s1, _ = _cm._domain_arrays(lag1, lag1["sigma"], log=True)
+    j0, _ = _cm._domain_arrays(lag0, jni0)
+    j1, _ = _cm._domain_arrays(lag1, jni1)
+    a0, b0, f0 = _layer_integrals(lag0, lag0["sigma"], jni0)
+    a1, b1, f1 = _layer_integrals(lag1, lag1["sigma"], jni1)
+    c0, c1 = float(lag0["psi_n_edge"]), float(lag1["psi_n_edge"])
+    if abs(c0 - c1) > 1e-12:
+        raise ValueError(f"domain edge changed between slices ({c0} -> {c1}): not supported")
+    layer = OuterLayer(c1, 0.5 * (f0 + f1), ((t0, t1), (a0, a1)), ((t0, t1), (b0, b1)))
+    sol = CurrentDiffusion(sched, ((t0, t1), rho, np.vstack((s0, s1))), IpBoundary(((t0, t1), (ip0, ip1))),
+                           j_ni=((t0, t1), rho, np.vstack((j0, j1))), outer_layer=layer)
+    return sol, dict(fpol_lcfs_used=0.5 * (f0 + f1), fpol_lcfs_change=f1 - f0, dphib_dt=(g1.phi_b - g0.phi_b) / (t1 - t0),
+                     layer_A=(a0, a1), layer_B=(b0, b1))
+
+
+def advance_interval(sol, state, t1, settings, crash_times, dt):
+    """Advance ``state`` to ``t1`` applying the crash operator at ``crash_times`` (identity where
+    q >= 1).  Returns ``(end_state, events, trajectory_states)``."""
+    traj = _saw.Trajectory(state.time, t1)
+    ct = np.asarray(crash_times, float)
+    ct = ct[(ct > state.time) & (ct <= t1)]
+    sch = _saw.CrashSchedule(ct, settings.sawtooth_f if settings.sawtooth != "off" else 1.0, trajectory=traj)
+    end = _saw.advance_with_crashes(sol, state, t1, sch, dt, scheme=settings.scheme)
+    return end, sch.events, traj.states
+
+
+def _window_state(history, t_a, t_b, rf):
+    """Trapezoid time average of psi over [t_a, t_b] from stored states (crash jumps stored as two states
+    at one time)."""
+    ts = np.array([s.time for s in history])
+    use = [i for i, s in enumerate(history) if t_a - 1e-12 <= s.time <= t_b + 1e-12]
+    before = [i for i in range(len(history)) if ts[i] < t_a]
+    idx = ([before[-1]] if before else []) + use
+    ts, P = ts[idx], np.array([history[i].psi for i in idx])
+    pb = np.array([history[i].psi_boundary for i in idx])
+    if ts[0] > t_a + 1e-12:
+        raise ValueError("window starts before the recorded history")
+    g = np.column_stack((P, pb))
+    avg = _saw._pl_integral(ts, g, t_a, t_b) / (t_b - t_a)
+    return CurrentState(rf, avg[:-1], float(avg[-1]), t_b, dict(window_average=[t_a, t_b]))
+
+
+def _slice_ip(sl):
+    if sl.measurements is None:
+        return abs(float(sl.meta["ip"]))
+    return abs(float(sl.measurements.groups["ip"].measured[0]))
+
+
+def _slice_record(fm, res, sl, label, extra=None):
+    """Distilled record of one solved slice (no measured values)."""
+    ms = sl.measurements
+    tab = rep = None
+    if ms is not None and res.converged:
+        groups = [g for g in ("flux_loop", "bpol_probe", "ip", "pf_current", "mse") if g in ms.groups]
+        tab = score(fm.gs, ms, groups=groups)
+        rep = chi2_report(tab)
+    asm = res.assembly
+    st = res.solve.stats if res.solve is not None else {}
+    lag = res.lag
+    out = dict(label=label, time=sl.time, status=res.status, passes=res.passes, wall_s=res.wall_s,
+               chi2=None if tab is None else {k: dict(chi2=v[0], n=v[1], chi2_per_n=v[2])
+                                              for k, v in chi2_summary(tab).items()},
+               chi2_report=rep, stats=st, q_check=res.record.get("q_check"), reason=res.record.get("reason"),
+               pass_trace=[{k: p.get(k) for k in ("k", "dj", "q_max_rel", "solve_status", "its", "anderson_mixed",
+                                                  "anderson_fallback", "d_axis_m")} for p in res.record.get("passes", [])],
+               q_axis_traced=None if lag is None else lag["phys"].get("q_axis"),
+               fractions=asm["fractions"] if asm else None, currents_A=asm["currents_A"] if asm else None,
+               v_loop=asm["v_loop"] if asm else None, sawtooth=asm["sawtooth"] if asm else None,
+               q_model=dict(rho=np.asarray(asm["q_model"]["rho"]).tolist(), q=np.asarray(asm["q_model"]["q"]).tolist())
+               if asm else None,
+               profiles_rho={k: np.asarray(v).tolist() for k, v in asm["profiles_rho"].items()} if asm else None,
+               boundary=fm.boundary_distance() if res.converged else None)
+    if lag is not None and res.converged:
+        out["state_psi"] = dict(rho_faces=asm["state"].rho_faces.tolist(), psi=asm["state"].psi.tolist(),
+                                psi_boundary=asm["state"].psi_boundary)
+    if lag is not None:
+        out["q_eq"] = dict(rho=np.asarray(lag["phys"]["rho"]).tolist(), q=np.asarray(lag["phys"]["q"]).tolist())
+    out.update(extra or {})
+    return out
+
+
+def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, initial_profiles=None,
+               callback=None):
+    """Evolve the current through ``slices`` (module docstring).
+
+    ``fm``: :class:`.forward.ForwardModel` configured for ``slices[0]`` (its rows are rebuilt for
+    every slice with :meth:`~.forward.ForwardModel.reconfigure`; the edge-taper case is kept, so the
+    taper stays uniform within the series); ``cfg``: :class:`.current_model.CurrentModelSettings`
+    (``n_cells`` sets the carried state's grid); ``start_psi``/``initial_profiles``: first-slice
+    starting state of the solver (as :func:`.fit.reconstruct`).  ``callback(record)`` is called after
+    every slice.  Returns a dict with ``slices`` (one record each), ``settings`` and the totals.
+    """
+    s = settings or SeriesSettings()
+    t_all = time.perf_counter()
+    n_solves0 = fm.n_solves
+    times = np.array([float(x.time) for x in slices])
+    if np.any(np.diff(times) <= 0):
+        raise ValueError("slice times must increase strictly")
+    out = dict(settings=s.as_dict(), model_settings=cfg.as_dict(), slices=[], times=times.tolist())
+    sl0 = slices[0]
+    mode = s.initial
+    if mode == "auto":
+        mse = None if sl0.measurements is None else sl0.measurements.groups.get("mse")
+        mode = "mse_fit" if (mse is not None and bool(mse.meta.get("er_corrected", False))) else "relaxed"
+        out["initial_auto_choice"] = mode
+    case = fm.case
+    crash = _crash_times(s, times[0], times[-1])
+    out["crash_times_used"] = crash.tolist() if s.sawtooth != "periodic" else dict(
+        period_s=_period(s), phase="a crash at the first slice time", f=s.sawtooth_f,
+        log_strength=s.log_strength())
+    p_relaxed = dict(log_strength=(s.log_strength() if s.sawtooth == "periodic" else None), f=s.sawtooth_f)
+    # ---------------------------------------------------------------- slice 0
+    t0 = time.perf_counter()
+    n0 = fm.n_solves
+    fitrec = None
+    if start_psi is not None:
+        fm.set_psi(start_psi)
+    if mode == "mse_fit":
+        fr = _fit.reconstruct(fm, sl0.kinetics, sl0.sources, cfg, s.initial_fit, params0=p_relaxed,
+                              initial_profiles=initial_profiles, label=f"{sl0.label}:mse_fit")
+        if fr.record.get("center") is None:
+            c0 = fr.record.get("center0") or {}
+            its = fr.record.get("iterations", [])
+            out["initial_fit_failure"] = dict(
+                status=fr.status, center0_status=c0.get("status"), center0_reason=c0.get("reason"),
+                n_iterations=len(its), last_jacobian=(its[-1].get("jacobian") if its else None),
+                last_trials=[{k: t.get(k) for k in ("lam", "status", "chi2")} for t in (its[-1].get("trials", []) if its else [])])
+            out["slices"].append(dict(label=sl0.label, time=sl0.time, status=f"initial_{fr.status}",
+                                      fit_status=fr.status, n_solves=fm.n_solves - n0))
+            out.update(status="failed_initial", n_solves=fm.n_solves - n_solves0,
+                       wall_s=round(time.perf_counter() - t_all, 2))
+            return out
+        res0 = fr.record["center"]["res"]
+        fm.restore(fr.record["center"]["snap"])
+        fm.probe_correction = fr.record["center"]["probe_correction"].copy()
+        fitrec = dict(status=fr.status, free=list(fr.free), theta=fr.theta.tolist(), sigma=fr.sigma.tolist(),
+                      prior={n: fr.record["specs"][n]["prior"] for n in fr.free}, chi2=fr.chi2,
+                      n_solves=fr.record["n_solves"], wall_s=fr.record["wall_s"],
+                      iterations=len(fr.record["iterations"]), stopping=fr.record.get("final_stopping_tests"),
+                      noise=fr.record.get("noise"), column_flags=fr.record.get("covariance_column_flags"))
+        params0 = fr.params
+    else:
+        state_fn0 = None
+        if mode == "from_profile":
+            def state_fn0(lag):
+                return _given_state(lag, s, cfg, _slice_ip(sl0))
+        res0 = _cm.consistent_solve(fm, sl0.kinetics, sl0.sources, p_relaxed, cfg, label=f"{sl0.label}:{mode}",
+                                    initial_profiles=initial_profiles, state_fn=state_fn0)
+        params0 = p_relaxed
+    rec0 = _slice_record(fm, res0, sl0, sl0.label, dict(initial_mode=mode, fit=fitrec, n_solves=fm.n_solves - n0,
+                                                        wall_total_s=round(time.perf_counter() - t0, 2)))
+    out["slices"].append(rec0)
+    if callback:
+        callback(rec0)
+    if not res0.converged:
+        out.update(status="failed_initial", n_solves=fm.n_solves - n_solves0, wall_s=round(time.perf_counter() - t_all, 2))
+        return out
+    st0 = res0.assembly["state"]
+    carried = CurrentState(st0.rho_faces, st0.psi, st0.psi_boundary, times[0], dict(initial_mode=mode))
+    lag_prev = res0.lag
+    jni_prev = _jni(lag_prev, sl0.kinetics, sl0.sources, params0)
+    history = [carried.copy()]
+    ip_carried = _slice_ip(sl0)
+    snap_prev = fm.snapshot()
+    pc_prev = fm.probe_correction.copy()
+    status = "completed"
+    for k in range(1, len(slices)):
+        sl = slices[k]
+        t1, tp = times[k], carried.time      # the interval starts at the carried (last consistent) state
+        tk0 = time.perf_counter()
+        nk = fm.n_solves
+        fm.restore(snap_prev)
+        if sl.measurements is None:     # generation mode (synthetic truth series)
+            fm.reconfigure(None, sl.reference_boundary, case_id=case.case_id, ip=_slice_ip(sl),
+                           generation_coil_reg=sl.meta["generation_coil_reg"])
+        else:
+            pf = sl.measurements.groups.get("pf_current")
+            roles = sl.meta.get("coil_roles") or (pf.meta.get("coil_roles") if pf is not None else None)
+            if not roles:      # no roles stated for this slice: the previous slice's roles are kept (recorded)
+                roles = {n: v["role"] for n, v in fm.rows_record.get("coils", {}).get("per_coil", {}).items()}
+            fm.reconfigure(sl.measurements, sl.reference_boundary, coil_roles=roles, case_id=case.case_id)
+            fm.probe_correction = pc_prev.copy()
+        fm.case = case
+        ip0, ip1 = ip_carried, _slice_ip(sl)
+        holder = {}
+        p_pred = dict(log_strength=None, f=s.sawtooth_f, s_bs=params0.get("s_bs", 1.0) if isinstance(params0, dict) else 1.0)
+
+        def state_fn(lag, sl=sl, t1=t1, tp=tp, ip0=ip0, ip1=ip1):
+            jni1 = _jni(lag, sl.kinetics, sl.sources, p_pred)
+            sol, info = interval_solver(lag_prev, lag, jni_prev, jni1, tp, t1, ip0, ip1)
+            end, events, states = advance_interval(sol, carried, t1, s, crash, s.dt_max)
+            holder.update(end=end, events=events, states=states, info=info, jni1=jni1)
+            use = end
+            if events:
+                # sawtooth effect over the interval (the measurement window): the interval average WITH the
+                # crashes minus the same average WITHOUT them, added to the crash-free end state.  Identical to the
+                # instantaneous state when the operator acted as the identity (q >= 1), continuous in the state
+                # (the operator is), and free of the smooth time lag a plain window average would add.
+                end0, _, states0 = advance_interval(sol, carried, t1, s, np.zeros(0), s.dt_max)
+                aw = _window_state(states, tp, t1, end.rho_faces)
+                a0 = _window_state(states0, tp, t1, end.rho_faces)
+                use = CurrentState(end.rho_faces, end0.psi + aw.psi - a0.psi,
+                                   end0.psi_boundary + aw.psi_boundary - a0.psi_boundary, t1,
+                                   dict(sawtooth_window=[tp, t1]))
+                holder["window_average"] = bool(any(e.record.active for e in events))
+            return use
+
+        res = _cm.consistent_solve(fm, sl.kinetics, sl.sources, p_pred, cfg, label=f"{sl.label}:evolve",
+                                   state_fn=state_fn)
+        extra = dict(n_solves=fm.n_solves - nk, interval=dict(holder.get("info", {}), start_s=float(tp), end_s=float(t1)),
+                     crashes=[dict(time=e.time, active=bool(e.record.active),
+                                   rho_mix=getattr(e.record, "rho_mix", None)) for e in holder.get("events", [])],
+                     window_average=holder.get("window_average", False))
+        filt = None
+        if res.converged and s.filter:
+            end_holder = dict(holder)
+            fr = _fit.reconstruct(fm, sl.kinetics, sl.sources, cfg, s.filter_fit, params0=p_pred,
+                                  start=fm.snapshot(), label=f"{sl.label}:filter", state_fn=state_fn)
+            if fr.record.get("center") is not None and fr.status in ("converged", "max_iter",
+                                                                     "stalled_no_significant_descent"):
+                res = fr.record["center"]["res"]
+                fm.restore(fr.record["center"]["snap"])
+                fm.probe_correction = fr.record["center"]["probe_correction"].copy()
+                filt = dict(status=fr.status, theta=fr.theta.tolist(), sigma=fr.sigma.tolist(),
+                            prior={n: fr.record["specs"][n]["prior"] for n in fr.free}, chi2=fr.chi2,
+                            n_solves=fr.record["n_solves"], wall_s=fr.record["wall_s"],
+                            stopping=fr.record.get("final_stopping_tests"))
+                # the corrections are absorbed into the carried state (their steady response)
+                ac = fr.params["a_corr"]
+                lag_f = res.lag
+                shapes = _cm.correction_shapes(lag_f, cfg, ip1)
+                dpsi, dpb = _cm.correction_response(lag_f, shapes, ac, holder["end"].rho_faces)
+                e = holder["end"]
+                holder["end"] = CurrentState(e.rho_faces, e.psi + dpsi, e.psi_boundary + dpb, e.time, dict(e.meta))
+            else:
+                filt = dict(status=fr.status, note="filter fit failed: the unfitted evolved state is carried")
+                holder.update(end_holder)
+        extra["filter"] = filt
+        extra["wall_total_s"] = round(time.perf_counter() - tk0, 2)
+        rec = _slice_record(fm, res, sl, sl.label, extra)
+        out["slices"].append(rec)
+        if callback:
+            callback(rec)
+        if not res.converged:
+            status = f"failed_at_slice_{k}"
+            if not s.keep_going_after_failure:
+                break
+            continue
+        carried = holder["end"]
+        ip_carried = ip1
+        history = [h for h in history + holder["states"] if h.time >= t1 - 2.0 * max(_period(s) if s.sawtooth ==
+                                                                                       "periodic" else 0.0, t1 - tp)]
+        if not history or history[-1].time < t1:
+            history.append(carried.copy())
+        lag_prev = res.lag
+        jni_prev = holder["jni1"]
+        snap_prev = fm.snapshot()
+        pc_prev = fm.probe_correction.copy()
+    out.update(status=status, n_solves=fm.n_solves - n_solves0, wall_s=round(time.perf_counter() - t_all, 2))
+    return out
+
+
+def _given_state(lag, s, cfg, ip):
+    """State of a supplied <J.B>(rho_tor,norm) on the current pass's geometry (the profile is held, the
+    state follows the geometry; the profile is evaluated inside its table only, edge-clipped)."""
+    if s.initial_profile is None:
+        raise ValueError("initial='from_profile' needs initial_profile = (rho_tor_norm, <J.B>)")
+    from scipy.interpolate import PchipInterpolator
+    r, j = (np.asarray(v, float) for v in s.initial_profile)
+    rq = np.clip(lag["phys"]["rho"], r[0], r[-1])
+    return _cm.state_from_jdotb(lag, PchipInterpolator(r, j)(rq), ip, cfg.n_cells)

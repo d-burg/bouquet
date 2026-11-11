@@ -67,25 +67,38 @@ def _arr(blk, key):
     return None if v is None else np.asarray(v, dtype=float)
 
 
-def _select(blk, t0, t1, transform=None):
-    """(values, errors) of the usable samples of one quantity block."""
+def _select(blk, t0, t1, transform=None, label="?"):
+    """(values, errors, note) of the usable samples of one quantity block.
+
+    Arrays of one block must agree in length: ``time``, ``data``, ``data_error_upper`` (a scalar is broadcast
+    to every sample) and ``validity_timed`` -- a mismatch raises (it was silently truncated, and a short
+    ``validity_timed`` silently ignored).  ``note`` says why a block contributes no sample, if so.
+    """
     t = _arr(blk, "time")
     data = _arr(blk, "data")
     err = _arr(blk, "data_error_upper")
     if data is None or t is None or data.size == 0:
-        return np.empty(0), np.empty(0)
-    n = min(t.size, data.size)
-    t, data = t[:n], data[:n]
-    err = np.full(n, np.nan) if err is None else err[:n]
+        return np.empty(0), np.empty(0), "no data or no time base"
+    if t.size != data.size:
+        raise ValueError(f"channel {label!r}: time ({t.size}) and data ({data.size}) differ in length")
+    n = data.size
+    if err is None:
+        return np.empty(0), np.empty(0), "no data_error_upper: channel invalid"
+    if err.ndim == 0:
+        err = np.full(n, float(err))
+    elif err.size != n:
+        raise ValueError(f"channel {label!r}: data_error_upper ({err.size}) and data ({n}) differ in length")
     ok = (t >= t0) & (t <= t1) & np.isfinite(data) & np.isfinite(err)
     ok &= (err > 0.0) & (err < _SIGMA_EXCLUDED)
     vt = _arr(blk, "validity_timed")
-    if vt is not None and vt.size >= n:
-        ok &= vt[:n] >= 0
+    if vt is not None:
+        if vt.size != n:
+            raise ValueError(f"channel {label!r}: validity_timed ({vt.size}) and data ({n}) differ in length")
+        ok &= vt >= 0
     data, err = data[ok], err[ok]
     if transform is not None:
         data, err = transform(data, err)
-    return data, err
+    return data, err, "" if data.size else "no usable sample in the window"
 
 
 def _reduce(vals, errs, reduction):
@@ -106,13 +119,16 @@ def _tan_transform(angle, err):
 def _build(name, entries, qty, t0, t1, reduction, min_samples, geom_fn,
            name_key="name", transform=None, extra_meta=None):
     labels, value, sigma, valid, nsamp = [], [], [], [], []
+    reasons = {}
     geometry = {}
     for i, e in enumerate(entries):
         blk = e if qty is None else e.get(qty)
         if blk is None:
             continue
         labels.append(str(e.get(name_key) or e.get("identifier") or f"{name}_{i:03d}"))
-        vals, errs = _select(blk, t0, t1, transform)
+        vals, errs, why = _select(blk, t0, t1, transform, labels[-1])
+        if why:
+            reasons[labels[-1]] = why
         ok = vals.size >= max(1, min_samples)
         v_ent = blk.get("validity") if isinstance(blk, dict) else None
         if v_ent is not None and np.ndim(v_ent) == 0 and v_ent < 0:
@@ -134,6 +150,8 @@ def _build(name, entries, qty, t0, t1, reduction, min_samples, geom_fn,
     meta = {"sigma_model": f"data_error_upper+{reduction}",
             "sigma_params": {"min_samples": int(min_samples)},
             "n_samples": np.array(nsamp), "source": "imas_json"}
+    if reasons:
+        meta["invalid_reason"] = reasons
     meta.update(extra_meta or {})
     geometry = {k: np.array(v, dtype=float) for k, v in geometry.items()}
     return ConstraintGroup(name=name, labels=labels, measured=np.array(value),

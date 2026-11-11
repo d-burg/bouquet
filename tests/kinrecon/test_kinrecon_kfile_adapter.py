@@ -153,7 +153,7 @@ def test_coils_split_and_per_turn(kfile):
     assert c.labels == ["F0", "F1", "E0"]
     np.testing.assert_array_equal(c.measured, [1000.0, -2000.0, 50.0])
     np.testing.assert_allclose(c.sigma, [100.0, 100.0, 10.0])
-    assert c.valid.tolist() == [True, True, True]      # FWTEC = 0 coil scored (R04)
+    assert c.valid.tolist() == [True, True, True]      # FWTEC = 0 coil scored (scoring convention)
     assert c.weight.tolist() == [1.0, 1.0, 1.0]
     assert c.meta["not_fitted_by_efit"] == ["E0"]
     np.testing.assert_array_equal(c.geometry["turns"], [10.0, 20.0, 1.0])
@@ -226,7 +226,7 @@ def _with_in1(text, **kv):
 def test_vbit_read_from_kfile_sets_the_floor():
     nl = parse_namelists(_with_in1(KFILE, VBIT="40.0", BITIP="1.0E+4"))
     nl["IN1"]["FWTSI"] = [1.0, 1.0, 1.0]
-    # relative storage (reference entry 0, SIREF set): a reference may be named (report 32 F3)
+    # relative storage (reference entry 0, SIREF set): a reference may be named
     nl["IN1"]["COILS"] = [0.0, -2.0, 0.3]
     nl["IN1"]["SIREF"] = [0.7]
     ms = measurements_from_kfile(nl, _machine(with_maps=True), flux_reference="L0")
@@ -275,7 +275,7 @@ def test_zero_weight_coils_old_behavior_option(kfile):
     assert "not_fitted_by_efit" not in c.meta
     d = measurements_from_kfile(kfile, _machine(with_maps=True),
                                 groups=["pf_current"]).groups["pf_current"]
-    # the note no longer claims a zero-weight coil is "held fixed" (wrong for F-coils, P1 report)
+    # the note no longer claims a zero-weight coil is "held fixed" (wrong for F-coils)
     assert "is not a constraint" in d.meta["note"] and "held fixed" not in d.meta["note"]
     np.testing.assert_array_equal(d.meta["efit_fit_weight"], [1.0, 1.0, 0.0])
 

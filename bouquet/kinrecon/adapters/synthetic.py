@@ -123,6 +123,11 @@ def synthetic_measurements(machine, model, noise, seed=0, dropout=None, time=0.0
                  "sigma_evaluated_on": "model"}
         if dspec is not None:
             gmeta["dropout"] = [labels[i] for i in np.flatnonzero(~keep)]
+        bad_sigma = ~(np.isfinite(sigma) & (sigma > 0))
+        if np.any(bad_sigma):
+            # a channel with sigma <= 0 (e.g. a relative model on a zero model value) cannot be scored
+            gmeta["invalid_sigma"] = [labels[i] for i in np.flatnonzero(bad_sigma)]
+            keep = keep & ~bad_sigma
         if name == "mse":
             gmeta["quantity"] = "tan_polarisation_angle"
         gmeta.update(group_meta.get(name, {}))

@@ -1,5 +1,5 @@
 r"""Anchored forward solve: one magnetics-constrained TokaMaker equilibrium for a fully specified
-current and pressure profile (project ruling R38, recipe "R-iso10" of the fit-recipe experiment).
+current and pressure profile (the anchored recipe with an isoflux boundary target, weight factor 10).
 
 What one solve is
 -----------------
@@ -35,14 +35,14 @@ Grad-Shafranov equation with
     (default factor 10; converged and verified on 5/5 magnetics cases at 10 and 30 in the
     experiment; window 3-30).  This makes the solve "magnetics + reference boundary", not a
     free-boundary shape reconstruction;
-* the edge-P' taper policy ``auto`` (R32/R35, :func:`.edge.solve_with_edge_taper`) with one
+* the edge-P' taper policy ``auto`` (:func:`.edge.solve_with_edge_taper`) with one
   :class:`.edge.EdgeTaperCase` per forward model, so the taper is uniform within a case;
 * OFT's default solver settings, never set: ``nl_tol``, ``urf``, ``maxits`` are read back and
   recorded (gate G7);
 * continuation: a solve starts from the current state of the solver (``init="keep"``), from a
   saved state (:meth:`ForwardModel.snapshot`), or -- first solve of a case only -- from a supplied
   reference ``psi`` on the mesh nodes;
-* verified convergence (R07): the solver flag AND a warm re-solve that reproduces the axis within
+* verified convergence: the solver flag AND a warm re-solve that reproduces the axis within
   0.5 mm and q0, l_i, Ip within 1e-3 (relative).  A solve that is not verified is a failure;
 * the nonlinear-residual history of every solve is captured from the solver's own output
   (file descriptor 1) and classified with :func:`.edge.classify_residual_history`.
@@ -91,7 +91,7 @@ os.environ.setdefault("GFORTRAN_UNBUFFERED_PRECONNECTED", "y")
 MU0 = 4.0e-7 * np.pi
 #: Coil roles understood by :class:`ForwardModel` (k-file adapter ``meta['coil_roles']``).
 COIL_ROLES = ("held", "fitted", "free")
-#: Verified-convergence criterion (R07; decided, fixed): warm re-solve reproduces these.
+#: Verified-convergence criterion (decided, fixed): warm re-solve reproduces these.
 VERIFY_AXIS_M = 5.0e-4
 VERIFY_REL = 1.0e-3
 
@@ -99,7 +99,7 @@ VERIFY_REL = 1.0e-3
 @dataclass
 class ForwardSettings:
     """Every setting of the anchored forward solve.  Weights, sigma use, constraint sets and the
-    anchor are decisions (each needs the user's confirmation; listed in the P1 report).
+    anchor are decisions (each needs the user's confirmation).
 
     ``vsc`` (coil name -> gain of the virtual vertical-stability coil) is device data and must be
     given by the caller.
@@ -119,11 +119,13 @@ class ForwardSettings:
     verify: bool = True
     nthreads: int = 1
     edge_taper: Any = field(default_factory=_edge.EdgeTaperSetting)
+    detector_version: str = _edge.DETECTOR_VERSION_DEFAULT   # "v2": corrected classification (non-default)
+    stall_policy: str = "report"                # "taper": treat a flat stall as taper-eligible (non-default)
 
     def as_dict(self):
         d = asdict(self)
         d["edge_taper"] = self.edge_taper.as_dict()
-        d["verify_criterion"] = dict(axis_m=VERIFY_AXIS_M, q0_li_ip_rel=VERIFY_REL, rule="R07")
+        d["verify_criterion"] = dict(axis_m=VERIFY_AXIS_M, q0_li_ip_rel=VERIFY_REL, rule="warm re-solve reproduces axis, q0, l_i and Ip")
         return d
 
 
@@ -222,7 +224,7 @@ def _stats(gs):
 
 
 def verify_states(a, b):
-    """R07 check of two stats dicts (solve and its warm re-solve)."""
+    """Verified-convergence check of two stats dicts (solve and its warm re-solve)."""
     try:
         d_ax = float(np.hypot(a["R_axis"] - b["R_axis"], a["Z_axis"] - b["Z_axis"]))
         rel = {k: abs(a[k] - b[k]) / max(abs(a[k]), 1e-300) for k in ("q_0", "l_i", "Ip")}
@@ -234,15 +236,15 @@ def verify_states(a, b):
 
 
 def orientation_record(measurements, F0):
-    """Frames of every scored quantity for a forward solve, and the refusals (independent review,
-    report 32, F4).
+    """Frames of every scored quantity for a forward solve, and the refusals.
 
-    TokaMaker solves with a POSITIVE plasma-current target, and :mod:`.score` compares Ip, flux loops,
-    probes and the diamagnetic flux SIGNED (only MSE has a stated orientation map).  Hence:
+    TokaMaker solves with a POSITIVE plasma-current target, and the forward solve uses the measured
+    values directly as constraint rows in the discharge's frame.  :mod:`.score` can compare an
+    equilibrium solved in another frame through a stated orientation map (``score(...,
+    orientation=...)``), but the rows of THIS forward solve carry no such map.  Hence:
 
     * measured Ip < 0 is REFUSED here: the solved state would carry the opposite poloidal field, and
-      every loop, probe and the Ip itself would flip sign against the data (no orientation map for
-      these groups is implemented);
+      every loop, probe and the Ip itself would flip sign against the rows;
     * B_t of either sign is allowed: ``F0`` is passed with the discharge's sign, so ``B_phi`` (MSE
       denominator, diamagnetic flux) is physical, and the MSE group's ``field_orientation`` must be
       ``(1, 1)`` (no map needed) -- anything else is refused as inconsistent.
@@ -498,7 +500,7 @@ class ForwardModel:
 
     def lock_tapered(self, reason):
         """Lock this case's edge taper ON (the ``auto`` policy after a detected limit cycle, applied to
-        the WHOLE reconstruction so that the case stays uniform, R32): every later solve is tapered."""
+        the WHOLE reconstruction so that the case stays uniform): every later solve is tapered."""
         if self.case.setting.mode is not _edge.EdgeTaperMode.AUTO:
             raise RuntimeError("lock_tapered applies only to the 'auto' edge-taper mode")
         self.case.locked = True
@@ -556,7 +558,7 @@ class ForwardModel:
 
     # ---------------------------------------------------------------- one solve
     def solve(self, jphi, pressure, ip=None, init="keep", label="solve", lock_case=True):
-        """One anchored solve under the edge-taper policy, then the R07 verification.
+        """One anchored solve under the edge-taper policy, then the verified-convergence check.
 
         ``jphi`` = ``(x, <j_phi>)`` [A/m^2] and ``pressure`` = ``(x, p_full)`` [Pa] on knots from
         psi_N = 0 to 1 (the same or different knots); ``ip`` [A] defaults to the measured Ip.
@@ -633,7 +635,9 @@ class ForwardModel:
 
         out = _edge.solve_with_edge_taper(one, setting=None if lock_case else s.edge_taper,
                                           case=self.case if lock_case else None,
-                                          label=f"{self.case_id}:{label}", tol=self.defaults["nl_tol"])
+                                          label=f"{self.case_id}:{label}", tol=self.defaults["nl_tol"],
+                                          detector_kw=dict(version=s.detector_version),
+                                          stall_policy=s.stall_policy)
         pol = out.record
         flag = pol["status"] != _edge.STATUS_FAILED
         stats = _stats(gs) if flag else {}

@@ -30,22 +30,20 @@ group with a digitizer-bit array,
 
     sigma = max(SERROR |value|, VBIT bit)
 
-with ``SERROR`` (default 0.03 when absent) and ``VBIT`` (default 10 when
-absent) both read from ``IN1``.  This is the sigma EFIT itself uses: on
-k-file / m-file pairs (same run) it reproduces EFIT's stored sigma arrays
-(``sigmpi``, ``sigsil``, ``sigfcc``, ``sigpasma``, ``siggam``, ``sigdia``)
-to float32 precision, channel by channel, and the implied multiplier equals
-the file's ``VBIT`` wherever the floor binds (``VBIT`` differs between k-file
-vintages, so a fixed constant is right for only some files).  EFIT source was
-not available; the rule is an empirical match, see the project record's EFIT
-conventions check.  Per group:
+with ``SERROR`` and ``VBIT`` read from ``IN1`` (``SERROR`` must be in the
+file or given by the caller; ``VBIT`` absent -> 10, EFIT's own default,
+recorded).  For probes, coil currents, MSE and the diamagnetic flux this is
+the sigma EFIT itself uses: on k-file / m-file pairs (same run) it reproduces
+EFIT's stored sigma arrays channel by channel.  **For flux loops it does
+not in general**: EFIT's loop sigma depends on its ``KERSIL`` switch (model
+``efit_kersil`` below); ``efit_vbit`` matched EFIT's stored loop sigma on
+only about 60 % of the loop channels of a large set of EFIT runs, and is kept
+as the default only until a decision is made.  Per group:
 
 * probes: ``max(SERROR |EXPMP2|, VBIT BITMPI)``;
-* flux loops: ``max(SERROR |COILS|, VBIT PSIBIT)`` on ``COILS`` AS STORED,
-  i.e. on the flux relative to the reference loop when the file stores
-  relative fluxes (EFIT does not use the absolute reference flux for sigma);
-  the reference loop itself (``flux_reference``) gets ``VBIT PSIBIT`` only;
-  times ``|flux_scale|``;
+* flux loops: ``max(SERROR |COILS|, VBIT PSIBIT)`` on ``COILS`` AS STORED
+  (approximate, see above); the reference loop itself (``flux_reference``)
+  gets ``VBIT PSIBIT`` only; times ``|flux_scale|``;
 * coil currents: ``max(SERROR |BRSP|, VBIT BITFC)`` and ``max(SERROR
   |ECURRT|, VBIT BITEC)`` (the E-coil floor never bound on the files
   checked: untested);
@@ -55,6 +53,41 @@ conventions check.  Per group:
 
 The VBIT value used, and where it came from, is recorded in each magnetics
 group's ``meta`` (``"VBIT"``, ``"VBIT_source"``) and in the set's ``meta``.
+
+**sigma model ``"efit_kersil"``** (named, not the default): EFIT's own rule
+as read from its weight-setting step (L. L. Lao et al., Nucl. Fusion 25,
+1611 (1985) describe the code; the rule below was read from its source).
+Probes, coils, MSE and the diamagnetic flux as ``efit_vbit``; Ip
+``max(SERROR |PLASMA|, VBIT BITIP)``; flux loops by ``KERSIL``
+(:func:`kersil_loop_sigma`)::
+
+    KERSIL = 2, 3:  sigma_m = max(ERRSIL |psi_m - psi_ref|, SICONT R_m |Ip|, VBIT PSIBIT_m)
+                    reference loop: KERSIL = 3 -> max(ERRSIL |psi_ref|, SICONT R_ref |Ip|, VBIT PSIBIT_ref)
+                                    KERSIL = 2 -> ERSIL8
+    otherwise:      sigma_m = max(SERROR |psi_m|, VBIT PSIBIT_m)
+                    (reference loop with zero bit: SERROR max |psi|)
+
+with ``R_m`` the loop radii of the machine bundle and the reference loop
+``|NSLREF|``.  ``ERRSIL``, ``SICONT``, ``ERSIL8`` are EFIT inputs whose
+defaults were not available here: they are taken from the file when present,
+else from ``efit_constants`` or the machine bundle's
+``meta["efit_sigma_constants"]``, else refused.  What ``psi`` and
+``psi_ref`` are at that step is stated with ``kersil_reference``:
+``"source"`` (the order of operations as read: ``COILS``, plus ``SIREF`` on
+every loop when ``FITSIREF`` is false and ``IECURR > 0`` or ``NSLREF < 0``;
+reference = that loop's value) or ``"siref"`` (reference flux = ``SIREF``;
+other loops relative to it in stored form).  On a large set of EFIT runs,
+with constants fitted to EFIT's stored sigma, ``"siref"`` reproduced every
+loop channel of an independent control set and 97 % of the fitted set (the
+rest a sub-percent difference on a few discharges), while ``"source"``
+reproduced about 60 %; ``"siref"`` is therefore an inference from data, not
+a reading of the source.  Whether this model becomes the default is a
+decision for the user; values below the EFIT floor (1e-10, file units) make a
+channel invalid, as EFIT zeroes its weight.
+
+**sigma model ``"efit_stored"``** (named, not the default): EFIT's own sigma
+written next to the k-file (m-file ``sigsil``, ``sigmpi``, ...), passed in as
+``stored_sigma``; the adapter only applies its unit scaling.
 
 ``sigma_model="efit_serror_bit"`` keeps the previous convention, a fixed
 ``max(SERROR |value|, 10 bit)`` for every bit-array group including Ip (the
@@ -74,8 +107,8 @@ per coil, and summarized in ``meta["coil_role_rule"]``).  Evidence: m-file /
 k-file pairs (calculated = measured exactly for E-coils with ``IECURR = 1``;
 F-coil calculated != measured where ``FWTFC = 0``; a k-file with every
 ``FWTFC = 0`` still has every calculated F current different from the
-measured one), and the k-file flags ``IECURR``, ``IFITVS``; EFIT source was
-not available (project record, fit-recipe experiment, assumption A4):
+measured one), and the k-file flags ``IECURR``, ``IFITVS`` (inferred from
+EFIT output, not from its source):
 
 * ``"fitted"`` -- an F-coil (``BRSP``) with ``FWTFC > 0``: its current is a
   free fit parameter AND its measurement is a constraint row of EFIT's fit;
@@ -89,7 +122,7 @@ not available (project record, fit-recipe experiment, assumption A4):
 
 **Scoring coils EFIT did not constrain.**  By default
 (``score_unfitted_coils=True``) coils with ``FWTFC`` / ``FWTEC`` = 0 are valid
-measurements with weight 1 for SCORING (project ruling R04) and are listed in
+measurements with weight 1 for SCORING (a scoring convention of this package) and are listed in
 ``meta["not_fitted_by_efit"]``; EFIT's own weights stay in
 ``meta["efit_fit_weight"]``.  Whether a coil measurement is a constraint of a
 FIT is a separate question answered by ``coil_roles`` (a fit should use rows
@@ -97,16 +130,16 @@ only for ``"fitted"`` coils and hold the ``"held"`` ones).
 ``score_unfitted_coils=False`` reproduces the earlier behavior (valid only
 where FWT > 0, weight = FWT).
 
-**Flux-loop gauge (``SIREF``; project record open item B14, settled by direct
-comparison with m-file values).**  Three k-file families exist on disk:
+**Flux-loop gauge (``SIREF``; settled by direct comparison with m-file
+values).**  Three k-file families have been seen:
 (A) OMFIT kinetic-EFIT aggregates store ``COILS`` RELATIVE to the reference
 loop (its own entry 0) with the measured absolute reference flux in ``SIREF``;
 EFIT itself fits absolute fluxes, m-file ``silopt = COILS + SIREF`` to 6e-8;
 (B) kinetic-EFIT ``k1.000`` files with ``FITSIREF = T`` also store relative
 ``COILS`` (reference entry ~2e-6 of the largest), ``psiref = SIREF``, and EFIT
 scores relative values against its own fitted offset ``csiref``; (C) the
-2026 EFIT-AI re-runs store ABSOLUTE ``COILS`` with ``SIREF = 0`` for some
-shots and relative ``COILS`` with ``SIREF != 0`` for others.  In every family
+recent EFIT re-runs store ABSOLUTE ``COILS`` with ``SIREF = 0`` for some
+discharges and relative ``COILS`` with ``SIREF != 0`` for others.  In every family
 the absolute flux is ``COILS + SIREF`` (per radian, the file's sign).  The
 adapter records ``meta["siref"]`` (file units), ``meta["coils_form"]``
 (``"relative"`` when the reference entry vanishes to 1e-4 of the largest and
@@ -122,9 +155,8 @@ when that is named).
 whose ``B_Z = +(1/R) dpsi/dR`` -- TokaMaker's ``psi_TM`` sign -- WHATEVER the
 direction of Ip (fit ``COILS = a psi_EFIT + b`` against EFIT's own ``psirz``
 and the probe-fitted field sign: ``a = -1.005 .. -1.007`` x 2 pi in the
-needed scale on 4 cases with Ip > 0 / < 0 and B_t > 0 / < 0; independent
-review, project record report 32, finding F2, and the P0a / suite runs that
-used ``-2 pi``).  IMAS DD 3.41.0 ``magnetics.flux_loop[:].flux`` is the flux
+needed scale on 4 cases with Ip > 0 / < 0 and B_t > 0 / < 0, in an
+independent review).  IMAS DD 3.41.0 ``magnetics.flux_loop[:].flux`` is the flux
 "over loop in which Z component of normal to loop is directed downwards",
 i.e. ``-2 pi psi_TM`` (what :func:`..diagnostics.flux_loop` models), so the
 measured value is ``-2 pi COILS``.  (The earlier default ``+2 pi`` with a
@@ -180,8 +212,11 @@ from . import sigma_from_model
 
 _BLOCK = re.compile(r"[&$]\s*([A-Za-z_][A-Za-z0-9_]*)(.*?)(?:^\s*/\s*$|[&$]END\b|\Z)",
                     re.S | re.M | re.I)
-_KEY = re.compile(r"(?<![\w.'\"])([A-Za-z_][A-Za-z0-9_]*)\s*(\(\s*(\d+)\s*\))?\s*=")
-_STR = re.compile(r"'[^']*'|\"[^\"]*\"")
+# a key: NAME, NAME(i), NAME(i:j) or (refused) NAME(i,j,...); the lookbehind keeps names inside numbers out
+_KEY = re.compile(r"(?<![\w.'\"])([A-Za-z_][A-Za-z0-9_]*)\s*(\(\s*([^)]*?)\s*\))?\s*=")
+_STR = re.compile(r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"")
+_TOKEN = re.compile(r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"|,|[^\s,]+")
+_COMMENT = re.compile(r"!.*$", re.M)
 
 
 def _value(tok):
@@ -189,23 +224,44 @@ def _value(tok):
     if not t:
         return None
     if t[0] in "'\"":
-        return t[1:-1]
+        q = t[0]
+        return t[1:-1].replace(q + q, q)
     low = t.lower()
     if low in (".true.", "t", ".t."):
         return True
     if low in (".false.", "f", ".f."):
         return False
-    return float(low.replace("d", "e"))
+    try:
+        return float(low.replace("d", "e"))
+    except ValueError:
+        raise ValueError(f"namelist value {t!r} is not a number, logical or string") from None
 
 
 def _values(text):
+    """Values of one namelist assignment, positionally: a null value (two consecutive commas, a leading comma,
+    or ``r*`` with nothing after the star) is ``None`` -- Fortran leaves that element unchanged, so the
+    positions of later values are kept.  Trailing nulls (a separator before the next name) are dropped."""
     out = []
-    for tok in re.findall(r"'[^']*'|\"[^\"]*\"|[^\s,]+", text):
+    prev_comma = True                     # a comma right at the start is a leading null
+    for tok in _TOKEN.findall(text):
+        if tok == ",":
+            if prev_comma:
+                out.append(None)
+            prev_comma = True
+            continue
+        prev_comma = False
         if "*" in tok and tok[0] not in "'\"":
             k, v = tok.split("*", 1)
-            out.extend([_value(v)] * int(k))
+            try:
+                count = int(k)
+            except ValueError:
+                raise ValueError(f"namelist repeat {tok!r} has no integer count") from None
+            out.extend([_value(v) if v else None] * count)
         else:
             out.append(_value(tok))
+    while out and out[-1] is None and text.rstrip().endswith(","):
+        out.pop()
+        break
     return out
 
 
@@ -216,24 +272,56 @@ def parse_namelists(text):
     Values are lists (numeric entries as float, logicals as bool, strings as
     str); ``n*v`` repeats are expanded.  A key repeated within a block keeps
     its last assignment (Fortran semantics); ``KEY(i) = v ...`` assigns from
-    1-based position ``i``.  Text outside ``&NAME ... /`` blocks is ignored.
+    1-based position ``i`` and ``KEY(i:j) = ...`` assigns positions ``i..j``
+    (more values than the range holds raises).  A null value (``a, , b``,
+    ``r*``) is kept as ``None`` at its position (Fortran: that element is
+    unchanged), never compacted.  ``!`` starts a comment (outside strings).
+    Refused with ``ValueError``: multi-dimensional entries ``KEY(i,j)=``, any
+    unparsed text before the first key of a block, and tokens that are not
+    numbers, logicals or strings (e.g. ``'****'`` overflow fields).  Text
+    outside ``&NAME ... /`` blocks is ignored.
     """
+    text = _STR.sub(lambda s: s.group(0).replace("!", "\1"), text)
+    text = _COMMENT.sub("", text).replace("\1", "!")
     out = {}
     for m in _BLOCK.finditer(text):
         name, body = m.group(1).upper(), m.group(2)
         masked = _STR.sub(lambda s: "\0" * len(s.group(0)), body)
         keys = list(_KEY.finditer(masked))
+        head = body[:keys[0].start()] if keys else body
+        if head.strip():
+            raise ValueError(f"namelist block {name}: unparsed text before the first key: {head.strip()[:40]!r}")
         block = out.setdefault(name, {})
         for i, k in enumerate(keys):
             end = keys[i + 1].start() if i + 1 < len(keys) else len(body)
             vals = _values(body[k.end():end])
             key = k.group(1).upper()
-            if k.group(3) is not None:
-                start = int(k.group(3)) - 1
+            sub = k.group(3)
+            if sub is not None:
+                if "," in sub:
+                    raise ValueError(f"namelist block {name}: multi-dimensional entry {key}({sub}) is not supported")
+                rng = re.fullmatch(r"(\d+)\s*(?::\s*(\d+))?", sub)
+                if rng is None:
+                    raise ValueError(f"namelist block {name}: cannot read the subscript of {key}({sub})")
+                start = int(rng.group(1)) - 1
+                if rng.group(2) is not None:
+                    stop = int(rng.group(2))
+                    if stop <= start:
+                        raise ValueError(f"namelist block {name}: empty range {key}({sub})")
+                    if len(vals) > stop - start:
+                        raise ValueError(f"namelist block {name}: {len(vals)} values for the range {key}({sub})")
                 cur = list(block.get(key, []))
                 cur.extend([None] * max(0, start + len(vals) - len(cur)))
-                cur[start:start + len(vals)] = vals
+                for j, v in enumerate(vals):
+                    if v is not None:          # a null leaves the element unchanged
+                        cur[start + j] = v
                 vals = cur
+            else:
+                prev = block.get(key)
+                if prev is not None and any(v is None for v in vals):
+                    # nulls leave earlier assignments of this key unchanged
+                    vals = [prev[j] if (v is None and j < len(prev)) else v for j, v in enumerate(vals)] \
+                        + list(prev[len(vals):])
             block[key] = vals
     return out
 
@@ -248,7 +336,14 @@ def read_kfile(path):
 # k-file -> MeasurementSet
 # ---------------------------------------------------------------------------
 
-def _num(block, key, n=None, default=None):
+def _num(block, key, n=None, default=None, log=None):
+    """Array ``key`` of a namelist block as floats (a null entry -> NaN).
+
+    With ``n``: entries beyond ``n`` are dropped only when every one of them is zero or null (EFIT pads its
+    namelist arrays to the namelist dimension); a nonzero entry beyond ``n`` raises (the machine bundle has
+    fewer channels than the file -- e.g. a wrong era).  A drop is recorded in ``log`` (a dict) when given.
+    A short array is padded with NaN (or ``default`` when the key is absent altogether).
+    """
     v = block.get(key)
     if v is None:
         if default is None:
@@ -257,20 +352,31 @@ def _num(block, key, n=None, default=None):
     a = np.array([np.nan if x is None else float(x) for x in v], dtype=float)
     if n is not None:
         if a.size < n:
-            a = np.concatenate([a, np.full(n - a.size, np.nan if default is None else default)])
-        a = a[:n]
+            a = np.concatenate([a, np.full(n - a.size, np.nan)])
+        elif a.size > n:
+            extra = a[n:]
+            if np.any(np.isfinite(extra) & (extra != 0.0)):
+                raise ValueError(f"k-file array {key} has {a.size} entries with nonzero values beyond the "
+                                 f"{n} channels of the machine bundle: the bundle does not match the file")
+            if log is not None:
+                log[key] = int(a.size - n)
+            a = a[:n]
     return a
 
 
 def _scalar(block, key, default=None):
     a = _num(block, key)
-    return default if a is None or a.size == 0 else float(a[0])
+    return default if a is None or a.size == 0 or not np.isfinite(a[0]) else float(a[0])
 
 
 ALL_GROUPS = ("flux_loop", "bpol_probe", "ip", "diamagnetic_flux", "pf_current", "mse")
 
 #: Magnetics sigma models the k-file adapter can apply (see module docstring).
-KFILE_SIGMA_MODELS = ("efit_vbit", "efit_serror_bit")
+KFILE_SIGMA_MODELS = ("efit_vbit", "efit_serror_bit", "efit_kersil", "efit_stored")
+#: Readings of the reference flux in the ``efit_kersil`` flux-loop rule (module docstring).
+KERSIL_REFERENCE_READINGS = ("source", "siref")
+#: EFIT zeroes the weight of a channel whose sigma does not exceed this (file units).
+EFIT_SIGMA_FLOOR = 1.0e-10
 #: ``VBIT`` used when the k-file's ``IN1`` does not set it.
 VBIT_DEFAULT = 10.0
 
@@ -278,7 +384,10 @@ VBIT_DEFAULT = 10.0
 def measurements_from_kfile(kfile, machine, groups=None, time_window=None,
                             er_corrected="auto", flux_scale=-2.0 * np.pi,
                             coil_current_per_turn=(), flux_reference=None, meta=None,
-                            sigma_model="efit_vbit", score_unfitted_coils=True):
+                            sigma_model="efit_vbit", score_unfitted_coils=True, *,
+                            serror=None, time=None, allow_missing_bits=False,
+                            efit_constants=None, kersil_reference=None, nslref=None,
+                            stored_sigma=None):
     """Build a :class:`MeasurementSet` from an EFIT k-file.
 
     Parameters
@@ -314,32 +423,91 @@ def measurements_from_kfile(kfile, machine, groups=None, time_window=None,
         True (default): coils with ``FWTFC`` / ``FWTEC`` = 0 are valid
         measurements with weight 1, noted in ``meta``.  False: they are
         invalid (the earlier behavior).
+    serror : float, optional
+        Used only when the file has no ``SERROR`` (otherwise the file's value
+        is used and this must be None); without either, a ``ValueError`` is
+        raised.  The source is recorded in ``meta["SERROR_source"]``.
+    time : float, optional
+        Slice time [s], used only when the file has no ``ITIME`` (otherwise a
+        ``ValueError``); recorded in ``meta["time_source"]``.
+    allow_missing_bits : bool
+        False (default): a group whose digitizer-bit array (``PSIBIT``,
+        ``BITMPI``, ``BITFC``/``BITEC``, ``BITIP`` where used) is absent
+        raises.  True: the floor is taken as 0 for that group and recorded in
+        its ``meta["bit_source"]``.
+    efit_constants : dict, optional
+        ``efit_kersil`` only: ``{"ERRSIL": ..., "SICONT": ..., "ERSIL8": ...}``
+        (EFIT input-namelist names; ERSIL8 needed only for ``KERSIL = 2``).
+        A constant present in the k-file is taken from the file; otherwise
+        from this dict, else from ``machine.meta["efit_sigma_constants"]``,
+        else a ``ValueError``.  Every value's source is recorded.
+    kersil_reference : {"source", "siref"}
+        ``efit_kersil`` only, required: how the reference flux of the
+        flux-loop rule is read (module docstring).
+    nslref : int, optional
+        ``efit_kersil`` only: EFIT's reference-loop number (1-based), used
+        when the file has no ``NSLREF``; without either, a ``ValueError``.
+    stored_sigma : dict, optional
+        ``efit_stored`` only: EFIT's own sigma per group (``"flux_loop"``,
+        ``"bpol_probe"``, ``"ip"``, ``"pf_current"``, ``"diamagnetic_flux"``,
+        ``"mse"``) as written by EFIT next to the k-file (m-file ``sigsil``,
+        ``sigmpi``, ``sigpasma``, ``sigfcc`` + ``sigecc``, ``sigdia``,
+        ``siggam``), in EFIT's units (flux loops Wb/rad, diamagnetic flux Wb);
+        the adapter applies ``|flux_scale|`` and the per-turn coil scaling.
+        Every built group must be present.
     """
     if sigma_model not in KFILE_SIGMA_MODELS:
         raise ValueError(f"sigma_model must be one of {KFILE_SIGMA_MODELS}, got {sigma_model!r}")
+    if sigma_model == "efit_kersil" and kersil_reference not in KERSIL_REFERENCE_READINGS:
+        raise ValueError(f"sigma_model 'efit_kersil' needs kersil_reference in {KERSIL_REFERENCE_READINGS} "
+                         "(stated, never defaulted)")
+    if sigma_model == "efit_stored" and not isinstance(stored_sigma, dict):
+        raise ValueError("sigma_model 'efit_stored' needs stored_sigma={group: EFIT sigma array}")
     nl = read_kfile(kfile) if isinstance(kfile, str) else kfile
     in1 = nl.get("IN1", {})
-    serror = _scalar(in1, "SERROR", 0.03)
+    serror_file = _scalar(in1, "SERROR")
+    if serror_file is not None:
+        if serror is not None:
+            raise ValueError("serror given by the caller but the k-file sets SERROR: remove one")
+        serror, serror_src = serror_file, "k-file &IN1"
+    elif serror is not None:
+        serror, serror_src = float(serror), "caller (SERROR absent from &IN1)"
+    else:
+        serror_src = "absent from &IN1 and not given (refused by every group that needs it)"
     vbit_file = _scalar(in1, "VBIT")
     if vbit_file is None or not np.isfinite(vbit_file):
-        vbit, vbit_src = VBIT_DEFAULT, f"default {VBIT_DEFAULT:g} (VBIT absent from &IN1)"
+        vbit, vbit_src = VBIT_DEFAULT, f"default {VBIT_DEFAULT:g} (VBIT absent from &IN1; EFIT's own default)"
     else:
         vbit, vbit_src = vbit_file, "k-file &IN1"
     itime = _scalar(in1, "ITIME")
     iavem = _scalar(in1, "IAVEM")
-    t_mid = 0.0 if itime is None else itime * 1e-3
+    if itime is not None:
+        if time is not None:
+            raise ValueError("time given by the caller but the k-file sets ITIME: remove one")
+        t_mid, t_src = itime * 1e-3, "k-file &IN1 ITIME [ms]"
+    elif time is not None:
+        t_mid, t_src = float(time), "caller (ITIME absent from &IN1)"
+    else:
+        raise ValueError("ITIME is absent from the k-file's &IN1: state the slice time with time=... [s]")
     if time_window is None:
-        time_window = 0.0 if iavem is None else 2.0 * iavem * 1e-3
+        if iavem is None:
+            raise ValueError("IAVEM is absent from the k-file's &IN1: state time_window=... [s] (full width)")
+        time_window = 2.0 * iavem * 1e-3
         tw_src = ("2 x IAVEM [ms]: EFIT averages the magnetics over ITIME +/- IAVEM "
                   "(IAVEM is a half-width)")
     else:
         tw_src = "caller"
-    ms_meta = {"source": "efit_kfile", "SERROR": serror, "ITIME_ms": itime,
-               "IAVEM_ms": iavem, "time_window_source": tw_src,
+    truncated = {}
+    ms_meta = {"source": "efit_kfile", "SERROR": serror, "SERROR_source": serror_src, "ITIME_ms": itime,
+               "IAVEM_ms": iavem, "time_source": t_src, "time_window_source": tw_src,
                "time_window_s": [t_mid - 0.5 * float(time_window),
                                  t_mid + 0.5 * float(time_window)],
-               "sigma_model": sigma_model}
-    if sigma_model == "efit_vbit":
+               "sigma_model": sigma_model, "truncated_trailing_zeros": truncated}
+    nulls = {f"{b}.{k}": [i for i, x in enumerate(v) if x is None]
+             for b, blk in nl.items() for k, v in blk.items() if isinstance(v, list) and None in v}
+    if nulls:
+        ms_meta["namelist_null_entries"] = nulls
+    if sigma_model in ("efit_vbit", "efit_kersil"):
         ms_meta.update({"VBIT": vbit, "VBIT_source": vbit_src})
     if isinstance(kfile, str):
         ms_meta["file"] = kfile.rsplit("/", 1)[-1]
@@ -354,26 +522,60 @@ def measurements_from_kfile(kfile, machine, groups=None, time_window=None,
             raise ValueError(f"group '{name}' requested but absent from the k-file")
         return present
 
+    def arrays(name, vkey, fkey, bkey, n, bit_needed=True):
+        """Value, weight and bit arrays of one group; missing weight or bit arrays are refused (or, for bits,
+        recorded when allow_missing_bits)."""
+        if serror is None:
+            raise ValueError(f"group '{name}': SERROR is absent from the k-file's &IN1; state it with serror=... "
+                             "(no default is assumed)")
+        value = _num(in1, vkey, n, log=truncated)
+        if np.count_nonzero(np.isfinite(value)) < n:
+            raise ValueError(f"group '{name}': k-file has {np.count_nonzero(np.isfinite(value))} values for "
+                             f"{n} sensors in the machine bundle")
+        if fkey not in in1:
+            raise ValueError(f"group '{name}': {vkey} present but {fkey} (fit weights) absent from &IN1")
+        fwt = _num(in1, fkey, n, log=truncated)
+        if bkey in in1:
+            bit, bsrc = _num(in1, bkey, n, log=truncated), f"k-file &IN1 {bkey}"
+        elif not bit_needed:
+            bit, bsrc = np.zeros(n), f"{bkey} absent (not used by this sigma rule)"
+        elif allow_missing_bits:
+            bit, bsrc = np.zeros(n), f"{bkey} absent: floor taken as 0 (allow_missing_bits=True)"
+        else:
+            raise ValueError(f"group '{name}': digitizer-bit array {bkey} absent from &IN1 (the sigma floor would "
+                             "be 0); pass allow_missing_bits=True to accept that explicitly")
+        if np.any(~np.isfinite(fwt)):
+            raise ValueError(f"group '{name}': {fkey} has null or non-finite entries")
+        return value, fwt, bit, bsrc
+
     def efit_group(name, value, fwt, bit, labels, geometry, scale=1.0, extra=None,
-                   rule="bit", floor_only=None, unfitted_valid=False):
+                   rule="bit", floor_only=None, unfitted_valid=False, sigma_override=None,
+                   override_text=None, bit_source=None):
         # rule "bit": max(SERROR |x|, n bit); rule "relative": SERROR |x|
         # (Ip under efit_vbit).  floor_only: channels whose sigma is the bit
         # floor alone (the reference loop).  unfitted_valid: FWT = 0 channels
-        # stay valid with weight 1 (coils, R04).
+        # stay valid with weight 1 (coils, scoring convention).  sigma_override:
+        # sigma in file units from another rule (efit_kersil loops, efit_stored).
         n = len(labels)
         if np.count_nonzero(np.isfinite(value)) < n:
             raise ValueError(f"group '{name}': k-file has "
                              f"{np.count_nonzero(np.isfinite(value))} values for "
                              f"{n} sensors in the machine bundle")
         value, fwt, bit = value[:n] * scale, fwt[:n], bit[:n] * np.abs(scale)
-        if sigma_model == "efit_serror_bit":
+        if sigma_override is not None:
+            sigma = np.asarray(sigma_override, dtype=float)[:n] * np.abs(scale)
+            floor = EFIT_SIGMA_FLOOR * np.abs(scale)
+            sigma = np.where(sigma > floor, sigma, np.nan)
+            params = {"serror": serror, "bit": bit, "vbit": vbit}
+            text = override_text
+        elif sigma_model == "efit_serror_bit":
             sigma = sigma_from_model("efit_serror_bit", value, serror=serror, bit=bit)
             params = {"serror": serror, "bit": bit}
             text = "max(SERROR |x|, 10 bit)"
-        elif rule == "relative":
+        elif rule == "relative" and sigma_model == "efit_vbit":
             sigma = sigma_from_model("relative", value, relative=serror)
             params = {"serror": serror}
-            text = "SERROR |x| (no bit floor for this group in EFIT)"
+            text = "SERROR |x| (no bit floor for this group in the efit_vbit model)"
         else:
             sigma = sigma_from_model("efit_vbit", value, serror=serror, bit=bit, vbit=vbit)
             params = {"serror": serror, "bit": bit, "vbit": vbit}
@@ -381,7 +583,6 @@ def measurements_from_kfile(kfile, machine, groups=None, time_window=None,
             if floor_only is not None and np.any(floor_only):
                 sigma = np.where(floor_only, vbit * bit, sigma)
                 text += "; reference loop: VBIT bit"
-        fwt = np.where(np.isfinite(fwt), fwt, 0.0)
         good = np.isfinite(value) & np.isfinite(sigma) & (sigma > 0)
         unfitted = fwt <= 0
         if unfitted_valid:
@@ -389,8 +590,10 @@ def measurements_from_kfile(kfile, machine, groups=None, time_window=None,
         else:
             valid, weight = good & ~unfitted, fwt
         gm = {"sigma_model": sigma_model, "sigma_params": params, "sigma_rule": text,
-              "source": "efit_kfile"}
-        if sigma_model == "efit_vbit":
+              "source": "efit_kfile", "SERROR_source": serror_src}
+        if bit_source is not None:
+            gm["bit_source"] = bit_source
+        if sigma_model in ("efit_vbit", "efit_kersil"):
             gm.update({"VBIT": vbit, "VBIT_source": vbit_src})
         if unfitted_valid:
             gm["efit_fit_weight"] = fwt.copy()
@@ -413,7 +616,7 @@ def measurements_from_kfile(kfile, machine, groups=None, time_window=None,
         ref = np.zeros(n, dtype=bool)
         if flux_reference is not None:
             ref[labels.index(flux_reference)] = True
-        coils_raw = _num(in1, "COILS", n)
+        coils_raw, fwt_l, bit_l, bsrc = arrays("flux_loop", "COILS", "FWTSI", "PSIBIT", n)
         gauge = flux_gauge(in1, coils_raw, labels.index(flux_reference) if flux_reference else None,
                            flux_scale)
         ms.meta["SIREF"] = gauge["siref"]
@@ -421,40 +624,199 @@ def measurements_from_kfile(kfile, machine, groups=None, time_window=None,
             raise ValueError(f"flux_reference {flux_reference!r} given, but this slice's loop fluxes are not in "
                              f"relative form (coils_form = {gauge['coils_form']!r}: {gauge['coils_form_evidence']}); "
                              "the storage form is decided per slice -- do not name a reference for absolute data")
+        extra = {"flux_scale": flux_scale, "units": "COILS [Wb/rad] x flux_scale",
+                 "flux_reference": flux_reference,
+                 "sigma_basis": "COILS as stored (relative to the reference loop "
+                                "when the file stores relative fluxes)"}
+        override, otext = None, None
+        if sigma_model == "efit_kersil":
+            plasma = _scalar(in1, "PLASMA")
+            if plasma is None:
+                raise ValueError("efit_kersil flux-loop sigma needs PLASMA (Ip) in &IN1")
+            r_m = machine.geometry("flux_loop").get("r")
+            override, krec = kersil_loop_sigma(in1, coils_raw, bit_l, r_m, plasma, vbit, serror,
+                                               _efit_constants(in1, efit_constants, machine), kersil_reference,
+                                               nslref)
+            otext = krec["rule"]
+            extra.update({"kersil": krec, "sigma_basis": krec["basis"]})
+            ref = np.zeros(n, dtype=bool)
+        elif sigma_model == "efit_stored":
+            override, otext = _stored(stored_sigma, "flux_loop", n), "EFIT's stored sigma (sigsil) x |flux_scale|"
+            ref = np.zeros(n, dtype=bool)
         ms.groups["flux_loop"] = efit_group(
-            "flux_loop", coils_raw, _num(in1, "FWTSI", n, 0.0),
-            _num(in1, "PSIBIT", n, 0.0), labels, machine.geometry("flux_loop"),
-            scale=flux_scale, floor_only=ref,
-            extra=dict({"flux_scale": flux_scale, "units": "COILS [Wb/rad] x flux_scale",
-                        "flux_reference": flux_reference,
-                        "sigma_basis": "COILS as stored (relative to the reference loop "
-                                       "when the file stores relative fluxes)"}, **gauge))
+            "flux_loop", coils_raw, fwt_l, bit_l, labels, machine.geometry("flux_loop"),
+            scale=flux_scale, floor_only=ref, sigma_override=override, override_text=otext, bit_source=bsrc,
+            extra=dict(extra, **gauge))
     if "bpol_probe" in groups and need("bpol_probe", "EXPMP2" in in1):
         labels = machine.labels("bpol_probe")
         n = len(labels)
+        v, w, b, bsrc = arrays("bpol_probe", "EXPMP2", "FWTMP2", "BITMPI", n)
         ms.groups["bpol_probe"] = efit_group(
-            "bpol_probe", _num(in1, "EXPMP2", n), _num(in1, "FWTMP2", n, 0.0),
-            _num(in1, "BITMPI", n, 0.0), labels, machine.geometry("bpol_probe"))
+            "bpol_probe", v, w, b, labels, machine.geometry("bpol_probe"), bit_source=bsrc,
+            sigma_override=_stored(stored_sigma, "bpol_probe", n) if sigma_model == "efit_stored" else None,
+            override_text="EFIT's stored sigma (sigmpi)")
     if "ip" in groups and need("ip", "PLASMA" in in1):
+        v, w, b, bsrc = arrays("ip", "PLASMA", "FWTCUR", "BITIP", 1, bit_needed=sigma_model != "efit_vbit")
         ms.groups["ip"] = efit_group(
-            "ip", _num(in1, "PLASMA", 1), _num(in1, "FWTCUR", 1, 0.0),
-            _num(in1, "BITIP", 1, 0.0), ["ip"], {}, rule="relative")
+            "ip", v, w, b, ["ip"], {}, rule="relative", bit_source=bsrc,
+            sigma_override=_stored(stored_sigma, "ip", 1) if sigma_model == "efit_stored" else None,
+            override_text="EFIT's stored sigma (sigpasma)")
     if "pf_current" in groups and need("pf_current", "BRSP" in in1 or "ECURRT" in in1):
         ms.groups["pf_current"] = _coils(in1, machine, efit_group, coil_current_per_turn,
-                                         score_unfitted_coils)
+                                         score_unfitted_coils, arrays, truncated,
+                                         stored_sigma if sigma_model == "efit_stored" else None)
     if "diamagnetic_flux" in groups and need("diamagnetic_flux", "DFLUX" in in1):
         v = _num(in1, "DFLUX", 1) * 1e-3
-        s = _num(in1, "SIGDLC", 1, np.nan) * 1e-3
-        w = _num(in1, "FWTDLC", 1, 0.0)
+        if "FWTDLC" not in in1:
+            raise ValueError("group 'diamagnetic_flux': DFLUX present but FWTDLC absent from &IN1")
+        w = _num(in1, "FWTDLC", 1)
+        if sigma_model == "efit_stored":
+            s = _stored(stored_sigma, "diamagnetic_flux", 1)
+            dm = {"sigma_model": "efit_stored", "sigma_rule": "EFIT's stored sigma (sigdia) [Wb]"}
+        else:
+            if "SIGDLC" not in in1:
+                raise ValueError("group 'diamagnetic_flux': DFLUX present but SIGDLC absent from &IN1")
+            s = _num(in1, "SIGDLC", 1) * 1e-3
+            dm = {"sigma_model": "efit_sigdlc", "sigma_rule": "SIGDLC x 1e-3 (SERROR not involved)"}
         ms.groups["diamagnetic_flux"] = ConstraintGroup(
             name="diamagnetic_flux", labels=["diamagnetic_flux"], measured=v, sigma=s,
             valid=(w > 0) & np.isfinite(s) & (s > 0), weight=w,
-            meta={"sigma_model": "efit_sigdlc", "sigma_params": {},
-                  "sigma_rule": "SIGDLC x 1e-3 (SERROR not involved)",
-                  "source": "efit_kfile", "units": "DFLUX, SIGDLC [mV s] x 1e-3"})
+            meta=dict(dm, sigma_params={}, source="efit_kfile", units="DFLUX, SIGDLC [mV s] x 1e-3"))
     if "mse" in groups and need("mse", "TGAMMA" in nl.get("INS", {})):
-        ms.groups["mse"] = _mse(nl, machine, er_corrected)
+        ms.groups["mse"] = _mse(nl, machine, er_corrected,
+                                _stored(stored_sigma, "mse", None) if sigma_model == "efit_stored" else None)
     return ms
+
+
+def _stored(stored, group, n):
+    if group not in stored:
+        raise ValueError(f"sigma_model 'efit_stored': stored_sigma has no entry for group '{group}'")
+    a = np.asarray(stored[group], dtype=float).ravel()
+    if n is not None and a.size < n:
+        raise ValueError(f"stored_sigma['{group}'] has {a.size} entries for {n} channels")
+    return a if n is None else a[:n]
+
+
+#: Names of the EFIT constants of the KERSIL flux-loop rule.
+KERSIL_CONSTANTS = ("ERRSIL", "SICONT", "ERSIL8")
+
+
+def _efit_constants(in1, given, machine):
+    """ERRSIL, SICONT, ERSIL8: from the k-file, else the caller, else ``machine.meta["efit_sigma_constants"]``.
+
+    Their EFIT defaults were not available to this module; a set of EFIT runs was reproduced with values found
+    by fitting EFIT's stored sigma, which is why they are inputs (no value is assumed here)."""
+    bundle = (getattr(machine, "meta", None) or {}).get("efit_sigma_constants") or {}
+    out, src = {}, {}
+    for k in KERSIL_CONSTANTS:
+        v = _scalar(in1, k)
+        if v is not None:
+            out[k], src[k] = v, "k-file &IN1"
+        elif given and k in given:
+            out[k], src[k] = float(given[k]), "caller (efit_constants)"
+        elif k in bundle:
+            out[k], src[k] = float(bundle[k]), "machine bundle meta['efit_sigma_constants']"
+    out["_source"] = src
+    return out
+
+
+def kersil_loop_sigma(in1, coils, psibit, r_loop, plasma, vbit, serror, consts, reading, nslref=None):
+    """EFIT's flux-loop sigma under its ``KERSIL`` switch, in file units (Wb/rad), and a record.
+
+    ``KERSIL`` = 2 or 3 (module docstring, sigma model ``efit_kersil``)::
+
+        sigma_m   = max(ERRSIL |psi_m - psi_ref|, SICONT R_m |Ip|, VBIT PSIBIT_m)      (m != reference)
+        sigma_ref = max(ERRSIL |psi_ref|,         SICONT R_ref |Ip|, VBIT PSIBIT_ref)   (KERSIL = 3)
+        sigma_ref = ERSIL8                                                               (KERSIL = 2)
+
+    any other ``KERSIL``: ``max(SERROR |psi_m|, VBIT PSIBIT_m)``, and when the reference loop's bit is zero its
+    sigma is ``SERROR max_m |psi_m|``.  ``R_m`` [m] are the loop radii of the machine bundle, ``Ip`` = |PLASMA|
+    [A].  The reference loop is ``|NSLREF|`` (1-based; from the file, else ``nslref``).
+
+    ``reading`` says what ``psi`` and ``psi_ref`` are (both readings are stated assumptions):
+
+    * ``"source"``: ``psi = COILS``, plus ``SIREF`` on every loop when ``FITSIREF`` is false and (``IECURR > 0``
+      or ``NSLREF < 0``) -- the order of operations of the EFIT weight-setting step as read -- and
+      ``psi_ref = psi[reference]``;
+    * ``"siref"``: the reference loop's flux is ``SIREF`` (the measured reference flux written in the file) and
+      every other loop's flux enters relative to it in stored form: ``COILS_m`` when ``SIREF != 0`` (relative
+      storage; the file's reference entry is not used) and ``COILS_m - COILS_ref`` when ``SIREF = 0``
+      (absolute storage).  This reading reproduced EFIT's stored sigma channel by channel on a set of runs where
+      the ``"source"`` reading did not (inferred from data, not read from source).
+    """
+    kersil = _scalar(in1, "KERSIL")
+    if kersil is None:
+        raise ValueError("efit_kersil needs KERSIL in the k-file")
+    nsl = _scalar(in1, "NSLREF")
+    nsl_src = "k-file &IN1"
+    if nsl is None:
+        if nslref is None:
+            raise ValueError("NSLREF is absent from the k-file: state the reference-loop number with nslref=...")
+        nsl, nsl_src = float(nslref), "caller (NSLREF absent from the k-file)"
+    iref = int(abs(nsl)) - 1
+    n = coils.size
+    if not 0 <= iref < n:
+        raise ValueError(f"reference loop |NSLREF| = {abs(nsl):g} outside the {n} loops")
+    fitsiref = (_flag_bool(in1, "FITSIREF"))
+    iecurr = _scalar(in1, "IECURR")
+    siref = _scalar(in1, "SIREF")
+    ip = abs(float(plasma))
+    bit = vbit * np.abs(psibit)
+    rec = {"KERSIL": kersil, "NSLREF": nsl, "NSLREF_source": nsl_src, "reading": reading, "FITSIREF": fitsiref,
+           "IECURR": iecurr, "SIREF": siref, "constants": {k: v for k, v in consts.items() if k != "_source"},
+           "constants_source": consts.get("_source", {}), "reference_index": iref}
+    if kersil in (2.0, 3.0):
+        for k in ("ERRSIL", "SICONT") + (("ERSIL8",) if kersil == 2.0 else ()):
+            if k not in consts:
+                raise ValueError(f"efit_kersil with KERSIL = {kersil:g} needs {k}: not in the k-file; give "
+                                 "efit_constants={...} or machine.meta['efit_sigma_constants']")
+        if r_loop is None:
+            raise ValueError("efit_kersil with KERSIL = 2/3 needs the loop radii 'r' in the machine bundle")
+        r_loop = np.asarray(r_loop, dtype=float)[:n]
+        if reading == "source":
+            if fitsiref is None or iecurr is None:
+                raise ValueError("the 'source' reading needs FITSIREF and IECURR in the k-file")
+            add = (not fitsiref) and (iecurr > 0 or nsl < 0)
+            psi = coils + ((siref or 0.0) if add else 0.0)
+            psi_ref = psi[iref]
+            rel = np.abs(psi - psi_ref)
+            ref_mag = abs(psi_ref)
+            basis = ("COILS" + (" + SIREF on every loop (FITSIREF false and IECURR > 0 or NSLREF < 0)" if add else "")
+                     + "; reference flux = that loop's value")
+        else:
+            s = siref or 0.0
+            rel = np.abs(coils if s != 0.0 else coils - coils[iref])
+            ref_mag = abs(s)
+            basis = ("reference flux = SIREF; other loops relative to it as stored ("
+                     + ("relative storage, SIREF != 0: COILS_m" if s != 0.0 else
+                        "absolute storage, SIREF = 0: COILS_m - COILS_ref") + ")")
+        sig = np.maximum.reduce([consts["ERRSIL"] * rel, consts["SICONT"] * r_loop * ip, bit])
+        if kersil == 3.0:
+            sig[iref] = max(consts["ERRSIL"] * ref_mag, consts["SICONT"] * r_loop[iref] * ip, bit[iref])
+            rtext = "max(ERRSIL |psi_ref|, SICONT R_ref |Ip|, VBIT PSIBIT_ref)"
+        else:
+            sig[iref] = consts["ERSIL8"]
+            rtext = "ERSIL8"
+        rule = (f"KERSIL = {kersil:g}: max(ERRSIL |psi_m - psi_ref|, SICONT R_m |Ip|, VBIT PSIBIT_m); reference loop "
+                f"{rtext}; reading '{reading}'")
+    else:
+        psi = coils
+        sig = np.maximum(serror * np.abs(psi), bit)
+        if abs(psibit[iref]) <= EFIT_SIGMA_FLOOR:
+            sig[iref] = serror * float(np.nanmax(np.abs(psi)))
+        basis = "COILS as stored"
+        rule = (f"KERSIL = {kersil:g}: max(SERROR |psi_m|, VBIT PSIBIT_m); reference loop SERROR max|psi| when its "
+                "bit is zero (this branch was not checked against EFIT output)")
+    rec.update(rule=rule, basis=basis)
+    return sig, rec
+
+
+def _flag_bool(block, key):
+    v = block.get(key)
+    if not v or v[0] is None:
+        return None
+    x = v[0]
+    return bool(x) if isinstance(x, bool) else bool(float(x))
 
 
 #: |COILS[reference]| <= this x max|COILS| counts as a zero reference entry (relative storage).
@@ -475,8 +837,9 @@ def flux_gauge(in1, coils, ref_index, flux_scale):
     big = float(np.nanmax(np.abs(coils))) if np.any(np.isfinite(coils)) else 0.0
     if ref_index is None:
         if s == 0.0:
-            form, ev = "absolute", ("SIREF = 0 (or absent): absolute storage (report 32 F3: SIREF = 0 slices store "
-                                    "absolute COILS); no flux_reference named, so the reference entry is not checked")
+            form, ev = "absolute", ("SIREF = 0 (or absent): absolute storage (SIREF = 0 slices store absolute COILS, "
+                                    "checked against m-files); no flux_reference named, so the reference entry is "
+                                    "not checked")
         else:
             form, ev = "undetermined", "SIREF != 0 but no flux_reference named: the reference entry cannot be checked"
     else:
@@ -493,7 +856,7 @@ def flux_gauge(in1, coils, ref_index, flux_scale):
     return {"siref": s, "siref_source": src, "coils_form": form, "coils_form_evidence": ev,
             "absolute_offset": float(flux_scale) * s,
             "absolute_rule": "absolute flux = (COILS + SIREF) x flux_scale = measured + absolute_offset "
-                             "(all k-file families checked against m-file silopt/psiref; B14)"}
+                             "(all k-file families checked against m-file silopt/psiref)"}
 
 
 def _coil_roles(labels, sizes, parts, fwt, iecurr):
@@ -518,7 +881,7 @@ def _coil_roles(labels, sizes, parts, fwt, iecurr):
     return roles, rule
 
 
-def _coils(in1, machine, efit_group, per_turn, score_unfitted):
+def _coils(in1, machine, efit_group, per_turn, score_unfitted, arrays=None, truncated=None, stored=None):
     parts = []
     for key, fkey, bkey in (("BRSP", "FWTFC", "BITFC"), ("ECURRT", "FWTEC", "BITEC")):
         if key in in1:
@@ -543,11 +906,16 @@ def _coils(in1, machine, efit_group, per_turn, score_unfitted):
     unknown = [k for k in per_turn if k not in ("BRSP", "ECURRT")]
     if unknown:
         raise ValueError(f"coil_current_per_turn names unknown arrays {unknown}")
-    val, fwt, bit, divide = [], [], [], []
+    val, fwt, bit, divide, bsrc = [], [], [], [], []
     for (k, fk, bk), n in zip(parts, sizes):
-        val.append(_num(in1, k, n))
-        fwt.append(_num(in1, fk, n, 0.0))
-        bit.append(_num(in1, bk, n, 0.0))
+        if arrays is not None:
+            v, w, b, src = arrays("pf_current", k, fk, bk, n)
+        else:
+            v, w, b, src = _num(in1, k, n), _num(in1, fk, n), _num(in1, bk, n), "k-file"
+        val.append(v)
+        fwt.append(w)
+        bit.append(b)
+        bsrc.append(src)
         divide.append(np.full(n, k in per_turn))
     val, fwt, bit, divide = (np.concatenate(x) for x in (val, fwt, bit, divide))
     geometry = {}
@@ -570,8 +938,12 @@ def _coils(in1, machine, efit_group, per_turn, score_unfitted):
              "coil_roles": roles, "coil_role_rule": rule, "IECURR": iecurr,
              "coil_arrays": {k: list(labels[sum(sizes[:j]):sum(sizes[:j + 1])])
                              for j, (k, _, _) in enumerate(parts)}}
+    override = None
+    if stored is not None:
+        override = _stored(stored, "pf_current", len(labels))
     return efit_group("pf_current", val, fwt, bit, labels, geometry, scale=scale,
-                      extra=extra, unfitted_valid=bool(score_unfitted))
+                      extra=extra, unfitted_valid=bool(score_unfitted), bit_source="; ".join(bsrc),
+                      sigma_override=override, override_text="EFIT's stored sigma (sigfcc, sigecc)")
 
 
 # ---------------------------------------------------------------------------
@@ -602,8 +974,8 @@ def _flag(nl, key, blocks=("INS", "EFITIN", "IN1")):
 def mse_er_status(tgamma, tgamma_uncor, a2, a5, r, active, usecer=None, keecur=None):
     """Decide whether k-file ``TGAMMA`` is already E_r-corrected.
 
-    Rule (project record, EFIT conventions check, rule R25 / R05), on the
-    active chords with ``D = TGAMMA - TGAMMAUNCOR``:
+    Rule (this package's convention, checked against k-files of known
+    provenance), on the active chords with ``D = TGAMMA - TGAMMAUNCOR``:
 
     0. No active chord -> ``"no_active_chords"`` (nothing to decide).
     1. ``TGAMMAUNCOR`` absent -> ``"unknown"``.
@@ -637,7 +1009,7 @@ def mse_er_status(tgamma, tgamma_uncor, a2, a5, r, active, usecer=None, keecur=N
     fractions only.
     """
     active = np.asarray(active, dtype=bool)
-    ev = {"rule": "D = TGAMMA - TGAMMAUNCOR on active chords (R25)",
+    ev = {"rule": "D = TGAMMA - TGAMMAUNCOR on active chords",
           "MSE_USECER": usecer, "KEECUR": keecur, "n_active": int(active.sum()),
           "d_rtol": ER_D_RTOL, "max_sign_changes": ER_MAX_SIGN_CHANGES,
           "min_sign_consistency": ER_MIN_SIGN_CONSISTENCY}
@@ -687,7 +1059,7 @@ def mse_er_status(tgamma, tgamma_uncor, a2, a5, r, active, usecer=None, keecur=N
     return {"status": "pre_corrected", "route": route, "evidence": ev}
 
 
-def _mse(nl, machine, er_corrected):
+def _mse(nl, machine, er_corrected, stored=None):
     ins = nl.get("INS", {})
     sig_key = "SGAMMA" if ins.get("SGAMMA") else "SIGGAM"
     core = ["TGAMMA", sig_key, "FWTGAM", "RRRGAM", "ZZZGAM",
@@ -697,7 +1069,7 @@ def _mse(nl, machine, er_corrected):
         raise ValueError(f"k-file MSE block lacks {missing}")
     n = min(len(ins[k]) for k in core)
     tg = _num(ins, "TGAMMA", n)
-    sg = _num(ins, sig_key, n)
+    sg = _num(ins, sig_key, n) if stored is None else _stored({"mse": stored}, "mse", n)
     fw = _num(ins, "FWTGAM", n, 0.0)
     a = {i: _num(ins, f"AA{i}GAM", n, 0.0) for i in range(1, 8)}
     coef = efit_to_imas_coefficients(a[1], a[2], a[3], a[4], a[5], a[6], a[7])
@@ -719,14 +1091,17 @@ def _mse(nl, machine, er_corrected):
                 f"sign consistency {ev.get('sign_consistency', '-')}): state it "
                 "explicitly with er_corrected=True/False")
         erc = st["status"] == "pre_corrected"
-        how, route = "TGAMMA - TGAMMAUNCOR rule (R25)", st["route"]
+        how, route = "TGAMMA - TGAMMAUNCOR rule", st["route"]
     else:
         erc, how, route = bool(er_corrected), "caller override", "caller_stated"
     if "mse" in machine.sensors and len(machine.labels("mse")) == n:
-        labels = machine.labels("mse")
+        labels, lab_src = machine.labels("mse"), "machine bundle"
     else:
         labels = [f"mse_{i:03d}" for i in range(n)]
-    meta = {"sigma_model": "efit_sgamma", "sigma_params": {}, "sigma_rule": "SGAMMA",
+        lab_src = ("generic (no 'mse' sensors in the machine bundle)" if "mse" not in machine.sensors else
+                   f"generic: the bundle names {len(machine.labels('mse'))} MSE channels, the file has {n}")
+    meta = {"sigma_model": "efit_sgamma" if stored is None else "efit_stored", "sigma_params": {},
+            "sigma_rule": "SGAMMA" if stored is None else "EFIT's stored sigma (siggam)", "labels_source": lab_src,
             "source": "efit_kfile", "quantity": "tan_polarisation_angle",
             "er_corrected": bool(erc), "er_corrected_source": how, "er_route": route,
             "er_status": st["status"], "er_evidence": st["evidence"],

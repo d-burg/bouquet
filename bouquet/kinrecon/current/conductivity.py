@@ -46,10 +46,11 @@ tokamaks", Phys. Plasmas 28, 022502 (2021), refit to NEO:
     f_t,eff^33 = f_t / (1 + (0.55 - 0.1 f_t) sqrt(nu_e*) + 0.45 (1 - f_t) nu_e* / Z^(3/2))
     F33(X)     = 1 - (1 + 0.36/Z) X + (0.59/Z) X^2 - (0.23/Z) X^3
 
-Verification status (details in the P0c report): the Sauter-1999 formulas
-(13a-b, 18a-e) were checked term by term against the paper.  The Redl-2021
-primary text was not accessible; its ``F33``/``f_t,eff^33`` coefficients are
-checked numerically against the authors' own published fit values
+Verification status: the Sauter-1999 formulas (13a-b, 18a-e) were checked
+term by term against the paper.  The Redl-2021 ``F33``/``f_t,eff^33``
+formulas (eqs. 17-18) were checked against the primary text by an
+independent review; the coefficients are also checked numerically against
+the authors' own published fit values
 (``sigma_new/sigma_Spitzer`` columns of the Zenodo dataset
 doi:10.5281/zenodo.4110606, Z_eff = 1.8, three trapped fractions, 18 points;
 see ``tests/kinrecon/test_current_conductivity.py``), and agree with the
@@ -147,6 +148,13 @@ def nu_e_star(q, R, ne, te_ev, zeff, eps, ln_lambda=None):
             / (te ** 2 * np.asarray(eps, dtype=float) ** 1.5))
 
 
+def _check_zeff(z):
+    """Z_eff < 1 is unphysical (a quasi-neutral plasma has Z_eff >= 1): refused, never clipped."""
+    if np.any(~np.isfinite(z)) or np.any(z < 1.0):
+        raise ValueError(f"Z_eff must be finite and >= 1 (min {float(np.nanmin(z)) if np.size(z) else 'n/a'!r}); "
+                         "it is not clipped")
+
+
 def f33_effective_trapped_fraction(ft, nu_e, zeff, model="redl2021"):
     r"""Collisionality-reduced trapped fraction f_t,eff^33.
 
@@ -160,8 +168,9 @@ def f33_effective_trapped_fraction(ft, nu_e, zeff, model="redl2021"):
     ft = np.asarray(ft, dtype=float)
     nu = np.asarray(nu_e, dtype=float)
     z = np.asarray(zeff, dtype=float)
+    _check_zeff(z)
     if model == "redl2021":
-        den = (1.0 + 0.25 * (1.0 - 0.7 * ft) * np.sqrt(nu) * (1.0 + 0.45 * np.sqrt(np.maximum(z - 1.0, 0.0)))
+        den = (1.0 + 0.25 * (1.0 - 0.7 * ft) * np.sqrt(nu) * (1.0 + 0.45 * np.sqrt(z - 1.0))
                + 0.61 * (1.0 - 0.41 * ft) * nu / np.sqrt(z))
     elif model == "sauter1999":
         den = 1.0 + (0.55 - 0.1 * ft) * np.sqrt(nu) + 0.45 * (1.0 - ft) * nu / z ** 1.5

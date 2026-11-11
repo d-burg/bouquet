@@ -14,7 +14,7 @@ thermal + fast-ion pressure) iterated to consistency with the anchored forward s
   E_r status is not established is not a fit constraint;
 
 plus one prior row ``(theta_j - mu_j)/sigma_j`` per free parameter with a Gaussian prior.  Thomson
-is never a weight (decision D04).  The objective is ``chi^2 = sum r^2`` (diagonal Gaussian likelihood
+is never a weight.  The objective is ``chi^2 = sum r^2`` (diagonal Gaussian likelihood
 + Gaussian priors); the MAP point is found by Levenberg-Marquardt with a forward-difference Jacobian.
 
 Parameters (:data:`PARAMETERS`; default free set: ``log_strength`` only):
@@ -24,16 +24,16 @@ name               meaning                                     default prior / b
 =================  ==========================================  ======================================
 ``log_strength``   ln of the sawtooth strength                 N(ln Lambda_0, 1.0); Lambda_0 at f = 0.37
                    ``Lambda = -ln(1 - 0.999 f) nu`` [1/s]      and a 60 ms period; bounds ln(1e-2)..ln(1e4)
-``f``              reconnection fraction at fixed strength     no Gaussian prior (uniform 0.1-1, R10)
+``f``              reconnection fraction at fixed strength     no Gaussian prior (uniform 0.1-1)
 ``s_pfast``        fast-ion pressure scale                     N(1, 0.15); bounds 0.2..3
 ``s_cd``           driven-current scale                        N(1, 0.20); bounds 0..3
-``s_bs``           bootstrap multiplier                        N(1, 0.5) (D15); bounds 0..3
+``s_bs``           bootstrap multiplier                        N(1, 0.5); bounds 0..3
 ``a_corr_k``       model-discrepancy current amplitude k       N(0, 0.02) (fraction of Ip); +-0.2
                    (Gaussian shapes in rho, ``current_model``)
 =================  ==========================================  ======================================
 
 Every prior, bound, step rule and stopping criterion is an explicit setting recorded in the
-result (they are decisions for the user; the defaults come from the project record: R10, D15,
+result (they are decisions for the user; the defaults are this package's proposals:
 A5, A9).
 
 Algorithm (Levenberg-Marquardt, H. B. Nielsen's damping update with the diagonal scaling of
@@ -43,9 +43,9 @@ D. W. Marquardt, J. SIAM 11, 431 (1963)):
 2. measured re-solve noise: one lagged solve at the center parameters gives the residual change a
    column sees with no parameter change (``noise``);
 3. Jacobian columns by forward differences, each a LAGGED solve (geometry, conductivity and
-   bootstrap from the center; R16) warm from the center; the step of parameter j starts at
+   bootstrap from the center) warm from the center; the step of parameter j starts at
    ``step0_j`` and is enlarged x4 (up to 3 times) until ``|dr| >= step_noise_factor * |noise|``
-   (default 20, report 09's rule of thumb); a step that would cross a bound is taken backwards;
+   (default 20, a rule of thumb from development checks); a step that would cross a bound is taken backwards;
 4. LM step ``(J^T J + lambda diag(J^T J)) delta = -J^T r``, shrunk as a whole so that no component
    exceeds its trust-region cap ``max_step`` (default 0.5 in ln strength, 0.1 in f and the scales,
    0.2 in s_bs, 0.01 in a_corr), clipped to the bounds; the trial is a
@@ -72,9 +72,9 @@ from . import current_model as _cm
 from .current import sawtooth as _saw
 from .score import chi2_summary, score
 
-#: Reference crash period of the default strength prior (R11/A5 proposal: median 60 ms) [s].
+#: Reference crash period of the default strength prior (proposal: median 60 ms) [s].
 PRIOR_PERIOD_S = 0.060
-#: Reference reconnection fraction (Bateman et al. 2006 hint, report 10/23) used by the prior center.
+#: Reference reconnection fraction (Bateman et al. 2006 hint) used by the prior center.
 PRIOR_F = 0.37
 
 
@@ -90,7 +90,7 @@ PARAMETERS = {
               note="reconnection fraction at fixed strength (uniform prior 0.1-1: bounds only)"),
     "s_pfast": dict(prior=(1.0, 0.15), bounds=(0.2, 3.0), step0=0.05, unit="1", note="fast-ion pressure scale"),
     "s_cd": dict(prior=(1.0, 0.20), bounds=(0.0, 3.0), step0=0.05, unit="1", note="driven-current scale"),
-    "s_bs": dict(prior=(1.0, 0.5), bounds=(0.0, 3.0), step0=0.05, unit="1", note="bootstrap multiplier (D15)"),
+    "s_bs": dict(prior=(1.0, 0.5), bounds=(0.0, 3.0), step0=0.05, unit="1", note="bootstrap multiplier"),
     "a_corr": dict(prior=(0.0, 0.02), bounds=(-0.2, 0.2), step0=0.005, unit="fraction of Ip",
                    note="model-discrepancy current amplitudes (one per center)"),
 }
@@ -338,7 +338,12 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
         fit_chi = {g: float(np.sum(r[[i for i, (gg, _) in enumerate(idx) if gg == g]] ** 2)) for g in groups}
         c = dict(theta=np.array(theta, float), params=p, res=res, r=full, r_data=r, index=idx + lp,
                  chi2=dict(objective=float(full @ full), data=float(r @ r), prior=float(rp @ rp), fit_groups=fit_chi,
-                           n_data=int(r.size), scored_all=summ),
+                           n_data=int(r.size), n_params=len(names), dof=int(r.size) - len(names), scored_all=summ,
+                           scored_all_dof=dict(n_channels=summ["total"]["n"], n_params=len(names),
+                                               dof=summ["total"]["n"] - len(names),
+                                               note="chi2/n in scored_all is descriptive (sigma are "
+                                                    "conventions); the n_params were fitted to the fit "
+                                                    "groups, a subset of these channels")),
                  tab=tab, all_tab=all_tab, snap=fm.snapshot(), probe_correction=fm.probe_correction.copy(),
                  z0=res.assembly["orbit_z"] if res.assembly else None)
         return c, res
@@ -355,7 +360,7 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
                           passes_record=res0.record.get("passes"), reason=res0.record.get("reason"))
     if center is None and res0.status == "limit_cycle_untapered_lock" and \
             fm.case.setting.mode.value == "auto" and not fm.taper_restarts:
-        # edge-taper policy 'auto' (R32/R35): a limit cycle was detected in an untapered solve of this
+        # edge-taper policy 'auto': a limit cycle was detected in an untapered solve of this
         # reconstruction before it had a consistent state -> the taper is applied to the WHOLE
         # reconstruction (uniform within the case): restart from the starting state, tapered
         fm.lock_tapered(f"limit cycle in {res0.record.get('passes', [{}])[-1].get('k')} pass of {label}:center0 "

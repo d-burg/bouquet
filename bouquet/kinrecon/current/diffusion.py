@@ -43,8 +43,8 @@ the boundary toroidal flux Phi_b changes in time, the state is held on fixed
 Boundary conditions: ``k psi' = 0`` on axis (``I(0) = 0``; also ``V'(0) = 0``);
 at ``rho = 1`` either ``I(1) = Ip(t)`` or ``dpsi_b/dt|_Phi = V_loop(t) / 2pi``.
 
-Domain edge and the lumped outer layer (ruling R29)
----------------------------------------------------
+Domain edge and the lumped outer layer
+--------------------------------------
 On a diverted boundary the domain ends at a closed surface ``psi_N = c``
 inside the last closed surface (default 0.995; see
 :func:`.geometry.choose_psi_n_edge`), and ``rho = 1`` is that cutoff.  The
@@ -94,32 +94,44 @@ COCOS-signed result is needed.
 
 Units: SI, ``psi`` in Wb/rad, ``mu0 = 4 pi 1e-7``.
 
-Discretization (choice justified in the P0c report)
----------------------------------------------------
+Discretization
+--------------
 Cell-centered conservative finite volumes on faces ``rho_f`` (uniform by
-default, any strictly increasing set from 0 to 1): the unknowns are cell
-values ``psi_c`` (plus ``psi_b`` at rho = 1 under the loop-voltage condition).
+default, any strictly increasing set from 0 to 1, at least 3 cells): the
+unknowns are cell values ``psi_c`` (plus ``psi_b`` at rho = 1 under the
+loop-voltage condition).
 Face fluxes are ``k_f (psi_{c+1} - psi_c)/(rho_{c+1} - rho_c)``; cell
 integrals of ``a`` and ``S`` use the midpoint rule.  Second order in space,
 including the axis (the cylindrical singularity is handled by ``k(0) = 0``).
 At ``rho = 1`` the gradient is the second-order one-sided formula through
 ``psi_b`` and the two outer cell values (``(8, -9, 1)/(3h)`` on uniform cells),
 so ``Ip`` under the loop-voltage condition, and ``psi_b`` under the Ip
-condition, are second order as well.
+condition, are second order as well.  The moving-boundary term (7) uses the
+same one-sided ``psi'(1)`` in the boundary row of the loop-voltage condition
+(second order; the row then has a second sub-diagonal, solved as a banded
+system with two lower diagonals).  With the lumped outer layer under the Ip
+condition the last cell's advection uses a two-point ``psi'`` (first order in
+that term in the last cell only; see :meth:`CurrentDiffusion._operator`).
+Inputs given as tables (profiles in rho, values in time) are interpolated
+inside the table only: a request outside the tabulated range raises unless
+``extrapolate=True`` was asked for explicitly (:func:`as_profile_function`,
+:func:`as_time_function`).
 Time: TR-BDF2 (L-stable, second order; default), or the theta method
 (``theta = 1`` backward Euler, ``theta = 0.5`` Crank-Nicolson as in QED.jl).
 Crank-Nicolson is not L-stable: with a resistive edge (large eta, fine grid)
 and a step much longer than the edge diffusion time it leaves undamped
 oscillations in ``<J.B>`` at the edge (measured in the P0c benchmark), which
 is why TR-BDF2 is the default.
-Every implicit stage is one tridiagonal solve; coefficients are re-evaluated
+Every implicit stage is one banded solve (tridiagonal except for the boundary
+row noted above); coefficients are re-evaluated
 at each stage time, so geometry, conductivity, non-inductive current and the
 boundary value may all vary within a step.
 
-Sawtooth hook (no model is implemented here)
---------------------------------------------
+Sawtooth hooks (the reconnection model itself is :mod:`.sawtooth`)
+-------------------------------------------------------------------
 * ``post_step(state, t, solver) -> state`` is applied after every step, e.g.
-  a crash operator acting on ``state.psi``;
+  the crash operator of :mod:`.sawtooth` acting on ``state.psi``
+  (:class:`.sawtooth.CrashSchedule`);
 * ``resistivity_modifier(t, rho, eta, state) -> eta`` modifies the resistivity
   used within the step; it is evaluated with the state at the start of the
   step for every stage, so each step stays linear.
@@ -130,7 +142,7 @@ Formulation after B. C. Lyons, "Neoclassical current diffusion solver"
 (``equations_readme.pdf`` in QED.jl, General Atomics, Apache-2.0) and S. C.
 Jardin, *Computational Methods in Plasma Physics* (CRC Press, 2010); the
 moving-boundary term (7) after F. Felici et al., Nucl. Fusion 51, 083052
-(2011).  The equations were re-derived (see the P0c report) and the code is
+(2011).  The equations were re-derived independently and the code is
 written independently; QED.jl is used only as a numerical benchmark.  The
 conductivity model is in :mod:`.conductivity` (Sauter 1999, Redl 2021).
 TR-BDF2: R. E. Bank et al., IEEE Trans. CAD 4, 436 (1985); M. E. Hosea and
@@ -151,6 +163,7 @@ __all__ = [
     "CurrentState",
     "IpBoundary",
     "VloopBoundary",
+    "PositiveFrameError",
     "OuterLayer",
     "GeometrySchedule",
     "CurrentDiffusion",
@@ -159,11 +172,31 @@ __all__ = [
 ]
 
 _TRBDF2_GAMMA = 2.0 - np.sqrt(2.0)
+_RANGE_RTOL = 1e-12     # a table "covers" a request that lies outside it by no more than this fraction of its span
+
+
+class PositiveFrameError(ValueError):
+    """An input or state is not in the positive frame of the module docstring (Ip > 0, psi' > 0, Phi_b > 0)."""
+
+
+def _check_inside(x, lo, hi, what):
+    x = np.asarray(x, dtype=float)
+    if x.size == 0:
+        return
+    tol = _RANGE_RTOL * max(hi - lo, abs(hi), abs(lo), 1.0)
+    xmin, xmax = float(np.min(x)), float(np.max(x))
+    if xmin < lo - tol or xmax > hi + tol:
+        raise ValueError(f"{what}: requested [{xmin:.6g}, {xmax:.6g}] lies outside the tabulated range "
+                         f"[{lo:.6g}, {hi:.6g}]; extend the table or pass extrapolate=True explicitly")
 
 
 # ====================================================================== inputs
-def as_time_function(spec):
-    """Scalar time function from a constant, a callable ``f(t)`` or ``(times, values)`` (linear)."""
+def as_time_function(spec, extrapolate=False, name="time table"):
+    """Scalar time function from a constant, a callable ``f(t)`` or ``(times, values)`` (linear).
+
+    A table is evaluated only inside ``[times[0], times[-1]]``: outside it a ``ValueError`` is raised, unless
+    ``extrapolate=True`` is passed, which holds the end values (the previous, silent behavior).
+    """
     if callable(spec):
         return spec
     if np.isscalar(spec):
@@ -174,10 +207,18 @@ def as_time_function(spec):
     values = np.asarray(values, dtype=float)
     if np.any(np.diff(times) <= 0):
         raise ValueError("times must increase strictly")
-    return lambda t: float(np.interp(t, times, values))
+    if extrapolate:
+        return lambda t: float(np.interp(t, times, values))
+    t0, t1 = float(times[0]), float(times[-1])
+
+    def f(t):
+        _check_inside(t, t0, t1, name)
+        return float(np.interp(t, times, values))
+
+    return f
 
 
-def as_profile_function(spec, log=False):
+def as_profile_function(spec, log=False, extrapolate=False, name="profile table"):
     """Radial profile ``f(t, rho)`` from several input forms.
 
     * ``None`` -> zero; a scalar -> constant;
@@ -187,6 +228,11 @@ def as_profile_function(spec, log=False):
 
     ``log=True`` interpolates ``log(values)`` (for conductivity, which varies
     by orders of magnitude near the edge), as QED.jl does for resistivity.
+
+    Tables are evaluated only inside their range (rho and, for the 3-tuple
+    form, time): a request outside it raises ``ValueError``.  ``extrapolate=True``
+    restores the previous behavior explicitly (PCHIP extrapolation in rho --
+    in log space for ``log=True`` -- and end values held in time).
     """
     if spec is None:
         return lambda t, rho: np.zeros_like(np.asarray(rho, dtype=float))
@@ -200,14 +246,25 @@ def as_profile_function(spec, log=False):
     if len(spec) == 2:
         rho_in, vals = (np.asarray(x, dtype=float) for x in spec)
         p = PchipInterpolator(rho_in, fwd(vals), extrapolate=True)
-        return lambda t, rho: inv(p(rho))
+        r0, r1 = float(rho_in[0]), float(rho_in[-1])
+
+        def f2(t, rho):
+            if not extrapolate:
+                _check_inside(rho, r0, r1, name)
+            return inv(p(rho))
+
+        return f2
     if len(spec) == 3:
         times, rho_in, vals = (np.asarray(x, dtype=float) for x in spec)
         if vals.shape != (times.size, rho_in.size):
             raise ValueError("values must have shape (n_times, n_rho)")
         ps = [PchipInterpolator(rho_in, fwd(v), extrapolate=True) for v in vals]
+        r0, r1 = float(rho_in[0]), float(rho_in[-1])
 
         def f(t, rho):
+            if not extrapolate:
+                _check_inside(rho, r0, r1, name)
+                _check_inside(t, float(times[0]), float(times[-1]), name + " (time)")
             if t <= times[0]:
                 return inv(ps[0](rho))
             if t >= times[-1]:
@@ -222,32 +279,46 @@ def as_profile_function(spec, log=False):
 
 @dataclass
 class IpBoundary:
-    """Total plasma current boundary condition I(rho = 1) = Ip(t) [A] (positive frame)."""
+    """Total plasma current boundary condition I(rho = 1) = Ip(t) [A] (positive frame).
+
+    A negative value raises :class:`PositiveFrameError` when it is evaluated (map the discharge onto the
+    positive frame first, module docstring); zero is allowed (linear-response checks).  ``extrapolate=True``
+    lets a ``(times, values)`` table hold its end values outside its range (otherwise refused).
+    """
 
     ip: object
+    extrapolate: bool = False
 
     def __post_init__(self):
-        self._f = as_time_function(self.ip)
+        self._f = as_time_function(self.ip, self.extrapolate, "Ip(t) table")
 
     def __call__(self, t):
-        return self._f(t)
+        v = self._f(t)
+        if not v >= 0:
+            raise PositiveFrameError(f"Ip({t!r}) = {v!r} < 0 (or not a number): the diffusion runs in the positive "
+                                     "frame (Ip > 0); reverse the signs of Ip and psi before solving")
+        return v
 
 
 @dataclass
 class VloopBoundary:
-    """Edge loop-voltage boundary condition 2 pi dpsi_b/dt|_Phi = V(t) [V] (positive drives co-current)."""
+    """Edge loop-voltage boundary condition 2 pi dpsi_b/dt|_Phi = V(t) [V] (positive drives co-current).
+
+    ``extrapolate=True`` lets a ``(times, values)`` table hold its end values outside its range (otherwise
+    refused)."""
 
     vloop: object
+    extrapolate: bool = False
 
     def __post_init__(self):
-        self._f = as_time_function(self.vloop)
+        self._f = as_time_function(self.vloop, self.extrapolate, "V_loop(t) table")
 
     def __call__(self, t):
         return self._f(t)
 
 
 class OuterLayer:
-    r"""Lumped uniform-E_par element for the layer ``psi_n_edge < psi_N < 1`` (equation (8); R29).
+    r"""Lumped uniform-E_par element for the layer ``psi_n_edge < psi_N < 1`` (equation (8)).
 
     Direct form: ``OuterLayer(psi_n_edge, fpol_lcfs, conductance, source)``
     with the layer integrals ``A_layer`` [A s / (Wb T m) = 1/(Ohm T m)] and
@@ -262,21 +333,21 @@ class OuterLayer:
     sawtooth hook acts on the core), and its geometry is static.
     """
 
-    def __init__(self, psi_n_edge, fpol_lcfs, conductance, source=0.0):
+    def __init__(self, psi_n_edge, fpol_lcfs, conductance, source=0.0, extrapolate=False):
         self.psi_n_edge = float(psi_n_edge)
         self.fpol_lcfs = float(fpol_lcfs)
         if not 0.0 < self.psi_n_edge < 1.0:
             raise ValueError("psi_n_edge must lie in (0, 1)")
         if not (np.isfinite(self.fpol_lcfs) and self.fpol_lcfs > 0):
             raise ValueError("fpol_lcfs must be positive (|F| at the last closed surface)")
-        self._A = as_time_function(conductance)
-        self._B = as_time_function(source)
+        self._A = as_time_function(conductance, extrapolate, "outer-layer conductance table")
+        self._B = as_time_function(source, extrapolate, "outer-layer source table")
         self.geometry = None
         self._sigma = None
         self._jni = None
 
     @classmethod
-    def from_profiles(cls, geometry, conductivity, j_ni=None):
+    def from_profiles(cls, geometry, conductivity, j_ni=None, extrapolate=False):
         """Layer element from an :class:`.geometry.OuterLayerGeometry`.
 
         ``conductivity`` and ``j_ni`` are given on the layer's psi_N (any form
@@ -288,8 +359,9 @@ class OuterLayer:
             raise TypeError("geometry must be an OuterLayerGeometry")
         obj = cls(geometry.psi_n_edge, geometry.fpol_lcfs, 1.0, 0.0)
         obj.geometry = geometry
-        obj._sigma = as_profile_function(conductivity, log=True)
-        obj._jni = as_profile_function(j_ni)
+        obj._sigma = as_profile_function(conductivity, log=True, extrapolate=extrapolate,
+                                         name="outer-layer conductivity table")
+        obj._jni = as_profile_function(j_ni, extrapolate=extrapolate, name="outer-layer <J_NI.B> table")
         obj._A = lambda t: geometry.integral(geometry.conductance_density(obj._sigma(t, geometry.psi_n)))
         obj._B = lambda t: geometry.integral(geometry.source_density(obj._jni(t, geometry.psi_n)))
         return obj
@@ -536,9 +608,15 @@ class CurrentDiffusion:
     resistivity_modifier
         Optional ``(t, rho_cells, eta, state) -> eta`` (sawtooth hook; see
         module docstring).
+    extrapolate_inputs
+        ``False`` (default): ``conductivity`` and ``j_ni`` tables are evaluated
+        only inside their rho (and time) range, and a request outside raises.
+        ``True``: PCHIP extrapolation (log space for conductivity) and end
+        values held in time, explicitly (the previous behavior).  Recorded in
+        :attr:`settings`.
     outer_layer
         :class:`OuterLayer` -- the lumped layer between the domain edge and the
-        last closed surface (R29); the boundary condition then applies at the
+        last closed surface; the boundary condition then applies at the
         last closed surface.  ``"none"`` -- explicitly the previous behavior:
         the boundary condition applies at the domain edge and nothing lies
         outside it.  ``None`` (default) -- allowed only when the geometry is
@@ -547,8 +625,14 @@ class CurrentDiffusion:
         than silently dropping the layer.
     """
 
-    def __init__(self, geometry, conductivity, boundary, j_ni=None, resistivity_modifier=None, outer_layer=None):
+    def __init__(self, geometry, conductivity, boundary, j_ni=None, resistivity_modifier=None, outer_layer=None,
+                 extrapolate_inputs=False):
         if isinstance(geometry, FluxSurfaceGeometry):
+            if float(geometry.dphib_dt) != 0.0:
+                raise ValueError(f"a static geometry carries dphib_dt = {geometry.dphib_dt!r} != 0: its Phi_b is "
+                                 "fixed, so the moving-boundary term would be applied with no change of Phi_b. "
+                                 "Use a GeometrySchedule (or a callable t -> geometry) for a moving boundary, or "
+                                 "set dphib_dt = 0")
             self._geo_fn = None
             self._geo_static = geometry
         elif callable(geometry):
@@ -556,8 +640,10 @@ class CurrentDiffusion:
             self._geo_static = None
         else:
             raise TypeError("geometry must be a FluxSurfaceGeometry or a callable t -> FluxSurfaceGeometry")
-        self.sigma_fn = as_profile_function(conductivity, log=True)
-        self.jni_fn = as_profile_function(j_ni)
+        self.extrapolate_inputs = bool(extrapolate_inputs)
+        self.sigma_fn = as_profile_function(conductivity, log=True, extrapolate=self.extrapolate_inputs,
+                                            name="conductivity table")
+        self.jni_fn = as_profile_function(j_ni, extrapolate=self.extrapolate_inputs, name="<J_NI.B> table")
         if not isinstance(boundary, (IpBoundary, VloopBoundary)):
             raise TypeError("boundary must be IpBoundary or VloopBoundary")
         self.boundary = boundary
@@ -581,6 +667,14 @@ class CurrentDiffusion:
     def ip_mode(self):
         return isinstance(self.boundary, IpBoundary)
 
+    @property
+    def settings(self):
+        """Solver choices that are not inputs (recorded so that nothing is assumed silently)."""
+        return dict(extrapolate_inputs=self.extrapolate_inputs, edge_treatment=self.edge_mode,
+                    boundary=type(self.boundary).__name__,
+                    boundary_extrapolate=bool(getattr(self.boundary, "extrapolate", False)),
+                    frame="positive (Ip >= 0 enforced at evaluation)")
+
     def _check_edge(self, geo):
         """Refuse a truncated geometry without an explicit edge treatment; check the layer's cutoff."""
         if self._edge_checked:
@@ -588,7 +682,7 @@ class CurrentDiffusion:
         c = float(geo.meta.get("psi_n_edge", 1.0))
         if self.edge_mode == "auto" and c < 1.0:
             raise ValueError(f"the geometry ends at psi_N = {c:g}, inside the last closed surface: pass "
-                             "outer_layer=OuterLayer(...) (R29: lumped outer layer, Ip at the last closed surface) or "
+                             "outer_layer=OuterLayer(...) (lumped outer layer, Ip at the last closed surface) or "
                              "outer_layer='none' to apply the boundary condition at the domain edge (previous behavior)")
         if self.edge_mode == "lumped" and abs(c - self.outer_layer.psi_n_edge) > 1e-12 and "psi_n_edge" in geo.meta:
             raise ValueError(f"outer layer starts at psi_N = {self.outer_layer.psi_n_edge:g} but the geometry ends at "
@@ -608,6 +702,9 @@ class CurrentDiffusion:
     # -------------------------------------------------------------- coefficients
     def coefficients(self, t, rho_faces, state=None):
         rf = np.asarray(rho_faces, dtype=float)
+        if rf.size < 4:
+            raise ValueError(f"the grid needs at least 3 cells (got {rf.size - 1}): the boundary gradient uses the "
+                             "two outer cell values")
         rc = 0.5 * (rf[1:] + rf[:-1])
         h = np.diff(rf)
         key = rf.tobytes()
@@ -658,7 +755,11 @@ class CurrentDiffusion:
 
     # -------------------------------------------------------------- linear operator
     def _operator(self, c, rf):
-        """Tridiagonal A (banded, shape (3, m)) and vector b with dy/dt = A y + b."""
+        """Banded A (shape (4, m): upper, diagonal, lower, second lower) and vector b with dy/dt = A y + b.
+
+        The second lower diagonal is nonzero only in the boundary row of the loop-voltage condition with a
+        moving boundary (second-order one-sided psi'(1) in the advection term).
+        """
         n = rf.size - 1
         rc = 0.5 * (rf[1:] + rf[:-1])
         ip_mode = self.ip_mode
@@ -666,6 +767,7 @@ class CurrentDiffusion:
         lower = np.zeros(m)   # A[i, i-1]
         diag = np.zeros(m)
         upper = np.zeros(m)   # A[i, i+1]
+        lower2 = np.zeros(m)  # A[i, i-2]
         b = np.zeros(m)
         d = np.diff(rc)                    # center distances (n-1)
         cond = c.k_f[1:n] / d              # interior face conductances
@@ -682,7 +784,6 @@ class CurrentDiffusion:
         diag[1:n] -= cond / mass[1:n]
         lower[1:n] += cond / mass[1:n]
         b[:n] -= src / mass
-        delta = 1.0 - rc[-1]
         wb, w1, w2 = _boundary_gradient_weights(rc)
         if ip_mode:
             gam_b = c.bc_value / c.F_lcfs           # I/F at the boundary face (last closed surface with a layer)
@@ -724,14 +825,16 @@ class CurrentDiffusion:
                 b[i] += gi * gam_b / (c.k_f[-1] * wb)
             else:
                 upper[i] += gi
-                # boundary row: two-point psi'(1) keeps the system tridiagonal (first order in this term only)
-                gb = c.w_b / delta
-                diag[n] += gb
-                lower[n] -= gb
-        ab = np.zeros((3, m))
+                # boundary row: dpsi_b/dt|_rho = V/2pi + w_b psi'(1) with the second-order one-sided psi'(1)
+                # through (psi_b, psi_{n-1}, psi_{n-2}) -- one entry on the second lower diagonal
+                diag[n] += c.w_b * wb
+                lower[n] += c.w_b * w1
+                lower2[n] += c.w_b * w2
+        ab = np.zeros((4, m))
         ab[0, 1:] = upper[:-1]
         ab[1, :] = diag
         ab[2, :-1] = lower[1:]
+        ab[3, :-2] = lower2[2:]
         return ab, b
 
     @staticmethod
@@ -739,6 +842,7 @@ class CurrentDiffusion:
         out = ab[1] * y
         out[:-1] += ab[0, 1:] * y[1:]
         out[1:] += ab[2, :-1] * y[:-1]
+        out[2:] += ab[3, :-2] * y[:-2]
         return out
 
     @staticmethod
@@ -746,7 +850,9 @@ class CurrentDiffusion:
         """Solve (I - alpha A) x = rhs."""
         lhs = -alpha * ab
         lhs[1] += 1.0
-        return solve_banded((1, 1), lhs, rhs)
+        if not np.any(lhs[3]):
+            return solve_banded((1, 1), lhs[:3], rhs)
+        return solve_banded((2, 1), lhs, rhs)
 
     def _pack(self, state):
         return state.psi.copy() if self.ip_mode else np.concatenate((state.psi, [state.psi_boundary]))
@@ -886,7 +992,7 @@ class CurrentDiffusion:
 
             <J_phi> = (F <1/R> / <B^2>) <J.B> - (dp/dpsi) (<R> - F^2 <1/R> / <B^2>)
 
-        (derived in the P0c report from J_phi = -R p' - F F'/(mu0 R) and
+        (derived from J_phi = -R p' - F F'/(mu0 R) and
         <J.B> = -F p' - F' <B^2>/mu0 for the field of eq. 1, p' = dp/dpsi).
 
         Scalars: ``ip`` [A], ``v_loop_boundary`` [V], ``w_pol`` = int B_p^2/(2 mu0) dV [J],

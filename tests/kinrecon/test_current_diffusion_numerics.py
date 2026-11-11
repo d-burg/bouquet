@@ -53,13 +53,21 @@ def test_time_convergence_order(scheme, theta, order, bc):
     # reference: the semi-discrete solution, approximated by 5120 TR-BDF2 steps for every scheme
     # (a 5120-step backward-Euler reference would itself carry ~6 % of the finest-step error)
     ref = sol.advance(st0, T_END, nsteps=5120, scheme="trbdf2")
-    errs = []
+    jref = sol.profiles(ref)["jdotb"]
+    errs, jerrs = [], []
     for ns in (40, 80, 160, 320):
         s = sol.advance(st0, T_END, nsteps=ns, **kw)
         errs.append(max(np.max(np.abs(s.psi - ref.psi)), abs(s.psi_boundary - ref.psi_boundary)))
+        jerrs.append(np.max(np.abs(sol.profiles(s)["jdotb"] - jref)))
     p = np.log2(np.array(errs[:-1]) / np.array(errs[1:]))
     # theory: p = 2 (TR-BDF2, CN), p = 1 (backward Euler); bound +-0.1, fixed before running
     assert order - 0.1 <= p[-1] <= order + 0.1, (errs, p)
+    # <J.B> (a second difference of psi) must converge at the same order: added after an independent review
+    # (psi alone cannot reveal undamped edge <J.B> oscillations).  On this smooth case CN passes; on a steep
+    # edge or a sampled initial state CN's <J.B> does not converge (module docstring), which is why TR-BDF2
+    # is the default.
+    pj = np.log2(np.array(jerrs[:-1]) / np.array(jerrs[1:]))
+    assert order - 0.1 <= pj[-1] <= order + 0.1, (jerrs, pj)
 
 
 def test_ip_boundary_conserves_total_current():

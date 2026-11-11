@@ -75,7 +75,7 @@ IMAS components: OMAS and IMAS.jl form the total pressure as
 ``p_thermal + pressure_fast_parallel + 2 pressure_fast_perpendicular``, so each stored
 component holds ONE THIRD of the corresponding true pressure (an isotropic p_fast is stored
 as p_fast/3 in both).  Every OMFIT export (ONETWO, RABBIT, FREYA) writes ``p/3``; the
-TRANSP plasma-state export writes true pressures (report 26, B.2/B.4 of the project record).
+TRANSP plasma-state export writes true pressures (checked on the exporters' source).
 The DD itself cannot tell the two apart, so readers must be TOLD which one a file uses
 (:mod:`.imas` refuses to guess).
 
@@ -190,8 +190,18 @@ def _geo_arrays(geometry, rho, names):
         val = getattr(geometry, n, None)
         if val is None:
             raise AmbiguousConventionError(f"frame conversion needs geometry field {n!r}, which is absent")
-        out[n] = PchipInterpolator(geometry.rho, np.asarray(val, float), extrapolate=True)(rho)
+        out[n] = PchipInterpolator(geometry.rho, np.asarray(val, float), extrapolate=True)(_inside(rho, geometry.rho))
     return out
+
+
+def _inside(rho, grid, tol=1e-12):
+    """``rho`` unchanged if it lies within the geometry's grid (to ``tol``); otherwise refused (no extrapolation)."""
+    r = np.asarray(rho, float)
+    g = np.asarray(grid, float)
+    if r.size and (np.min(r) < g[0] - tol or np.max(r) > g[-1] + tol):
+        raise ValueError(f"frame conversion at rho [{np.min(r):.6g}, {np.max(r):.6g}] outside the geometry's grid "
+                         f"[{g[0]:.6g}, {g[-1]:.6g}]: not extrapolated")
+    return r
 
 
 def jphi_over_r_from_jdotb(jdotb, rho, geometry):
@@ -221,7 +231,7 @@ def toroidal_frames(jdotb, rho, geometry):
         g = _geo_arrays(geometry, rho, ("fpol", "avg_inv_r", "avg_b2"))
         out["j_tor"] = jr / g["avg_inv_r"]
         out["jphi_avg"] = np.asarray(jdotb, float) * g["fpol"] * g["avg_inv_r"] / g["avg_b2"]
-    dv = PchipInterpolator(geometry.rho, geometry.dvol_drho, extrapolate=True)(rho)
+    dv = PchipInterpolator(geometry.rho, geometry.dvol_drho, extrapolate=True)(_inside(rho, geometry.rho))
     out["current_enclosed"] = enclosed_current(rho, jr, dv)
     return out
 

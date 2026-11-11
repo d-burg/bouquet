@@ -1,6 +1,6 @@
 r"""PROPOSED default uncertainty priors for non-inductive sources (status ``"proposed"``; never applied silently).
 
-The default prior widths are a user decision (project decision D-B3).  This module only
+The default prior widths are a user decision.  This module only
 collects the proposals with the evidence each rests on, so a caller can attach them
 explicitly::
 
@@ -8,11 +8,11 @@ explicitly::
     s.uncertainty = proposed_priors("simple_beam")
 
 Every entry is a :class:`.provider.ScalePrior` / :class:`.provider.ShapePrior` with
-``status="proposed"`` and a ``basis`` string.  Evidence (kinetic-reconstruction record,
-report 30): the built-in model against a transport code (ONETWO) on 11 discharges / 1363
+``status="proposed"`` and a ``basis`` string.  Evidence (this package's development checks,
+not published): the built-in model against a transport code (ONETWO) on 11 discharges / 1363
 slices (slowing-down part, given the code's own births) and on 2 discharges / 102 slices
 (full chain with pencil beams); two runs of the transport code on one discharge; and the
-literature survey of report 28 (quiet-plasma agreement of classical fast-ion models with
+a literature survey (quiet-plasma agreement of classical fast-ion models with
 neutrons, MSE-inferred fast-ion pressure and beam-driven current within ~10-20 %).
 
 ``kind``:
@@ -30,7 +30,7 @@ __all__ = ["proposed_priors", "PRIOR_KINDS"]
 
 PRIOR_KINDS = ("simple_beam", "transport_code", "simple_ec", "mhd_active")
 
-_B30 = "record report 30"
+_B30 = "development check against a transport code"
 
 
 def proposed_priors(kind):
@@ -41,7 +41,7 @@ def proposed_priors(kind):
             ScalePrior("p_fast", "*", 1.0, 0.20, status=P,
                        basis=f"{_B30}: built-in/transport-code stored energy 1.02 (slowing down on the code's births; "
                              "log-sd 0.08) and 1.04-1.16 per MW (full chain, log-sd 0.07, energy-mix dependent); plus "
-                             "0.15 for the transport code's own error (report 28 literature)"),
+                             "0.15 for the transport code's own error (literature survey)"),
             ScalePrior("n_fast", "*", 1.0, 0.20, status=P,
                        basis=f"{_B30}: built-in/transport-code fast-ion content 1.01 (log-sd 0.08); as p_fast"),
             ScalePrior("jdotb", "*", 0.5, 0.35, status=P,
@@ -60,19 +60,19 @@ def proposed_priors(kind):
     if kind == "transport_code":
         return [
             ScalePrior("p_fast", "*", 1.0, 0.20, status=P,
-                       basis="report 28 literature (quiet plasmas, 0.15) widened by the measured run-to-run spread of "
+                       basis="literature survey (quiet plasmas, 0.15) widened by the measured run-to-run spread of "
                              f"two runs of one transport code on one discharge ({_B30}: stored energy per MW 0.81, "
                              "log-sd 0.14, n=13)"),
             ScalePrior("n_fast", "*", 1.0, 0.20, status=P, basis="as p_fast"),
             ScalePrior("jdotb", "*", 1.0, 0.25, status=P,
-                       basis=f"report 28 literature (0.20) widened by the run-to-run spread ({_B30}: NBCD per MW 0.78, "
+                       basis=f"literature survey (0.20) widened by the run-to-run spread ({_B30}: NBCD per MW 0.78, "
                              "log-sd 0.28, n=13, one discharge)"),
-            ShapePrior("jdotb", "*", "shift", 0.05, status=P, basis="report 28 literature (MSE-based NBCD location)"),
+            ShapePrior("jdotb", "*", "shift", 0.05, status=P, basis="literature survey (MSE-based NBCD location)"),
         ]
     if kind == "simple_ec":
         return [
             ScalePrior("jdotb", "*", 1.0, 0.25, status=P,
-                       basis="zeta0 from a ray/beam tracer: report 28 literature (linear tracer vs measurement chi2 ~5); "
+                       basis="zeta0 from a ray/beam tracer: literature survey (linear tracer vs measurement chi2 ~5); "
                              f"{_B30}: tracer zeta varies 0.002-0.33 with deposition radius, so a fixed formula "
                              "without a tracer is not covered by this width"),
             ShapePrior("jdotb", "*", "shift", 0.03, status=P,
@@ -81,9 +81,9 @@ def proposed_priors(kind):
     if kind == "mhd_active":
         return [
             ScalePrior("p_fast", "*", 0.75, 0.30, status=P, upper=1.05,
-                       basis="report 28 literature: stored fast-ion energy 0.72 and neutrons 0.6-0.9 with Alfven "
+                       basis="literature survey: stored fast-ion energy 0.72 and neutrons 0.6-0.9 with Alfven "
                              "eigenmodes; one-sided"),
             ScalePrior("jdotb", "*", 0.70, 0.30, status=P, upper=1.05,
-                       basis="report 28 literature: NBCD reduced up to ~50 % with MHD; one-sided"),
+                       basis="literature survey: NBCD reduced up to ~50 % with MHD; one-sided"),
         ]
     raise ValueError(f"kind must be one of {PRIOR_KINDS}")

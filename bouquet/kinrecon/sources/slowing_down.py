@@ -6,9 +6,8 @@ in a Maxwellian plasma with ``v_thi << v << v_the``.  No orbit width, no charge-
 loss, no anomalous transport, no beam-beam collisions (see LIMITATIONS).  Each energy
 component of a beam is a separate source born at its OWN energy (``E_k = E_full / k``).
 
-Equations (derived for this module from the cited collision operators; the derivation is
-reproduced in the kinetic-reconstruction record, report 30)
------------------------------------------------------------------------------------------
+Equations (derived for this module from the cited collision operators)
+----------------------------------------------------------------------
 Drag on electrons (``v << v_the``) and energy loss to ions (``v >> v_thi``) give
 
 .. code-block:: text
@@ -91,6 +90,15 @@ sawteeth, tearing modes), no beam-beam or beam-fast-ion collisions, no time hist
 (steady state at each slice; valid when the source changes slowly compared with
 ``tau_th = tau_s N(w)``), electron pitch-angle scattering neglected (``m_e/m_b`` small),
 thermalization taken to v = 0 (energy below ~ T_i is a few percent of E0 for E0 >> T_i).
+
+Fast-ion density lower limit: ``n_fast`` (S7) counts the slowing-down distribution down to
+v = 0; no thermalization cutoff is applied, so ions that have already joined the thermal
+population are counted as fast.  The share below 1.5 T_i is small for the full-energy
+component (about 2 % for an 80 keV deuterium beam at T_i = 3-5 keV) but not for the E/3
+component (8-17 % in the same conditions; independent review).  Stored energy and pressure are
+much less affected (weighted by energy).  The linear electron drag (S1) assumes v << v_te;
+at the edge (T_e of 100-300 eV) v_b/v_te reaches 0.3-0.5 for 80 keV deuterium and the drag is
+overstated by roughly 10-20 % there (not corrected).
 """
 
 from dataclasses import dataclass
@@ -220,8 +228,9 @@ def pitch_integral(w, alpha, power):
     """int_0^1 x^power/(x^3+w^3) [x^3 (1+w^3)/(x^3+w^3)]^alpha dx (S10 with power 4, S11 with power 3).
 
     Composite Gauss-Legendre (48 nodes per panel) on panels split at 0.25 w, w and 4 w,
-    vectorized over arrays ``w`` and ``alpha`` of one shape; accurate to ~1e-10 on smooth
-    integrands (tested against the closed forms at ``alpha = 0``).
+    vectorized over arrays ``w`` and ``alpha`` of one shape; tested against the closed forms at
+    ``alpha = 0`` and against adaptive quadrature at ``alpha > 0`` (relative error ~1e-10 for
+    w >~ 0.01, worst measured 1.2e-7 at w = 1e-3).
     """
     w = np.atleast_1d(_pos(w, "w"))
     alpha = np.broadcast_to(np.asarray(alpha, float), w.shape)

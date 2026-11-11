@@ -13,6 +13,8 @@ _BASE = """\
  &IN1
  ITIME = 1500
  PLASMA = 1.0D+06
+ FWTCUR = 1.0
+ BITIP = 100.0
  COILS = {coils}
  FWTSI = 3*1.0
  PSIBIT = 3*1.0E-3
@@ -48,7 +50,7 @@ def test_coil_roles_follow_fit_weights_and_iecurr():
     assert pf.meta["IECURR"] == 1.0
     assert pf.meta["coil_arrays"] == {"BRSP": ["F0", "F1"], "ECURRT": ["E0", "E1"]}
     assert "'free' (free current, measurement not a constraint)" in pf.meta["coil_role_rule"]
-    # scoring is unchanged: zero-weight coils are still scored with weight 1 (R04)
+    # scoring is unchanged: zero-weight coils are still scored with weight 1 (scoring convention)
     assert pf.valid.tolist() == [True] * 4 and pf.weight.tolist() == [1.0] * 4
     pf2 = _ms(iecurr="IECURR = 2").groups["pf_current"]
     assert pf2.meta["coil_roles"]["E0"] == "free" and pf2.meta["coil_roles"]["F0"] == "fitted"

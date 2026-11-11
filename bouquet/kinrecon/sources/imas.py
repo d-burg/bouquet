@@ -23,7 +23,7 @@ driven current is summed from ``nbi`` (2), ``ec`` (3), ``lh`` (4), ``ic`` (5), `
 (6), ``auxiliary`` (100) and the combined RF/NBI indices 101-107; ``total`` (1, would double
 count), ``ohmic`` (7), ``bootstrap_current`` (13) and the FUSE time-derivative (409) and
 sawtooth (701) entries are excluded (``kinrecon`` computes its own bootstrap and ohmic
-current; report 26 B.4).  Any other source with a non-zero ``j_parallel`` is REFUSED unless
+current).  Any other source with a non-zero ``j_parallel`` is REFUSED unless
 the caller classifies it in ``classify``.
 
 Sign: the DD defines ``j_parallel = <J.B>/B0`` with the producer's signed B0, so the co-Ip
@@ -97,14 +97,29 @@ def _ip_sign(dd, time, ip_sign):
     t = dd.get("core_profiles", {}).get("time")
     if ip is not None and np.size(ip):
         ip = np.asarray(ip, float)
-        val = ip[int(np.argmin(np.abs(np.asarray(t, float) - time)))] if t is not None and len(t) == ip.size else ip.flat[0]
+        if t is not None and len(t) == ip.size:
+            i = int(np.argmin(np.abs(np.asarray(t, float) - time)))
+            val, where = ip[i], f"core_profiles.global_quantities.ip[{i}] (time nearest to {time:g} s)"
+        elif ip.size == 1:
+            val, where = ip.flat[0], "core_profiles.global_quantities.ip (single value)"
+        else:
+            raise AmbiguousConventionError("core_profiles.global_quantities.ip has no matching time base; pass ip_sign")
         if val != 0:
-            return float(np.sign(val)), "core_profiles.global_quantities.ip"
-    for ts in dd.get("equilibrium", {}).get("time_slice", []):
-        v = ts.get("global_quantities", {}).get("ip")
+            return float(np.sign(val)), where
+    eq_t = dd.get("equilibrium", {}).get("time")
+    slices = dd.get("equilibrium", {}).get("time_slice", [])
+    if slices:
+        if eq_t is not None and len(eq_t) == len(slices):
+            i = int(np.argmin(np.abs(np.asarray(eq_t, float) - time)))
+        elif len(slices) == 1:
+            i = 0
+        else:
+            raise AmbiguousConventionError("equilibrium.time_slice has no matching time base for the Ip sign; "
+                                           "pass ip_sign")
+        v = slices[i].get("global_quantities", {}).get("ip")
         if isinstance(v, (int, float)) and v != 0:
-            return float(np.sign(v)), "equilibrium.time_slice[0].global_quantities.ip"
-    raise AmbiguousConventionError("the sign of Ip is not in the IDS; pass ip_sign")
+            return float(np.sign(v)), f"equilibrium.time_slice[{i}].global_quantities.ip"
+    raise AmbiguousConventionError("the sign of Ip is not in the IDS at this time; pass ip_sign")
 
 
 def _b0(dd, time, B0, R0):
@@ -117,9 +132,13 @@ def _b0(dd, time, B0, R0):
         t = dd.get("core_sources", {}).get("time")
         if b0.size > 1 and t is not None and len(t) == b0.size:
             b0_signed = float(np.interp(time, np.asarray(t, float), b0))
-        else:
+            origin = "core_sources.vacuum_toroidal_field.b0 (interpolated in time)"
+        elif b0.size == 1:
             b0_signed = float(b0.flat[0])
-        origin = "core_sources.vacuum_toroidal_field.b0"
+            origin = "core_sources.vacuum_toroidal_field.b0 (single value)"
+        else:
+            raise AmbiguousConventionError("core_sources.vacuum_toroidal_field.b0 has no matching time base; "
+                                           "pass B0 (signed)")
     else:
         raise AmbiguousConventionError("core_sources.vacuum_toroidal_field.b0 is absent; pass B0 (signed)")
     r0 = R0 if R0 is not None else vtf.get("r0")
@@ -199,7 +218,10 @@ def from_imas(dd, time, rho, *, fast_pressure_components, time_window=0.0, max_t
         profs = [onto(blocks[i], "j_parallel") for i in sel]
         if all(p is None for p in profs):
             continue
-        prof = np.mean([p if p is not None else np.zeros_like(rho) for p in profs], axis=0)
+        if any(p is None for p in profs):
+            raise ValueError(f"source {name!r}: j_parallel is missing in {sum(p is None for p in profs)} of the "
+                             f"{len(profs)} slices of the window (a missing slice is not a zero)")
+        prof = np.mean(profs, axis=0)
         if verdict is None:
             if np.any(prof != 0):
                 raise AmbiguousConventionError(f"source {name!r} (index {idx}) carries j_parallel but is not "
@@ -240,9 +262,15 @@ def from_imas(dd, time, rho, *, fast_pressure_components, time_window=0.0, max_t
                 pars.append(onto(blk, "pressure_fast_parallel"))
                 perps.append(onto(blk, "pressure_fast_perpendicular"))
                 dens.append(onto(blk, "density_fast"))
-            def mean(lst):
-                return None if all(x is None for x in lst) else np.mean([x if x is not None else 0 * rho for x in lst], 0)
-            par, perp, den = mean(pars), mean(perps), mean(dens)
+            def mean(lst, what=""):
+                if all(x is None for x in lst):
+                    return None
+                if any(x is None for x in lst):
+                    raise ValueError(f"{label}: {what} is missing in {sum(x is None for x in lst)} of the {len(lst)} "
+                                     "slices of the window (a missing slice is not a zero)")
+                return np.mean(lst, 0)
+            par, perp, den = (mean(pars, "pressure_fast_parallel"), mean(perps, "pressure_fast_perpendicular"),
+                              mean(dens, "density_fast"))
             if (par is None) != (perp is None):
                 raise ValueError(f"{label}: only one of pressure_fast_parallel/perpendicular is present")
             for nm, a in (("p_par", par), ("p_perp", perp), ("n_fast", den)):

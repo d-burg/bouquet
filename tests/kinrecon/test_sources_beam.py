@@ -85,7 +85,7 @@ def test_model_energy_conservation_and_outputs():
     ne, te, ions, zeff = _plasma()
     ft = 1.46 * np.sqrt(A * RHO / R0)
     model = SimpleBeamModel([_beam(), _beam(name="b2", direction=-1, tangency_radius=0.8, power=1e6)],
-                            smoothing_width=0.06)
+                            smoothing_width=0.06, compute_nbcd=True)
     s = model.compute(RHO, time=1.0, ne=ne, te_ev=te, ions=ions, zeff=zeff, ft=ft, B0=2.0, R0=R0, dvol_drho=DV,
                       rho_of_rz=rho_of_rz)
     for b in model.beams:
@@ -93,7 +93,9 @@ def test_model_energy_conservation_and_outputs():
         births = s.meta["beams"][b.name]["births_per_s"]
         absorbed = np.sum(np.array(births) * b.energies * E_CHARGE)
         assert abs(bm.volume_integral(RHO, DV, qe + qi) / absorbed - 1) < 1e-9
-    assert np.trapezoid(s.jdotb["b1"] * DV, RHO) > 0 > np.trapezoid(s.jdotb["b2"] * DV, RHO)   # co / counter
+    # the built-in driven current is flagged NOT validated: read only after an explicit acknowledgement
+    j = s.acknowledge_not_validated("*", reason="sign check in a unit test")
+    assert np.trapezoid(j["b1"] * DV, RHO) > 0 > np.trapezoid(j["b2"] * DV, RHO)   # co / counter
     np.testing.assert_allclose((s.p_par["beam_A2_Z1"] + 2 * s.p_perp["beam_A2_Z1"]) / 3, s.p_fast["beam_A2_Z1"],
                                rtol=1e-10)
     assert s.provenance.limitations and "no anomalous fast-ion transport" in " ".join(s.provenance.limitations)

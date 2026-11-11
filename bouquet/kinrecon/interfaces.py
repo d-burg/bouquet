@@ -119,7 +119,10 @@ class ResidualTable:
     ``excluded[name]`` lists ``(label, reason)`` for the measurement-valid
     channels the mask removed, and ``notes`` holds table-wide remarks (groups
     skipped, MSE E_r treatment).  ``measurements`` is the set that was scored,
-    not a modified copy.
+    not a modified copy.  ``frame`` records the orientation map used by the scorer.
+
+    A used channel must have a finite sigma > 0: :meth:`residual` raises otherwise (a zero sigma would give
+    an infinite or NaN chi^2 silently).  Channels with weight 0 do not enter chi^2 and are not counted.
     """
 
     measurements: MeasurementSet
@@ -127,18 +130,24 @@ class ResidualTable:
     model_valid: Dict[str, np.ndarray] = field(default_factory=dict)
     excluded: Dict[str, List[Tuple[str, str]]] = field(default_factory=dict)
     notes: List[str] = field(default_factory=list)
+    frame: Dict[str, object] = field(default_factory=dict)
 
     def used(self, name):
-        """Mask of the channels of one group that enter chi^2."""
+        """Mask of the channels of one group that enter chi^2 (valid, model-valid, weight != 0)."""
         g = self.measurements.groups[name]
         mv = self.model_valid.get(name)
-        return g.valid if mv is None else g.valid & np.asarray(mv, dtype=bool)
+        use = g.valid & (g.weight != 0)
+        return use if mv is None else use & np.asarray(mv, dtype=bool)
 
     def residual(self, name):
         """Normalized residuals of the used channels of one group (:meth:`used`)."""
         g = self.measurements.groups[name]
         use = self.used(name)
-        r = g.weight[use] * (np.asarray(self.model[name])[use] - g.measured[use]) / g.sigma[use]
+        sig = g.sigma[use]
+        if np.any(~np.isfinite(sig)) or np.any(sig <= 0):
+            bad = [g.labels[i] for i in np.nonzero(use)[0][~(np.isfinite(sig) & (sig > 0))]]
+            raise ValueError(f"group '{name}': used channel(s) {bad[:5]} have sigma <= 0 or non-finite")
+        r = g.weight[use] * (np.asarray(self.model[name])[use] - g.measured[use]) / sig
         return r
 
     def chi2(self, name=None):

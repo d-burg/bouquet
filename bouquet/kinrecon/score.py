@@ -19,6 +19,28 @@ the comparison through the table's per-group ``model_valid`` mask and listed
 in ``table.excluded[group]`` as ``(label, reason)``; table-wide notes (groups
 skipped, MSE E_r treatment) are in ``table.notes``.  The measurement set is
 neither copied nor modified: ``table.measurements`` is the input object.
+
+Orientation (frames).  Every signed quantity is compared in the
+DISCHARGE's frame.  The equilibrium may be solved in another frame (e.g. the
+positive-Ip frame of a forward solve); the map between the two is STATED,
+never fit: ``orientation = {"sign_ip": +-1, "sign_bt": +-1}`` multiplies the
+modeled values of the groups that flip with the plasma current (Ip, flux
+loops, poloidal-field probes, coil currents) and with the toroidal field
+(diamagnetic flux), and enters MSE as ``(sign_pol, sign_tor)``.  The frame
+used is recorded in ``table.frame``.  Scoring is refused when the
+equilibrium's own Ip / B_phi sign, after the map, disagrees with the
+discharge's (the measured Ip's sign, and ``meta["discharge_orientation"]``
+when the set declares it) -- a sign error would otherwise show up only as
+an enormous chi^2.
+
+Comparing equilibria.  The channels that enter chi^2 can depend on the
+equilibrium (off-mesh points, Thomson channels outside the LCFS), so totals of
+different equilibria are not comparable unless they are taken over the same
+channels: :func:`score_common` scores several equilibria on the intersection
+of their modelable channels.  :func:`chi2_report` reports chi^2 with the
+channel count and the degrees of freedom separately and names the sigma
+conventions; on real data the sigma are conventions (e.g. EFIT's), not
+standard deviations, so chi^2/dof is not a pass/fail quantity.
 """
 
 import numpy as np
@@ -35,7 +57,78 @@ STUB_GROUPS = ("q", "vloop")
 _THOMSON_PROFILE = {"thomson_ne": "n_e", "thomson_te": "t_e"}
 
 
-def _model_group(eq, name, group, kinetics, notes):
+#: Which orientation sign multiplies each group's modeled value (MSE handled separately; Thomson unsigned).
+FRAME_SIGN_OF_GROUP = {"ip": "sign_ip", "flux_loop": "sign_ip", "bpol_probe": "sign_ip", "pf_current": "sign_ip",
+                       "diamagnetic_flux": "sign_bt"}
+
+
+def _equilibrium_signs(eq, need_ip=True, need_bt=True):
+    """(sign of Ip, sign of B_phi) of a solved equilibrium (0 where not needed or, for B_phi, not available)."""
+    s_ip = float(np.sign(float(eq.get_globals()[0]))) if need_ip else 0.0
+    s_bt = 0.0
+    if not need_bt:
+        return s_ip, s_bt
+    try:
+        tm = _diag._tokamaker(eq)
+        lim = np.asarray(getattr(tm, "lim_contour", None), dtype=float)
+        if lim.ndim == 2 and lim.shape[0] > 2:
+            c = lim[:, :2].mean(axis=0)
+            b, _ = _diag.field_at(eq, c[None, :])
+            bphi = float(np.asarray(b, dtype=float).reshape(-1, 3)[0, 1])
+            s_bt = float(np.sign(bphi)) if np.isfinite(bphi) else 0.0
+    except Exception:            # noqa: BLE001  (no B_phi available: the B_t check is skipped and noted)
+        s_bt = 0.0
+    return s_ip, s_bt
+
+
+def resolve_orientation(eq, measurements, orientation=None):
+    """The stated frame map and the checks of the module docstring ("Orientation").
+
+    Returns ``{"sign_ip", "sign_bt", "source", "equilibrium_signs", "discharge_signs", "checks"}``; raises
+    ``ValueError`` when the mapped equilibrium signs disagree with the discharge's.
+    """
+    if orientation is None:
+        orientation = measurements.meta.get("orientation_map")
+        src = "measurements.meta['orientation_map']" if orientation is not None else "identity (not stated)"
+    else:
+        src = "caller"
+    orientation = dict(orientation or {})
+    unknown = set(orientation) - {"sign_ip", "sign_bt"}
+    if unknown:
+        raise ValueError(f"orientation has unknown keys {sorted(unknown)}; use sign_ip, sign_bt")
+    m_ip, m_bt = float(orientation.get("sign_ip", 1.0)), float(orientation.get("sign_bt", 1.0))
+    if m_ip not in (1.0, -1.0) or m_bt not in (1.0, -1.0):
+        raise ValueError("orientation signs must be +1 or -1")
+    declared = dict(measurements.meta.get("discharge_orientation") or {})
+    d_ip = declared.get("ip_sign")
+    d_bt = declared.get("bt_sign")
+    ipg = measurements.groups.get("ip")
+    checks = []
+    if ipg is not None and np.any(ipg.valid):
+        meas = float(np.sign(np.asarray(ipg.measured, float)[np.nonzero(ipg.valid)[0][0]]))
+        if d_ip is not None and float(d_ip) != meas:
+            raise ValueError(f"declared discharge Ip sign {d_ip} disagrees with the measured Ip's sign {meas}")
+        d_ip = meas
+        checks.append("discharge Ip sign from the measured Ip")
+    if d_ip is None:
+        checks.append("discharge Ip sign unknown (no Ip measurement, none declared): Ip check skipped")
+    # the equilibrium's signs are read only when a discharge sign is known to check them against
+    e_ip, e_bt = _equilibrium_signs(eq, need_ip=d_ip is not None, need_bt=d_bt is not None)
+    problems = []
+    if d_ip is not None and e_ip != 0 and e_ip * m_ip != float(d_ip):
+        problems.append(f"Ip: equilibrium sign {e_ip:+g} x map {m_ip:+g} != discharge sign {float(d_ip):+g}")
+    if d_bt is not None and e_bt != 0 and e_bt * m_bt != float(d_bt):
+        problems.append(f"B_t: equilibrium sign {e_bt:+g} x map {m_bt:+g} != discharge sign {float(d_bt):+g}")
+    if d_bt is not None and e_bt == 0:
+        checks.append("B_t sign of the equilibrium not available: B_t check skipped")
+    if problems:
+        raise ValueError("score: orientation mismatch (" + "; ".join(problems) + "); state the map with "
+                         "orientation={'sign_ip': ..., 'sign_bt': ...} (or measurements.meta['orientation_map'])")
+    return dict(sign_ip=m_ip, sign_bt=m_bt, source=src, equilibrium_signs=dict(ip=e_ip, bt=e_bt),
+                discharge_signs=dict(ip=d_ip, bt=d_bt), checks=checks)
+
+
+def _model_group(eq, name, group, kinetics, notes, frame=None):
     """``Synthetic`` for one group, applying its meta and the kinetics."""
     geo = group.geometry
     if name == "flux_loop":
@@ -80,6 +173,11 @@ def _model_group(eq, name, group, kinetics, notes):
         else:
             notes.append("mse: E_R from kinetics['e_r'] applied through c3 and c7")
         sp, st = group.meta.get("field_orientation", (1.0, 1.0))
+        if frame is not None and (frame["sign_ip"], frame["sign_bt"]) != (1.0, 1.0):
+            if "field_orientation" in group.meta and (float(sp), float(st)) != (frame["sign_ip"], frame["sign_bt"]):
+                raise ValueError(f"score: MSE field_orientation {tuple(group.meta['field_orientation'])} disagrees with "
+                                 f"the stated orientation map ({frame['sign_ip']:+g}, {frame['sign_bt']:+g})")
+            sp, st = frame["sign_ip"], frame["sign_bt"]
         if (float(sp), float(st)) != (1.0, 1.0):
             notes.append(f"mse: stated field orientation sign_pol={sp:+g}, sign_tor={st:+g}")
         return _diag.mse(eq, geo, e_r=e_r, e_z=e_z, sign_pol=float(sp), sign_tor=float(st),
@@ -90,7 +188,7 @@ def _model_group(eq, name, group, kinetics, notes):
     raise KeyError(name)
 
 
-def score(equilibrium, measurements, kinetics=None, groups=None):
+def score(equilibrium, measurements, kinetics=None, groups=None, orientation=None):
     """Residual table of *equilibrium* against *measurements*.
 
     Parameters
@@ -118,6 +216,12 @@ def score(equilibrium, measurements, kinetics=None, groups=None):
     (``'polarisation_angle'`` [rad, default] or ``'tan_polarisation_angle'``)
     and ``field_orientation`` (``(sign_pol, sign_tor)``, a stated convention,
     default ``(1, 1)``).
+
+    orientation : dict, optional
+        ``{"sign_ip": +-1, "sign_bt": +-1}``: the stated map from the
+        equilibrium's frame to the discharge's (module docstring); default
+        ``measurements.meta["orientation_map"]``, else the identity.  The
+        mapped signs are checked against the discharge's; a mismatch raises.
 
     Returns
     -------
@@ -154,11 +258,17 @@ def score(equilibrium, measurements, kinetics=None, groups=None):
             continue
         todo.append(name)
 
+    frame = resolve_orientation(equilibrium, measurements, orientation)
+    if (frame["sign_ip"], frame["sign_bt"]) != (1.0, 1.0):
+        notes.append(f"orientation map from {frame['source']}: sign_ip {frame['sign_ip']:+g}, "
+                     f"sign_bt {frame['sign_bt']:+g} applied to the modeled values")
     model, model_valid, excluded = {}, {}, {}
     for name in todo:
         group = measurements.groups[name]
-        syn = _model_group(equilibrium, name, group, kinetics, notes)
+        syn = _model_group(equilibrium, name, group, kinetics, notes, frame)
         value = np.asarray(syn.value, dtype=float)
+        if name in FRAME_SIGN_OF_GROUP:
+            value = value * frame[FRAME_SIGN_OF_GROUP[name]]
         if value.shape != group.measured.shape:
             raise ValueError(f"score: group '{name}' modeled {value.shape} for "
                              f"{group.measured.shape} channels")
@@ -172,11 +282,78 @@ def score(equilibrium, measurements, kinetics=None, groups=None):
         model[name] = value
         model_valid[name] = ok
     return ResidualTable(measurements=measurements, model=model, model_valid=model_valid,
-                         excluded=excluded, notes=notes)
+                         excluded=excluded, notes=notes, frame=frame)
+
+
+def score_common(equilibria, measurements, kinetics=None, groups=None, orientations=None):
+    """Score several equilibria on the SAME channels: the intersection of their modelable channels.
+
+    Each equilibrium is scored with :func:`score`; per group, a channel enters every table only if every
+    equilibrium could model it (the union of the exclusions is applied to all, with the reason
+    ``"not modelable in every compared equilibrium"`` added to ``excluded`` where it was modelable in this
+    one).  ``orientations`` is an optional list with one orientation map per equilibrium.  Returns
+    ``(tables, record)``; ``record`` gives, per group, the common channel count and the channels removed for
+    comparability.  Totals of the returned tables are comparable; a channel that leaves one equilibrium's
+    plasma is removed from all (it is never scored by dropping it from one of them only).
+    """
+    eqs = list(equilibria)
+    if not eqs:
+        raise ValueError("score_common needs at least one equilibrium")
+    ors = list(orientations) if orientations is not None else [None] * len(eqs)
+    if len(ors) != len(eqs):
+        raise ValueError("one orientation map per equilibrium")
+    tabs = [score(e, measurements, kinetics=kinetics, groups=groups, orientation=o) for e, o in zip(eqs, ors)]
+    names = set(tabs[0].model)
+    for t in tabs[1:]:
+        if set(t.model) != names:
+            raise ValueError("score_common: the equilibria were scored on different groups")
+    record = {}
+    reason = "not modelable in every compared equilibrium"
+    for name in sorted(names):
+        common = np.logical_and.reduce([np.asarray(t.model_valid[name], bool) for t in tabs])
+        g = measurements.groups[name]
+        removed = [g.labels[i] for i in np.nonzero(g.valid & ~common & np.logical_or.reduce(
+            [np.asarray(t.model_valid[name], bool) for t in tabs]))[0]]
+        for t in tabs:
+            own = np.asarray(t.model_valid[name], bool)
+            extra = g.valid & own & ~common
+            if np.any(extra):
+                t.excluded.setdefault(name, []).extend((g.labels[i], reason) for i in np.nonzero(extra)[0])
+                t.notes.append(f"{name}: {int(extra.sum())} channel(s) removed for comparability ({reason})")
+            t.model_valid[name] = common.copy()
+        record[name] = dict(n_common=int(np.count_nonzero(g.valid & common)), removed_for_comparability=removed)
+    return tabs, record
+
+
+def chi2_report(table, n_params=0):
+    """chi^2 of a table with its channel count, parameter count and degrees of freedom stated separately.
+
+    ``n_params`` is the number of parameters fitted to THESE channels (0 for an equilibrium scored without
+    fitting).  Returns ``{"groups": {name: {"chi2", "n_channels", "sigma_model"}}, "total": {"chi2",
+    "n_channels", "n_params", "dof", "chi2_per_dof"}, "interpretation": text}``.  ``chi2_per_dof`` is
+    descriptive: on real data the sigma are conventions (named per group), correlations (a shared
+    reference loop, time-slice-correlated relative errors) are ignored, so it is not a goodness-of-fit
+    test; compare equilibria through :func:`score_common` on the same channels.
+    """
+    groups = {}
+    for name in table.model:
+        g = table.measurements.groups[name]
+        groups[name] = dict(chi2=table.chi2(name), n_channels=table.n_valid(name),
+                            sigma_model=g.meta.get("sigma_model"))
+    n = table.n_valid()
+    dof = n - int(n_params)
+    total = dict(chi2=table.chi2(), n_channels=n, n_params=int(n_params), dof=dof,
+                 chi2_per_dof=(table.chi2() / dof) if dof > 0 else float("nan"))
+    return dict(groups=groups, total=total,
+                interpretation=("chi^2 under the stated sigma conventions (diagonal, correlations ignored); "
+                                "not a pass/fail quantity on real data -- compare equilibria on the same channels"))
 
 
 def chi2_summary(table):
-    """``{group: (chi2, n_valid, chi2/n)}`` plus ``'total'`` for a table."""
+    """``{group: (chi2, n_valid, chi2/n)}`` plus ``'total'`` for a table.
+
+    Kept for existing callers.  ``chi2/n`` divides by the channel count, not the degrees of freedom, and is
+    descriptive only (module docstring); use :func:`chi2_report` for dof and the sigma conventions."""
     out = {}
     for name in table.model:
         c, n = table.chi2(name), table.n_valid(name)

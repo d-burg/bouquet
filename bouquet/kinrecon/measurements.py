@@ -44,8 +44,14 @@ data dictionary lacks or cannot hold exactly:
 **Format choice: JSON.**  It is standard-library only (this subpackage must
 not depend on h5py, see ``interfaces``), the files are KB-sized, diffable and
 hashable, and Python writes floats with ``repr`` so the round trip is exact to
-the bit.  Non-finite values are written as the ``NaN`` / ``Infinity`` tokens
-Python's ``json`` reads back (not strict JSON).
+the bit.  Non-finite values are written, by default, as the ``NaN`` /
+``Infinity`` tokens Python's ``json`` reads back (not strict JSON; other
+readers may refuse them).  ``write_measurements(..., strict_json=True)``
+writes strict JSON instead, with every non-finite float replaced by
+``{"__float__": "nan" | "inf" | "-inf"}``; the reader accepts both forms.
+(The default is kept so that existing frozen files stay byte-identical;
+switching it is a format decision.)  Tuples in ``meta`` are read back as
+lists: the round trip is exact for values, not for container types.
 
 **MSE.**  The data dictionary stores the polarisation ANGLE
 (``mse.channel[:].polarisation_angle``, rad).  EFIT and the k-file store
@@ -478,18 +484,43 @@ def from_dict(doc):
     return ms
 
 
-def write_measurements(path, ms):
-    """Write ``ms`` to the JSON measurement file ``path``."""
+def _strict(obj):
+    """Replace non-finite floats by tagged dicts (strict JSON)."""
+    if isinstance(obj, float) and not np.isfinite(obj):
+        return {"__float__": "nan" if np.isnan(obj) else ("inf" if obj > 0 else "-inf")}
+    if isinstance(obj, dict):
+        return {k: _strict(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_strict(v) for v in obj]
+    return obj
+
+
+def _unstrict(obj):
+    if isinstance(obj, dict):
+        if set(obj) == {"__float__"}:
+            return float(obj["__float__"])
+        return {k: _unstrict(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_unstrict(v) for v in obj]
+    return obj
+
+
+def write_measurements(path, ms, strict_json=False):
+    """Write ``ms`` to the JSON measurement file ``path`` (module docstring, "Format choice": ``strict_json``
+    writes strict JSON with tagged non-finite floats)."""
     doc = to_dict(ms)
     with open(path, "w") as f:
-        json.dump(doc, f, indent=1)
+        if strict_json:
+            json.dump(_strict(doc), f, indent=1, allow_nan=False)
+        else:
+            json.dump(doc, f, indent=1)
         f.write("\n")
 
 
 def read_measurements(path):
-    """Read a JSON measurement file written by :func:`write_measurements`."""
+    """Read a JSON measurement file written by :func:`write_measurements` (either form)."""
     with open(path) as f:
-        return from_dict(json.load(f))
+        return from_dict(_unstrict(json.load(f)))
 
 
 # ---------------------------------------------------------------------------

@@ -68,7 +68,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional
 
 import numpy as np
 
-#: Diffusion-domain edge (project decision): default, coarse-grid value, upper limit.
+#: Diffusion-domain edge (this package's rule): default, coarse-grid value, upper limit.
 DOMAIN_EDGE_DEFAULT = 0.995
 DOMAIN_EDGE_COARSE = 0.99
 DOMAIN_EDGE_MAX = 0.999
@@ -501,9 +501,20 @@ class EdgeTaperSetting:
 DETECTOR_DEFAULTS = dict(periods=(2, 3, 4, 5, 6), n_periods=3, min_amplitude=0.02, periodicity_frac=0.2,
                          amplitude_ratio_min=0.75, drift_frac=0.1, drift_per_iteration_max=0.005,
                          trend_window=12, fast_rate=0.05)
+#: Named detector versions.  ``"v1"`` is the DEFAULT (the criterion in use); ``"v2"`` is the corrected
+#: classification proposed after an independent review -- a criterion change, NOT the default until decided.
+#: v2 = v1 plus: periods 2..12 (v1 misses cycles of period >= 7 and the quasi-periodic 3/4 alternation, which
+#: repeats with period 7), and a cycle may not drift upward faster than ``max_rising_drift_per_iteration``
+#: (v1 accepts |drift| <= 0.005 decades/iteration of either sign, so a slowly DIVERGING oscillation could be
+#: called a cycle and tapered); a rejected rising oscillation is classified by its trend.
+DETECTOR_VERSIONS = {
+    "v1": dict(DETECTOR_DEFAULTS),
+    "v2": dict(DETECTOR_DEFAULTS, periods=tuple(range(2, 13)), max_rising_drift_per_iteration=0.0005),
+}
+DETECTOR_VERSION_DEFAULT = "v1"
 
 
-def classify_residual_history(residuals, tol=None, **criterion):
+def classify_residual_history(residuals, tol=None, version=DETECTOR_VERSION_DEFAULT, **criterion):
     """Classify a nonlinear-residual history (one norm per iteration).
 
     Work in l_k = log10(r_k).  A **limit cycle of period p** (p = 2..6, smallest first) is
@@ -550,17 +561,27 @@ def classify_residual_history(residuals, tol=None, **criterion):
     solve whose state alternates (e.g. the magnetic axis jumping between two locations) while
     its residual stays flat to within ``min_amplitude`` is ``stalled``, not ``limit_cycle``.
 
-    Returns a dict with ``verdict``, ``period`` (cycle only), the measured quantities and
-    the criterion used.
+    Decay bound stated: C3 accepts up to 25 % amplitude decay over ``n_periods - 1`` periods
+    (13 % per period with the default 3 periods), so a mildly damped oscillation can pass.
+
+    ``version`` selects a named criterion (:data:`DETECTOR_VERSIONS`; default ``"v1"``); keyword
+    arguments override single parameters of it.  ``"v2"`` adds C5: drift per iteration
+    D / p <= ``max_rising_drift_per_iteration`` (upward drift at most 0.0005 decades/iteration),
+    and tests periods 2..12.
+
+    Returns a dict with ``verdict``, ``period`` (cycle only), the measured quantities, the
+    criterion used and ``version``.
     """
-    crit = dict(DETECTOR_DEFAULTS)
+    if version not in DETECTOR_VERSIONS:
+        raise ValueError(f"unknown detector version {version!r}; known: {sorted(DETECTOR_VERSIONS)}")
+    crit = dict(DETECTOR_VERSIONS[version])
     unknown = set(criterion) - set(crit)
     if unknown:
         raise TypeError(f"unknown detector parameters {sorted(unknown)}")
     crit.update(criterion)
     r = np.asarray(residuals, dtype=float).ravel()
     out: Dict[str, Any] = dict(verdict=None, period=None, n=int(r.size), criterion=_jsonable(crit),
-                               tol=None if tol is None else float(tol))
+                               tol=None if tol is None else float(tol), version=version)
     if r.size and not np.all(np.isfinite(r)):
         out.update(verdict="diverging", reason="non-finite residual")
         return out
@@ -597,6 +618,9 @@ def classify_residual_history(residuals, tol=None, **criterion):
         ok = (A >= crit["min_amplitude"] and lag <= crit["periodicity_frac"] * A and osc
               and amp_ratio >= crit["amplitude_ratio_min"] and abs(drift) <= crit["drift_frac"] * A
               and abs(drift) / p <= crit["drift_per_iteration_max"])
+        if "max_rising_drift_per_iteration" in crit:
+            t["rising_drift_ok"] = bool(drift / p <= crit["max_rising_drift_per_iteration"])
+            ok = ok and t["rising_drift_ok"]
         t["passes"] = bool(ok)
         tested[p] = t
         if ok:
@@ -693,6 +717,12 @@ class EdgeTaperCase:
                     solves=list(self.history))
 
 
+#: What ``auto`` does with a solve the detector calls ``stalled``.  ``"report"`` (DEFAULT): failed, no taper.
+#: ``"taper"`` (named option, a gating-criterion change awaiting a decision): treat a flat stall like a limit
+#: cycle and try the tapered re-solve.
+STALL_POLICIES = ("report", "taper")
+
+
 def _attempt(solve, taper, label, tol, detector_kw):
     a = solve(taper)
     if isinstance(a, Mapping):
@@ -709,7 +739,7 @@ def _attempt(solve, taper, label, tol, detector_kw):
 
 
 def solve_with_edge_taper(solve: Callable[[Optional[EdgeTaperSpec]], Any], setting=None, *, case=None,
-                          label="solve", tol=None, detector_kw=None):
+                          label="solve", tol=None, detector_kw=None, stall_policy="report"):
     """Run ``solve`` under the edge-taper policy.
 
     ``solve(taper)`` is called with ``None`` (untapered) or an :class:`EdgeTaperSpec`; it must
@@ -725,7 +755,13 @@ def solve_with_edge_taper(solve: Callable[[Optional[EdgeTaperSpec]], Any], setti
       (both histories kept).  Any other verdict -> ``failed``, taper NOT applied.
     * With ``case`` locked by its reference, the lock overrides: tapered case -> one tapered
       solve; untapered case -> one untapered solve, a limit cycle is reported, not tapered.
+
+    ``detector_kw`` may name the detector ``version`` (default ``"v1"``).  ``stall_policy``
+    (:data:`STALL_POLICIES`, default ``"report"``): ``"taper"`` also tries the tapered re-solve
+    when the untapered solve is ``stalled`` (non-default option).  Both are recorded.
     """
+    if stall_policy not in STALL_POLICIES:
+        raise ValueError(f"stall_policy must be one of {STALL_POLICIES}")
     if setting is not None and not isinstance(setting, EdgeTaperSetting):
         setting = EdgeTaperSetting(EdgeTaperMode(setting))
     if case is not None:
@@ -738,6 +774,9 @@ def solve_with_edge_taper(solve: Callable[[Optional[EdgeTaperSpec]], Any], setti
     rec: Dict[str, Any] = dict(label=label, setting=setting.as_dict(), mode=mode.value, attempts=[],
                                taper_applied=False, status=None, reason=None, case_lock=None,
                                tol_recorded=None if tol is None else float(tol))
+    if dkw.get("version", DETECTOR_VERSION_DEFAULT) != DETECTOR_VERSION_DEFAULT or stall_policy != "report":
+        rec["nondefault_options"] = dict(detector_version=dkw.get("version", DETECTOR_VERSION_DEFAULT),
+                                         stall_policy=stall_policy)
     final = None
     if case is not None and case.locked is not None:
         rec["case_lock"] = dict(case_id=case.case_id, locked=case.locked, decided_by=case.decided_by)
@@ -771,14 +810,15 @@ def solve_with_edge_taper(solve: Callable[[Optional[EdgeTaperSpec]], Any], setti
             rec["status"], rec["reason"] = STATUS_FAILED, "mode off: not converged, no taper"
         else:
             v = ar["detector"]["verdict"]
-            if v == "limit_cycle":
+            if v == "limit_cycle" or (v == "stalled" and stall_policy == "taper"):
                 b, br = _attempt(solve, setting.spec, label + ":tapered", tol, dkw)
                 rec["attempts"].append(br)
                 final, rec["taper_applied"] = b, True
                 rec["status"] = STATUS_CONVERGED_TAPER if b.converged else STATUS_FAILED
-                rec["reason"] = (f"untapered solve in a limit cycle (period {ar['detector']['period']}); "
-                                 + ("tapered re-solve converged" if b.converged else
-                                    "tapered re-solve did not converge either (both histories kept)"))
+                why = (f"untapered solve in a limit cycle (period {ar['detector']['period']})" if v == "limit_cycle"
+                       else "untapered solve stalled (stall_policy='taper', non-default)")
+                rec["reason"] = (why + "; " + ("tapered re-solve converged" if b.converged else
+                                               "tapered re-solve did not converge either (both histories kept)"))
             else:
                 rec["status"] = STATUS_FAILED
                 rec["reason"] = f"not converged and no limit cycle (detector: {v}); taper not applied"

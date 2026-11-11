@@ -1,4 +1,4 @@
-"""Lumped outer layer and domain edge (ruling R29) of ``bouquet.kinrecon.current``.
+"""Lumped outer layer and domain edge of ``bouquet.kinrecon.current``.
 
 Synthetic, separatrix-like geometry tabulated on psi_N (what an equilibrium
 code returns), with the logarithmic X-point singularity of a diverted
@@ -102,7 +102,8 @@ def _exact():
     e2[0] = 0.0
     bp2_int = 2 * np.pi * MU0 * DPSI * float(PchipInterpolator(xs, e2).antiderivative()(1.0))
     jb_ohm = PchipInterpolator(xs, sigma(xs) * F(xs) * g1(xs) * V / (2 * np.pi))
-    return dict(V=V, q=q_new, q95=float(q_new(x95)), li3=2 * bp2_int / (MU0 ** 2 * IP ** 2 * R0), jb_ohm=jb_ohm)
+    return dict(V=V, q=q_new, q95=float(q_new(x95)), li3=2 * bp2_int / (MU0 ** 2 * IP ** 2 * R0), jb_ohm=jb_ohm,
+                I=PchipInterpolator(xs, inew))
 
 
 EXACT = _exact()
@@ -175,6 +176,36 @@ def test_lumped_layer_steady_state_matches_exact_relaxed_state(steady, c):
     assert 0.0 < p["outer_layer_current"] < 0.01 * IP
 
 
+@pytest.mark.parametrize("c", CUTOFFS)
+def test_lumped_layer_error_is_below_half_the_effect_of_a_halved_layer(steady, c):
+    """Discrimination bounds derived on this fixture (added after an independent review showed that dropping
+    the layer entirely at c = 0.999 passed every bound above).  For each quantity the lumped layer's error
+    against the exact relaxed state must be at most HALF the error produced by a layer whose current is halved
+    (conductance and source x 0.5): a 25 % error in the layer current would then be detected.  The layer
+    current itself is compared with the exact quadrature (IP - I_exact(c)), not with the code's own formula,
+    under the same rule.  Measured margins: factor 2-60 (q at c = 0.999 is the tightest, 5.5e-5 vs 1.1e-4)."""
+    sol, r2x, ss, p = steady[c]
+    xl = _layer_samples(c)
+    lg = OuterLayerGeometry.from_psi_coordinates(xl, 0.0, DPSI, dvdpsi(xl), g1(xl), F(xl), avg_grad_psi2_r2=bp2(xl),
+                                                 fpol_lcfs=F(1.0))
+    half = OuterLayer.from_profiles(lg, (xl, 0.5 * sigma(xl)), (xl, 0.5 * jni(xl)))
+    sol_h, r2x_h = build(c, outer=half)
+    ss_h = sol_h.steady_state(CurrentState.uniform_faces(NCELLS))
+    p_h = sol_h.profiles(ss_h)
+
+    def errors(p_, ss_, r2x_):
+        xf, q, xc, jb = _interior(p_, r2x_)
+        je = EXACT["jb_ohm"](xc)
+        lay_ex = IP - float(EXACT["I"](c))
+        return dict(q=np.max(np.abs(q / EXACT["q"](xf) - 1.0)), jb=np.max(np.abs(jb - je)) / np.max(np.abs(je)),
+                    V=abs(ss_.meta["v_loop"] / EXACT["V"] - 1.0), q95=abs(p_["q95"] / EXACT["q95"] - 1.0),
+                    li3=abs(p_["li3"] / EXACT["li3"] - 1.0), layer=abs(p_["outer_layer_current"] / lay_ex - 1.0))
+
+    good, bad = errors(p, ss, r2x), errors(p_h, ss_h, r2x_h)
+    for k in good:
+        assert good[k] <= 0.5 * bad[k], (k, good[k], bad[k])
+
+
 def test_interior_independent_of_cutoff(steady):
     """Cutoff-to-cutoff interior q differences <= 1e-3 (experiment section 0 item 1, same bound)."""
     xs = np.linspace(0.02, 0.98, 400)
@@ -222,7 +253,8 @@ def test_total_current_conserved_with_layer_ip_ramp():
     for k in range(1, 9):
         s = sol.advance(s, 0.01 * k, dt=5e-4)
         p = sol.profiles(s)
-        assert abs(p["ip"] / ip_t(s.time) - 1.0) < 1e-13
+        # (p["ip"] is the boundary value itself when a layer is attached -- not checked, that would be a
+        # tautology; the independent check is the volume integral plus the layer's Ohm's law below)
         vp = sol.geometry_at(s.time).evaluate(p["rho_cells"], ["dvol_drho"])["dvol_drho"]
         i_c = np.sum(p["jt_over_r"] * vp * np.diff(p["rho_faces"])) / (2 * np.pi)
         assert abs(i_c / p["ip_domain_edge"] - 1.0) < 1e-12

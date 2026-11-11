@@ -4,7 +4,7 @@ The "FUSE-equivalent, bugs fixed" tier.  It follows the structure of FUSE's ``Ac
 plus IMAS.jl's classical fast-ion profiles (Meneghini et al., arXiv:2409.05894 (2024); FUSE
 and IMAS.jl are Apache-2.0, General Atomics) but is RE-DERIVED here from the physics
 literature (:mod:`.slowing_down`, :mod:`.nbcd`) and differs from FUSE where FUSE is known to
-be wrong (project ruling R37c):
+be wrong:
 
 ==========================================  =======================================  ===================================
 item                                        FUSE (v1.1.2 / IMAS.jl 7.1.6)            here
@@ -25,7 +25,30 @@ pitch-angle scattering exponent             main-ion mass for all ions          
 beam-ion Coulomb logarithm                  = electron one                           NRL beam-ion form (default)
 ion-impact ionization                       on n_i = n_e with Z = 1, no impurities   main ions + each impurity (Z)
 trapped-electron correction                 large-aspect-ratio fit                   G = L31 (Redl; general geometry)
+inward orbit (banana) shift of births       ``banana_width (1 - xi) x                NOT included: births stay on the
+                                            banana_shift_fraction`` (default 0.5)    flux surface of the ionization point
+NBCD output                                 returned                                 opt-in only, flagged NOT validated
 ==========================================  =======================================  ===================================
+
+**Beam-driven current is not validated and is off by default.**  The fast-ion current here is
+the cylindrical Gaffey result (S11) with the birth-point pitch: fast ions born in the trapped
+region of pitch space are counted as passing, and passing ions carry their birth pitch rather
+than the transit average.  Against a transport code this overestimated the driven current by
+1.5-2.4x per MW for tangential injection, consistent with an independent Monte-Carlo estimate
+of the trapping effect (x1.5-2.0); a bounce-averaged fast-ion model (Cordey, Nucl. Fusion 16,
+499 (1976), recalled) is the remedy and is not implemented.  :class:`SimpleBeamModel` therefore
+returns NO driven current unless ``compute_nbcd=True``, and then marks every beam's ``jdotb``
+as not validated in the output (``not_validated``), in its provenance and in its limitations;
+reading it raises until the caller acknowledges it
+(:meth:`.provider.NonInductiveSources.acknowledge_not_validated`).  No calibration factor is
+applied.  The fast-ion pressure, density and heating are unaffected by this flag.
+
+**Dropped FUSE feature (declared difference).**  FUSE ``ActorSimpleNB`` shifts each birth
+inward by ``banana_width (1 - xi) banana_shift_fraction`` (default fraction 0.5), a crude
+finite-orbit correction of the deposition.  It is not reproduced here (births are mapped to
+the flux surface of their ionization point); this may contribute to an outward bias of the
+fast-ion pressure near the edge.  Listed in :data:`FUSE_DIFFERENCES` and in every provenance
+record.
 
 Fractions of a beam's NEUTRAL flux by energy component k = 1, 2, 3 (energies E/k):
 
@@ -81,13 +104,12 @@ the smoothing width), straight-line orbits of the neutrals, no finite-orbit widt
 fast ions (births are mapped to the flux surface of the ionization point), no prompt or
 orbit loss, no fast-ion CX loss, no anomalous fast-ion transport (Alfven eigenmodes,
 sawteeth, tearing modes), no beam-beam collisions, steady state per slice (no time history),
-O(eps^2) frame ambiguity of a 1-D current model (the fast-ion parallel current is equated
-with <J.B>/B0), collisionless trapped-electron correction, and NO FAST-ION TRAPPING: the
-fast-ion current is the cylindrical Gaffey result (S11), which treats fast ions born inside
-the trapped region of pitch space as passing.  Against a transport code this overestimated
-NBCD by 1.9-2.1x per MW on tangential injection where 40-80 % of births were trapped at birth
-(kinetic-reconstruction record, report 30); a bounce-averaged fast-ion model (Cordey,
-Nucl. Fusion 16, 499 (1976), recalled) is the remedy, not yet implemented.
+a 1-D current model (the fast-ion parallel current is equated with <J.B>/B0, using the
+birth-point pitch: an order-one error near the trapped-passing boundary, not O(eps^2)),
+collisionless trapped-electron correction, NO FAST-ION TRAPPING (see above), no inward orbit
+shift of the births (see above).  Cross-section fit clamps (T_e outside [1, 1e5] eV; proton
+impact zeroed below 0.1 keV/u) are counted per call and recorded in provenance
+(``inputs["cross_section_clamps"]``).
 """
 
 from dataclasses import dataclass, field
@@ -112,10 +134,12 @@ BEAM_LIMITATIONS = [
     "steady state per slice (no time history of the beam power)",
     "ground-state stopping cross sections (no multi-step enhancement): shine-through overestimated",
     "collisionless trapped-electron correction G = L31(f_t)",
-    "1-D current model: fast-ion parallel current equated with <J.B>/B0 (O(eps^2) frame ambiguity)",
+    "1-D current model: fast-ion parallel current equated with <J.B>/B0 with the birth-point pitch (order-one "
+    "error near the trapped-passing boundary)",
     "no fast-ion trapping: the cylindrical (Gaffey) fast-ion current counts trapped fast ions as passing, "
-    "which overestimates NBCD; measured 1.9-2.1x a transport code per MW for tangential injection with a large "
-    "fraction of births inside the trapped region (record report 30)",
+    "which overestimates NBCD (1.5-2.4x a transport code per MW for tangential injection); the driven current is "
+    "therefore opt-in and flagged NOT validated",
+    "no inward orbit (banana) shift of the births (FUSE ActorSimpleNB applies one; dropped here)",
 ]
 FUSE_DIFFERENCES = [
     "each energy component born at its own energy E/k, with its own cross sections (FUSE PR #1201 behavior)",
@@ -124,6 +148,9 @@ FUSE_DIFFERENCES = [
     "axis-mirrored, volume-normalized deposition smoothing (FUSE PR #1200 behavior)",
     "exact species sums in critical energy and pitch-angle scattering; beam-ion Coulomb logarithm separate",
     "ion-impact ionization on main ions and impurities with their own densities and charges",
+    "DROPPED: FUSE's inward banana shift of births (banana_width (1 - xi) banana_shift_fraction, default 0.5) is not "
+    "applied; births stay on the flux surface of the ionization point",
+    "NBCD is opt-in (compute_nbcd=True) and flagged NOT validated (no fast-ion trapping); FUSE returns it",
 ]
 
 
@@ -235,14 +262,23 @@ class FreyaCrossSections:
             out = out * x + a
         return out
 
-    def inverse_mfp(self, e_per_amu_ev, v_beam, ne, te_ev, hydrogenic, impurities):
-        """Total lambda^-1 [1/m] (arrays on the path).  ``hydrogenic`` / ``impurities``: lists of (n, Z)."""
-        te = np.clip(np.asarray(te_ev, float), 1.0, 1.0e5)
+    def inverse_mfp(self, e_per_amu_ev, v_beam, ne, te_ev, hydrogenic, impurities, log=None):
+        """Total lambda^-1 [1/m] (arrays on the path).  ``hydrogenic`` / ``impurities``: lists of (n, Z).
+
+        ``log`` (a dict, optional) accumulates how often the fits' clamps acted: ``te_clamped`` (points with
+        T_e outside [1, 1e5] eV) and ``proton_impact_zeroed`` (calls below 0.1 keV/u).
+        """
+        te_in = np.asarray(te_ev, float)
+        te = np.clip(te_in, 1.0, 1.0e5)
+        if log is not None:
+            log["te_clamped"] = log.get("te_clamped", 0) + int(np.count_nonzero((te_in < 1.0) | (te_in > 1.0e5)))
         sv_e = np.exp(self._poly(self._CFIONE, np.log(te))) * 1e-6              # m^3/s
         lam = np.asarray(ne, float) * sv_e / v_beam
         e = float(e_per_amu_ev)
         lnek = np.log(e / 1000.0)
         sig_p = 0.0 if lnek <= -2.30258 else float(np.exp(self._poly(self._CFIONP, np.array(lnek)))) * 1e-4
+        if log is not None and lnek <= -2.30258:
+            log["proton_impact_zeroed"] = log.get("proton_impact_zeroed", 0) + 1
         sig_cx = 0.6937e-14 * (1.0 - 0.155 * np.log10(e)) ** 2 / (1.0 + 0.1112e-14 * e ** 3.3) * 1e-4
         for n, _z in hydrogenic:
             lam = lam + np.asarray(n, float) * (sig_p + sig_cx)
@@ -311,13 +347,14 @@ def _bin(rho_grid, dvol_drho, rho_pts, weights, width, mirror_axis):
 
 
 def pencil_beam_deposition(beam, rho_of_rz, rho, dvol_drho, ne, te_ev, hydrogenic, impurities,
-                           cross_sections=None, n_steps=4000, smoothing_width=0.0, mirror_axis=True):
+                           cross_sections=None, n_steps=4000, smoothing_width=0.0, mirror_axis=True, clamp_log=None):
     r"""Attenuate a pencil beam (eq. B3) and return births per component on ``rho``.
 
     ``rho_of_rz(R, Z)`` gives rho_tor_norm (NaN outside the plasma) from the caller's
     equilibrium; ``ne``, ``te_ev`` are arrays on ``rho``; ``hydrogenic`` / ``impurities`` are
     lists of ``(n_array_on_rho, Z)``.  The beam travels from ``(source_r, 0, source_z)`` toward
-    the co-Ip toroidal direction for ``direction = +1`` (internal positive frame).
+    the co-Ip toroidal direction for ``direction = +1`` (internal positive frame).  ``clamp_log``
+    (a dict) accumulates the cross-section fits' clamp counts.
     """
     if beam.tangency_radius is None:
         raise ValueError("pencil_beam_deposition needs pencil geometry")
@@ -348,7 +385,14 @@ def pencil_beam_deposition(beam, rho_of_rz, rho, dvol_drho, ne, te_ev, hydrogeni
     shine = np.zeros(3)
     for k, Ek in enumerate(beam.energies):
         vb = np.sqrt(2.0 * Ek * E_CHARGE / (beam.A * M_AMU))
-        lam = np.where(inside, xs.inverse_mfp(Ek / beam.A, vb, ne_s, te_s, hyd_s, imp_s), 0.0)
+        try:
+            lam_all = xs.inverse_mfp(Ek / beam.A, vb, ne_s[inside], te_s[inside], [(n[inside], z) for n, z in hyd_s],
+                                     [(n[inside], z) for n, z in imp_s], log=clamp_log)
+        except TypeError:                      # a caller's cross-section object without the log argument
+            lam_all = xs.inverse_mfp(Ek / beam.A, vb, ne_s[inside], te_s[inside], [(n[inside], z) for n, z in hyd_s],
+                                     [(n[inside], z) for n, z in imp_s])
+        lam = np.zeros_like(s)
+        lam[inside] = lam_all
         tau = np.concatenate([[0.0], np.cumsum(0.5 * (lam[1:] + lam[:-1]) * np.diff(s))])
         I = rates[k] * np.exp(-tau)
         W[k] = np.where(seg_in, I[:-1] - I[1:], 0.0)
@@ -378,11 +422,20 @@ class SimpleBeamModel:
     Settings (all recorded in provenance; the defaults are the bug-fixed model):
     ``smoothing_width`` (rho units, pencil beams only; 0 = cloud-in-cell binning),
     ``mirror_axis`` (True), ``shielding`` (``"redl_l31"``), ``ln_lambda_e`` (``"nrl_ei"``),
-    ``ln_lambda_i`` (``"nrl_beam_ion"``), ``cross_sections`` (FREYA fits), ``n_steps`` (4000).
+    ``ln_lambda_i`` (``"nrl_beam_ion"``), ``cross_sections`` (FREYA fits), ``n_steps`` (4000),
+    ``compute_nbcd`` (False: no driven current is returned; True: returned and flagged NOT
+    validated, module docstring), ``zeff_check_rtol`` (None: the Z_eff given and the one
+    implied by the ion list are compared and the difference recorded; a number: refuse when
+    the relative difference exceeds it).
     """
 
+    #: Reason attached to every built-in driven current (module docstring).
+    NBCD_NOT_VALIDATED = ("built-in NBCD: cylindrical fast-ion current with birth-point pitch, no fast-ion "
+                          "trapping; 1.5-2.4x a transport code per MW in tests; no calibration applied")
+
     def __init__(self, beams, *, smoothing_width, mirror_axis=True, shielding="redl_l31", ln_lambda_e="nrl_ei",
-                 ln_lambda_i="nrl_beam_ion", cross_sections=None, n_steps=4000):
+                 ln_lambda_i="nrl_beam_ion", cross_sections=None, n_steps=4000, compute_nbcd=False,
+                 zeff_check_rtol=None):
         if not beams:
             raise ValueError("no beams given")
         names = [b.name for b in beams]
@@ -396,12 +449,18 @@ class SimpleBeamModel:
         self.ln_lambda_i = ln_lambda_i
         self.cross_sections = FreyaCrossSections() if cross_sections is None else cross_sections
         self.n_steps = int(n_steps)
+        self.compute_nbcd = bool(compute_nbcd)
+        self.zeff_check_rtol = None if zeff_check_rtol is None else float(zeff_check_rtol)
+        self._clamp_log = {}
 
     def settings(self):
         return {"smoothing_width": self.smoothing_width, "mirror_axis": self.mirror_axis, "shielding": self.shielding,
                 "ln_lambda_e": self.ln_lambda_e, "ln_lambda_i": self.ln_lambda_i,
                 "cross_sections": getattr(self.cross_sections, "name", type(self.cross_sections).__name__),
-                "n_steps": self.n_steps}
+                "n_steps": self.n_steps,
+                "compute_nbcd": self.compute_nbcd if not self.compute_nbcd else "True (output flagged NOT validated)",
+                "zeff_check_rtol": self.zeff_check_rtol, "banana_shift": "not applied (declared difference from FUSE)",
+                "fast_ion_density_lower_limit": "v = 0 (no thermalization cutoff; slowing_down module docstring)"}
 
     def deposit(self, beam, rho, dvol_drho, ne, te_ev, ions, rho_of_rz):
         """Births, <xi0>, <P_2(xi0)> and shine-through of one beam on ``rho``."""
@@ -435,7 +494,8 @@ class SimpleBeamModel:
         hyd = [(ion.n, ion.Z) for ion in ions if ion.Z <= 1.0 + 1e-9]
         imp = [(ion.n, ion.Z) for ion in ions if ion.Z > 1.0 + 1e-9]
         return pencil_beam_deposition(beam, rho_of_rz, rho, dvol_drho, ne, te_ev, hyd, imp, self.cross_sections,
-                                      self.n_steps, self.smoothing_width, self.mirror_axis)
+                                      self.n_steps, self.smoothing_width, self.mirror_axis,
+                                      clamp_log=self._clamp_log)
 
     def compute(self, rho, *, time, ne, te_ev, ions, zeff, ft, B0, R0, dvol_drho, rho_of_rz=None, uncertainty=None,
                 time_window=0.0, inputs=None, eps=None):
@@ -449,6 +509,13 @@ class SimpleBeamModel:
         rho = np.asarray(rho, float)
         ne, te = np.asarray(ne, float), np.asarray(te_ev, float)
         zeff = np.broadcast_to(np.asarray(zeff, float), rho.shape)
+        # Z_eff (used in the shielding) against the one implied by the ion list (used in E_c, R_D and stopping)
+        zeff_ions = sum(np.asarray(i.n, float) * i.Z ** 2 for i in ions) / ne
+        zrel = float(np.max(np.abs(zeff_ions / zeff - 1.0)))
+        if self.zeff_check_rtol is not None and zrel > self.zeff_check_rtol:
+            raise ValueError(f"Z_eff given and Z_eff of the ion list (sum n Z^2 / n_e) differ by up to {zrel:.3g} "
+                             f"(relative) > zeff_check_rtol = {self.zeff_check_rtol:g}")
+        self._clamp_log = {}
         jdotb, p_fast, n_fast, p_par, p_perp, heating = {}, {}, {}, {}, {}, {}
         diag = {}
         for b in self.beams:
@@ -462,8 +529,9 @@ class SimpleBeamModel:
                 jf += m["j_fast"]
                 for key in tot:
                     tot[key] += m[key]
-            Fb = shielding_factor(zeff, b.Z, self.shielding, ft=ft, eps=eps)
-            jdotb[b.name] = jf * Fb * B0          # <J.B> = j_par B0 (module LIMITATIONS: O(eps^2) frame)
+            if self.compute_nbcd:
+                Fb = shielding_factor(zeff, b.Z, self.shielding, ft=ft, eps=eps)
+                jdotb[b.name] = jf * Fb * B0      # <J.B> = j_par B0 (module LIMITATIONS); NOT validated
             sp = b.species_label
             for d, key in ((p_fast, "p_fast"), (n_fast, "n_fast"), (p_par, "p_par"), (p_perp, "p_perp")):
                 d[sp] = d.get(sp, 0.0) + tot[key]
@@ -474,7 +542,9 @@ class SimpleBeamModel:
         prov = Provenance(
             provider="simple_beam", source_code="kinrecon.sources.beam", source_version=SOURCES_VERSION,
             inputs=dict(inputs or {}, time=time, beams=[_beam_record(b) for b in self.beams],
-                        sha256=array_sha256(rho, ne, te, zeff, dvol_drho, *[i.n for i in ions])),
+                        sha256=array_sha256(rho, ne, te, zeff, dvol_drho, *[i.n for i in ions]),
+                        zeff_vs_ions_max_rel_difference=zrel, cross_section_clamps=dict(self._clamp_log),
+                        nbcd="computed, NOT validated" if self.compute_nbcd else "not computed (compute_nbcd=False)"),
             conventions={"current": "<J.B> = j_par B0, signed relative to Ip",
                          "pressure": "isotropic equivalent (C8); true components in p_par/p_perp"},
             settings=self.settings(),
@@ -484,6 +554,9 @@ class SimpleBeamModel:
             notes="Re-derived zeroth-order model; differences from FUSE ActorSimpleNB: " + "; ".join(FUSE_DIFFERENCES)
                   + ".  Credits: FUSE / IMAS.jl (Apache-2.0, General Atomics) for the model structure and the FREYA "
                     "cross-section fits.")
+        if self.compute_nbcd:
+            prov.limitations.insert(0, "NOT VALIDATED: the returned beam-driven current (" + self.NBCD_NOT_VALIDATED + ")")
         return NonInductiveSources(rho=rho, time=time, time_window=time_window, B0=B0, R0=R0, jdotb=jdotb,
                                    p_fast=p_fast, n_fast=n_fast, p_par=p_par, p_perp=p_perp, heating=heating,
-                                   uncertainty=list(uncertainty or []), provenance=prov, meta={"beams": diag})
+                                   uncertainty=list(uncertainty or []), provenance=prov, meta={"beams": diag},
+                                   not_validated={f"jdotb:{k}": self.NBCD_NOT_VALIDATED for k in jdotb})

@@ -78,7 +78,10 @@ switching to it when q becomes non-monotonic would be discontinuous, which
 is why the rearrangement is used for every topology.
 
 Current sheets.  ``chi_new`` is continuous but its slope jumps where ``D``
-ends and at the new position of every interior critical level.  With
+ends, at the new position of every interior critical level, and -- when the
+minimum of ``chi`` on ``[0, s_*]`` is interior and ``D`` starts at the axis --
+at the new position ``s_lo + mu(chi(0))`` of the axis level, where the axis
+crossing (slope ``chi'(0) != 0``) ends.  With
 ``S(L) = sum over crossings chi(s) = L of 1/|chi'(s)|`` (``mu' = -S``), the
 one-sided slopes are ``chi_new' = -1/S`` (0 where a crossing is a q = 1
 surface).  At ``s_mix``, in the monotonic case,
@@ -120,8 +123,13 @@ Partial reconnection
 
 (TRANSP ``XSWID2 = 1 - f``, Pankin et al. 2025 sec. VIII.A, "a model that
 'averages'" no and full current mixing).  Conserves Phi (fixed grid), psi and
-the enclosed current outside the changed zone, psi at the boundary and Ip;
-it does **not** conserve helical flux for 0 < f < 1 (phenomenological).
+the enclosed current outside the changed zone (``|rho - rho_k| >= w_eff``
+around every sheet, so out to ``rho_mix + w_eff``, not only ``rho_mix``), psi
+at the boundary and Ip.  Helical flux (the toroidal-flux measure of every
+level set of ``chi``) is conserved only for ``f = 1`` and ``w = 0``: it is
+not conserved for 0 < f < 1 (phenomenological), and the sheet smoothing (K4)
+changes it near every sheet (by 1-3 % of ``s_mix`` at ``w = 0.05`` for
+q0 = 0.7-0.9 in the independent review's check).
 
 Smoothness.  As ``q0 -> 1-`` (monotonic case) ``s_mix ~ (1 - q0)``, the change
 of ``iota`` is O(1 - q0) over a measure O(1 - q0), so ``|psi_post - psi| =
@@ -147,11 +155,14 @@ Convergence measure (decided criterion 1e-9, never loosened):
 
 .. code-block:: text
 
-    r = || G K_f(M z + c) - z ||_inf / ( psi(rho_mix) - psi(0) )                       (P1)
+    r = || G K_f(M z + c) - z ||_inf / | psi(rho_mix) - psi(0) |                     (P1)
 
 for the pre-crash state ``y = M z + c`` (``psi(rho_mix) - psi(0)`` from the
 same interpolant as the operator; when the operator is inactive the
-denominator is ``psi(last cell) - psi(0)``).  Both the matrix form and the
+denominator is ``|psi(last cell) - psi(0)|``).  The denominator is positive
+in the positive frame, which is enforced: Ip <= 0, Phi_b <= 0 or a state with
+``psi(last cell) <= psi(0)`` raises :class:`~.diffusion.PositiveFrameError`
+(a negative denominator would let any negative residual pass).  Both the matrix form and the
 real stepping (``advance`` then ``reconnect``) must meet it.
 
 Time-dependent mode
@@ -187,7 +198,7 @@ import numpy as np
 from scipy.interpolate import PchipInterpolator
 from scipy.optimize import brentq
 
-from .diffusion import CurrentDiffusion, CurrentState
+from .diffusion import CurrentDiffusion, CurrentState, PositiveFrameError
 
 __all__ = [
     "CYCLE_TOL",
@@ -423,9 +434,11 @@ class ReconnectionRecord:
 
     ``topology``: ``'none'`` (q >= 1 everywhere), ``'monotonic'`` (q0 < 1, one q = 1 surface),
     ``'reversed'`` (q0 >= 1 with an off-axis q < 1 region), ``'multiple'`` (more than one q < 1 region).
-    Conservation residuals (expected exactly 0): ``psi_outside_max_change`` (cells outside the changed zone),
+    Locality residuals: ``psi_outside_max_change`` (cells outside the changed zone),
     ``current_outside_max_rel_change`` (relative change of dpsi/drho, i.e. of the enclosed current, on faces
-    between unchanged cells), ``psi_boundary_change``.  Toroidal flux is conserved by construction (fixed grid).
+    between unchanged cells), ``psi_boundary_change``.  They are exactly 0 by construction (the operator copies
+    those cells), so they check the zone bookkeeping, not conservation by the rearrangement itself; toroidal flux
+    is conserved by construction (fixed grid).  Helical flux is not recorded here (see (K5)).
     """
 
     active: bool = False
@@ -456,6 +469,22 @@ class ReconnectionRecord:
 
 
 # ====================================================================== the operator
+def _check_positive_frame(cfac, depth):
+    """Refuse a state outside the positive frame (Phi_b > 0 and psi rising from the axis to the last cell).
+
+    The operator, its record and the cycle criterion (P1) assume ``psi' > 0`` overall (Ip > 0, module
+    docstring of :mod:`.diffusion`).  With Ip < 0 the helical flux ``chi = psi - c s`` falls everywhere, the
+    operator would be silently inactive, and a residual divided by a negative depth would pass any test.
+    """
+    if not (np.isfinite(cfac) and cfac > 0):
+        raise PositiveFrameError(f"boundary toroidal flux must be positive (Phi_b/2pi = {cfac!r}): map the "
+                                 "discharge onto the positive frame first")
+    if not (np.isfinite(depth) and depth > 0):
+        raise PositiveFrameError(f"psi(last cell) - psi(axis) = {depth!r} <= 0: the state is not in the positive "
+                                 "frame (Ip > 0, psi' > 0); map the discharge onto it first (reverse the signs of Ip "
+                                 "and psi), or the current is reversed over most of the plasma")
+
+
 def _core(psi, rc, cfac, f, w, n_samples, n_levels):
     """Reconnection (K1)-(K5) on cell values.  Returns (psi_post, info dict)."""
     s_cells = rc * rc
@@ -466,6 +495,7 @@ def _core(psi, rc, cfac, f, w, n_samples, n_levels):
     m = _fd_slopes(s_nodes, chi)
     H = _Hermite(s_nodes, chi, m)
     crit_s, crit_k = H.critical_points()
+    _check_positive_frame(cfac, float(psi[-1] - psi_axis))
     info = dict(active=False, topology="none", psi_axis=psi_axis, chi_axis_slope=float(m[0]),
                 q0_pre=float(cfac / (cfac + m[0])) if cfac + m[0] != 0 else float("inf"),
                 rho_q1=tuple(np.sqrt(crit_s).tolist()), depth=float(psi[-1] - psi_axis))
@@ -556,6 +586,24 @@ def _core(psi, rc, cfac, f, w, n_samples, n_levels):
         for k, i in enumerate(ii):
             if S_reg[k] > 0:
                 sheets.append((float(pos[k]), (1.0 if ck[i - 1] > 0 else -1.0) / S_reg[k]))
+    # the axis-level sheet: when the minimum of chi on [0, s_*] is interior and D starts at the axis, the axis
+    # crossing (slope m0 = chi'(0) != 0) ends at the level L0 = chi(0); chi_new has a slope jump at the position
+    # s_lo + mu(L0) of that level (S(L) changes by 1/|m0| there).  Levels above a position lie to its left
+    # (chi_new decreasing), so for m0 > 0 (rising axis piece: crossings exist above L0) the left slope includes
+    # the axis crossing; for m0 < 0 (falling axis piece: crossings below L0) the right slope does.
+    if s_lo == 0.0 and not min_at_axis and m[0] != 0.0 and m_star < chi[0] < M:
+        L0 = float(chi[0])
+        S_reg0 = 0.0
+        for jj, pc in enumerate(pieces):
+            if pc.flat or jj == 0:
+                continue
+            if pc.lo < L0 < pc.hi:
+                d0 = abs(float(H.deriv(pc.crossing(np.array([L0]))[0])))
+                S_reg0 += 1.0 / d0 if d0 > 0 else np.inf
+        if np.isfinite(S_reg0) and S_reg0 > 0:
+            with_axis, without = -1.0 / (S_reg0 + 1.0 / abs(m[0])), -1.0 / S_reg0
+            jump = (without - with_axis) if m[0] > 0 else (with_axis - without)
+            sheets.append((float(s_lo + mu(np.array([L0]))[0]), jump))
     sheet_out = []
     psi_Ks = psi_K
     for s_k, J_s in sheets:
@@ -893,8 +941,15 @@ def _anderson(resid, z, nrm, tol, max_evals, hist, verbose, depth=5):
                 n_ev += 1
         if step is None:
             Gs, Fs = [g], [r]
-            rg, yg, infg, ng = resid(g)
             n_ev += 1
+            try:
+                rg, yg, infg, ng = resid(g)
+            except ValueError as exc:
+                # the physical map itself failed (e.g. the zone reaches the last two cells): stop and report
+                # the best iterate as not converged instead of aborting the solve
+                if verbose:
+                    print(f"  anderson {n_ev}: plain step failed ({exc}); stopping")
+                break
             step = (g, rg, yg, infg, ng)
         z, r, y, info, nrm = step
         if nrm < best[0]:
@@ -933,6 +988,9 @@ def solve_periodic_orbit(solver: CurrentDiffusion, rho_faces, f, period, nsteps=
     nsteps = int(nsteps)
     phi_b = solver.geometry_at(t_ref).phi_b
     cfac = phi_b / (2.0 * np.pi)
+    ip_ref = float(solver.boundary(t_ref))
+    if not ip_ref > 0:
+        raise PositiveFrameError(f"Ip = {ip_ref!r} at t_ref: the periodic orbit needs Ip > 0 (positive frame)")
     S, s0 = _step_matrices(solver, rf, period / nsteps, t_ref, scheme)
     M, c = _affine_power(S, s0, nsteps)
     # stationarity / consistency check of the matrix form against the solver
@@ -949,7 +1007,7 @@ def solve_periodic_orbit(solver: CurrentDiffusion, rho_faces, f, period, nsteps=
         y = M @ z + c
         post, info = K(y)
         r = _gauge(post) - z
-        return r, y, info, float(np.max(np.abs(r)) / info["depth"])
+        return r, y, info, float(np.max(np.abs(r)) / abs(info["depth"]))
 
     def jacobian(y, info):
         """G (K'(y) M) with K' along the dominant left singular vectors of M's rows that K reads."""
@@ -963,7 +1021,7 @@ def solve_periodic_orbit(solver: CurrentDiffusion, rho_faces, f, period, nsteps=
         for kk in np.nonzero(keep)[0]:
             u = np.zeros(n)
             u[:mprime] = U[:, kk]
-            h = 1e-6 * info["depth"] / np.max(np.abs(u))
+            h = 1e-6 * abs(info["depth"]) / np.max(np.abs(u))
             try:
                 d = (K(y + h * u)[0] - K(y - h * u)[0]) / (2.0 * h) - u
             except ValueError:
@@ -1010,7 +1068,7 @@ def solve_periodic_orbit(solver: CurrentDiffusion, rho_faces, f, period, nsteps=
     pre = solver.advance(st, t_ref + period, nsteps=nsteps, scheme=scheme)
     post, rec = reconnect(pre, phi_b, f, sheet_width, n_samples, n_levels)
     z_step = _gauge(post.psi)
-    res_step = float(np.max(np.abs(z_step - z)) / rec.depth)
+    res_step = float(np.max(np.abs(z_step - z)) / abs(rec.depth))
     states = [st]
     s = st
     for kk in range(nsteps):
@@ -1177,21 +1235,25 @@ def simulate_slice(solver, rho_faces, sched: SliceSchedule, f, dt, nsteps_orbit=
     """Time-dependent run for one window: start from the periodic orbit at the schedule's mean interval
     (phase from the last crash before the start when known, else just after a crash), apply the measured
     crashes, record the window.  Inputs are those of ``solver`` (frozen inputs give the periodic start).
-    Returns dict(trajectory, events, orbit, initial_phase, state)."""
+    The starting phase is capped at 1 (the pre-crash state) when the last crash lies more than one mean
+    interval before the start; the cap is reported (``initial_phase_capped``, ``initial_phase_raw``).
+    Returns dict(trajectory, events, orbit, initial_phase, state, initial_phase_capped, initial_phase_raw)."""
     if sched.mean_interval is None:
         raise ValueError("need at least two crashes to set the starting orbit")
     tau = sched.mean_interval
     orbit = solve_periodic_orbit(solver, rho_faces, f, tau, nsteps=nsteps_orbit, sheet_width=sheet_width,
                                  z0=orbit_z0, scheme=scheme)
-    phase = 0.0
+    phase, phase_raw = 0.0, None
     if sched.last_crash_before_start is not None:
-        phase = min((sched.t_start - sched.last_crash_before_start) / tau, 1.0)
+        phase_raw = (sched.t_start - sched.last_crash_before_start) / tau
+        phase = min(phase_raw, 1.0)
     s0 = orbit.phase_state(phase)
     s0 = CurrentState(s0.rho_faces, s0.psi, s0.psi_boundary, sched.t_start, dict(s0.meta))
     traj = Trajectory(*sched.window)
     sch = CrashSchedule(sched.crash_times, f, sheet_width, trajectory=traj)
     s = advance_with_crashes(solver, s0, sched.window[1], sch, dt, scheme=scheme, stops=(sched.window[0],))
-    return dict(trajectory=traj, events=sch.events, orbit=orbit, initial_phase=phase, state=s)
+    return dict(trajectory=traj, events=sch.events, orbit=orbit, initial_phase=phase, state=s,
+                initial_phase_capped=bool(phase_raw is not None and phase_raw > 1.0), initial_phase_raw=phase_raw)
 
 
 # ====================================================================== trigger diagnostic (never in the fit)

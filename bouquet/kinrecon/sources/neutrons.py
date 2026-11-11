@@ -1,7 +1,8 @@
 r"""D-D neutron-rate ESTIMATES: thermonuclear and classical beam-target (diagnostic use only).
 
 A neutron rate from the provider's own fast-ion distribution is the cheapest measured check
-of the fast-ion content (report 28 of the project record).  These are estimates, clearly
+of the fast-ion content (W. W. Heidbrink and G. J. Sadler, Nucl. Fusion 34, 535 (1994), review of
+fast-ion diagnostics).  These are estimates, clearly
 labeled: no beam-beam reactions, the isotropic part of the classical distribution only (the
 rate of a fast particle on an isotropic target does not depend on its pitch), and either a
 cold (stationary) target or a Maxwellian target at T_i (eq. D5).
@@ -32,14 +33,17 @@ average over the target velocities (isotropic Maxwellian, thermal speed ``u = sq
                        [exp(-(v_r - v_b)^2/u^2) - exp(-(v_r + v_b)^2/u^2)] dv_r            (D5)
 
 (the angular integral of a shifted Maxwellian, standard; it tends to sigma(v_b) v_b as u -> 0).
-Validity of D1: 0.5-5000 keV; of D2: 0.2-100 keV.
+Validity of D1: 0.5-5000 keV; of D2: 0.2-100 keV.  Outside those ranges the functions return 0
+below the lower limit (``dd_n_cross_section`` below 0.5 keV CM, ``dd_n_reactivity`` below 0.2 keV)
+and the fit's extrapolation above the upper limit; :func:`validity_flags` reports how many inputs
+fell outside, and the provider records it in its provenance.
 """
 
 import numpy as np
 
 from .conventions import E_CHARGE, M_AMU
 
-__all__ = ["dd_n_cross_section", "dd_n_reactivity", "thermonuclear_rate", "beam_target_rate"]
+__all__ = ["dd_n_cross_section", "dd_n_reactivity", "thermonuclear_rate", "beam_target_rate", "validity_flags"]
 
 _BG = 31.3970                      # sqrt(keV)
 _A = (5.3701e4, 3.3027e2, -1.2706e-1, 2.9327e-5, -2.5151e-9)
@@ -68,6 +72,20 @@ def dd_n_reactivity(t_kev):
     return np.where(t >= 0.2, sv, 0.0) * 1e-6
 
 
+def validity_flags(e_cm_kev=None, t_kev=None):
+    """Counts of inputs outside the stated fit ranges (D1: 0.5-5000 keV CM; D2: 0.2-100 keV)."""
+    out = {}
+    if e_cm_kev is not None:
+        e = np.asarray(e_cm_kev, float)
+        out["cross_section_below_0.5keV_zeroed"] = int(np.count_nonzero(e < 0.5))
+        out["cross_section_above_5000keV"] = int(np.count_nonzero(e > 5000.0))
+    if t_kev is not None:
+        t = np.asarray(t_kev, float)
+        out["reactivity_below_0.2keV_zeroed"] = int(np.count_nonzero(t < 0.2))
+        out["reactivity_above_100keV"] = int(np.count_nonzero(t > 100.0))
+    return out
+
+
 def thermonuclear_rate(n_d, ti_kev):
     """Thermonuclear D-D neutron rate density [m^-3 s^-1] = n_D^2 <sigma v>/2 (eq. D3)."""
     return 0.5 * np.asarray(n_d, float) ** 2 * dd_n_reactivity(ti_kev)
@@ -77,14 +95,21 @@ _GLX, _GLW = np.polynomial.legendre.leggauss(64)
 
 
 def _warm_kernel(v, u, m_r):
-    """<sigma v_r> over a Maxwellian target (eq. D5) at beam speeds ``v`` (1-D) and target speed ``u`` (array)."""
-    t = np.linspace(-6.0, 6.0, 241)
-    vr = v[None, :, None] + u[:, None, None] * t[None, None, :]             # (n_rho, n_v, n_t)
-    vr = np.abs(vr)
-    sig = dd_n_cross_section(0.5 * m_r * vr ** 2 / E_CHARGE / 1e3)
+    """<sigma v_r> over a Maxwellian target (eq. D5) at beam speeds ``v`` (1-D) and target speed ``u`` (array).
+
+    D5 integrates over v_r >= 0 only.  With v_r = v_b + u t the range is t in [max(-6, -v_b/u), 6] (the
+    Gaussian factor is below e^-36 beyond 6 widths); integrating over the full line t in [-6, 6] with |v_r|
+    counted the range v_r < 6 u - v_b twice whenever v_b < 6 u (double counting of low relative speeds,
+    found by an independent review and checked against a 3-D Monte-Carlo average).
+    """
     vb, uu = v[None, :, None], u[:, None, None]
+    t_lo = np.maximum(-6.0, -vb / uu)                                        # (n_rho, n_v, 1)
+    s = np.linspace(0.0, 1.0, 241)[None, None, :]
+    t = t_lo + (6.0 - t_lo) * s
+    vr = np.maximum(vb + uu * t, 0.0)                                        # >= 0 by construction
+    sig = dd_n_cross_section(0.5 * m_r * vr ** 2 / E_CHARGE / 1e3)
     kern = np.exp(-((vr - vb) / uu) ** 2) - np.exp(-((vr + vb) / uu) ** 2)
-    integ = np.trapezoid(sig * vr ** 2 * kern, t, axis=-1) * u[:, None]      # dv_r = u dt
+    integ = np.trapezoid(sig * vr ** 2 * kern, s, axis=-1) * (6.0 - t_lo[..., 0]) * u[:, None]   # dv_r = u dt
     return integ / (np.sqrt(np.pi) * v[None, :] * u[:, None])
 
 

@@ -20,7 +20,17 @@ field                  meaning                                                  
 ``heating[name]``      (q_e, q_i) power densities (optional)                     W/m^3
 ``uncertainty``        list of :class:`ScalePrior` / :class:`ShapePrior`         --
 ``provenance``         :class:`Provenance`                                       --
+``not_validated``      ``{"jdotb:<name>": reason}``: outputs the producer marks  --
+                       as NOT validated (hard flag; see below)
 =====================  ========================================================  ===========
+
+**Not-validated outputs.**  A producer may return a quantity that is known not to be
+trustworthy (the built-in beam model's driven current, :mod:`.beam`) only with an entry in
+``not_validated``.  Reading such a current -- ``jdotb[name]``, iterating ``jdotb``,
+:attr:`jdotb_total`, :meth:`j_parallel`, :meth:`toroidal`, :meth:`on_psi_n` -- raises
+:class:`NotValidatedError` until the caller acknowledges it explicitly with
+:meth:`acknowledge_not_validated`, which returns the arrays and records the
+acknowledgement in ``meta["acknowledged_not_validated"]``.  The flag is serialized.
 
 ``j_parallel`` (= <J.B>/B0, eq. C2) and the toroidal frames (eqs. C3-C7, need geometry) are
 computed on request, never stored twice.
@@ -30,7 +40,7 @@ values, a non-positive B0, or a pressure entry whose true components disagree wi
 isotropic-equivalent value.  ``uncertainty`` may be left empty, but then
 :meth:`NonInductiveSources.completeness` reports it and
 :meth:`NonInductiveSources.require_complete` raises -- the default prior widths are a
-user decision (project decision D-B3), so nothing is filled in on the caller's behalf.
+user decision, so nothing is filled in on the caller's behalf.
 """
 
 import datetime
@@ -43,12 +53,58 @@ import numpy as np
 from .conventions import (CURRENT_FRAME, PRESSURE_CONVENTION, RADIAL_COORDINATE, jpar_from_jdotb, p_fast_from_true,
                           psi_n_to_rho, toroidal_frames)
 
-__all__ = ["ScalePrior", "ShapePrior", "Provenance", "NonInductiveSources", "SOURCES_VERSION"]
+__all__ = ["ScalePrior", "ShapePrior", "Provenance", "NonInductiveSources", "SOURCES_VERSION", "NotValidatedError",
+           "GuardedArrays"]
 
 #: Version of the ``kinrecon.sources`` layer recorded in every provenance record.
 SOURCES_VERSION = "0.1.0"
 
 _QUANTITIES = ("jdotb", "p_fast", "n_fast", "heating")
+
+
+class NotValidatedError(RuntimeError):
+    """A not-validated output was read without an explicit acknowledgement (module docstring)."""
+
+
+class GuardedArrays(dict):
+    """A dict of arrays whose flagged keys raise :class:`NotValidatedError` when read.
+
+    ``keys()``, ``in`` and ``len`` work normally (a caller can see what exists); reading a flagged value
+    (``[]``, ``get``, ``values``, ``items``, iteration over items) raises.  :meth:`raw` returns a plain dict
+    (for serialization and for :meth:`NonInductiveSources.acknowledge_not_validated`).
+    """
+
+    def __init__(self, data, flagged, what):
+        super().__init__(data)
+        self._flagged = dict(flagged)
+        self._what = what
+
+    def _check(self, key):
+        if key in self._flagged:
+            raise NotValidatedError(f"{self._what}[{key!r}] is NOT validated ({self._flagged[key]}); call "
+                                    "acknowledge_not_validated(...) to use it explicitly")
+
+    def __getitem__(self, key):
+        self._check(key)
+        return super().__getitem__(key)
+
+    def get(self, key, default=None):
+        if key in self:
+            self._check(key)
+        return super().get(key, default)
+
+    def values(self):
+        for k in self.keys():
+            self._check(k)
+        return super().values()
+
+    def items(self):
+        for k in self.keys():
+            self._check(k)
+        return super().items()
+
+    def raw(self):
+        return dict(super().items())
 
 
 @dataclass(frozen=True)
@@ -180,6 +236,7 @@ class NonInductiveSources:
     heating: Dict[str, Tuple[np.ndarray, np.ndarray]] = field(default_factory=dict)
     uncertainty: List[object] = field(default_factory=list)
     meta: Dict[str, object] = field(default_factory=dict)
+    not_validated: Dict[str, str] = field(default_factory=dict)
 
     radial_coordinate = RADIAL_COORDINATE
     current_frame = CURRENT_FRAME
@@ -202,7 +259,15 @@ class NonInductiveSources:
             raise ValueError("time_window must be >= 0")
         if not isinstance(self.provenance, Provenance):
             raise TypeError("provenance must be a Provenance record")
-        self.jdotb = {k: _arr(v, n, f"jdotb[{k!r}]") for k, v in self.jdotb.items()}
+        raw = self.jdotb.raw() if isinstance(self.jdotb, GuardedArrays) else dict(self.jdotb)
+        self.not_validated = {str(k): str(v) for k, v in dict(self.not_validated).items()}
+        for key in self.not_validated:
+            if not key.startswith("jdotb:"):
+                raise ValueError(f"not_validated key {key!r}: only 'jdotb:<name>' entries are supported")
+            if key[6:] not in raw:
+                raise ValueError(f"not_validated names {key!r} but there is no such jdotb entry")
+        flagged = {k[6:]: v for k, v in self.not_validated.items()}
+        self.jdotb = GuardedArrays({k: _arr(v, n, f"jdotb[{k!r}]") for k, v in raw.items()}, flagged, "jdotb")
         self.p_fast = {k: _arr(v, n, f"p_fast[{k!r}]") for k, v in self.p_fast.items()}
         self.n_fast = {k: _arr(v, n, f"n_fast[{k!r}]") for k, v in self.n_fast.items()}
         self.p_par = {k: _arr(v, n, f"p_par[{k!r}]") for k, v in self.p_par.items()}
@@ -228,8 +293,28 @@ class NonInductiveSources:
     # ------------------------------------------------------------------ totals and frames
     @property
     def jdotb_total(self):
-        """Sum of <J_CD.B> over sources [A T/m^2]."""
+        """Sum of <J_CD.B> over sources [A T/m^2] (raises :class:`NotValidatedError` if any is flagged)."""
         return sum(self.jdotb.values(), np.zeros_like(self.rho))
+
+    def acknowledge_not_validated(self, names, reason):
+        """Return ``{name: <J.B> array}`` for flagged sources, recording the caller's ``reason``.
+
+        ``names``: the flagged source names (``"*"`` for all flagged).  The acknowledgement is appended to
+        ``meta["acknowledged_not_validated"]`` (name, flag, reason) so that it travels with the object.
+        """
+        flagged = {k[6:]: v for k, v in self.not_validated.items()}
+        names = list(flagged) if names == "*" else list(names)
+        if not reason:
+            raise ValueError("acknowledge_not_validated needs a reason")
+        raw = self.jdotb.raw()
+        out = {}
+        for nme in names:
+            if nme not in flagged:
+                raise KeyError(f"{nme!r} is not a flagged jdotb source")
+            out[nme] = raw[nme]
+            self.meta.setdefault("acknowledged_not_validated", []).append(
+                dict(source=nme, flag=flagged[nme], reason=str(reason)))
+        return out
 
     @property
     def p_fast_total(self):
@@ -266,10 +351,10 @@ class NonInductiveSources:
         """List of plain-language gaps (empty when every quantity has a prior and provenance is full)."""
         gaps = []
         if not self.uncertainty:
-            gaps.append("no uncertainty descriptors (prior widths are a user decision, D-B3)")
+            gaps.append("no uncertainty descriptors (prior widths are a user decision)")
         else:
             covered = {(u.quantity, u.target) for u in self.uncertainty if isinstance(u, ScalePrior)}
-            for q, d in (("jdotb", self.jdotb), ("p_fast", self.p_fast), ("n_fast", self.n_fast)):
+            for q, d in (("jdotb", self.jdotb.raw()), ("p_fast", self.p_fast), ("n_fast", self.n_fast)):
                 for k in d:
                     if (q, k) not in covered and (q, "*") not in covered:
                         gaps.append(f"no scale prior for {q}[{k!r}]")
@@ -277,6 +362,8 @@ class NonInductiveSources:
             gaps.append("provenance lists no assumptions")
         if not self.provenance.limitations:
             gaps.append("provenance lists no limitations")
+        for k, v in self.not_validated.items():
+            gaps.append(f"{k} is NOT validated ({v})")
         return gaps
 
     def require_complete(self):
@@ -298,7 +385,7 @@ class NonInductiveSources:
             "pressure_convention": PRESSURE_CONVENTION,
             "rho": self.rho.tolist(), "time": self.time, "time_window": self.time_window,
             "B0": self.B0, "R0": self.R0,
-            "jdotb": {k: v.tolist() for k, v in self.jdotb.items()},
+            "jdotb": {k: v.tolist() for k, v in self.jdotb.raw().items()},
             "p_fast": {k: v.tolist() for k, v in self.p_fast.items()},
             "n_fast": {k: v.tolist() for k, v in self.n_fast.items()},
             "p_par": {k: v.tolist() for k, v in self.p_par.items()},
@@ -306,6 +393,7 @@ class NonInductiveSources:
             "heating": {k: [qe.tolist(), qi.tolist()] for k, (qe, qi) in self.heating.items()},
             "uncertainty": [pri(u) for u in self.uncertainty],
             "provenance": self.provenance.to_dict(), "meta": self.meta,
+            "not_validated": dict(self.not_validated),
         }
 
     @classmethod
@@ -325,7 +413,8 @@ class NonInductiveSources:
         return cls(rho=d["rho"], time=d["time"], time_window=d["time_window"], B0=d["B0"], R0=d["R0"],
                    jdotb=d["jdotb"], p_fast=d["p_fast"], n_fast=d["n_fast"], p_par=d.get("p_par", {}),
                    p_perp=d.get("p_perp", {}), heating={k: tuple(v) for k, v in d.get("heating", {}).items()},
-                   uncertainty=unc, provenance=Provenance(**prov), meta=d.get("meta", {}))
+                   uncertainty=unc, provenance=Provenance(**prov), meta=d.get("meta", {}),
+                   not_validated=d.get("not_validated", {}))
 
     def to_json(self, path):
         with open(path, "w") as f:

@@ -12,12 +12,11 @@ boundary built in:
 The exact fully relaxed state is a volume quadrature on these surfaces
 (no metric): ``I/F = (V/2pi) A(x) + B(x)``, ``A = int sigma <1/R^2>/(2 pi F) dV``,
 ``B = int <J_NI.B>/(2 pi F^2) dV``, ``V`` fixed by ``I(1) = Ip``; on the fixed
-surfaces ``q = q_ref I_ref / I`` and ``dpsi/dx = dpsi_ref I / I_ref`` (as in the
-domain-edge experiment).
+surfaces ``q = q_ref I_ref / I`` and ``dpsi/dx = dpsi_ref I / I_ref``.
 
-Bounds are taken from the domain-edge experiment report (section numbers in
-each assertion; never adjusted to the measured values here).  All numbers are
-synthetic.
+Bounds are those of an earlier measurement campaign of the domain edge on ten
+equilibria (stated beside each assertion; never adjusted to the measured values
+here).  All numbers are synthetic.
 """
 import os
 import sys
@@ -37,7 +36,7 @@ from bouquet.kinrecon.current import (MU0, CurrentDiffusion, CurrentState, FluxS
 
 R0, B0, F0, DPSI, IP = 1.7, 2.0, 3.4, 0.18, 1.2e6
 CUTOFFS = (0.99, 0.995, 0.999)
-NCELLS, NRHO = 400, 401        # as in the experiment (its section 1.1)
+NCELLS, NRHO = 400, 401        # as in that campaign
 
 
 def F(x):
@@ -111,7 +110,7 @@ EXACT = _exact()
 
 # ----------------------------------------------------------------------------- truncated problem
 def _domain_samples(c, n_in=300, n_edge=100):
-    """sqrt-uniform interior + geometric clustering toward the cutoff (the experiment's sample grid)."""
+    """sqrt-uniform interior + geometric clustering toward the cutoff (the campaign's sample grid)."""
     a = np.linspace(np.sqrt(1e-3), np.sqrt(0.97 * c), n_in) ** 2
     d = np.geomspace(0.03 * c, 1e-3 * (1 - c), n_edge)
     return np.concatenate((a[:-1], c - d, [c]))
@@ -160,8 +159,8 @@ def steady():
 def test_lumped_layer_steady_state_matches_exact_relaxed_state(steady, c):
     sol, r2x, ss, p = steady[c]
     xf, q, xc, jb = _interior(p, r2x)
-    # interior q: <= 1e-3, the experiment's bound "for every cutoff from 0.95 to 0.99999 in all 10 equilibria"
-    # (section 0, item 1; code vs exact quadrature 2e-5 to 6e-4, section 2.4)
+    # interior q: <= 1e-3, the campaign's bound "for every cutoff from 0.95 to 0.99999 in all 10 equilibria"
+    # (code vs exact quadrature measured there: 2e-5 to 6e-4)
     assert np.max(np.abs(q / EXACT["q"](xf) - 1.0)) <= 1e-3
     # <J.B>_ohm relative to its maximum, V_loop: <= 9.3e-4 (section 2.4 table, max over 10 cases)
     je = EXACT["jb_ohm"](xc)
@@ -207,7 +206,7 @@ def test_lumped_layer_error_is_below_half_the_effect_of_a_halved_layer(steady, c
 
 
 def test_interior_independent_of_cutoff(steady):
-    """Cutoff-to-cutoff interior q differences <= 1e-3 (experiment section 0 item 1, same bound)."""
+    """Cutoff-to-cutoff interior q differences <= 1e-3 (the same bound)."""
     xs = np.linspace(0.02, 0.98, 400)
     qs = {}
     for c in CUTOFFS:
@@ -219,7 +218,7 @@ def test_interior_independent_of_cutoff(steady):
 
 def test_dropping_the_layer_is_detected():
     """Discriminating power: treatment (iii) (Ip applied at the cutoff, layer dropped; outer_layer='none')
-    at c = 0.99 biases V and interior q by more than the bounds above (experiment section 2.4: 0.2-1.1 %)."""
+    at c = 0.99 biases V and interior q by more than the bounds above (measured in the campaign: 0.2-1.1 %)."""
     sol, r2x = build(0.99, outer="none")
     ss = sol.steady_state(CurrentState.uniform_faces(NCELLS))
     p = sol.profiles(ss)
@@ -265,9 +264,9 @@ def test_total_current_conserved_with_layer_ip_ramp():
 
 
 def test_time_dependent_interior_independent_of_cutoff():
-    """5 % Ip ramp in 50 ms (the experiment's scenario b), TR-BDF2, dt = 0.5 ms, 400 cells.  The experiment
+    """5 % Ip ramp in 50 ms (one of the campaign's scenarios), TR-BDF2, dt = 0.5 ms, 400 cells.  The campaign
     measured the implicit lumped layer within 2.6e-4 of the finest cutoff in interior q and <J.B> for every
-    c >= 0.98 (section 2.5); two cutoffs therefore agree to 2 x 2.6e-4 = 5.2e-4 (triangle inequality)."""
+    c >= 0.98; two cutoffs therefore agree to 2 x 2.6e-4 = 5.2e-4 (triangle inequality)."""
     ip_t = lambda t: IP * (1.0 + 0.05 * min(t / 0.05, 1.0))  # noqa: E731
     xs = np.linspace(0.02, 0.9, 300)
     res = {}

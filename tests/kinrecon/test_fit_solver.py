@@ -1,4 +1,4 @@
-"""Live-solver tests of the P1 reconstruction (``pytest -m solver``): synthetic closure.
+"""Live-solver tests of the single-slice reconstruction (``pytest -m solver``): synthetic closure.
 
 Public synthetic fixture only: the sawtoothing L-mode slice ``tests/data/g_synthetic_lmode.geqdsk``
 with its IDA-layout kinetics ``tests/data/ida_synthetic_lmode.cdf``, on the public D3D-like mesh
@@ -20,7 +20,7 @@ Checked:
     MAP point toward the prior mean; with zero noise the data still dominate), data chi^2 < 0.1;
 (c) sigma = 0 identity: the consistent solve of the reconstruction configuration at the TRUE
     parameters on noiseless data reproduces the truth state (axis 0.5 mm; q0, l_i, Ip 1e-3, the
-    R07 criterion) with data chi^2 < 1e-2;
+    forward model's verified-convergence criterion) with data chi^2 < 1e-2;
 (d) failure handling: a consistency loop that cannot converge in its pass budget is reported as
     such and the fit refuses to start from it;
 (e) settings-record completeness and the solver settings (OFT defaults, read back).

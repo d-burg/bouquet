@@ -1,8 +1,8 @@
 """``bouquet.kinrecon.current.bootstrap`` (Redl 2021, jboot1 form).
 
 Synthetic profiles only.  The transcription is checked against OFT's own Python implementation
-(``OpenFUSIONToolkit.TokaMaker.bootstrap.redl_bootstrap``, the function the project's spike
-compared with TokaMaker's in-solve Fortran Redl) when OFT is importable; the structural checks run
+(``OpenFUSIONToolkit.TokaMaker.bootstrap.redl_bootstrap``, which agrees with TokaMaker's in-solve
+Fortran Redl) when OFT is importable; the structural checks run
 without OFT.
 """
 import os

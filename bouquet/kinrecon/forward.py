@@ -17,7 +17,7 @@ Grad-Shafranov equation with
     every case tested), each with weight ``1/sigma`` of the measurement set;
   - flux loops in the ABSOLUTE gauge: ``target = measured + meta['absolute_offset']`` (the k-file
     ``SIREF`` route, :func:`.adapters.efit_kfile.flux_gauge`); the relative form as outer passes is
-    ill-posed (the offset is almost unobservable in the coil fit; fit-recipe experiment finding 3).
+    ill-posed (the offset is almost unobservable in the coil fit; measured).
     Scoring stays in the measurement's own form;
   - probes at their center points; with ``probe_in_solve="corrected_point"`` (default) the target
     of each probe is shifted by ``b_point - b_length_averaged`` evaluated on the previous state, so
@@ -32,13 +32,13 @@ Grad-Shafranov equation with
     gauge row (target 0);
   - isoflux rows on every ``isoflux_stride``-th point of a supplied REFERENCE boundary (from a
     prior magnetic equilibrium, e.g. EFIT01), weight ``anchor_factor * 2 pi median(1/sigma_loop)``
-    (default factor 10; converged and verified on 5/5 magnetics cases at 10 and 30 in the
-    experiment; window 3-30).  This makes the solve "magnetics + reference boundary", not a
+    (default factor 10; converged and verified on 5/5 magnetics cases at 10 and 30; working
+    window 3-30, measured).  This makes the solve "magnetics + reference boundary", not a
     free-boundary shape reconstruction;
 * the edge-P' taper policy ``auto`` (:func:`.edge.solve_with_edge_taper`) with one
   :class:`.edge.EdgeTaperCase` per forward model, so the taper is uniform within a case;
 * OFT's default solver settings, never set: ``nl_tol``, ``urf``, ``maxits`` are read back and
-  recorded (gate G7);
+  recorded and compared with the defaults at every solve (record key ``G7``);
 * continuation: a solve starts from the current state of the solver (``init="keep"``), from a
   saved state (:meth:`ForwardModel.snapshot`), or -- first solve of a case only -- from a supplied
   reference ``psi`` on the mesh nodes;
@@ -53,8 +53,7 @@ record; :meth:`ForwardModel.settings_record` holds the case-level settings (rows
 Units and frames: TokaMaker psi per radian; flux-loop targets for ``set_flux_constraints`` are
 ``2 pi psi_TM = -psi_IMAS`` (OFT ``fit_flux_eval`` evaluates ``+2 pi psi_TM``, :mod:`.diagnostics`
 ``-2 pi psi_TM``); coil rows ``weight * mu0 * (I - target)`` with ``I`` in A (OFT
-``tokamaker_set_coil_regmat`` multiplies targets by mu0; checked in the Fortran by the fit-recipe
-experiment).  Plasma current must be positive (TokaMaker refuses a negative Ip target): a
+``tokamaker_set_coil_regmat`` multiplies targets by mu0; checked in the Fortran).  Plasma current must be positive (TokaMaker refuses a negative Ip target): a
 reversed-Ip discharge is solved in the positive frame and the caller states the map.
 
 Device data (mesh, coil names, VSC gains, the reference boundary, F0) are all supplied by the
@@ -296,7 +295,8 @@ class ForwardModel:
     mesh : tuple
         ``(pts, lc, reg, coil_dict, cond_dict)`` as returned by OFT ``load_gs_mesh``.
     F0 : float
-        Vacuum ``R B_phi`` [T m] (sign as the discharge).
+        Vacuum ``R B_phi`` [T m] (sign as the discharge); changed between the slices of a series
+        with :meth:`set_F0`.
     measurements : MeasurementSet
         Needs ``flux_loop``, ``bpol_probe``, ``ip`` and ``pf_current`` groups for the magnetics
         rows; the flux-loop group must carry ``absolute_offset`` (and ``coils_form`` not
@@ -314,8 +314,8 @@ class ForwardModel:
     ip, generation_coil_reg : float, optional
         GENERATION MODE (``measurements=None``; synthetic truth states for closure tests): no
         magnetics or coil-measurement rows; the Ip target ``ip`` [A]; every coil regularized toward
-        zero with the raw OFT weight ``generation_coil_reg`` (the validation suite's reference
-        re-solve uses 1e-2); isoflux rows on ``reference_boundary`` with weight 1.  Never used for a
+        zero with the raw OFT weight ``generation_coil_reg`` (the closure tests use 1e-2);
+        isoflux rows on ``reference_boundary`` with weight 1.  Never used for a
         reconstruction.
 
     :meth:`reconfigure` rebuilds the rows on the same TokaMaker object (one OFT environment and
@@ -331,7 +331,7 @@ class ForwardModel:
         s = self.settings
         if s.flux_gauge != "absolute":
             raise ValueError("only flux_gauge='absolute' is implemented (the relative form as outer passes is "
-                             "ill-posed; fit-recipe experiment finding 3)")
+                             "ill-posed: the offset is almost unobservable in the coil fit)")
         if s.probe_in_solve not in ("corrected_point", "point"):
             raise ValueError("probe_in_solve must be 'corrected_point' or 'point'")
         if not s.vsc:
@@ -508,6 +508,16 @@ class ForwardModel:
         self.case.decided_by = str(reason)
         self.taper_restarts.append(str(reason))
 
+    def set_F0(self, F0):
+        """Vacuum ``R0 B_phi`` [T m] for the following solves (a time series: each slice's own
+        measured value).  It is passed to TokaMaker with the profiles of every solve, so it also
+        replaces the value carried by a restored snapshot.  A change of sign (B_t reversal) is
+        refused: the orientation record is made once per case."""
+        F0 = float(F0)
+        if not np.isfinite(F0) or F0 == 0.0 or np.sign(F0) != np.sign(self.F0):
+            raise ValueError(f"F0 = {F0!r}: must be finite, nonzero and of the case's sign ({np.sign(self.F0):+.0f})")
+        self.F0 = F0
+
     # ---------------------------------------------------------------- state
     def snapshot(self):
         """A copy of the solver's equilibrium (psi, coil currents, profiles, targets)."""
@@ -600,7 +610,7 @@ class ForwardModel:
                 x_, y_, pax, trec = _pressure.solver_inputs_with_taper(
                     xp, pp, base["pprime"], 1.0, taper, separatrix_pressure=s.separatrix_pressure)
             gs.set_targets(Ip=ipv, pax=float(pax))
-            gs.set_profiles(ffp_prof={"type": "jphi-linterp", "x": xj, "y": yj},
+            gs.set_profiles(ffp_prof={"type": "jphi-linterp", "x": xj, "y": yj}, foffset=self.F0,
                             pp_prof={"type": "linterp", "x": np.asarray(x_, float), "y": np.asarray(y_, float)})
             self._apply_rows()
             now = self._read_settings()

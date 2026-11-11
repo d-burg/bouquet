@@ -1,6 +1,6 @@
 """Score any solved TokaMaker equilibrium against a measurement set.
 
-:func:`score` is the forward model (layer L1): it evaluates the synthetic
+:func:`score` is the forward model: it evaluates the synthetic
 diagnostics of :mod:`.diagnostics` on an equilibrium and returns a
 :class:`~.interfaces.ResidualTable`.  It fits nothing and changes nothing: the
 equilibrium's flux, coil currents and profiles are only read (the tests check

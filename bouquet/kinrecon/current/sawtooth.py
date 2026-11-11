@@ -155,7 +155,7 @@ Convergence measure (decided criterion 1e-9, never loosened):
 
 .. code-block:: text
 
-    r = || G K_f(M z + c) - z ||_inf / | psi(rho_mix) - psi(0) |                     (P1)
+    r = || G K_f(M z + c) - z ||_inf / | psi(rho_mix) - psi(0) |                     (PO)
 
 for the pre-crash state ``y = M z + c`` (``psi(rho_mix) - psi(0)`` from the
 same interpolant as the operator; when the operator is inactive the
@@ -226,7 +226,7 @@ __all__ = [
     "q1_shear_diagnostic",
 ]
 
-CYCLE_TOL = 1e-9            # decided periodic-orbit criterion (P1); never loosened
+CYCLE_TOL = 1e-9            # decided periodic-orbit criterion (PO); never loosened
 DEFAULT_SHEET_WIDTH = 0.05  # TRANSP XSWIDQ default, in rho = sqrt(Phi_N)
 DEFAULT_HISTORY = 1.5       # s of crash history before a window (core memory 0.5-1 s measured)
 F_CAP = 0.999               # cap in -ln(1 - F_CAP f) so that f = 1 is finite
@@ -472,7 +472,7 @@ class ReconnectionRecord:
 def _check_positive_frame(cfac, depth):
     """Refuse a state outside the positive frame (Phi_b > 0 and psi rising from the axis to the last cell).
 
-    The operator, its record and the cycle criterion (P1) assume ``psi' > 0`` overall (Ip > 0, module
+    The operator, its record and the cycle criterion (PO) assume ``psi' > 0`` overall (Ip > 0, module
     docstring of :mod:`.diffusion`).  With Ip < 0 the helical flux ``chi = psi - c s`` falls everywhere, the
     operator would be silently inactive, and a residual divided by a negative depth would pass any test.
     """
@@ -776,7 +776,7 @@ class PeriodicOrbit:
 
     ``states[k]`` (k = 0..nsteps) are the states at phase k/nsteps after a crash, from real stepping of the
     solver: ``states[0]`` is just after the crash, ``states[-1]`` just before the next one.  Times run from
-    ``t_ref`` to ``t_ref + period``.  ``residual`` is (P1) for the matrix map, ``residual_stepping`` for the
+    ``t_ref`` to ``t_ref + period``.  ``residual`` is (PO) for the matrix map, ``residual_stepping`` for the
     real stepping; ``converged`` requires both below ``tol``.
     """
 
@@ -914,7 +914,7 @@ def _anderson(resid, z, nrm, tol, max_evals, hist, verbose, depth=5):
     """Anderson acceleration (type II, depth ``depth``) of the physical map z -> z + r(z).  An accelerated step
     is accepted only if it lowers the residual measure below the current one; otherwise the history is
     cleared and a plain step (one physical cycle) is taken, which is always accepted.  Returns
-    (z, residual, n_evals, y, info) for the best iterate.  The stopping test is the unchanged (P1)."""
+    (z, residual, n_evals, y, info) for the best iterate.  The stopping test is the unchanged (PO)."""
     r, y, info, nrm = resid(z)
     best = (nrm, z, y, info)
     Gs, Fs = [], []
@@ -973,7 +973,7 @@ def solve_periodic_orbit(solver: CurrentDiffusion, rho_faces, f, period, nsteps=
     the iteration continues with the Anderson-accelerated physical map (at most ``max_map_evals``
     evaluations; ``n_plain_cycles`` counts them).
     ``z0`` (cell values; any offset) warm-starts the Newton iteration (continuation).  ``tol`` is the
-    criterion (P1); it may be made stricter but not looser than :data:`CYCLE_TOL`.  Non-convergence is
+    criterion (PO); it may be made stricter but not looser than :data:`CYCLE_TOL`.  Non-convergence is
     reported (``converged=False`` and a warning), never hidden.
     """
     t_start = _time.perf_counter()

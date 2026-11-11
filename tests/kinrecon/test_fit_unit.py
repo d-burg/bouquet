@@ -118,9 +118,10 @@ def test_failed_trial_is_a_rejected_step(monkeypatch):
     trials = out.record["iterations"][0]["trials"]
     assert trials[0]["status"] == "solve_failed" and trials[0]["chi2"] is None
     assert trials[1]["status"] == "consistent"
-    # damping raised after the failure (by x10 per rejection; a capped step that does not change with
-    # lambda is not re-solved, so the next solved trial may sit several factors of 10 higher)
-    assert trials[1]["lam"] >= 10.0 * trials[0]["lam"] * (1 - 1e-12)
+    # damping raised after the failure: x10 for the rejection, then x10 twice more without a solve because
+    # the capped step did not change with lambda (deterministic on this problem: exactly x1000)
+    assert trials[0]["capped"]
+    assert trials[1]["lam"] == pytest.approx(1000.0 * trials[0]["lam"], rel=1e-12)
     th, cov = _expected(FIT.PARAMETERS["log_strength"]["prior"][1])
     assert abs(out.theta[0] - th[0]) < 1e-6
     assert calls["consistent"] >= 3
@@ -164,6 +165,32 @@ def test_settings_record_is_complete(monkeypatch):
                                                               meta={"er_corrected": False})})
     use, why = FIT.fit_groups(ms, FIT.FitSettings())
     assert use == [] and "E_r" in why["mse"]
+
+
+def test_stopping_summary_records_which_test_fired(monkeypatch):
+    fm = FakeFM()
+    _install(monkeypatch, fm)
+    kin, src = _kin()
+    out = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=1.0), FIT.FitSettings(),
+                          params0=dict(log_strength=0.5, f=0.37))
+    sm = out.record["stopping_summary"]
+    assert out.status == "converged" and sm["test"] == "a"
+    assert sm["grad_floor"] == FIT.FitSettings().grad_tol_chi2 and sm["grad_floor_noise_scaled"] is False
+    assert sm["final_gn_step"]["taken"] and sm["final_gn_step"]["kept_with_chi2_increase"] is False
+    # test (b) through its noise-scaled branch: GN step 0.2 sigma (test (a) fails), decrement 0.04, floor
+    # max(0.01, 0.05) = 0.05 set by the noise
+    st = FIT.FitSettings()
+    r = FIT.stopping_tests(np.array([[1.0]]), np.array([-0.2]), st, 0.05, [])
+    assert r["converged"] and r["test"] == "b" and r["grad_floor"] == 0.05 and r["grad_floor_noise_scaled"] is True
+    r0 = FIT.stopping_tests(np.array([[1.0]]), np.array([-0.2]), st, 0.0, [])
+    assert not r0["converged"] and r0["test"] is None and r0["grad_floor_noise_scaled"] is False
+    # a final Gauss-Newton step kept although chi^2 rose (within the noise) is stated with the increase
+    log = [dict(final_gn_step=dict(accepted=True, status="consistent", chi2_change=0.003))]
+    s2 = FIT.stopping_summary("converged", r, log)
+    assert s2["test"] == "b" and s2["final_gn_step"]["kept_with_chi2_increase"] is True
+    assert s2["final_gn_step"]["chi2_increase"] == pytest.approx(0.003)
+    s3 = FIT.stopping_summary("stalled_no_significant_descent", r0, [dict()])
+    assert s3["test"] is None and s3["final_gn_step"] == dict(taken=False)
 
 
 def test_parameter_expansion_and_unknown():

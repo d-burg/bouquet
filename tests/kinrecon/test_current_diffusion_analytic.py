@@ -193,7 +193,7 @@ def _cylinder_equilibrium(n_geo=2001):
 
 
 def test_jphi_avg_cylinder_equilibrium():
-    """<J_phi> output (eq. J1 of the P0c derivation) against an exact force-balance equilibrium.
+    """<J_phi> output (the module's <J_phi> relation) against an exact force-balance equilibrium.
 
     Previously untested.  The state is the exact psi sampled onto the cells (not a discrete solution).
     Interior cells: second order (bound 1.9-2.1, and < 1e-3 of max J_z at 200 cells; fixed before running).

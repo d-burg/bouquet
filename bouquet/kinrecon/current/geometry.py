@@ -55,8 +55,7 @@ The containers are filled from plain arrays.  Helpers:
   the cutoff surface and the last closed surface, for the lumped outer-layer
   element of :mod:`.diffusion`.
 
-Domain edge (project ruling R29; evidence in the domain-edge experiment of
-the kinetic-reconstruction record)
+Domain edge (the cutoff rule of :func:`choose_psi_n_edge`)
 -----------------------------------------------------------------------------
 On a diverted boundary the rho_tor metric is singular at the separatrix: q,
 ``drho/dpsi_N`` and ``<|grad rho|^2/R^2>`` grow like ``a + b ln(1/(1 - psi_N))``
@@ -107,13 +106,13 @@ MU0 = 4.0e-7 * np.pi  # vacuum permeability as fixed in QED.jl and OFT [H/m]
 _REQUIRED = ("rho", "dvol_drho", "avg_grad_rho2_r2", "avg_inv_r2", "fpol")
 _OPTIONAL_PROFILES = ("avg_inv_r", "avg_r", "avg_b2", "trapped_fraction", "eps", "r_geo")
 
-# ----------------------------------------------------------------------------- domain-edge rule (R29)
+# ----------------------------------------------------------------------------- domain-edge rule
 PSI_N_EDGE_DEFAULT = 0.995    # default cutoff
 PSI_N_EDGE_FALLBACK = 0.99    # coarse 2-D grid, or geometry routes disagree at the default
 PSI_N_EDGE_MAX = 0.999        # never beyond
 COARSE_GRID_MAX = 65          # "2-D grid <= 65^2": either grid dimension <= 65 points
 ROUTE_TOLERANCE = 1.0e-3      # relative disagreement of two geometry routes at the default cutoff
-XPOINT_MARGIN = 1.0e-3        # closed with margin: psi_N(X) - c >= 1e-3 (experiment report, recommendation item 1)
+XPOINT_MARGIN = 1.0e-3        # closed with margin: psi_N(X) - c >= 1e-3
 
 # ----------------------------------------------------------------------------- sample guard (from_psi_coordinates)
 MIN_SAMPLE_GAP = 1.0e-10      # psi_N gap below which two samples are treated as the same surface
@@ -138,7 +137,7 @@ class EdgeChoice:
 
 
 def choose_psi_n_edge(grid_shape=None, route_disagreement=None, psi_n_xpoint=None, requested=None):
-    r"""Diffusion-domain cutoff ``psi_N = c`` by the R29 rule, with the reason.
+    r"""Diffusion-domain cutoff ``psi_N = c`` by the domain-edge rule, with the reason.
 
     Parameters
     ----------
@@ -156,8 +155,7 @@ def choose_psi_n_edge(grid_shape=None, route_disagreement=None, psi_n_xpoint=Non
     psi_n_xpoint : float, optional
         psi_N of the first X-point inside the limiter (file normalization).  When
         given, the cutoff must satisfy ``psi_N(X) - c >= 1e-3`` (closed with
-        margin; recommendation item 1 of the domain-edge experiment, an
-        addition to the R29 text).  If even 0.99 fails, a ``ValueError`` is
+        margin).  If even 0.99 fails, a ``ValueError`` is
         raised: no admissible cutoff exists and the caller must decide.
     requested : float, optional
         A cutoff chosen by the caller.  It is validated (``0 < c <= 0.999``;
@@ -171,8 +169,10 @@ def choose_psi_n_edge(grid_shape=None, route_disagreement=None, psi_n_xpoint=Non
         ``psi_n_edge`` in {0.995, 0.99} (or the validated request), ``reason``
         and ``checks`` (what was and was not checked).
 
-    Source: project ruling R29 (2026-11-10) and the domain-edge experiment
-    report it rests on (sections 2.2, 2.4 and 8).
+    The rule: 0.995 by default, 0.99 on a 2-D grid of 65^2 or coarser, when two
+    geometry routes disagree by more than 1e-3 at 0.995, or when an X-point is
+    within 1e-3 of 0.995; never beyond 0.999 (q, ``drho/dpsi_N`` and the metric
+    diverge logarithmically at a separatrix, and tracing noise near it grows).
     """
     checks = {}
     triggers = []
@@ -204,14 +204,14 @@ def choose_psi_n_edge(grid_shape=None, route_disagreement=None, psi_n_xpoint=Non
     else:
         checks["psi_n_xpoint"] = "not checked (no X-point location given)"
     rule = PSI_N_EDGE_FALLBACK if triggers else PSI_N_EDGE_DEFAULT
-    rule_reason = ("fallback (R29): " + "; ".join(triggers)) if triggers else "default (R29)"
+    rule_reason = ("fallback (domain-edge rule): " + "; ".join(triggers)) if triggers else "default (domain-edge rule)"
     unchecked = [k for k, v in checks.items() if isinstance(v, str)]
     if unchecked:
         rule_reason += "; not checked: " + ", ".join(unchecked)
     if requested is not None:
         c = float(requested)
         if not 0.0 < c <= PSI_N_EDGE_MAX:
-            raise ValueError(f"psi_n_edge = {c} is outside (0, {PSI_N_EDGE_MAX}] (R29: never beyond {PSI_N_EDGE_MAX})")
+            raise ValueError(f"psi_n_edge = {c} is outside (0, {PSI_N_EDGE_MAX}] (the domain edge is never beyond {PSI_N_EDGE_MAX})")
         reason = f"requested by the caller (rule would give {rule}: {rule_reason})"
         if c > rule:
             reason += "; WARNING: the request is beyond the rule's choice"
@@ -237,9 +237,9 @@ def check_psi_samples(psi_n, arrays=None, min_gap=MIN_SAMPLE_GAP, merge_rtol=MER
     3. After merging, an *isolated* gap -- one shorter than ``isolated_ratio``
        (1e-3) times every neighboring gap -- is refused (``ValueError``).  PCHIP
        derivatives are weighted harmonic means of the adjacent secants, so the
-       secant over such a gap amplifies tracing noise by the gap ratio; the
-       domain-edge experiment found two samples 1e-16 apart (from concatenated
-       grids) silently giving 2-5e-3 errors in q.  Smoothly graded grids
+       secant over such a gap amplifies tracing noise by the gap ratio; two
+       samples 1e-16 apart (from concatenated grids) were measured to give
+       2-5e-3 errors in q silently.  Smoothly graded grids
        (geometric clustering, square-root spacing) have neighboring gap ratios
        of order one and pass.
 
@@ -505,7 +505,7 @@ class FluxSurfaceGeometry:
             Further profiles on ``psi_n`` named as the optional fields of this
             class (e.g. ``avg_inv_r``, ``trapped_fraction``); resampled.
         psi_n_edge : float, optional
-            Domain cutoff ``c`` (R29; see :func:`choose_psi_n_edge`).  The last
+            Domain cutoff ``c`` (see :func:`choose_psi_n_edge`).  The last
             sample must be the cutoff surface itself (``|psi_n[-1] - c| <=
             1e-12``; nothing is extrapolated) and ``rho`` is normalized to the
             toroidal flux inside it, ``rho = sqrt(Phi / Phi(c))``.  The layer
@@ -558,7 +558,7 @@ class FluxSurfaceGeometry:
                                  "sample the cutoff surface itself (nothing is extrapolated)")
             psi_true = psi_true.copy()
             psi_true[-1] = c
-            edge_treatment = (f"truncated at psi_N = {c:g} (R29): rho normalized to Phi(psi_N = {c:g}); the layer outside "
+            edge_treatment = (f"truncated at psi_N = {c:g} (domain-edge rule): rho normalized to Phi(psi_N = {c:g}); the layer outside "
                               "is the lumped outer element (see OuterLayerGeometry / diffusion.OuterLayer)")
         psi_n = psi_true / c          # normalized to the domain edge
         dpsi = dpsi * c               # flux from the axis to the domain edge
@@ -616,8 +616,7 @@ class OuterLayerGeometry:
     r"""Volume-based tabulation of the outer layer ``psi_n_edge < psi_N < 1``.
 
     The lumped outer-layer element of :mod:`.diffusion` needs only volume
-    integrals over the layer (domain-edge experiment, recommendation 8;
-    ruling R29):
+    integrals over the layer:
 
     .. code-block:: text
 
@@ -649,8 +648,7 @@ class OuterLayerGeometry:
 
     ``ampere_current`` and ``dpsi_ref`` allow full-plasma q95 and l_i(3) on the
     reference surfaces (fixed-surface approximation: on fixed surfaces
-    ``dpsi/dpsi_N`` scales with the enclosed current), as in the domain-edge
-    experiment.
+    ``dpsi/dpsi_N`` scales with the enclosed current).
     """
 
     psi_n: np.ndarray
@@ -800,8 +798,8 @@ def from_tokamaker(gs, R0, B0=None, npsi=200, psi_pad_axis=1.0e-3, psi_n_edge="a
     psi_N = 1) and optionally ``gs.sauter_fc`` (``f_t = 1 - f_c``), then
     :meth:`FluxSurfaceGeometry.from_psi_coordinates`.
 
-    Domain edge (R29; module docstring)
-    -----------------------------------
+    Domain edge (module docstring)
+    ------------------------------
     ``psi_n_edge="auto"`` (default): ``c`` from :func:`choose_psi_n_edge`
     (0.995 unless ``route_disagreement`` -- measured by the caller between
     ``get_fsa`` and an independent route at 0.995 -- exceeds 1e-3; a
@@ -820,8 +818,8 @@ def from_tokamaker(gs, R0, B0=None, npsi=200, psi_pad_axis=1.0e-3, psi_n_edge="a
     surfaces up to ``1 - psi_pad_edge`` (default 1e-3) and Phi_b extrapolated
     (PCHIP) to psi_N = 1, no outer layer; the extrapolated fraction of Phi_b
     is recorded as ``meta['phi_b_extrapolated_fraction']``.  On a diverted
-    boundary this under-represents the logarithmic q rise (domain-edge
-    experiment, issue 4) and is not R29-conformant.
+    boundary this under-represents the logarithmic q rise and does not follow
+    the domain-edge rule.
 
     ``R0`` (reference major radius) must be given; ``B0`` defaults to
     ``|F0| / R0`` with TokaMaker's vacuum ``F0``.  ``<B^2> = <B_p^2> + F^2

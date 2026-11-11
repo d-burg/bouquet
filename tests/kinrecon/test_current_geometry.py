@@ -106,7 +106,7 @@ def test_no_equilibrium_solver_import():
                 assert not (node.module or "").startswith("OpenFUSIONToolkit"), mod
 
 
-# ----------------------------------------------------------------------------- domain-edge rule (R29)
+# ----------------------------------------------------------------------------- domain-edge rule
 from bouquet.kinrecon.current import (OuterLayerGeometry, check_psi_samples, choose_psi_n_edge,  # noqa: E402
                                       PSI_N_EDGE_DEFAULT, PSI_N_EDGE_FALLBACK, PSI_N_EDGE_MAX)
 
@@ -123,7 +123,7 @@ def test_edge_rule_default_and_fallbacks():
     assert c == 0.99 and "disagree" in why
     ch = choose_psi_n_edge(grid_shape=(257, 257), route_disagreement=2e-4)
     assert ch.psi_n_edge == 0.995 and ch.checks["route_disagreement"]["value"] == 2e-4
-    # closed with margin (experiment recommendation 1): X-point 1e-3 beyond the cutoff
+    # closed with margin: X-point 1e-3 beyond the cutoff
     assert choose_psi_n_edge(psi_n_xpoint=1.0000001).psi_n_edge == 0.995
     assert choose_psi_n_edge(psi_n_xpoint=0.9955).psi_n_edge == 0.99
     with pytest.raises(ValueError, match="no cutoff"):
@@ -154,8 +154,8 @@ def test_duplicate_samples_exact_repeat_is_merged():
 
 
 def test_duplicate_samples_with_different_values_raise():
-    """Two samples 1e-16 apart from concatenated, separately traced grids (the case the domain-edge
-    experiment hit): the values differ at the tracing-noise level, so the guard refuses to choose."""
+    """Two samples 1e-16 apart from concatenated, separately traced grids (a case met in
+    practice): the values differ at the tracing-noise level, so the guard refuses to choose."""
     x = np.linspace(0.01, 1.0, 50) ** 2
     v = np.sin(x)
     xd = np.insert(x, 21, x[20] + 1e-16)

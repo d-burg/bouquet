@@ -13,13 +13,13 @@ L32 (eqs. 12-16) and alpha (eqs. 20-21) fits, used in Sauter's (1999) "jboot1" f
 with ``I(psi) = F = R B_phi``, ``R_pe = p_e / p``, ``p = p_e + p_i`` (thermal), L34 = L31 (Redl
 section II.C).  The transcription follows, term for term, OFT's Python implementation
 ``OpenFUSIONToolkit.TokaMaker.bootstrap.redl_bootstrap`` (``formula_form='jboot1'``,
-``use_legacy_L34=False``), which the project's spike compared with TokaMaker's in-solve Fortran
-Redl on the same equilibria (agreement 4-5e-4 of the peak, the solver-noise level; project
-record, spike part 3).  ``tests/kinrecon/test_redl_bootstrap.py`` checks this module against
-that function to round-off whenever OFT is importable.
+``use_legacy_L34=False``), which agrees with TokaMaker's in-solve Fortran Redl on the same
+equilibria to 4-5e-4 of the peak (the solver-noise level; measured).
+``tests/kinrecon/test_redl_bootstrap.py`` checks this module against that function to round-off
+whenever OFT is importable.
 
-Collisionality and Coulomb logarithms (the spike's choice, kept so that the P1 route reproduces
-the spike's physics; each is a named option of :func:`redl_jdotb`):
+Collisionality and Coulomb logarithms (the defaults reproduce the earlier prototype of this
+package; each is a named option of :func:`redl_jdotb`):
 
 * ``ln Lambda_e``: NRL form ``23.5 - ln(sqrt(n_e[cm^-3]) T_e^-5/4) - sqrt(1e-5 + (ln T_e - 2)^2/16)``,
   floored at 10 (OFT ``calculate_ln_lambda``, ``electron_lnLambda_model='NRL'``);
@@ -28,7 +28,7 @@ the spike's physics; each is a named option of :func:`redl_jdotb`):
 * ``nu_e* = 6.921e-18 |q| R n_e Z_eff ln Lambda_e / (T_e^2 eps^1.5)`` (Sauter 1999 eq. 18b; the
   definition Redl 2021 keeps);
 * ``nu_i* = 4.90e-18 |q| R n_i Z_i^4 ln Lambda_ii / (T_i^2 eps^1.5)`` with
-  ``Z_i^4 = (n_e / n_i) Z_eff`` (``ion_collisionality="spike"``: the spike's
+  ``Z_i^4 = (n_e / n_i) Z_eff`` (``ion_collisionality="spike"``, named after that prototype:
   ``Z_ion = ((n_e/n_i) Z_eff)^(1/4)``); ``"zeff"`` uses ``Z_eff^4`` and ``"unity"`` 1, as OFT's
   ``ion_collisionality_model`` options.  Sauter 1999 eq. 18c defines nu_i* with Z^4 of the main
   ion; the choice matters only through alpha.
@@ -122,7 +122,7 @@ def redl_jdotb(psi_n, te, ti, ne, ni, zeff, q, R, eps, ft, fpol, dpsi, ion_colli
     dpsi : float
         ``|psi_boundary - psi_axis|`` [Wb/rad]; derivatives are ``d/dpsi = d/dpsi_N / dpsi``.
     gradient : str
-        ``"numpy_second_order"``: ``numpy.gradient(y, psi_n, edge_order=2)`` (the spike's choice).
+        ``"numpy_second_order"``: ``numpy.gradient(y, psi_n, edge_order=2)`` (the prototype's choice).
 
     Returns ``(jdotb, parts)`` with ``parts`` holding ``L31``, ``L32``, ``alpha``, ``nu_e_star``,
     ``nu_i_star``, ``ln_lambda_e``, ``ln_lambda_ii`` and the settings used.

@@ -1,14 +1,14 @@
 """Periodic sawtooth state of ``bouquet.kinrecon.current.sawtooth`` on a synthetic cylinder.
 
 Bounds and their sources:
-* the cycle criterion (P1) is the decided 1e-9, for both the matrix map and real stepping;
+* the cycle criterion (PO) is the decided 1e-9, for both the matrix map and real stepping;
 * the one-period matrix map equals ``advance`` to round-off (1e-12 relative; the prototype measured 3.6e-15);
 * Newton converges in at most 6 iterations away from the q0 = 1 kink (the prototype's measured 2-6);
 * Newton vs brute-force cycle stepping: both are fixed points of the same map to 1e-9, so they differ by at most
   ~1e-9/(1 - r) with r the contraction rate of the map; r <= 0.99 in every case of the development checks, so the
   bound is 1e-7 of the mixing-region flux depth;
 * smoothness: symmetric finite-difference asymmetry |y+ + y- - 2 y0| / |y+ - y-| <= 0.1 at a 1e-2 relative step
-  (acceptance rule of the scoping report; the prototype measured <= 0.073);
+  (the acceptance rule set for the operator; an earlier prototype measured <= 0.073);
 * onset of q = 1 (relaxed q0 -> 1-): l_i is C1 (its change is O((1 - q0)^2) or smaller), so its one-sided
   difference quotient from the onset must shrink when the step shrinks fourfold: ratio <= 0.5 (exponent >= 1.5;
   2 expected); q0 itself has an intrinsic slope break there and is not bounded;

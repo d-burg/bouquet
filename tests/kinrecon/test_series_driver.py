@@ -1,0 +1,459 @@
+"""The series driver :func:`bouquet.kinrecon.series.run_series` with the equilibrium solve replaced
+(no OFT): analytic separatrix-like geometry (as ``test_coordinates_kinetics_series.py``), a mocked
+forward model whose "equilibrium" is one of a few known geometries, and a mocked fit.
+
+* Filter mode carries the state of the ACCEPTED center: the mocked filter fit advances the state on
+  several perturbed geometries (Jacobian columns, a trial) after reaching its center, so the last
+  state the fit computed is not the center's.  The carried state must equal the state advanced from
+  the previous slice on the center's geometry plus the corrections' steady response, computed here
+  directly with the interval solver (exact to round-off: same operations, same inputs).
+* Filter mode absorbs only a converged fit: for every other status the slice keeps its evolved,
+  unfitted equilibrium (the solver is restored to it) and state, and the record says
+  ``absorbed: False``.
+* Independent reference: the chain of intervals built by ``run_series`` (state carried between
+  slices, Ip linear between the slices' values, lumped outer layer) against a separately coded
+  vertex-centered finite-volume solution of the same diffusion problem, integrated EXACTLY in time
+  (matrix exponential of the semi-discrete system with the Ip ramp as augmented states).  Shared
+  inputs: the geometry profiles ``V', <|grad rho|^2/R^2>, <1/R^2>, F`` and the layer conductance
+  ``A_layer`` (scalar).  Everything else -- discretization, time integration, the boundary coupling
+  ``k psi'(1) + A_layer dpsi_b/dt = Ip(t)/F_lcfs``, the Ip ramp and the chaining -- is independent.
+  Static geometry, uniform conductivity, no non-inductive current.  Bound (fixed before the first
+  run): the gauge-free profile ``psi - psi_b`` within 1e-3 of its span and the boundary flux change
+  within 1e-3 (relative) at every slice (100 cells, the default step); the test discriminates: the
+  same series without the Ip ramp differs from the reference by more than 10x the bound.  (The
+  boundary flux converges slowly: the layer shares the LAST CELL's dpsi/dt, a first-order coupling
+  stated in the diffusion module; measured 7e-4 at 100 cells, 2e-4 at 200, 3e-5 at 400.)
+* The sawtooth operator inside a series: with ``sawtooth="periodic"`` and a state with q >= 1 the
+  crashes are recorded and change nothing (states identical to ``sawtooth="off"``); with q < 1 on axis
+  a crash acts (the carried, instantaneous state jumps), and the reported slice state is continuous
+  in the crash time: a crash moved from just before a slice time to just after it changes the slice
+  state by about its share of the interval, not by the whole jump.
+* Time-varying ``F0``: each slice's ``F0`` is set on the forward model before its solve.
+"""
+import os
+import sys
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
+from scipy.interpolate import CubicSpline
+from scipy.linalg import expm
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_REPO = os.path.dirname(os.path.dirname(_HERE))
+for _p in (_REPO, _HERE):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+import test_coordinates_kinetics_series as GEO  # noqa: E402
+from bouquet.kinrecon import current_model as CM  # noqa: E402
+from bouquet.kinrecon import series as SE  # noqa: E402
+from bouquet.kinrecon.current import MU0, CurrentState  # noqa: E402
+
+IP0 = GEO.IP
+SIGMA = 2.0e6          # uniform conductivity [S/m]: skin depth over 20 ms ~ 0.09 m (resolved by the grids used)
+
+
+# ============================================================== mocks
+class FakeFM:
+    """Forward-model stand-in: its "equilibrium" is a key into ``lags``; ``gs`` is itself."""
+
+    def __init__(self, lags, F0=GEO.F0):
+        self.lags = lags
+        self.key = "pred"
+        self.gs = self
+        self.n_solves = 0
+        self.probe_correction = np.zeros(0)
+        self.case = SimpleNamespace(case_id="fake")
+        self.case_id = "fake"
+        self.F0 = F0
+        self.F0_at_solve = []
+        self.rows_record = {"coils": {"per_coil": {}}}
+
+    def snapshot(self):
+        return dict(key=self.key)
+
+    def restore(self, snap):
+        self.key = snap["key"]
+
+    def set_F0(self, F0):
+        self.F0 = float(F0)
+
+    def reconfigure(self, measurements, reference_boundary, coil_roles=None, case_id="case", ip=None,
+                    generation_coil_reg=None):
+        self.ip_measured = ip
+
+    def boundary_distance(self):
+        return {}
+
+
+def _assembly(lag, state):
+    rho = np.asarray(lag["phys"]["rho"])
+    return dict(state=state, fractions={}, currents_A={}, v_loop=0.0, sawtooth=dict(active=False),
+                q_model=dict(rho=rho, q=np.asarray(lag["phys"]["q"])), profiles_rho=dict(rho=rho))
+
+
+def _result(lag, state, ok=True):
+    return CM.ConsistentResult(ok, "consistent" if ok else "solve_failed", 2, _assembly(lag, state), lag,
+                               SimpleNamespace(stats={}), dict(passes=[], q_check=None), 0.0)
+
+
+def _install(monkeypatch, fm, state0, lag_of_slice):
+    """Mocked consistent solve: slice 0 returns ``state0``; later slices evaluate the supplied state on
+    the geometry ``lag_of_slice(fm)`` twice (two passes) and leave the solver at that equilibrium."""
+
+    def consistent(fm_, kin, src, params, cfg, ip=None, start=None, z0=None, label="", initial_profiles=None,
+                   state_fn=None):
+        fm_.n_solves += 1
+        fm_.F0_at_solve.append(fm_.F0)
+        lag = lag_of_slice(fm_)
+        if state_fn is None:
+            return _result(lag, state0)
+        state_fn(lag)
+        st = state_fn(lag)
+        return _result(lag, st)
+
+    monkeypatch.setattr(SE._cm, "consistent_solve", consistent)
+
+
+def _src():
+    return SimpleNamespace(jdotb_at=lambda ge, **kw: np.zeros_like(np.asarray(ge, float)))
+
+
+def _slices(times, ips, F0s=None):
+    bnd = np.zeros((8, 2))
+    return [SE.SliceData(time=t, measurements=None, reference_boundary=bnd, kinetics=None, sources=_src(),
+                         label=f"s{k}", meta=dict(ip=ip, generation_coil_reg=1.0),
+                         F0=None if F0s is None else F0s[k])
+            for k, (t, ip) in enumerate(zip(times, ips))]
+
+
+def _lag(sigma_scale=1.0, q0=1.1, sigma_const=None):
+    lag = GEO._lag(q0=q0, sigma_scale=sigma_scale)
+    lag["jbs"] = np.zeros_like(lag["phys"]["psi_n"])
+    if sigma_const is not None:
+        lag["sigma"] = np.full_like(lag["phys"]["psi_n"], float(sigma_const))
+    return lag
+
+
+def _steady(lag, ip, n=100):
+    rf = CurrentState.uniform_faces(n)
+    st = CM.build_solver(lag, lag["jbs"], ip).steady_state(rf)
+    return CurrentState(rf, st.psi, st.psi_boundary, 0.0)
+
+
+# ============================================================== filter mode
+CENTER_A = (0.01, -0.02, 0.015)
+
+
+def _fake_reconstruct(status, lags, center_key="center", after=("col0", "col1", "trial")):
+    """A filter fit that reaches its center on ``lags[center_key]`` and then advances the state on the
+    geometries ``after`` (as the fit's Jacobian columns / trials do), leaving the solver at the last one."""
+    calls = []
+
+    def reconstruct(fm, kin, src, cfg, settings, params0=None, start=None, label="", state_fn=None, **kw):
+        names = [f"a_corr_{k}" for k in range(3)]
+        lag_c = lags[center_key]
+        st_c = state_fn(lag_c)
+        shapes = CM.correction_shapes(lag_c, cfg, fm.ip_measured)
+        dpsi, dpb = CM.correction_response(lag_c, shapes, CENTER_A, st_c.rho_faces)
+        asm_state = CurrentState(st_c.rho_faces, st_c.psi + dpsi, st_c.psi_boundary + dpb, st_c.time)
+        center = dict(res=_result(lag_c, asm_state), snap=dict(key=center_key), probe_correction=np.zeros(0))
+        for k in after:
+            state_fn(lags[k])
+            fm.key = k
+        calls.append(label)
+        return SimpleNamespace(status=status, theta=np.array(CENTER_A), sigma=np.full(3, 0.01), free=names,
+                               params=dict(a_corr=CENTER_A), chi2={},
+                               record=dict(center=None if status in ("failed_initial_consistency",) else center,
+                                           specs={n: dict(prior=(0.0, 0.02)) for n in names}, n_solves=7,
+                                           wall_s=0.0, final_stopping_tests=None,
+                                           stopping_summary=dict(status=status)))
+
+    reconstruct.calls = calls
+    return reconstruct
+
+
+def _filter_setup(monkeypatch, status):
+    lags = dict(pred=_lag(), center=_lag(sigma_scale=1.3), col0=_lag(sigma_scale=0.7), col1=_lag(sigma_scale=1.6),
+                trial=_lag(sigma_scale=0.5))
+    fm = FakeFM(lags)
+    st0 = _steady(lags["pred"], IP0)
+    _install(monkeypatch, fm, st0, lambda f: f.lags[f.key])
+    rec = _fake_reconstruct(status, lags)
+    monkeypatch.setattr(SE._fit, "reconstruct", rec)
+    cfg = CM.CurrentModelSettings(r0=GEO.R0)
+    seen = []
+    out = SE.run_series(fm, _slices([0.0, 0.02, 0.04], [IP0, 1.01 * IP0, 1.02 * IP0]), cfg,
+                        SE.SeriesSettings(initial="relaxed", sawtooth="off", filter=True),
+                        callback=lambda r: seen.append(fm.key))
+    return out, lags, cfg, seen
+
+
+def _advance(lag_prev, lag, carried, t0, t1, ip0, ip1):
+    sol, _ = SE.interval_solver(lag_prev, lag, lag_prev["jbs"], lag["jbs"], t0, t1, ip0, ip1)
+    return sol.advance(carried, t1, dt=SE.SeriesSettings().dt_max, scheme="trbdf2")
+
+
+def _state(d):
+    return CurrentState(np.asarray(d["rho_faces"]), np.asarray(d["psi"]), d["psi_boundary"], d["time"])
+
+
+def test_filter_carries_the_accepted_centers_state(monkeypatch):
+    out, lags, cfg, seen = _filter_setup(monkeypatch, "converged")
+    assert out["status"] == "completed"
+    s1 = out["slices"][1]
+    f = s1["filter"]
+    assert f["status"] == "converged" and f["absorbed"] is True
+    # expected: carried state of slice 0 advanced over [0, 0.02] between slice 0's geometry (pred) and the
+    # center's geometry, plus the corrections' steady response on the center's geometry
+    c0 = _state(out["slices"][0]["carried_state"])
+    e = _advance(lags["pred"], lags["center"], c0, 0.0, 0.02, IP0, 1.01 * IP0)
+    shapes = CM.correction_shapes(lags["center"], cfg, 1.01 * IP0)
+    dpsi, dpb = CM.correction_response(lags["center"], shapes, CENTER_A, e.rho_faces)
+    got = _state(s1["carried_state"])
+    span = np.ptp(e.psi + dpsi)
+    assert np.max(np.abs(got.psi - (e.psi + dpsi))) <= 1e-12 * span
+    assert abs(got.psi_boundary - (e.psi_boundary + dpb)) <= 1e-12 * span
+    # the state of the fit's last solve (the "trial" geometry) is measurably different: the check above
+    # would fail if that state were carried
+    last = _advance(lags["pred"], lags["trial"], c0, 0.0, 0.02, IP0, 1.01 * IP0)
+    assert np.max(np.abs((last.psi - last.psi[0]) - (e.psi - e.psi[0]))) > 1e-6 * span
+    assert f["last_solve_state_vs_center"]["max_dpsi_rel"] > 1e-6
+    assert f["center_state_check"]["max_dpsi_rel"] <= 1e-12
+    # the solver holds the center's equilibrium when the slice is recorded, and the next interval starts from it
+    assert seen[1] == "center"
+    s2 = out["slices"][2]
+    assert s2["filter"]["absorbed"] is True
+    e2 = _advance(lags["center"], lags["center"], got, 0.02, 0.04, 1.01 * IP0, 1.02 * IP0)
+    sh2 = CM.correction_shapes(lags["center"], cfg, 1.02 * IP0)
+    d2, b2 = CM.correction_response(lags["center"], sh2, CENTER_A, e2.rho_faces)
+    got2 = _state(s2["carried_state"])
+    assert np.max(np.abs(got2.psi - (e2.psi + d2))) <= 1e-12 * np.ptp(e2.psi + d2)
+
+
+@pytest.mark.parametrize("status", ["stalled_no_significant_descent", "max_iter", "failed_trials", "jacobian_failed",
+                                    "converged_no_final_jacobian"])
+def test_filter_absorbs_only_converged_fits(monkeypatch, status):
+    out, lags, cfg, seen = _filter_setup(monkeypatch, status)
+    c0 = _state(out["slices"][0]["carried_state"])
+    e = _advance(lags["pred"], lags["pred"], c0, 0.0, 0.02, IP0, 1.01 * IP0)      # evolved, unfitted
+    for k, s in enumerate(out["slices"][1:], start=1):
+        f = s["filter"]
+        assert f["status"] == status and f["status"] != "converged"
+        assert f["absorbed"] is False and "not absorbed" in f["note"]
+        assert seen[k] == "pred"                        # the solver was restored to the evolved equilibrium
+    got = _state(out["slices"][1]["carried_state"])
+    assert np.max(np.abs(got.psi - e.psi)) <= 1e-12 * np.ptp(e.psi)
+    assert got.psi_boundary == pytest.approx(e.psi_boundary, abs=1e-12 * np.ptp(e.psi))
+
+
+# ============================================================== independent reference
+def _reference_matrices(lag, n_nodes):
+    """Vertex-centered finite volumes for a dpsi/dt = (k psi')' on rho in [0, 1] with
+    k psi'(1) + A_layer dpsi_b/dt = Ip/F_lcfs (lumped layer at the last node).  Returns (M, K, e_last)."""
+    geom = lag["geom"]
+    x = np.linspace(0.0, 1.0, n_nodes)
+    h = x[1] - x[0]
+
+    def coef(r):
+        g = geom.evaluate(np.atleast_1d(r), ["dvol_drho", "avg_grad_rho2_r2", "fpol", "avg_inv_r2"])
+        vp = np.where(np.atleast_1d(r) == 0.0, 0.0, g["dvol_drho"])
+        a = vp * g["avg_inv_r2"] * SIGMA / (2 * np.pi * g["fpol"])
+        k = vp * g["avg_grad_rho2_r2"] / (2 * np.pi * MU0 * g["fpol"])
+        return a, k
+
+    mid = 0.5 * (x[1:] + x[:-1])
+    _, kf = coef(mid)
+    m = np.zeros(n_nodes)
+    lo = np.concatenate(([0.0], mid))
+    hi = np.concatenate((mid, [1.0]))
+    for i in range(n_nodes):           # control-volume integral of a (Gauss-Legendre, 4 points)
+        gp, gw = np.polynomial.legendre.leggauss(4)
+        r = 0.5 * (hi[i] - lo[i]) * gp + 0.5 * (hi[i] + lo[i])
+        m[i] = 0.5 * (hi[i] - lo[i]) * np.sum(gw * coef(r)[0])
+    A_layer = SE._layer_integrals(lag, lag["sigma"], lag["jbs"])[0]
+    m[-1] += A_layer
+    K = np.zeros((n_nodes, n_nodes))
+    for i in range(n_nodes - 1):
+        c = kf[i] / h
+        K[i, i] -= c
+        K[i, i + 1] += c
+        K[i + 1, i + 1] -= c
+        K[i + 1, i] += c
+    e = np.zeros(n_nodes)
+    e[-1] = 1.0
+    return x, m, K, e, A_layer
+
+
+def _reference(lag, psi0_fn, times, ips, n_nodes=1201):
+    """Exact-in-time solution of the semi-discrete reference with Ip linear between slices."""
+    x, m, K, e, _ = _reference_matrices(lag, n_nodes)
+    F_lcfs = float(lag["layer"].fpol_lcfs)
+    y = psi0_fn(x)
+    out = [y.copy()]
+    for k in range(1, len(times)):
+        dt = times[k] - times[k - 1]
+        slope = (ips[k] - ips[k - 1]) / dt
+        # augmented z = [psi, Ip, dIp/dt]:  psi' = M^-1 (K psi + e Ip / F),  Ip' = dIp/dt,  (dIp/dt)' = 0
+        n = x.size
+        G = np.zeros((n + 2, n + 2))
+        G[:n, :n] = K / m[:, None]
+        G[:n, n] = e / (m * F_lcfs)
+        G[n, n + 1] = 1.0
+        z = np.concatenate((y, [ips[k - 1], slope]))
+        y = (expm(G * dt) @ z)[:n]
+        out.append(y.copy())
+    return x, out
+
+
+def _psi0_fn(lag):
+    """Analytic non-relaxed start: enclosed current I/F = (Ip0/F_lcfs) u(rho) with a peaked u, so that
+    psi' = (I/F)/k; psi(0) = 0."""
+    geom = lag["geom"]
+    F_lcfs = float(lag["layer"].fpol_lcfs)
+
+    def dpsi(r):
+        g = geom.evaluate(np.atleast_1d(r), ["dvol_drho", "avg_grad_rho2_r2", "fpol"])
+        k = g["dvol_drho"] * g["avg_grad_rho2_r2"] / (2 * np.pi * MU0 * g["fpol"])
+        u = 1.0 - (1.0 - np.atleast_1d(r) ** 2) ** 3          # all of Ip inside the domain edge, no edge current
+        return (IP0 / F_lcfs) * u / k
+
+    gp, gw = np.polynomial.legendre.leggauss(8)
+
+    def seg(a, b):                           # composite 8-point Gauss-Legendre on 1e-3-wide pieces
+        n = max(1, int(np.ceil((b - a) / 1e-3)))
+        e = np.linspace(a, b, n + 1)
+        r = (0.5 * (e[1:] - e[:-1])[:, None] * gp + 0.5 * (e[1:] + e[:-1])[:, None]).ravel()
+        return float(np.sum(np.tile(gw, n) * np.repeat(0.5 * np.diff(e), gp.size) * dpsi(r)))
+
+    def psi(xs):
+        xs = np.atleast_1d(np.asarray(xs, float))
+        cum, out, last = 0.0, np.zeros_like(xs), 0.0
+        for i, xv in enumerate(xs):          # xs increasing
+            if xv > last:
+                cum += seg(last, xv)
+                last = xv
+            out[i] = cum
+        return out
+
+    return psi
+
+
+def _series_states(monkeypatch, lag, n_cells, times, ips, psi0_fn):
+    rf = CurrentState.uniform_faces(n_cells)
+    rc = 0.5 * (rf[1:] + rf[:-1])
+    vals = psi0_fn(np.concatenate((rc, [1.0])))
+    st0 = CurrentState(rf, vals[:-1], float(vals[-1]), 0.0)
+    fm = FakeFM(dict(pred=lag))
+    _install(monkeypatch, fm, st0, lambda f: f.lags["pred"])
+    out = SE.run_series(fm, _slices(times, ips), CM.CurrentModelSettings(r0=GEO.R0, n_cells=n_cells),
+                        SE.SeriesSettings(initial="relaxed", sawtooth="off"))
+    assert out["status"] == "completed", out["status"]
+    return rc, [_state(s["carried_state"]) for s in out["slices"]]
+
+
+def _errors(rc, states, x, ref):
+    prof, bnd = [], []
+    for st, y in zip(states[1:], ref[1:]):
+        yr = CubicSpline(x, y)(rc) - y[-1]
+        yp = st.psi - st.psi_boundary
+        prof.append(float(np.max(np.abs(yp - yr)) / np.ptp(yr)))
+        db_ref = y[-1] - ref[0][-1]
+        db = st.psi_boundary - states[0].psi_boundary
+        bnd.append(float(abs(db - db_ref) / abs(db_ref)))
+    return max(prof), max(bnd)
+
+
+def test_series_chain_matches_an_independent_diffusion_reference(monkeypatch):
+    lag = _lag(sigma_const=SIGMA)
+    times = np.arange(6) * 0.02
+    ips = IP0 * (1.0 + 0.05 * np.arange(6))
+    psi0 = _psi0_fn(lag)
+    x, ref = _reference(lag, psi0, times, ips)
+    errs = {}
+    for n in (100,):
+        rc, states = _series_states(monkeypatch, lag, n, times, ips, psi0)
+        errs[n] = _errors(rc, states, x, ref)
+    assert errs[100][0] <= 1e-3 and errs[100][1] <= 1e-3, errs
+    # discrimination: the same chain without the Ip ramp is far outside the bound
+    rc, flat = _series_states(monkeypatch, lag, 100, times, np.full(6, IP0), psi0)
+    e_flat = _errors(rc, flat, x, ref)
+    assert max(e_flat) > 10 * 1e-3, e_flat
+
+
+# ============================================================== sawteeth inside a series
+def _sawtooth_series(monkeypatch, ip, mode, crash_times=None):
+    lag = _lag()
+    fm = FakeFM(dict(pred=lag))
+    st0 = _steady(lag, ip)
+    _install(monkeypatch, fm, st0, lambda f: f.lags["pred"])
+    s = SE.SeriesSettings(initial="relaxed", sawtooth=mode, sawtooth_log_strength=np.log(400.0),
+                          crash_times=crash_times)
+    times = np.arange(4) * 0.02
+    out = SE.run_series(fm, _slices(times, np.full(4, ip)), CM.CurrentModelSettings(r0=GEO.R0), s)
+    assert out["status"] == "completed"
+    return out, lag, st0
+
+
+def _q(lag, state, ip):
+    return CM.build_solver(lag, lag["jbs"], ip).profiles(state)["q"]
+
+
+def _gauge_free(d):
+    return np.asarray(d["psi"]) - d["psi_boundary"]
+
+
+def test_sawteeth_in_a_series_identity_where_q_at_least_one(monkeypatch):
+    on, lag, st0 = _sawtooth_series(monkeypatch, IP0, "periodic")
+    assert np.min(_q(lag, st0, IP0)) >= 1.0
+    off, _, _ = _sawtooth_series(monkeypatch, IP0, "off")
+    crashes = [c for s in on["slices"][1:] for c in s["crashes"]]
+    assert len(crashes) >= 2                                 # crashes were scheduled inside the series ...
+    assert not any(c["active"] for c in crashes)
+    assert all(c["dpsi_max"] == 0.0 for c in crashes)        # ... and the operator changed nothing (exact)
+    # the states equal the crash-free series' to round-off (the step is split at each crash time, so the
+    # arithmetic differs; bound 1e-12 of the span)
+    for a, b in zip(on["slices"], off["slices"]):
+        for key in ("carried_state", "state_psi"):
+            if key in a:
+                pa, pb = np.asarray(a[key]["psi"]), np.asarray(b[key]["psi"])
+                span = np.ptp(pb)
+                assert np.max(np.abs(pa - pb)) <= 1e-12 * span, key
+                assert abs(a[key]["psi_boundary"] - b[key]["psi_boundary"]) <= 1e-12 * span, key
+
+
+def test_sawteeth_in_a_series_act_where_q_below_one_and_slice_state_is_continuous(monkeypatch):
+    """One measured crash just BEFORE the first evolved slice time (t1 - eps) or just AFTER it (t1 + eps):
+    the carried (instantaneous) state jumps by the whole crash, the reported slice state only by the
+    crash's share of the interval (about eps/interval = 0.5 %; bound 5 %, set before the first run)."""
+    eps = 1.0e-4
+    t1 = 0.02
+    ip = 1.8 * IP0                                          # q < 1 on axis in the steady state
+    before, lag, st0 = _sawtooth_series(monkeypatch, ip, "crash_times", crash_times=[t1 - eps])
+    assert np.min(_q(lag, st0, ip)) < 1.0
+    after, _, _ = _sawtooth_series(monkeypatch, ip, "crash_times", crash_times=[t1 + eps])
+    off, _, _ = _sawtooth_series(monkeypatch, ip, "off")
+    b1, a1, o1 = before["slices"][1], after["slices"][1], off["slices"][1]
+    assert [c["active"] for c in b1["crashes"]] == [True] and a1["crashes"] == []
+    assert [c["active"] for c in after["slices"][2]["crashes"]] == [True]
+    span = np.ptp(_gauge_free(o1["carried_state"]))
+    jump = np.max(np.abs(_gauge_free(b1["carried_state"]) - _gauge_free(a1["carried_state"])))
+    assert jump > 1e-3 * span                                # the operator acted on the state
+    # the crash-free slice is the instantaneous state (no crash in its interval)
+    assert np.array_equal(np.asarray(a1["state_psi"]["psi"]), np.asarray(o1["state_psi"]["psi"]))
+    d_slice = np.max(np.abs(_gauge_free(b1["state_psi"]) - _gauge_free(a1["state_psi"])))
+    assert d_slice <= 0.05 * jump, (d_slice, jump)
+
+
+# ============================================================== time-varying F0
+def test_each_slice_is_solved_with_its_own_F0(monkeypatch):
+    lag = _lag()
+    fm = FakeFM(dict(pred=lag))
+    _install(monkeypatch, fm, _steady(lag, IP0), lambda f: f.lags["pred"])
+    F0s = [GEO.F0, GEO.F0 * 1.004, None, GEO.F0 * 0.997]
+    out = SE.run_series(fm, _slices(np.arange(4) * 0.02, np.full(4, IP0), F0s), CM.CurrentModelSettings(r0=GEO.R0),
+                        SE.SeriesSettings(initial="relaxed", sawtooth="off"))
+    assert fm.F0_at_solve == [GEO.F0, GEO.F0 * 1.004, GEO.F0 * 1.004, GEO.F0 * 0.997]
+    assert [s["vacuum_F0"]["F0"] for s in out["slices"]] == fm.F0_at_solve
+    assert out["slices"][2]["vacuum_F0"]["source"].startswith("not given")

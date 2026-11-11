@@ -22,8 +22,8 @@ Checked (bounds fixed before the first run):
 (c) the ``mse_fit`` start (corrections on the relaxed shape, prior N(0, 0.02)) on NOISELESS data
     recovers ``A_TRUE`` within 3 Laplace sigma per amplitude, with status ``converged`` (the prior pulls
     the MAP point toward zero; the bound allows for it).  On the seeded noisy set the first forward
-    solves of this fit stall at 1.7x the solver tolerance (a flat residual stall of the anchored solve,
-    reported with the knot study), so the recovery is tested on the noiseless set;
+    solves of this fit stall at 1.7x the solver tolerance (a flat residual stall of the anchored solve),
+    so the recovery is tested on the noiseless set;
 (d) the pass-consistency q check passed on every reconstructed slice.
 """
 import json

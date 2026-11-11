@@ -70,7 +70,10 @@ D. W. Marquardt, J. SIAM 11, 431 (1963)):
 
 Statuses: ``converged``, ``stalled_no_significant_descent``, ``max_iter``, ``failed_trials``,
 ``jacobian_failed``, ``failed_initial_consistency``, ``no_free_parameters``.  The number of forward
-solves, wall time, every trial (predicted and realized chi^2 change, gain ratio) are recorded.
+solves, wall time, every trial (predicted and realized chi^2 change, gain ratio) are recorded, and
+``stopping_summary`` (:func:`stopping_summary`) states which stopping test ended the fit, the value
+of test (b)'s floor and whether its noise-scaled branch set it, and whether the final Gauss-Newton
+step was kept with a chi^2 increase (and by how much).
 
 Edge taper: the whole-reconstruction tapered restart after a limit cycle in the first center is a
 NON-DEFAULT option (``taper_restart=False`` by default); without it such a center is a failure.
@@ -312,20 +315,51 @@ def stopping_tests(A, g, settings, noise_chi2, history):
     grad_floor = max(settings.grad_tol_chi2, settings.noise_factor * noise_chi2)
     rel = [h for h in history[-settings.chi2_rel_window:]]
     out = dict(gn_step_sigma=step_sig.tolist(), newton_decrement=dec, grad_floor=grad_floor,
-               last_rel_decreases=rel, noise_chi2=noise_chi2)
+               grad_floor_fixed=float(settings.grad_tol_chi2), grad_floor_noise=float(settings.noise_factor * noise_chi2),
+               grad_floor_noise_scaled=bool(settings.noise_factor * noise_chi2 > settings.grad_tol_chi2),
+               last_rel_decreases=rel, noise_chi2=noise_chi2, test=None)
     if np.all(step_sig < settings.step_tol_sigma):
-        out.update(converged=True, criterion=f"undamped Gauss-Newton step < {settings.step_tol_sigma} posterior "
-                                             "sigma in every parameter")
+        out.update(converged=True, test="a",
+                   criterion=f"undamped Gauss-Newton step < {settings.step_tol_sigma} posterior sigma in every parameter")
     elif dec <= grad_floor:
-        out.update(converged=True, criterion=f"Newton decrement g^T A^-1 g = {dec:.3g} <= {grad_floor:.3g} "
-                                             f"(max(grad_tol_chi2, noise_factor x chi^2 noise))")
+        out.update(converged=True, test="b",
+                   criterion=f"Newton decrement g^T A^-1 g = {dec:.3g} <= {grad_floor:.3g} "
+                             f"(max(grad_tol_chi2, noise_factor x chi^2 noise))")
     elif (len(rel) >= settings.chi2_rel_window and all(r < settings.chi2_rel_tol for r in rel)
           and np.all(step_sig < 1.0)):
-        out.update(converged=True, criterion=f"{settings.chi2_rel_window} accepted steps each decreased chi^2 by "
-                                             f"< {settings.chi2_rel_tol:g} (relative) and the GN step is < 1 sigma")
+        out.update(converged=True, test="c",
+                   criterion=f"{settings.chi2_rel_window} accepted steps each decreased chi^2 by "
+                             f"< {settings.chi2_rel_tol:g} (relative) and the GN step is < 1 sigma")
     else:
         out.update(converged=False)
     return out
+
+
+def stopping_summary(status, stop, log):
+    """Which stopping test ended a fit and how (recorded in every result as ``stopping_summary``).
+
+    ``test``: ``"a"`` (undamped Gauss-Newton step), ``"b"`` (Newton decrement) or ``"c"`` (small
+    relative decreases) when a test held, else ``None``; ``grad_floor`` of test (b) and whether its
+    noise-scaled branch set it (``grad_floor_noise_scaled``: ``noise_factor x chi^2 noise`` above
+    ``grad_tol_chi2``); ``final_gn_step``: whether the undamped Gauss-Newton step of the test was
+    taken and kept, and the chi^2 change it made (``kept_with_chi2_increase`` and ``chi2_increase``
+    when it was kept although chi^2 rose, within the measured noise).  Values only; no rule is
+    applied here."""
+    st = stop or {}
+    fin = (log[-1].get("final_gn_step") if log else None)
+    fgn = dict(taken=fin is not None)
+    if fin is not None:
+        dchi = fin.get("chi2_change")
+        kept = bool(fin.get("accepted"))
+        fgn.update(accepted=kept, status=fin.get("status"), chi2_change=dchi,
+                   kept_with_chi2_increase=bool(kept and dchi is not None and dchi > 0),
+                   chi2_increase=(float(dchi) if (kept and dchi is not None and dchi > 0) else 0.0))
+    return dict(status=status, test=st.get("test") if st.get("converged") else None,
+                criterion=st.get("criterion") if st.get("converged") else None,
+                grad_floor=st.get("grad_floor"), grad_floor_fixed=st.get("grad_floor_fixed"),
+                grad_floor_noise=st.get("grad_floor_noise"), grad_floor_noise_scaled=st.get("grad_floor_noise_scaled"),
+                newton_decrement=st.get("newton_decrement"), gn_step_sigma=st.get("gn_step_sigma"),
+                final_gn_step=fgn)
 
 
 def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, initial_profiles=None, label="fit",
@@ -377,6 +411,8 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
 
     def finish(status, center, J=None, extra=None, jinfo=None):
         rec["status"] = status
+        rec["stopping_summary"] = stopping_summary(status, rec.get("final_stopping_tests") or (extra or {}).get(
+            "final_stopping_tests") or (log[-1].get("stopping_tests") if log else None), log)
         rec["n_solves"] = fm.n_solves - n0
         rec["wall_s"] = round(time.perf_counter() - t_all, 2)
         rec["forward"] = fm.settings_record()
@@ -574,7 +610,10 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
                 trial, tres = evaluate(tt, center["snap"], center["z0"], f"{label}:it{it}:final_gn",
                                        ref_index=ref_index)
                 fin = dict(delta=(tt - center["theta"]).tolist(), status=(tres.status if trial is None else "consistent"),
-                           chi2=None if trial is None else trial["chi2"]["objective"])
+                           chi2=None if trial is None else trial["chi2"]["objective"],
+                           chi2_center=center["chi2"]["objective"],
+                           chi2_change=(None if trial is None else
+                                        trial["chi2"]["objective"] - center["chi2"]["objective"]))
                 if trial is not None and trial["chi2"]["objective"] <= center["chi2"]["objective"] + \
                         settings.noise_factor * (noise["chi2"] or 0.0):
                     center = trial

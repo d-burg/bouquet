@@ -2,7 +2,7 @@
 
 These tests target defects found by an independent review (they fail on the code before the fix):
 
-* the periodic-orbit criterion (P1) divided by a depth that is negative for Ip < 0, so a negative residual
+* the periodic-orbit criterion (PO) divided by a depth that is negative for Ip < 0, so a negative residual
   passed the 1e-9 test vacuously; the positive frame is now enforced and the residual is non-negative;
 * for non-monotonic q the slope jump at the new position of the axis level chi(0) was never smoothed.
 

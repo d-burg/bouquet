@@ -340,8 +340,8 @@ def probe_segment_points(geometry, n_avg=PROBE_N_AVG_DEFAULT):
     toroidal extent is irrelevant under axisymmetry).  The averaging rule is the
     midpoint rule with ``n_avg`` points at offsets ``(k - (n_avg - 1)/2) |L| / n_avg``,
     ``k = 0 .. n_avg - 1``; this placement was determined numerically against
-    EFIT's own calculated probe signals (project record, probe-table test: 1e-4 sigma
-    rms with midpoints vs 0.023 sigma with endpoint-inclusive placement).
+    EFIT's own calculated probe signals (1e-4 sigma rms with midpoints vs 0.023 sigma with
+    endpoint-inclusive placement; measured).
 
     Returns ``(points (n, n_avg, 2), ends (n, 2, 2))``: the averaging points and
     the two segment end points ``center -/+ |L|/2 t`` of every probe (``t`` the
@@ -400,8 +400,8 @@ def bpol_probe(eq, geometry, model="finite_length", n_avg=PROBE_N_AVG_DEFAULT):
     segment is never silently truncated.  ``model="point"``: the field at the
     center only (the earlier behavior).  The evidence that EFIT's calculated
     signals are length-averaged (and that the point model misses them by up to
-    1.5 sigma, about +0.13 chi^2 per probe on fine-grid cases) is in the
-    project record (probe-table test, finite probe length).
+    1.5 sigma, about +0.13 chi^2 per probe on fine-grid cases) is a comparison with
+    EFIT's own calculated probe signals.
     """
     if model not in PROBE_MODELS:
         raise ValueError(f"bpol_probe: model must be one of {PROBE_MODELS}")
@@ -628,13 +628,13 @@ def q(eq, geometry):
 
     Planned: ``get_q`` at the constraint's psi_N (OFT ``q_con`` semantics).
     """
-    raise NotImplementedError("kinrecon.diagnostics.q is a stub (P0b)")
+    raise NotImplementedError("kinrecon.diagnostics.q is a stub (not implemented)")
 
 
 def vloop(eq, geometry):
     """Loop voltage (``magnetics.flux_loop[:].voltage``). NOT IMPLEMENTED.
 
-    Needs the current-diffusion model (P0c / L2); a static equilibrium has no
-    loop voltage of its own.
+    Needs the current-diffusion model; a static equilibrium has no loop voltage of
+    its own.
     """
-    raise NotImplementedError("kinrecon.diagnostics.vloop is a stub (needs L2)")
+    raise NotImplementedError("kinrecon.diagnostics.vloop is a stub (needs the current-diffusion model)")

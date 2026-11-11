@@ -57,14 +57,13 @@ Integrating (6) across the layer gives exactly
     I_lcfs/F_lcfs - I(c)/F(c) = A_layer dpsi/dt|_Phi + B_layer                         (8)
     A_layer = int a drho = int sigma <1/R^2> / (2 pi F) dV,  B_layer = int <J_NI.B> / (2 pi F^2) dV
 
-(volume integrals over the layer; :class:`OuterLayer`).  Coupling
-(domain-edge experiment, recommendation 8; treatment "ii"):
+(volume integrals over the layer; :class:`OuterLayer`).  Coupling:
 
 * Ip condition: Ip(t) is the total current at the last closed surface.
   The layer is attached implicitly to the last cell -- its mass becomes
   ``m_last + A_layer``, its source ``s_last + B_layer`` and the outer flux
   ``Ip/F_lcfs`` -- so the layer's ``dpsi/dt|_Phi`` equals the last cell's
-  (still one tridiagonal solve; no lag, which diverged in the experiment).
+  (still one tridiagonal solve; no lag: a lagged coupling was found to diverge).
   The flux through the cutoff face follows from (8) with that rate.
 * Loop-voltage condition: V(t) is the loop voltage at the last closed
   surface; with uniform ``dpsi/dt`` across the layer the cutoff surface moves
@@ -73,7 +72,7 @@ Integrating (6) across the layer gives exactly
 
 In steady state both are exact (uniform ``dpsi/dt`` everywhere); in time the
 quasi-static layer was measured accurate to <= 2.6e-4 in interior q for
-c >= 0.98 on a 5 %/50 ms Ip ramp (experiment section 2.5).  Outputs report
+c >= 0.98 on a 5 %/50 ms Ip ramp.  Outputs report
 the layer current and name the surface of every edge quantity
 (``profiles()['surfaces']``).  ``outer_layer="none"`` keeps the previous
 behavior explicitly (boundary condition applied at the domain edge).
@@ -120,7 +119,7 @@ Time: TR-BDF2 (L-stable, second order; default), or the theta method
 (``theta = 1`` backward Euler, ``theta = 0.5`` Crank-Nicolson as in QED.jl).
 Crank-Nicolson is not L-stable: with a resistive edge (large eta, fine grid)
 and a step much longer than the edge diffusion time it leaves undamped
-oscillations in ``<J.B>`` at the edge (measured in the P0c benchmark), which
+oscillations in ``<J.B>`` at the edge (measured), which
 is why TR-BDF2 is the default.
 Every implicit stage is one banded solve (tridiagonal except for the boundary
 row noted above); coefficients are re-evaluated
@@ -1021,7 +1020,7 @@ class CurrentDiffusion:
           in ``surfaces``).  ``q95`` is q at psi_N = 0.95 normalized to the
           flux of the last closed surface, ``psi(c)`` plus the layer's flux
           ``dpsi_ref int I/I_ref dpsi_N`` (on fixed surfaces dpsi/dpsi_N scales
-          with the enclosed current; as in the domain-edge experiment).
+          with the enclosed current).
           Without a layer these are the domain values (the domain edge is the
           boundary).
         """

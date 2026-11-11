@@ -3,7 +3,7 @@
 The public synthetic free-boundary equilibrium of ``test_score_solver.py`` is
 solved on the repository's public D3D-like mesh from the public synthetic
 g-file (shape and profiles only), at OFT default solver settings, and its
-geometry is read with the R29 domain edge (default ``psi_n_edge="auto"``).
+geometry is read with the domain-edge rule (default ``psi_n_edge="auto"``).
 Checked:
 
 (a) the edge choice: 0.995 with a stated reason (no 2-D grid; route agreement
@@ -187,7 +187,7 @@ def test_edge_default_is_r29(result):
 def test_internal_consistency(result):
     for key in ("auto", "0.99"):
         r = result[key]
-        # same TokaMaker trace for q and the averages: agreement to round-off (P0c measured 4e-16)
+        # same TokaMaker trace for q and the averages: agreement to round-off (measured 4e-16)
         assert r["q_geo_vs_tm"] < 1e-10, r
         # Phi identity of the resampled geometry: the construction accuracy bounded in
         # test_from_psi_coordinates_recovers_rho_geometry (1e-4 at 200 samples)
@@ -196,7 +196,7 @@ def test_internal_consistency(result):
 
 def test_independent_routes_agree(result):
     """Domain + layer volume and toroidal flux vs TokaMaker's own integrals: two geometry routes, bound 1e-3
-    (the R29 route-agreement tolerance)."""
+    (the domain-edge rule's route-agreement tolerance)."""
     for key in ("auto", "0.99"):
         r = result[key]
         assert abs(r["volume_rel"]) < 1e-3, r
@@ -208,8 +208,8 @@ def test_independent_routes_agree(result):
                    "public mesh -- a route offset inside TokaMaker, larger than the 1e-3 bound; the bound is kept "
                    "and the discrepancy is an open item, not a tolerance change")
 def test_layer_ampere_current_matches_ip(result):
-    """The layer's Ampere current at its outermost sample (psi_N = 1 - 1e-2 (1 - c)) vs Ip; bound 1e-3 (the R29
-    route-agreement tolerance)."""
+    """The layer's Ampere current at its outermost sample (psi_N = 1 - 1e-2 (1 - c)) vs Ip; bound 1e-3 (the
+    domain-edge rule's route-agreement tolerance)."""
     for key in ("auto", "0.99"):
         r = result[key]
         assert abs(r["ampere_last_rel"]) < 1e-3, r
@@ -222,7 +222,7 @@ def test_lumped_steady_state_on_tokamaker_geometry(result):
         assert 0.0 < r["layer_fraction"] < 0.01
         assert "last closed surface" in r["surfaces"]["ip"]
         assert np.isfinite(r["q95"]) and np.isfinite(r["li3"])
-    # interior q independent of the cutoff: <= 1e-3 (domain-edge experiment, section 0 item 1)
+    # interior q independent of the cutoff: <= 1e-3
     assert result["interior_q_cutoff_diff"] <= 1e-3
 
 

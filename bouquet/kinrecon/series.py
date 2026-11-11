@@ -17,11 +17,18 @@ with, on each interval ``[t_{k-1}, t_k]``,
 * the plasma current ``Ip(t)`` linear between the slices' measured values, applied at the last closed
   surface through the lumped outer layer (its conductance and source linear in time; ``|F|`` at the
   last closed surface fixed at the mean of the two slices' values, stated);
+* the vacuum field: every slice is solved with its own ``F0 = R0 B0`` (:attr:`SliceData.F0`, the
+  measured value at that time; when it is not given the previous slice's value is kept and the
+  slice record says so), so ``F`` at the last closed surface differs between the two ends of an
+  interval and the mean above is the interval's value (recorded as ``fpol_lcfs_used`` and
+  ``fpol_lcfs_change``);
 * sawteeth (:mod:`.current.sawtooth`) applied by the reconnection operator, which is the identity
   wherever q >= 1, so there is no sawtooth effect at all on a state with q >= 1 everywhere:
   ``sawtooth="crash_times"`` uses measured crash times; ``sawtooth="periodic"`` places crashes every
-  ``1/nu`` with ``nu`` from the two parameters ``(f, ln Lambda)`` (phase: a crash at the series start,
-  stated); ``"off"``: none.  A slice reports the crash-free end state plus the sawtooth effect averaged
+  ``1/nu`` with ``nu`` from the two parameters ``(f, ln Lambda)``.  Phase of the periodic train
+  (stated, not measured): the first slice's state is the CYCLE AVERAGE of the periodic orbit (initial
+  ``"relaxed"`` and ``"mse_fit"``), and the first crash of the train is one period AFTER the first
+  slice time (``t_0 + 1/nu``, ``t_0 + 2/nu``, ...); ``"off"``: none.  A slice reports the crash-free end state plus the sawtooth effect averaged
   over the interval since the previous slice (the measurement window): ``psi = psi_end^(no crash) +
   <psi^(crashes)>_window - <psi^(no crash)>_window``.  This is the instantaneous state when the operator
   acted as the identity, is continuous in the state (a switch between averaged and instantaneous states
@@ -60,8 +67,13 @@ Initial state (first slice):
 Fit interaction: (i) default -- the initial state is fitted once; later slices are evolved and
 SCORED with no fitting (a prediction test); (ii) ``filter=True`` -- at every later slice the
 correction amplitudes are re-fitted with the evolved state as the prior mean (corrections
-N(0, sigma) on top of it), and the corrected state (corrections absorbed into psi as their
-zero-net-current steady response) is carried forward.
+N(0, sigma) on top of it).  Only a filter fit with status ``"converged"`` is absorbed: the state is
+re-advanced on the ACCEPTED center's own equilibrium (the fit's other solves -- Jacobian columns,
+trials -- also advance the state, on their perturbed equilibria, and none of those is carried),
+the corrections are added to it as their zero-net-current steady response, and that state is
+carried forward and the center is the slice's answer.  Any other fit status (stalled, max_iter,
+failed) leaves the slice at its evolved, unfitted equilibrium and state, which are scored and
+carried; the record says ``absorbed: False`` with the fit's status.
 
 The vessel/eddy-current contribution through the previous slice's flux is not modeled
 (``vessel_eddy=False``; ``True`` is refused).
@@ -89,7 +101,7 @@ SAWTOOTH_MODES = ("periodic", "crash_times", "off")
 @dataclass
 class SliceData:
     """Inputs of one time slice: ``time`` [s], measurement set (with ``ip``), reference boundary
-    (anchor), kinetic inputs and sources AT THAT TIME."""
+    (anchor), kinetic inputs, sources and the vacuum ``F0`` AT THAT TIME."""
     time: float
     measurements: Any
     reference_boundary: np.ndarray
@@ -97,6 +109,7 @@ class SliceData:
     sources: Any
     label: str = ""
     meta: Dict[str, Any] = field(default_factory=dict)
+    F0: Optional[float] = None       # vacuum R0 B_phi [T m] at this time (sign as the discharge); None: keep
 
 
 @dataclass
@@ -287,13 +300,15 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
     case = fm.case
     crash = _crash_times(s, times[0], times[-1])
     out["crash_times_used"] = crash.tolist() if s.sawtooth != "periodic" else dict(
-        period_s=_period(s), phase="a crash at the first slice time", f=s.sawtooth_f,
+        period_s=_period(s), phase="first slice: cycle average of the periodic orbit; first crash one period after "
+                                   "the first slice time", f=s.sawtooth_f,
         log_strength=s.log_strength())
     p_relaxed = dict(log_strength=(s.log_strength() if s.sawtooth == "periodic" else None), f=s.sawtooth_f)
     # ---------------------------------------------------------------- slice 0
     t0 = time.perf_counter()
     n0 = fm.n_solves
     fitrec = None
+    f0rec0 = _apply_f0(fm, sl0)
     if start_psi is not None:
         fm.set_psi(start_psi)
     if mode == "mse_fit":
@@ -318,6 +333,7 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
                       prior={n: fr.record["specs"][n]["prior"] for n in fr.free}, chi2=fr.chi2,
                       n_solves=fr.record["n_solves"], wall_s=fr.record["wall_s"],
                       iterations=len(fr.record["iterations"]), stopping=fr.record.get("final_stopping_tests"),
+                      stopping_summary=fr.record.get("stopping_summary"),
                       noise=fr.record.get("noise"), column_flags=fr.record.get("covariance_column_flags"))
         params0 = fr.params
     else:
@@ -329,7 +345,8 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
                                     initial_profiles=initial_profiles, state_fn=state_fn0)
         params0 = p_relaxed
     rec0 = _slice_record(fm, res0, sl0, sl0.label, dict(initial_mode=mode, fit=fitrec, n_solves=fm.n_solves - n0,
-                                                        wall_total_s=round(time.perf_counter() - t0, 2)))
+                                                        wall_total_s=round(time.perf_counter() - t0, 2),
+                                                        vacuum_F0=f0rec0))
     out["slices"].append(rec0)
     if callback:
         callback(rec0)
@@ -338,9 +355,9 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
         return out
     st0 = res0.assembly["state"]
     carried = CurrentState(st0.rho_faces, st0.psi, st0.psi_boundary, times[0], dict(initial_mode=mode))
+    out["slices"][-1]["carried_state"] = _state_record(carried)
     lag_prev = res0.lag
     jni_prev = _jni(lag_prev, sl0.kinetics, sl0.sources, params0)
-    history = [carried.copy()]
     ip_carried = _slice_ip(sl0)
     snap_prev = fm.snapshot()
     pc_prev = fm.probe_correction.copy()
@@ -351,6 +368,7 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
         tk0 = time.perf_counter()
         nk = fm.n_solves
         fm.restore(snap_prev)
+        f0rec = _apply_f0(fm, sl)
         if sl.measurements is None:     # generation mode (synthetic truth series)
             fm.reconfigure(None, sl.reference_boundary, case_id=case.case_id, ip=_slice_ip(sl),
                            generation_coil_reg=sl.meta["generation_coil_reg"])
@@ -366,11 +384,13 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
         holder = {}
         p_pred = dict(log_strength=None, f=s.sawtooth_f, s_bs=params0.get("s_bs", 1.0) if isinstance(params0, dict) else 1.0)
 
-        def state_fn(lag, sl=sl, t1=t1, tp=tp, ip0=ip0, ip1=ip1):
+        def state_fn(lag, sl=sl, t1=t1, tp=tp, ip0=ip0, ip1=ip1, carried=carried, lag_prev=lag_prev,
+                     jni_prev=jni_prev, holder=holder):
             jni1 = _jni(lag, sl.kinetics, sl.sources, p_pred)
             sol, info = interval_solver(lag_prev, lag, jni_prev, jni1, tp, t1, ip0, ip1)
             end, events, states = advance_interval(sol, carried, t1, s, crash, s.dt_max)
-            holder.update(end=end, events=events, states=states, info=info, jni1=jni1)
+            holder.clear()
+            holder.update(end=end, events=events, states=states, info=info, jni1=jni1, window_average=False)
             use = end
             if events:
                 # sawtooth effect over the interval (the measurement window): the interval average WITH the
@@ -388,36 +408,19 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
 
         res = _cm.consistent_solve(fm, sl.kinetics, sl.sources, p_pred, cfg, label=f"{sl.label}:evolve",
                                    state_fn=state_fn)
-        extra = dict(n_solves=fm.n_solves - nk, interval=dict(holder.get("info", {}), start_s=float(tp), end_s=float(t1)),
-                     crashes=[dict(time=e.time, active=bool(e.record.active),
-                                   rho_mix=getattr(e.record, "rho_mix", None)) for e in holder.get("events", [])],
-                     window_average=holder.get("window_average", False))
         filt = None
         if res.converged and s.filter:
-            end_holder = dict(holder)
-            fr = _fit.reconstruct(fm, sl.kinetics, sl.sources, cfg, s.filter_fit, params0=p_pred,
-                                  start=fm.snapshot(), label=f"{sl.label}:filter", state_fn=state_fn)
-            if fr.record.get("center") is not None and fr.status in ("converged", "max_iter",
-                                                                     "stalled_no_significant_descent"):
-                res = fr.record["center"]["res"]
-                fm.restore(fr.record["center"]["snap"])
-                fm.probe_correction = fr.record["center"]["probe_correction"].copy()
-                filt = dict(status=fr.status, theta=fr.theta.tolist(), sigma=fr.sigma.tolist(),
-                            prior={n: fr.record["specs"][n]["prior"] for n in fr.free}, chi2=fr.chi2,
-                            n_solves=fr.record["n_solves"], wall_s=fr.record["wall_s"],
-                            stopping=fr.record.get("final_stopping_tests"))
-                # the corrections are absorbed into the carried state (their steady response)
-                ac = fr.params["a_corr"]
-                lag_f = res.lag
-                shapes = _cm.correction_shapes(lag_f, cfg, ip1)
-                dpsi, dpb = _cm.correction_response(lag_f, shapes, ac, holder["end"].rho_faces)
-                e = holder["end"]
-                holder["end"] = CurrentState(e.rho_faces, e.psi + dpsi, e.psi_boundary + dpb, e.time, dict(e.meta))
-            else:
-                filt = dict(status=fr.status, note="filter fit failed: the unfitted evolved state is carried")
-                holder.update(end_holder)
-        extra["filter"] = filt
-        extra["wall_total_s"] = round(time.perf_counter() - tk0, 2)
+            filt, res = _filter_slice(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1)
+        extra = dict(n_solves=fm.n_solves - nk, interval=dict(holder.get("info", {}), start_s=float(tp), end_s=float(t1)),
+                     crashes=[dict(time=e.time, active=bool(e.record.active),
+                                   rho_mix=getattr(e.record, "rho_mix", None),
+                                   dpsi_max=getattr(e.record, "dpsi_max", None)) for e in holder.get("events", [])],
+                     window_average=holder.get("window_average", False), filter=filt, vacuum_F0=f0rec,
+                     wall_total_s=round(time.perf_counter() - tk0, 2))
+        if res.converged:
+            extra["carried_state"] = _state_record(holder["end"])
+        # what the next interval starts from (taken before the callback, which may use the solver)
+        nxt = dict(carried=holder.get("end"), jni1=holder.get("jni1"))
         rec = _slice_record(fm, res, sl, sl.label, extra)
         out["slices"].append(rec)
         if callback:
@@ -427,18 +430,82 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
             if not s.keep_going_after_failure:
                 break
             continue
-        carried = holder["end"]
+        carried = nxt["carried"]
         ip_carried = ip1
-        history = [h for h in history + holder["states"] if h.time >= t1 - 2.0 * max(_period(s) if s.sawtooth ==
-                                                                                       "periodic" else 0.0, t1 - tp)]
-        if not history or history[-1].time < t1:
-            history.append(carried.copy())
         lag_prev = res.lag
-        jni_prev = holder["jni1"]
+        jni_prev = nxt["jni1"]
         snap_prev = fm.snapshot()
         pc_prev = fm.probe_correction.copy()
     out.update(status=status, n_solves=fm.n_solves - n_solves0, wall_s=round(time.perf_counter() - t_all, 2))
     return out
+
+
+def _apply_f0(fm, sl):
+    """Set the slice's vacuum ``F0`` on the forward model (kept when the slice gives none)."""
+    if sl.F0 is None:
+        return dict(F0=float(fm.F0), source="not given for this slice: the previous value is kept")
+    fm.set_F0(float(sl.F0))
+    return dict(F0=float(fm.F0), source="slice")
+
+
+def _state_record(st):
+    return dict(time=float(st.time), rho_faces=np.asarray(st.rho_faces).tolist(), psi=np.asarray(st.psi).tolist(),
+                psi_boundary=float(st.psi_boundary))
+
+
+def _psi_shape_diff(a, b):
+    """``max |(a - b) - (a - b)[0]| / max |b - b[0]|`` on the cells (the gauge-free size of a state
+    difference relative to the state's psi span) and the boundary-value difference [Wb/rad]."""
+    d = np.asarray(a.psi, float) - np.asarray(b.psi, float)
+    span = float(np.max(np.abs(np.asarray(b.psi, float) - float(b.psi[0])))) or 1.0
+    return float(np.max(np.abs(d - d[0])) / span), float(a.psi_boundary - b.psi_boundary)
+
+
+def _filter_slice(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1):
+    """Filter fit of one evolved slice (module docstring).  Returns ``(record, result)``; on return
+    the solver holds the slice's answer and ``holder`` the state to carry."""
+    pred = dict(res=res, holder=dict(holder), snap=fm.snapshot(), pc=fm.probe_correction.copy())
+    fr = _fit.reconstruct(fm, sl.kinetics, sl.sources, cfg, s.filter_fit, params0=p_pred,
+                          start=pred["snap"], label=f"{sl.label}:filter", state_fn=state_fn)
+    stale = holder.get("end")       # advanced by the LAST solve of the fit (a column, a trial or the center)
+    c = fr.record.get("center")
+    filt = dict(status=fr.status, absorbed=False, theta=fr.theta.tolist(), sigma=fr.sigma.tolist(),
+                prior={n: fr.record["specs"][n]["prior"] for n in fr.free}, chi2=fr.chi2,
+                n_solves=fr.record["n_solves"], wall_s=fr.record["wall_s"],
+                stopping=fr.record.get("final_stopping_tests"), stopping_summary=fr.record.get("stopping_summary"))
+    if c is None or fr.status != "converged":
+        # not absorbed: the slice stays at its evolved, unfitted equilibrium and state
+        fm.restore(pred["snap"])
+        fm.probe_correction = pred["pc"].copy()
+        holder.clear()
+        holder.update(pred["holder"])
+        filt["note"] = (f"filter fit not converged ({fr.status}): its corrections are not absorbed; the evolved, "
+                        "unfitted equilibrium is scored and its state carried")
+        return filt, pred["res"]
+    res = c["res"]
+    fm.restore(c["snap"])
+    fm.probe_correction = c["probe_correction"].copy()
+    # re-advance the carried state on the accepted center's own equilibrium (the geometry its assembly used)
+    use_c = state_fn(res.lag)
+    ac = fr.params["a_corr"]
+    e = holder["end"]
+    dpsi, dpb = np.zeros_like(e.psi), 0.0
+    if any(a != 0.0 for a in ac):
+        shapes = _cm.correction_shapes(res.lag, cfg, ip1)
+        dpsi, dpb = _cm.correction_response(res.lag, shapes, ac, e.rho_faces)
+    holder["end"] = CurrentState(e.rho_faces, e.psi + dpsi, e.psi_boundary + dpb, e.time,
+                                 dict(e.meta, filter_corrections_absorbed=list(ac)))
+    # checks (recorded): the re-advanced, corrected state is the center's own assembly state, and the size
+    # of the difference to the state of the fit's last solve (which is not carried)
+    asm_st = res.assembly["state"]
+    chk = CurrentState(e.rho_faces, use_c.psi + dpsi, use_c.psi_boundary + dpb, e.time)
+    filt.update(absorbed=True,
+                carried_from="state re-advanced on the accepted center's equilibrium, plus the corrections' steady "
+                             "response",
+                center_state_check=dict(zip(("max_dpsi_rel", "dpsi_boundary"), _psi_shape_diff(chk, asm_st))),
+                last_solve_state_vs_center=(dict(zip(("max_dpsi_rel", "dpsi_boundary"), _psi_shape_diff(stale, e)))
+                                            if stale is not None else None))
+    return filt, res
 
 
 def _given_state(lag, s, cfg, ip):

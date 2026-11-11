@@ -43,6 +43,41 @@ the boundary toroidal flux Phi_b changes in time, the state is held on fixed
 Boundary conditions: ``k psi' = 0`` on axis (``I(0) = 0``; also ``V'(0) = 0``);
 at ``rho = 1`` either ``I(1) = Ip(t)`` or ``dpsi_b/dt|_Phi = V_loop(t) / 2pi``.
 
+Domain edge and the lumped outer layer (ruling R29)
+---------------------------------------------------
+On a diverted boundary the domain ends at a closed surface ``psi_N = c``
+inside the last closed surface (default 0.995; see
+:func:`.geometry.choose_psi_n_edge`), and ``rho = 1`` is that cutoff.  The
+layer ``c < psi_N < 1`` is a lumped element with uniform parallel electric
+field, i.e. ``dpsi/dt|_Phi`` uniform across it (quasi-static layer).
+Integrating (6) across the layer gives exactly
+
+.. code-block:: text
+
+    I_lcfs/F_lcfs - I(c)/F(c) = A_layer dpsi/dt|_Phi + B_layer                         (8)
+    A_layer = int a drho = int sigma <1/R^2> / (2 pi F) dV,  B_layer = int <J_NI.B> / (2 pi F^2) dV
+
+(volume integrals over the layer; :class:`OuterLayer`).  Coupling
+(domain-edge experiment, recommendation 8; treatment "ii"):
+
+* Ip condition: Ip(t) is the total current at the last closed surface.
+  The layer is attached implicitly to the last cell -- its mass becomes
+  ``m_last + A_layer``, its source ``s_last + B_layer`` and the outer flux
+  ``Ip/F_lcfs`` -- so the layer's ``dpsi/dt|_Phi`` equals the last cell's
+  (still one tridiagonal solve; no lag, which diverged in the experiment).
+  The flux through the cutoff face follows from (8) with that rate.
+* Loop-voltage condition: V(t) is the loop voltage at the last closed
+  surface; with uniform ``dpsi/dt`` across the layer the cutoff surface moves
+  at the same rate, so the existing condition applies at ``rho = 1`` and the
+  layer only adds ``A_layer V/2pi + B_layer`` to the total current.
+
+In steady state both are exact (uniform ``dpsi/dt`` everywhere); in time the
+quasi-static layer was measured accurate to <= 2.6e-4 in interior q for
+c >= 0.98 on a 5 %/50 ms Ip ramp (experiment section 2.5).  Outputs report
+the layer current and name the surface of every edge quantity
+(``profiles()['surfaces']``).  ``outer_layer="none"`` keeps the previous
+behavior explicitly (boundary condition applied at the domain edge).
+
 Steady state ("fully relaxed"): ``dpsi/dt|_Phi = V/2pi`` uniform in rho.  Then
 (6) integrates to ``I/F = int_0^rho (a V/2pi + S) drho'``; ``V`` follows from
 ``I(1) = Ip`` (or ``Ip`` from a given ``V``).  This is the discrete
@@ -110,12 +145,13 @@ import numpy as np
 from scipy.interpolate import PchipInterpolator
 from scipy.linalg import solve_banded
 
-from .geometry import MU0, FluxSurfaceGeometry
+from .geometry import MU0, FluxSurfaceGeometry, OuterLayerGeometry
 
 __all__ = [
     "CurrentState",
     "IpBoundary",
     "VloopBoundary",
+    "OuterLayer",
     "GeometrySchedule",
     "CurrentDiffusion",
     "as_profile_function",
@@ -208,6 +244,71 @@ class VloopBoundary:
 
     def __call__(self, t):
         return self._f(t)
+
+
+class OuterLayer:
+    r"""Lumped uniform-E_par element for the layer ``psi_n_edge < psi_N < 1`` (equation (8); R29).
+
+    Direct form: ``OuterLayer(psi_n_edge, fpol_lcfs, conductance, source)``
+    with the layer integrals ``A_layer`` [A s / (Wb T m) = 1/(Ohm T m)] and
+    ``B_layer`` [A/(T m)] as constants, callables ``f(t)`` or ``(times,
+    values)``.  Full-plasma q95 / l_i(3) are then not available (no layer
+    profile).
+
+    Profile form: :meth:`from_profiles` with an
+    :class:`.geometry.OuterLayerGeometry` and the layer's conductivity and
+    ``<J_NI.B>`` on its psi_N samples; the integrals are evaluated at every
+    stage time.  The layer is not touched by ``resistivity_modifier`` (the
+    sawtooth hook acts on the core), and its geometry is static.
+    """
+
+    def __init__(self, psi_n_edge, fpol_lcfs, conductance, source=0.0):
+        self.psi_n_edge = float(psi_n_edge)
+        self.fpol_lcfs = float(fpol_lcfs)
+        if not 0.0 < self.psi_n_edge < 1.0:
+            raise ValueError("psi_n_edge must lie in (0, 1)")
+        if not (np.isfinite(self.fpol_lcfs) and self.fpol_lcfs > 0):
+            raise ValueError("fpol_lcfs must be positive (|F| at the last closed surface)")
+        self._A = as_time_function(conductance)
+        self._B = as_time_function(source)
+        self.geometry = None
+        self._sigma = None
+        self._jni = None
+
+    @classmethod
+    def from_profiles(cls, geometry, conductivity, j_ni=None):
+        """Layer element from an :class:`.geometry.OuterLayerGeometry`.
+
+        ``conductivity`` and ``j_ni`` are given on the layer's psi_N (any form
+        of :func:`as_profile_function` with ``rho`` read as psi_N: a callable
+        ``f(t, psi_n)``, ``(psi_n, values)``, ``(times, psi_n, values)`` or a
+        constant; conductivity arrays interpolated in log space).
+        """
+        if not isinstance(geometry, OuterLayerGeometry):
+            raise TypeError("geometry must be an OuterLayerGeometry")
+        obj = cls(geometry.psi_n_edge, geometry.fpol_lcfs, 1.0, 0.0)
+        obj.geometry = geometry
+        obj._sigma = as_profile_function(conductivity, log=True)
+        obj._jni = as_profile_function(j_ni)
+        obj._A = lambda t: geometry.integral(geometry.conductance_density(obj._sigma(t, geometry.psi_n)))
+        obj._B = lambda t: geometry.integral(geometry.source_density(obj._jni(t, geometry.psi_n)))
+        return obj
+
+    def integrals(self, t):
+        """``(A_layer, B_layer)`` at time ``t``."""
+        a, b = float(self._A(t)), float(self._B(t))
+        if not (np.isfinite(a) and a > 0 and np.isfinite(b)):
+            raise ValueError("outer-layer conductance must be positive and finite, source finite")
+        return a, b
+
+    def layer_profile(self, t, gam_c, rate):
+        """Enclosed current I(psi_N) [A] in the layer for cutoff flux ``gam_c = I(c)/F(c)`` and
+        ``dpsi/dt|_Phi = rate`` (uniform), at the layer samples (equation (8) integrated partially)."""
+        g = self.geometry
+        sig = np.asarray(self._sigma(t, g.psi_n), dtype=float)
+        jni = np.asarray(self._jni(t, g.psi_n), dtype=float)
+        gam = gam_c + rate * g.cumulative(g.conductance_density(sig)) + g.cumulative(g.source_density(jni))
+        return g.fpol * gam
 
 
 class GeometrySchedule:
@@ -410,6 +511,9 @@ class _Coeffs:
     geo_c: Dict[str, np.ndarray]
     geo: FluxSurfaceGeometry
     bc_value: float
+    layer_A: float = 0.0   # outer-layer conductance A_layer (eq. 8); 0 without a layer
+    layer_B: float = 0.0   # outer-layer source B_layer
+    F_lcfs: float = 0.0    # |F| where the boundary condition applies (last closed surface with a layer)
 
 
 class CurrentDiffusion:
@@ -432,9 +536,18 @@ class CurrentDiffusion:
     resistivity_modifier
         Optional ``(t, rho_cells, eta, state) -> eta`` (sawtooth hook; see
         module docstring).
+    outer_layer
+        :class:`OuterLayer` -- the lumped layer between the domain edge and the
+        last closed surface (R29); the boundary condition then applies at the
+        last closed surface.  ``"none"`` -- explicitly the previous behavior:
+        the boundary condition applies at the domain edge and nothing lies
+        outside it.  ``None`` (default) -- allowed only when the geometry is
+        not truncated (``geometry.meta['psi_n_edge']`` absent or 1); a
+        geometry that ends inside the boundary raises ``ValueError`` rather
+        than silently dropping the layer.
     """
 
-    def __init__(self, geometry, conductivity, boundary, j_ni=None, resistivity_modifier=None):
+    def __init__(self, geometry, conductivity, boundary, j_ni=None, resistivity_modifier=None, outer_layer=None):
         if isinstance(geometry, FluxSurfaceGeometry):
             self._geo_fn = None
             self._geo_static = geometry
@@ -450,10 +563,44 @@ class CurrentDiffusion:
         self.boundary = boundary
         self.resistivity_modifier = resistivity_modifier
         self._static_cache = {}
+        if isinstance(outer_layer, str):
+            if outer_layer != "none":
+                raise ValueError("outer_layer must be an OuterLayer, 'none' or None")
+            self.outer_layer, self.edge_mode = None, "none"
+        elif outer_layer is None:
+            self.outer_layer, self.edge_mode = None, "auto"
+        elif isinstance(outer_layer, OuterLayer):
+            self.outer_layer, self.edge_mode = outer_layer, "lumped"
+        else:
+            raise TypeError("outer_layer must be an OuterLayer, 'none' or None")
+        self._edge_checked = False
+        if self._geo_fn is None:
+            self._check_edge(self._geo_static)
 
     @property
     def ip_mode(self):
         return isinstance(self.boundary, IpBoundary)
+
+    def _check_edge(self, geo):
+        """Refuse a truncated geometry without an explicit edge treatment; check the layer's cutoff."""
+        if self._edge_checked:
+            return
+        c = float(geo.meta.get("psi_n_edge", 1.0))
+        if self.edge_mode == "auto" and c < 1.0:
+            raise ValueError(f"the geometry ends at psi_N = {c:g}, inside the last closed surface: pass "
+                             "outer_layer=OuterLayer(...) (R29: lumped outer layer, Ip at the last closed surface) or "
+                             "outer_layer='none' to apply the boundary condition at the domain edge (previous behavior)")
+        if self.edge_mode == "lumped" and abs(c - self.outer_layer.psi_n_edge) > 1e-12 and "psi_n_edge" in geo.meta:
+            raise ValueError(f"outer layer starts at psi_N = {self.outer_layer.psi_n_edge:g} but the geometry ends at "
+                             f"psi_N = {c:g}")
+        self._edge_checked = True
+
+    @property
+    def psi_n_edge(self):
+        """psi_N of the domain edge (1.0 when the geometry is not truncated)."""
+        if self.outer_layer is not None:
+            return self.outer_layer.psi_n_edge
+        return float(self.geometry_at(0.0).meta.get("psi_n_edge", 1.0)) if self._geo_fn is None else np.nan
 
     def geometry_at(self, t):
         return self._geo_static if self._geo_fn is None else self._geo_fn(t)
@@ -468,6 +615,7 @@ class CurrentDiffusion:
             geo, gf, gc = self._static_cache[key]
         else:
             geo = self.geometry_at(t)
+            self._check_edge(geo)
             gf = geo.evaluate(rf, ["dvol_drho", "avg_grad_rho2_r2", "fpol"])
             gf["dvol_drho"][0] = 0.0
             gc = geo.evaluate(rc)
@@ -484,8 +632,29 @@ class CurrentDiffusion:
         m_c = Vc * gc["avg_inv_r2"] * sigma / (2.0 * np.pi * Fc) * h
         s_c = Vc * jni / (2.0 * np.pi * Fc ** 2) * h
         wfac = geo.dphib_dt / (2.0 * geo.phi_b)
+        if self.outer_layer is not None:
+            lay_a, lay_b = self.outer_layer.integrals(t)
+            f_lcfs = self.outer_layer.fpol_lcfs
+        else:
+            lay_a, lay_b, f_lcfs = 0.0, 0.0, float(gf["fpol"][-1])
         return _Coeffs(t=t, k_f=k_f, F_f=gf["fpol"], m_c=m_c, s_c=s_c, w_c=wfac * rc, w_b=wfac, sigma_c=sigma,
-                       jni_c=jni, geo_c=gc, geo=geo, bc_value=self.boundary(t))
+                       jni_c=jni, geo_c=gc, geo=geo, bc_value=self.boundary(t), layer_A=lay_a, layer_B=lay_b,
+                       F_lcfs=f_lcfs)
+
+    def _cutoff_flux(self, c, psi, rc):
+        """Under the Ip condition: (I/F at the domain edge, layer dpsi/dt|_Phi) for cell values ``psi``.
+
+        Without a layer: ``(Ip/F_edge, nan)``.  With a layer, the last cell
+        and the layer share ``dpsi/dt|_Phi`` (eq. 8):
+        ``rate = (Ip/F_lcfs - Gamma_{n-1/2} - s_last - B_layer) / (m_last + A_layer)`` and
+        ``Gamma_c = Ip/F_lcfs - A_layer rate - B_layer``.
+        """
+        if self.outer_layer is None:
+            return c.bc_value / c.F_f[-1], np.nan
+        gam_b = c.bc_value / c.F_lcfs
+        gam_in = c.k_f[-2] * (psi[-1] - psi[-2]) / (rc[-1] - rc[-2])
+        rate = (gam_b - gam_in - c.s_c[-1] - c.layer_B) / (c.m_c[-1] + c.layer_A)
+        return gam_b - c.layer_A * rate - c.layer_B, rate
 
     # -------------------------------------------------------------- linear operator
     def _operator(self, c, rf):
@@ -500,17 +669,24 @@ class CurrentDiffusion:
         b = np.zeros(m)
         d = np.diff(rc)                    # center distances (n-1)
         cond = c.k_f[1:n] / d              # interior face conductances
+        mass, src = c.m_c, c.s_c
+        layer = ip_mode and self.outer_layer is not None
+        if layer:
+            # eq. (8): the layer shares the last cell's dpsi/dt|_Phi -> implicit, added mass and source
+            mass, src = c.m_c.copy(), c.s_c.copy()
+            mass[-1] += c.layer_A
+            src[-1] += c.layer_B
         # diffusion, interior faces
-        diag[:n - 1] -= cond / c.m_c[:n - 1]
-        upper[:n - 1] += cond / c.m_c[:n - 1]
-        diag[1:n] -= cond / c.m_c[1:n]
-        lower[1:n] += cond / c.m_c[1:n]
-        b[:n] -= c.s_c / c.m_c
+        diag[:n - 1] -= cond / mass[:n - 1]
+        upper[:n - 1] += cond / mass[:n - 1]
+        diag[1:n] -= cond / mass[1:n]
+        lower[1:n] += cond / mass[1:n]
+        b[:n] -= src / mass
         delta = 1.0 - rc[-1]
         wb, w1, w2 = _boundary_gradient_weights(rc)
         if ip_mode:
-            gam_b = c.bc_value / c.F_f[-1]          # I/F at the boundary face
-            b[n - 1] += gam_b / c.m_c[n - 1]
+            gam_b = c.bc_value / c.F_lcfs           # I/F at the boundary face (last closed surface with a layer)
+            b[n - 1] += gam_b / mass[n - 1]
         else:
             # boundary flux k_b psi'(1), psi'(1) from the second-order one-sided formula
             kb = c.k_f[-1] / c.m_c[n - 1]
@@ -530,9 +706,19 @@ class CurrentDiffusion:
                 upper[i] += gi
                 lower[i] -= gi
             i = n - 1
-            gi = w[i] / (1.0 - rc[i - 1])
-            lower[i] -= gi
-            if ip_mode:   # psi_b = (Gamma_b / k_b - w1 psi_{n-1} - w2 psi_{n-2}) / wb
+            if layer:
+                # with the layer the cutoff-face flux depends on dpsi/dt (eq. 8); keep the row tridiagonal
+                # with the two-point backward psi' (first order in this term, last cell only)
+                gi = w[i] / (rc[i] - rc[i - 1])
+                diag[i] += gi
+                lower[i] -= gi
+                gi = None
+            else:
+                gi = w[i] / (1.0 - rc[i - 1])
+                lower[i] -= gi
+            if gi is None:
+                pass
+            elif ip_mode:   # psi_b = (Gamma_b / k_b - w1 psi_{n-1} - w2 psi_{n-2}) / wb
                 diag[i] -= gi * w1 / wb
                 lower[i] -= gi * w2 / wb
                 b[i] += gi * gam_b / (c.k_f[-1] * wb)
@@ -569,8 +755,9 @@ class CurrentDiffusion:
         n = rf.size - 1
         if self.ip_mode:
             psi = y.copy()
-            psi_b = _psi_boundary_from_flux(psi, 0.5 * (rf[1:] + rf[:-1]),
-                                            c_end.bc_value / c_end.F_f[-1] / c_end.k_f[-1])
+            rc = 0.5 * (rf[1:] + rf[:-1])
+            gam_c, _ = self._cutoff_flux(c_end, psi, rc)
+            psi_b = _psi_boundary_from_flux(psi, rc, gam_c / c_end.k_f[-1])
         else:
             psi, psi_b = y[:n].copy(), float(y[n])
         return CurrentState(rf, psi, psi_b, t, meta)
@@ -638,12 +825,17 @@ class CurrentDiffusion:
     def steady_state(self, rho_faces, t=0.0, psi_boundary=0.0):
         r"""Fully relaxed state: ``dpsi/dt|_Phi = V/2pi`` uniform (module docstring).
 
-        Under :class:`IpBoundary`, ``V = 2 pi (Ip/F_b - sum S) / sum m``; under
-        :class:`VloopBoundary`, ``V`` is the boundary value and Ip follows.
-        ``psi_boundary`` fixes the arbitrary offset.  The returned state's
-        ``meta['v_loop']`` holds V [V] and ``meta['ip']`` the total current.
-        The moving-boundary term (7) does not enter (relaxation is defined in
-        the fixed-Phi frame).
+        Under :class:`IpBoundary`, ``V = 2 pi (Ip/F_b - sum S - B_layer) / (sum m + A_layer)``
+        (``F_b`` and the layer terms of eq. (8) at the last closed surface when
+        an :class:`OuterLayer` is attached; without one, at the domain edge
+        and zero); under :class:`VloopBoundary`, ``V`` is the boundary value and
+        Ip follows, ``Ip = F_b (I(c)/F(c) + A_layer V/2pi + B_layer)``.
+        ``psi_boundary`` fixes the arbitrary offset (psi at the domain edge).
+        The returned state's ``meta`` holds ``v_loop`` [V], ``ip`` (the total
+        current at the last closed surface, or at the domain edge without a
+        layer), ``ip_domain_edge`` = I(c) and ``outer_layer_current`` =
+        ``ip - ip_domain_edge`` [A].  The moving-boundary term (7) does not
+        enter (relaxation is defined in the fixed-Phi frame).
         """
         rf = np.asarray(rho_faces, dtype=float)
         rc = 0.5 * (rf[1:] + rf[:-1])
@@ -651,17 +843,25 @@ class CurrentDiffusion:
         c = self.coefficients(t, rf)
         if self.ip_mode:
             ip = c.bc_value
-            rate = (ip / c.F_f[-1] - c.s_c.sum()) / c.m_c.sum()     # dpsi/dt|_Phi
+            rate = (ip / c.F_lcfs - c.s_c.sum() - c.layer_B) / (c.m_c.sum() + c.layer_A)     # dpsi/dt|_Phi
         else:
             rate = c.bc_value / (2.0 * np.pi)
         gam = np.cumsum(c.m_c * rate + c.s_c)                      # I/F at faces 1..n
         if not self.ip_mode:
-            ip = gam[-1] * c.F_f[-1]
+            ip = (gam[-1] + c.layer_A * rate + c.layer_B) * c.F_lcfs
         dpsi = gam[:n - 1] * np.diff(rc) / c.k_f[1:n]
         psi = np.concatenate(([0.0], np.cumsum(dpsi)))
         psi_b_rel = _psi_boundary_from_flux(psi, rc, gam[-1] / c.k_f[-1])
         psi += psi_boundary - psi_b_rel
-        return CurrentState(rf, psi, psi_boundary, t, dict(v_loop=2.0 * np.pi * rate, ip=float(ip)))
+        i_c = float(gam[-1] * c.F_f[-1])
+        return CurrentState(rf, psi, psi_boundary, t, dict(v_loop=2.0 * np.pi * rate, ip=float(ip), ip_domain_edge=i_c,
+                                                           outer_layer_current=float(ip) - i_c,
+                                                           psi_n_edge=float(self._edge_value(c.geo))))
+
+    def _edge_value(self, geo):
+        if self.outer_layer is not None:
+            return self.outer_layer.psi_n_edge
+        return float(geo.meta.get("psi_n_edge", 1.0))
 
     # -------------------------------------------------------------- outputs
     def profiles(self, state, dpressure_drho=None):
@@ -690,7 +890,34 @@ class CurrentDiffusion:
         <J.B> = -F p' - F' <B^2>/mu0 for the field of eq. 1, p' = dp/dpsi).
 
         Scalars: ``ip`` [A], ``v_loop_boundary`` [V], ``w_pol`` = int B_p^2/(2 mu0) dV [J],
-        ``li3`` = 2 int B_p^2 dV / (mu0^2 Ip^2 R0).
+        ``li3`` = 2 int B_p^2 dV / (mu0^2 Ip^2 R0), ``q95``.
+
+        Edge quantities and the surface each refers to (also returned, as
+        text, in ``surfaces``; ``c = psi_n_edge``, the domain edge):
+
+        * ``ip`` -- total plasma current at the last closed surface
+          (psi_N = 1), including the lumped outer layer; without a layer, the
+          current at the domain edge (which is then the boundary);
+        * ``ip_domain_edge`` -- I(c); ``outer_layer_current`` = ``ip - I(c)``
+          and ``outer_layer_current_noninductive`` (its non-inductive part, the
+          layer increment of I/F split in the ratio ``B_layer : A_layer rate``,
+          exact when F is constant across the layer); 0 without a layer;
+        * ``q``, ``psi`` at the last face -- the domain edge c;
+        * ``v_loop_boundary`` -- loop voltage at the last closed surface (with
+          a layer: ``2 pi dpsi/dt|_Phi`` of the uniform-E_par layer);
+        * ``w_pol``, ``li3_domain`` -- the domain psi_N <= c, l_i normalized
+          with I(c);
+        * ``li3``, ``w_pol_full``, ``q95`` -- the full plasma to the last
+          closed surface: inside c from the solution, in the layer from the
+          same uniform-E_par current on the reference surfaces (needs an
+          :class:`OuterLayer` built :meth:`~OuterLayer.from_profiles` with an
+          ``ampere_current`` and ``dpsi_ref``; otherwise NaN, with the reason
+          in ``surfaces``).  ``q95`` is q at psi_N = 0.95 normalized to the
+          flux of the last closed surface, ``psi(c)`` plus the layer's flux
+          ``dpsi_ref int I/I_ref dpsi_N`` (on fixed surfaces dpsi/dpsi_N scales
+          with the enclosed current; as in the domain-edge experiment).
+          Without a layer these are the domain values (the domain edge is the
+          boundary).
         """
         rf = state.rho_faces
         rc = state.rho_cells
@@ -699,6 +926,7 @@ class CurrentDiffusion:
         c = self.coefficients(state.time, rf, state)
         geo = c.geo
         gc = c.geo_c
+        lay = self.outer_layer
         # face gradients and fluxes
         dpsi_f = np.zeros(n + 1)
         dpsi_f[1:n] = np.diff(state.psi) / np.diff(rc)
@@ -706,10 +934,18 @@ class CurrentDiffusion:
         dpsi_f[n] = wb * state.psi_boundary + w1 * state.psi[-1] + w2 * state.psi[-2]
         gam_f = c.k_f * dpsi_f                       # I/F
         if self.ip_mode:
-            gam_f[n] = c.bc_value / c.F_f[-1]
+            gam_f[n], rate_layer = self._cutoff_flux(c, state.psi, rc)
             dpsi_f[n] = gam_f[n] / c.k_f[-1]
+        else:
+            rate_layer = c.bc_value / (2.0 * np.pi)
         I_f = gam_f * c.F_f
-        ip = float(I_f[-1])
+        ip_c = float(I_f[-1])
+        if lay is None:
+            ip = ip_c
+        elif self.ip_mode:
+            ip = float(c.bc_value)
+        else:
+            ip = float((gam_f[n] + c.layer_A * rate_layer + c.layer_B) * c.F_lcfs)
         Vc = gc["dvol_drho"]
         jdotb = 2.0 * np.pi * gc["fpol"] ** 2 * np.diff(gam_f) / (Vc * h)
         jt_r = 2.0 * np.pi * np.diff(I_f) / (Vc * h)
@@ -718,6 +954,8 @@ class CurrentDiffusion:
         v_b = v_loop[-1] + (v_loop[-1] - v_loop[-2]) * (1.0 - rc[-1]) / (rc[-1] - rc[-2])
         if not self.ip_mode:
             v_b = c.bc_value
+        elif lay is not None:
+            v_b = 2.0 * np.pi * rate_layer
         # psi on faces
         psi_f = np.empty(n + 1)
         psi_f[1:n] = state.psi[:-1] + (state.psi[1:] - state.psi[:-1]) * (rf[1:n] - rc[:-1]) / np.diff(rc)
@@ -728,11 +966,54 @@ class CurrentDiffusion:
         q_f[0] = q_f[1] - (q_f[2] - q_f[1]) * rf[1] ** 2 / (rf[2] ** 2 - rf[1] ** 2)
         # poloidal field energy: int B_p^2 dV = int psi'^2 g2 V' drho = 2 pi mu0 int I psi' drho
         bp2_int = 2.0 * np.pi * MU0 * np.trapezoid(I_f * dpsi_f, rf)
+        li3_dom = 2.0 * bp2_int / (MU0 ** 2 * ip_c ** 2 * geo.R0) if ip_c != 0 else np.nan
+        c_edge = self._edge_value(geo)
+
+        def q_at(psin_full, psi_lcfs):
+            pn = (psi_f - psi_f[0]) / (psi_lcfs - psi_f[0])
+            if not np.all(np.diff(pn) > 0) or psin_full > pn[-1]:
+                return np.nan
+            return float(PchipInterpolator(pn, q_f)(psin_full))
+
+        lay_I = lay_dI_ni = 0.0
+        surf = dict(ip_domain_edge=f"domain edge psi_N = {c_edge:g}", q_last_face=f"domain edge psi_N = {c_edge:g}",
+                    w_pol=f"domain psi_N <= {c_edge:g}", li3_domain=f"domain psi_N <= {c_edge:g}, normalized with I(c)")
+        if lay is None:
+            what = "last closed surface" if c_edge >= 1.0 else f"domain edge psi_N = {c_edge:g} (no outer layer: " \
+                                                                 "outer_layer='none', previous behavior)"
+            surf.update(ip=what, v_loop_boundary=what, li3=what, q95=f"psi_N = 0.95 normalized to the {what}",
+                        w_pol_full=what)
+            li3, w_full, q95 = li3_dom, bp2_int / (2.0 * MU0), q_at(0.95, psi_f[-1])
+        else:
+            lay_I = ip - ip_c
+            dgam = c.layer_A * rate_layer + c.layer_B
+            lay_dI_ni = lay_I * (c.layer_B / dgam) if dgam != 0 else np.nan
+            surf.update(ip="last closed surface psi_N = 1 (domain + lumped outer layer)",
+                        v_loop_boundary="last closed surface (uniform-E_par outer layer)")
+            g = lay.geometry
+            if g is not None and g.ampere_current is not None and g.dpsi_ref is not None:
+                I_l = lay.layer_profile(state.time, gam_f[n], rate_layer)
+                ratio = I_l / g.ampere_current
+                tail = 1.0 - g.psi_n[-1]
+                dpsi_l = g.dpsi_ref * (np.trapezoid(ratio, g.psi_n) + ratio[-1] * tail)
+                bp2_l = 2.0 * np.pi * MU0 * g.dpsi_ref * (np.trapezoid(I_l * ratio, g.psi_n) + I_l[-1] * ratio[-1] * tail)
+                w_full = (bp2_int + bp2_l) / (2.0 * MU0)
+                li3 = 2.0 * (bp2_int + bp2_l) / (MU0 ** 2 * ip ** 2 * geo.R0)
+                q95 = q_at(0.95, psi_f[-1] + dpsi_l)
+                txt = "full plasma to the last closed surface (layer on the reference surfaces, uniform E_par)"
+                surf.update(li3=txt, w_pol_full=txt, q95="psi_N = 0.95 normalized to the last closed surface flux "
+                                                         "(domain psi(c) + layer flux on the reference surfaces)")
+            else:
+                li3 = w_full = q95 = np.nan
+                why = "not available: the OuterLayer has no layer geometry with ampere_current and dpsi_ref"
+                surf.update(li3=why, w_pol_full=why, q95=why)
         out = dict(time=state.time, rho_faces=rf.copy(), rho_cells=rc.copy(), psi=psi_f, dpsi_drho=dpsi_f,
                    I_enclosed=I_f, q=q_f, iota=1.0 / q_f, jdotb=jdotb, jdotb_ni=c.jni_c.copy(), jdotb_ohmic=j_ohm,
                    j_par=jdotb / geo.B0, jt_over_r=jt_r, v_loop=v_loop, conductivity=c.sigma_c.copy(), ip=ip,
-                   v_loop_boundary=float(v_b), w_pol=bp2_int / (2.0 * MU0),
-                   li3=2.0 * bp2_int / (MU0 ** 2 * ip ** 2 * geo.R0) if ip != 0 else np.nan)
+                   v_loop_boundary=float(v_b), w_pol=bp2_int / (2.0 * MU0), li3=li3, li3_domain=li3_dom,
+                   w_pol_full=w_full, q95=q95, ip_domain_edge=ip_c, outer_layer_current=float(lay_I),
+                   outer_layer_current_noninductive=float(lay_dI_ni), psi_n_edge=c_edge,
+                   edge_treatment=self.edge_mode, surfaces=surf)
         if "avg_inv_r" in gc:
             out["j_tor"] = jt_r / gc["avg_inv_r"]
         if dpressure_drho is not None and "avg_r" in gc and "avg_b2" in gc:

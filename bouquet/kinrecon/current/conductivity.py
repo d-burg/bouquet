@@ -54,9 +54,20 @@ checked numerically against the authors' own published fit values
 doi:10.5281/zenodo.4110606, Z_eff = 1.8, three trapped fractions, 18 points;
 see ``tests/kinrecon/test_current_conductivity.py``), and agree with the
 independent implementations in IMAS.jl (``neo_conductivity``) and OFT's
-``TokaMaker.bootstrap``.  Redl 2021 keeps Sauter's definitions of ``nu_e*``
-and ``ln(Lambda_e)`` (S99 18b, 18d), as restated in Saxena et al.,
-arXiv:2507.05166, appendix A.
+``TokaMaker.bootstrap``.
+
+Collisionality used with the Redl fits (settled from the primary text): Redl
+et al. 2021 keep Sauter's definition -- their section II.B states that the
+collisionality varies "according to Eqs. (18b) and (18c) in Ref. 4", Ref. 4
+being Sauter, Angioni and Lin-Liu, Phys. Plasmas 6, 2834 (1999) -- and S99
+eq. (18b) contains ``Z`` (= Z_eff): ``nu_e* = 6.921e-18 q R n_e Z ln(Lambda_e) /
+(Te^2 eps^1.5)``; S99 section II also writes it as ``0.012 n_e20 Z_eff q R /
+(eps^1.5 T_ekeV^2)``.  So :func:`nu_e_star` includes Z_eff for both models, as
+IMAS.jl ``nuestar`` does.  Saxena et al., arXiv:2507.05166, appendix A
+(eq. A4a), was found in an earlier reading to restate nu_e* without Z_eff
+(not re-read for this note); such a restatement disagrees with
+both primary texts and is not followed.  (The authors' Zenodo dataset cannot
+decide this: it tabulates the fits against nu_e* as an input coordinate.)
 
 Units are SI except temperatures, which are in eV as in the source papers.
 """
@@ -116,9 +127,11 @@ def spitzer_conductivity(ne, te_ev, zeff, ln_lambda=None):
 
 
 def nu_e_star(q, R, ne, te_ev, zeff, eps, ln_lambda=None):
-    r"""Electron collisionality nu_e* (Sauter 1999 eq. 18b).
+    r"""Electron collisionality nu_e* (Sauter 1999 eq. 18b; also the definition Redl 2021 uses).
 
-    ``nu_e* = 6.921e-18 |q| R n_e Z ln(Lambda_e) / (Te^2 eps^1.5)`` with ``R``
+    ``nu_e* = 6.921e-18 |q| R n_e Z ln(Lambda_e) / (Te^2 eps^1.5)``, ``Z`` =
+    Z_eff (S99 eq. 18b, checked against the paper; Redl 2021 section II.B
+    refers to S99 eqs. 18b-c, see the module docstring), with ``R``
     the flux-surface major radius [m] and ``eps`` the local inverse aspect
     ratio.  The papers leave the surface definitions of ``R`` and ``eps`` to
     the user; IMAS.jl and the OFT Python bootstrap both use

@@ -144,3 +144,81 @@ def test_steady_state_ohmic_shape_toroidal():
     shape = p["conductivity"] * gc["fpol"] * gc["avg_inv_r2"] * ss.meta["v_loop"] / (2 * np.pi)
     np.testing.assert_allclose(p["jdotb_ohmic"], shape, rtol=1e-10)
     np.testing.assert_allclose(p["v_loop"], ss.meta["v_loop"], rtol=1e-10)
+
+
+def _cylinder_equilibrium(n_geo=2001):
+    """Periodic-cylinder force-balance equilibrium with a diamagnetic B_z(r) (exact, analytic).
+
+    J_z = j0 (1 - r^2/a^2), B_theta = mu0 j0 (r/2 - r^3/(4 a^2)), B_z = B0 (1 - 0.05 r^2/a^2),
+    J_theta = -B_z'/mu0, dp/dr = J_theta B_z - J_z B_theta (radial force balance).  rho = sqrt(Phi/Phi_b) with
+    Phi(r) = 2 pi B0 (r^2/2 - 0.05 r^4/(4 a^2)); F = R0 B_z, <1/R^2> = 1/R0^2, <R> = R0, <1/R> = 1/R0,
+    <B^2> = B_z^2 + B_theta^2, psi(r) = R0 int B_theta dr.  In this geometry the identity of
+    ``profiles()['jphi_avg']`` reduces exactly to <J_phi> = J_z:
+    (B_z/B^2)(J_z B_z + J_theta B_theta) - (p_r / (R0 B_theta)) R0 B_theta^2 / B^2 = J_z.
+    """
+    from scipy.optimize import brentq
+    a, Rc, Bc, j0, bz = 0.5, 1.0e4, 2.0, 1.0e6, 0.05
+
+    def B_z(r):
+        return Bc * (1.0 - bz * r ** 2 / a ** 2)
+
+    def B_t(r):
+        return MU0 * j0 * (r / 2.0 - r ** 3 / (4.0 * a ** 2))
+
+    def J_z(r):
+        return j0 * (1.0 - r ** 2 / a ** 2)
+
+    def dp_dr(r):
+        return -B_z(r) * (-2.0 * Bc * bz * r / a ** 2) / MU0 - J_z(r) * B_t(r)
+
+    def phi(r):
+        return 2.0 * np.pi * Bc * (r ** 2 / 2.0 - bz * r ** 4 / (4.0 * a ** 2))
+
+    phib = phi(a)
+    rho = np.linspace(0.0, 1.0, n_geo)
+    r = np.array([0.0] + [brentq(lambda x: phi(x) - phib * v ** 2, 0.0, a, xtol=1e-15, rtol=1e-15)
+                          for v in rho[1:-1]] + [a])
+    dr_drho = np.empty(n_geo)
+    dr_drho[1:] = rho[1:] * phib / (np.pi * r[1:] * B_z(r[1:]))
+    dr_drho[0] = np.sqrt(phib / (np.pi * Bc))
+    one = np.ones(n_geo)
+    geo = FluxSurfaceGeometry(rho=rho, dvol_drho=4 * np.pi ** 2 * Rc * r * dr_drho,
+                              avg_grad_rho2_r2=1.0 / (dr_drho * Rc) ** 2, avg_inv_r2=one / Rc ** 2, fpol=Rc * B_z(r),
+                              phi_b=phib, B0=Bc, R0=Rc, avg_inv_r=one / Rc, avg_r=Rc * one,
+                              avg_b2=B_z(r) ** 2 + B_t(r) ** 2, meta=dict(r=r))
+    psi = Rc * MU0 * j0 * (r ** 2 / 4.0 - r ** 4 / (16.0 * a ** 2))
+    ip = 2.0 * np.pi * a * B_t(a) / MU0
+    r_of_rho = lambda x: np.interp(x, rho, r)  # noqa: E731  (only for evaluating exact values at cells)
+    return geo, rho, psi, ip, J_z, dp_dr, dr_drho, r_of_rho
+
+
+def test_jphi_avg_cylinder_equilibrium():
+    """<J_phi> output (eq. J1 of the P0c derivation) against an exact force-balance equilibrium.
+
+    Previously untested.  The state is the exact psi sampled onto the cells (not a discrete solution).
+    Interior cells: second order (bound 1.9-2.1, and < 1e-3 of max J_z at 200 cells; fixed before running).
+    Last cell: first order (bound 0.9-1.1).  [A first run asserted second order over all cells and failed
+    at the last cell: there the exact Ip boundary flux meets the O(h^2) error of the central-difference
+    face flux at rho_{n-1/2}, which no longer cancels across the cell, so <J.B> -- and with it <J_phi> --
+    is O(h) in the last cell whenever the state is not a discrete solution of the scheme (a sampled
+    equilibrium, or a state after a post_step crash).  Measured 1.1e-3, 6.1e-4, 3.1e-4 at 50/100/200 cells.]"""
+    from scipy.interpolate import PchipInterpolator
+    geo, rho, psi, ip, J_z, dp_dr, dr_drho, r_of_rho = _cylinder_equilibrium()
+    drdrho = PchipInterpolator(rho, dr_drho)
+    rr = PchipInterpolator(rho, geo.meta["r"])
+    e_in, e_last = [], []
+    for n in (25, 50, 100, 200):
+        rf = CurrentState.uniform_faces(n)
+        st = CurrentState.from_psi(rho, psi, rf)
+        sol = CurrentDiffusion(geo, 1.0e7, IpBoundary(ip))
+        rcells = st.rho_cells
+        p = sol.profiles(st, dpressure_drho=lambda x: dp_dr(rr(x)) * drdrho(x))
+        exact = J_z(rr(rcells))
+        err = np.abs(p["jphi_avg"] - exact) / np.max(np.abs(exact))
+        e_in.append(np.max(err[:-1]))
+        e_last.append(err[-1])
+    o_in = np.log2(np.array(e_in[:-1]) / np.array(e_in[1:]))
+    o_last = np.log2(np.array(e_last[:-1]) / np.array(e_last[1:]))
+    assert e_in[-1] < 1e-3, e_in
+    assert 1.9 <= o_in[-1] <= 2.1, (e_in, o_in)
+    assert 0.9 <= o_last[-1] <= 1.1, (e_last, o_last)

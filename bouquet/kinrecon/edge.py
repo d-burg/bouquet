@@ -28,7 +28,9 @@ iteration count, and never silent.  Project decisions (stated in neutral words):
   of I_p and of stored energy affected), and "converged" and "converged with edge taper"
   are distinct statuses.
 
-Three named variants (:data:`TAPER_VARIANTS`): ``edge_pinned`` (default, below),
+Three named variants (:data:`TAPER_VARIANTS`): ``edge_pinned`` (described below; the
+default of :func:`apply_edge_taper`, while the ``auto`` policy defaults to
+``pressure_conserving``, see :class:`EdgeTaperSetting`),
 ``last_node`` (exactly ``pprime[-1] = 0`` on the caller's grid, the standard TokaMaker
 practice; its width is the grid's last interval) and ``pressure_conserving`` (the ramp plus
 a compensating gradient in a band just inside it, so the pressure inside the band is
@@ -477,9 +479,15 @@ class EdgeTaperMode(str, Enum):
 
 @dataclass(frozen=True)
 class EdgeTaperSetting:
-    """Mode plus the taper geometry used when the taper is applied."""
+    """Mode plus the taper geometry used when the taper is applied.
+
+    The policy's default taper is ``pressure_conserving`` with the default band width
+    (:data:`BAND_WIDTH_DEFAULT`): it keeps the pedestal-top and core pressure and the
+    stored energy, at the price of modifying P' in the band just inside the taper start.
+    :func:`apply_edge_taper` called directly still defaults to ``edge_pinned``.
+    """
     mode: EdgeTaperMode = EdgeTaperMode.AUTO
-    spec: EdgeTaperSpec = field(default_factory=EdgeTaperSpec)
+    spec: EdgeTaperSpec = field(default_factory=lambda: EdgeTaperSpec(variant="pressure_conserving"))
 
     def __post_init__(self):
         object.__setattr__(self, "mode", EdgeTaperMode(self.mode))

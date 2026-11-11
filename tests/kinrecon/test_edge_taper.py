@@ -249,7 +249,10 @@ def test_policy_auto_limit_cycle_then_tapered():
     f = FakeSolve((False, CYCLE), (True, CONV))
     o = E.solve_with_edge_taper(f, E.EdgeTaperSetting("auto"))
     assert o.record["status"] == E.STATUS_CONVERGED_TAPER and o.record["taper_applied"]
-    assert f.calls[0] is None and f.calls[1] == E.EdgeTaperSpec()
+    # the policy's default taper is the pressure-conserving one with the default band
+    default = E.EdgeTaperSpec(variant="pressure_conserving")
+    assert E.EdgeTaperSetting().spec == default and E.BAND_WIDTH_DEFAULT == 0.02
+    assert f.calls[0] is None and f.calls[1] == default
     assert o.record["detector_verdict_untapered"] == "limit_cycle"
     assert len(o.record["attempts"]) == 2 and o.payload == ("state", True)
 
@@ -289,11 +292,11 @@ def test_case_uniformity_tapered_lock():
     ref = FakeSolve((False, CYCLE), (True, CONV))
     o = E.solve_with_edge_taper(ref, case=case, label="reference")
     assert o.record["status"] == E.STATUS_CONVERGED_TAPER
-    assert case.locked is True and case.decided_by == "reference" and case.taper_for_later_solves() == E.EdgeTaperSpec()
+    assert case.locked is True and case.decided_by == "reference" and case.taper_for_later_solves() == E.EdgeTaperSetting().spec
     # a later draw that would converge untapered still gets the same taper, with no untapered attempt
     draw = FakeSolve((True, CONV), (True, CONV))
     o2 = E.solve_with_edge_taper(draw, case=case, label="draw_001")
-    assert draw.calls == [E.EdgeTaperSpec()] and o2.record["status"] == E.STATUS_CONVERGED_TAPER
+    assert draw.calls == [E.EdgeTaperSetting().spec] and o2.record["status"] == E.STATUS_CONVERGED_TAPER
     assert o2.record["case_lock"]["locked"] is True
     assert [h["label"] for h in case.history] == ["reference", "draw_001"]
     json.dumps(case.as_dict())

@@ -69,26 +69,71 @@ meas)^2 / sigma^2``, IMAS DD).  A channel is valid when its FWT > 0, sigma is
 finite and > 0, and (MSE) |TGAMMA| > 1e-8, since EFIT writes 0 for chords
 without data.
 
-**Coils EFIT did not fit.**  ``FWTFC`` / ``FWTEC`` = 0 means EFIT held that
-coil current fixed (snap-file template: fit weights, default 0), not that the
-measurement is bad.  By default (``score_unfitted_coils=True``) such coils are
-valid measurements with weight 1 and are listed in the group's
-``meta["not_fitted_by_efit"]``; EFIT's own weights stay in
-``meta["efit_fit_weight"]``.  ``score_unfitted_coils=False`` reproduces the
-earlier behavior (valid only where FWT > 0, weight = FWT).
+**Coil roles in EFIT's fit** (recorded in ``meta["coil_roles"]``, one entry
+per coil, and summarized in ``meta["coil_role_rule"]``).  Evidence: m-file /
+k-file pairs (calculated = measured exactly for E-coils with ``IECURR = 1``;
+F-coil calculated != measured where ``FWTFC = 0``; a k-file with every
+``FWTFC = 0`` still has every calculated F current different from the
+measured one), and the k-file flags ``IECURR``, ``IFITVS``; EFIT source was
+not available (project record, fit-recipe experiment, assumption A4):
 
-**Units.**  Flux loops are multiplied by ``flux_scale`` (default 2 pi: EFIT
-COILS are poloidal flux per radian, COCOS 1; IMAS ``flux_loop[:].flux`` is
-the total flux in Wb, COCOS 11, psi_11 = 2 pi psi_1 with the same sign --
-O. Sauter and S. Yu. Medvedev, Comput. Phys. Commun. 184, 293 (2013), Table
-I).  The SIGN of the stored flux depends on the producer's conventions
-(e.g. the discharge's current direction and the device's flux-loop
-calibration), so it is a stated choice: pass a negative ``flux_scale`` when
-the file's sign is opposite to the one wanted.  A k-file may also store loop
-fluxes RELATIVE to a reference loop (its own entry then reads 0, and EFIT
-fits the reference flux separately, cf. ``FITSIREF`` / ``SIREF``); name that
-loop with ``flux_reference`` and it is recorded in ``meta`` so the forward
-model compares ``psi_i - psi_ref``.  Neither is inferred from the file.
+* ``"fitted"`` -- an F-coil (``BRSP``) with ``FWTFC > 0``: its current is a
+  free fit parameter AND its measurement is a constraint row of EFIT's fit;
+* ``"free"`` -- an F-coil with ``FWTFC = 0``: its current is still a free fit
+  parameter, but its MEASUREMENT is not a constraint (it is NOT held fixed);
+* ``"held"`` -- an E-coil (``ECURRT``) when ``IECURR = 1``: EFIT holds it at
+  the measured current;
+* ``"fitted"`` / ``"free"`` for E-coils when ``IECURR = 2`` (by ``FWTEC``), and
+  ``"undetermined"`` when ``IECURR`` is absent or has another value (the caller
+  must state the role).
+
+**Scoring coils EFIT did not constrain.**  By default
+(``score_unfitted_coils=True``) coils with ``FWTFC`` / ``FWTEC`` = 0 are valid
+measurements with weight 1 for SCORING (project ruling R04) and are listed in
+``meta["not_fitted_by_efit"]``; EFIT's own weights stay in
+``meta["efit_fit_weight"]``.  Whether a coil measurement is a constraint of a
+FIT is a separate question answered by ``coil_roles`` (a fit should use rows
+only for ``"fitted"`` coils and hold the ``"held"`` ones).
+``score_unfitted_coils=False`` reproduces the earlier behavior (valid only
+where FWT > 0, weight = FWT).
+
+**Flux-loop gauge (``SIREF``; project record open item B14, settled by direct
+comparison with m-file values).**  Three k-file families exist on disk:
+(A) OMFIT kinetic-EFIT aggregates store ``COILS`` RELATIVE to the reference
+loop (its own entry 0) with the measured absolute reference flux in ``SIREF``;
+EFIT itself fits absolute fluxes, m-file ``silopt = COILS + SIREF`` to 6e-8;
+(B) kinetic-EFIT ``k1.000`` files with ``FITSIREF = T`` also store relative
+``COILS`` (reference entry ~2e-6 of the largest), ``psiref = SIREF``, and EFIT
+scores relative values against its own fitted offset ``csiref``; (C) the
+2026 EFIT-AI re-runs store ABSOLUTE ``COILS`` with ``SIREF = 0`` for some
+shots and relative ``COILS`` with ``SIREF != 0`` for others.  In every family
+the absolute flux is ``COILS + SIREF`` (per radian, the file's sign).  The
+adapter records ``meta["siref"]`` (file units), ``meta["coils_form"]``
+(``"relative"`` when the reference entry vanishes to 1e-4 of the largest and
+``SIREF != 0``; ``"absolute"`` when ``SIREF = 0`` and the reference entry is
+nonzero; otherwise ``"undetermined"``) and ``meta["absolute_offset"]`` =
+``flux_scale * SIREF`` [Wb]: ``measured + absolute_offset`` is the absolute
+flux in the group's units.  Only a solver needs the absolute gauge; scoring
+stays in the form the data are stored in (relative to ``flux_reference``
+when that is named).
+
+**Units and sign.**  Flux loops are multiplied by ``flux_scale``, default
+``-2 pi``.  The k-files tested store ``COILS`` in the sign of the flux
+whose ``B_Z = +(1/R) dpsi/dR`` -- TokaMaker's ``psi_TM`` sign -- WHATEVER the
+direction of Ip (fit ``COILS = a psi_EFIT + b`` against EFIT's own ``psirz``
+and the probe-fitted field sign: ``a = -1.005 .. -1.007`` x 2 pi in the
+needed scale on 4 cases with Ip > 0 / < 0 and B_t > 0 / < 0; independent
+review, project record report 32, finding F2, and the P0a / suite runs that
+used ``-2 pi``).  IMAS DD 3.41.0 ``magnetics.flux_loop[:].flux`` is the flux
+"over loop in which Z component of normal to loop is directed downwards",
+i.e. ``-2 pi psi_TM`` (what :func:`..diagnostics.flux_loop` models), so the
+measured value is ``-2 pi COILS``.  (The earlier default ``+2 pi`` with a
+COCOS-1 "same sign" argument was wrong for these files.)  Other producers
+may differ: ``flux_scale`` stays a stated argument.  A k-file may store loop
+fluxes RELATIVE to a reference loop or ABSOLUTE -- decided PER SLICE from the
+file (``SIREF`` and the reference entry; "Flux-loop gauge" above).  Naming a
+``flux_reference`` on a slice that is not in relative form raises: the
+relative model ``psi_i - psi_ref`` would then be compared with absolute data.
 
 ``DFLUX`` and ``SIGDLC`` [mV s] are multiplied by 1e-3 to Wb.  Coil currents
 are passed through as written, or divided by the bundle's ``pf_current``
@@ -231,7 +276,7 @@ VBIT_DEFAULT = 10.0
 
 
 def measurements_from_kfile(kfile, machine, groups=None, time_window=None,
-                            er_corrected="auto", flux_scale=2.0 * np.pi,
+                            er_corrected="auto", flux_scale=-2.0 * np.pi,
                             coil_current_per_turn=(), flux_reference=None, meta=None,
                             sigma_model="efit_vbit", score_unfitted_coils=True):
     """Build a :class:`MeasurementSet` from an EFIT k-file.
@@ -255,7 +300,8 @@ def measurements_from_kfile(kfile, machine, groups=None, time_window=None,
         Whether ``TGAMMA`` is E_r-corrected; ``auto`` applies
         :func:`mse_er_status` and raises when the status cannot be decided.
     flux_scale : float
-        Multiplies ``COILS`` and ``PSIBIT`` (see module docstring).
+        Multiplies ``COILS`` and ``PSIBIT``; default ``-2 pi`` (module
+        docstring, "Units and sign").
     coil_current_per_turn : bool or sequence of str
         Source arrays (``"BRSP"``, ``"ECURRT"``) whose currents are divided by
         the bundle's ``pf_current`` ``turns``; True = all.
@@ -350,9 +396,11 @@ def measurements_from_kfile(kfile, machine, groups=None, time_window=None,
             gm["efit_fit_weight"] = fwt.copy()
             gm["not_fitted_by_efit"] = [labels[i] for i in np.nonzero(unfitted)[0]]
             if np.any(unfitted):
-                gm["note"] = ("EFIT did not fit the coils in 'not_fitted_by_efit' "
-                              "(fit weight 0: current held fixed); they are scored here "
-                              "as valid measurements with weight 1")
+                gm["note"] = ("EFIT gave the coils in 'not_fitted_by_efit' fit weight 0: their "
+                              "MEASUREMENT is not a constraint of EFIT's fit (an F-coil current is "
+                              "then still a free fit parameter; an E-coil with IECURR = 1 is held at "
+                              "its measured current -- see meta['coil_roles']); they are scored "
+                              "here as valid measurements with weight 1")
         gm.update(extra or {})
         return ConstraintGroup(name=name, labels=labels, measured=value, sigma=sigma,
                                valid=valid, weight=weight, geometry=geometry, meta=gm)
@@ -365,14 +413,22 @@ def measurements_from_kfile(kfile, machine, groups=None, time_window=None,
         ref = np.zeros(n, dtype=bool)
         if flux_reference is not None:
             ref[labels.index(flux_reference)] = True
+        coils_raw = _num(in1, "COILS", n)
+        gauge = flux_gauge(in1, coils_raw, labels.index(flux_reference) if flux_reference else None,
+                           flux_scale)
+        ms.meta["SIREF"] = gauge["siref"]
+        if flux_reference is not None and gauge["coils_form"] != "relative":
+            raise ValueError(f"flux_reference {flux_reference!r} given, but this slice's loop fluxes are not in "
+                             f"relative form (coils_form = {gauge['coils_form']!r}: {gauge['coils_form_evidence']}); "
+                             "the storage form is decided per slice -- do not name a reference for absolute data")
         ms.groups["flux_loop"] = efit_group(
-            "flux_loop", _num(in1, "COILS", n), _num(in1, "FWTSI", n, 0.0),
+            "flux_loop", coils_raw, _num(in1, "FWTSI", n, 0.0),
             _num(in1, "PSIBIT", n, 0.0), labels, machine.geometry("flux_loop"),
             scale=flux_scale, floor_only=ref,
-            extra={"flux_scale": flux_scale, "units": "COILS [Wb/rad] x flux_scale",
-                   "flux_reference": flux_reference,
-                   "sigma_basis": "COILS as stored (relative to the reference loop "
-                                  "when the file stores relative fluxes)"})
+            extra=dict({"flux_scale": flux_scale, "units": "COILS [Wb/rad] x flux_scale",
+                        "flux_reference": flux_reference,
+                        "sigma_basis": "COILS as stored (relative to the reference loop "
+                                       "when the file stores relative fluxes)"}, **gauge))
     if "bpol_probe" in groups and need("bpol_probe", "EXPMP2" in in1):
         labels = machine.labels("bpol_probe")
         n = len(labels)
@@ -399,6 +455,67 @@ def measurements_from_kfile(kfile, machine, groups=None, time_window=None,
     if "mse" in groups and need("mse", "TGAMMA" in nl.get("INS", {})):
         ms.groups["mse"] = _mse(nl, machine, er_corrected)
     return ms
+
+
+#: |COILS[reference]| <= this x max|COILS| counts as a zero reference entry (relative storage).
+RELATIVE_REFERENCE_RTOL = 1.0e-4
+
+
+def flux_gauge(in1, coils, ref_index, flux_scale):
+    """The k-file's flux-loop gauge: ``SIREF`` and the storage form of ``COILS``.
+
+    Returns ``{"siref", "siref_source", "coils_form", "coils_form_evidence",
+    "absolute_offset", "absolute_rule"}`` (module docstring, "Flux-loop
+    gauge").  ``absolute_offset = flux_scale * SIREF`` [Wb]; the absolute flux
+    in the group's units is ``measured + absolute_offset``.
+    """
+    siref = _scalar(in1, "SIREF")
+    src = "k-file &IN1 SIREF" if siref is not None else "absent (taken as 0)"
+    s = 0.0 if siref is None or not np.isfinite(siref) else float(siref)
+    big = float(np.nanmax(np.abs(coils))) if np.any(np.isfinite(coils)) else 0.0
+    if ref_index is None:
+        if s == 0.0:
+            form, ev = "absolute", ("SIREF = 0 (or absent): absolute storage (report 32 F3: SIREF = 0 slices store "
+                                    "absolute COILS); no flux_reference named, so the reference entry is not checked")
+        else:
+            form, ev = "undetermined", "SIREF != 0 but no flux_reference named: the reference entry cannot be checked"
+    else:
+        r = float(coils[ref_index])
+        rel = abs(r) / big if big > 0 else np.inf
+        if rel <= RELATIVE_REFERENCE_RTOL and s != 0.0:
+            form = "relative"
+        elif s == 0.0 and r != 0.0:
+            form = "absolute"
+        else:
+            form = "undetermined"
+        ev = (f"|COILS[reference]| / max|COILS| = {rel:.3g} (threshold {RELATIVE_REFERENCE_RTOL:g}); "
+              f"SIREF {'= 0' if s == 0.0 else '!= 0'}")
+    return {"siref": s, "siref_source": src, "coils_form": form, "coils_form_evidence": ev,
+            "absolute_offset": float(flux_scale) * s,
+            "absolute_rule": "absolute flux = (COILS + SIREF) x flux_scale = measured + absolute_offset "
+                             "(all k-file families checked against m-file silopt/psiref; B14)"}
+
+
+def _coil_roles(labels, sizes, parts, fwt, iecurr):
+    """Per-coil role in EFIT's fit (module docstring, "Coil roles")."""
+    roles, k = {}, 0
+    for (key, _, _), n in zip(parts, sizes):
+        for i in range(n):
+            lab, w = labels[k], float(fwt[k])
+            if key == "BRSP":
+                roles[lab] = "fitted" if w > 0 else "free"
+            elif iecurr == 1.0:
+                roles[lab] = "held"
+            elif iecurr == 2.0:
+                roles[lab] = "fitted" if w > 0 else "free"
+            else:
+                roles[lab] = "undetermined"
+            k += 1
+    rule = ("F-coils (BRSP): FWTFC > 0 -> 'fitted' (free current + measurement row), FWTFC = 0 -> "
+            "'free' (free current, measurement not a constraint); E-coils (ECURRT): IECURR = 1 -> "
+            "'held' at the measured current, IECURR = 2 -> 'fitted'/'free' by FWTEC, else "
+            f"'undetermined' (IECURR in this file: {iecurr})")
+    return roles, rule
 
 
 def _coils(in1, machine, efit_group, per_turn, score_unfitted):
@@ -444,10 +561,15 @@ def _coils(in1, machine, efit_group, per_turn, score_unfitted):
         if turns is None:
             raise ValueError("coil_current_per_turn needs 'turns' in the bundle's pf_current")
         scale = np.where(divide, 1.0 / np.asarray(turns, dtype=float), 1.0)
+    iecurr = _scalar(in1, "IECURR")
+    roles, rule = _coil_roles(labels, sizes, parts, fwt, iecurr)
     extra = {"current_convention": {k: ("k-file value / bundle turns" if k in per_turn
                                         else "as written in the k-file")
                                     for k, _, _ in parts},
-             "score_unfitted_coils": bool(score_unfitted)}
+             "score_unfitted_coils": bool(score_unfitted),
+             "coil_roles": roles, "coil_role_rule": rule, "IECURR": iecurr,
+             "coil_arrays": {k: list(labels[sum(sizes[:j]):sum(sizes[:j + 1])])
+                             for j, (k, _, _) in enumerate(parts)}}
     return efit_group("pf_current", val, fwt, bit, labels, geometry, scale=scale,
                       extra=extra, unfitted_valid=bool(score_unfitted))
 

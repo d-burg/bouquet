@@ -102,7 +102,8 @@ def test_magnetics_sigma_and_weights(kfile):
     ms = measurements_from_kfile(nl, _machine())
     fl = ms.groups["flux_loop"]
     two_pi = 2 * np.pi
-    np.testing.assert_allclose(fl.measured, np.array([0.1, -0.2, 0.3]) * two_pi, rtol=1e-15)
+    # default flux_scale is -2 pi (the k-files tested store COILS in the solver's psi sign)
+    np.testing.assert_allclose(fl.measured, -np.array([0.1, -0.2, 0.3]) * two_pi, rtol=1e-15)
     # sigma = max(SERROR |COILS|, VBIT PSIBIT) x 2 pi, VBIT absent -> 10
     np.testing.assert_allclose(fl.sigma, np.maximum(0.03 * np.array([0.1, 0.2, 0.3]), 1e-2) * two_pi)
     assert fl.valid.tolist() == [True, False, True]
@@ -124,11 +125,18 @@ def test_magnetics_sigma_and_weights(kfile):
 def test_flux_sign_and_reference(kfile):
     nl = read_kfile(kfile)
     nl["IN1"]["FWTSI"] = [1.0, 1.0, 1.0]
-    g = measurements_from_kfile(nl, _machine(), groups=["flux_loop"], flux_scale=-2 * np.pi,
-                                flux_reference="L0").groups["flux_loop"]
-    np.testing.assert_allclose(g.measured, -2 * np.pi * np.array([0.1, -0.2, 0.3]))
+    # this slice stores ABSOLUTE fluxes (no SIREF, reference entry nonzero): a reference is refused
+    with pytest.raises(ValueError, match="not in relative form"):
+        measurements_from_kfile(nl, _machine(), groups=["flux_loop"], flux_reference="L0")
+    g = measurements_from_kfile(nl, _machine(), groups=["flux_loop"], flux_scale=+2 * np.pi).groups["flux_loop"]
+    np.testing.assert_allclose(g.measured, 2 * np.pi * np.array([0.1, -0.2, 0.3]))   # a stated scale is applied
+    # relative storage (reference entry 0, SIREF set): the reference is accepted
+    nl["IN1"]["COILS"] = [0.0, -0.2, 0.3]
+    nl["IN1"]["SIREF"] = [0.4]
+    g = measurements_from_kfile(nl, _machine(), groups=["flux_loop"], flux_reference="L0").groups["flux_loop"]
+    np.testing.assert_allclose(g.measured, -2 * np.pi * np.array([0.0, -0.2, 0.3]))
     assert (g.sigma > 0).all()                     # sigma uses |scale|
-    assert g.meta["flux_reference"] == "L0"
+    assert g.meta["flux_reference"] == "L0" and g.meta["coils_form"] == "relative"
     with pytest.raises(ValueError, match="flux_reference"):
         measurements_from_kfile(nl, _machine(), groups=["flux_loop"], flux_reference="nope")
 
@@ -218,7 +226,9 @@ def _with_in1(text, **kv):
 def test_vbit_read_from_kfile_sets_the_floor():
     nl = parse_namelists(_with_in1(KFILE, VBIT="40.0", BITIP="1.0E+4"))
     nl["IN1"]["FWTSI"] = [1.0, 1.0, 1.0]
-    nl["IN1"]["COILS"] = [2.0, -0.2, 0.3]
+    # relative storage (reference entry 0, SIREF set): a reference may be named (report 32 F3)
+    nl["IN1"]["COILS"] = [0.0, -2.0, 0.3]
+    nl["IN1"]["SIREF"] = [0.7]
     ms = measurements_from_kfile(nl, _machine(with_maps=True), flux_reference="L0")
     two_pi = 2 * np.pi
     assert ms.meta["VBIT"] == 40.0 and ms.meta["VBIT_source"] == "k-file &IN1"
@@ -227,8 +237,8 @@ def test_vbit_read_from_kfile_sets_the_floor():
                                                     40 * 1e-3), rtol=1e-15)
     assert pr.meta["VBIT"] == 40.0 and pr.meta["sigma_model"] == "efit_vbit"
     fl = ms.groups["flux_loop"]
-    # reference loop L0: VBIT PSIBIT only, although SERROR |COILS| = 0.06 > 0.04
-    np.testing.assert_allclose(fl.sigma, np.array([0.04, 0.04, 0.04]) * two_pi, rtol=1e-15)
+    # reference loop L0: VBIT PSIBIT only; L1: SERROR |COILS| = 0.06 > 0.04 binds
+    np.testing.assert_allclose(fl.sigma, np.array([0.04, 0.06, 0.04]) * two_pi, rtol=1e-15)
     co = ms.groups["pf_current"]
     np.testing.assert_allclose(co.sigma, [400.0, 400.0, 40.0])       # F0, F1, E0
     # Ip: SERROR |PLASMA|, no bit floor (VBIT BITIP = 4e5 would dominate)
@@ -265,7 +275,8 @@ def test_zero_weight_coils_old_behavior_option(kfile):
     assert "not_fitted_by_efit" not in c.meta
     d = measurements_from_kfile(kfile, _machine(with_maps=True),
                                 groups=["pf_current"]).groups["pf_current"]
-    assert "did not fit" in d.meta["note"]
+    # the note no longer claims a zero-weight coil is "held fixed" (wrong for F-coils, P1 report)
+    assert "is not a constraint" in d.meta["note"] and "held fixed" not in d.meta["note"]
     np.testing.assert_array_equal(d.meta["efit_fit_weight"], [1.0, 1.0, 0.0])
 
 

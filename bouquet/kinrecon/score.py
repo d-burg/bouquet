@@ -49,7 +49,15 @@ def _model_group(eq, name, group, kinetics, notes):
         return _diag.flux_loop(eq, geo, reference=(float(np.asarray(geo["r"])[i]),
                                                    float(np.asarray(geo["z"])[i])))
     if name == "bpol_probe":
-        return _diag.bpol_probe(eq, geo)
+        model = group.meta.get("probe_model", "finite_length")
+        n_avg = int(group.meta.get("probe_n_avg", _diag.PROBE_N_AVG_DEFAULT))
+        if model == "finite_length" and "length" in geo:
+            notes.append(f"bpol_probe: finite-length probes (EFIT midpoint rule, n_avg = {n_avg})")
+        elif model == "finite_length":
+            notes.append("bpol_probe: no probe lengths in the geometry: point probes")
+        else:
+            notes.append("bpol_probe: point probes (meta['probe_model'] = 'point')")
+        return _diag.bpol_probe(eq, geo, model=model, n_avg=n_avg)
     if name == "ip":
         return _diag.ip(eq, geo)
     if name == "diamagnetic_flux":
@@ -103,7 +111,10 @@ def score(equilibrium, measurements, kinetics=None, groups=None):
         Naming such a group explicitly raises instead.
 
     Group ``meta`` read here: flux-loop ``flux_reference`` (label of the
-    reference loop; the model is then relative to it); MSE ``er_corrected`` (bool), ``quantity``
+    reference loop; the model is then relative to it); probe ``probe_model``
+    (``'finite_length'`` [default: length-averaged where the geometry carries
+    ``length``] or ``'point'``) and ``probe_n_avg`` (default 25, EFIT
+    ``NSMP2``); MSE ``er_corrected`` (bool), ``quantity``
     (``'polarisation_angle'`` [rad, default] or ``'tan_polarisation_angle'``)
     and ``field_orientation`` (``(sign_pol, sign_tor)``, a stated convention,
     default ``(1, 1)``).

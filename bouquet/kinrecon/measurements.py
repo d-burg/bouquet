@@ -503,8 +503,15 @@ class MachineBundle:
     ``sensors`` maps a canonical group name (see
     :data:`~.interfaces.GROUP_IDS_PATHS`) to ``{"labels": [...], <geometry>}``
     with the same per-channel geometry keys a :class:`ConstraintGroup` uses:
-    ``r``, ``z``; ``direction_r``, ``direction_z`` for poloidal-field probes;
+    ``r``, ``z``; ``direction_r``, ``direction_z`` for poloidal-field probes,
+    plus their optional signed ``length`` [m] (EFIT ``SMP2`` semantics: > 0
+    the probe segment lies along its direction, < 0 perpendicular to it;
+    convention text :data:`.diagnostics.PROBE_LENGTH_CONVENTION`, to be
+    recorded in ``meta['probe_length_convention']``; probes are then scored
+    length-averaged by default, see :func:`.diagnostics.bpol_probe`);
     ``coefficients`` (n, 9) for MSE; ``turns`` (optional) for coils.
+    Adapters copy every per-channel key into the group geometry, so a
+    ``length`` in the bundle reaches the scorer unchanged.
     Channels are listed in the order the device's own files use, so that
     adapters reading unlabeled arrays (e.g. EFIT k-files) can name them.
 

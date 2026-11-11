@@ -37,6 +37,9 @@ group                  unit         model
                                     toroidal normal component.  IMAS
                                     ``magnetics.b_field_pol_probe[:].field``,
                                     direction from ``poloidal_angle``.
+                                    Averaged over the probe's signed
+                                    ``length`` (EFIT convention) when the
+                                    geometry carries one (default).
 ``ip``                 A            signed toroidal plasma current from
                                     ``get_globals`` (``gs_comp_globals``,
                                     divided by mu0 in
@@ -128,6 +131,23 @@ def on_mesh(eq, pts):
     pts = np.asarray(pts, dtype=float).reshape(-1, 2)
     xy = np.asarray(gs.r)[:, :2]
     tri = np.asarray(gs.lc)
+    # the mesh of a TokaMaker object never changes: results are cached per (mesh, point set)
+    key = (xy.shape, float(np.sum(xy)), float(np.sum(xy[:, 0] * np.arange(xy.shape[0]))), tri.shape,
+           pts.tobytes())
+    hit = _ON_MESH_CACHE.get(key)
+    if hit is not None:
+        return hit.copy()
+    out = _on_mesh_compute(xy, tri, pts)
+    if len(_ON_MESH_CACHE) > 256:
+        _ON_MESH_CACHE.clear()
+    _ON_MESH_CACHE[key] = out.copy()
+    return out
+
+
+_ON_MESH_CACHE = {}
+
+
+def _on_mesh_compute(xy, tri, pts):
     a, b, c = xy[tri[:, 0]], xy[tri[:, 1]], xy[tri[:, 2]]
     v0, v1 = b - a, c - a
     den = v0[:, 0] * v1[:, 1] - v1[:, 0] * v0[:, 1]
@@ -296,7 +316,68 @@ def flux_loop(eq, geometry, reference=None):
     return Synthetic(val, reason)
 
 
-def bpol_probe(eq, geometry):
+#: Probe models of :func:`bpol_probe`.
+PROBE_MODELS = ("finite_length", "point")
+#: Default number of averaging points along a finite-length probe (EFIT ``NSMP2``).
+PROBE_N_AVG_DEFAULT = 25
+#: Reason recorded for a finite-length probe whose segment leaves the mesh.
+REASON_SEGMENT_OFF_MESH = ("finite-length probe: part of the averaging segment lies off the "
+                           "TokaMaker mesh; the channel is not modelable (never truncated)")
+#: Convention text stored with probe lengths (machine bundles, group meta, records).
+PROBE_LENGTH_CONVENTION = ("EFIT: signed length SMP2 [m]; > 0 the segment lies along the probe "
+                           "direction (AMP2), < 0 perpendicular to it (saddle loops); B.n averaged "
+                           "at n_avg midpoints (k - (n_avg-1)/2) |L| / n_avg, k = 0..n_avg-1")
+
+
+def probe_segment_points(geometry, n_avg=PROBE_N_AVG_DEFAULT):
+    """Averaging points of finite-length poloidal-field probes.
+
+    EFIT convention (OMFIT ``omfit_efund.py``, T. Strait 2016 note; ``mhdin.dat``
+    ``&IN5 NSMP2 = 25``): a probe of signed length ``L`` (EFIT ``SMP2``) centered
+    at ``(r, z)`` measures the field component along its direction averaged over a
+    straight segment of length ``|L|``; for ``L > 0`` the segment lies along the
+    probe direction ``n``, for ``L < 0`` perpendicular to it (saddle loops; their
+    toroidal extent is irrelevant under axisymmetry).  The averaging rule is the
+    midpoint rule with ``n_avg`` points at offsets ``(k - (n_avg - 1)/2) |L| / n_avg``,
+    ``k = 0 .. n_avg - 1``; this placement was determined numerically against
+    EFIT's own calculated probe signals (project record, probe-table test: 1e-4 sigma
+    rms with midpoints vs 0.023 sigma with endpoint-inclusive placement).
+
+    Returns ``(points (n, n_avg, 2), ends (n, 2, 2))``: the averaging points and
+    the two segment end points ``center -/+ |L|/2 t`` of every probe (``t`` the
+    segment's unit tangent).  A probe with ``L = 0`` (or no ``length`` key)
+    has all its points at the center.
+    """
+    pts = _points(geometry)
+    n = pts.shape[0]
+    nr = np.atleast_1d(np.asarray(geometry["direction_r"], dtype=float)).ravel()
+    nz = np.atleast_1d(np.asarray(geometry["direction_z"], dtype=float)).ravel()
+    norm = np.hypot(nr, nz)
+    if np.any(~np.isfinite(norm) | (norm <= 0.0)):
+        raise ValueError("bpol_probe: probe direction must be a finite, non-zero vector")
+    nr, nz = nr / norm, nz / norm
+    L = np.zeros(n) if "length" not in geometry else \
+        np.atleast_1d(np.asarray(geometry["length"], dtype=float)).ravel()
+    if L.shape != (n,):
+        raise ValueError("bpol_probe: 'length' must have one entry per probe")
+    if not np.all(np.isfinite(L)):
+        raise ValueError("bpol_probe: 'length' must be finite (0 for a point probe)")
+    n_avg = int(n_avg)
+    if n_avg < 1:
+        raise ValueError("n_avg must be >= 1")
+    # segment tangent: along n for L > 0, perpendicular (n rotated by +90 deg) for L < 0
+    tr = np.where(L >= 0.0, nr, -nz)
+    tz = np.where(L >= 0.0, nz, nr)
+    off = (np.arange(n_avg) - 0.5 * (n_avg - 1)) / n_avg          # midpoints, in units of |L|
+    s = np.abs(L)[:, None] * off[None, :]
+    points = np.stack((pts[:, 0:1] + s * tr[:, None], pts[:, 1:2] + s * tz[:, None]), axis=-1)
+    half = 0.5 * np.abs(L)
+    ends = np.stack((np.column_stack((pts[:, 0] - half * tr, pts[:, 1] - half * tz)),
+                     np.column_stack((pts[:, 0] + half * tr, pts[:, 1] + half * tz))), axis=1)
+    return points, ends
+
+
+def bpol_probe(eq, geometry, model="finite_length", n_avg=PROBE_N_AVG_DEFAULT):
     """Poloidal-field probe signal ``B . n`` [T].
 
     ``n = (direction_r, direction_z)`` is the probe's unit normal in the
@@ -304,10 +385,26 @@ def bpol_probe(eq, geometry):
     ``magnetics.b_field_pol_probe[:].poloidal_angle`` is measured CLOCKWISE
     from the +R direction in the (R, Z) plane, so ``n = (cos a, -sin a)``
     (``a = -pi/2`` points along +Z); the conversion is
-    :func:`bouquet.kinrecon.measurements.probe_direction`.  Identical to OFT ``fit_field_eval``
-    (``grad_shaf_fit.F90``) with a zero toroidal normal component.  The
-    direction vector is normalized here and must be non-zero.
+    :func:`bouquet.kinrecon.measurements.probe_direction`.  The point form is
+    identical to OFT ``fit_field_eval`` (``grad_shaf_fit.F90``) with a zero
+    toroidal normal component.  The direction vector is normalized here and
+    must be non-zero.
+
+    ``model="finite_length"`` (default): when ``geometry`` carries a signed
+    ``length`` [m] (EFIT ``SMP2``; IMAS ``b_field_pol_probe[:].length``), the
+    signal is ``B . n`` averaged over the probe's segment by the EFIT midpoint
+    rule (:func:`probe_segment_points`, ``n_avg`` points, default 25 = EFIT
+    ``NSMP2``).  Probes with ``length = 0`` and geometries without ``length``
+    are point probes.  If any averaging point OR either segment end lies off
+    the mesh the channel is NaN with :data:`REASON_SEGMENT_OFF_MESH` -- a
+    segment is never silently truncated.  ``model="point"``: the field at the
+    center only (the earlier behavior).  The evidence that EFIT's calculated
+    signals are length-averaged (and that the point model misses them by up to
+    1.5 sigma, about +0.13 chi^2 per probe on fine-grid cases) is in the
+    project record (probe-table test, finite probe length).
     """
+    if model not in PROBE_MODELS:
+        raise ValueError(f"bpol_probe: model must be one of {PROBE_MODELS}")
     pts = _points(geometry)
     nr = np.atleast_1d(np.asarray(geometry["direction_r"], dtype=float)).ravel()
     nz = np.atleast_1d(np.asarray(geometry["direction_z"], dtype=float)).ravel()
@@ -316,8 +413,38 @@ def bpol_probe(eq, geometry):
     norm = np.hypot(nr, nz)
     if np.any(~np.isfinite(norm) | (norm <= 0.0)):
         raise ValueError("bpol_probe: probe direction must be a finite, non-zero vector")
-    B, reason = field_at(eq, pts)
-    return Synthetic((B[:, 0] * nr + B[:, 2] * nz) / norm, reason)
+    has_len = "length" in geometry
+    if model == "point" or not has_len:
+        B, reason = field_at(eq, pts)
+        return Synthetic((B[:, 0] * nr + B[:, 2] * nz) / norm, reason)
+    seg, ends = probe_segment_points(geometry, n_avg)
+    n, m = seg.shape[0], seg.shape[1]
+    B, reason_pts = field_at(eq, seg.reshape(-1, 2))
+    bn = (B[:, 0].reshape(n, m) * (nr / norm)[:, None] + B[:, 2].reshape(n, m) * (nz / norm)[:, None])
+    reason_pts = reason_pts.reshape(n, m)
+    good = np.all(np.isfinite(pts), axis=1) & (pts[:, 0] > 0.0)
+    end_ok = np.ones(n, dtype=bool)
+    flat_ends = ends.reshape(-1, 2)
+    fin = np.all(np.isfinite(flat_ends), axis=1) & (flat_ends[:, 0] > 0.0)
+    on = np.zeros(flat_ends.shape[0], dtype=bool)
+    on[fin] = on_mesh(eq, flat_ends[fin])
+    end_ok = on.reshape(n, 2).all(axis=1)
+    val = np.full(n, np.nan)
+    reason = _reasons(n)
+    for i in range(n):
+        if not good[i]:
+            reason[i] = REASON_BAD_GEOMETRY
+            continue
+        bad = [r for r in reason_pts[i] if r]
+        if bad and all(r == REASON_NONFINITE for r in bad):
+            reason[i] = REASON_NONFINITE
+            continue
+        if bad or not end_ok[i]:
+            reason[i] = REASON_SEGMENT_OFF_MESH if np.any(np.abs(seg[i] - pts[i]) > 0) else (bad[0] if bad else
+                                                                                               REASON_OFF_MESH)
+            continue
+        val[i] = float(np.mean(bn[i]))
+    return Synthetic(val, reason)
 
 
 def ip(eq, geometry=None):

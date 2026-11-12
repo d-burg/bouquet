@@ -4,7 +4,9 @@
   noise model, for closure tests and limited-coverage studies;
 * :mod:`.imas_json` -- from an IMAS-style JSON dict (OMAS / FUSE output) and a
   time window;
-* :mod:`.efit_kfile` -- from an EFIT k-file namelist and a machine bundle.
+* :mod:`.efit_kfile` -- from an EFIT k-file namelist and a machine bundle;
+* :mod:`.efit_tree` -- from an EFIT run's stored measurement arrays of one
+  time (measured and fitted values, weights, chi^2) and a machine bundle.
 
 Every group an adapter builds records the name of its uncertainty convention
 in ``meta["sigma_model"]`` (and its parameters in ``meta["sigma_params"]``).

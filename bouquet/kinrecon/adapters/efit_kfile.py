@@ -155,10 +155,14 @@ values).**  Three k-file families have been seen:
 loop (its own entry exactly 0) with the measured absolute reference flux in
 ``SIREF``; EFIT itself fits absolute fluxes, m-file ``silopt = COILS + SIREF``
 to 6e-8; (B) kinetic-EFIT files with ``FITSIREF = T`` also store relative
-``COILS`` (the reference entry small but not zero), ``psiref = SIREF``, and
-EFIT scores relative values against its own fitted reference offset
-(``csiref``: EFIT's calculated loop flux plus that offset is its total flux
-at the loop); (C) EFIT re-runs store ABSOLUTE ``COILS`` with ``SIREF = 0``
+``COILS`` (the reference entry small but not zero) with the MEASURED
+reference flux in ``SIREF``, and EFIT fits an additive reference offset
+together with its other unknowns (its calculated loop flux equals the
+stored relative value plus that offset); whether the fitted offset is
+written to a measurement file depends on the code version -- some versions
+store it (where present, the closed form below reproduces it exactly),
+others write it only to the fit's text output -- so it is never read from
+a file here; (C) EFIT re-runs store ABSOLUTE ``COILS`` with ``SIREF = 0``
 for some discharges and relative ``COILS`` with ``SIREF != 0`` and
 ``FITSIREF = T`` for others.  In every family the absolute flux is ``COILS +
 SIREF`` (per radian, the file's sign).
@@ -168,7 +172,7 @@ The storage form (``meta["coils_form"]``: ``"relative"``, ``"absolute"`` or
 and the rule that decided is recorded (``meta["coils_form_rule"]``):
 
 1. ``"fitsiref"`` -- ``FITSIREF = T`` in the file: relative to a reference
-   offset that EFIT fits;
+   offset that EFIT fits (scored with a fitted offset, below);
 2. ``"siref_zero"`` / ``"reference_entry_zero"`` -- what one slice can decide
    without a threshold: ``SIREF = 0`` (or absent) -> absolute; the reference
    loop's entry exactly 0 with ``SIREF != 0`` -> relative;
@@ -180,9 +184,35 @@ and the rule that decided is recorded (``meta["coils_form_rule"]``):
 4. otherwise ``"undetermined"``: naming a ``flux_reference`` is then refused.
 
 ``meta["absolute_offset"]`` = ``flux_scale * SIREF`` [Wb]: ``measured +
-absolute_offset`` is the absolute flux in the group's units.  Only a solver
-needs the absolute gauge; scoring stays in the form the data are stored in
-(relative to ``flux_reference`` when that is named).
+absolute_offset`` is the absolute flux in the group's units (``SIREF`` is
+the MEASURED reference flux, so the solver's gauge never comes from EFIT's
+fit).  Only a solver needs the absolute gauge; scoring stays in the form the
+data are stored in (relative to ``flux_reference`` when that is named),
+except for a fitted reference below.
+
+**Fitted reference offset.**  When the file's own record says EFIT fitted
+the reference (``FITSIREF = T``), the loops are scored as EFIT fits them
+(``fitsiref_scoring="fitted_offset"``, default): absolutely modeled plus ONE
+additive offset ``c`` per table, minimizing ``sum_m ((model_m - measured_m +
+c)/sigma_m)^2 + ((c - c0)/s0)^2`` with the prior row ``c0 = -flux_scale x
+SIREF`` (the measured reference flux) and ``s0`` the reference loop's sigma,
+the reference loop ALSO an ordinary row; no prior row when the reference loop
+is switched off (EFIT weight 0); one extra datum (the prior row) and one
+extra parameter (``c``) in the counts.  The group's meta then carries
+``flux_offset = "fitted"``, ``flux_offset_prior`` and
+``flux_offset_reference`` (the reference loop: ``flux_reference`` when named,
+else ``|NSLREF|``), and ``flux_reference`` is None (:func:`..score.score`).
+``fitsiref_scoring="reference_loop"`` keeps the earlier reading (relative to
+the named reference loop; recorded).
+
+**Uncertainty-model and vessel switches.**  A file whose namelist turns on
+EFIT's calibration-error uncertainty model (``IMAGSIGMA > 0``) is refused
+under every rule-based sigma model unless
+``allow_calibration_sigma_option=True`` (none reproduces it); its state is
+recorded in ``meta["calibration_sigma_option"]``.  The vessel-current
+switches the file carries (``IFITVS``, ``IVESEL``, ``VLOOP``) are recorded
+in ``meta["vessel"]``; when ``IVESEL`` is absent, whether EFIT prescribed
+vessel currents is unknown (``prescription_known=False``).
 
 **Units and sign.**  Flux loops are multiplied by ``flux_scale``, default
 ``-2 pi``.  The k-files tested store ``COILS`` in the sign of the flux
@@ -442,7 +472,8 @@ def measurements_from_kfile(kfile, machine, groups=None, time_window=None,
                             sigma_model=DEFAULT_SIGMA_MODEL, score_unfitted_coils=True, *,
                             serror=None, time=None, allow_missing_bits=False,
                             efit_constants=None, kersil_reference=None, nslref=None,
-                            stored_sigma=None, vbit=None, flux_storage=None, exclude=None):
+                            stored_sigma=None, vbit=None, flux_storage=None, exclude=None,
+                            fitsiref_scoring="fitted_offset", allow_calibration_sigma_option=False):
     """Build a :class:`MeasurementSet` from an EFIT k-file.
 
     Parameters
@@ -528,6 +559,18 @@ def measurements_from_kfile(kfile, machine, groups=None, time_window=None,
         ``{group: {label: reason}}``: channels to exclude by default, added to
         the machine bundle's ``meta["channel_exclusions"]``; applied as
         recorded exclusions (:func:`.apply_exclusions`).
+    fitsiref_scoring : {"fitted_offset", "reference_loop"}
+        How flux loops are scored when the file's own record says EFIT fitted
+        the reference (``FITSIREF = T``; module docstring, "Fitted reference
+        offset"): ``"fitted_offset"`` (default; EFIT's convention, one fitted
+        additive offset with the reference prior row) or ``"reference_loop"``
+        (relative to the reference loop named by ``flux_reference``, the
+        earlier reading; non-default, recorded).
+    allow_calibration_sigma_option : bool
+        False (default): a file whose namelist turns on EFIT's calibration-error
+        uncertainty model (``IMAGSIGMA > 0``) is refused under every rule-based
+        sigma model (none reproduces it); ``efit_stored`` is allowed.  True
+        accepts it (recorded as an override).
     """
     if sigma_model not in KFILE_SIGMA_MODELS:
         raise ValueError(f"sigma_model must be one of {KFILE_SIGMA_MODELS}, got {sigma_model!r}")
@@ -550,8 +593,18 @@ def measurements_from_kfile(kfile, machine, groups=None, time_window=None,
                          "(stated, never defaulted)")
     if sigma_model == "efit_stored" and not isinstance(stored_sigma, dict):
         raise ValueError("sigma_model 'efit_stored' needs stored_sigma={group: EFIT sigma array}")
+    if fitsiref_scoring not in FITSIREF_SCORING:
+        raise ValueError(f"fitsiref_scoring must be one of {FITSIREF_SCORING}")
     nl = read_kfile(kfile) if isinstance(kfile, str) else kfile
     in1 = nl.get("IN1", {})
+    calib = calibration_sigma_option(nl)
+    if calib["on"] and sigma_model != "efit_stored":
+        if not allow_calibration_sigma_option:
+            raise ValueError(f"the k-file turns on EFIT's calibration-error uncertainty model (IMAGSIGMA = "
+                             f"{calib['IMAGSIGMA']:g}): no rule-based sigma model of this adapter reproduces it; use "
+                             "sigma_model='efit_stored' with EFIT's stored sigma, or pass "
+                             "allow_calibration_sigma_option=True (recorded)")
+        calib["override"] = "allow_calibration_sigma_option=True: rule-based sigma used although EFIT's run did not"
     serror_file = _scalar(in1, "SERROR")
     if serror_file is not None:
         if serror is not None:
@@ -586,7 +639,8 @@ def measurements_from_kfile(kfile, machine, groups=None, time_window=None,
                "time_window_s": [t_mid - 0.5 * float(time_window),
                                  t_mid + 0.5 * float(time_window)],
                "sigma_model": sigma_model, "sigma_model_requested": requested_model,
-               "sigma_model_selection": selection, "truncated_trailing_zeros": truncated}
+               "sigma_model_selection": selection, "truncated_trailing_zeros": truncated,
+               "calibration_sigma_option": calib, "vessel": vessel_switches(nl)}
     nulls = {f"{b}.{k}": [i for i, x in enumerate(v) if x is None]
              for b, blk in nl.items() for k, v in blk.items() if isinstance(v, list) and None in v}
     if nulls:
@@ -715,6 +769,14 @@ def measurements_from_kfile(kfile, machine, groups=None, time_window=None,
                  "flux_reference": flux_reference,
                  "sigma_basis": "COILS as stored (relative to the reference loop "
                                 "when the file stores relative fluxes)"}
+        fitted_offset = gauge["coils_form_rule"] == "fitsiref" and fitsiref_scoring == "fitted_offset"
+        if gauge["coils_form_rule"] == "fitsiref":
+            extra["fitsiref_scoring"] = fitsiref_scoring
+        if fitted_offset:
+            # the file's own record says EFIT fitted the reference: one additive offset with the reference prior
+            # row (the measured reference flux SIREF and the reference loop's sigma), the reference loop also an
+            # ordinary row; flux_reference then only names that loop (the scorer's flux_reference stays None)
+            extra.update(flux_reference=None, flux_reference_requested=flux_reference, flux_offset="fitted")
         override, otext = None, None
         if sigma_model == "efit_kersil":
             plasma = _scalar(in1, "PLASMA")
@@ -737,7 +799,10 @@ def measurements_from_kfile(kfile, machine, groups=None, time_window=None,
         ms.groups["flux_loop"] = efit_group(
             "flux_loop", coils_raw, fwt_l, bit_l, labels, machine.geometry("flux_loop"),
             scale=flux_scale, floor_only=ref, sigma_override=override, override_text=otext, bit_source=bsrc,
-            extra=dict(extra, **gauge))
+            extra=dict(gauge, **extra))
+        if fitted_offset:
+            _fitted_offset_prior(ms.groups["flux_loop"], in1, labels, flux_reference, flux_scale, gauge, nslref,
+                                 machine)
     if "bpol_probe" in groups and need("bpol_probe", "EXPMP2" in in1):
         labels = machine.labels("bpol_probe")
         n = len(labels)
@@ -965,6 +1030,70 @@ def kersil_loop_sigma(in1, coils, psibit, r_loop, plasma, vbit, serror, consts, 
                 "bit is zero (this branch was not checked against EFIT output)")
     rec.update(rule=rule, basis=basis)
     return sig, rec
+
+
+#: Scoring readings of a FITSIREF = T file (``measurements_from_kfile(fitsiref_scoring=...)``).
+FITSIREF_SCORING = ("fitted_offset", "reference_loop")
+
+
+def _fitted_offset_prior(g, in1, labels, flux_reference, flux_scale, gauge, nslref, machine):
+    """Set the reference prior row of the fitted loop offset on a FITSIREF = T flux-loop group: ``c0 =
+    -flux_scale x SIREF`` (the measured reference flux as an offset of the stored relative values) and ``s0`` =
+    the reference loop's sigma in the group's units; the reference loop is ``flux_reference`` when named, else
+    ``|NSLREF|`` (file, caller, machine bundle).  When the reference loop is switched off (EFIT weight 0) or
+    has no valid sigma there is no prior row (recorded), as in EFIT's fit."""
+    ref = flux_reference
+    src = "flux_reference (caller)"
+    if ref is None:
+        nsl = _scalar(in1, "NSLREF")
+        src = "k-file &IN1 NSLREF"
+        if nsl is None:
+            nsl, src = nslref, "caller nslref"
+        if nsl is None:
+            nsl = ((getattr(machine, "meta", None) or {}).get("efit_sigma_constants") or {}).get("NSLREF")
+            src = "machine bundle meta['efit_sigma_constants']['NSLREF']"
+        if nsl is not None and 1 <= abs(int(nsl)) <= len(labels):
+            ref = labels[abs(int(nsl)) - 1]
+    g.meta["flux_offset_reference"] = ref
+    g.meta["flux_offset_reference_source"] = src if ref is not None else "not identified"
+    if ref is None:
+        g.meta["flux_offset_prior_note"] = ("reference loop not identified (no flux_reference, no NSLREF): the offset "
+                                            "carries no prior row")
+        return
+    i = labels.index(ref)
+    s0 = float(g.sigma[i])
+    if not (bool(g.valid[i]) and np.isfinite(s0) and s0 > 0):
+        g.meta["flux_offset_prior_note"] = (f"reference loop {ref!r} switched off (EFIT weight 0) or without a valid "
+                                            "sigma: no prior row, as in EFIT's fit")
+        return
+    g.meta["flux_offset_prior"] = [-float(flux_scale) * float(gauge["siref"]), s0]
+    g.meta["flux_offset_prior_source"] = (f"measured reference flux SIREF (k-file) and the sigma of reference loop "
+                                          f"{ref!r}")
+
+
+def calibration_sigma_option(nl):
+    """Whether the file turns on EFIT's calibration-error uncertainty model (``IMAGSIGMA > 0`` in any namelist
+    block; its thresholds ``ERRMAG`` / ``ERRMAGB`` recorded).  Returns ``{"on", "IMAGSIGMA", "ERRMAG", "ERRMAGB",
+    "note"}``."""
+    v = _flag(nl, "IMAGSIGMA")
+    out = {"on": bool(v is not None and v > 0), "IMAGSIGMA": v, "ERRMAG": _flag(nl, "ERRMAG"),
+           "ERRMAGB": _flag(nl, "ERRMAGB")}
+    out["note"] = ("IMAGSIGMA absent: the option is off by EFIT's default" if v is None else
+                   ("on: EFIT replaced its rule-based sigma by the calibration-error model during the iterations"
+                    if out["on"] else "off"))
+    return out
+
+
+def vessel_switches(nl):
+    """The vessel-current switches a k-file carries (``IFITVS``, ``IVESEL`` and ``VLOOP`` where present in any
+    namelist block, else None).  ``IVESEL`` (EFIT's prescribed eddy currents from the measured loop voltage)
+    is not written to every k-file: when it is absent, whether the run prescribed vessel currents is unknown
+    (``prescription_known=False``) and comparisons during a current ramp are to be treated as unverified."""
+    out = {k: _flag(nl, k) for k in ("IFITVS", "IVESEL", "VLOOP")}
+    out["prescription_known"] = out["IVESEL"] is not None
+    out["note"] = ("IVESEL not in the file: whether EFIT prescribed vessel currents is unknown (comparisons during "
+                   "a current ramp unverified)" if out["IVESEL"] is None else "IVESEL read from the file")
+    return out
 
 
 def _flag_bool(block, key):

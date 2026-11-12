@@ -71,7 +71,13 @@ Conventions (documented defaults of the scorer):
   fit does: ``c = (sum w r + c0/s0^2) / (sum w + 1/s0^2)``; the prior row's
   chi^2 term ``((c - c0)/s0)^2`` is recorded in
   ``table.frame["flux_offset_prior_chi2"]`` (one extra datum, one extra
-  parameter; it is not part of the per-channel residuals);
+  parameter; it is not part of the per-channel residuals, so a group's
+  chi^2/N stays (sum over the loops)/N, while :func:`chi2_report` counts
+  the prior row as one datum and the offset as one parameter in its total).
+  When the group names its reference loop (``meta["flux_offset_reference"]``)
+  and that loop is switched off in the set (invalid or weight 0), the prior
+  row is absent, as in EFIT's fit (the offset is then constrained by the
+  loops alone); the reason is recorded in ``table.frame``;
 * E_r is never counted twice: an MSE group declared E_r-corrected with an
   E_r supplied is refused;
 * an orientation mismatch between the equilibrium and the discharge is
@@ -337,12 +343,23 @@ def _fit_flux_offset(table):
     use = table.used("flux_loop")
     if not np.any(use):
         table.frame["flux_offset"] = 0.0
+        table.frame["flux_offset_counts"] = dict(n_extra_data=0, n_extra_params=0)
         table.model["flux_loop"] = m
         return
     w = (g.weight[use] / g.sigma[use]) ** 2
     num, den = float(np.sum(w * (g.measured[use] - m[use]))), float(np.sum(w))
     prior = g.meta.get("flux_offset_prior")
     rule = "one additive loop offset per table, weighted least squares over the used channels"
+    ref = g.meta.get("flux_offset_reference")
+    table.frame.pop("flux_offset_prior_dropped", None)
+    if prior is not None and ref is not None:
+        if ref not in g.labels:
+            raise ValueError(f"flux_offset_reference {ref!r} is not a flux-loop label")
+        i = g.labels.index(ref)
+        if not (bool(g.valid[i]) and float(g.weight[i]) != 0.0):
+            table.frame["flux_offset_prior_dropped"] = (f"reference loop {ref!r} is switched off in the set (invalid "
+                                                        "or weight 0): no prior row, as in EFIT's fit")
+            prior = None
     if prior is not None:
         c0, s0 = (float(v) for v in prior)
         if not (np.isfinite(c0) and np.isfinite(s0) and s0 > 0):
@@ -353,6 +370,9 @@ def _fit_flux_offset(table):
     table.model["flux_loop"] = m + c
     table.frame["flux_offset"] = c
     table.frame["flux_offset_rule"] = rule
+    table.frame["flux_offset_counts"] = dict(n_extra_data=int(prior is not None), n_extra_params=1)
+    for k in ("flux_offset_prior", "flux_offset_prior_chi2"):
+        table.frame.pop(k, None)
     if prior is not None:
         table.frame["flux_offset_prior"] = [c0, s0]
         table.frame["flux_offset_prior_chi2"] = float(((c - c0) / s0) ** 2)
@@ -418,14 +438,34 @@ def chi2_report(table, n_params=0):
         groups[name] = dict(chi2=table.chi2(name), n_channels=table.n_valid(name),
                             sigma_model=g.meta.get("sigma_model"), sigma_model_id=_sigma_id(g))
     n = table.n_valid()
-    dof = n - int(n_params)
-    total = dict(chi2=table.chi2(), n_channels=n, n_params=int(n_params), dof=dof,
-                 chi2_per_dof=(table.chi2() / dof) if dof > 0 else float("nan"))
+    off = flux_offset_record(table)
+    c_tot, n_par = table.chi2(), int(n_params)
+    if off is not None:
+        # the fitted loop offset: one extra parameter, and its prior row (when present) one extra datum
+        c_tot += float(off.get("prior_chi2") or 0.0)
+        n += int(off["n_extra_data"])
+        n_par += int(off["n_extra_params"])
+    dof = n - n_par
+    total = dict(chi2=c_tot, n_channels=n, n_params=n_par, dof=dof,
+                 chi2_per_dof=(c_tot / dof) if dof > 0 else float("nan"))
     ids = sorted({str(v["sigma_model_id"]) for v in groups.values()})
     total["sigma_models"] = ids
-    return dict(groups=groups, total=total,
+    return dict(groups=groups, total=total, flux_offset=off,
                 interpretation=("chi^2 under the stated sigma conventions (diagonal, correlations ignored); "
                                 "not a pass/fail quantity on real data -- compare equilibria on the same channels"))
+
+
+def flux_offset_record(table):
+    """The fitted loop offset of a table (module docstring) as a record, or None when the loops were not
+    scored with a fitted offset: ``{"offset", "rule", "prior", "prior_chi2", "prior_dropped", "n_extra_data",
+    "n_extra_params"}`` (measurement units; ``prior`` = ``(c0, s0)`` or None)."""
+    fr = getattr(table, "frame", None) or {}
+    if "flux_offset" not in fr:
+        return None
+    cnt = fr.get("flux_offset_counts") or dict(n_extra_data=int("flux_offset_prior" in fr), n_extra_params=1)
+    return dict(offset=float(fr["flux_offset"]), rule=fr.get("flux_offset_rule"), prior=fr.get("flux_offset_prior"),
+                prior_chi2=fr.get("flux_offset_prior_chi2"), prior_dropped=fr.get("flux_offset_prior_dropped"),
+                n_extra_data=int(cnt["n_extra_data"]), n_extra_params=int(cnt["n_extra_params"]))
 
 
 def _sigma_id(group):

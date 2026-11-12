@@ -69,7 +69,15 @@ the solver needs is ``measured + meta["absolute_offset"]`` with
 [source units per radian] and its ``reference_convention`` (``"measured"``:
 the measured reference-loop flux; ``"fitted"``: a reference offset fitted by
 EFIT, its ``FITSIREF`` option) are inputs, recorded with the value of the
-reference loop's own stored entry.  Scoring stays in the storage form
+reference loop's own stored entry.  The forward solve takes its gauge from a
+MEASURED reference only (:class:`..forward.ForwardModel` refuses
+``"fitted"`` unless its ``fitted_reference_gauge`` option is set): EFIT's
+fitted offset is part of EFIT's solution.  Whether a measurement file
+carries EFIT's fitted offset depends on the code version that wrote it
+(where present, the closed form of the fitted-offset reading reproduces it
+exactly; otherwise it is written only to the fit's text output); a caller
+that has it may pass it as ``source_fit_reference_flux``, used only to make
+EFIT's own fitted loop values absolute in :func:`source_fit_chi2`.  Scoring stays in the storage form
 (relative to ``flux_reference`` when that label is named), or -- with
 ``flux_offset="fitted"`` (recorded in the group's ``meta``) -- the loops are
 scored absolutely plus one additive offset solved in closed form in every
@@ -205,7 +213,7 @@ def weight_convention_check(measured, fitted, weight, chi2, rtol=WEIGHT_CHECK_RT
 def measurements_from_efit_arrays(arrays, machine, time, time_window, *, sigma_model, groups=None,
                                   flux_storage=None, reference_flux=None, reference_convention=None,
                                   reference_flux_source=None, flux_reference=None, flux_offset=None,
-                                  reference_prior=None,
+                                  reference_prior=None, reference_loop=None, source_fit_reference_flux=None,
                                   flux_scale=-2.0 * np.pi,
                                   input_weight=None, require_weight_check=False, weight_check_rtol=WEIGHT_CHECK_RTOL,
                                   rule_inputs=None, er_corrected=None, coil_current_per_turn=(),
@@ -241,6 +249,12 @@ def measurements_from_efit_arrays(arrays, machine, time, time_window, *, sigma_m
         per radian]; the scorer's offset then carries EFIT's prior row tying it to that measurement (the
         reference loop stays an ordinary row as well).  Recorded as ``meta["flux_offset_prior"]`` in
         measurement units.
+    reference_loop : str, optional
+        With ``flux_offset="fitted"``: label of the reference loop (``meta["flux_offset_reference"]``); when that
+        loop is switched off in the set the scorer drops the prior row, as EFIT does.
+    source_fit_reference_flux : float, optional
+        EFIT's own fitted reference [source units per radian], when the caller has it: used ONLY to make EFIT's
+        fitted loop values absolute in :func:`source_fit_chi2` (default: ``reference_flux``); never a solve gauge.
     input_weight : float or dict, optional
         ``"weight_inverse"``: EFIT's input weight of the fitted channels (a number for every group or
         ``{group: number or array}``; required).
@@ -432,6 +446,16 @@ def measurements_from_efit_arrays(arrays, machine, time, time_window, *, sigma_m
             # the offset the scorer fits is measured - model = -flux_scale x reference flux
             g.meta["flux_offset_prior"] = [-float(flux_scale) * r0, abs(float(flux_scale)) * s0]
             g.meta["flux_offset_prior_source"] = "measured reference flux and the reference loop's sigma (caller)"
+        if reference_loop is not None:
+            if flux_offset != "fitted":
+                raise ValueError("reference_loop applies to flux_offset='fitted'")
+            if reference_loop not in labels:
+                raise ValueError(f"reference_loop {reference_loop!r} is not a flux-loop label")
+            g.meta["flux_offset_reference"] = reference_loop
+        if source_fit_reference_flux is not None:
+            g.meta["source_fit_absolute_offset"] = (float(flux_scale) * float(source_fit_reference_flux)
+                                                    if flux_storage == "relative" else 0.0)
+            g.meta["source_fit_reference_flux"] = float(source_fit_reference_flux)
         g.meta.update(flux_scale=flux_scale, units="stored loop flux [per radian] x flux_scale",
                       flux_reference=flux_reference, flux_offset=flux_offset, coils_form=flux_storage,
                       coils_form_rule="caller",
@@ -578,11 +602,16 @@ def source_fit_chi2(ms, groups=None):
         prior_term = None
         if name == "flux_loop" and g.meta.get("flux_offset") == "fitted":
             # the fitted values are stored in the measured values' form; the model the scorer offsets is absolute
-            f = f + float(g.meta.get("absolute_offset", 0.0))
+            f = f + float(g.meta.get("source_fit_absolute_offset", g.meta.get("absolute_offset", 0.0)))
             u0 = g.valid & (g.weight != 0) & np.isfinite(f)
             w = (g.weight[u0] / g.sigma[u0]) ** 2
             num, den = float(np.sum(w * (m[u0] - f[u0]))), float(np.sum(w))
             pr = g.meta.get("flux_offset_prior")
+            ref = g.meta.get("flux_offset_reference")
+            if pr is not None and ref is not None:
+                i = g.labels.index(ref)
+                if not (bool(g.valid[i]) and float(g.weight[i]) != 0.0):
+                    pr = None          # reference loop switched off: no prior row (as the scorer and EFIT)
             if pr is not None:
                 num, den = num + pr[0] / pr[1] ** 2, den + 1.0 / pr[1] ** 2
             c = num / den if den > 0 else 0.0

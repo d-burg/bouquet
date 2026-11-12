@@ -16,9 +16,12 @@ Grad-Shafranov equation with
     k-file route: EFIT-weighted channels only -- channels EFIT gave zero weight broke the fit on
     every case tested), each with weight ``1/sigma`` of the measurement set;
   - flux loops in the ABSOLUTE gauge: ``target = measured + meta['absolute_offset']`` (the k-file
-    ``SIREF`` route, :func:`.adapters.efit_kfile.flux_gauge`); the relative form as outer passes is
-    ill-posed (the offset is almost unobservable in the coil fit; measured).
-    Scoring stays in the measurement's own form;
+    ``SIREF`` route, :func:`.adapters.efit_kfile.flux_gauge`), from a MEASURED reference flux (a gauge
+    built from another fit's fitted reference is refused unless ``fitted_reference_gauge=True``); the
+    relative form as outer passes is ill-posed (the offset is almost unobservable in the coil fit;
+    measured).  Scoring stays in the measurement's own form; when the set asks for a fitted additive
+    offset (``meta['flux_offset'] = 'fitted'``) it is fitted in the score (:func:`.score.score`), one
+    per table, with the reference prior row;
   - probes at their center points; with ``probe_in_solve="corrected_point"`` (default) the target
     of each probe is shifted by ``b_point - b_length_averaged`` evaluated on the previous state, so
     that the in-solve objective equals the finite-length one used in scoring to first order (the
@@ -122,6 +125,8 @@ class ForwardSettings:
     edge_taper: Any = field(default_factory=_edge.EdgeTaperSetting)
     detector_version: str = _edge.DETECTOR_VERSION_DEFAULT   # "v2": corrected classification (non-default)
     stall_policy: str = "report"                # "taper": treat a flat stall as taper-eligible (non-default)
+    fitted_reference_gauge: bool = False        # True: accept a gauge built from ANOTHER fit's fitted reference
+    #                                             (non-default; the default takes it from a measured reference)
 
     def as_dict(self):
         d = asdict(self)
@@ -394,6 +399,12 @@ class ForwardModel:
         rec = dict(notes=[], orientation=orientation_record(ms, self.F0))
         # ---- flux loops
         fl = ms.groups["flux_loop"]
+        conv = fl.meta.get("reference_convention")
+        if conv == "fitted" and not s.fitted_reference_gauge:
+            raise ValueError("the flux-loop gauge was built from a FITTED reference (another fit's solution); the "
+                             "forward solve takes its gauge from the measured reference -- pass the measured "
+                             "reference flux (reference_convention='measured'), or set "
+                             "ForwardSettings(fitted_reference_gauge=True) (recorded)")
         vfl = np.asarray(fl.valid, bool) & np.isfinite(fl.measured) & np.isfinite(fl.sigma) & (fl.sigma > 0)
         loc_fl = np.column_stack((fl.geometry["r"], fl.geometry["z"]))
         on = _diag.on_mesh(gs, loc_fl)
@@ -409,6 +420,10 @@ class ForwardModel:
                         weight=1.0 / np.asarray(fl.sigma, float)[vfl])
         rec["flux_loops"] = dict(n_rows=int(vfl.sum()), n_off_mesh_excluded=int(off.sum()),
                                  gauge="absolute: target = measured + absolute_offset (SIREF route)",
+                                 reference_convention=conv or "measured (k-file SIREF)",
+                                 scoring_offset=("fitted in the score (one additive offset per table, with the "
+                                                 "reference prior row when present)"
+                                                 if fl.meta.get("flux_offset") == "fitted" else None),
                                  coils_form=form, weight="1/sigma of the measurement set",
                                  sigma_model=fl.meta.get("sigma_model"),
                                  scoring_form=("relative to " + str(fl.meta.get("flux_reference"))

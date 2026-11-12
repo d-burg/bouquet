@@ -1,5 +1,75 @@
 # Bouquet — change summaries
 
+## Unreleased — the checked Z_eff source rule (`ni_source="checked"`)
+
+An opt-in route. No default moves: `ni_source="standard"` reads every file
+bit for bit as in 1.4.1, and the goldens are untouched.
+
+- **`read_ida(ni_source="checked")` applies the Z_eff source rule**
+  (`bouquet.io.zeff_sources`; [zeff-source-rule.md](zeff-source-rule.md)).
+  The file's two Z_eff candidates -- the CER carbon density (via
+  Z_eff = 1 + Z(Z − 1) n_C/n_e) and the line-integrated `Zeff` -- are tested
+  per slice: the impurity source on coverage of its measurement points
+  (I-1), not being a placeholder (I-2), valid data and a positive main-ion
+  density with fast ions inside the boundary (I-3) and consistency with
+  supplied raw analyses overall and in the core (I-4); the file value on
+  carrying an uncertainty (L-1), its size (L-2), not being a copy of the
+  impurity value (L-3) and not being radially flat (L-4), plus a recorded
+  advisory on its time variation. Each candidate is **qualified**,
+  **unverified** (a test, or part of one, could not be evaluated: no
+  measurement points, no raw analyses, no uncertainty) or **failed**. A
+  missing fast-ion density does not make a source unverified: the
+  impurity-derived Z_eff does not depend on it (singly charged main and fast
+  ions), so I-3 then runs without fast ions and the record says so
+  (`evaluated_without`). Ranking: a qualified impurity source, else a qualified file
+  value, else an unverified impurity source (labeled and warned), else the
+  read is refused (`ZeffSourceRefused`) unless `zeff_override="CER"` /
+  `"Zeff"` names a source. An unverified file value is used only by an
+  override. The chosen source runs through the `"CER"` / `"Zeff"` route's
+  arithmetic. Thresholds are module constants, set from measured
+  distributions on one validation set, and recorded with every result.
+- **Inside the boundary.** The rule screens the impurity data over
+  ψ_N ≤ 1 only: a profile invalid only outside the boundary (SOL holes or
+  undershoot) is tested inside and not refused, and its carbon envelope is
+  then screened inside the boundary on `"checked"` (recorded). Data invalid
+  inside the boundary are refused as missing data.
+- **Raw analyses** carry a `kind` label (`"hand_fit"`, `"automatic"`,
+  `"other"`); the reference is the hand-fit one, else the automatic one, by
+  label, never by order. I-4 runs only against supplied raw analyses; the
+  file's own fit points serve coverage (I-1) only.
+- **The record** (`IDAProfiles.zeff_rule`, `schema_version` 2; on
+  `"checked"` also `zeff_provenance["zeff_rule"]`, archived with the
+  baseline's `li_metrics`): every candidate, its state and every test value,
+  threshold, verdict and unevaluated part, the tension, the decision, any
+  override, a `crosschecks` slot (reported, never selecting), the thresholds.
+  A `"checked"` read emits at most one short `ZeffSourceWarning`.
+- **`"CER"`, `"Zeff"`, `"all"` are unchanged** in their output; the rule is
+  evaluated beside them and recorded, and one `ZeffSourceWarning` per read is
+  emitted only when a source the route takes **fails** a recorded test
+  (with the clamps the route applies); unverified sources and tensions are
+  recorded, not warned. Because `ImasSource.ni_source="auto"` resolves to
+  `"all"` on `ida_hybrid`, default hybrid runs now evaluate the rule (the
+  advisory reads every slice of the IDA file) and can show this warning, for
+  example for a file Z_eff that copies the carbon value.
+- **Uncertainty re-read**: the rule is evaluated once, on the profile
+  file's read; the uncertainty step reuses that record
+  (`read_ida(zeff_rule_from=)`), so it neither warns twice nor lets a
+  separate σ file decide differently.
+- **Configuration**: `"checked"` is accepted by
+  `ReconstructionSource.ni_source` and `ImasSource.ni_source` (a measured
+  route, `bouquet.experimental.IDA_ION_ROUTES`), with a new
+  `zeff_override` field on both (allowed only with `"checked"`), and
+  `Bouquet.from_imas(zeff_override=...)`. On `ida_hybrid` the dd's fast-ion
+  charge density enters I-3; on the g-file route the new
+  `ReconstructionSource.zeff_fast_density` supplies one (`"none"` declares
+  there are none; an array on the IDA file's ψ_N grid, or
+  `{"psi_N", "n_fast"}`), validated and stored with the config.
+- **Time series**: `bouquet.io.ida.zeff_rule_series(path, times,
+  source=...)` -- one source named by the user for the whole series, failing
+  and unverified slices flagged, never switched; an unnamed series is refused
+  with the per-slice outcomes. Independent per-slice reads do not enforce
+  one source.
+
 ## 1.4.1 — bug fixes, a template-fallback warning, an opt-in branch-guard diagnostic (2026-10-30)
 
 A patch on 1.4.0: bug fixes, a warning and an opt-in experimental

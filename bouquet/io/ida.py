@@ -33,6 +33,8 @@ from typing import Optional
 
 import numpy as np
 
+from . import zeff_sources as _zs
+
 # Magnitude above which a value is treated as a netCDF fill marker rather
 # than data (default fills are ~9.97e36; physical densities are < 1e22).
 _CARBON_FILL = 1e30
@@ -115,6 +117,15 @@ class IDAProfiles:
     #: physical (``ni >= 0``, ``ni <= ne``) and unchanged, it is only made
     #: visible.  See docs/physics-notes.md, "Kinetic assumptions".
     zeff_provenance: Optional[dict] = None
+    #: The Z_eff source-rule record (:mod:`bouquet.io.zeff_sources`): every
+    #: candidate with each test's value, threshold and verdict, the tension
+    #: between the candidates, the decision, any override and the thresholds
+    #: used.  ``None`` on ``ni_source="standard"`` (the rule is not applied);
+    #: on ``"checked"`` it decides the source (and is also stored as
+    #: ``zeff_provenance["zeff_rule"]``); on ``"CER"`` / ``"Zeff"`` /
+    #: ``"all"`` it is evaluated and recorded beside the forced route, which
+    #: it does not change (``record["forced"]``).
+    zeff_rule: Optional[dict] = None
 
 
 @dataclass
@@ -212,6 +223,259 @@ def _carbon_tier_usable(nC, ne, sigma_nC=None, sigma_ne=None, *,
     return False
 
 
+def _file_fit_points(f, t_idx):
+    """The file's own impurity-density points for the slice (the points its
+    fit used), from ``raw_n_12C6`` / ``raw_n_12C6_err`` / ``psin_n_12C6``;
+    ``None`` when the file does not carry all three.  Fill values and
+    non-finite entries are padding and are dropped, so a slice whose fit
+    used no point gives an empty set
+    (:func:`bouquet.io.zeff_sources.fit_points_from_arrays`)."""
+    keys = ("raw_n_12C6", "raw_n_12C6_err", "psin_n_12C6")
+    if not all(k in f for k in keys):
+        return None
+    return _zs.fit_points_from_arrays(*(f[k][t_idx] for k in keys))
+
+
+#: the forced routes' candidates (what each route takes regardless of the
+#: rule; "all" averages both where both have an envelope)
+_FORCED_CANDIDATES = {"CER": [_zs.IMPURITY], "Zeff": [_zs.LINE],
+                      "all": [_zs.IMPURITY, _zs.LINE]}
+
+
+def _zeff_rule_for_slice(f, t_idx, t_sel, time_ms, *, psi_N, ne, zeff,
+                         sigma_zeff, n_carbon, sigma_n_carbon,
+                         sigma_zeff_carbon_rule, validity, impurity_Z, q,
+                         is_ensemble, ni_source, override, fit_points,
+                         raw_points, fast_density, ensemble_median,
+                         crosschecks, path):
+    """Gather the rule's inputs from an open IDA file at one slice and build
+    the record (:func:`bouquet.io.zeff_sources.zeff_source_record`); on
+    ``ni_source="checked"`` refuse when no source can be used.  Nothing is
+    warned here: :func:`_zeff_rule_warn` warns once, after the route's
+    arithmetic.  ``validity``: the carbon validity screen restricted to the
+    plasma (:func:`bouquet.io.zeff_sources.validity_inside_boundary`), the
+    precondition of I-3; ``sigma_zeff_carbon_rule``: the carbon Z_eff
+    envelope under that screen (the tension's impurity sigma)."""
+    psi_N, ne = np.asarray(psi_N, dtype=float), np.asarray(ne, dtype=float)
+    # rho_tor,norm on the file's grid (inside the boundary) from its own q
+    rho_map, rho_note = None, "none (the file carries no q)"
+    if q is not None:
+        try:
+            rho_map = _zs.rho_map_from_q(psi_N, q)
+            rho_note = "rho_tor from the file's q"
+        except ValueError as exc:
+            rho_note = ("none (the rho_tor map from the file's q could not "
+                        f"be built: {exc})")
+    nfast = fast_density
+    if callable(nfast):
+        nfast = np.asarray(nfast(psi_N), dtype=float)
+    elif nfast is not None and not isinstance(nfast, str):
+        nfast = np.asarray(nfast, dtype=float)
+        if nfast.shape != psi_N.shape:
+            raise ValueError(
+                f"{path!r}: zeff_fast_density has shape {nfast.shape}, the "
+                f"file's psi_N grid {psi_N.shape}; pass it on that grid, as "
+                "f(psi_N), or as {'psi_N': ..., 'n_fast': ...} in the config")
+
+    impurity = None
+    zeff_from_carbon = None
+    if n_carbon is not None:
+        # the file's density is carbon (n_12C6): its Z_eff by quasineutrality
+        # (and the value a copied file Z_eff would hold, L-3) uses Z = 6
+        with np.errstate(divide="ignore", invalid="ignore"):
+            zeff_from_carbon = 1.0 + (6.0 * 5.0 * np.asarray(n_carbon,
+                                                             dtype=float)
+                                      / np.clip(ne, 1e10, None))
+        if float(impurity_Z) != 6.0:
+            impurity = _zs.unusable_impurity(
+                f"impurity_Z={float(impurity_Z):g}, but the file's impurity "
+                "density is carbon ('n_12C6', Z = 6)")
+        else:
+            fit = (fit_points if fit_points is not None else
+                   None if is_ensemble else _file_fit_points(f, t_idx))
+            win = (_zs.slice_window(f["time_win_start"][:],
+                                    f["time_win_end"][:], t_idx, t_sel)
+                   if ("time_win_start" in f and "time_win_end" in f)
+                   else None)
+            impurity = _zs.impurity_tests(
+                psi_N, ne, n_carbon, sigma_n_carbon, impurity_Z=impurity_Z,
+                n_fast=nfast, rho_map=rho_map, fit_points=fit,
+                raw_points=raw_points, slice_time=t_sel, slice_window=win,
+                validity=validity)
+        impurity["dataset"] = "n_12C6"
+
+    line = None
+    if zeff is not None:
+        # the advisory: the core median over the file's non-placeholder
+        # slices (all slices without a carbon channel)
+        zs_, nes_, ncs_ = [], [], []
+        for k in range(time_ms.size):
+            z_k = np.asarray(f["Zeff"][k], dtype=float)
+            ne_k = np.asarray(f["n_e"][k], dtype=float)
+            nc_k = (np.asarray(f["n_12C6"][k], dtype=float)
+                    if "n_12C6" in f else None)
+            if is_ensemble:
+                _c = (lambda a: np.median(a, axis=0)) if ensemble_median \
+                    else (lambda a: np.mean(a, axis=0))
+                z_k, ne_k = _c(z_k), _c(ne_k)
+                nc_k = None if nc_k is None else _c(nc_k)
+            zs_.append(z_k)
+            nes_.append(ne_k)
+            ncs_.append(nc_k)
+        series = _zs.advisory_core_series(
+            psi_N, zs_, nes_, ncs_ if "n_12C6" in f else None)
+        line = _zs.line_tests(psi_N, zeff, sigma_zeff,
+                              zeff_impurity=zeff_from_carbon,
+                              core_median_series=series)
+        line["dataset"] = "Zeff"
+
+    names = {"CER": _zs.IMPURITY, "Zeff": _zs.LINE}
+    forced = (None if ni_source == "checked" else
+              dict(ni_source=str(ni_source),
+                   candidates=list(_FORCED_CANDIDATES[ni_source])))
+    usable_imp = impurity is not None and impurity.get("usable", True)
+    try:
+        rec = _zs.zeff_source_record(
+            impurity, line, psi_N=psi_N,
+            zeff_imp=zeff_from_carbon if usable_imp else None,
+            sigma_zeff_imp=sigma_zeff_carbon_rule if usable_imp else None,
+            zeff_line=zeff, sigma_zeff_line=sigma_zeff,
+            override=names.get(override), time=t_sel, forced=forced,
+            crosschecks=crosschecks)
+    except _zs.ZeffSourceRefused as exc:      # an override that cannot hold
+        raise _zs.ZeffSourceRefused(
+            f"{path!r} at {t_sel:.4f} s: zeff_override={override!r}: {exc}"
+        ) from None
+    rec["ni_source"] = str(ni_source)
+    rec["rho_map"] = rho_note
+    if validity is not None:
+        rec["validity_screen"] = dict(
+            validity, region=f"psi_N <= {_zs.PSI_N_PLASMA_MAX:g}",
+            note=("the reader's carbon validity criteria, applied inside the "
+                  "boundary only (where the rule's tests are defined); the "
+                  "pre-existing routes' own screen is unchanged"))
+
+    dec = rec["decision"]
+    if ni_source == "checked" and dec["source"] is None:
+        raise _zs.ZeffSourceRefused(
+            f"{path!r} at {t_sel:.4f} s: the Z_eff source rule "
+            f"(ni_source='checked') refuses this slice: "
+            f"{_zs.refusal_message(rec)}.  Name a source with "
+            "zeff_override='CER' or 'Zeff' (recorded as an override), or "
+            "pass ni_source='standard' (the file's Z_eff as stored, no "
+            "rule).  See docs/zeff-source-rule.md", rec)
+    return rec
+
+
+def _zeff_rule_warn(rec, ni_source, t_sel, used, provenance):
+    """Warn once per read, after the route's arithmetic.  ``"checked"``: the
+    decided source's findings (unverified, tension, override, dilution,
+    advisory).  A forced route: only when a candidate the route takes FAILS
+    a recorded test (an unverified one is recorded, not warned), with any
+    clamping the route applies; the route itself is unchanged."""
+    import warnings
+
+    if ni_source == "checked":
+        rec["route_taken"] = dict(
+            zeff_source=provenance.get("source"),
+            n_clipped_vb=provenance.get("n_clipped_vb"),
+            n_clipped_cer=provenance.get("n_clipped_cer"))
+        msg = _zs.checked_warning(rec)
+        if msg:
+            warnings.warn(f"read_ida (ni_source='checked', {t_sel:.4f} s): "
+                          + msg, _zs.ZeffSourceWarning, stacklevel=3)
+        return
+    rec["forced"]["candidates_used"] = list(used)
+    rec["forced"]["n_clipped"] = dict(
+        VB=int(provenance.get("n_clipped_vb", 0)),
+        CER=int(provenance.get("n_clipped_cer", 0)))
+    msgs = _zs.forced_route_failures(rec, used)
+    if msgs:
+        clips = [f"{k} {v}" for k, v in rec["forced"]["n_clipped"].items()
+                 if v]
+        if clips:
+            msgs.append("the route clamps Z_eff to [1, Z] at "
+                        + ", ".join(clips) + " node(s)")
+    rec["forced_warnings"] = msgs
+    if msgs:
+        warnings.warn(
+            f"read_ida (ni_source={ni_source!r}, {t_sel:.4f} s): "
+            + "; ".join(msgs) + " (recorded in IDAProfiles.zeff_rule; the "
+            "route is unchanged)", _zs.ZeffSourceWarning, stacklevel=3)
+
+
+def zeff_rule_series(path, times, *, source=None, **kwargs):
+    """One Z_eff source, named by the user, for a time series of slices of
+    one IDA file.
+
+    ``source`` (``"CER"`` or ``"Zeff"``) is required: every slice is read
+    with ``ni_source="checked"`` and ``zeff_override=source`` (recorded on
+    each slice), and the slices on which that source fails its tests or is
+    unverified are flagged in the series record (never switched).  Without
+    ``source`` the call is refused (:class:`ZeffSourceRefused`) with the
+    rule's per-slice outcomes listed, so the user can name one: the rule
+    does not pick a series source itself, even when every slice agrees.
+
+    This helper is the only place the one-source-per-series provision is
+    enforced: independent per-slice reads (``read_ida(ni_source="checked",
+    time=t)`` or one ``ReconstructionSource(ni_source="checked", time=t)``
+    per slice) each apply the rule on their own and can take different
+    sources on different slices.
+
+    Returns ``(profiles, series)``: one :class:`IDAProfiles` per time and
+    the series record (:func:`bouquet.io.zeff_sources.series_source`).
+    ``kwargs`` go to :func:`read_ida` (per-slice point data cannot be passed
+    this way; read slice by slice for that).  A slice on which the named
+    source cannot be used at all (absent, or an impurity density that fails
+    I-3) is refused, naming the slice.
+    """
+    import warnings
+
+    if kwargs.get("ni_source", "checked") != "checked":
+        raise ValueError("zeff_rule_series applies ni_source='checked'")
+    kwargs.pop("ni_source", None)
+    for k in ("zeff_override", "zeff_fit_points", "zeff_raw_points",
+              "zeff_rule_from"):
+        if k in kwargs:
+            raise ValueError(f"zeff_rule_series: {k} is per slice; read the "
+                             "slices with read_ida instead")
+    names = {"CER": _zs.IMPURITY, "Zeff": _zs.LINE}
+    if source is not None and source not in names:
+        raise ValueError(f"source={source!r} must be 'CER' or 'Zeff'")
+    if source is None:
+        recs = []
+        for t in times:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", _zs.ZeffSourceWarning)
+                try:
+                    recs.append(read_ida(path, time=t, ni_source="checked",
+                                         **kwargs).zeff_rule)
+                except _zs.ZeffSourceRefused as exc:
+                    recs.append(exc.record)
+        try:
+            _zs.series_source(recs, source=None)   # refuses, listing them
+        except _zs.ZeffSourceRefused as exc:
+            # this helper takes the reader's names, not the record's
+            raise _zs.ZeffSourceRefused(
+                f"{exc}.  Pass source='CER' ({_zs.IMPURITY}) or "
+                f"source='Zeff' ({_zs.LINE})",
+                record=getattr(exc, "record", None)) from exc
+    out, recs = [], []
+    for t in times:
+        try:
+            p = read_ida(path, time=t, ni_source="checked",
+                         zeff_override=source, **kwargs)
+        except _zs.ZeffSourceRefused as exc:
+            raise _zs.ZeffSourceRefused(
+                f"zeff_rule_series (source={source!r}), slice {t}: {exc}",
+                exc.record) from None
+        out.append(p)
+        recs.append(p.zeff_rule)
+    series = _zs.series_source(recs, source=names[source])
+    series["source_route"] = source
+    return out, series
+
+
 def _chi(delta, var_delta):
     """Route disagreement in sigma; NaN where the spread is zero."""
     return np.sqrt(np.divide(delta ** 2, var_delta,
@@ -229,6 +493,13 @@ def read_ida(
     zeff_substitute=None,
     impurity_Z: float = 6.0,
     sigma_ni_from_ne: Optional[bool] = None,
+    *,
+    zeff_override: Optional[str] = None,
+    zeff_fit_points=None,
+    zeff_raw_points=None,
+    zeff_fast_density=None,
+    zeff_crosschecks: Optional[dict] = None,
+    zeff_rule_from: Optional[dict] = None,
 ) -> IDAProfiles:
     """Read an IDA ``.cdf`` and return profiles + sigmas at ``time``.
 
@@ -249,8 +520,28 @@ def read_ida(
         ``"std"`` -> sample standard deviation. Unused for the direct layout.
     ensemble_median : bool
         Ensemble central estimator: sample mean (default) or median.
-    ni_source : {"standard", "Zeff", "CER", "all"}
-        Which measurement the main-ion density comes from.  ``"standard"``
+    ni_source : {"standard", "checked", "Zeff", "CER", "all"}
+        Which measurement the main-ion density comes from.  ``"checked"``
+        applies the Z_eff source rule (:mod:`bouquet.io.zeff_sources`,
+        docs/zeff-source-rule.md): the impurity-density candidate (``n_12C6``)
+        and the file's line-integrated ``Zeff`` are tested at the slice, each
+        is qualified, unverified (a test, or part of one, could not be
+        evaluated) or failed, and the source the ranking names (qualified
+        impurity > qualified file value > unverified impurity, labeled and
+        warned) is taken through the ``"CER"`` or ``"Zeff"`` route below;
+        otherwise the read is refused
+        (:class:`~bouquet.io.zeff_sources.ZeffSourceRefused`) unless
+        ``zeff_override`` names a source.  The rule's validity screen and
+        tests are restricted to the plasma (psi_N <= 1): an impurity density
+        invalid only outside the boundary is not refused, and when the
+        carbon envelope was dropped by the whole-grid screen for that reason
+        alone the impurity source takes its envelope screened inside the
+        boundary (``sigma_Zeff_carbon_source`` says so).  The record is
+        ``IDAProfiles.zeff_rule`` (and ``zeff_provenance["zeff_rule"]``).
+        Each ``"checked"`` read applies the rule on its own: the
+        one-source-per-series provision is enforced only by
+        :func:`zeff_rule_series`, not by independent per-slice reads.
+        ``"standard"``
         (default): ``Zeff`` is the file's VB value as stored, ``ni`` follows
         from ``(ne, clip(Zeff, 1, Z))`` by single-impurity quasineutrality and
         ``sigma_ni = |ni| sigma_ne/ne``; ``sigma_Zeff`` is the file's own
@@ -261,7 +552,13 @@ def read_ida(
         propagated sigma; ``"CER"`` subtracts the measured carbon density
         ``n_12C6``; ``"all"`` takes the mean of the two. An explicit route
         needs its own ``*_err`` dataset on the direct layout and raises
-        without it; ``"all"`` uses whichever routes the file supports.
+        without it; ``"all"`` uses whichever routes the file supports.  On
+        these three routes the rule is evaluated and recorded
+        (``IDAProfiles.zeff_rule``, ``record["forced"]``) without changing
+        the route; a warning
+        (:class:`~bouquet.io.zeff_sources.ZeffSourceWarning`, once per read)
+        is emitted only when a source the route takes FAILS a recorded test
+        (an unverified one is recorded only).
     impurity_Z : float
         Impurity charge Z (carbon Z=6).
     zeff_substitute : callable, optional
@@ -279,6 +576,51 @@ def read_ida(
         (``sigma_ni`` has always been propagated, never chosen by this
         flag).  Passing it emits a ``DeprecationWarning``; it will be
         removed in a future release.
+    zeff_override : {"CER", "Zeff"}, optional
+        ``ni_source="checked"`` only: an explicit, recorded choice of source
+        that is honored whatever its tests say (``record["override"]`` keeps
+        the failed tests and what the rule would have chosen).  Refused when
+        the file does not carry the named source or cannot use it, and for
+        an impurity density that fails I-3 (invalid inside the boundary, or
+        n_i <= 0): an override cannot make those usable.
+    zeff_fit_points : MeasurementPoints or dict, optional
+        The impurity-density points the file's fit used at this slice
+        (``value``, ``sigma`` in m^-3 at ``rho`` or ``psi_N``).  Default: the
+        file's own ``raw_n_12C6`` / ``raw_n_12C6_err`` / ``psin_n_12C6``
+        datasets when it carries all three; otherwise none.
+        These serve the coverage test (I-1) only.
+    zeff_raw_points : dict or sequence of MeasurementPoints, optional
+        Raw impurity-density analyses with per-point times [s]; selected in
+        the file's ``time_win_start`` / ``time_win_end`` window for the slice
+        when it states one, else within +-25 ms.  Each analysis carries a
+        ``kind`` label: the one labeled ``"hand_fit"`` is the reference for
+        the coverage and consistency tests when present, else the one
+        labeled ``"automatic"`` (the order never decides); all are recorded.
+        Without raw analyses the consistency test (I-4) is not evaluated.
+    zeff_fast_density : array, callable or "none", optional
+        Fast-ion charge density [m^-3] on the file's ``psi_N`` grid (or
+        ``f(psi_N)``), included in the rule's main-ion positivity test (I-3);
+        ``"none"`` declares there are no fast ions (evaluated with fast ions
+        = 0, recorded as a declaration).  Without it I-3 is evaluated
+        without fast ions and the record says so (``evaluated_without``);
+        this does not by itself make the impurity source unverified -- the
+        impurity-derived Z_eff does not depend on the fast-ion density
+        (singly charged main and fast ions), which changes the thermal n_i,
+        not the choice of source.
+        Points are placed in rho_tor,norm through the file's own ``q``
+        (:func:`bouquet.io.zeff_sources.rho_map_from_q`); a file without a
+        usable ``q`` leaves tests that need rho_tor on ``psi_N``-only points
+        not evaluated, and the record says why.
+    zeff_crosschecks : dict, optional
+        Cross-checks to record beside the decision (``record["crosschecks"]``);
+        never used to select a source.
+    zeff_rule_from : dict, optional
+        A rule record from an earlier read of the PROFILE file at this slice
+        (its ``IDAProfiles.zeff_rule``, same ``ni_source``).  The rule is
+        then not evaluated again and nothing is warned again: on
+        ``"checked"`` the source is the one that record decided.  Used by
+        the uncertainty re-read, so that neither a re-read of the same file
+        nor a separately supplied sigma file decides differently.
 
     Notes
     -----
@@ -306,10 +648,30 @@ def read_ida(
     if sigma_method not in ("percentile", "std"):
         raise ValueError(
             f"unknown sigma_method {sigma_method!r}; expected 'percentile' or 'std'")
-    if ni_source not in ("standard", "Zeff", "CER", "all"):
+    if ni_source not in ("standard", "checked", "Zeff", "CER", "all"):
         raise ValueError(
-            f"unknown ni_source {ni_source!r}; expected 'standard', 'Zeff', "
-            "'CER', or 'all'")
+            f"unknown ni_source {ni_source!r}; expected 'standard', "
+            "'checked', 'Zeff', 'CER', or 'all'")
+    if zeff_rule_from is not None:
+        if ni_source == "standard" or not isinstance(zeff_rule_from, dict) \
+                or zeff_rule_from.get("ni_source") != ni_source:
+            raise ValueError(
+                "zeff_rule_from must be the zeff_rule record of a read with "
+                f"the same ni_source ({ni_source!r})")
+        if zeff_override is not None:
+            raise ValueError("zeff_rule_from already carries the decision "
+                             "(and any override); do not pass zeff_override")
+    if zeff_override is not None:
+        if ni_source != "checked":
+            raise ValueError(
+                f"zeff_override={zeff_override!r} applies to "
+                f"ni_source='checked' only (got ni_source={ni_source!r}: "
+                "'CER' and 'Zeff' already name their source, 'standard' "
+                "applies no rule)")
+        if zeff_override not in ("CER", "Zeff"):
+            raise ValueError(
+                f"zeff_override={zeff_override!r} must be 'CER' (the impurity "
+                "density) or 'Zeff' (the file's line-integrated Z_eff)")
     if ni_source == "CER" and float(impurity_Z) != 6.0:
         raise ValueError(
             f"ni_source={ni_source!r} requires impurity_Z=6.0, got {impurity_Z!r}: "
@@ -362,6 +724,14 @@ def read_ida(
         # this file's carbon data; its verdict is sigma_Zeff_carbon (None:
         # rejected, or not run)
         _carbon_screened = False
+        # the Z_eff source rule (every route but "standard"): the same
+        # validity criteria restricted to the plasma (psi_N <= 1), where the
+        # rule's tests are defined, and the carbon Z_eff envelope under that
+        # screen -- the tension's impurity sigma, and the "checked" route's
+        # carbon envelope when the whole-grid screen above dropped it for
+        # values outside the boundary only
+        _rule_on = ni_source != "standard"
+        _rule_validity = _sigma_zc_rule = _sigma_zc_rule_source = None
 
         if is_ensemble:
             def _samples(key):  # (n_samples, n_radial) at the selected slice
@@ -404,6 +774,20 @@ def read_ida(
                             / np.clip(ne_s, 1e10, None))
                     sigma_Zeff_carbon = _band(zc_s)
                     sigma_Zeff_carbon_source = "ensemble-samples"
+                if _rule_on:
+                    _rule_validity = _zs.validity_inside_boundary(
+                        psi_N, ne_s, nc_s)
+                    if sigma_Zeff_carbon is not None:
+                        _sigma_zc_rule = sigma_Zeff_carbon
+                        _sigma_zc_rule_source = sigma_Zeff_carbon_source
+                    elif _rule_validity["ok"]:
+                        with np.errstate(divide="ignore", invalid="ignore"):
+                            _sigma_zc_rule = _band(
+                                1.0 + impurity_Z * (impurity_Z - 1.0) * nc_s
+                                / np.clip(ne_s, 1e10, None))
+                        _sigma_zc_rule_source = (
+                            "ensemble-samples (validity screened inside the "
+                            "boundary only)")
         else:
             def col(key):       # one radial profile at the selected time
                 return np.asarray(f[key][t_idx], dtype=float)
@@ -438,6 +822,24 @@ def read_ida(
                             (_snc / np.clip(_nc, 1e10, None)) ** 2
                             + (sigma_ne / np.clip(ne, 1e10, None)) ** 2)
                     sigma_Zeff_carbon_source = "n_12C6_err"
+            if _rule_on and n_carbon is not None:
+                _has_err = sigma_n_carbon is not None
+                _rule_validity = _zs.validity_inside_boundary(
+                    psi_N, ne, n_carbon, sigma_n_carbon,
+                    sigma_ne if _has_err else None)
+                if sigma_Zeff_carbon is not None:
+                    _sigma_zc_rule = sigma_Zeff_carbon
+                    _sigma_zc_rule_source = sigma_Zeff_carbon_source
+                elif _has_err and _rule_validity["ok"]:
+                    _nc, _snc = n_carbon, sigma_n_carbon
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        _dil = (impurity_Z * (impurity_Z - 1.0) * _nc
+                                / np.clip(ne, 1e10, None))
+                        _sigma_zc_rule = _dil * np.sqrt(
+                            (_snc / np.clip(_nc, 1e10, None)) ** 2
+                            + (sigma_ne / np.clip(ne, 1e10, None)) ** 2)
+                    _sigma_zc_rule_source = ("n_12C6_err (validity screened "
+                                             "inside the boundary only)")
 
         q_ida = None
         if "q" in f:
@@ -484,6 +886,31 @@ def read_ida(
             else:
                 print("[read_ida] Zeff-vs-carbon cross-check skipped: no "
                       "valid core (psi_N<=0.9) carbon points in this file")
+
+        # The Z_eff source rule (bouquet.io.zeff_sources): evaluated on every
+        # route but "standard" (which applies no rule, bit for bit as
+        # before); it decides the source on "checked" and is recorded beside
+        # the forced routes.
+        zeff_rule = None
+        _rule_reused = zeff_rule_from is not None
+        if _rule_reused:
+            # evaluated once, on the profile file's own read: reused as is
+            zeff_rule = dict(zeff_rule_from)
+            zeff_rule["reused"] = (
+                "not re-evaluated on this read: the record of an earlier "
+                "read of the profile file (zeff_rule_from)")
+        elif _rule_on:
+            zeff_rule = _zeff_rule_for_slice(
+                f, t_idx, t_sel, time_ms, psi_N=psi_N, ne=ne, zeff=Zeff,
+                sigma_zeff=sigma_Zeff, n_carbon=n_carbon,
+                sigma_n_carbon=sigma_n_carbon,
+                sigma_zeff_carbon_rule=_sigma_zc_rule,
+                validity=_rule_validity, impurity_Z=impurity_Z,
+                q=q_ida, is_ensemble=is_ensemble, ni_source=ni_source,
+                override=zeff_override, fit_points=zeff_fit_points,
+                raw_points=zeff_raw_points, fast_density=zeff_fast_density,
+                ensemble_median=ensemble_median, crosschecks=zeff_crosschecks,
+                path=path)
 
         if ni_source == "standard":
             # The established route (as before PR #56): the VB Z_eff as
@@ -544,6 +971,18 @@ def read_ida(
                 zeff_cer = 1.0 + (impurity_Z * (impurity_Z - 1.0)
                                   * n_carbon / np.clip(ne, 1e10, None))
 
+        # "checked" naming the carbon density: when the whole-grid screen
+        # dropped its envelope for values outside the boundary only (the
+        # rule's inside-boundary screen passed), the envelope screened
+        # inside the boundary is used -- the forced "CER" route is unchanged
+        _carbon_env_inside = False
+        if (ni_source == "checked" and sigma_Zeff_carbon is None
+                and _sigma_zc_rule is not None
+                and zeff_rule["decision"]["source"] == _zs.IMPURITY):
+            sigma_Zeff_carbon = _sigma_zc_rule
+            sigma_Zeff_carbon_source = _sigma_zc_rule_source
+            _carbon_env_inside = True
+
         # A route is LIVE only with a value AND a validated envelope.
         # sigma_Zeff_carbon carries the carbon screen's verdict (see
         # _carbon_tier_usable), so the ladder and the tier share ONE screen.
@@ -551,7 +990,17 @@ def read_ida(
         _cer_ok = (zeff_cer is not None and sigma_Zeff_carbon is not None
                    and sigma_n_carbon is not None
                    and float(impurity_Z) == 6.0)
-        if ni_source == "Zeff":
+        # "checked": the rule's source, through the same arithmetic as the
+        # forced route it names ("CER" / "Zeff"); without that source's
+        # envelope (an override only) the bottom rung below takes its value
+        # with the ne-fraction sigma
+        _prefer_cer = False
+        if ni_source == "checked":
+            _src = zeff_rule["decision"]["source"]
+            _prefer_cer = _src == _zs.IMPURITY
+            use_vb = (not _prefer_cer) and _vb_ok
+            use_cer = _prefer_cer and _cer_ok
+        elif ni_source == "Zeff":
             use_vb, use_cer = True, False
         elif ni_source == "CER":
             if not _cer_ok:
@@ -570,7 +1019,7 @@ def read_ida(
         zeff_sigma_from_ne = not (use_vb or use_cer)
         zeff_from_carbon = False
         if zeff_sigma_from_ne:
-            if zeff_vb is not None:
+            if zeff_vb is not None and not _prefer_cer:
                 use_vb = True
             elif zeff_cer is not None:
                 # No Zeff dataset: Z_eff DERIVED from the carbon density.
@@ -585,7 +1034,7 @@ def read_ida(
                     _why = (f"impurity_Z={float(impurity_Z):g}, but the "
                             "file's impurity density is carbon ('n_12C6', "
                             "Z = 6)")
-                elif sigma_Zeff_carbon is None and (
+                elif ni_source != "checked" and sigma_Zeff_carbon is None and (
                         _carbon_screened
                         or not _carbon_tier_usable(
                             n_carbon, ne, unit="radii",
@@ -593,6 +1042,12 @@ def read_ida(
                     _why = ("the carbon validity screen rejected its "
                             "'n_12C6' data (negative, non-finite or fill "
                             "values)")
+                if _why is not None and ni_source == "checked":
+                    raise _zs.ZeffSourceRefused(
+                        f"{path!r}: the Z_eff source rule (ni_source="
+                        "'checked') names the carbon density, but it cannot "
+                        f"be used because {_why}; pass ni_source='standard' "
+                        "(the file's Z_eff as stored, no rule)", zeff_rule)
                 if _why is not None:
                     raise KeyError(
                         f"{path!r} carries no usable Z_eff information: no "
@@ -605,8 +1060,13 @@ def read_ida(
                 use_cer = True
                 zeff_from_carbon = True
                 import warnings
+                _lead = (f"read_ida: {path!r} has no 'Zeff' dataset; Z_eff is "
+                         if zeff_vb is None else
+                         f"read_ida: {path!r}: the carbon source named by "
+                         "the Z_eff source rule has no usable envelope "
+                         "here; Z_eff is ")
                 warnings.warn(
-                    f"read_ida: {path!r} has no 'Zeff' dataset; Z_eff is "
+                    _lead +
                     "DERIVED from the carbon density (1 + Z(Z-1) n_C/n_e, "
                     "the validity screen passed, Z = 6) with an n_e-fraction "
                     "sigma (zeff_provenance['zeff_source'] = "
@@ -659,6 +1119,22 @@ def read_ida(
                          "Zeff+carbon_density" if w_c else "Zeff"),
             zeff_from_carbon_fallback=bool(zeff_from_carbon),
         )
+        if ni_source == "checked":
+            # the rule that chose the source, archived with the route
+            zeff_provenance["zeff_rule"] = zeff_rule
+            zeff_provenance["zeff_override"] = (
+                zeff_override if not _rule_reused else
+                {_zs.IMPURITY: "CER", _zs.LINE: "Zeff"}.get(
+                    (zeff_rule.get("override") or {}).get("source")))
+            if _carbon_env_inside:
+                zeff_provenance["carbon_envelope_screen"] = (
+                    "inside the boundary only (psi_N <= 1): the whole-grid "
+                    "carbon screen rejected values outside the boundary")
+        if zeff_rule is not None and not _rule_reused:
+            _zeff_rule_warn(
+                zeff_rule, ni_source, t_sel,
+                ([_zs.IMPURITY] if w_c else []) + ([_zs.LINE] if w_v else []),
+                zeff_provenance)
 
         _inv = 1.0 / (impurity_Z - 1.0)
         # dZeff_res/dne comes from the CER route alone (VB's Z_eff has no ne
@@ -737,6 +1213,7 @@ def read_ida(
         zeff_dne=zeff_dne,
         q=q_ida,
         zeff_provenance=zeff_provenance,
+        zeff_rule=zeff_rule,
     )
 
 

@@ -1108,16 +1108,50 @@ def resolve_uncertainty(config, baseline) -> dict:
                     what="uncertainty.ida_path",
                     ida_fuse=getattr(src, "ida_timing", "window") == "ida_fuse")
                 _t_req = _sig_match["ida_time_used"]
-            ida = read_ida(
-                ida_path, time=_t_req,
-                sigma_mode=unc.sigma_mode, sigma_method=unc.sigma_method,
-                ni_source=(out_ni_source if _ion_route
-                           else STANDARD_NI_SOURCE),
-                # the carbon tier's Z(Z-1) propagation is quadratically
-                # Z-sensitive; the kinetics loader already passes this, and
-                # omitting it here silently pinned the sigma math to carbon
-                impurity_Z=float(getattr(src, "impurity_Z", 6.0)),
-            )
+            # The Z_eff source rule is evaluated once, on the PROFILE file's
+            # own read (the kinetics): this sigma read reuses that record
+            # (zeff_rule_from), so it neither warns again nor -- for a
+            # separately supplied sigma file -- decides differently; on the
+            # "checked" route its source is the profile file's decision.
+            # Without a stored record (a forced route on the g-file path,
+            # where the record decides nothing) the rule's warnings of this
+            # re-read are silenced: the kinetics read already gave them.
+            _rule_kw = {}
+            if _ion_route and out_ni_source != STANDARD_NI_SOURCE:
+                _prof_rule = None
+                if isinstance(src, ReconstructionSource):
+                    _prof_rule = ((getattr(baseline, "li_metrics", None) or {})
+                                  .get("zeff_provenance") or {}).get(
+                                      "zeff_rule")
+                elif _shared is not None:
+                    _prof_rule = getattr(_shared[1], "zeff_rule", None)
+                if _prof_rule is not None and \
+                        _prof_rule.get("ni_source") == out_ni_source:
+                    _rule_kw["zeff_rule_from"] = _prof_rule
+                elif out_ni_source == "checked":
+                    _rule_kw["zeff_override"] = getattr(src, "zeff_override",
+                                                        None)
+            import contextlib as _cl
+            import warnings as _w
+            from .io.zeff_sources import ZeffSourceWarning as _ZSW
+            _quiet = (_w.catch_warnings() if (
+                _ion_route and out_ni_source != STANDARD_NI_SOURCE)
+                else _cl.nullcontext())
+            with _quiet:
+                if _ion_route and out_ni_source != STANDARD_NI_SOURCE:
+                    _w.simplefilter("ignore", _ZSW)
+                ida = read_ida(
+                    ida_path, time=_t_req,
+                    sigma_mode=unc.sigma_mode, sigma_method=unc.sigma_method,
+                    ni_source=(out_ni_source if _ion_route
+                               else STANDARD_NI_SOURCE),
+                    # the carbon tier's Z(Z-1) propagation is quadratically
+                    # Z-sensitive; the kinetics loader already passes this,
+                    # and omitting it here silently pinned the sigma math to
+                    # carbon
+                    impurity_Z=float(getattr(src, "impurity_Z", 6.0)),
+                    **_rule_kw,
+                )
             if _sig_match is not None and abs(
                     float(ida.time) - _sig_match["ida_time_used"]) > 1e-9:
                 raise RuntimeError(
@@ -1661,8 +1695,22 @@ def _load_kinetic_profiles(source) -> dict:
     path = source.profiles_path
     if path.endswith(".cdf"):
         from .io.ida import read_ida
+        _ns = getattr(source, "ni_source", "standard")
+        _rule_kw = {}
+        if _ns == "checked":
+            _rule_kw["zeff_override"] = getattr(source, "zeff_override", None)
+        _fd = getattr(source, "zeff_fast_density", None)
+        if _ns != "standard" and _fd is not None:
+            # the Z_eff source rule's fast-ion input (I-3): "none" (declared),
+            # an array on the file's psi_N grid, or {"psi_N", "n_fast"}
+            if isinstance(_fd, dict):
+                _x = np.asarray(_fd["psi_N"], dtype=float)
+                _y = np.asarray(_fd["n_fast"], dtype=float)
+                _fd = (lambda x, _x=_x, _y=_y: np.interp(
+                    np.asarray(x, dtype=float), _x, _y))
+            _rule_kw["zeff_fast_density"] = _fd
         ida = read_ida(path, time=source.time, impurity_Z=source.impurity_Z,
-                       ni_source=getattr(source, "ni_source", "standard"))
+                       ni_source=_ns, **_rule_kw)
         return dict(
             psi_N=np.asarray(ida.psi_N, dtype=float),
             ne=np.asarray(ida.ne, dtype=float),

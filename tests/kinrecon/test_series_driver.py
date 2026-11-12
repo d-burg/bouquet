@@ -232,6 +232,27 @@ def test_filter_carries_the_accepted_centers_state(monkeypatch):
     assert np.max(np.abs(got2.psi - (e2.psi + d2))) <= 1e-12 * np.ptp(e2.psi + d2)
 
 
+def test_filter_times_fit_only_at_the_anchor_slices(monkeypatch):
+    lags = dict(pred=_lag(), center=_lag(sigma_scale=1.3), col0=_lag(sigma_scale=0.7), col1=_lag(sigma_scale=1.6),
+                trial=_lag(sigma_scale=0.5))
+    fm = FakeFM(lags)
+    _install(monkeypatch, fm, _steady(lags["pred"], IP0), lambda f: f.lags[f.key])
+    rec = _fake_reconstruct("converged", lags)
+    monkeypatch.setattr(SE._fit, "reconstruct", rec)
+    cfg = CM.CurrentModelSettings(r0=GEO.R0)
+    times = [0.0, 0.02, 0.04, 0.06]
+    st = SE.SeriesSettings(initial="relaxed", sawtooth="off", filter=True, filter_times=(0.04,))
+    out = SE.run_series(fm, _slices(times, [IP0, 1.01 * IP0, 1.02 * IP0, 1.03 * IP0]), cfg, st)
+    assert [s["filter"] is not None for s in out["slices"][1:]] == [False, True, False]
+    assert out["slices"][2]["filter"]["absorbed"] is True and len(rec.calls) == 1
+    assert st.filter_at(0.04) and not st.filter_at(0.02) and SE.SeriesSettings(filter=True).filter_at(0.02)
+    assert out["settings"]["filter_times"] == (0.04,)
+    with pytest.raises(ValueError, match="need filter=True"):
+        SE.SeriesSettings(filter_times=(0.04,))
+    with pytest.raises(ValueError, match="empty"):
+        SE.SeriesSettings(filter=True, filter_times=())
+
+
 @pytest.mark.parametrize("status", ["stalled_no_significant_descent", "max_iter", "failed_trials", "jacobian_failed",
                                     "converged_no_final_jacobian", "converged_within_noise"])
 def test_filter_absorbs_only_converged_fits(monkeypatch, status):

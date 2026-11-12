@@ -83,7 +83,9 @@ first slice's fit record (``start_label``).
 Fit interaction: (i) default -- the initial state is fitted once; later slices are evolved and
 SCORED with no fitting (a prediction test); (ii) ``filter=True`` -- at every later slice the
 correction amplitudes are re-fitted with the evolved state as the prior mean (corrections
-N(0, sigma) on top of it).  Only a filter fit with status ``"converged"`` is absorbed (not
+N(0, sigma) on top of it); with ``filter_times`` given, only at the slices whose time lies within
+``filter_time_tol`` of one of those times (anchor fits; every other slice is evolved and scored
+without fitting, and its record says ``filter: None``).  Only a filter fit with status ``"converged"`` is absorbed (not
 ``"converged_within_noise"``, whose status is recorded like any other non-absorbed one): the state is
 re-advanced on the ACCEPTED center's own equilibrium (the fit's other solves -- Jacobian columns,
 trials -- also advance the state, on their perturbed equilibria, and none of those is carried),
@@ -153,6 +155,8 @@ class SeriesSettings:
     initial_fit_nonconverged: str = "refuse"             # INITIAL_FIT_POLICIES
     filter: bool = False
     filter_fit: _fit.FitSettings = field(default_factory=lambda: _fit.FitSettings(free=("a_corr",)))
+    filter_times: Optional[Sequence[float]] = None       # with filter=True: fit only at these slice times [s]
+    filter_time_tol: float = 1.0e-6                      # [s] match tolerance of filter_times
     dt_max: float = 1.0e-3                               # diffusion step [s]
     scheme: str = "trbdf2"
     sawtooth: str = "periodic"
@@ -180,6 +184,12 @@ class SeriesSettings:
             raise ValueError("sawtooth_first_crash_phase must lie in (0, 1]")
         if self.layer_fpol not in LAYER_FPOL_MODES:
             raise ValueError(f"layer_fpol must be one of {LAYER_FPOL_MODES}")
+        if self.filter_times is not None:
+            if not self.filter:
+                raise ValueError("filter_times select the slices of the filter: they need filter=True")
+            self.filter_times = tuple(float(t) for t in self.filter_times)
+            if not self.filter_times:
+                raise ValueError("filter_times is empty (give None to fit at every slice)")
         if self.initial_fit is None:
             free = ("log_strength", "a_corr") if self.sawtooth == "periodic" else ("a_corr",)
             self.initial_fit = _fit.FitSettings(free=free)
@@ -190,6 +200,14 @@ class SeriesSettings:
     def log_strength(self):
         return (_fit.PARAMETERS["log_strength"]["prior"][0] if self.sawtooth_log_strength is None
                 else float(self.sawtooth_log_strength))
+
+    def filter_at(self, t):
+        """True when the filter fits the slice at time ``t`` [s] (every slice without ``filter_times``)."""
+        if not self.filter:
+            return False
+        if self.filter_times is None:
+            return True
+        return any(abs(float(t) - ft) <= self.filter_time_tol for ft in self.filter_times)
 
     def as_dict(self):
         d = {k: v for k, v in asdict(self).items() if k not in ("initial_profile",)}
@@ -494,7 +512,7 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
         res = _cm.consistent_solve(fm, sl.kinetics, sl.sources, p_pred, cfg, label=f"{sl.label}:evolve",
                                    state_fn=state_fn)
         filt = None
-        if res.converged and s.filter:
+        if res.converged and s.filter_at(t1):
             filt, res = _filter_slice(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1)
         extra = dict(n_solves=fm.n_solves - nk, interval=dict(holder.get("info", {}), start_s=float(tp), end_s=float(t1)),
                      crashes=[dict(time=e.time, active=bool(e.record.active),

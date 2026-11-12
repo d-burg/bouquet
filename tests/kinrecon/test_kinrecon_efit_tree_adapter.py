@@ -207,3 +207,34 @@ def test_round_trip_through_the_measurement_file():
         np.testing.assert_array_equal(b.measured, g.measured)
         np.testing.assert_array_equal(np.isnan(b.sigma), np.isnan(g.sigma))
         np.testing.assert_array_equal(b.valid, g.valid)
+
+
+def test_fitted_flux_offset_in_the_scorer_and_for_efits_own_fit():
+    from bouquet.kinrecon.interfaces import ResidualTable
+    from bouquet.kinrecon.score import _fit_flux_offset
+    a, s = _arrays()
+    with pytest.raises(ValueError, match="two readings of the gauge"):
+        _ms(a, flux_offset="fitted")
+    ms = _ms(a, flux_offset="fitted", flux_reference=None)
+    g = ms.groups["flux_loop"]
+    assert g.meta["flux_offset"] == "fitted"
+    use = g.valid
+    # a model that differs from the data by a constant plus known residuals: the offset absorbs the constant
+    resid = np.array([0.3, -0.5, 9.0, 0.2]) * g.sigma
+    resid[2] = 0.0
+    model = g.measured - 0.7 + np.where(use, resid, 0.0)
+    tab = ResidualTable(measurements=ms, model={"flux_loop": model.copy()},
+                        model_valid={"flux_loop": np.isfinite(model)})
+    _fit_flux_offset(tab)
+    w = 1.0 / g.sigma[use] ** 2
+    c = np.sum(w * (g.measured[use] - model[use])) / np.sum(w)
+    assert tab.frame["flux_offset"] == pytest.approx(c, rel=1e-12)
+    r = tab.residual("flux_loop")
+    assert abs(np.sum(r / g.sigma[use])) < 1e-9 * np.sum(np.abs(r / g.sigma[use]))   # weighted mean residual 0
+    _fit_flux_offset(tab)                                                           # idempotent
+    assert tab.frame["flux_offset"] == pytest.approx(c, rel=1e-12)
+    # EFIT's own fitted values: a constant shift of all fitted loops leaves its chi2 unchanged under the offset
+    a2 = dict(a, CSILOP=a["CSILOP"] + 0.05)
+    c1 = ET.source_fit_chi2(_ms(a, flux_offset="fitted", flux_reference=None))["flux_loop"]
+    c2 = ET.source_fit_chi2(_ms(a2, flux_offset="fitted", flux_reference=None))["flux_loop"]
+    assert c2[0] == pytest.approx(c1[0], rel=1e-9) and c1[1] == 3

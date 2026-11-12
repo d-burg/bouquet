@@ -55,9 +55,17 @@ Conventions (documented defaults of the scorer):
   test), a finite-length probe whose segment leaves the mesh, a Thomson
   channel outside the LCFS (unless ``kinetics["thomson_outside"] =
   "extrapolate"``), a non-finite model value;
-* no gauge is applied inside :func:`score`: flux loops are modeled in the
-  form the data are stored in (relative to ``meta["flux_reference"]`` when it
-  is named);
+* no gauge is applied inside :func:`score` unless the group asks for one:
+  flux loops are modeled in the form the data are stored in (relative to
+  ``meta["flux_reference"]`` when it is named); with ``meta["flux_offset"] =
+  "fitted"`` the loops are modeled absolutely plus ONE additive offset per
+  table, solved in closed form by weighted least squares over the used
+  channels (``c = sum w (measured - model) / sum w``, ``w = (weight /
+  sigma)^2``; the offset is one fitted nuisance parameter, recorded in
+  ``table.frame["flux_offset"]`` and in the notes) -- the reading of data
+  stored relative to a reference offset that the producing fit itself fitted
+  (EFIT's ``FITSIREF``), under which that fit's own fitted values reproduce
+  its own chi^2;
 * E_r is never counted twice: an MSE group declared E_r-corrected with an
   E_r supplied is refused;
 * an orientation mismatch between the equilibrium and the discharge is
@@ -305,8 +313,32 @@ def score(equilibrium, measurements, kinetics=None, groups=None, orientation=Non
                          "excluded from chi2 (see table.excluded)")
         model[name] = value
         model_valid[name] = ok
-    return ResidualTable(measurements=measurements, model=model, model_valid=model_valid,
-                         excluded=excluded, notes=notes, frame=frame)
+    table = ResidualTable(measurements=measurements, model=model, model_valid=model_valid,
+                          excluded=excluded, notes=notes, frame=frame)
+    if "flux_loop" in model and measurements.groups["flux_loop"].meta.get("flux_offset") == "fitted":
+        _fit_flux_offset(table)
+    return table
+
+
+def _fit_flux_offset(table):
+    """Add the closed-form weighted-least-squares offset to the modeled loops (module docstring); the
+    model must be absolute (no ``flux_reference``).  Re-callable: the previous offset is removed first."""
+    g = table.measurements.groups["flux_loop"]
+    if g.meta.get("flux_reference") is not None:
+        raise ValueError("flux_offset='fitted' models the loops absolutely: flux_reference must be None")
+    prev = float(table.frame.get("flux_offset", 0.0))
+    m = np.asarray(table.model["flux_loop"], float) - prev
+    use = table.used("flux_loop")
+    if not np.any(use):
+        table.frame["flux_offset"] = 0.0
+        table.model["flux_loop"] = m
+        return
+    w = (g.weight[use] / g.sigma[use]) ** 2
+    c = float(np.sum(w * (g.measured[use] - m[use])) / np.sum(w))
+    table.model["flux_loop"] = m + c
+    table.frame["flux_offset"] = c
+    table.frame["flux_offset_rule"] = "one additive loop offset per table, weighted least squares over the used channels"
+    table.notes.append(f"flux_loop: fitted additive offset {c:.6g} (one nuisance parameter, closed form)")
 
 
 def score_common(equilibria, measurements, kinetics=None, groups=None, orientations=None):
@@ -345,6 +377,8 @@ def score_common(equilibria, measurements, kinetics=None, groups=None, orientati
                 t.excluded.setdefault(name, []).extend((g.labels[i], reason) for i in np.nonzero(extra)[0])
                 t.notes.append(f"{name}: {int(extra.sum())} channel(s) removed for comparability ({reason})")
             t.model_valid[name] = common.copy()
+            if name == "flux_loop" and g.meta.get("flux_offset") == "fitted":
+                _fit_flux_offset(t)          # the offset is re-solved on the common channels
         record[name] = dict(n_common=int(np.count_nonzero(g.valid & common)), removed_for_comparability=removed)
     return tabs, record
 

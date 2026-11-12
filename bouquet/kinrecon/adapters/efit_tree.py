@@ -70,7 +70,11 @@ the solver needs is ``measured + meta["absolute_offset"]`` with
 the measured reference-loop flux; ``"fitted"``: a reference offset fitted by
 EFIT, its ``FITSIREF`` option) are inputs, recorded with the value of the
 reference loop's own stored entry.  Scoring stays in the storage form
-(relative to ``flux_reference`` when that label is named).
+(relative to ``flux_reference`` when that label is named), or -- with
+``flux_offset="fitted"`` (recorded in the group's ``meta``) -- the loops are
+scored absolutely plus one additive offset solved in closed form in every
+table (:func:`..score.score`): the reading of data stored relative to an
+offset the producing fit itself fitted (reference convention ``"fitted"``).
 
 **Units and sign** as in :mod:`.efit_kfile`: flux loops (and their fitted
 values) multiplied by ``flux_scale`` (default ``-2 pi``); coil currents as
@@ -200,7 +204,8 @@ def weight_convention_check(measured, fitted, weight, chi2, rtol=WEIGHT_CHECK_RT
 
 def measurements_from_efit_arrays(arrays, machine, time, time_window, *, sigma_model, groups=None,
                                   flux_storage=None, reference_flux=None, reference_convention=None,
-                                  reference_flux_source=None, flux_reference=None, flux_scale=-2.0 * np.pi,
+                                  reference_flux_source=None, flux_reference=None, flux_offset=None,
+                                  flux_scale=-2.0 * np.pi,
                                   input_weight=None, require_weight_check=False, weight_check_rtol=WEIGHT_CHECK_RTOL,
                                   rule_inputs=None, er_corrected=None, coil_current_per_turn=(),
                                   score_unfitted_coils=True, diamagnetic_scale=1.0, exclude=None, meta=None):
@@ -227,6 +232,9 @@ def measurements_from_efit_arrays(arrays, machine, time, time_window, *, sigma_m
         ``reference_convention`` ("measured" or "fitted") and ``reference_flux_source`` (text) are recorded.
     flux_reference : str, optional
         Label of the reference loop for relative scoring (only with ``flux_storage="relative"``).
+    flux_offset : {None, "fitted"}
+        ``"fitted"``: score the loops with one closed-form additive offset per table (not with
+        ``flux_reference``).
     input_weight : float or dict, optional
         ``"weight_inverse"``: EFIT's input weight of the fitted channels (a number for every group or
         ``{group: number or array}``; required).
@@ -383,6 +391,10 @@ def measurements_from_efit_arrays(arrays, machine, time, time_window, *, sigma_m
             raise ValueError(f"reference_convention must be one of {REFERENCE_CONVENTIONS}")
         labels = machine.labels("flux_loop")
         n = len(labels)
+        if flux_offset not in (None, "fitted"):
+            raise ValueError("flux_offset must be None or 'fitted'")
+        if flux_offset == "fitted" and flux_reference is not None:
+            raise ValueError("flux_offset='fitted' and flux_reference are two readings of the gauge: give one")
         if flux_reference is not None:
             if flux_reference not in labels:
                 raise ValueError(f"flux_reference {flux_reference!r} is not a flux-loop label")
@@ -408,7 +420,8 @@ def measurements_from_efit_arrays(arrays, machine, time, time_window, *, sigma_m
                   kersil=kersil)
         iref = labels.index(flux_reference) if flux_reference is not None else None
         g.meta.update(flux_scale=flux_scale, units="stored loop flux [per radian] x flux_scale",
-                      flux_reference=flux_reference, coils_form=flux_storage, coils_form_rule="caller",
+                      flux_reference=flux_reference, flux_offset=flux_offset, coils_form=flux_storage,
+                      coils_form_rule="caller",
                       coils_form_evidence=("stated by the caller" + ("" if iref is None else
                                            f"; reference loop's stored entry {g.measured[iref] / flux_scale:.6g} "
                                            "(per radian)")),
@@ -537,7 +550,8 @@ def source_fit_chi2(ms, groups=None):
     """EFIT's own chi^2 on exactly the set's channels and sigma: ``sum ((fitted - measured) / sigma)^2`` over
     the valid channels of each group that carries ``meta["source_fit"]``.  Fitted and measured values are
     compared in the form they are stored in (relatively stored loops: EFIT's fitted values are in the same
-    relative form, as its own stored chi^2 compares them).  Returns ``{group: (chi2, n, chi2/n)}``."""
+    relative form, as its own stored chi^2 compares them); with the group's ``flux_offset="fitted"`` one
+    closed-form additive offset is applied to the fitted loops as well (the same convention as the scorer).  Returns ``{group: (chi2, n, chi2/n)}``."""
     out = {}
     for name, g in ms.groups.items():
         if groups is not None and name not in groups:
@@ -546,6 +560,10 @@ def source_fit_chi2(ms, groups=None):
         if fit is None:
             continue
         m, f = np.asarray(g.measured, float), np.asarray(fit, float)
+        if name == "flux_loop" and g.meta.get("flux_offset") == "fitted":
+            u0 = g.valid & (g.weight != 0) & np.isfinite(f)
+            w = (g.weight[u0] / g.sigma[u0]) ** 2
+            f = f + float(np.sum(w * (m[u0] - f[u0])) / np.sum(w)) if np.any(u0) else f
         use = g.valid & (g.weight != 0) & np.isfinite(f)
         z = g.weight[use] * (f[use] - m[use]) / g.sigma[use]
         n = int(use.sum())

@@ -43,7 +43,8 @@ with, on each interval ``[t_{k-1}, t_k]``,
   ``t_0 + phase/nu`` for sensitivity studies).  With measured crash times the first slice's state
   is the window average of the measured-crash slice run of the current model over the window
   ``[t_0 - (t_1 - t_0), t_0]`` (the first interval's length; the run starts on the periodic orbit at
-  the measured mean interval ``history`` before the window, so the crash record must cover it), and
+  the measured mean interval ``history`` before the window, so the crash record must cover it; a record
+  that covers the history and holds no crash in it starts the series crash-free, recorded), and
   the later crashes are the measured ones; ``"off"``: none.  A slice reports the crash-free end state plus the sawtooth effect averaged
   over the interval since the previous slice (the measurement window): ``psi = psi_end^(no crash) +
   <psi^(crashes)>_window - <psi^(no crash)>_window``.  This is the instantaneous state when the operator
@@ -736,9 +737,17 @@ def _measured_crash_start(s, cfg, times):
         sched = _saw.schedule_for_slice(s.crash_times, window, history=cfg.history, record_start=s.crash_record_start)
     except ValueError as exc:
         raise ValueError(f"measured crash times cannot start the series at its first slice: {exc}") from exc
+    n_hist = int(np.count_nonzero((np.asarray(s.crash_times, float) > sched.t_start)
+                                  & (np.asarray(s.crash_times, float) <= window[1])))
+    if n_hist == 0:
+        # the record covers the history (checked above) and holds no crash in it: the first slice is crash-free
+        rec = dict(window=list(window), history_s=cfg.history, record_start=s.crash_record_start, n_crashes_history=0,
+                   note="no measured crash in the covered history before the first slice: the first slice is the "
+                        "crash-free (steady) model state; the measured crashes act from then on")
+        return cfg, dict(log_strength=None, f=s.sawtooth_f), rec
     if sched.mean_interval is None:
-        raise ValueError("measured crash times cannot start the series: fewer than two crashes in the history "
-                         f"[{sched.t_start}, {window[1]}]")
+        raise ValueError("measured crash times cannot start the series: one crash in the history "
+                         f"[{sched.t_start}, {window[1]}] (two are needed to set the starting orbit)")
     ls = float(np.log(_saw.crash_strength(s.sawtooth_f, 1.0 / sched.mean_interval)))
     cfg0 = dataclasses.replace(cfg, crash_times=tuple(float(x) for x in s.crash_times), window=window,
                                crash_record_start=s.crash_record_start)

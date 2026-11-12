@@ -126,3 +126,17 @@ def test_one_zeff_source_per_series():
     assert out["failing_slices"] == [0.02] and out["unverified_slices"] == [0.04]
     with pytest.raises(ValueError, match="used another source"):
         SE.check_zeff_series(_zslices([_zrec(ZR.IMPURITY), _zrec(ZR.LINE)]), ZR.IMPURITY)
+
+
+def test_crash_record_with_no_crash_in_the_covered_history_starts_crash_free():
+    s = SE.SeriesSettings(initial="relaxed", sawtooth="crash_times", crash_times=[0.03, 0.05],
+                          crash_record_start=-2.0)
+    cfg = CM.CurrentModelSettings(r0=SD.GEO.R0)
+    cfg0, p0, rec = SE._measured_crash_start(s, cfg, np.array([0.0, 0.02]))
+    assert cfg0 is cfg and p0["log_strength"] is None and rec["n_crashes_history"] == 0
+    one = SE.SeriesSettings(initial="relaxed", sawtooth="crash_times", crash_times=[-0.3, 0.05], crash_record_start=-2.0)
+    with pytest.raises(ValueError, match="one crash in the history"):
+        SE._measured_crash_start(one, cfg, np.array([0.0, 0.02]))
+    uncovered = SE.SeriesSettings(initial="relaxed", sawtooth="crash_times", crash_times=[0.03, 0.05])
+    with pytest.raises(ValueError, match="cannot start the series"):
+        SE._measured_crash_start(uncovered, cfg, np.array([0.0, 0.02]))

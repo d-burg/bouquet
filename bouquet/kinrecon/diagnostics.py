@@ -408,8 +408,11 @@ def probe_reproduction(model, reference, sigma, tolerance_rms):
     """Per-signal agreement of modeled probe signals with a reference (e.g. EFIT's calculated signals).
 
     ``z = (model - reference) / sigma`` over channels with finite values and ``sigma > 0``; returns ``{"z",
-    "rms", "max_abs", "n", "tolerance_rms", "passed"}`` with ``passed = rms <= tolerance_rms``.  The tolerance
-    is the caller's stated criterion; it is recorded, not chosen here.
+    "rms", "max_abs", "argmax", "n", "tolerance_rms", "passed", "passed_rms", "passed_per_signal_max"}`` with
+    ``passed = passed_rms = rms <= tolerance_rms`` and, reported beside it, ``passed_per_signal_max =
+    max_abs <= tolerance_rms`` (the same tolerance applied to every signal; ``argmax`` the channel index of
+    ``max_abs``).  Both readings are reported; ``passed`` keeps the rms reading.  The tolerance is the
+    caller's stated criterion; it is recorded, not chosen here.
     """
     model, reference, sigma = (np.asarray(x, dtype=float).ravel() for x in (model, reference, sigma))
     use = np.isfinite(model) & np.isfinite(reference) & np.isfinite(sigma) & (sigma > 0.0)
@@ -418,8 +421,10 @@ def probe_reproduction(model, reference, sigma, tolerance_rms):
     z = np.full(model.shape, np.nan)
     z[use] = (model[use] - reference[use]) / sigma[use]
     rms = float(np.sqrt(np.mean(z[use] ** 2)))
-    return {"z": z, "rms": rms, "max_abs": float(np.max(np.abs(z[use]))), "n": int(use.sum()),
-            "tolerance_rms": float(tolerance_rms), "passed": bool(rms <= tolerance_rms)}
+    zmax = float(np.max(np.abs(z[use])))
+    return {"z": z, "rms": rms, "max_abs": zmax, "argmax": int(np.nanargmax(np.abs(z))), "n": int(use.sum()),
+            "tolerance_rms": float(tolerance_rms), "passed": bool(rms <= tolerance_rms),
+            "passed_rms": bool(rms <= tolerance_rms), "passed_per_signal_max": bool(zmax <= tolerance_rms)}
 
 
 def bpol_probe(eq, geometry, model="finite_length", n_avg=PROBE_N_AVG_DEFAULT):

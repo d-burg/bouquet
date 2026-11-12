@@ -172,3 +172,11 @@ def test_probe_reproduction_record():
     assert diag.probe_reproduction([1.0], [1.0], [1.0], 0.0)["passed"]
     with pytest.raises(ValueError, match="no channel"):
         diag.probe_reproduction([np.nan], [1.0], [1.0], 1.0)
+
+
+def test_probe_reproduction_reports_rms_and_per_signal_maximum():
+    # rms passes, one signal does not: both readings are reported, ``passed`` keeps the rms reading
+    out = diag.probe_reproduction([0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.15], [0.1] * 4, 0.8)
+    assert out["rms"] == pytest.approx(0.75, rel=1e-12) and out["max_abs"] == pytest.approx(1.5, rel=1e-12)
+    assert out["argmax"] == 3
+    assert out["passed"] and out["passed_rms"] and not out["passed_per_signal_max"]

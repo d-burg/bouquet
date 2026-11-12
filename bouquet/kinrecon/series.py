@@ -67,7 +67,12 @@ Initial state (first slice):
 * ``"relaxed"``: the steady (or periodic) model state of the first slice;
 * ``"from_profile"``: a supplied current profile ``<J.B>(rho_tor,norm)`` (e.g. from a prior
   equilibrium; controlled tests), held as a profile through the first slice's pass loop, the state
-  being the one with that current on the converged geometry.  (Holding a psi(rho) or q(rho) state
+  being the one with that current on the converged geometry.  By default the profile is used as
+  given (its integral sets the current inside the domain edge, and the outer layer carries the rest
+  of Ip, which can be negative when the profile was made on other surfaces);
+  ``initial_profile_domain_fraction = f`` scales it on every pass so that the current inside the
+  domain edge is ``f Ip`` (e.g. the producing equilibrium's own enclosed-current fraction at that
+  surface; the scale factor is recorded in the state's ``meta``).  (Holding a psi(rho) or q(rho) state
   FIXED while the geometry iterates was tried and did not converge on the public fixture: the passes
   drift by ~4e-4 in l_i per pass without and oscillate with Anderson mixing; not offered.)
 * ``"auto"``: ``"mse_fit"`` when the first slice has an MSE group declared E_r-corrected, else
@@ -150,6 +155,7 @@ class SeriesSettings:
     """Every setting of the series driver (recorded)."""
     initial: str = "auto"
     initial_profile: Optional[Any] = None                # (rho_tor_norm, <J.B> [A T/m^2]) for "from_profile"
+    initial_profile_domain_fraction: Optional[float] = None   # scale it to carry f Ip inside the domain edge
     initial_fit: Optional[_fit.FitSettings] = None       # None: free ("log_strength", "a_corr") with periodic
     #                                                      sawteeth, ("a_corr",) otherwise
     initial_fit_nonconverged: str = "refuse"             # INITIAL_FIT_POLICIES
@@ -178,6 +184,8 @@ class SeriesSettings:
             raise ValueError("sawtooth='crash_times' needs crash_times")
         if self.vessel_eddy:
             raise NotImplementedError("the vessel/eddy-current contribution is not modeled (vessel_eddy=False)")
+        if self.initial_profile_domain_fraction is not None and not 0.0 < float(self.initial_profile_domain_fraction) <= 1.0:
+            raise ValueError("initial_profile_domain_fraction must lie in (0, 1]")
         if self.initial_fit_nonconverged not in INITIAL_FIT_POLICIES:
             raise ValueError(f"initial_fit_nonconverged must be one of {INITIAL_FIT_POLICIES}")
         if not 0.0 < float(self.sawtooth_first_crash_phase) <= 1.0:
@@ -680,4 +688,11 @@ def _given_state(lag, s, cfg, ip):
     from scipy.interpolate import PchipInterpolator
     r, j = (np.asarray(v, float) for v in s.initial_profile)
     rq = np.clip(lag["phys"]["rho"], r[0], r[-1])
-    return _cm.state_from_jdotb(lag, PchipInterpolator(r, j)(rq), ip, cfg.n_cells)
+    jb = PchipInterpolator(r, j)(rq)
+    st = _cm.state_from_jdotb(lag, jb, ip, cfg.n_cells)
+    if s.initial_profile_domain_fraction is None:
+        return st
+    scale = float(s.initial_profile_domain_fraction) * abs(float(ip)) / st.meta["enclosed_current_domain_edge"]
+    st = _cm.state_from_jdotb(lag, scale * jb, ip, cfg.n_cells)
+    st.meta.update(profile_scale=scale, domain_fraction=float(s.initial_profile_domain_fraction))
+    return st

@@ -253,6 +253,22 @@ def test_filter_times_fit_only_at_the_anchor_slices(monkeypatch):
         SE.SeriesSettings(filter=True, filter_times=())
 
 
+def test_supplied_initial_profile_can_be_scaled_to_a_domain_current_fraction():
+    lag = _lag()
+    cfg = CM.CurrentModelSettings(r0=GEO.R0)
+    rho = np.linspace(0.0, 1.0, 51)
+    prof = (rho, 1.0e6 * (1.0 - 0.8 * rho ** 2))
+    raw = SE._given_state(lag, SE.SeriesSettings(initial="from_profile", initial_profile=prof), cfg, IP0)
+    st = SE._given_state(lag, SE.SeriesSettings(initial="from_profile", initial_profile=prof,
+                                                initial_profile_domain_fraction=0.99), cfg, IP0)
+    assert "profile_scale" not in raw.meta
+    assert st.meta["enclosed_current_domain_edge"] == pytest.approx(0.99 * IP0, rel=1e-12)
+    assert st.meta["profile_scale"] == pytest.approx(0.99 * IP0 / raw.meta["enclosed_current_domain_edge"], rel=1e-12)
+    np.testing.assert_allclose(st.psi, st.meta["profile_scale"] * raw.psi, rtol=1e-12, atol=1e-15)
+    with pytest.raises(ValueError, match="initial_profile_domain_fraction"):
+        SE.SeriesSettings(initial_profile_domain_fraction=1.5)
+
+
 @pytest.mark.parametrize("status", ["stalled_no_significant_descent", "max_iter", "failed_trials", "jacobian_failed",
                                     "converged_no_final_jacobian", "converged_within_noise"])
 def test_filter_absorbs_only_converged_fits(monkeypatch, status):

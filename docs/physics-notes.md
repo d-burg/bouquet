@@ -1178,6 +1178,13 @@ scheme cannot guarantee. One Z_eff value per draw. See
 
 ## Kinetic assumptions: Z_eff, n_i and the clips (PR #56)
 
+Which of an IDA file's two Z_eff candidates (the CER carbon density or the
+line-integrated `Zeff`) to trust at a slice is decided, on request, by the
+Z_eff source rule (`ni_source="checked"`): per-slice qualification tests, a
+decision table and a stored record -- see
+[zeff-source-rule.md](zeff-source-rule.md).  The default
+(`ni_source="standard"`) is unchanged.
+
 These are the assumptions of the IDA / FUSE ion coupling (PR #56). In 1.4.0
 they were made EXPERIMENTAL and opt-in (owner decision 2026-10-09). Since
 2026-10 item 2 -- the measured IDA route (`ni_source="Zeff" | "CER" | "all"`)

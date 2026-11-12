@@ -2312,7 +2312,7 @@ def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impu
                          ni_source="standard", zeff_from_fuse=False,
                          z_fast=None, z2_fast=None, x_phi=None,
                          subtract_fast=False, zeff_for_ni=None,
-                         zeff_absent=False):
+                         zeff_absent=False, zeff_override=None):
     """IDA-hybrid kinetics: replace FUSE ne/Te/Ti (+omega) -- and on the
     measured routes ni/Zeff -- with IDA fits, resampled onto the FUSE
     ``psi_N`` grid (psi_N == psi_N_kinetic).
@@ -2351,6 +2351,9 @@ def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impu
     clipped to ``[1, Z]``, bit for bit.  ``Z_imp`` and ``n_z`` follow from
     this n_i in the caller (:func:`bouquet.physics.
     impurity_charge_with_fast_ions`).
+    ``ni_source="checked"`` (the Z_eff source rule, docs/zeff-source-rule.md)
+    hands read_ida the dd's fast-ion charge density ``z_fast`` for the rule's
+    main-ion positivity test, and ``zeff_override`` (a named source).
     ``zeff_absent``: the file carries no ``Zeff`` dataset, so read_ida's own
     standard derivation is handed the dd's thermal Z_eff in its place (the
     run's Z_eff is the dd's on this route anyway; stamped in
@@ -2370,8 +2373,16 @@ def _merge_ida_kinetics(psi_N, ne_fuse, ni_fuse, Zeff_fuse, ida_path, time, impu
                          dtype=float)
         _zsub = lambda x: np.interp(np.asarray(x, dtype=float),
                                     np.asarray(psi_N, dtype=float), _zd)
+    _rule_kw = {}
+    if ni_source == "checked":
+        _rule_kw["zeff_override"] = zeff_override
+        if z_fast is not None:
+            _zf = np.asarray(z_fast, dtype=float)
+            _rule_kw["zeff_fast_density"] = lambda x: np.interp(
+                np.asarray(x, dtype=float), np.asarray(psi_N, dtype=float),
+                _zf)
     ida = read_ida(ida_path, time=time, impurity_Z=impurity_Z, ni_source=ni_source,
-                   zeff_substitute=_zsub)
+                   zeff_substitute=_zsub, **_rule_kw)
     _ipsi = np.asarray(ida.psi_N, dtype=float)
     ida_map = None
     if x_phi is None:
@@ -3000,7 +3011,8 @@ def read_imas_baseline(
             z_fast=z_fast, z2_fast=z2_fast,
             x_phi=None if coord == _coords.PSI else x_run,
             subtract_fast=_subtract,
-            zeff_for_ni=Zeff_th, zeff_absent=_zeff_absent)
+            zeff_for_ni=Zeff_th, zeff_absent=_zeff_absent,
+            zeff_override=getattr(source, "zeff_override", None))
         if _ni_fast_meta["agrees"] is False and _drift is not None and _drift["exceeds"]:
             _ni_fast_meta["evidence"] += (
                 f"; likely the psi_N(rho) drift ({_drift['evidence']})")

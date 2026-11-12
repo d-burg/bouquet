@@ -39,7 +39,8 @@ import warnings
 __all__ = ["REGISTRY", "ExperimentalFeatureWarning",
            "experimental_features_enabled", "warn_experimental_features",
            "docs_markdown", "DOCS_BEGIN", "DOCS_END",
-           "STANDARD_NI_SOURCE", "IDA_ION_ROUTES", "NI_SOURCES",
+           "STANDARD_NI_SOURCE", "CHECKED_NI_SOURCE", "IDA_ION_ROUTES",
+           "NI_SOURCES",
            "AUTO_NI_SOURCE", "MEASURED_NI_SOURCE", "IMAS_NI_SOURCES",
            "GRADUATED", "resolved_ni_source", "resolved_ni_subtract_fast",
            "baseline_kinetics_route",
@@ -57,8 +58,14 @@ class ExperimentalFeatureWarning(UserWarning):
 #: (ReconstructionSource's default); on ida_hybrid, the dd's Z_eff with n_i
 #: from it and the IDA n_e (an explicit choice there since 2026-10).
 STANDARD_NI_SOURCE = "standard"
-#: The measured IDA routes (PR #56): VB Z_eff, CER carbon, or their mean.
-IDA_ION_ROUTES = ("Zeff", "CER", "all")
+#: The checked-source route: the Z_eff source rule (bouquet.io.zeff_sources,
+#: docs/zeff-source-rule.md) tests the CER carbon and the VB Z_eff at the
+#: slice and takes the one its decision table names, through the "CER" or
+#: "Zeff" route; refused when neither qualifies and none is named.
+CHECKED_NI_SOURCE = "checked"
+#: The measured IDA routes (PR #56): VB Z_eff, CER carbon, or their mean --
+#: and the checked choice between the first two.
+IDA_ION_ROUTES = ("Zeff", "CER", "all", CHECKED_NI_SOURCE)
 #: Every ``ni_source`` a :class:`~bouquet.config.ReconstructionSource` takes.
 NI_SOURCES = (STANDARD_NI_SOURCE,) + IDA_ION_ROUTES
 #: :class:`~bouquet.config.ImasSource`'s default: resolved per run
@@ -213,6 +220,8 @@ GRADUATED = {
             "Z_eff and n_i from the IDA file's measured routes: the "
             "visible-bremsstrahlung Z_eff ('Zeff'), the CER carbon density "
             "('CER'), or the clamped equal-weight mean of the two ('all'), "
+            "or the one of the first two that the Z_eff source rule names "
+            "at the slice ('checked'; docs/zeff-source-rule.md), "
             "with the route disagreement folded into sigma_ni / sigma_Zeff, "
             "the 'IDA-resolved' Z_eff envelope and the PR #56 auto rule of "
             "UncertaintyConfig.ni_from_zeff.  The DEFAULT on ida_hybrid "
@@ -243,6 +252,12 @@ GRADUATED = {
             "old IDA vintages without Zeff_err ('all' falls to CER alone): "
             "not shown that the CER-only Z_eff is no worse than VB on those "
             "files",
+            "'checked': the source rule's thresholds were set on one "
+            "device's validation set; a file without measurement points or "
+            "raw analyses leaves its impurity source unverified, so a "
+            "qualified file Z_eff is preferred there and an unverified "
+            "impurity source is used (labeled and warned) only when the "
+            "file value does not qualify",
         ]),
     "kinetic_sampler_clips": dict(
         description=(

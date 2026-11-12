@@ -220,8 +220,22 @@ class ReconstructionSource:
     their disagreement beyond the combined sigma added to ``sigma_ni`` /
     ``sigma_Zeff``; a file lacking one route's envelope falls to the other
     route ALONE (an older vintage without ``Zeff_err`` gets the CER value).
-    ``IDAProfiles.zeff_provenance`` records the route; its known limitations
-    are listed in ``bouquet.experimental.GRADUATED["ida_ion_route"]``.
+    ``"checked"`` applies the Z_eff source rule (docs/zeff-source-rule.md):
+    the carbon density and the file's Z_eff are tested at the slice (each
+    qualified, unverified or failed) and the one the ranking names
+    (qualified carbon > qualified file Z_eff > unverified carbon, labeled
+    and warned) is taken through the ``"CER"`` or ``"Zeff"`` route;
+    otherwise the read is refused unless ``zeff_override`` (``"CER"`` /
+    ``"Zeff"``, recorded) names one.  ``zeff_fast_density`` supplies the
+    fast-ion charge density for the rule's main-ion test (or ``"none"`` to
+    declare there are none); without it that test runs without fast ions,
+    recorded (it does not by itself make the carbon unverified).  Each time
+    slice (each source) applies the rule on its own -- one source for a
+    series is enforced only by ``bouquet.io.ida.zeff_rule_series``.
+    ``IDAProfiles.zeff_provenance`` records the route (and on ``"checked"``
+    the rule's full record, ``zeff_provenance["zeff_rule"]``); its known
+    limitations are listed in
+    ``bouquet.experimental.GRADUATED["ida_ion_route"]``.
     Ignored for p-files.
     """
 
@@ -230,8 +244,18 @@ class ReconstructionSource:
     cocos: int = 1
     time: Optional[float] = None       # IDA time slice [s] (multi-time .cdf files)
     impurity_Z: float = 6.0            # effective impurity charge (carbon); set per machine
-    # IDA path: "standard" | measured "Zeff" | "CER" | "all" (see above)
+    # IDA path: "standard" | measured "Zeff" | "CER" | "all" | "checked"
+    # (see above)
     ni_source: str = "standard"
+    # ni_source="checked" only: an explicit, recorded Z_eff source ("CER" or
+    # "Zeff") used whatever the rule's tests say; None = the rule decides
+    zeff_override: Optional[str] = None
+    # IDA file on a rule route ("checked", "CER", "Zeff", "all") only: the
+    # fast-ion charge density for the Z_eff source rule's main-ion test
+    # (I-3) -- "none" (declared: no fast ions, evaluated with 0), an array
+    # on the IDA file's psi_N grid, or {"psi_N": ..., "n_fast": ...} [m^-3];
+    # None = not available (I-3 evaluated without fast ions, recorded)
+    zeff_fast_density: Optional[object] = None
     profile_overrides: dict = field(default_factory=dict)  # name -> array, manual override
     # reconstruction knobs
     psi_pad: float = 1e-3
@@ -249,6 +273,61 @@ class ReconstructionSource:
         from .coords import run_coord
         run_coord(self.coord)
         _check_ni_source(self.ni_source, "ReconstructionSource")
+        _check_zeff_override(self.zeff_override, self.ni_source,
+                             "ReconstructionSource")
+        self.zeff_fast_density = _check_zeff_fast_density(
+            self.zeff_fast_density, self.ni_source, self.profiles_path,
+            "ReconstructionSource")
+
+
+def _check_zeff_fast_density(v, ni_source, profiles_path, who):
+    """``ReconstructionSource.zeff_fast_density``, validated and normalized:
+    None, ``"none"``, a 1-D array, or ``{"psi_N": array, "n_fast": array}``
+    (finite, n_fast >= 0, psi_N strictly rising).  Only for an IDA ``.cdf``
+    on a route that applies the Z_eff source rule.  A callable (accepted by
+    ``read_ida(zeff_fast_density=)``) is refused here: a config must stay
+    JSON-round-trippable (``BouquetConfig.to_dict``); pass the dict form."""
+    import numpy as np
+    if v is None:
+        return None
+    if ni_source == "standard":
+        raise ValueError(f"{who}.zeff_fast_density applies to a route that "
+                         "applies the Z_eff source rule ('checked', 'CER', "
+                         "'Zeff', 'all'), not ni_source='standard'")
+    if not str(profiles_path).endswith(".cdf"):
+        raise ValueError(f"{who}.zeff_fast_density applies to an IDA .cdf "
+                         f"profile file only (profiles_path={profiles_path!r})")
+    if isinstance(v, str):
+        if v != "none":
+            raise ValueError(f"{who}.zeff_fast_density={v!r}: the only string "
+                             "accepted is 'none' (declared: no fast ions)")
+        return v
+    if callable(v):
+        raise ValueError(f"{who}.zeff_fast_density: a callable cannot be "
+                         "stored in a config; pass {'psi_N': ..., "
+                         "'n_fast': ...} arrays instead")
+
+    def _ok(a, what):
+        a = np.asarray(a, dtype=float)
+        if a.ndim != 1 or a.size < 2 or not np.all(np.isfinite(a)):
+            raise ValueError(f"{who}.zeff_fast_density: {what} must be a "
+                             "finite 1-D array of at least two values")
+        return a
+    if isinstance(v, dict):
+        if set(v) != {"psi_N", "n_fast"}:
+            raise ValueError(f"{who}.zeff_fast_density: a dict needs exactly "
+                             f"the keys 'psi_N' and 'n_fast', got {sorted(v)}")
+        x, y = _ok(v["psi_N"], "psi_N"), _ok(v["n_fast"], "n_fast")
+        if x.shape != y.shape or not np.all(np.diff(x) > 0):
+            raise ValueError(f"{who}.zeff_fast_density: psi_N must rise "
+                             "strictly and match n_fast in length")
+        if np.any(y < 0):
+            raise ValueError(f"{who}.zeff_fast_density: n_fast < 0")
+        return {"psi_N": x, "n_fast": y}
+    y = _ok(v, "the profile")
+    if np.any(y < 0):
+        raise ValueError(f"{who}.zeff_fast_density: n_fast < 0")
+    return y
 
 
 #: ImasSource.ida_timing: the reviewed window rule, or IDA_fuse's own pairing.
@@ -260,6 +339,18 @@ def _check_ni_source(v, who, allowed=None):
     allowed = NI_SOURCES if allowed is None else allowed
     if v not in allowed:
         raise ValueError(f"{who}.ni_source={v!r} must be one of {allowed}")
+
+
+def _check_zeff_override(v, ni_source, who):
+    """``zeff_override`` names a source for ``ni_source="checked"`` only."""
+    if v is None:
+        return
+    if v not in ("CER", "Zeff"):
+        raise ValueError(f"{who}.zeff_override={v!r} must be 'CER', 'Zeff' "
+                         "or None")
+    if ni_source != "checked":
+        raise ValueError(f"{who}.zeff_override={v!r} applies to "
+                         f"ni_source='checked' only (ni_source={ni_source!r})")
 
 
 @dataclass
@@ -312,14 +403,19 @@ class ImasSource:
     #       resolves to "standard" there instead.
     #   "standard" -> the dd's Z_eff, n_i from it and the IDA n_e (the default
     #       before 2026-10; an explicit choice now).
-    #   "Zeff" | "CER" | "all" -> that measured route explicitly (see
-    #       ReconstructionSource.ni_source); a file that lacks its data is
+    #   "Zeff" | "CER" | "all" | "checked" -> that measured route explicitly
+    #       (see ReconstructionSource.ni_source); a file that lacks its data is
     #       REFUSED (ValueError), never downgraded, zeff_from_fuse or not.
+    #       "checked" applies the Z_eff source rule (docs/zeff-source-rule.md)
+    #       with the dd's fast-ion density in its main-ion positivity test.
     # The route a run took is stamped warning-free in li_metrics
     # ("zeff_source": "ida" / "dd"; "kinetics_route"), and that ONE route is
     # what the uncertainty, the sampler clips and the Z_eff ladder follow
     # (bouquet.experimental.baseline_kinetics_route).
     ni_source: str = "auto"
+    # ni_source="checked" only: an explicit, recorded Z_eff source ("CER" or
+    # "Zeff") used whatever the rule's tests say; None = the rule decides
+    zeff_override: Optional[str] = None
     # ida_hybrid on a measured route only: True keeps the dd's Z_eff -- its
     # TOTAL Z_eff (validated zeff dataset, else the all-ion sum; owner
     # decision 2026-10-18), zeff_includes_fast following the beam -- while
@@ -403,6 +499,7 @@ class ImasSource:
                              "True or False")
         from .experimental import IMAS_NI_SOURCES
         _check_ni_source(self.ni_source, "ImasSource", IMAS_NI_SOURCES)
+        _check_zeff_override(self.zeff_override, self.ni_source, "ImasSource")
         if self.ida_timing not in IDA_TIMINGS:
             raise ValueError(f"ImasSource.ida_timing={self.ida_timing!r} must be one of "
                              f"{IDA_TIMINGS}")

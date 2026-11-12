@@ -216,6 +216,7 @@ class Bouquet(SwbBaseline):
                   ida_path=None, LCFS_geqdsk=None, impurity_Z=6.0,
                   ni_source="auto", zeff_from_fuse=False,
                   zeff_fast_ions=False, ni_subtract_fast=None,
+                  zeff_override=None,
                   kinetic_source=None, anchor_pressure_to_equilibrium=False,
                   reconstruction_engine=None, solve_method=None,
                   **solver_kwargs) -> "Bouquet":
@@ -231,8 +232,10 @@ class Bouquet(SwbBaseline):
         thermal-kinetics source per run (the measured route "all": the
         VB+CER mean where both exist, else whichever).  The dd's Z_eff is an
         explicit choice (``ni_source="standard"``: n_i from it and the IDA
-        n_e; or ``zeff_from_fuse=True``).  An IDA file with no Z_eff
-        information is refused.  The dd's fast-ion pressure stays in
+        n_e; or ``zeff_from_fuse=True``).  ``ni_source="checked"`` applies
+        the Z_eff source rule (docs/zeff-source-rule.md) to the IDA file,
+        ``zeff_override`` ("CER" / "Zeff") naming a source explicitly.  An
+        IDA file with no Z_eff information is refused.  The dd's fast-ion pressure stays in
         (``ImasSource.include_pfast``, the one declared cross-source input)
         and its beam density is subtracted from the IDA n_i
         (``ni_subtract_fast=None`` follows it).  EXPERIMENTAL
@@ -288,6 +291,7 @@ class Bouquet(SwbBaseline):
                               zeff_from_fuse=zeff_from_fuse,
                               zeff_fast_ions=zeff_fast_ions,
                               ni_subtract_fast=ni_subtract_fast,
+                              zeff_override=zeff_override,
                               LCFS_geqdsk=LCFS_geqdsk),
             solver=SolverConfig(mesh_path=mesh, **solver_kwargs),
             generation=GenerationConfig(n_equils=n_draws,

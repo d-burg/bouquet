@@ -65,7 +65,13 @@ Conventions (documented defaults of the scorer):
   ``table.frame["flux_offset"]`` and in the notes) -- the reading of data
   stored relative to a reference offset that the producing fit itself fitted
   (EFIT's ``FITSIREF``), under which that fit's own fitted values reproduce
-  its own chi^2;
+  its own chi^2.  With ``meta["flux_offset_prior"] = (c0, s0)`` (measurement
+  units: the measured reference flux expressed as an offset, and the
+  reference loop's sigma) the offset also carries that prior row, as EFIT's
+  fit does: ``c = (sum w r + c0/s0^2) / (sum w + 1/s0^2)``; the prior row's
+  chi^2 term ``((c - c0)/s0)^2`` is recorded in
+  ``table.frame["flux_offset_prior_chi2"]`` (one extra datum, one extra
+  parameter; it is not part of the per-channel residuals);
 * E_r is never counted twice: an MSE group declared E_r-corrected with an
   E_r supplied is refused;
 * an orientation mismatch between the equilibrium and the discharge is
@@ -334,11 +340,24 @@ def _fit_flux_offset(table):
         table.model["flux_loop"] = m
         return
     w = (g.weight[use] / g.sigma[use]) ** 2
-    c = float(np.sum(w * (g.measured[use] - m[use])) / np.sum(w))
+    num, den = float(np.sum(w * (g.measured[use] - m[use]))), float(np.sum(w))
+    prior = g.meta.get("flux_offset_prior")
+    rule = "one additive loop offset per table, weighted least squares over the used channels"
+    if prior is not None:
+        c0, s0 = (float(v) for v in prior)
+        if not (np.isfinite(c0) and np.isfinite(s0) and s0 > 0):
+            raise ValueError("flux_offset_prior must be (finite value, sigma > 0)")
+        num, den = num + c0 / s0 ** 2, den + 1.0 / s0 ** 2
+        rule += " plus the prior row (c - c0)^2 / s0^2"
+    c = num / den
     table.model["flux_loop"] = m + c
     table.frame["flux_offset"] = c
-    table.frame["flux_offset_rule"] = "one additive loop offset per table, weighted least squares over the used channels"
-    table.notes.append(f"flux_loop: fitted additive offset {c:.6g} (one nuisance parameter, closed form)")
+    table.frame["flux_offset_rule"] = rule
+    if prior is not None:
+        table.frame["flux_offset_prior"] = [c0, s0]
+        table.frame["flux_offset_prior_chi2"] = float(((c - c0) / s0) ** 2)
+    table.notes.append(f"flux_loop: fitted additive offset {c:.6g} (one nuisance parameter, closed form"
+                       + (", with the reference prior row)" if prior is not None else ")"))
 
 
 def score_common(equilibria, measurements, kinetics=None, groups=None, orientations=None):

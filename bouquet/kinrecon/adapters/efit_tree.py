@@ -205,6 +205,7 @@ def weight_convention_check(measured, fitted, weight, chi2, rtol=WEIGHT_CHECK_RT
 def measurements_from_efit_arrays(arrays, machine, time, time_window, *, sigma_model, groups=None,
                                   flux_storage=None, reference_flux=None, reference_convention=None,
                                   reference_flux_source=None, flux_reference=None, flux_offset=None,
+                                  reference_prior=None,
                                   flux_scale=-2.0 * np.pi,
                                   input_weight=None, require_weight_check=False, weight_check_rtol=WEIGHT_CHECK_RTOL,
                                   rule_inputs=None, er_corrected=None, coil_current_per_turn=(),
@@ -235,6 +236,11 @@ def measurements_from_efit_arrays(arrays, machine, time, time_window, *, sigma_m
     flux_offset : {None, "fitted"}
         ``"fitted"``: score the loops with one closed-form additive offset per table (not with
         ``flux_reference``).
+    reference_prior : (float, float), optional
+        With ``flux_offset="fitted"``: the MEASURED reference flux and the reference loop's sigma [source units
+        per radian]; the scorer's offset then carries EFIT's prior row tying it to that measurement (the
+        reference loop stays an ordinary row as well).  Recorded as ``meta["flux_offset_prior"]`` in
+        measurement units.
     input_weight : float or dict, optional
         ``"weight_inverse"``: EFIT's input weight of the fitted channels (a number for every group or
         ``{group: number or array}``; required).
@@ -419,6 +425,13 @@ def measurements_from_efit_arrays(arrays, machine, time, time_window, *, sigma_m
         g = build("flux_loop", "flux_loop", n, labels, machine.geometry("flux_loop"), scale=flux_scale,
                   kersil=kersil)
         iref = labels.index(flux_reference) if flux_reference is not None else None
+        if reference_prior is not None:
+            if flux_offset != "fitted":
+                raise ValueError("reference_prior applies to flux_offset='fitted'")
+            r0, s0 = (float(v) for v in reference_prior)
+            # the offset the scorer fits is measured - model = -flux_scale x reference flux
+            g.meta["flux_offset_prior"] = [-float(flux_scale) * r0, abs(float(flux_scale)) * s0]
+            g.meta["flux_offset_prior_source"] = "measured reference flux and the reference loop's sigma (caller)"
         g.meta.update(flux_scale=flux_scale, units="stored loop flux [per radian] x flux_scale",
                       flux_reference=flux_reference, flux_offset=flux_offset, coils_form=flux_storage,
                       coils_form_rule="caller",
@@ -551,7 +564,9 @@ def source_fit_chi2(ms, groups=None):
     the valid channels of each group that carries ``meta["source_fit"]``.  Fitted and measured values are
     compared in the form they are stored in (relatively stored loops: EFIT's fitted values are in the same
     relative form, as its own stored chi^2 compares them); with the group's ``flux_offset="fitted"`` one
-    closed-form additive offset is applied to the fitted loops as well (the same convention as the scorer).  Returns ``{group: (chi2, n, chi2/n)}``."""
+    closed-form additive offset is applied to the fitted loops as well (the same convention as the scorer,
+    including the reference prior row when the group carries one; its chi^2 term is returned separately as
+    ``"flux_loop_offset_prior"``).  Returns ``{group: (chi2, n, chi2/n)}``."""
     out = {}
     for name, g in ms.groups.items():
         if groups is not None and name not in groups:
@@ -560,14 +575,24 @@ def source_fit_chi2(ms, groups=None):
         if fit is None:
             continue
         m, f = np.asarray(g.measured, float), np.asarray(fit, float)
+        prior_term = None
         if name == "flux_loop" and g.meta.get("flux_offset") == "fitted":
             u0 = g.valid & (g.weight != 0) & np.isfinite(f)
             w = (g.weight[u0] / g.sigma[u0]) ** 2
-            f = f + float(np.sum(w * (m[u0] - f[u0])) / np.sum(w)) if np.any(u0) else f
+            num, den = float(np.sum(w * (m[u0] - f[u0]))), float(np.sum(w))
+            pr = g.meta.get("flux_offset_prior")
+            if pr is not None:
+                num, den = num + pr[0] / pr[1] ** 2, den + 1.0 / pr[1] ** 2
+            c = num / den if den > 0 else 0.0
+            f = f + c
+            if pr is not None:
+                prior_term = float(((c - pr[0]) / pr[1]) ** 2)
         use = g.valid & (g.weight != 0) & np.isfinite(f)
         z = g.weight[use] * (f[use] - m[use]) / g.sigma[use]
         n = int(use.sum())
         out[name] = (float(np.sum(z ** 2)), n, float(np.sum(z ** 2) / n) if n else float("nan"))
+        if prior_term is not None:
+            out["flux_loop_offset_prior"] = (prior_term, 1, prior_term)
     return out
 
 

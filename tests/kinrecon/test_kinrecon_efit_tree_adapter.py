@@ -238,3 +238,25 @@ def test_fitted_flux_offset_in_the_scorer_and_for_efits_own_fit():
     c1 = ET.source_fit_chi2(_ms(a, flux_offset="fitted", flux_reference=None))["flux_loop"]
     c2 = ET.source_fit_chi2(_ms(a2, flux_offset="fitted", flux_reference=None))["flux_loop"]
     assert c2[0] == pytest.approx(c1[0], rel=1e-9) and c1[1] == 3
+
+
+def test_fitted_flux_offset_with_the_reference_prior_row():
+    from bouquet.kinrecon.interfaces import ResidualTable
+    from bouquet.kinrecon.score import _fit_flux_offset
+    a, s = _arrays()
+    with pytest.raises(ValueError, match="applies to flux_offset='fitted'"):
+        _ms(a, reference_prior=(0.5, 1e-3))
+    ms = _ms(a, flux_offset="fitted", flux_reference=None, reference_prior=(0.5, 1e-3))
+    g = ms.groups["flux_loop"]
+    c0, s0 = g.meta["flux_offset_prior"]
+    assert c0 == pytest.approx(TWO_PI * 0.5) and s0 == pytest.approx(TWO_PI * 1e-3)
+    use = g.valid
+    model = g.measured - 3.0 + np.where(use, 0.2 * g.sigma, 0.0)
+    tab = ResidualTable(measurements=ms, model={"flux_loop": model.copy()}, model_valid={"flux_loop": np.isfinite(model)})
+    _fit_flux_offset(tab)
+    w = 1.0 / g.sigma[use] ** 2
+    c = (np.sum(w * (g.measured[use] - model[use])) + c0 / s0 ** 2) / (np.sum(w) + 1.0 / s0 ** 2)
+    assert tab.frame["flux_offset"] == pytest.approx(c, rel=1e-12)
+    assert tab.frame["flux_offset_prior_chi2"] == pytest.approx(((c - c0) / s0) ** 2, rel=1e-12)
+    out = ET.source_fit_chi2(ms)
+    assert out["flux_loop_offset_prior"][1] == 1 and out["flux_loop_offset_prior"][0] >= 0.0

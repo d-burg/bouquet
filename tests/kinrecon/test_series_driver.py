@@ -267,22 +267,84 @@ def test_supplied_initial_profile_can_be_scaled_to_a_domain_current_fraction():
     np.testing.assert_allclose(st.psi, st.meta["profile_scale"] * raw.psi, rtol=1e-12, atol=1e-15)
     with pytest.raises(ValueError, match="initial_profile_domain_fraction"):
         SE.SeriesSettings(initial_profile_domain_fraction=1.5)
+    # an enclosed fraction slightly above 1 only with an explicit tolerance; the excess is recorded
+    with pytest.raises(ValueError, match="initial_profile_domain_fraction"):
+        SE.SeriesSettings(initial_profile_domain_fraction=1.006)
+    over = SE._given_state(lag, SE.SeriesSettings(initial="from_profile", initial_profile=prof,
+                                                  initial_profile_domain_fraction=1.006,
+                                                  initial_profile_domain_fraction_tolerance=0.01), cfg, IP0)
+    assert over.meta["enclosed_current_domain_edge"] == pytest.approx(1.006 * IP0, rel=1e-12)
+    assert over.meta["domain_fraction_excess"] == pytest.approx(0.006, rel=1e-12)
+    assert st.meta["domain_fraction_excess"] == 0.0
 
 
 @pytest.mark.parametrize("status", ["stalled_no_significant_descent", "max_iter", "failed_trials", "jacobian_failed",
-                                    "converged_no_final_jacobian", "converged_within_noise"])
+                                    "converged_no_final_jacobian"])
 def test_filter_absorbs_only_converged_fits(monkeypatch, status):
     out, lags, cfg, seen = _filter_setup(monkeypatch, status)
     c0 = _state(out["slices"][0]["carried_state"])
     e = _advance(lags["pred"], lags["pred"], c0, 0.0, 0.02, IP0, 1.01 * IP0)      # evolved, unfitted
     for k, s in enumerate(out["slices"][1:], start=1):
         f = s["filter"]
-        assert f["status"] == status and f["status"] != "converged"
+        assert f["status"] == status and f["status"] not in SE.ACCEPTED_FIT_STATUSES
         assert f["absorbed"] is False and "not absorbed" in f["note"]
         assert seen[k] == "pred"                        # the solver was restored to the evolved equilibrium
     got = _state(out["slices"][1]["carried_state"])
     assert np.max(np.abs(got.psi - e.psi)) <= 1e-12 * np.ptp(e.psi)
     assert got.psi_boundary == pytest.approx(e.psi_boundary, abs=1e-12 * np.ptp(e.psi))
+
+
+def test_filter_absorbs_a_within_noise_fit_with_its_label(monkeypatch):
+    """A fit stopped at the optimum to within the measured noise is absorbed like a converged one and keeps its
+    label in the slice record."""
+    out, lags, cfg, seen = _filter_setup(monkeypatch, "converged_within_noise")
+    ref, _, _, _ = _filter_setup(monkeypatch, "converged")
+    for a, b in zip(out["slices"][1:], ref["slices"][1:]):
+        assert a["filter"]["status"] == "converged_within_noise" and a["filter"]["absorbed"] is True
+        assert np.array_equal(np.asarray(a["carried_state"]["psi"]), np.asarray(b["carried_state"]["psi"]))
+    assert seen[1] == "center"
+
+
+def test_filter_with_a_fitted_ip_carries_the_state_at_the_fitted_current(monkeypatch):
+    """With the Ip target fitted (``ip_rel`` in the fit's parameters) the absorbed state is the evolved state scaled
+    to the fitted current plus the corrections, and the next interval starts from that current."""
+    lags = dict(pred=_lag(), center=_lag(sigma_scale=1.3), col0=_lag(sigma_scale=0.7), col1=_lag(sigma_scale=1.6),
+                trial=_lag(sigma_scale=0.5))
+    fm = FakeFM(lags)
+    _install(monkeypatch, fm, _steady(lags["pred"], IP0), lambda f: f.lags[f.key])
+    k_ip = 1.004
+    base = _fake_reconstruct("converged", lags)
+
+    def rec(*a, **kw):
+        out = base(*a, **kw)
+        out.free = list(out.free) + ["ip_rel"]
+        out.params = dict(out.params, ip_rel=k_ip - 1.0)
+        return out
+
+    monkeypatch.setattr(SE._fit, "reconstruct", rec)
+    cfg = CM.CurrentModelSettings(r0=GEO.R0)
+    out = SE.run_series(fm, _slices([0.0, 0.02, 0.04], [IP0, 1.01 * IP0, 1.02 * IP0]), cfg,
+                        SE.SeriesSettings(initial="relaxed", sawtooth="off", filter=True))
+    s1 = out["slices"][1]
+    c0 = _state(out["slices"][0]["carried_state"])
+    e = CM.scale_state(_advance(lags["pred"], lags["center"], c0, 0.0, 0.02, IP0, 1.01 * IP0), k_ip)
+    shapes = CM.correction_shapes(lags["center"], cfg, 1.01 * IP0 * k_ip)
+    dpsi, dpb = CM.correction_response(lags["center"], shapes, CENTER_A, e.rho_faces)
+    got = _state(s1["carried_state"])
+    assert np.max(np.abs(got.psi - (e.psi + dpsi))) <= 1e-12 * np.ptp(e.psi + dpsi)
+    assert s1["ip_carried_A"] == pytest.approx(1.01 * IP0 * k_ip, rel=1e-14)
+    assert s1["filter"]["absorbed"] is True
+
+
+def test_scale_state_scales_the_current_and_keeps_the_boundary_value():
+    lag = _lag()
+    st = _steady(lag, IP0)
+    sc = CM.scale_state(st, 1.02)
+    assert sc.psi_boundary == st.psi_boundary
+    np.testing.assert_allclose(sc.psi - sc.psi_boundary, 1.02 * (st.psi - st.psi_boundary), rtol=1e-14)
+    sol = CM.build_solver(lag, lag["jbs"], 1.02 * IP0)
+    assert sol.profiles(sc)["ip_domain_edge"] == pytest.approx(
+        1.02 * CM.build_solver(lag, lag["jbs"], IP0).profiles(st)["ip_domain_edge"], rel=1e-9)
 
 
 # ============================================================== independent reference
@@ -551,7 +613,7 @@ def _initial_fit_series(monkeypatch, status, policy="refuse", log_strength=np.lo
     return out, seen
 
 
-@pytest.mark.parametrize("status", ["stalled_no_significant_descent", "converged_within_noise", "max_iter"])
+@pytest.mark.parametrize("status", ["stalled_no_significant_descent", "max_iter", "jacobian_failed", "failed_trials"])
 def test_series_refuses_to_start_from_a_nonconverged_first_slice_fit(monkeypatch, status):
     out, _ = _initial_fit_series(monkeypatch, status)
     assert out["status"] == "refused_initial_fit_not_converged" and status in out["reason"]
@@ -567,10 +629,19 @@ def test_series_refuses_to_start_from_a_nonconverged_first_slice_fit(monkeypatch
         SE.SeriesSettings(initial_fit_nonconverged="maybe")
 
 
+def test_series_starts_from_a_within_noise_first_slice_fit_with_its_label(monkeypatch):
+    out, _ = _initial_fit_series(monkeypatch, "converged_within_noise")
+    assert out["status"] == "completed" and len(out["slices"]) == 3
+    assert out["slices"][0]["fit"]["status"] == "converged_within_noise"
+    assert "converged_within_noise" in out["slices"][0]["fit"]["start_label"]
+    assert "initial_fit_nonconverged_start" not in out
+
+
 def test_first_slice_fit_sets_the_periodic_crash_train(monkeypatch):
     """With periodic sawteeth the first-slice fit has ``log_strength`` free by default, and its fitted value
     (not the prior) sets the period of the series' crash train."""
-    assert SE.SeriesSettings().initial_fit.free == ("log_strength", "a_corr")
+    assert SE.SeriesSettings(sawtooth="periodic").initial_fit.free == ("log_strength", "a_corr")
+    assert SE.SeriesSettings().initial_fit.free == ("a_corr",)          # default: no prescribed train
     assert SE.SeriesSettings(sawtooth="off").initial_fit.free == ("a_corr",)
     with pytest.raises(ValueError):
         SE.SeriesSettings(sawtooth="off", initial_fit=SE._fit.FitSettings(free=("log_strength",)))
@@ -579,7 +650,7 @@ def test_first_slice_fit_sets_the_periodic_crash_train(monkeypatch):
     assert "log_strength" in seen["free"]
     ct = out["crash_times_used"]
     assert ct["log_strength"] == ls and ct["log_strength_source"].startswith("fitted at the first slice")
-    s = SE.SeriesSettings()
+    s = SE.SeriesSettings(sawtooth="periodic")
     assert ct["period_s"] == pytest.approx(SE._period(s, ls), rel=1e-15)
     assert ct["period_s"] != pytest.approx(SE._period(s), rel=1e-3)
 

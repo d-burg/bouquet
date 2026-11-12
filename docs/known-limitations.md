@@ -55,6 +55,18 @@ closed by loosening a bar. The measurements behind them are in
   the release tree (3.34 at `27979d1`) and the library warns; its draws do not suffer (24 in spec in 24–25
   attempts). The warning is informative there, not a failure; it stays as
   evidence for the 1.5 rule.
+- **g-file route: no impurity pressure in the solve (no tracking issue
+  yet).** The solve pressure of a g-file run is
+  `e (n_e T_e + n_i T_i) + p_fast`. The thermal impurity term `e n_z T_i`
+  that the IMAS routes add is zero there, for the reconstruction and for
+  every draw alike: the adapter looks for the impurity charge on
+  `FixedComponentsConfig`, which has no such field
+  (`ReconstructionSource.impurity_Z` sets the quasi-neutrality only). For a
+  carbon plasma at Z_eff = 2 with T_i = T_e the missing term is about 2 % of
+  the thermal pressure, so the solve pressure, the betas and the
+  pressure-driven current are low by about that share. The reconstruction
+  and its draws are consistent with each other
+  ([architecture.md §7.1](../architecture.md#71-the-solve-pressure)).
 
 ## Draws and statistics
 

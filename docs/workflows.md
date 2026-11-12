@@ -48,8 +48,8 @@ Baseline: g-file + profiles (p-file / IDA), or IMAS/OMAS JSON
 └───────────┬────────────┘
             ▼
 ┌────────────────────────┐
-│  Rebuild j_phi         │  j_ind (GPR) + j_BS (Sauter, per-draw)
-│  Match pressure & l_i  │  + fixed anchors; secant l_i iteration
+│  Compose j_phi         │  inductive (GPR candidate, amplitude closes I_p)
+│  Bootstrap loop        │  + bootstrap (Redl, self-consistent) + fixed driven
 └───────────┬────────────┘
             ▼
 ┌────────────────────────┐
@@ -58,25 +58,33 @@ Baseline: g-file + profiles (p-file / IDA), or IMAS/OMAS JSON
 └───────────┬────────────┘
             ▼
 ┌────────────────────────┐
-│  Store to HDF5 (v2)    │  profiles + raw bytes + diagnostics
+│  Store to HDF5 (v3)    │  profiles + raw bytes + diagnostics
 │  + provenance          │  + config_json / schema_version
 └────────────────────────┘
 ```
 
+The diagram is the default route, the unified engine: the kinetic channels
+are redrawn together until the thermal pressure matches the baseline's, and
+l_i is recorded for each draw, not matched. The deprecated legacy route
+(`reconstruction_engine="legacy"`) instead builds each draw to an l_i
+tolerance with a secant on the inductive amplitude
+([architecture.md §3.3](../architecture.md#33-li-matching-recon-anchor--adaptive-gate)).
+
 The same flow is available as a rendered diagram, and as a full 550-node
 logic map with a `file:line` anchor on every node:
 **[interactive flowchart](https://d-burg.github.io/bouquet/flowchart/)**
-([source + regeneration](flowchart/)).
+([source + regeneration](flowchart/)). The logic map predates 1.4.0 and is
+marked stale there.
 
 ## Stage reference
 
 | Stage | Method | What it does |
 |---|---|---|
 | Solver | `setup_solver()` | Stands up the TokaMaker object from `SolverConfig` (mesh, order, isoflux/saddle constraints, VSC definition). Idempotent. |
-| Baseline | `prepare()` / `reconstruct()` / `prepare_baseline()` | Resolves the baseline from `config.source`. `reconstruct()` is the g-file-path alias (`setup_solver()` + `prepare_baseline()`) and prints the reconstruction-fidelity summary; `prepare()` is the source-agnostic form. The IMAS path does a single forward solve instead of a reconstruction. |
-| Guard | `verify_sigma0_consistency()` | Optional but recommended: one bootstrap solve confirming the *draw* pipeline reproduces the *baseline* j_BS split at σ=0. See [physics-notes.md](physics-notes.md#the-0-consistency-guard). |
+| Baseline | `prepare()` / `reconstruct()` / `prepare_baseline()` | Resolves the baseline from `config.source`. `reconstruct()` is the g-file-path alias (`setup_solver()` + `prepare_baseline()`) and prints the reconstruction-fidelity summary; `prepare()` is the source-agnostic form. Under the default engine both source types go through the same reconstruction loop ([engine.md](engine.md)); on the legacy route the IMAS path does a single forward solve instead of a reconstruction. |
+| Guard | `verify_sigma0_consistency()` | Optional but recommended: one unperturbed draw through the `generate()` route, gated against the reconstruction at the run's own tolerances (legacy route: one bootstrap solve against the baseline j_BS split). See [physics-notes.md](physics-notes.md#the-0-consistency-guard). |
 | Draws | `generate(n=None)` | Draws `n` (default `GenerationConfig.n_equils`) perturbations, solves each, archives to `{header}.h5`. Returns the per-draw diagnostics list. With `generation.n_inspec_target` set, keeps drawing until that many pass the filters — see [until-N](#until-n-in-spec-draws). |
-| Selection | `filter(rms_max_mm=None, plot=False)` | Applies the coil-drift and boundary-RMS filters, writing non-destructive pass flags into the archive. `rms_max_mm=None` applies `filtering.rms_max_mm`; a number, `"auto"` or `"off"` overrides it for this call (announced and stamped). Returns a summary dict. |
+| Selection | `filter(rms_max_mm=None, plot=False)` | Applies [the in-spec rule](#the-in-spec-rule) (by default the coil χ² test and the boundary-RMS cut), writing non-destructive pass flags into the archive. `rms_max_mm=None` applies `filtering.rms_max_mm`; a number, `"auto"` or `"off"` overrides it for this call (announced and stamped). Returns a summary dict. |
 | Export | `export()` / `export_bundle()` / `export_ids()` | Pruned `{header}_selected.h5`, a per-draw file bundle, or one IMAS/OMAS IDS per draw. |
 | All of it | `run()` | `setup_solver → prepare_baseline → generate → filter → export`, idempotent on the early stages. |
 
@@ -89,16 +97,22 @@ non-default knobs), `archive` (its `BouquetArchive`), `selected_indices()`,
 
 | Quantity | Perturbed? | Notes |
 |----------|:----------:|-------|
-| n_e, T_e, T_i | ✓ | Drawn from the GPR posterior |
+| n_e, T_e, T_i | ✓ | Gaussian-process draws, redrawn together until the thermal pressure matches the baseline's within 5 % |
 | Z_eff | ✓ | Active channel (on by default; `zeff_scalar_sigma=0.0` turns it off) |
 | n_i, n_z (impurity) | derived | Quasi-neutrality with the drawn Z_eff (`impurity_Z`) |
 | Total pressure (p_tot) | ✓ | Recomputed from the perturbed kinetics |
-| Bootstrap current (j_BS) | ✓ | Sauter model recomputed per draw (`recalculate_j_BS`) |
-| Inductive current (j_ind) | ✓ | GPR-perturbed, then scaled to match l_i |
+| Bootstrap current (j_BS) | ✓ | Redl (2021) model on each solved state, iterated to self-consistency per draw |
+| Inductive current (j_ind) | ✓ | One Gaussian-process candidate per draw; its amplitude closes I_p. l_i is recorded, not matched |
 | Coil currents | ✓ | Adjusted by TokaMaker within the homotopy bounds |
 | Aux channels (ω_tor, E_r, χ_e, χ_i) | optional | Switchboard: perturbed + stored when sigmas are supplied (passive) |
 | p_fast, j_NBI, j_RF, j_other | ✗ | Fixed additive components, never perturbed (`j_other`: fusion, runaways, sawteeth and unknown-index core_sources entries on the IMAS path) |
-| Equilibrium anchors (p_diff, jphi_diff, jBS_diff) | ✗ | Fixed offsets applied to the baseline **and** every draw |
+| Closure coefficients, plasma current I_p | ✗ | The reconstruction's, held for every draw |
+
+The table is the default route; [architecture.md §3.6](../architecture.md#36-what-is-perturbed-vs-held-fixed)
+has the full list. On the deprecated legacy route the bootstrap comes from
+TokaMaker's `solve_with_bootstrap` (`recalculate_j_BS`), the inductive current
+is scaled to match l_i, and the fixed offsets `p_diff`, `jphi_diff`, `jBS_diff`
+are applied to the baseline and every draw.
 
 ## Configuration reference
 
@@ -107,6 +121,9 @@ object as `b.solver`, `b.source`, `b.uncertainty`, `b.generation`,
 `b.filtering`, `b.fixed_components`. The dataclass docstrings in
 [`bouquet/config.py`](../bouquet/config.py) are the source of truth; this table
 is a navigational summary of the defaults.
+
+`BouquetConfig.output_header` (required, a non-empty string) names the run:
+the archive is written to `f"{output_header}.h5"`.
 
 ### `SolverConfig` (`b.solver`)
 
@@ -149,6 +166,24 @@ unchanged (the source boundary at `ISOFLUX_WEIGHT` = 500 per point; its g-file
 reconstruction's own set at 200). The archive's `solver_geometry_json` stamps
 `isoflux_rule`, `isoflux_n`, `isoflux_weight_total`, `isoflux_source_n`,
 `boundary_length_m` and `isoflux_resampling` (method, N, the X-points kept).
+
+### `ReconstructionSource` (`b.source`, g-file route)
+
+| Knob | Default | Meaning |
+|---|---|---|
+| `geqdsk_path`, `profiles_path` | required | The g-file, and the one file that supplies the kinetic profiles: an IDA-layout `.cdf` (then also the default σ source) or a p-file, chosen by extension |
+| `cocos` | `1` | The COCOS convention of the g-file |
+| `time` | `None` | The time slice [s] of a multi-time IDA file |
+| `impurity_Z` | `6.0` | The impurity charge of the single-impurity quasi-neutrality (carbon); set it for your device. For a p-file the species footer is authoritative |
+| `psi_pad` | `1e-3` | Padding in ψ_N inside the axis and the LCFS for flux-surface evaluations |
+| `n_k` | `5` | The order `k` of the smoothing spline (`scipy.interpolate.UnivariateSpline`) that builds the inductive basis from the residual between the g-file current and the bootstrap. Read by both engines |
+| `psi_bridge` | `0.99` | ψ_N above which that residual is replaced by a single zero anchor at ψ_N = 1 before the spline is fitted. Read by both engines |
+| `rescale_j_BS` | `False` | Legacy reconstruction only (`fit_inductive_profile`): also fit a bootstrap scale factor against the g-file current. The unified engine does not read it |
+| `shelf_psi_N` | `0.0` | Legacy reconstruction only: when > 0, the isolated bootstrap is held flat inside this ψ_N at its value there. The unified engine does not read it |
+| `profile_overrides` | `{}` | Reserved (name → array on the kinetic grid). Not applied yet: a non-empty dict raises `NotImplementedError` at the baseline on either engine |
+| `coord` | `"psi_n"` | The radial coordinate of the run; see [Radial coordinate](#radial-coordinate-bsourcecoord) |
+
+`ni_source` is in the next table.
 
 ### Ion and Z_eff fields of the sources (`b.source`, PR #56)
 

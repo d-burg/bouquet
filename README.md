@@ -207,7 +207,7 @@ load. Legacy-only settings on a unified configuration are refused, not
 ignored, and the error says to set `reconstruction_engine="legacy"`.
 The engine can be named at construction (`from_geqdsk` / `from_imas(...,
 reconstruction_engine="legacy")`) or set afterwards
-(`bq.generation.reconstruction_engine = "legacy"`): the order no longer
+(`b.generation.reconstruction_engine = "legacy"`): the order no longer
 matters, because the settings whose validated value depends on the engine
 (`isolate_edge_jBS`, `perturb_jind_in_anchor`) are left unset by the
 factories and resolved when `prepare_baseline()` runs, and the archive
@@ -395,7 +395,11 @@ If you use bouquet in your research, please cite it (see also
 [`CITATION.cff`](CITATION.cff) / the "Cite this repository" button):
 
 > Burgess, D., Hansen, C. (2026). bouquet: BOotstrap Uncertainty QUantified
-> Equilibrium Toolkit (v1.0.0). Zenodo. https://doi.org/10.5281/zenodo.19398541
+> Equilibrium Toolkit (v1.4.1). Zenodo. https://doi.org/10.5281/zenodo.19398541
+
+That DOI stands for all versions and resolves to the latest release; each
+release also has its own DOI, listed on the Zenodo page. Cite the version
+you ran (`bq.__version__`).
 
 ## License
 

@@ -27,6 +27,7 @@ Docstrings in the source are authoritative; this page is a map.
 | `ReconstructionSource` / `ImasSource` | Baseline source definitions (g-file + profiles, or IMAS/OMAS JSON) |
 | `Baseline` / `resolve_baseline()` | The common separated-current product every source resolves to |
 | `resolve_uncertainty()` | Resolve sigma envelopes + GPR length scales from the config |
+| `__version__` | The package version string, set in `bouquet/__init__.py` and stamped on every archive as `bouquet_version` |
 
 ## Archive
 
@@ -50,6 +51,10 @@ Docstrings in the source are authoritative; this page is a map.
 | `discover_scan_keys()` / `count_equilibria()` / `list_equilibrium_indices()` | Archive introspection |
 | `select_indices()` / `read_filter_flags()` | Filter-flag queries |
 | `filter_coil_currents()` / `filter_boundaries()` / `export_filtered()` | Post-generation selection of the machine-realizable subset |
+| `filter_coil_chi2()` | The measurement-referenced coil filter (`FilterConfig.coil_filter="chi2"`, the default): each draw's coil currents against the baseline's, weighted by a per-coil σ. A draw passes when `chi2/nu <= chi2_max` AND its worst coil has `\|z\| <= z_max`; the two default (`None`) to the device's calibrated acceptance (`DeviceSpec.acceptance`) when the σ came from a device model, else to `devices.GENERIC_ACCEPTANCE`. A draw with no usable coil fails. With `apply=True` the scan is stamped `coil_filter="chi2"` and `coil_sigma_model`. See [workflows.md](workflows.md#the-in-spec-rule) and [coil-constraints.md](coil-constraints.md) |
+| `resolve_coil_sigma()` / `coil_sigma_floor_fraction()` / `CoilSigmaUnavailable` | The per-coil σ of that filter, returned as `(sigma, model)` with `model` a JSON-able provenance record. Order: an explicit `sigma` (a named model of the device, `{"floor", "fraction"}`, a per-coil table, or a callable), else the device's model (given, or detected from the coil names) with the floor of the named tolerance `era`, else `CoilSigmaUnavailable` is raised. `era=None` takes the device's default band and warns; it is never inferred from a path. `coil_sigma_floor_fraction(baseline, floor, fraction)` is the two-number model itself, `hypot(floor_i, fraction * \|I_base,i\|)` per coil |
+| `DEVICES` / `detect_device()` | The registry `{name: DeviceSpec}` of device calibrations (coil signature, the coil σ model and its eras, the χ² acceptance, the boundary RMS cut, the vertical-control pair; one entry, `"DIII-D"`), and the lookup that returns the device whose coil signature exactly matches a list of coil names, else `None`. See [workflows.md](workflows.md#running-bouquet-on-another-device) |
+| `measured_coil_currents()` | `{name: (current_A, sigma_A)}` from an IMAS `pf_active` at `time_s`, a time in seconds on the coil time base (the nearest sample; warns when it is further than `time_tol_s` away). `data_error_upper` is read as the 1σ magnitude |
 | `refilter_inspec()` / `InspecBands` | Re-judge an archive's opt-in in-spec bands (l_i, beta_p, q0 gate) from its stored numbers; default `bands=None` = the magnetics rule (owner decision 2026-10-14; see [workflows.md](workflows.md#the-in-spec-rule)) |
 | `bouquet.filtering.passes_all_filters()` (+ `passes_coil_spec` / `passes_coil_chi2` / `passes_boundary_spec` / `boundary_deviation_mm`) | The selection predicate itself, on raw numbers rather than an archive. Shared with `generate_bouquet`'s [until-N](workflows.md#until-n-in-spec-draws) stopping rule so the two agree by construction. Module-level, not re-exported at the package root |
 | `bouquet.filtering.make_coil_predicate()` (+ `coil_spec.resolve_coil_acceptance()`) | Builds the **configured** coil verdict (chi2 or legacy, with the loud `CoilSigmaUnavailable` fallback) once per run from the same `FilterConfig` fields `Bouquet.filter()` cuts on — the reason the until-N count and the postprocess selection are the same set |
@@ -120,6 +125,7 @@ Where each is archived: [archive-schema.md](archive-schema.md#records-added-in-1
 | `parallel_generate()` | Process-parallel driver (`backend="laptop"` pool or `"slurm"` job array) |
 | `parallel_cases()` / `run_case()` / `merge_cases()` | Many bouquets on one node: one standing solver per worker, cases swapped on (`Bouquet.set_case`), merged per input group |
 | `CaseSpec` / `GeqdskProfilePairs` / `IdaTimeslices` / `ImasTimeslices` | The cases of a sweep (one baseline source each) and the sources that expand into them |
+| `ParallelSource` | The base class of those three sources: `header` (the stem of every case header), `source_kwargs` (passed to every case's source) and `expand()`, which returns the deterministic list of `CaseSpec`. A hand-built `list[CaseSpec]` works as well |
 | `units.make_units()` / `units.units_from_cases()` / `units.add_units()` / `python -m bouquet.units work` | Many bouquets (one per baseline) on a shared-filesystem queue, across processes, nodes and jobs (`bouquet.workqueue`) |
 | `run_shard()` | The per-worker serial pipeline on one shard |
 | `merge_archives()` | Concatenate shards, verifying every shard hit the same baseline |
@@ -131,6 +137,7 @@ Where each is archived: [archive-schema.md](archive-schema.md#records-added-in-1
 |------------------|-------------|
 | `GEQDSKEquilibrium` / `read_geqdsk()` | Full-featured COCOS-aware GEQDSK reader with flux-surface analysis |
 | `read_eqdsk_from_bytes()` | Parse a g-file from in-memory bytes |
+| `find_lcfs_xpoints()` | The poloidal-field nulls on the last closed flux surface, found from the g-file's ψ(R, Z) rather than from a boundary extremum: a list of `(R, Z, B_pol_ratio)` in ascending \|B_θ\|, empty for a limited plasma (then nothing should be pinned). Gives the points for `SolverConfig.saddle_targets` on lower-null, upper-null and double-null shapes alike |
 | `bouquet.io.write_geqdsk()` | Write a raw g-file dict to disk (import from `bouquet.io`) |
 | `PFile` / `read_pfile()` | Osborne p-file reader/writer with rotation computation |
 | `read_ida()` / `IDAProfiles` | IDA netCDF kinetic fits (direct + ensemble layouts) |
@@ -150,8 +157,12 @@ Details: [io-and-plotting.md](io-and-plotting.md).
 | `isotropize_fast_pressure()` | Anisotropic fast-pressure reduction for the isotropic GS solve (`method` is **required** — the two dd conventions differ by 3×) |
 | `detect_p_fast_convention()` / `resolve_p_fast_reduction()` | Which fast-pressure storage convention a dd was written in, and the reduction rule that follows (`bouquet.io.imas`) |
 | `fast_pressure_residual()` / `infer_fast_pressure()` | Fast-ion pressure accounting |
-| `core_pressure_health()` / `core_pressure_hollow_record()` | Report-only description of core-pressure hollowness (rise above the axis value, its extent); gates nothing |
+| `core_pressure_health()` / `core_pressure_hollow_record()` / `CorePressureHollowWarning` | Report-only description of core-pressure hollowness (rise above the axis value, its extent), and the warning class the record emits; gates nothing |
 | `radial_field_from_impurity_force_balance()` | Impurity radial-force-balance E_r with propagated uncertainty |
+| `radial_field_from_cer()` | Deprecated alias of `radial_field_from_impurity_force_balance()` with the argument names of one diagnostic (`n_carbon`, `t_carbon`, `Z_C`, ...); kept so existing scripts run |
+| `fsa_current_geometry()` | The per-surface flux-surface-average geometry of a live TokaMaker equilibrium or a `copy_eq()` snapshot, as a dict (`psi_N`, `R_avg`, `inv_R`, `inv_R2`, `dV_dpsi`, `dpsi_dpsiN`, `pprime`, `dA_dpsiN`). The grid is clipped to `[psi_pad, 1 - psi_pad]`, because `get_q` at the exact axis returns the axis values on every surface |
+| `Ip_fsa_integral()` / `Ip_fsa_weights()` | The plasma current [A] carried by a current profile on an equilibrium's flux-surface geometry, and the weights `(w, c)` with `I_p[J] = trapezoid(w * J, psi_N) + c`. `convention` is `"jphi-linterp"` (TokaMaker's profile variable `<R> P' + <1/R> FF'/mu0`, which bouquet's arrays are; `c` is its `P'` term) or `"fsa"` (`<j_phi/R>/<1/R>`, `c = 0`). See [current-conventions.md](current-conventions.md) |
+| `eq_jphi_profile()` | The equilibrium's own current profile in either convention, rebuilt from its Grad-Shafranov source functions, so that `Ip_fsa_integral` of it returns the equilibrium's I_p (the consistency check of that measure) |
 | `Hmode_profiles()` | Synthetic H-mode profile generator |
 
 ## Sampling and uncertainty
@@ -159,6 +170,7 @@ Details: [io-and-plotting.md](io-and-plotting.md).
 | Function / Class | Description |
 |------------------|-------------|
 | `GPRProfilePerturber` | Gaussian process profile perturbation engine (Gibbs non-stationary kernels) |
+| `make_rng()` | The one place a seed becomes a `numpy.random.Generator`: `generate_bouquet` calls it once and passes the Generator to every draw site, so one seed fixes the whole ensemble. `None` gives an OS-entropy stream (not reproducible); an existing Generator is passed through |
 | `generate_perturbed_GPR()` | One-call wrapper for perturbing a 1-D profile |
 | `sigmoid_length_scale()` | Spatially varying correlation length for Gibbs kernels |
 | `verify_gpr_statistics()` | Monte Carlo validation of the GPR sampling statistics |
@@ -174,7 +186,10 @@ Details: [io-and-plotting.md](io-and-plotting.md).
 `plot_kinetic_profiles`, `plot_jphi_profiles`, `plot_jphi`,
 `plot_aux_profiles`, `plot_transport_profiles`, `plot_coil_currents`,
 `plot_spec_summary`, `plot_tokamaker_comparison`, `plot_input_vs_recon`, the
-`draw_*` axes-level variants, `set_plot_style`, and `WONG`. Signatures and
+`draw_*` axes-level variants (`draw_kinetic_profiles`,
+`draw_pressure_profiles`, `draw_jphi_total`, `draw_jphi_components`,
+`draw_flux_function`; `draw_jphi_profiles` is deprecated in favor of the
+total / components pair), `set_plot_style`, and `WONG`. Signatures and
 selection semantics: [io-and-plotting.md](io-and-plotting.md#plotting).
 
 ## Environment

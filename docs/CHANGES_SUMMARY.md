@@ -1,5 +1,53 @@
 # Bouquet — change summaries
 
+## Unreleased — documentation brought to 1.4.1 (no code change)
+
+Documentation and example outputs only. No code, default, test or golden
+changes.
+
+- **`architecture.md` rewritten for the default route.** It described the
+  legacy reconstruction and draws as the pipeline. It now specifies the
+  unified engine (what a draw is, sampling, the current composition and its
+  three buckets, the bootstrap loop and its tolerances, the coil χ² test and
+  the boundary cut, archive schema v3), with the legacy route kept only
+  where old archives or the remaining legacy options need it. The
+  top-level section numbers are kept and the anchors other pages link to
+  still resolve.
+- **Statements on other pages that disagreed with the code.**
+  `engine.md`: the g-file adapter's pressure has no impurity term (below);
+  the archived split stores the pressure-driven term as its own `j_pressure`
+  dataset, not on `j_BS`; `evaluate_jBS` has used the `F<1/R>/<B^2>`
+  conversion since evaluator version `/2`. `coil-constraints.md`: the
+  default χ² coil test judges the E-coils (only the legacy drift band leaves
+  them out), and two stale pointers into `architecture.md` are corrected.
+  `workflows.md`: the pipeline diagram, the stage table and the
+  perturbed-versus-fixed table describe the default route (Redl bootstrap in
+  a self-consistent loop, I_p closed by the inductive amplitude, l_i
+  recorded and not matched, archive schema v3). `physics-notes.md`: the σ=0
+  guard section describes the default route's check (one unperturbed draw
+  through `generate()`, gated stage by stage) before the legacy one, and the
+  legacy bootstrap sections are labeled as such.
+- **A limitation the rewrite surfaced, now listed.** On the g-file route
+  the solve pressure carries no thermal impurity term (about 2 % of the
+  thermal pressure for carbon at Z_eff = 2), for the reconstruction and the
+  draws alike ([known-limitations.md](known-limitations.md)). Nothing is
+  changed here.
+- **API reference complete.** Every public name of the package has a row
+  (`__version__`, `filter_coil_chi2`, `resolve_coil_sigma`,
+  `coil_sigma_floor_fraction`, `CoilSigmaUnavailable`, `DEVICES`,
+  `detect_device`, `measured_coil_currents`, `ParallelSource`,
+  `find_lcfs_xpoints`, `CorePressureHollowWarning`, `radial_field_from_cer`,
+  `fsa_current_geometry`, `Ip_fsa_integral`, `Ip_fsa_weights`,
+  `eq_jphi_profile`, `make_rng` were missing).
+- **`workflows.md` configuration reference.** A `ReconstructionSource`
+  table (it had none), stating which fields the unified engine does not
+  read, and `BouquetConfig.output_header`.
+- **Smaller fixes.** README: the legacy-route snippet sets
+  `b.generation.reconstruction_engine`; the citation names 1.4.1 and the
+  all-versions DOI. `io-and-plotting.md`: the IMAS export's
+  `profiles_2d.psi` layout (#101). The docs index lists `draw-methods.md`
+  and `current-conventions.md` and says archive schema v3.
+
 ## 1.4.1 — bug fixes, a template-fallback warning, an opt-in branch-guard diagnostic (2026-10-30)
 
 A patch on 1.4.0: bug fixes, a warning and an opt-in experimental

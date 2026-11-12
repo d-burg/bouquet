@@ -1,28 +1,35 @@
 # Bouquet: Architecture, Assumptions, and Caveats
 
-This document catalogues the physics assumptions, numerical approximations,
-data-format conventions, and known limitations of the bouquet perturbed-equilibrium
-toolkit.  It is intended as a reference for developers and for users who need to
-understand exactly what is — and is not — guaranteed by the code.
-
----
+This document lists the physics assumptions, numerical approximations,
+coordinate and sign conventions, tolerances and architectural limitations of
+bouquet 1.4.1: what the code assumes and what it guarantees. It describes the
+default route first, the unified reconstruction engine for both the
+reconstruction and the draws. Where another page carries the detail, this one
+states the assumption and links to it: [docs/engine.md](docs/engine.md) (the
+engine, its rows, draws and boundary constraint),
+[docs/workflows.md](docs/workflows.md) (the pipeline and the configuration
+reference), [docs/physics-notes.md](docs/physics-notes.md),
+[docs/current-conventions.md](docs/current-conventions.md) (identities
+A1-A9), [docs/coil-constraints.md](docs/coil-constraints.md),
+[docs/archive-schema.md](docs/archive-schema.md),
+[docs/known-limitations.md](docs/known-limitations.md) and
+[docs/validation-provenance.md](docs/validation-provenance.md).
 
 ## Table of Contents
 
 1. [Overview](#1-overview)
-   - [1.5 Class API and Baseline Sources](#15-class-api-and-baseline-sources)
 2. [Coordinate Systems and Sign Conventions](#2-coordinate-systems-and-sign-conventions)
 3. [Equilibrium Perturbation Methodology](#3-equilibrium-perturbation-methodology)
 4. [Quasi-Neutrality and Impurity Handling](#4-quasi-neutrality-and-impurity-handling)
 5. [Current Density Decomposition](#5-current-density-decomposition)
-6. [Rotation Profile Computation](#6-rotation-profile-computation)
-7. [Pressure and Beta Calculations](#7-pressure-and-beta-calculations)
+6. [Rotation and Radial Electric Field](#6-rotation-and-radial-electric-field)
+7. [Pressure and Beta](#7-pressure-and-beta)
 8. [Flux-Surface Geometry and Averaging](#8-flux-surface-geometry-and-averaging)
 9. [Internal Inductance](#9-internal-inductance)
 10. [Numerical Floors and Clamps](#10-numerical-floors-and-clamps)
-11. [Edge Extrapolation](#11-edge-extrapolation)
+11. [Edge Treatment](#11-edge-treatment)
 12. [Data Format Assumptions](#12-data-format-assumptions)
-13. [HDF5 Storage Schema](#13-hdf5-storage-schema)
+13. [HDF5 Archive](#13-hdf5-archive)
 14. [Unit Conventions](#14-unit-conventions)
 15. [Coil Constraint Handling (DIII-D Reference)](#15-coil-constraint-handling-diii-d-reference)
 16. [Known Limitations and Future Work](#16-known-limitations-and-future-work)
@@ -31,100 +38,96 @@ understand exactly what is — and is not — guaranteed by the code.
 
 ## 1. Overview
 
-Bouquet generates families ("bouquets") of perturbed tokamak equilibria by:
+### 1.1 The pipeline
 
-1. Starting from a baseline kinetic equilibrium — either a g-file plus
-   kinetic profiles (p-file or IDA netCDF), or an IMAS/OMAS data-dictionary
-   JSON with pre-separated currents (see §1.5).
-2. Drawing correlated perturbations of ne, Te, ni, Ti from Gaussian
-   process regression (GPR) posteriors, respecting user-supplied
-   uncertainty envelopes.
-3. Matching the perturbed pressure profile to the baseline volume-averaged
-   pressure (within a configurable tolerance).
-4. Decomposing the perturbed current density into bootstrap and inductive
-   components and iterating the inductive profile to match the baseline
-   internal inductance li.
-5. Solving the Grad-Shafranov equation via TokaMaker for each accepted
-   perturbation.
-6. Archiving all results (geqdsk bytes, p-file bytes, scalar diagnostics)
-   to a single HDF5 database.
+Bouquet turns one tokamak equilibrium into an ensemble ("bouquet") of
+perturbed equilibria, each a free-boundary Grad-Shafranov solve by TokaMaker
+(OpenFUSIONToolkit). On the default route:
 
-Each of these steps carries assumptions documented below.
+1. **Source.** A g-file with kinetic profiles (a p-file or an IDA-layout
+   profile fit), or an IMAS/OMAS data-dictionary JSON (optionally with
+   IDA-layout kinetics), reduced by an adapter (`adapters.GFileAdapter`,
+   `adapters.IdsAdapter`) to one contract (`adapters.EngineContract`):
+   kinetics, pressure, inductive and fixed driven currents as `<j.B>`, the
+   boundary and the constraint rows.
+2. **Reconstruction.** `Bouquet.prepare_baseline()` runs the unified engine
+   (`engine.py`): a closure on the latest solved geometry, one GS solve per
+   pass, Redl re-evaluated on every solved state, until the criteria hold on
+   two consecutive passes, then a delivery solve that every draw starts from
+   ([§5.4](#54-the-self-consistent-loop-and-its-tolerances)).
+3. **Draws.** `Bouquet.generate()` perturbs the kinetics, Z_eff and the
+   inductive current, holds the reconstruction's closure coefficients, closes
+   only the I_p row, runs one self-consistent bootstrap loop, then a
+   progressive coil homotopy ([§3](#3-equilibrium-perturbation-methodology), [§15](#15-coil-constraint-handling-diii-d-reference)).
+4. **Acceptance.** A draw is in spec on the magnetics: a chi-squared test of
+   its coil currents against the device's coil uncertainties AND a cut on the
+   RMS displacement of its last closed flux surface. l_i, beta_p and
+   Lambda = beta_p + l_i(3)/2 are recorded, not filtered, unless an opt-in
+   band is set ([§15.5](#155-the-in-spec-rule)).
+5. **Archive.** Every draw that reaches the archive is stored, in spec or
+   not, in one HDF5 file, schema v3 ([§13](#13-hdf5-archive)).
 
-### 1.5 Class API and Baseline Sources
+### 1.2 Solve routes
 
-The class-based orchestrator (`bouquet/run.py`, `bouquet/config.py`,
-`bouquet/baseline.py`) wraps the functional pipeline. `Bouquet(config)` owns
-the TokaMaker solver and resolves any source to a common `Baseline`
-(separated currents + targets + kinetic profiles), so generation never
-depends on where the baseline came from:
+`GenerationConfig.solve_method` selects how the reconstruction and the draws
+are made (`config.resolve_solve_method`; one draw-method object per route in
+`bouquet.draw_methods`, compared hook by hook in
+[docs/draw-methods.md](docs/draw-methods.md)):
 
-| Module | Role |
-|---|---|
-| `config.py` | Typed dataclass config: `SolverConfig`, `ReconstructionSource` / `ImasSource`, `UncertaintyConfig`, `GenerationConfig`, `FilterConfig`, `FixedComponentsConfig` |
-| `baseline.py` | `Baseline` dataclass + `resolve_baseline()` dispatch + `resolve_uncertainty()` (sigma precedence: explicit profile > IDA `.cdf` > flat scalar fraction) |
-| `io/ida.py` | DIII-D IDA netCDF reader (via h5py; profiles + `*_err` sigmas; ni = ne quasi-neutrality) |
-| `io/imas.py` | FUSE/IMAS JSON reader (stdlib json; no OMAS install needed) |
-| `physics.py` | Convention reductions shared by all sources (below) |
-| `run.py` | The `Bouquet` driver: solver → baseline → generate → filter → export |
+| route | selected by | status |
+|---|---|---|
+| unified engine | `solve_method="engine"`, or `solve_method=None` with `reconstruction_engine="unified"` (the default) | default since 1.4.0 |
+| legacy | `solve_method="legacy"` or `reconstruction_engine="legacy"` | deprecated since 1.4.0, removed in 1.5 (#90); one `DeprecationWarning` per run (`Bouquet._warn_legacy_route`) |
+| swb | `solve_method="swb"` (IMAS sources only): OFT `solve_with_bootstrap` is the baseline and every draw | experimental |
 
-**IMAS-path physics assumptions** (all in `bouquet/physics.py` and
-`io/imas.py` docstrings, summarized here because this document is the
-assumption catalogue):
+A baseline built by one route is refused by the other's draws; legacy-path
+settings the engine never reads are refused under it
+(`engine.ENGINE_UNREAD_LEGACY_FIELDS`,
+[docs/engine.md](docs/engine.md#settings-the-engine-does-not-read-refused)).
+The legacy route appears below only where old archives or the remaining
+legacy options need it.
 
-* **Toroidal-current authority**: the IDS `j_tor` (converted to TokaMaker
-  `jphi`) is taken as the total `j_phi`; the inductive component is the
-  residual `j_phi − j_BS − j_NBI − j_RF`, so the decomposition sums exactly.
-* **Current conventions** (`docs/current-conventions.md`): bouquet arrays are
-  TokaMaker `jphi = ⟨j_φ⟩`; IMAS `j_tor = ⟨j_φ/R⟩/⟨1/R⟩` and its parallel
-  currents are `⟨J·B⟩/B0`. The reader converts exactly with the FUSE
-  equilibrium's own `gm1/gm5/gm8/gm9/f/dpressure_dpsi` (averages a producer
-  omits are traced from `profiles_2d.psi`): the total via (A5),
-  each component's field-aligned part `F⟨1/R⟩⟨J·B⟩/⟨B²⟩`, with the pressure
-  term `p′(⟨R⟩ − F²⟨1/R⟩/⟨B²⟩)` assigned to the bootstrap (as IMAS.jl does).
-  `solve_with_bootstrap` output is already TokaMaker `jphi`.
-* **Fast-pressure isotropization**: anisotropic fast-ion pressure
-  (`pressure_fast_perpendicular` / `_parallel`) is reduced to the scalar
-  GS pressure via `tr(P)/3 = (2 p_perp + p_par)/3` by default ("trace";
-  also "mean", "perp"). Fast pressure and driven currents are *fixed
-  components*: summed into every draw, never GPR-perturbed.
-* **l_i target**: the IDS-reported `li_3` is provisional only; the
-  forward solve on the TokaMaker mesh re-evaluates the baseline and sets
-  `l_i_target` to the TokaMaker `li_1`, recording both for comparison
-  (`Baseline.li_metrics`).
+### 1.3 Class API and baseline sources
 
----
+`Bouquet(config)` (`run.py`) owns the TokaMaker solver and runs
+`setup_solver → prepare_baseline → generate → filter → export`
+(`Bouquet.run()`). The configuration is a set of dataclasses (`config.py`;
+reference in [docs/workflows.md](docs/workflows.md#configuration-reference)):
+`SolverConfig` (mesh, isoflux and saddle constraints, the VSC pair
+`coil_vsc`, default `{'F9A': 1.0, 'F9B': -1.0}`, coil regularization),
+`ReconstructionSource` (g-file + `profiles_path`, a p-file or an IDA `.cdf`;
+`cocos` 1, `impurity_Z` 6.0, `psi_pad` 1e-3 by default), `ImasSource`
+(IMAS/OMAS JSON, optional IDA file, `impurity_Z` 6.0), `UncertaintyConfig`,
+`GenerationConfig`, `FilterConfig` and `FixedComponentsConfig` (user `p_fast`,
+`j_NBI`, `j_RF`, `j_other`). Code anchors below name the module
+(`module.function`) under `bouquet/`.
 
 ## 2. Coordinate Systems and Sign Conventions
 
-### 2.1 COCOS Convention
+### 2.1 COCOS (g-file reader)
 
-The geqdsk reader implements the COCOS (COordinate COnventionS) framework
+`io.geqdsk.GEQDSKEquilibrium` implements the COCOS framework
 [O. Sauter and S.Yu. Medvedev, Computer Physics Communications **184**
-(2013) 293].  Eight sign/exponent parameters fully determine the
-orientation:
+(2013) 293]. `_cocos_params` gives, for COCOS 1-8 and 11-18:
 
-| Symbol | Meaning | COCOS 1 (EFIT default) |
-|--------|---------|----------------------|
-| `sigma_Bp` | Sign of poloidal field relative to psi gradient | +1 |
-| `sigma_RpZ` | Handedness of (R, phi, Z) | +1 |
-| `sigma_rhotp` | Sign of (theta_pol × phi_tor) | +1 |
-| `exp_Bp` | 2pi exponent (0 for COCOS 1-8, 1 for 11-18) | 0 |
+| Symbol | Meaning | COCOS 1 |
+|--------|---------|---------|
+| `sigma_Bp` | sign of the poloidal flux gradient | +1 |
+| `sigma_RpZ` | +1 for right-handed (R, phi, Z), -1 for (R, Z, phi) | +1 |
+| `sigma_rhotp` | sign of (theta_pol × phi_tor) | +1 |
+| `exp_Bp` | 2π exponent: 0 for COCOS 1-8, 1 for 11-18 | 0 |
 
-**Assumption:** The default is COCOS 1 (standard EFIT).  An incorrect
-choice propagates sign errors through all flux-surface-averaged
-quantities, safety factor, and current density.
+**Assumption:** the reader's default is COCOS 1 (`cocos=1`, also
+`ReconstructionSource.cocos`). A wrong choice propagates sign errors into
+every flux-surface average, q and the current density. The g-file adapter
+refuses a file whose flux-surface current `<j_phi>` does not carry the sign
+of its own I_p in the bulk (`adapters.gfile_parallel_current`), which catches
+most wrong choices.
 
-**User control:** The `cocos` parameter on `GEQDSKEquilibrium`.
+### 2.2 COCOS conversion, Bt/Ip flip, serialization
 
-### 2.1b COCOS Conversion (`cocosify`)
-
-`GEQDSKEquilibrium.cocosify(cocos_out)` converts the raw g-file data
-from the current COCOS to any target COCOS, following the transformation
-rules in Sauter & Medvedev (2013), Eq. 14/23.
-
-The effective transformation parameters between `cocos_in` and
-`cocos_out` are:
+`GEQDSKEquilibrium.cocosify(cocos_out, copy=False)` converts the raw arrays
+following Sauter & Medvedev (2013), Eqs. 14 and 23:
 
 ```
 sigma_Bp_eff    = sigma_Bp_out    * sigma_Bp_in
@@ -133,1100 +136,1096 @@ sigma_rhotp_eff = sigma_rhotp_out * sigma_rhotp_in
 exp_Bp_eff      = exp_Bp_out      - exp_Bp_in
 ```
 
-The multiplicative factors applied to each g-file field:
-
 | Field | Factor |
 |-------|--------|
 | PSIRZ, SIMAG, SIBRY | `sigma_RpZ_eff * sigma_Bp_eff * (2π)^exp_Bp_eff` |
 | PPRIME, FFPRIM | `sigma_RpZ_eff * sigma_Bp_eff / (2π)^exp_Bp_eff` |
-| FPOL, BCENTR | `sigma_RpZ_eff` |
-| CURRENT | `sigma_RpZ_eff` |
+| FPOL, BCENTR, CURRENT | `sigma_RpZ_eff` |
 | QPSI | `sigma_rhotp_eff` |
 
-These factors have been verified field-by-field against OMFIT's
-`OMFITgeqdsk.cocosify()` for COCOS 1→7, 1→11, 7→1, and 7→11
-(see `examples/COCOS_Bt_Ip/omfit_cocos_comparison.ipynb`).
+The cache of derived quantities is cleared on every call. The comparison
+against OMFIT's `OMFITgeqdsk.cocosify()` (COCOS 1→7, 1→11, 7→1, 7→11) is the
+notebook `examples/COCOS_Bt_Ip/omfit_cocos_comparison.ipynb`; it needs
+`omfit_classes` and is not part of the test suite.
 
-**Caveat:** `cocosify` transforms the raw numerical arrays but does
-not re-derive any cached quantities.  The cache is cleared on every
-call, so subsequent property accesses (q_profile, geometry, etc.)
-will recompute using the new COCOS parameters.
+`flip_Bt_Ip()` negates `BCENTR`, `FPOL`, `CURRENT`, `SIMAG`, `SIBRY`,
+`PSIRZ`, `PPRIME` and `FFPRIM` at a fixed COCOS index; `QPSI` is unchanged
+(q ∝ Bt/Ip). `save(filename)` and `to_bytes()` write the fixed format the
+parser reads (5 values per line, 16 characters each).
 
-### 2.1c Bt/Ip Flip (`flip_Bt_Ip`)
-
-`GEQDSKEquilibrium.flip_Bt_Ip()` reverses the direction of both
-the toroidal field and the plasma current.  This negates:
-
-- `BCENTR`, `FPOL` (toroidal field direction)
-- `CURRENT` (plasma current direction)
-- `SIMAG`, `SIBRY`, `PSIRZ` (poloidal flux)
-- `PPRIME`, `FFPRIM` (per-psi derivatives)
-
-The safety factor `QPSI` is **unchanged** because q ∝ Bt/Ip and
-both signs cancel.
-
-**Use case:** Converting between experiments with opposite field
-and current directions (e.g. forward vs. reversed Bt operation on
-DIII-D).
-
-### 2.1d Serialisation (`save`, `to_bytes`)
-
-Modified equilibria can be written back to standard GEQDSK format
-via `save(filename)` or serialised to bytes via `to_bytes()` for
-HDF5 storage.  The writer uses the same fixed-format (5 values per
-line, 16 chars each) as the parser expects, ensuring exact
-round-trip fidelity.
-
-### 2.2 Normalised Poloidal Flux (psi_N)
-
-Defined as:
+### 2.3 Normalized poloidal flux (psi_N)
 
 ```
 psi_N = (psi - psi_axis) / (psi_boundary - psi_axis)
 ```
 
-Ranges from 0 (magnetic axis) to 1 (last closed flux surface).
-All 1-D profile grids in bouquet use this normalisation.
+0 at the magnetic axis, 1 at the last closed flux surface. ψ is the poloidal
+flux per radian (COCOS 1-8, TokaMaker's convention). The solver's
+flux-surface quantities are sampled at `clip(psi_N, psi_pad, 1 - psi_pad)`,
+`ReconstructionSource.psi_pad = 1e-3` (`physics.evaluate_jBS`,
+`adapters._q0_psi`), never on the singular end surfaces.
 
-### 2.3 Toroidal Flux Coordinate (rho)
+### 2.4 Toroidal-flux coordinate and `coord="phi_n"` runs
 
-`rhovn` (normalised square-root toroidal flux) is computed by
-integrating the safety factor:
+The g-file reader's `rhovn` ignores a stored `RHOVN` and recomputes it from
+`QPSI` (`GEQDSKEquilibrium.rhovn`):
 
 ```
-rho(psi_N) = sqrt( integral_0^psi_N q dpsi_N  /  integral_0^1 q dpsi_N )
+Phi(psi) = integral_{psi_axis}^{psi} q dpsi'      (cumulative trapezoid)
+rho      = sqrt( Phi / Phi_edge )
 ```
 
-The code explicitly recomputes this from `QPSI` rather than trusting
-the RHOVN array stored in many g-files, because some equilibrium solvers
-write a placeholder `RHOVN = sqrt(psi_N)` which is only correct when q
-is spatially constant.
+A source with `coord="phi_n"` puts the whole run on Φ_N = ρ² (`"rho_tor"` is
+accepted and runs as Φ_N; `coords.run_coord`). Profiles, envelopes and draws
+live on Φ_N; TokaMaker receives them tagged with the coordinate, and bouquet
+samples every readback at the ψ_N the solver's own toroidal-flux map gives for
+each node (`coords.psi_at`). Datasets named `psi_N` hold the run grid; the
+baseline group records it as `profile_coord`
+([docs/workflows.md](docs/workflows.md#radial-coordinate-bsourcecoord)).
 
-**Caveat:** A ~22% discrepancy against OMFIT's rhovn has been observed
-in testing and has not yet been fully resolved.  See
-[Section 16, Future Work](#16-known-limitations-and-future-work).
+### 2.5 The positive-current frame
 
-### 2.4 Midplane Convention
+Bouquet solves every equilibrium with I_p > 0 and `F0 = |R0 B0|`
+(`utils.IFILE_FRAME`). The g-file adapter maps p', FF', F into that frame
+with `sign(I_p)` and `|F|`; the IMAS reader multiplies every current it reads
+by `sign(equilibrium ip)` and refuses a dictionary whose net `j_tor`
+disagrees in sign (`io.imas` module docstring). The factors are archived as
+`_baseline` attributes `source_current_sign`, `source_b0_sign`; the IMAS
+exporter returns what it overwrites to the source's orientation. User
+`j_NBI` / `j_RF` are defined in the positive frame.
 
-The outboard midplane is defined following OMFIT:
+### 2.6 Outboard midplane (g-file reader)
 
-- R_mid = geometric centre + minor radius (outboard intersection)
-- Z_mid = Z of the magnetic axis
-- Br, Bz interpolated from the 2-D psi grid via `RectBivariateSpline`
-- Bp = signed `sqrt(Br^2 + Bz^2)`, sign from
-  `-sigma_rhotp * sigma_RpZ * sign(Bz)`
-- Bt = F(psi) / R_mid
+`GEQDSKEquilibrium.midplane`, following OMFIT: R_mid = geometric center +
+minor radius of each traced surface; Z_mid = Z of the magnetic axis; Br, Bz
+interpolated from the 2-D grid (`RectBivariateSpline`);
+Bp = `-sigma_rhotp * sigma_RpZ * sign(Bz) * sqrt(Br^2 + Bz^2)`, 0 on axis;
+Bt = F(psi) / R_mid. These are point values, not flux-surface averages; they
+feed the E×B and Hahm-Burrell terms of the per-draw p-file
+([§6.2](#62-eb-decomposition-e_r-and-the-hahm-burrell-rate)).
 
-This is an **exact** midplane evaluation (no flux-surface averaging).
-It is used in the rotation decomposition (Er, Hahm-Burrell rate) and
-has been verified against OMFIT to <0.01% in R, <0.01% in Bt, and
-<0.3% in Bp (excluding the degenerate magnetic axis).
+### 2.7 Where q0 is quoted
 
----
+| quantity | radius |
+|---|---|
+| the engine's q0 row, the q0 sigma=0 gate, `constrain_sawteeth` | ψ_N = `psi_pad` (the clipped axis sample, `adapters._q0_psi`) |
+| TokaMaker `get_stats()['q_0']` | ψ_N = 0.02 (`physics.SOLVER_Q0_PSI_N`) |
+| a g-file's `QPSI[0]`, an IDS `q[0]` | the magnetic axis, ψ_N = 0 |
 
 ## 3. Equilibrium Perturbation Methodology
 
-### 3.1 Profile Sampling
+### 3.1 What a draw is
 
-Perturbations of ne, Te, ni, Ti are drawn from a zero-mean Gaussian
-process whose covariance kernel is built from user-supplied uncertainty
-envelopes sigma(psi_N).  Supported kernels include RBF (squared
-exponential) and Matern, with either scalar or spatially-varying
-(Gibbs non-stationary) length scales.
+An engine draw (`engine_draws.GenerateEngineDraws`) starts from the
+reconstruction's delivered state (`engine.EngineState`): its geometry
+snapshot G*, closure coefficients x*, relaxed bootstrap λ_BS* and, when on,
+the delivery correction. It
 
-**Covariance matrix conditioning:** The eigendecomposition uses
-`np.linalg.eigh` for symmetric matrices.  Small negative eigenvalues
-from floating-point round-off are clamped to zero.
+1. samples the kinetics, Z_eff, the auxiliary channels and one inductive
+   candidate ([§3.2](#32-profile-sampling)), and takes the run's bootstrap
+   scale, drawn uniformly from `GenerationConfig.jBS_scale_range` (default
+   `(0.99, 1.01)`; 1.0 is the reconstruction's value);
+2. composes the current with x* held ([§5.2](#52-the-composition-and-the-three-current-buckets)),
+   the pressure-driven term from the draw's own p', and closes one row, I_p,
+   as a scalar amplitude on the inductive term (zero extra solves);
+3. runs one self-consistent bootstrap loop (`jbs_loop.run_jbs_loop`, ceiling
+   `jbs_max_passes_draw = 12`, the closure-half current residual gated);
+4. runs the coil homotopy ([§15.4](#154-progressive-homotopy)) and a
+   post-homotopy bootstrap stage (ceiling `jbs_max_passes_post_homotopy = 6`);
+5. records l_i(3), l_i(1), beta_N, beta_p, Lambda, q0, q95 and the axis
+   position; it matches none of them.
 
-**Monotonicity enforcement:** For profiles that are physically
-monotonically decreasing (ne, Te, ni, Ti in a standard tokamak), the
-sampler rejects draws that violate monotonicity up to a maximum of
-10 000 attempts before raising an error.
+Every perturbed quantity is formed as `base + (drawn - base)`. With every
+perturbation zero and scale 1.0 the first request is bit-identical to the
+reconstruction's stored request (recorded per draw as
+`identity.pass1_request_bit_identical`; `EngineDrawContext` refuses to run
+otherwise). `Bouquet.verify_sigma0_consistency()` runs one such draw through
+the full `generate()` route and gates it ([§5.4](#54-the-self-consistent-loop-and-its-tolerances)).
 
-**Assumption:** Profile uncertainties are Gaussian-distributed and
-fully characterised by the covariance kernel.  Non-Gaussian tails
-(e.g. from ELMs or sawtooth crashes) are not captured.
+Drawn kinetics outside the bootstrap model's domain (a non-finite node,
+n_e, n_i, T_e, T_i ≤ 0, Z_eff < 1) are rejected before any solve
+(`kinetics_nonphysical`, `engine_draws.check_draw_kinetics`). Every solve in
+a draw is capped at `engine_draw_solve_maxits = 100` GS iterations; a draw
+over `draw_wall_budget_s = 600` s of wall time is rejected (host-dependent).
 
-### 3.2 Pressure Matching
+### 3.2 Profile sampling
 
-After drawing perturbed profiles, the total kinetic pressure is computed
-as:
+One `numpy.random.Generator` per run (`sampling.make_rng(seed)`) feeds every
+draw in a fixed order (`engine_draws.RNG_STREAM`): n_e, T_e, then Z_eff
+(deriving n_i) or n_i, then T_i, redrawn together until the pressure matches
+([§3.4](#34-pressure-matching)); then each auxiliary channel; then one
+inductive candidate.
 
-```
-P = e_charge * (ne * Te + ni * Ti)    [Pa, with ne in m^-3 and Te in eV]
-```
+- **Kernel.** `sampling.GPRProfilePerturber`, squared-exponential (the
+  default of `generate_perturbed_GPR`; Matérn-5/2 available), covariance
+  `C_ij = sigma_i sigma_j K_ij` with unit-variance `K`, so the marginal
+  standard deviation equals the input sigma; a 1-D length-scale array gives
+  the Gibbs kernel. Length scales, in the run coordinate:
+  `UncertaintyConfig.n_ls = 0.5`, `t_ls = 0.4`, `j_ls = 0.25`; auxiliary
+  channels and Z_eff 0.4.
+- **Factorization.** A non-pivoted Cholesky of `C + jitter I`,
+  `jitter = 1e-10 * n * max(diag C)` (`sampling._CHOL_JITTER`), so a seed
+  gives the same draw on any LAPACK build up to rounding; each marginal sigma
+  is inflated by at most a relative ~3e-8, and an all-zero sigma is exact.
+- **Monotonicity.** n_e, T_e, T_i and an independently drawn n_i are redrawn
+  until non-increasing in the run coordinate, at most
+  `sampling._MAX_MONOTONIC_DRAWS = 10 000` attempts; the constraint is dropped
+  for a channel whose baseline is itself non-monotonic. Z_eff and the
+  auxiliary channels are not constrained.
+- **Inductive candidate.** One sample of the parallel inductive, drawn in
+  toroidal units with marginal sigma `sigma_jphi = jphi_scalar_sigma ×
+  |baseline j_phi|` (`jphi_scalar_sigma = 0.1`) and length scale `j_ls`,
+  redrawn (at most 500 times) only while it is negative where its mean exceeds
+  its sigma; negative excursions where the mean is within sigma of zero are
+  clipped to zero (`engine_draws.sample_inductive`).
+- **Sigma sources** (`baseline.resolve_uncertainty`, first that applies per
+  channel): an explicit `UncertaintyConfig.sigma_profiles[chan]`; an IDA file
+  (`UncertaintyConfig.ida_path`, else the source's own `.cdf`); an IMAS
+  source's own `*_error_upper`; else the assumed H-mode flat-top radial
+  template `uncertainties.sigma_template(psi_N, chan) × |profile|` (or
+  `<chan>_scalar_sigma × |profile|` when set). The winner per channel is
+  logged and returned as `sigma_source`.
 
-Draws whose volume-averaged `<P>` differs from the baseline by more
-than `p_thresh` percent are rejected and re-sampled until acceptance
-or `max_pressure_iter` attempts.
-
-**Default `p_thresh = 5%`** (was 0.5% in early versions).  The threshold
-is calibrated to DIII-D's actual pressure measurement uncertainty so
-that the accepted sampling distribution spans a physically meaningful
-range rather than a vanishingly narrow `<P>`-conserving subspace.
-
-Reference values:
-
-| Measurement | Reported uncertainty |
-|---|---|
-| Diamagnetic loop `W_MHD` (between ELMs) | ~10% |
-| Kinetic-EFIT pressure profile | ~3-6% (Thomson + CER propagated) |
-| Volume-averaged `<P>` from kinetic-EFIT | ~3-5% |
-
-A 0.5% threshold is roughly 10-20x tighter than the data warrants and
-artificially anti-correlates ne/Te perturbations in the accepted samples;
-5% reflects kinetic-EFIT propagated uncertainty.
-
-**Source:** *MHD Equilibrium Reconstruction in the DIII-D Tokamak* (Lao
-et al., GA-A24687, 2004); *Equilibrium reconstruction improvement via
-Kalman-filter-based vessel current estimation at DIII-D* (Ou, Walker,
-Schuster, Ferron, FED 2007).
-
-**Assumption:** The acceptance loop preserves the GPR-drawn profile
-shapes; no rescaling is applied.  Only draws within the threshold are
-kept.
-
-**Iteration limit:** 100 000 attempts (effectively unlimited).
+**Assumption:** profile uncertainties are Gaussian and fully described by the
+covariance kernel. Non-Gaussian structure (ELM or sawtooth phases, pedestal
+bifurcation) is not represented.
 
 ### 3.3 li Matching: Recon-Anchor + Adaptive Gate
 
-The internal inductance is anchored to the baseline value through a
-three-stage process designed to make the pipeline behave as a true
-forward operator (sigma -> 0 reproduces the reconstructed equilibrium):
+**The default route does not match l_i.** An engine draw closes only the I_p
+row; l_i(3) drifts with the draw and is recorded. An l_i band is an opt-in
+acceptance filter ([§3.5](#35-opt-in-bands)), not a construction step.
 
-1. **Recon-anchor solve (NEW).**  After `solve_with_bootstrap` (SWB)
-   recomputes `j_BS` and `isolated_j_BS` from the perturbed kinetics,
-   we drop SWB's `matched_j_inductive` and substitute recon's converged
-   `j_inductive_fit` (passed via `input_jinductive`).  SWB seeds with
-   `create_power_flux_fun(1.5, 1.5)` (broad shape) and alpha-scales to
-   match Ip, but the resulting inductive has a fundamentally different
-   *shape* than recon's eqdsk-fit inductive (typical recon/SWB ratio
-   varies 1.4-3.4x with psi on the DIII-D reference case).  Without this
-   substitution the pipeline's "zero-perturbation baseline" lives at
-   l_i ~0.89 vs recon's 1.10 -- a ~19% systematic offset that breaks
-   sigma -> 0 reproducibility regardless of how the matching loop is
-   tuned.
+**Legacy route (deprecated since 1.4.0, removed in 1.5, #90).**
+`TokaMaker_interface.perturb_kinetic_equilibrium` constructs each draw so that
+its l_i lands within a construction tolerance: `GenerationConfig.l_i_tolerance`
+when set, else `filtering.LEGACY_L_I_CONSTRUCTION_TOLERANCE = 0.05` (fraction
+of the target; `filtering.l_i_construction_tolerance`). The draw first solves
+a recon-anchor state with the reconstruction's own inductive
+(`input_jinductive`), then either the standard route (inductive candidates
+screened with a cylindrical l_i proxy, then a secant on the inductive
+amplitude, at most `sampling._MAX_LI_ITER = 20` steps) or route R2
+(`perturb_jind_in_anchor=True`: the inductive is perturbed in the anchor
+block and I_p sets its amplitude). The construction tolerance is recorded in
+the scan's `inspec_bands_json` and is not an acceptance filter. The legacy
+route is not replay-deterministic
+([docs/known-limitations.md](docs/known-limitations.md)).
 
-2. **Post-anchor l_i gate (NEW).**  Immediately after the recon-anchor
-   solve, check if `|l_i_actual - l_i_target| / l_i_target` is already
-   within `l_i_tolerance`.  If yes, **skip** the iterative matching
-   loop entirely and accept the anchored equilibrium.  This avoids the
-   `find_optimal_scale` and `jphi-correction` rescaling drift that
-   otherwise nudges l_i by ~1% per draw even when no kinetic perturbation
-   is present.
+### 3.4 Pressure matching
 
-3. **Adaptive proxy + secant matching (legacy fallback).**  Only runs
-   when the gate fails (rare; typically high-sigma draws where the
-   perturbation pushes l_i outside `l_i_tolerance`):
+The kinetic channels are redrawn together until the flux-surface integral of
+the draw's thermal pressure `e (n_e T_e + n_i T_i)` on the engine grid
+matches the baseline's within `p_thresh = 0.05` (a fraction: 5 %;
+`kinetic_sampler.sample_kinetics`), at most `sampling._MAX_PRESSURE_ITER =
+int(1e5)` attempts. The accepted draw keeps its sampled shapes; nothing is
+rescaled.
 
-   - **Cylindrical proxy filter:** A fast 1-D proxy for l_i is computed
-     without solving Grad-Shafranov, using pre-computed geometry.
-     Draws whose proxy l_i falls outside a margin of the *corrected*
-     target (`PRESCREEN_MARGIN` x `l_i_tolerance`, default 3x) are
-     rejected cheaply before any GS solve.
-   - **Secant iteration:** Scales the inductive amplitude to match the
-     true Grad-Shafranov l_i within `l_i_tolerance`.
-   - **Adaptive proxy correction:** After each GS solve, the proxy
-     target is updated based on the observed proxy-vs-reality offset,
-     blended 70% new / 30% old.
+### 3.5 Opt-in bands
 
-**Empirical reproducibility at sigma=0** (DIII-D reference case, 6 draws):
+`filtering.InspecBands`, all off by default, applied to the archived draw
+(a draw outside a band is archived with `in_spec=False`, never dropped):
 
-| Quantity | recon | sigma=0 pipeline |
+| band | setting | test |
 |---|---|---|
-| l_i | 1.110 | 1.105-1.110 (mean offset -0.17%) |
-| bnd_RMS vs eqdsk | 2.84 mm | 3.1-4.2 mm |
-| X-pt drift | 0 | < 2 mm |
+| l_i(3) | `l_i_tolerance` (fraction) or `l_i_sigma` (absolute 1σ) | `\|l_i - l_i*\| <= l_i_tolerance * l_i*`, or `<= inspec_band_nsigma * l_i_sigma` |
+| beta_p | `beta_p_target` with `beta_p_sigma` | `\|beta_p - beta_p_target\| <= inspec_band_nsigma * beta_p_sigma` |
+| q0 | `constrain_sawteeth` (default `False`) | q0 ≥ 1 at ψ_N = `psi_pad` |
 
-**Iteration limit:** 20 secant steps.  If not converged the equilibrium
-is rejected.
+`l_i*` is the reconstruction's l_i(3); `inspec_band_nsigma = 2.0`; a missing
+or non-finite banded quantity fails. With `constrain_sawteeth` set and the
+reconstruction's own q(0) < 1, `generate_bouquet` switches the gate off for
+the scan and records why (`inspec_bands_json["q0_gate"]`).
 
-**Step clamping:** Secant steps clamped to +/-15% to prevent runaway.
+### 3.6 What Is Perturbed vs. Held Fixed
 
-### 3.4 Safety Factor Constraint
-
-By default (`constrain_sawteeth=True`), any equilibrium with q(0) < 1
-is rejected.  This prevents the generation of sawtoothing equilibria
-that would require additional physics (reconnection, island evolution)
-to model self-consistently.
-
-**Caveat:** The constraint is checked *after* the GS solve, so
-rejected equilibria still cost a TokaMaker call.
-
-### 3.5 What Is Perturbed vs. Held Fixed
+Default route:
 
 | Quantity | Perturbed? | Notes |
 |----------|-----------|-------|
-| ne, Te, ni, Ti | Yes | Drawn from GPR posterior |
-| Total pressure (ptot) | Yes | Recomputed from perturbed kinetics |
-| Bootstrap current (j_BS) | Yes (optional) | Recomputed from Sauter model if `recalculate_j_BS=True` |
-| Inductive current (j_ind) | Yes | Scaled to match li |
-| Coil currents | Yes | Adjusted by TokaMaker to match Ip |
-| nz1 (impurity density) | **No** | Kept from baseline; see [Section 4](#4-quasi-neutrality-and-impurity-handling) |
-| nb (beam density) | **No** | Preserved from baseline p-file |
-| pb (beam pressure) | **No** | Preserved from baseline p-file |
-| Toroidal rotation (omeg) | **No** | Preserved from baseline p-file |
-| Poloidal rotation (omegp) | **No** | Preserved from baseline p-file |
-| kpol | **No** | Preserved from baseline p-file |
-| E×B rotation (w_ExB) | **No** | Zero placeholder stored; see [Section 16](#16-known-limitations-and-future-work) |
-| Diamagnetic rotations | Yes | Recomputed from perturbed ne, Te, ni, Ti + baseline nz1 |
-| Er, Hahm-Burrell rate | Yes | Recomputed using exact midplane B-fields |
-
----
+| n_e, T_e, T_i | yes | Gaussian-process draws, pressure-matched |
+| Z_eff | yes | on by default for every source; `zeff_scalar_sigma=0.0` turns it off |
+| n_i, n_z | derived | quasi-neutrality with the drawn Z_eff ([§4](#4-quasi-neutrality-and-impurity-handling)) |
+| solve pressure | recomputed | from the drawn kinetics; fixed `p_fast` added |
+| bootstrap current | recomputed | Redl on each solved state, self-consistent ([§5.3](#53-the-bootstrap-model)) |
+| inductive current | yes | one Gaussian-process candidate; its amplitude closes I_p |
+| closure coefficients x*, plasma current I_p | no | the reconstruction's |
+| coil currents | yes | solved within the homotopy bounds ([§15](#15-coil-constraint-handling-diii-d-reference)) |
+| auxiliary channels (rotation, E_r, transport coefficients) | optional | perturbed and stored when a sigma is supplied; passive (they do not enter the solve) |
+| `p_fast`, `j_NBI`, `j_RF`, `j_other`, fast-ion moments `z_fast`, `z2_fast` | no | fixed, added to every draw |
+| p-file rotation profiles (`omeg`, `omegp`, `omgvb`, `kpol`) | no | kept from the baseline p-file |
+| diamagnetic and E×B rotation, E_r, Hahm-Burrell rate of the per-draw p-file | recomputed | from the draw's kinetics and geometry ([§6](#6-rotation-and-radial-electric-field)) |
+| `w_ExB` dataset | no | a zero placeholder ([§6.4](#64-the-w_exb-dataset)) |
 
 ## 4. Quasi-Neutrality and Impurity Handling
 
-### 4.1 The Problem
+### 4.1 The Z_eff-primary scheme
 
-Quasi-neutrality requires:
+Each draw perturbs {n_e, T_e, T_i, Z_eff} and derives the main-ion density
+from quasi-neutrality with one effective impurity charge Z_imp and main-ion
+charge 1 (`physics.main_ion_density_from_zeff`):
 
 ```
-ne = ni * Z_main + nz1 * Z_imp + nb * Z_beam
+n_i = n_e (Z_imp - Z_eff) / (Z_imp - 1)          (no fast ions)
+n_z = (n_e - n_i) / Z_imp
 ```
 
-When bouquet perturbs ne and ni independently, this constraint can be
-violated.  Recomputing `nz1 = (ne - ni - nb) / Z_imp` from
-independently perturbed profiles can yield **negative impurity density**
-— an unphysical result.
+For `1 <= Z_eff <= Z_imp` this gives `0 <= n_i <= n_e` and `n_z >= 0`. The
+derived n_i is an increment on the baseline n_i,
+`n_i_draw = n_i_base + n_i(n_e_draw, Z_eff_draw) - n_i(n_e_base, Z_eff_base)`,
+so a zero perturbation returns the baseline n_i exactly even when the baseline
+is not single-impurity quasi-neutral (`kinetic_sampler.sample_kinetics`). One
+Z_eff realization per draw is used in the solve, the bootstrap, the archive
+and the per-draw p-file ([§4.5](#45-the-per-draw-p-file)).
 
-### 4.2 Bouquet's Approach
+On the standard ion route n_i is always derived from the drawn Z_eff. On the
+measured IDA ion routes it is derived only when n_i and Z_eff come from one
+IDA resolution or n_i has only the assumed sigma; otherwise n_i keeps its own
+sigma channel (`baseline.resolve_uncertainty`). `UncertaintyConfig.ni_from_zeff`
+overrides either. Which Z_eff definition feeds what on each route:
+[docs/physics-notes.md](docs/physics-notes.md#z_eff-which-definition-feeds-what-on-every-route).
 
-**`generate_bouquet()` does not recompute nz1.**  The baseline impurity
-density is preserved in the perturbed p-file.  This means:
+### 4.2 The impurity charge
 
-- The perturbed p-file does **not** satisfy exact quasi-neutrality.
-- The impurity contribution to pressure and diamagnetic rotation uses
-  the original (self-consistent) nz1 profile.
-- The total pressure `ptot` is recomputed as
-  `ne*Te + (ni + nz1_baseline)*Ti + pb`, which is self-consistent with
-  the stored profiles.
+Z_imp is the declared value where the baseline carries one (`Baseline.Z_imp`,
+set on the IMAS routes); otherwise the sampler inverts it from the baseline as
+the median, over surfaces with `(n_e - n_i)/n_e > 1e-3` and `Z_eff > 1`, of
 
-**Rationale:** Bouquet perturbs the *thermal* species (ne, ni, Te, Ti)
-within their measurement uncertainties.  The impurity content is not
-being perturbed — it is a separate measurement (e.g. from charge-exchange
-spectroscopy) with its own uncertainty.  Forcing quasi-neutrality by
-adjusting nz1 would couple the impurity density to the thermal profile
-uncertainties in a physically unmotivated way.
+```
+Z_imp = 1 + n_e (Z_eff - 1) / (n_e - n_i)
+```
 
-### 4.3 `compute_quasineutrality()` Standalone Behaviour
+(`physics.effective_impurity_charge`, via `kinetic_sampler.dilution_Z_imp`).
+`ReconstructionSource.impurity_Z` and `ImasSource.impurity_Z` (default 6.0,
+carbon) are the charge with which the IDA reader and the IDA-hybrid IMAS
+route derive n_i from Z_eff (`io.ida.read_ida`,
+`io.imas._merge_ida_kinetics`). Set it for the device.
 
-The `PFile.compute_quasineutrality()` method is still available for
-users who want to enforce charge balance explicitly.  If the result
-contains negative values, a `UserWarning` is emitted with the number
-of affected grid points and the minimum value.  The negative values
-are **not** clamped — the caller decides how to handle them.
+### 4.3 Fast ions
 
-### 4.4 Downstream Consequences
+With fast-ion charge moments `z_fast = Σ Z_s n_s` and `z2_fast = Σ Z_s² n_s`
+the formula depends on whether Z_eff's numerator includes the fast ions
+(`physics.main_ion_density_from_zeff`):
 
-Because baseline nz1 is preserved:
+```
+thermal numerator:   n_i = (Z_imp (n_e - z_fast) - Z_eff n_e) / (Z_imp - 1)
+total numerator:     n_i = n_e (Z_imp - Z_eff)/(Z_imp - 1) - (Z_imp z_fast - z2_fast)/(Z_imp - 1)
+```
 
-- `omgpp` (impurity diamagnetic) reflects the original impurity
-  pressure gradient, not a quasi-neutrality-derived one.
-- Zeff computed from the stored profiles will differ slightly from
-  `(ni + nz1*Z^2 + nb) / ne` because quasi-neutrality is not exact.
-- These differences are small for typical bouquet perturbation
-  magnitudes (5-10% profile variations) and are within the measurement
-  uncertainty of the impurity density itself.
+The Z_eff window that keeps n_i ≥ 0 and n_z ≥ 0 follows the same convention
+(`physics.zeff_bounds`) and reduces to `[1, Z_imp]` without fast ions. The
+moments are held fixed in every draw, so the sampled Z_eff is conditional on
+a fixed beam fraction ([docs/known-limitations.md](docs/known-limitations.md)).
 
----
+### 4.4 Clips
+
+`UncertaintyConfig.kinetic_clips` (default `None`, resolved on for every
+route; an explicit `False` turns them off) enables in
+`kinetic_sampler.sample_kinetics`: a drawn Z_eff floored at 1
+(`ZEFF_DRAW_MIN`); a derived n_i held in `[0, n_e - z_fast]`; an independent
+n_i capped at `n_e - z_fast` when Z_imp is declared; the same window on a
+passive Z_eff auxiliary draw. With or without clips a Z_eff draw is held in
+the `zeff_bounds` window. Every clip that moves a node is counted on the draw
+(`KineticDraw.clips`, archived with the sampler version
+`kinetic_sampler.KINETIC_SAMPLER_VERSION`).
+
+### 4.5 The per-draw p-file
+
+For a text p-file source, each draw's p-file is the baseline p-file with
+n_e, T_e, n_i, T_i replaced, a single-species beam block from `z_fast`,
+`z2_fast` when present, the impurity density recomputed from this draw's
+(n_e, n_i) by `PFile.compute_quasineutrality()`
+(`nz1 = (ne - ni - Z_beam nb) / Z_imp`, negatives clipped to zero here; on
+its own the method only warns), then `ptot` and the rotation profiles
+recomputed (`generate_bouquet`). A binary IDA `.cdf` source stores none.
+
+`PFile` identifies ion species by charge, mass and the presence of `nb`, not
+by position (`PFile.ion_roles`): the beam is the last species only with a
+non-zero `nb`; the main ion is the first hydrogenic species (Z = 1,
+0.5 ≤ A ≤ 3.5); the impurity is the first other species. It raises when a role
+is ambiguous; a non-hydrogenic main ion is not supported.
 
 ## 5. Current Density Decomposition
 
-### 5.1 Bootstrap Current
+### 5.1 Conventions
 
-The bootstrap current density `j_BS` is computed using the Sauter
-model [O. Sauter, C. Angioni, and Y.R. Lin-Liu, Physics of Plasmas
-**6** (1999) 2834], which is the standard analytic model used by most
-transport codes.
-
-**Assumption:** The Sauter model is a fit to numerical neoclassical
-calculations and is accurate to ~10% for standard tokamak conditions.
-It can be less accurate for:
-
-- Very low aspect ratio (spherical tokamaks)
-- Strong rotation
-- Non-Maxwellian distributions
-- Very steep edge pedestals
-
-**Implementation note.** bouquet evaluates the bootstrap with the Redl et al.
-(2021) fit (OFT's `redl_bootstrap`, `formula_form='jboot1'`), the successor of
-the Sauter fit with the same inputs. Default
-(`GenerationConfig.jbs_self_consistent=True`): `physics.evaluate_jBS` on the
-delivered equilibrium and the caller's own ψ_N grid, iterated to
-self-consistency with the closure and the GS solve (`bouquet/jbs_loop.py`;
-joint under-relaxation of the bootstrap and the solved current, convergence on
-two consecutive passes, hard failure or a flagged slice). Legacy
-(`jbs_self_consistent=False`): once per baseline and per draw through OFT's
-`solve_with_bootstrap` on its own auxiliary equilibrium, then frozen. The
-archive records which one ran (the schema-v3 `jbs_loop` block); see
-[physics-notes.md](docs/physics-notes.md#self-consistent-bootstrap-jbs_self_consistent).
-
-**Assumption (both paths):** the kinetic profiles are held at their ψ_N labels
-while the current redistributes; the Redl drive is main-ion + electron only.
-
-### 5.2 Inductive Current
-
-The inductive current `j_ind` is defined as the residual:
+bouquet's toroidal current density is TokaMaker's: the plain flux-surface
+average `<j_phi>` that `jphi-linterp` consumes, `J_TM = <R> p' + <1/R> FF'/mu0`
+(identity A3 of [docs/current-conventions.md](docs/current-conventions.md)).
+Field-aligned components are held as parallel currents `<j.B>` [T A/m²]
+and converted with one factor everywhere in the package
+(`physics.field_aligned_conversion`):
 
 ```
-j_ind = j_total - j_BS
+<j_phi>_component = kappa <j.B>_component,      kappa = F <1/R> / <B^2>
 ```
 
-It is fitted with a `scipy.interpolate.UnivariateSpline` using a
-smoothing factor of `len(psi) * var(residual) * 0.01`.
+`physics.parallel_to_toroidal`, `toroidal_to_parallel` (its exact inverse),
+`evaluate_jBS`, `engine.conversion_factor` and the converted SWB output all
+use κ; a geometry carrying `<1/R^2>` is refused. IMAS `j_tor`
+(`<j_phi/R>/<1/R>`) converts to and from `J_TM` with identity A5
+(`physics.jtor_imas_to_jphi_tokamaker`, `jphi_tokamaker_to_jtor_imas`).
 
-**Assumption:** The inductive profile shape is smooth and can be
-represented by a low-order spline.  No cross-validation is performed
-on the smoothing parameter.
+### 5.2 The composition and the three current buckets
 
-### 5.3 Bootstrap Shelf Option
-
-If `shelf_psi_N > 0`, the bootstrap current is flattened for
-psi_N < shelf_psi_N (i.e. in the core), using the value at the shelf
-location.  This separates core and edge bootstrap contributions and
-can be useful when the Sauter model produces unphysical core structure.
-
-**Caveat:** The shelf introduces a discontinuity in the j_BS derivative
-at psi_N = shelf_psi_N.
-
----
-
-## 6. Rotation Profile Computation
-
-### 6.1 Diamagnetic Rotation
-
-The diamagnetic rotation frequency for species *s* is:
+The engine forms the solver's current in one place (`engine.compose`), on the
+geometry of the latest solve:
 
 ```
-omega_dia,s = (1 / n_s Z_s e) * d(n_s T_s) / dpsi
+<j_phi> = kappa [ s_ind <j.B>_ind + s_bs <j.B>_BS + <j.B>_fix ]
+        + p' (<R> - F^2 <1/R> / <B^2>)                         (identity I2)
 ```
 
-In p-file units (n in 10^20/m^3, T in keV, psi in Wb), this gives
-kRad/s directly.
+`s_ind`, `s_bs` are the closure's multipliers (by default four
+peak-normalized Gaussians at ψ_N 0.15, 0.45, 0.75, 0.95, width 0.20,
+`utils.STRUCTURED_BASIS_DEFAULT`). The last term, p'G, is the
+pressure-driven current (diamagnetic plus Pfirsch-Schlüter, zero `<j.B>`),
+recomputed every pass from the solved equilibrium's p'; `F`, `<B^2>` come
+from `evaluate_jBS`, `<R>`, `<1/R>`, p' from `utils.fsa_current_geometry`.
 
-**Sign convention (enforced by code):**
-- Impurity and main-ion diamagnetic: negative (counter-current)
-- Electron diamagnetic: positive (co-current)
-
-The code uses `np.abs()` to compute the magnitude and then applies
-the sign by convention.
-
-**Assumption:** All ion species share the same temperature unless
-an explicit impurity temperature `TI` is provided.
-
-### 6.2 ExB Decomposition
+The archive keeps that term as its own bucket, `j_pressure`
+(`schema.SPLIT_PRESSURE_SEPARATE`, group attribute
+`current_split_convention = "pressure_separate"`):
 
 ```
-omega_ExB  = omega_VxB + omega_dia_impurity
-omega_VxB(main)  = omega_ExB - omega_dia_main
-omega_VxB(elec)  = omega_ExB - omega_dia_electron
+j_phi = j_inductive + j_BS + j_NBI + j_RF (+ j_other) + j_pressure
 ```
 
-If `omega_VxB` (the impurity VxB term, from measured toroidal
-rotation) is not present in the p-file, it defaults to zero.
+`j_BS` is the field-aligned `kappa s_bs <j.B>_BS` only, so the bootstrap
+multiplier and jitter never act on p'G. All routes archive this split (the
+legacy route evaluates p'G on the archived state,
+`TokaMaker_interface.archived_pressure_term`). An archive written before
+PR #64 has no attribute and carries p'G inside `j_inductive`;
+`schema.read_current_split_convention` infers which. Engine draws also store
+the parallel parts (`jB_parallel/`, identity
+`j_phi = kappa (jB_inductive + jB_BS + jB_NBI + jB_RF) + j_pressure`).
 
-### 6.3 Radial Electric Field and Hahm-Burrell Rate
+The archived `j_phi` is the achieved flux-surface current of the converged
+solve, not the request (`_achieved_jphi_fsa`); the engine evaluates `j_BS`
+and the fixed parts on the archived equilibrium and `j_inductive` is the
+unclipped residual. `jphi-linterp` delivers a current that differs from the
+request near the edge; `engine_delivery_correction` (default `False`) would
+add the previous pass's `request - achieved/c` to each request.
+
+### 5.3 The bootstrap model
+
+The bootstrap is the Redl et al. (2021) fit [A. Redl et al., Phys. Plasmas
+**28**, 022502 (2021)], the successor of the Sauter fit [O. Sauter,
+C. Angioni and Y.R. Lin-Liu, Phys. Plasmas **6**, 2834 (1999)], evaluated by
+`physics.evaluate_jBS` on whatever equilibrium the solver holds: OFT's
+`redl_bootstrap(formula_form='jboot1')` with NRL electron / Z_avg ion Coulomb
+logarithms and the Koh multi-species ion collisionality
+(`physics.EVALUATE_JBS_VERSION`, `evaluate_jBS/4`). It returns the
+field-aligned `kappa <j.B>` and p'G separately.
+
+- The drive is the electrons and the main ions; impurity and fast-ion
+  pressure enter the GS pressure, not the bootstrap drive.
+- The inverse aspect ratio is `eps = (R_max - R_min)/(R_max + R_min)` of each
+  surface and `R_geo = (R_max + R_min)/2` enters ν* (`eps_definition =
+  "r_over_R_geo"`, default; alternatives in `physics.EPS_DEFINITIONS`).
+- Gradients are taken on the caller's own grid with the current
+  equilibrium's flux range; the kinetic profiles are held at their ψ_N (or
+  Φ_N) labels while the current redistributes.
+- Non-physical input (n, T ≤ 0, Z_eff < 1) or a failed surface trace raises
+  `JBSEvaluationError`; only on the clipped axis and separatrix end nodes is a
+  non-finite value set to zero (counted in `diag["n_nonfinite_zeroed_at_ends"]`).
+- Every engine Redl profile receives the shared innermost-surface repair
+  (`smooth_jbs_transition`).
+
+The Redl fit is the only bootstrap model implemented; its accuracy limits
+(low aspect ratio, strong rotation, non-Maxwellian populations, steep
+pedestals) are those of the published fit.
+
+### 5.4 The self-consistent loop and its tolerances
+
+`jbs_loop.run_jbs_loop` owns every solve that contains a bootstrap: closure on
+the previous solved geometry, relax the solved current by β, one GS solve,
+Redl on the new equilibrium, relax the bootstrap by ω. Both relaxations change
+only the path, not the fixed point. `r_j` is the current-weighted L2 distance
+between the bootstrap the equilibrium was solved with and Redl on that
+equilibrium; `r_I` is the same residual as a fraction of I_p. The engine
+requires `GenerationConfig.jbs_self_consistent = True`; a frozen bootstrap
+(`False`) exists only on the legacy route.
+
+Convergence (each value read from its home; `engine.convergence_table()`):
+
+| criterion | value | source |
+|---|---|---|
+| r_j | 1e-3 | `GenerationConfig.jbs_rtol_j` |
+| r_I | 1e-4 | `GenerationConfig.jbs_rtol_Ip` |
+| \|Δl_i\| between passes | 1e-3 | `GenerationConfig.jbs_tol_li` |
+| \|Δq0\| between passes (q0 row on) | 2e-3 | `GenerationConfig.jbs_tol_q0` |
+| \|q0 − q0_target\| (q0 row on) | 0.01 | `GenerationConfig.q0_tol` |
+| l_i, g-file hard row (absolute) | 1e-3 | `engine.gfile_li_row_tol()` (the `li_tol` default of `_rematch_li_request`) |
+| l_i, IDS soft-row discrepancy | 0.005 | `GenerationConfig.structured_li_tol` |
+| MSE tan γ change | 0.1 σ_eff | `jbs_loop.MSE_CHORD_OFFSET_TOL_SIGMA` |
+| consecutive passes | 2 | `jbs_loop.JBS_REQUIRED_CONSECUTIVE` |
+| pass ceiling: reconstruction / draw / post-homotopy | 12 / 12 / 6 | `jbs_max_passes`, `jbs_max_passes_draw`, `jbs_max_passes_post_homotopy` |
+| relaxation ω / β | 0.7 / 0.7 | `jbs_relax`, `jbs_relax_current` |
+| ω floor; halving after growing passes; growth abort | 0.25; 3; 3 passes at the floor | `JBS_RELAX_FLOOR`, `jbs_relax_halve_on`, `JBS_GROWTH_ABORT_PASSES` |
+| closure scale bounds | 0.2 < s < 5 | `utils.close_ip_structured` default |
+| I_p round trip | 0.05 % | `utils.IP_ROUNDTRIP_TOL_PCT` |
+
+A non-converged loop raises `JBSNotConverged` (or, with
+`jbs_loop_on_fail="flag"`, is delivered flagged); a non-finite iterate raises
+`JBSNonFinite` at once. The reconstruction's default rows are I_p and l_i
+(`engine_rows = ("Ip", "l_i")`):
+
+| source | I_p row | l_i row |
+|---|---|---|
+| g-file | hard, exact | hard, target = the reader's `li(2)` key (the ITER-normalized l_i(3), [§9](#9-internal-inductance)), absolute tolerance 1e-3 |
+| IDS | soft, σ = 0.5 % of I_p | soft, target = the source's `li_3` at the magnetic-axis radius, σ = 0.04 |
+
+The IDS `li_3` radius is resolved by `GenerationConfig.imas_li3_radius =
+"auto"` (`adapters.resolve_li3_radius`). The q0 and MSE rows are opt-in
+([docs/engine.md](docs/engine.md)).
+
+**sigma=0 gates** (`Bouquet.verify_sigma0_consistency`): the
+zero-perturbation draw must meet r_j, r_I, |Δl_i| and |Δq0| against the
+reconstruction at the loop tolerances above, at its loop stage and at its
+archived stage; its maximum F-coil and VSC-coil drift must lie within the
+hard coil bound the route rejects at (the tightest homotopy stage, 1 % by
+default) and its LCFS RMS deviation within the in-spec boundary cut.
+
+### 5.5 The inductive component
+
+- **g-file.** The file carries only the total current. The adapter forms
+  `<j.B>_in = F p' + F' <B^2>/mu0` from the reader's own traced surfaces
+  (identity I0, `adapters.gfile_parallel_current`), subtracts the Redl
+  bootstrap evaluated once on the anchor solve and the fixed parts, and
+  smooths the residual (`adapters.inductive_basis`: a smoothing spline of
+  degree `ReconstructionSource.n_k` (default 5) with `s = n var * 0.1` on
+  ψ_N ≤ `psi_bridge` (default 0.99) with a zero anchor at ψ_N = 1, the raw
+  residual blended in below ψ_N 0.30, PCHIP, floored at 0). That shape is
+  held for the whole reconstruction and scaled by the closure, so the g-file
+  fixed point depends on the anchor's bootstrap through that one subtraction.
+- **IDS.** The inductive is the parallel residual by definition,
+  `|B0| (j_total - j_bootstrap - Σ driven)`; the source's `j_ohmic` is a
+  cross-check recorded in `provenance["inductive_consistency"]`, not a choice
+  (`GenerationConfig.engine_ids_inductive = "residual"`; `"j_ohmic"` and
+  `"auto"` are explicit options).
+
+### 5.6 Fixed driven currents
+
+User `j_NBI`, `j_RF`, `j_other` (toroidal, `FixedComponentsConfig`) are
+converted to parallel with the anchor's κ. On an IDS source the driven
+`core_sources` entries are added by their data-dictionary identifier
+(`adapters.IDS_DRIVEN_SOURCE_PARTS`: nbi 2 → `nbi`; ec, lh, ic 3-5 → `rf`;
+fusion 6, runaways 501, sawteeth 701 → `other`); aggregates, ohmic,
+bootstrap and the neoclassical entry are never added. Every driven part is
+held fixed in every draw; the engine archives `other` inside `j_RF`. The
+source-time matching rules:
+[docs/engine.md](docs/engine.md#the-contract-adaptersenginecontract).
+
+### 5.7 Legacy-route notes
+
+On the deprecated legacy route the bootstrap can be frozen
+(`jbs_self_consistent=False`: one `solve_with_bootstrap` per baseline and per
+draw), and then the thermal pressure uses the frozen constant
+`physics.ELEMENTARY_CHARGE_LEGACY = 1.6022e-19` C
+(`physics.thermal_pressure_charge`). `ReconstructionSource.shelf_psi_N`
+(default 0.0, off) and `rescale_j_BS` (default `False`) apply only to the
+legacy g-file reconstruction's inductive fit (`baseline.py`); the engine's
+g-file adapter does not read them. SWB's bootstrap output convention is
+identified from the installed toolkit and converted to `kappa <j.B>`
+(`physics.swb_jbs_convention`, `_swb_jbs_to_toroidal`); an unrecognized build
+is refused.
+
+## 6. Rotation and Radial Electric Field
+
+### 6.1 Diamagnetic rotation in the per-draw p-file
+
+`PFile.compute_diamagnetic_rotations(psi)`, for species s:
 
 ```
-Er    = omega_ExB * R_mid * Bp_mid        [kV/m]
-omghb = (R_mid * Bp_mid)^2 / Bt_mid * d(omega_ExB)/dpsi
+omega_dia,s = (1 / (n_s Z_s e)) d(n_s T_s)/dpsi
 ```
 
-These use exact outboard-midplane values of R, Bp, Bt (not
-flux-surface averages), following the OMFIT convention.
+In p-file units (n in 10^20 m^-3, T in keV, ψ in Wb/rad) this gives krad/s.
+The code takes the magnitude and applies the sign by convention: impurity
+(`omgpp`) and main-ion (`ommpp`) negative, electron (`omepp`) positive. Main
+ions and electrons are taken with charge 1, the impurity charge from
+`PFile.ion_roles`. All ions share `ti` unless an impurity temperature `TI` is
+passed.
 
-**Hahm-Burrell derivative method:** The `d(omega_ExB)/dpsi` term is
-computed using a Savitzky-Golay filter with `deriv=1` (window ≈ 3%
-of the grid, minimum 7 points, polynomial order 3).  This is
-mathematically equivalent to fitting a local cubic polynomial and
-analytically differentiating it, which is optimal for noisy data.
-A naive `np.gradient()` on `omega_ExB` amplifies grid-scale noise
-because `omghb` is effectively a **second derivative** of the
-kinetic profiles (`omega_ExB ~ d(nT)/dpsi`, `omghb ~ d^2(nT)/dpsi^2`).
+### 6.2 E×B decomposition, E_r and the Hahm-Burrell rate
 
-**Baseline consistency:** When storing the baseline p-file to HDF5,
-`generate_bouquet()` recomputes the baseline rotation profiles
-(diamagnetic, ExB decomposition, Er, omghb) using the same midplane
-method as the perturbed p-files.  This ensures the baseline and
-perturbed curves in `plot_pfile_bouquet()` are directly comparable.
-Without this recomputation, the baseline `omghb` (from the original
-p-file creation tool) can differ from the perturbed `omghb` by an
-order of magnitude purely due to methodological differences.
-
-### 6.4 Numerical Safeguards
-
-Near the magnetic axis, `dpsi = gradient(psi)` approaches zero and
-produces division-by-zero spikes.  At the plasma edge, densities
-approach zero with the same effect.  Flooring is applied:
-
-- **dpsi floor:** `max(1e-4 * max|dpsi|, 1e-30)`
-- **Density floor:** `1e-4 * max|ne|` (applied to ne, ni, nz1 in
-  the denominator only)
-- **Bt floor:** `sign(Bt) * 1e-6` where |Bt| < 1e-6 T
-
-These floors are small enough to preserve the physics everywhere
-except the degenerate axis/edge points.  Any remaining NaN/inf values
-are replaced with zero via `np.nan_to_num`.
-
----
-
-## 7. Pressure and Beta Calculations
-
-### 7.1 Total Pressure (P-file)
+`PFile.compute_rotation_decomposition(R, Bp, Bt, psi)`:
 
 ```
-ptot = 16.022 * (ne * Te + (ni + nz1) * Ti) + pb     [kPa]
+omgeb = omgvb + omgpp              (omgvb from the baseline p-file; zero if absent)
+ommvb = omgeb - ommpp
+omevb = omgeb - omepp
+er    = omgeb * R_mid * Bp_mid                         [kV/m]
+omghb = (R_mid Bp_mid)^2 / Bt_mid * d(omgeb)/dpsi
 ```
 
-where the constant 16.022 kPa/(10^20 m^-3 keV) = e_charge * 1e20.
+R, Bp, Bt are the reader's outboard-midplane values of the draw's own
+archived g-file ([§2.6](#26-outboard-midplane-g-file-reader)).
+`d(omgeb)/dpsi` is a Savitzky-Golay first derivative (window
+`max(7, round(0.03 n) | 1)` points, polynomial order 3), because `omghb` is
+effectively a second derivative of the kinetic profiles. The baseline p-file's
+rotation profiles are recomputed by the same method when the baseline is
+archived, so baseline and draws are comparable.
 
-**Assumption:** Main ions are singly charged (Z_main = 1).  The
-formula is correct for arbitrary Z_main but the p-file convention
-stores `ni` as the main-ion density (not `ni * Z_main`).
+### 6.3 Radial electric field from impurity force balance
 
-### 7.2 Total Pressure (Bouquet SI)
-
-```
-P = EC * (ne * Te + ni * Ti)    [Pa]
-```
-
-where `EC = 1.6022e-19` J/eV, ne in m^-3, Te in eV.
-
-**Caveat:** The bouquet SI pressure does not include the impurity or
-beam contributions.  The p-file pressure does.  When comparing the
-two, the difference is `EC * nz1 * Ti + pb`.
-
-### 7.3 Beta
+`bouquet.radial_field_from_impurity_force_balance` (public;
+`radial_field_from_cer` is a deprecated alias) evaluates the steady radial
+force balance of the measured impurity species, inertia and viscosity
+neglected:
 
 ```
-beta_t = 2 mu0 <p> / Bt_vac^2
-beta_p = 2 mu0 <p> / <Bp>^2
-beta_N = beta_t / (Ip / a Bt)    [in %·m·T/MA]
+E_r = (1/(Z_imp e n_imp)) dp_imp/dR  -  v_theta B_phi  +  v_phi B_theta
+p_imp = e n_imp T_imp,   v_phi = omega_tor R,   dp/dR = (dp/dpsi_N)(dpsi_N/dR)
 ```
 
-where `Bt_vac = B0 * R0 / R_boundary`.
+Inputs are SI on a common ψ_N grid; the info dict returns the three terms
+(`diamagnetic`, `toroidal` = `v_phi B_theta`, `poloidal` = `-v_theta B_phi`)
+and an optional propagated 1σ. `B_theta` is the poloidal field for
+right-handed (r, θ, φ), −B_Z at the outboard midplane for either I_p / B_T
+direction; `v_pol` is v_θ along the same θ̂; other signs are the inputs' own,
+and `B_phi`, `omega_tor`, `v_pol` must share one lab frame (`B_phi = F/R`
+from the input g-file, not a bouquet-written one). Since 1.4.1
+`io.ida.read_ida_cer` returns `Bpol = -Bpol_midplane` (IDA stores B_Z); an
+E_r built with that reader in 1.4.0 or earlier has the wrong sign of the
+`v_phi B_theta` term. Agreement with IDA's E_r was checked on
+normal-orientation cases only. The library does not use E_r internally
+(tests: `tests/test_physics.py::TestRadialField`, `tests/test_ida.py`).
 
-**Caveat:** Beta quantities are computed in the geqdsk reader but
-are not yet fully validated.  See [Section 16](#16-known-limitations-and-future-work).
+### 6.4 The `w_ExB` dataset
 
----
+The per-draw `w_ExB` dataset is a zero placeholder on every route
+(`TokaMaker_interface.perturb_kinetic_equilibrium`,
+`GenerateEngineDraws.draw`); a self-consistent E×B rotation would need the
+radial force balance per draw, which is not implemented.
+
+## 7. Pressure and Beta
+
+### 7.1 The solve pressure
+
+The adapter's pressure (`adapters.EngineContract.pressure`), in Pa:
+
+```
+p = e (n_e T_e + n_i T_i)  +  p_imp  +  p_fast
+p_imp = e n_z T_i,   n_z = max((n_e,th - n_i)/Z_imp, 0)      (physics.impurity_pressure)
+```
+
+with `e = physics.ELEMENTARY_CHARGE = 1.602176634e-19` C, n in m^-3, T in eV;
+the impurity is assumed thermalized at T_i. `p_fast` is fixed:
+`FixedComponentsConfig.p_fast`, else a p-file's `pb` (g-file route), else the
+isotropized IMAS fast pressure ([§7.5](#75-fast-pressure-from-imas-sources)).
+
+**The impurity term is evaluated only where Z_imp is declared.** On the IMAS
+routes it is (`Baseline.Z_imp`, with `n_e,th = n_e - z_fast`). On the g-file
+route the adapter reads Z_imp from `FixedComponentsConfig`, which has no such
+field, so `p_imp = 0` and the solve pressure is
+`e (n_e T_e + n_i T_i) + p_fast` (`adapters.GFileAdapter.read`; the same holds
+for the legacy g-file reconstruction, `baseline.py`).
+
+A draw's pressure is the contract's in increment form, `base + (drawn - base)`
+per part (`EngineDrawContext.pressures`). The archive stores the solve
+pressure as `pressure` and `e (n_e T_e + n_i T_i)` as `pressure_thermal`.
+
+### 7.2 Separatrix pressure and the edge P' pin
+
+TokaMaker integrates P' inward from zero at the boundary and rescales it to an
+axis target (`edge_pressure.py`):
+
+- `GenerationConfig.separatrix_pressure = "offset"` (default): the axis target
+  is `p_axis - p_sep`, so P' is the input's own; `p_sep` (the total solve
+  pressure at its last node) is added back wherever pressure, beta or stored
+  energy is reported or delivered, including every g-file bouquet writes.
+  `"legacy"` passes the full axis pressure, which inflates P' by
+  `p_axis / (p_axis - p_sep)`.
+- `GenerationConfig.edge_pprime_pin = True` (default): the last P' node is
+  zero. `False` keeps the profile's own edge derivative.
+
+A pressure that is `p_sep` inside the boundary and zero outside is not
+physical; only P' enters the GS equation and `p_sep` is bookkeeping
+([docs/physics-notes.md](docs/physics-notes.md#the-pressure-handed-to-the-solver-separatrix-pressure-and-the-edge-p-pin)).
+
+### 7.3 P-file total pressure
+
+```
+ptot = _NT_TO_KPA * (ne*Te + (ni + nz1)*Ti) + pb       [kPa]
+_NT_TO_KPA = e * 1e20 = 16.02176634 kPa per (10^20 m^-3 keV)
+```
+
+(`PFile.compute_pressure`; `nz1`, `pb` default to zero). The p-file's `ni` is
+the main-ion density.
+
+### 7.4 Beta
+
+Archived and engine-recorded betas are the solver's (`get_stats()`), reported
+in the full-pressure frame with `p_sep` added back
+(`edge_pressure.pressure_frames`). The archived `beta_p` and `Lambda` follow
+`filtering.LAMBDA_DEFINITION`:
+
+```
+beta_p  = 2 mu0 <p>_V / B_pa^2,   B_pa = mu0 I_p / L_p     (L_p: LCFS poloidal circumference)
+Lambda  = beta_p + l_i(3)/2                                (no "-1")
+```
+
+with `<p>_V` the volume average of the full pressure (thermal + fast, `p_sep`
+added back). Lambda is reported, never filtered.
+
+The g-file reader's betas (`GEQDSKEquilibrium.betas`, from `PRES`) describe
+the input file: `beta_t = <p>_V / (Bt_vac^2/(2 mu0))`, `Bt_vac = BCENTR
+RCENTR / R_geo(LCFS)`; `beta_p` with `B_pa = mu0 I_p / L` (L from the file
+boundary); `beta_N = 100 beta_t / (I_p[MA] / (a Bt_vac))`.
+
+### 7.5 Fast pressure from IMAS sources
+
+Anisotropic `pressure_fast_perpendicular` / `_parallel` are reduced to the
+scalar GS pressure by a rule that depends on the producer's storage
+convention (`physics.isotropize_fast_pressure`): `"trace"`
+`(2 p_perp + p_par)/3`, `"mean"` or `"perp"` for fields holding the full
+directional pressures; `"sum"` `p_par + 2 p_perp` for fields holding a third
+each (IMAS.jl / FUSE). `FixedComponentsConfig.p_fast_reduction = "auto"`
+detects the convention from the data dictionary's provenance
+(`io.imas.detect_p_fast_convention`) and otherwise falls back to `"sum"` with
+a warning (`io.imas.P_FAST_UNDETERMINED_FALLBACK`). The two families differ by
+a factor of 3 on the same input.
 
 ## 8. Flux-Surface Geometry and Averaging
 
-### 8.1 Contour Tracing
+### 8.1 Two geometry sources
 
-Flux surfaces are traced using `contourpy` on the 2-D psi(R,Z) grid
-and resampled to 257 arc-length-uniform points using periodic (interior)
-or non-periodic (near-separatrix) cubic splines.
+- **The solver's.** Every closure, Redl evaluation, l_i and current integral
+  of the engine uses TokaMaker's own flux-surface quantities on its mesh
+  (`sauter_fc`, `get_q`, `utils.fsa_current_geometry`, `get_globals`), sampled
+  between `psi_pad` and `1 - psi_pad`.
+- **The g-file reader's** (`io.geqdsk.GEQDSKEquilibrium`). It supplies the
+  g-file adapter's input current `<j.B>_in` and l_i target, the archive
+  readers' and plots' quantities, and the midplane values of the per-draw
+  p-file. [§8.2](#82-the-g-file-readers-geometry) describes it.
 
-**Threshold for periodic vs. non-periodic:** psi_N = 0.99.
+### 8.2 The g-file reader's geometry
 
-**Rationale:** The X-point introduces a cusp in the separatrix contour.
-Periodic splines would smooth it out; non-periodic splines preserve
-the cusp but may oscillate slightly.
+- **Tracing.** Flux surfaces are traced with `contourpy` on the 2-D ψ(R, Z)
+  grid; the main contour is the one with the largest angular-winding score
+  about the axis (`_select_main_contour`). Interior surfaces (ψ_N < 0.99) are
+  resampled to 257 arc-length-uniform points with a periodic cubic spline,
+  near-separatrix surfaces (0.99 ≤ ψ_N < 1) with a non-periodic spline that
+  keeps the X-point cusp; contours with fewer than 20 points are used raw.
+- **X-point.** An open contour is closed by `_crop_at_xpoint`: the X-point is
+  taken as the midpoint of the contour's gap, and the segment between the two
+  closest passes that winds around the axis is kept. This assumes one X-point
+  per open contour; a double-null contour is not treated separately.
+- **Averages.** `<Q> = oint Q dl/|Bp| / oint dl/|Bp|` with trapezoidal
+  arc-length weights. |Bp| is floored at `max(1e-6 max|Bp|, 1e-14)` on each
+  surface, which smooths the X-point singularity; averages very close to the
+  separatrix carry that smoothing.
+- **Separatrix and axis.** At ψ_N = 1 the reader uses the file's
+  `RBBBS`/`ZBBBS`, closed and unresampled; with fewer than 4 boundary points
+  the surface is replaced by a degenerate contour at the axis without an
+  error. At the axis, q is extrapolated quadratically from the first three
+  interior surfaces, the elongations linearly from the first two, and the
+  triangularities are set to zero.
+- **Current densities**, analytic from the file's p' and FF':
+  `j_tor_averaged` = `<Jt/R>/<1/R>` (the IMAS / OMFIT convention) and
+  `j_tor_averaged_direct` = `<Jt>` = `-sigma_Bp (p' <R> + FF' <1/R>/mu0) (2π)^exp_Bp`
+  (TokaMaker's, used by the engine). They are identities A4 and A3 of
+  [docs/current-conventions.md](docs/current-conventions.md) and differ in
+  both terms: by `p' (1/<1/R> - <R>)` and, on the FF' term, by
+  `<1/R^2>/<1/R>` against `<1/R>`. A5 converts one into the other.
 
-### 8.2 X-Point Detection
+### 8.3 The boundary constraint
 
-The X-point is located as the sharpest bend in the separatrix contour
-(minimum cosine of the angle between adjacent tangent vectors).
-
-**Assumption:** Single lower X-point.  Double-null or upper-single-null
-configurations may not be handled correctly.
-
-### 8.3 Flux-Surface Averaging
-
-Averages use flux-expansion weighting:
-
-```
-<Q> = (1/V') * oint Q * dl / |Bp|
-V'  = oint dl / |Bp|
-```
-
-where `dl` is the arc-length element along the contour.
-
-**Bp flooring:** `max(1e-6 * max|Bp|, 1e-14)` prevents X-point-adjacent
-spikes from dominating the average.
-
-**Caveat:** This smooths the true geometric singularity at the X-point.
-Flux-surface averages on surfaces very close to the separatrix
-(psi_N > 0.995) should be treated with caution.
-
-### 8.4 Separatrix Treatment
-
-At psi_N = 1, the code uses the stored RBBBS/ZBBBS boundary from the
-g-file rather than tracing a contour.  If the boundary has fewer than
-4 points, a degenerate contour at the magnetic axis is substituted
-with no error raised.
-
-### 8.5 Jt Averaging
-
-Two definitions are computed:
-
-- **`j_tor_averaged`** (OMFIT standard): `<Jt/R> / <1/R>`.  This is
-  the current density that, when multiplied by the cross-sectional
-  area, gives the total toroidal current.
-
-- **`j_tor_averaged_direct`**: literal `<Jt>`.
-
-These differ by a Jensen inequality correction proportional to
-`p' * [<R> - 1/<1/R>]`.  The difference is small for circular
-cross-sections but can be significant for highly shaped plasmas.
-
----
+The unified engine holds one standard isoflux set for the reconstruction and
+every draw (`solver_geometry.standard_isoflux`): the source boundary
+resampled by arc length to `N_ISOFLUX = 256` points with the source's
+X-points kept exactly, per-length weights summing to `ISOFLUX_WEIGHT_TOTAL =
+2e5`, the outermost point first. The total is a constant chosen inside a
+window measured on one device and the synthetic fixtures, not a per-case
+calibration (#93); `SolverConfig.isoflux_weight_total` overrides it and a
+`SolverConfig.isoflux_pts` set is used as given. The partition between
+boundary and coil stiffness is reported (`boundary_balance`, warned outside
+`[1/3, 3]`), never acted on
+([docs/engine.md](docs/engine.md#the-boundary-constraint-a-constant-total-inside-a-measured-window)).
 
 ## 9. Internal Inductance
 
-### 9.1 Definitions
+### 9.1 The estimator the chain runs on
 
-Multiple definitions of li are computed:
+```
+l_i(3) = 2 int B_p^2 dV / ((mu0 I_p)^2 R_axis)
+```
 
-| Name | Formula | Notes |
-|------|---------|-------|
-| li(1)_EFIT | `<Bp^2> / Bp_edge^2` | Standard EFIT definition |
-| li(1)_TLUCE | li(1)_EFIT × shape correction | Rarely used |
-| li(2) | Volume-weighted variant | |
-| li(3) | Alternative magnetic energy | Used by bouquet for matching |
+TokaMaker `get_stats(li_normalization='iter')`, `utils.li_achieved(...,
+"li_3")`, the engine's l_i rows and the opt-in l_i band all use it; the
+archive states it in the `_baseline` attribute `l_i_scale = "iter(li3)"`
+(`utils.LI_SCALE`). The IDS `li_3` target is rescaled to the axis radius when
+the source's own radius can be determined ([§5.4](#54-the-self-consistent-loop-and-its-tolerances)).
 
-The shape correction for li(1)_TLUCE is `(1 + kappa^2) / (2 * kappa_a)`
-where `kappa_a = V / (2 pi R0 pi a^2)`.
+Per draw the archive stores `l_i(3)` and `l_i(1)` = TokaMaker `get_stats`
+with `li_normalization='iter'` / `'std'` and `lcfs_pad=psi_pad`;
+`utils.li_achieved(..., "li_1")` uses the LCFS contour's own perimeter
+instead (`utils.lcfs_perimeter`).
 
-**Default:** `li(1)` returns the EFIT definition.
+### 9.2 g-file reader keys
 
-**Risk:** Different transport codes and databases use different li
-definitions.  Users must verify which definition their workflow expects.
+`GEQDSKEquilibrium.li`, with `int B_p^2 dV = Σ_k (oint 2π |B_p| dl)_k Δψ_k`
+and L, V from the file boundary (`RBBBS`/`ZBBBS`; V by Pappus):
 
----
+| key | formula |
+|---|---|
+| `li(1)`, `li(1)_EFIT` | `(int B_p^2 dV / V) / (mu0 I_p / L)^2` |
+| `li(2)` | `2 int B_p^2 dV / ((mu0 I_p)^2 R_axis)`: the ITER l_i(3) at the axis (the key name is historical; issue #20) |
+| `li(3)` | `2 int B_p^2 dV / ((mu0 I_p)^2 RCENTR)` |
+| `li(1)_TLUCE` | `li(3)` key × `(1 + kappa^2)/(2 kappa_a)`, `kappa` of the boundary, `kappa_a = V/(2π RCENTR π a^2)` |
+
+The g-file adapter's l_i target is the `li(2)` key. Codes and databases use
+different l_i definitions; check which one a comparison needs.
 
 ## 10. Numerical Floors and Clamps
 
-| Location | Floor | Purpose |
-|----------|-------|---------|
-| Diamagnetic dpsi | `1e-4 * max\|dpsi\|` | Prevent axis singularity |
-| Diamagnetic density | `1e-4 * max\|ne\|` | Prevent edge/negative-density singularity |
-| Rotation Bt | `1e-6` T | Prevent Er/omghb blowup |
-| Flux-surface Bp | `1e-6 * max\|Bp\|` | Prevent X-point weight blowup |
-| Secant step | ±15% of current value | Prevent li iteration runaway |
-| Ip scaling | 50% of Ip_desired | Safety floor for TokaMaker scaling |
-| GPR eigenvalues | max(lambda, 0) | Numerical PSD enforcement |
+| location | floor or clamp | purpose |
+|----------|----------------|---------|
+| p-file diamagnetic `dpsi` | `max(1e-4 max\|dpsi\|, 1e-30)` | axis singularity |
+| p-file diamagnetic densities (denominator only) | `1e-4 max\|ne\|` | edge / zero-density singularity |
+| p-file rotation `Bt` | `sign(Bt) 1e-6` T where \|Bt\| < 1e-6 T | `omghb` division |
+| p-file rotations, `omghb` | non-finite → 0 | |
+| p-file `Zeff` where n_e → 0 | non-finite → 1 | |
+| reader flux-surface `\|Bp\|` | `max(1e-6 max\|Bp\|, 1e-14)` per surface | X-point weight |
+| GP covariance | jitter `1e-10 n max(diag C)` | Cholesky well-posed |
+| drawn Z_eff | `zeff_bounds` window; floor 1 with clips | n_i ≥ 0, n_z ≥ 0 |
+| derived n_i (clips on) | `[0, n_e - z_fast]` | quasi-neutrality |
+| inductive candidate | negative excursions → 0 where the mean is within σ of 0 | |
+| adapter Z_eff; `p_imp` impurity density; per-draw p-file `nz1` | clipped below at 1; at 0; at 0 | |
+| Redl end nodes (ψ_N ≤ psi_pad, ≥ 1 − psi_pad) | non-finite → 0, counted | |
+| closure scales | 0.2 < s < 5, else refused | closure validity |
+| coil bound half-width | `max(drift_F \|I_base\|, 50 A)` | small-baseline coils ([§15.3](#153-homotopy-bounds)) |
+| `#VSC` bound scale | `max(min\|I_pair\|, 10 kA)` | near-zero VSC coil |
+| homotopy saturation | drift ≥ 0.99 × installed bound | active-constraint detection |
 
-These floors are empirically chosen to be small enough that they do not
-affect the physics on resolved grid points.  They are not user-configurable.
+None of these is a user setting except the clips (`kinetic_clips`) and the
+coil floor (`coil_drift_floor_A`, a `generate_bouquet` keyword).
 
----
+## 11. Edge Treatment
 
-## 11. Edge Extrapolation
-
-Many EFIT and TokaMaker equilibria force p'(1) = FF'(1) = 0 as a
-free-boundary condition.  This creates a spurious dip in the current
-density at the separatrix.
-
-When `extrapolate_edge=True` (the default in the geqdsk reader), the
-last 3-4 non-zero points of p' and FF' are quadratically extrapolated
-to the boundary.  A sign-protection clip prevents the extrapolation
-from reversing sign.
-
-**Caveat:** This creates artificial structure at the plasma edge and
-may distort the near-edge j_phi and pressure gradient profiles.
-Users working on pedestal physics should consider disabling this
-feature.
-
----
+- **g-file edge extrapolation.** Many equilibrium codes write p'(1) =
+  FF'(1) = 0. With `extrapolate_edge=True` (the reader's default, used by the
+  g-file adapter), when the last value is exactly zero and the one before is
+  not, the last node is replaced by the quadratic extrapolation
+  `3 y[-2] - 3 y[-3] + y[-4]`, set to zero if that reverses sign
+  (`GEQDSKEquilibrium._trace_surfaces`). Only the last node changes; on the
+  g-file route it enters `<j.B>_in` there.
+- **Solver edge.** The last P' node is zero by default and the separatrix
+  pressure is offset ([§7.2](#72-separatrix-pressure-and-the-edge-p-pin)).
+- **Bootstrap edge taper** (off by default). `bootstrap_kwargs=
+  {"taper_edge_jBS": True}` multiplies every composed term by OFT's edge taper
+  (1 below `taper_edge_psi0 = 0.999`, quintic smoothstep to 0 at the LCFS;
+  `physics.edge_taper_weight`).
+- **Kinetic grid.** Kinetics reach the run grid by PCHIP (`utils.pchip_interp`);
+  an IDA grid past the separatrix is kept as `psi_N_kinetic`.
 
 ## 12. Data Format Assumptions
 
-### 12.1 GEQDSK (G-file)
+### 12.1 GEQDSK (g-file)
 
-- Standard fixed-format: 5 values per line, 16 characters per value.
-- The parser handles SOLPS variants (extra whitespace) and FIESTA
-  row-by-row PSIRZ output.
-- **Assumption:** The grid is uniform and rectangular (guaranteed by
-  the GEQDSK specification).
-- Br and Bz are computed from 2-D `np.gradient()` (second-order
-  finite differences), which can amplify numerical noise at grid
-  edges.
+- Fixed format, 5 values per line, 16 characters each; SOLPS-style files
+  (spaces between numbers, lines longer than 80 characters) and row-by-row
+  `PSIRZ` blocks (FIESTA) are handled (`io.geqdsk._read_geqdsk`).
+- **Assumption:** a uniform rectangular (R, Z) grid. Br, Bz and Jt come from
+  `numpy.gradient` (second-order differences), noisier at the grid edges;
+  the reader's current densities use p', FF' instead ([§8.2](#82-the-g-file-readers-geometry)).
 
-### 12.2 P-file (Osborne Format)
+### 12.2 P-file (Osborne format)
 
-- Header lines match the regex:
-  `(\d+)\s+(\S+)\s+(\S+)\(([^)]*)\)\s+(.*?)\s*$`
-- Each profile block: count, x-name, y-name(units), description.
-- The `"N Z A of ION SPECIES"` block is parsed separately and encodes
-  species ordering: [impurity, main ion, beam ion].
-- **Assumption:** All profiles use `psinorm` as the radial coordinate.
-  Non-standard p-files using other normalisations will silently produce
-  incorrect results.
+- Blocks of `count x-name y-name(units) description`; the `N Z A of ION
+  SPECIES` block is parsed separately and species roles are identified as in
+  [§4.5](#45-the-per-draw-p-file).
+- **Assumption:** every profile uses `psinorm` (ψ_N). The x-name is not
+  checked: a file on another coordinate is read as ψ_N without a warning.
+- `PFile` remaps every profile onto the `ne` grid by default (`remap=True`)
+  and keeps the as-read profiles for an unmodified round trip.
 
-### 12.3 HDF5 Database
+### 12.3 IDA-layout profile fits
 
-See [Section 13](#13-hdf5-storage-schema).
+`io.ida.read_ida` reads the netCDF4 file with h5py: 2-D `(n_time, n_radial)`
+profiles with `*_err` 1σ companions on a `psi_n` grid that extends past the
+separatrix, time in ms, SI units. There is no stored main-ion density: by
+default n_i is derived from (n_e, Z_eff) with `impurity_Z`; the measured
+routes (`ni_source` `"Zeff"`, `"CER"`, `"all"`) are in
+[docs/physics-notes.md](docs/physics-notes.md#kinetic-assumptions-z_eff-n_i-and-the-clips-pr-56).
 
----
+### 12.4 IMAS / OMAS data dictionaries
 
-## 13. HDF5 Storage Schema
+`io.imas.read_imas_baseline` reads the JSON with the standard library.
+Currents are converted with the paired equilibrium slice's own `f`,
+`gm1/gm5/gm8/gm9`, `dpressure_dpsi` (traced from `profiles_2d.psi` when
+omitted): the total by A5, each component by its field-aligned part
+([§5.1](#51-conventions)). The dictionary is COCOS 11 (ψ per full turn); the
+export (`write_imas_draw`, `export_imas_drawset`) converts the archived
+g-file's ψ, P', FF' with `psi_11 = -2π psi` (it treats that g-file as
+COCOS 7). **Since 1.4.1** the exported `profiles_2d.psi` is written
+`[i_R][i_Z]` (dim1 = R first); every earlier export is transposed (#101), and
+the reader's tracer (`io.imas._fsa_from_profiles_2d`) refuses an array whose
+shape is not `(len(dim1), len(dim2))`.
 
-Each bouquet run produces a single HDF5 file with the structure:
+## 13. HDF5 Archive
 
-```
-header.h5
-+-- scan/
-|   +-- {scan_val_key}/
-|   |   +-- _baseline/
-|   |   |   +-- baseline.eqdsk          # raw geqdsk bytes
-|   |   |   +-- baseline.pfile          # raw p-file bytes (optional)
-|   |   |   +-- ne, te, ni, ti [...]    # baseline 1-D profiles
-|   |   |   +-- sigma_ne, sigma_te [...] # uncertainty envelopes
-|   |   |   +-- coil_currents [A]       # recon's converged coils
-|   |   |   +-- coil_names              # JSON list of coil names
-|   |   |   ^-- attrs: Ip_target, l_i_target
-|   |   +-- 0/
-|   |   |   +-- {header}_{sv}_{0}.eqdsk # raw geqdsk bytes
-|   |   |   +-- {header}_{sv}_{0}.pfile # raw p-file bytes (optional)
-|   |   |   +-- psi_N, j_phi, ne, te, ni, ti [...]
-|   |   |   +-- j_BS, j_BS,edge, j_inductive, pressure, w_ExB
-|   |   |   +-- coil_currents [A]       # this draw's converged coils
-|   |   |   ^-- attrs: count, scan_val, l_i(1), l_i(3), coil_names,
-|   |   |       homotopy_pass, homotopy_F_lim, homotopy_VSC_lim,
-|   |   |       max_F_drift_pct, max_VSC_drift_pct, in_spec,
-|   |   |       inspec_F_max, inspec_VSC_max
-|   |   +-- 1/ ...
-|   +-- {another_scan_val}/ ...
-```
-
-**Key design choices:**
-
-- Raw geqdsk and p-file bytes are stored as opaque binary datasets.
-  This enables exact round-tripping: `GEQDSKEquilibrium.from_bytes()`
-  and `PFile.from_bytes()` reconstruct the original objects.
-- Scalar diagnostics (l_i(1), l_i(3)) are stored as attributes.
-- Coil currents are stored as a 1-D array with coil names in a
-  companion string attribute.  *Both* the `_baseline` group and every
-  per-draw group store `coil_currents [A]`, so per-draw drift can be
-  computed as `(I_draw - I_baseline) / |I_baseline|` without
-  re-running reconstruction.
-- The `_baseline` group stores the unperturbed equilibrium for
-  comparison.
-- Homotopy / in-spec metadata (see [Section 15.7](#157-per-draw-h5-attributes))
-  is stored as attributes on each per-draw group so downstream
-  analysis can filter by `in_spec` or stratify by `homotopy_pass`.
-
----
+Each run writes one HDF5 file, schema v3 (`schema.SCHEMA_VERSION = 3`);
+[docs/archive-schema.md](docs/archive-schema.md) is the reference. Each scan
+point or time slice is a group `scan/<scan_key>/` with its own `config_json`,
+holding `_baseline/` (the reconstruction) and one group per archived draw
+(`<count>/`). Profile datasets carry bare names
+with the unit in `attrs["units"]`; the raw
+g-file and p-file bytes (`eqdsk`, `pfile`) round-trip through
+`GEQDSKEquilibrium.from_bytes` / `PFile.from_bytes`. Both `_baseline` and
+every draw store `coil_currents`, so drifts can be recomputed without a
+solve. Out-of-spec draws are archived; selection is by flags written
+non-destructively by `Bouquet.filter()` (`passes_coil_filter`,
+`passes_boundary_filter`, `passes_draw_band`, `selected`). v3 adds the
+self-consistent bootstrap record (`jbs_loop` attributes); a group without it
+carries a frozen bootstrap.
 
 ## 14. Unit Conventions
 
-### 14.1 Bouquet Internal (SI)
+### 14.1 Bouquet internal (SI)
 
 | Quantity | Unit |
 |----------|------|
-| ne, ni | m^-3 |
-| Te, Ti | eV |
+| n_e, n_i, n_z, `z_fast`, `z2_fast` | m^-3 |
+| T_e, T_i | eV |
 | Pressure | Pa |
-| Current density | A/m^2 |
-| Psi | Wb (Weber) |
-| B-field | T (Tesla) |
+| Toroidal current density `<j_phi>` | A/m² |
+| Parallel current `<j.B>` | T A/m² (raw, not IMAS `<j.B>/B0`) |
+| ψ | Wb/rad (COCOS 1-8; the IMAS export is COCOS 11, Wb per full turn) |
+| B | T |
 | R, Z | m |
+| Coil currents | A as archived; the DIII-D tolerances are stated in ampere-turns of the mesh coil sets |
+| Boundary deviation | mm |
+| `w_ExB` | rad/s |
 
 ### 14.2 P-file
 
 | Quantity | Unit |
 |----------|------|
 | ne, ni, nz1, nb | 10^20 m^-3 |
-| Te, Ti | keV |
-| Pressure (ptot, pb) | kPa |
-| Rotation (omeg, omgeb, ...) | kRad/s |
-| Er | kV/m |
+| te, ti | keV |
+| ptot, pb | kPa |
+| Rotation (`omeg`, `omgeb`, ...) | krad/s |
+| er | kV/m |
 
-### 14.3 Conversion Constants
+### 14.3 Conversion constants
 
 | Conversion | Value | Used in |
 |------------|-------|---------|
-| EC (eV to J) | 1.6022e-19 | Bouquet pressure = EC * n * T |
-| _NT_TO_KPA | 16.02176634 | P-file ptot = _NT_TO_KPA * (ne*Te + ...) |
-| m^-3 to 10^20/m^3 | 1e-20 | P-file density |
-| eV to keV | 1e-3 | P-file temperature |
-| Pa to kPa | 1e-3 | P-file pressure |
-
----
+| `physics.ELEMENTARY_CHARGE` (eV → J) | 1.602176634e-19 | every thermal pressure and the Redl drive on the default route |
+| `physics.ELEMENTARY_CHARGE_LEGACY` | 1.6022e-19 | the frozen legacy path only ([§5.7](#57-legacy-route-notes)) |
+| `io.pfile._NT_TO_KPA` | 16.02176634 | p-file `ptot` |
+| m^-3 → 10^20 m^-3 | 1e-20 | p-file density |
+| eV → keV | 1e-3 | p-file temperature |
+| Pa → kPa | 1e-3 | p-file pressure |
 
 ## 15. Coil Constraint Handling (DIII-D Reference)
 
-This section documents how bouquet keeps perturbed-equilibrium coil
-currents close to the reconstructed baseline, what physical
-tolerances motivate the default parameters, and how to interpret the
-per-draw `in_spec` flag.
+Every draw is a free-boundary solve; the coils carry the boundary. Bouquet
+keeps a draw's coil currents near the reconstruction's with bounds on
+TokaMaker's coil least-squares problem, applied through a progressive
+homotopy, and judges the result with the in-spec rule. The DIII-D numbers
+come from the device registry (`devices.DEVICES["DIII-D"]`); the user-facing
+summary and the VSC metric's derivation are in
+[docs/coil-constraints.md](docs/coil-constraints.md).
 
-### 15.1 Why coils need explicit constraints
+### 15.1 Coil solve and regularization
 
-Each perturbed equilibrium is a forward Grad-Shafranov solve.  TokaMaker
-adjusts coil currents to satisfy: (i) the isoflux constraint (LCFS at
-specified points), (ii) the requested plasma current `Ip_target`, and
-(iii) the requested current profile.  When kinetic profiles are
-perturbed, the natural minimum-energy GS solution can shift coils
-substantially -- particularly the F9A/F9B vertical-stability pair --
-producing equilibria that are mathematically valid but engineering-
-infeasible.
+- Every GS solve uses OFT's bounded (BVLS) coil least squares, entered once in
+  `Bouquet.setup_solver` with ±1e98 bounds that never bind
+  (`solver_state.enter_bounded_coil_mode`).
+- A draw's bootstrap loop solves under the reconstruction's own coil
+  regularization (`GenerateEngineDraws.install_coil_reg`); the homotopy
+  installs the strong one (`TokaMaker_interface.strong_coil_reg`): every coil
+  set pulled toward the reconstruction's current at `soft_reg_weight = 1e4`,
+  `#VSC` toward zero at `vsc_soft_reg_weight = 1.0`. `generate_bouquet`
+  restores the reconstruction's regularization and releases the bounds on
+  every exit.
+- The engine's homotopy holds the reconstruction's own isoflux pattern
+  (`GenerateEngineDraws.homotopy_isoflux`); the legacy route re-traces the
+  draw's LCFS at weight 200 per point. There is no per-draw I_p
+  re-alignment.
 
-A "perturbed equilibrium" is physically meaningful only when its
-coil currents are reachable from the reconstructed baseline within
-DIII-D's actual current-control tolerance.  Bouquet enforces this by
-adding explicit per-coil bounds to the GS solver's QP and rejecting
-draws that cannot satisfy them.
+### 15.2 Coil classes on DIII-D
 
-### 15.2 Three coil classes on DIII-D
+| class | members | treatment |
+|---|---|---|
+| shaping F-coils | F1A-F8A, F1B-F8B | bounded per coil; judged by the χ² test |
+| vertical-control pair | F9A, F9B (`SolverConfig.coil_vsc`, anti-series) | bounded per coil and on the `#VSC` channel; judged by the χ² test |
+| E-coils | ECOILA, ECOILB (or the six-circuit split on the finer mesh) | bounded per coil, with the 50 A floor; judged by the χ² test |
 
-The DIII-D coil set partitions naturally:
+The device is named in `BouquetConfig.device` or detected from the exact set
+of coil names in the mesh (`devices.detect_device`); there is no partial
+match. The legacy drift metric's "F-coil" class is every coil whose name
+starts with `F` and is not in the VSC pair (`_coil_max_drifts`), a DIII-D
+naming assumption.
 
-| Class | Members | Baseline range | Role |
-|---|---|---|---|
-| **Non-VSC F-coils** | F1A-F8A, F1B-F8B (16 coils) | 35-180 kA | Shaping + position |
-| **VSC pair** | F9A, F9B | 35-50 kA, opposed signs | Vertical-stability (antisymmetric) |
-| **E-coils** | ECOILA, ECOILB | 500-1000 A | Ohmic / auxiliary |
+### 15.3 Homotopy bounds
 
-Each class has a different natural drift scale under perturbation:
-non-VSC F-coils typically need <1% to compensate kinetic perturbations,
-the VSC pair physically *requires* a few percent to track the moving
-plasma centroid, and E-coils sit near a noise floor in absolute terms.
-
-### 15.3 Engineering tolerance budget
-
-The "applied vs programmed" coil current on DIII-D is bounded by a
-combination of error sources:
-
-| Source | Typical magnitude (DIII-D F-coils) |
-|---|---|
-| Power-supply current ripple (12-pulse + filter) | 30-50 A (~1% of full scale) |
-| Rogowski coil + integrator noise | ~1-2% |
-| Steady-state regulation error (PI controller) | 10-30 A |
-| Un-modelled vessel-coupled drift during shot | 10-100 A |
-| EFIT "calculated - measured" coil delta | 10s to ~100 A |
-
-Combined, an absolute floor of **~50 A** captures the realistic
-engineering tolerance below which "drift" is indistinguishable from
-measurement + regulation noise.  For comparison, vessel induced currents
-themselves can reach 0.5-4 kA per discretized segment during plasma
-flattop -- but those are *passive* vessel currents, not coil currents,
-and EFIT models them as free parameters separately from PF coil fits.
-
-**Sources:**
-
-* *MHD Equilibrium Reconstruction in the DIII-D Tokamak* (Lao et al.,
-  GA-A24687, 2004).
-* *Magnetic diagnostic system of the DIII-D tokamak* (Strait et al.) --
-  ~250 inductive sensors; ~1% accuracy on poloidal probes and flux
-  loops.
-* *Equilibrium reconstruction improvement via Kalman-filter-based
-  vessel current estimation at DIII-D* (Ou, Walker, Schuster, Ferron,
-  *Fusion Eng. & Design* 82 (2007) 1144) -- vessel induced currents
-  0.5-4 kA per segment during flattop; PF coil currents treated as
-  free fit parameters with measurement uncertainty.
-* *GA-A24059: New measurements of coil-related magnetic field errors
-  on DIII-D* (Anderson et al., 2002) -- coil axis alignment +/-5 mm,
-  parallelism +/-0.2 deg.
-* *Observation of poloidal current flow to vacuum vessel wall during
-  DIII-D vertical instabilities* (Strait et al., *Nucl. Fusion* 31
-  (1991) 419) -- vessel can carry hundreds of kA during VDEs (not
-  applicable to steady-state shots).
-* *Performance of current measurement system in poloidal field power
-  supply for EAST* -- 12-pulse converter <1% ripple, 1% steady-state
-  error coefficient typical.
-
-### 15.4 Bound construction
-
-For each coil at each homotopy pass with parameters
-`(drift_F, drift_VSC)`, bouquet installs hard bounds:
+At a stage `(drift_F, drift_VSC)` (`TokaMaker_interface._homotopy_coil_bounds`):
 
 ```
-For each coil 'name' with baseline I_base:
-    delta = max(drift_F * |I_base|, coil_drift_floor_A)
+every coil set (VSC pair included):
+    delta = max(drift_F * |I_base|, coil_drift_floor_A)        coil_drift_floor_A = 50 A
     bounds[name] = [I_base - delta, I_base + delta]
-
-Additionally on the antisymmetric VSC channel:
-    vsc_delta = max(drift_VSC * min(|F9A_base|, |F9B_base|), coil_drift_floor_A)
-    bounds['#VSC'] = [-vsc_delta, +vsc_delta]
+the #VSC channel:
+    scale = max(min(|I_F9A,base|, |I_F9B,base|), 10 kA)        (_vsc_bound_scale)
+    bounds['#VSC'] = ±max(drift_VSC * scale, coil_drift_floor_A)
 ```
 
-Per-coil and channel bounds are enforced simultaneously by the GS solver
-(TokaMaker's `set_coil_bounds`).  Notes:
+`I_base` is the reconstruction's coil current. The worst-case total drift of a
+VSC-pair coil is `drift_F + drift_VSC`. The 10 kA floor
+(`_COIL_DRIFT_DENOM_FLOOR_A`) lifts the bound for a pair with one near-zero
+coil; it changes a homotopy bound, not an acceptance gate.
+`coil_drift_hard_factor` (default `None`) adds an outer bound at
+`± coil_drift_hard_factor * coil_drift * |I_base|` in every solve, with the
+same floored `#VSC` scale.
 
-* The bound `delta` uses the *larger* of a relative cap (`drift_F` * the
-  coil baseline magnitude) and an absolute floor (`coil_drift_floor_A`,
-  default 50 A).  This prevents nonsense bounds on small-baseline coils
-  where a percentage bound would be smaller than measurement noise.
-* The `#VSC` channel bound uses the *minimum* of `|F9A_base|` and
-  `|F9B_base|` so that the bound is conservative for both coils (their
-  baselines are typically asymmetric: ~45 kA vs ~37 kA on
-  the reference case).
-* Total drift on F9A/F9B = bare drift + VSC channel contribution.
-  Caller selects passes so that `drift_F + drift_VSC <=` the desired
-  total F9 tolerance.
+### 15.4 Progressive homotopy
 
-### 15.5 Progressive homotopy
+After an engine draw's bootstrap loop, `GenerationConfig.homotopy_passes`
+(default `[(0.05, 0.10), (0.02, 0.05), (0.01, 0.01)]`) is tried in order under
+the strong regularization, each stage warm-started from the previous one and
+capped at `engine_draw_solve_maxits`. After each stage:
 
-Hard bounds at the eventual target spec (e.g. +/-2% on all coils) are
-often QP-infeasible from a cold start because the perturbed kinetics
-naturally want a coil distribution outside the bound region.
-Bouquet supports a **progressive homotopy** via the `homotopy_passes`
-kwarg: a list of `(drift_F, drift_VSC)` tuples that the solver tries
-in order, warm-starting each pass from the prior pass's converged psi.
+- a stage whose drift reaches `COIL_SATURATION_FRACTION = 0.99` of an
+  installed bound is treated as infeasible: roll back to the last good stage
+  and stop; if no stage succeeded the draw is rejected (`homotopy_saturated`);
+- a stage whose drift already exceeds the next stage's bound stops the
+  schedule there;
+- a failed solve rolls back to the last good stage (a re-solve restores the
+  solver's flux-surface state) and stops; with no good stage, or a failed
+  rollback, the draw is rejected.
 
-A typical 3-pass schedule for the "strict ±2% global" spec:
+The post-homotopy bootstrap stage (ceiling 6 passes, saturation-guarded)
+follows. `homotopy_pass` is the index of the last successful stage (−1 when
+no bounds ran); `engine_draw_homotopy=False` replaces the homotopy by a
+measured drift. A capped stage with `#VSC` at its bound and the axis moved
+vertically by more than `engine.VERTICAL_RUNAWAY_AXIS_FRAC = 0.1` a is
+labeled `vertical_runaway` (not a filter). `guard_bistability=True` (default
+`False`) is an opt-in experimental diagnostic (#87); the `SKIP_HARD`,
+`SKIP_ISO`, `SKIP_HOMOTOPY` environment variables are diagnostic bypasses.
 
-```python
-homotopy_passes = [
-    (0.05, 0.10),   # Pass 1: loose, get QP near optimum
-    (0.02, 0.05),   # Pass 2: intermediate tightening
-    (0.01, 0.01),   # Pass 3: total F9 drift <= 2% (bare 1% + VSC 1%)
-]
-```
+### 15.5 The in-spec rule
 
-If a pass fails (`Closed flux volume lost` or `Matrix solve failed for
-targets`), bouquet rolls back to the prior successful pass's psi,
-re-installs that pass's bounds, re-solves once to restore mygs's
-internal flux-surface state (without this re-solve `get_stats()` returns
-`l_i = inf`), and stops tightening.  The draw is recorded with
-`homotopy_pass` = index of the last successful pass.
+A draw is in spec when it passes the configured coil test AND the boundary
+cut AND every opt-in band that is on, and was not rejected before archiving
+(`filtering` module docstring; verdict formed in `generate_bouquet` through
+`filtering.passes_all_filters`). The same predicate gives the archived
+`in_spec` attribute (`in_spec_source = "inspec_rule"`), the until-N count
+(`GenerationConfig.n_inspec_target`, default `None` = exactly `n_equils = 20`
+attempts; when set, the attempt cap `max_total_draws` defaults to
+`5 × n_inspec_target`, never below `n_equils`) and `Bouquet.filter()`'s
+`selected` flag. The scan records the rule applied (`inspec_rule`:
+`"magnetics"` by default, with `"+li"`, `"+beta_p"`, `"+q0"` for bands that
+are on); `bouquet.refilter_inspec` re-judges an archive under another rule
+from the stored numbers.
 
-If Pass 1 itself fails the draw is rejected outright.
+The magnetics constrain I_p, the boundary and a shape-weighted combination
+of the current and pressure moments, which the free-boundary solve with these
+two tests applies; l_i(3) and beta_p alone are inferences, so their bands are
+opt-in ([§3.5](#35-opt-in-bands)).
 
-### 15.6 The `in_spec` criterion
+### 15.6 The coil χ² test
 
-After homotopy, each draw is tagged `in_spec` if:
-
-```
-max_non_VSC_F_drift_pct <= inspec_F_max   AND   max_VSC_drift_pct <= inspec_VSC_max
-```
-
-For the **non-VSC F-coils** the drift is computed per-coil as
-`(I_draw - I_baseline) / |I_baseline| * 100`, where
-`I_draw = mygs.get_coil_currents()` (the *total* current, i.e. bare +
-vcontrol·VSC contribution) and `I_baseline` is recon's coil currents
-captured on entry to `generate_bouquet`.
-
-The **VSC pair does not use that per-coil formula.** Because F9A or F9B
-routinely sits near a current zero-crossing, `max_VSC_drift_pct` is scored on
-the common-mode / differential channel decomposition, gated against an
-error-propagated `sigma_VSC` built from the coil magnitudes
-(`_vsc_channel_drift_pct`). See
-[`docs/coil-constraints.md`](docs/coil-constraints.md#vsc-drift-metric-anti-series-pair)
-for the derivation and its assumptions.
-
-**E-coils are not currently part of the `in_spec` check.**  Reason:
-their baselines (~500-1000 A) are small enough that the 50 A
-`coil_drift_floor_A` translates to 5-10% relative drift, but in
-absolute terms 50 A is the engineering noise floor (see Section 15.3).
-A user who wants strict 2% on E-coils should lower
-`coil_drift_floor_A` to ~10-15 A and accept that Pass 1 may need a
-looser absolute floor to remain feasible.
-
-### 15.7 Per-draw H5 attributes
-
-After homotopy, every stored draw carries these attributes (see
-[Section 13](#13-hdf5-storage-schema)):
-
-| Attribute | Meaning |
-|---|---|
-| `homotopy_pass` | Index of last successful pass (0-based; -1 if no hard bounds ran) |
-| `homotopy_F_lim` | `drift_F` value of the last successful pass |
-| `homotopy_VSC_lim` | `drift_VSC` value of the last successful pass |
-| `max_F_drift_pct` | Max non-VSC F-coil drift in percent |
-| `max_VSC_drift_pct` | Max F9A/F9B drift in percent |
-| `in_spec` | Boolean: did this draw satisfy the `inspec_*_max` criteria? |
-| `inspec_F_max`, `inspec_VSC_max` | The thresholds that were applied |
-
-Out-of-spec draws are still archived (with `in_spec=False`) so
-downstream analysis can filter as needed.  Empirical survival rates
-at the strict +/-2% global spec on the DIII-D reference case (n=8 draws per
-sigma):
-
-| `SIGMA_SCALE` | yield | `in_spec` rate |
-|---|---|---|
-| 0.0 | 7/8 | 2/7 (28%) |
-| 0.5 | 7/8 | 1/7 (14%) |
-| 1.0 | 8/8 | 4/8 (50%) |
-
-The non-monotonic pattern is real: at sigma=0 iso-update systematically
-forces ~2.5-3.5% VSC drift even with zero kinetic perturbation, while
-at sigma=1.0 some draws happen to align with low-VSC equilibria and
-satisfy the strict bound while others need much more.
-
-### 15.8 The `vsc_soft_reg_weight` knob — what it controls and what it doesn't
-
-Bouquet installs two layers of soft regularization on the F9 pair:
-
-1. **Per-coil bare soft-reg** (weight = `soft_reg_weight`, default 1e4):
-   pulls `F9A_bare` toward recon's `F9A`, and `F9B_bare` toward recon's
-   `F9B`.  This is applied identically to every non-VSC F-coil.
-2. **`#VSC` channel soft-reg** (weight = `vsc_soft_reg_weight`, default 1.0):
-   pulls the antisymmetric channel value (the additional coordinated
-   F9A↑/F9B↓ knob TokaMaker provides via `set_coil_vsc`) toward zero.
-
-The F9 pair has two physical degrees of freedom (F9A_bare, F9B_bare).
-The per-coil soft-reg already pins both at weight 1e4.  Adding
-`vsc_soft_reg_weight` is a *third* pull on a 2-DoF subspace and at
-sufficiently high weight makes the QP over-determined.  Empirical
-findings on the DIII-D reference case (n=15 per setting):
-
-| `vsc_soft_reg_weight` | σ=0 outcome | σ=0.5 in-spec | σ=1.0 in-spec |
-|---|---|---|---|
-| 1.0 (default) | 0/30 in-spec | 23% (n=30) | 23% (n=30) |
-| 100 | 1/15 in-spec | **40%** | – |
-| 1e3 | **QP singular, 0/15 yield** | – | – |
-| 1e4 | **QP singular, 0/15 yield** | – | – |
-
-So `vsc_soft_reg_weight` is useful only as a moderate antisymmetric
-tightener at intermediate σ.  At low σ it does **not** rescue in-spec
-yield, because the σ=0 in-spec gap comes from the iso-update step
-shifting the LCFS, which the homotopy then must satisfy, requiring
-F9 to drift ~3% on the antisymmetric mode regardless of the soft-reg
-weight.
-
-**Recommended values:**
-
-| σ scale | `vsc_soft_reg_weight` | `homotopy_passes` |
-|---|---|---|
-| 0.0 | 1.0 | **`None`** (soft-reg-only mode; natural F9 drift ~0.6%, all in-spec) |
-| 0.5 | 100 | `[(0.05,0.10), (0.02,0.05), (0.01,0.01)]` |
-| 1.0 | 1.0 | `[(0.05,0.10), (0.02,0.05), (0.01,0.01)]` |
-
-The σ=0 case is the asymmetric one: the **iso-update step assumes a
-non-trivial boundary shift that doesn't actually happen at σ=0**, and
-the resulting F9 antisymmetric drift is what blocks the strict ±2%
-in-spec.  Skipping hard bounds entirely at σ=0 (`homotopy_passes=None`,
-optionally `SKIP_HARD=1`) returns the pipeline to soft-reg-only mode
-where natural F9 drift is 0.6% — comfortably in spec.
-
-### 15.9 Post-perturb pipeline summary
-
-After kinetic perturbation and the recon-anchor solve, every draw
-goes through:
+`FilterConfig.coil_filter = "chi2"` (default; `coil_spec.coil_chi2`):
 
 ```
-1. Ip-secant alignment
-       Iterate until mygs.get_globals()[0] == _recon_Ip (within 0.1%)
-       with damped retries on Picard maxits failure.
-
-2. Iso-update  (only if hard bounds will be installed)
-       Replace recon's eqdsk-derived isoflux points with the post-Ip-aligned
-       LCFS so the QP has a self-consistent boundary target.
-
-3. Progressive homotopy
-       Loop over homotopy_passes, warm-starting each pass and rolling back
-       on failure (re-solving to restore mygs state for downstream stats).
-
-4. In-spec tagging
-       Compute max F-coil and max VSC drift percentages, set in_spec flag,
-       store all metadata on the H5 group.
+z_i     = (I_i,draw - I_i,base) / sigma_i
+chi2/nu = mean_i z_i^2
+pass    = chi2/nu <= chi2_max  AND  max_i |z_i| <= z_max
 ```
 
-Each step is independently configurable via env vars / kwargs:
+over every baseline coil with σ > 0; a draw with no coil currents fails.
+σ (`coil_spec.resolve_coil_sigma`) is `FilterConfig.coil_sigma`, else the
+device's model; for DIII-D `sigma_i = hypot(floor_i, 0.0035 |I_i,base|)` in
+ampere-turns, era floor 325 A-t (after the coil-current acquisition upgrade)
+or 825 A-t (before), refined per coil and clipped below at 100 / 250 A-t; the
+era is `FilterConfig.coil_daq_era`, the tightest (latest) with a warning when
+unknown. Acceptance (`coil_spec.resolve_coil_acceptance`): explicit
+`chi2_max` / `z_max`, else the device's calibration of its default model
+(DIII-D: `chi2/nu <= 6.1`, `|z| <= 6.3`, 95th percentiles on real flat-top
+slices over the 18 F-coils), else 4.0 / 5.0 (`devices.GENERIC_ACCEPTANCE`).
+The E-coils ride on the F-coil model as an extrapolation, and `max|z|` over
+20 or 24 coils rejects above the nominal 5 % (`devices` module docstring).
+The test judges draws relative to the reconstruction's coil set, not the
+reconstruction's distance from the measured currents. An unregistered device
+falls back loudly to the legacy band ([§15.8](#158-the-legacy-drift-verdict-and-per-draw-attributes)).
 
-* `SKIP_HARD=1`: skip iso-update + homotopy (use soft-reg only)
-* `SKIP_ISO=1`: skip iso-update but keep homotopy (diagnostic)
-* `homotopy_passes=None`: single legacy pass at uniform `coil_drift`
-* `inspec_F_max`, `inspec_VSC_max`: spec thresholds (`FilterConfig`, default
-  both 0.02)
+### 15.7 The boundary cut
 
----
+`FilterConfig.rms_max_mm = "auto"` (default): the device's calibrated cut,
+8.5 mm for DIII-D, else the generic 5.0 mm (`devices.boundary_cut_for`); a
+number sets it; `"off"` or `None` disables it. The deviation is the RMS over
+the reconstruction's LCFS points of the nearest-neighbor distance to the
+draw's LCFS (`filtering.boundary_deviation_mm`; reference `recon_lcfs_ref`,
+else the baseline g-file boundary). A missing contour scores NaN and fails a
+cut that is on.
+
+### 15.8 The legacy drift verdict and per-draw attributes
+
+The flat ±% band is kept beside the rule as `coil_drift_in_spec` (never a
+filter), and is the coil test with `coil_filter="legacy"` or as the χ²
+fallback:
+
+```
+max_F_drift_pct   <= 100 * FilterConfig.inspec_F_max      (0.02)
+max_VSC_drift_pct <= 100 * FilterConfig.inspec_VSC_max    (0.02)
+```
+
+`max_F_drift_pct` is the largest `100 (I_draw - I_base)/max(|I_base|, 1 A)`
+over the non-VSC F-coils; E-coils are not part of this band.
+`max_VSC_drift_pct` decomposes the pair into common-mode `(ΔI_A - ΔI_B)/2`
+and differential `(ΔI_A + ΔI_B)/2` channels:
+
+```
+sigma_VSC         = hypot(I_A,base, I_B,base)/2 + 10 kA
+max_VSC_drift_pct = 100 max(|ΔI_cm|, |ΔI_df|) / sigma_VSC
+```
+
+(`_vsc_channel_drift_pct`; derivation in
+[docs/coil-constraints.md](docs/coil-constraints.md#vsc-drift-metric-anti-series-pair)).
+
+Every draw group carries `homotopy_pass`, `homotopy_F_lim`,
+`homotopy_VSC_lim`, both drift metrics, `coil_drift_in_spec`, `in_spec`,
+`in_spec_source` and the band thresholds (table in
+[docs/coil-constraints.md](docs/coil-constraints.md#per-draw-attributes)).
+An archive written before 2026-10-15 has no `in_spec_source`; its `in_spec`
+is the drift verdict (`filtering.in_spec_fields`).
 
 ## 16. Known Limitations and Future Work
 
-### 16.1 E×B Rotation (w_ExB) Not Computed from Equilibrium
+[docs/known-limitations.md](docs/known-limitations.md) is the maintained
+list, each entry with its consequence and tracking issue (bistable
+near-double-null equilibria #87, MSE-stage runtime #88, the boundary-weight
+total #93, the p-file beam density #97, IDA versus data-dictionary
+consistency #89, the experimental swb route #81, the legacy route #90). This
+section keeps only limitations that follow from architectural assumptions.
 
-The `w_ExB` field stored in the HDF5 is a **zero placeholder**.
-A self-consistent E×B rotation would require solving the radial
-force balance for each perturbed equilibrium, which is not yet
-implemented.  The diamagnetic decomposition (omgpp, ommpp, omepp)
-and derived quantities (omgeb, Er, omghb) in the perturbed p-file
-*are* computed, but they use the baseline VxB rotation (`omgvb`)
-if present, or zero if absent.
-
-### 16.2 rhovn Discrepancy
-
-A ~22% discrepancy between bouquet's `rhovn` and OMFIT's `rhovn`
-has been observed.  The bouquet computation integrates q over psi_N;
-OMFIT may use a different integration scheme or include additional
-corrections.  This affects any analysis using rho as the radial
-coordinate.
-
-### 16.3 Beta Quantities
-
-`beta_t`, `beta_p`, `beta_N` are computed in the geqdsk reader
-but have not been validated against EFIT or other reference codes.
-
-### 16.4 Double-Null and Upper-Single-Null Equilibria
-
-The X-point detection assumes a single lower X-point.  Double-null
-or upper-single-null configurations may produce incorrect contour
-cropping, flux-surface averaging, and geometric quantities (kappa,
-delta, squareness).
-
-### 16.5 Near-Axis Shaping
-
-Elongation (kappa) and triangularity (delta) are computed from the
-half-widths and extrema of each flux surface.  Near the magnetic
-axis, these quantities become noisy because the contours are nearly
-circular and the extrema are poorly defined.  No smoothing is
-currently applied.
-
-### 16.6 Uncertainty Envelope Model
-
-The default uncertainty envelope is a power-law profile:
-
-```
-sigma(psi_N) = sigma_0 * (1 - psi_N)^n
-```
-
-with a flat core, smooth tanh transition, and a minimum floor.  This
-is a simple parametric model.  Users with experimentally-derived
-profile uncertainties should supply them directly rather than relying
-on this model.
-
-### 16.7 Non-Gaussian Profile Uncertainties
-
-The GPR sampling assumes Gaussian-distributed profile uncertainties.
-Non-Gaussian features (e.g. pedestal bifurcation, ELM-induced
-transients, sawtooth mixing) are not captured.
-
-### 16.8 Single Ion Temperature
-
-The diamagnetic rotation calculation assumes all ion species
-(main + impurity) share the same temperature `Ti` unless a separate
-impurity temperature `TI` is explicitly provided.  This is a common
-assumption in tokamak transport modelling but breaks down when strong
-ion-impurity temperature decoupling exists (e.g. during NBI heating).
-
-### 16.9 Beam and Impurity Perturbation
-
-Currently, bouquet does not perturb:
-
-- Fast-ion density (nb) or pressure (pb)
-- Impurity density (nz1)
-- Toroidal/poloidal rotation profiles (omeg, omegp, kpol)
-
-Adding uncertainty-driven perturbation of these quantities is a
-natural extension but would require additional uncertainty
-specifications and potentially different sampling strategies (e.g.
-rotation profiles are not necessarily monotonic).
-
-### 16.10 P-file Regeneration for Example Files
-
-The example p-files shipped with the repository have rotation profiles
-computed from a specific baseline equilibrium.  If the baseline
-equilibrium is changed (e.g. different bootstrap current amplitude),
-the rotation profiles in the shipped p-file will be stale.
-Regeneration of rotation profiles for all example files is planned.
-
-### 16.11 Flux-Surface Average vs. Midplane for Diagnostics
-
-Some diagnostics (e.g. Thomson scattering, charge-exchange
-recombination) measure profiles at specific poloidal locations
-(typically the outboard midplane), not flux-surface averages.
-Bouquet perturbs flux-surface-averaged profiles.  For strongly
-up-down asymmetric plasmas, this distinction matters.
-
-### 16.12 Bootstrap Current Model Alternatives
-
-Only the Sauter model is currently implemented.  Alternative models
-(e.g. Sauter with Redl corrections, NEO, or direct drift-kinetic
-solvers) may give significantly different bootstrap current profiles,
-especially in the pedestal region.  Adding pluggable bootstrap
-current models is planned.
+- **E×B rotation is not computed.** `w_ExB` is a zero placeholder
+  ([§6.4](#64-the-w_exb-dataset)); the per-draw p-file's E×B decomposition
+  uses the baseline's impurity V×B rotation (`omgvb`), or zero when absent.
+- **Profiles are flux functions on a fixed label.** Kinetic profiles are
+  perturbed as functions of ψ_N (or Φ_N) and held at their labels while the
+  current redistributes; measurements at one poloidal location are treated as
+  flux-surface values, which matters for strongly up-down asymmetric plasmas.
+- **Gaussian uncertainties with a fixed kernel**; without a measured sigma,
+  an assumed H-mode flat-top template ([§3.2](#32-profile-sampling)).
+- **One effective impurity, one ion temperature.** Quasi-neutrality uses one
+  effective impurity charge and main-ion charge 1; the impurity pressure and
+  the p-file diamagnetic rotation take the impurity at T_i. Multiple
+  impurities and a decoupled impurity temperature are not modeled. On the
+  g-file route the impurity pressure term is zero ([§7.1](#71-the-solve-pressure)).
+- **Fixed components are not perturbed.** `p_fast`, the driven currents and
+  the fast-ion charge moments are held fixed (the beam fraction's own
+  uncertainty is not sampled); rotation and transport channels are perturbed
+  only as passive auxiliary channels.
+- **One bootstrap model**, the Redl fit ([§5.3](#53-the-bootstrap-model)).
+- **Scalar-pressure Grad-Shafranov.** Anisotropic fast-ion pressure is reduced
+  to a scalar ([§7.5](#75-fast-pressure-from-imas-sources)).
+- **The g-file reader's geometry.** The reader assumes one X-point per open
+  contour and floors |Bp| on each surface ([§8.2](#82-the-g-file-readers-geometry));
+  its near-separatrix averages and its geometry for double-null files carry
+  those assumptions. The engine's own geometry comes from the solver
+  ([§8.1](#81-two-geometry-sources)).

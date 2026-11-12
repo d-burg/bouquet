@@ -119,6 +119,9 @@ def test_one_zeff_source_per_series():
     assert named["applied"] and named["candidate"] == "carbon"
     with pytest.raises(ValueError, match="switches"):
         SE.check_zeff_series(_zslices([dict(zeff_source="carbon"), dict(zeff_source="file")]))
+    sw = SE.check_zeff_series(_zslices([dict(zeff_source="const"), dict(zeff_source="carbon"),
+                                        dict(zeff_source="carbon")]), switch_allowed=True)
+    assert sw["switch_allowed"] and sw["switches"] == [dict(time=0.02, source_from="const", source_to="carbon")]
     recs = [_zrec(ZR.IMPURITY), _zrec(ZR.IMPURITY, imp_state=ZR.FAILED), _zrec(ZR.IMPURITY, imp_state=ZR.UNVERIFIED)]
     with pytest.raises(ZR.ZeffSourceRefused, match="needs one Z_eff source named"):
         SE.check_zeff_series(_zslices(recs))

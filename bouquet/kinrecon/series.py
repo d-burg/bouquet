@@ -193,6 +193,8 @@ class SeriesSettings:
     vessel_eddy: bool = False
     zeff_series_source: Optional[str] = None  # the series' ONE Z_eff source kind for the checked-source rule
     #                                            ("impurity_density" or "line_integrated"; see check_zeff_series)
+    zeff_source_switch_allowed: bool = False  # NON-DEFAULT: accept named Z_eff sources that change between slices
+    #                                            (e.g. by phase of a discharge); every switch is recorded
     keep_going_after_failure: bool = False   # True: a failed slice is recorded and skipped; the next interval
     #                                          starts from the last consistent state (recorded per slice)
 
@@ -424,7 +426,7 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
     if np.any(np.diff(times) <= 0):
         raise ValueError("slice times must increase strictly")
     out = dict(settings=s.as_dict(), model_settings=cfg.as_dict(), slices=[], times=times.tolist())
-    out["zeff_series"] = check_zeff_series(slices, s.zeff_series_source)
+    out["zeff_series"] = check_zeff_series(slices, s.zeff_series_source, s.zeff_source_switch_allowed)
     zeff_flags = set(out["zeff_series"].get("failing_slices") or []) | set(out["zeff_series"].get("unverified_slices")
                                                                          or [])
     sl0 = slices[0]
@@ -624,12 +626,14 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
     return out
 
 
-def check_zeff_series(slices, source=None):
+def check_zeff_series(slices, source=None, switch_allowed=False):
     """One Z_eff source for the whole series (the checked-source rule's series provision): every slice's
     kinetic inputs must use the same source, never switched between slices.
 
     * kinetics without a Z_eff record (e.g. :class:`.current_model.KineticProfiles`): nothing to check (recorded);
-    * slices whose kinetic inputs name different Z_eff candidates are refused (``ValueError``);
+    * slices whose kinetic inputs name different Z_eff candidates are refused (``ValueError``), unless the caller
+      allows it explicitly (``switch_allowed=True``, non-default: e.g. named sources by phase of a discharge); the
+      switches are then listed (``switches``: time, from, to) and the check of the checked-source rule is not made;
     * when the slices were assembled with the checked-source rule (``record["zeff_rule"]``), the series needs
       its source named (``source``: ``"impurity_density"`` or ``"line_integrated"``,
       :func:`.zeff_sources.series_source`; without a name it is refused with the per-slice outcomes), every
@@ -644,6 +648,12 @@ def check_zeff_series(slices, source=None):
         return dict(applied=False, note="the kinetic inputs carry no Z_eff record: one-source check not applicable")
     if None in names:
         raise ValueError("Z_eff: some slices carry a Z_eff source record and some do not; one source per series")
+    if len(set(names)) > 1 and switch_allowed:
+        sw = [dict(time=float(b.time), source_from=na, source_to=nb)
+              for a, b, na, nb in zip(slices[:-1], slices[1:], names[:-1], names[1:]) if na != nb]
+        return dict(applied=True, switch_allowed=True, candidates=sorted(set(names)), switches=sw,
+                    note="NON-DEFAULT: Z_eff sources change between slices by explicit option (zeff_source_switch_"
+                         "allowed=True); every switch listed", failing_slices=[], unverified_slices=[])
     if len(set(names)) > 1:
         raise ValueError(f"Z_eff source switches within the series ({sorted(set(names))}): a series takes one "
                          "named source")

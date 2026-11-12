@@ -260,3 +260,9 @@ def test_fitted_flux_offset_with_the_reference_prior_row():
     assert tab.frame["flux_offset_prior_chi2"] == pytest.approx(((c - c0) / s0) ** 2, rel=1e-12)
     out = ET.source_fit_chi2(ms)
     assert out["flux_loop_offset_prior"][1] == 1 and out["flux_loop_offset_prior"][0] >= 0.0
+    # EFIT's fitted values are relative to its reference: they are made absolute with the gauge passed
+    # (absolute_offset) before the offset with its prior row is solved
+    w = 1.0 / g.sigma[use] ** 2
+    m, f = g.measured[use], g.meta["source_fit"][use] + g.meta["absolute_offset"]
+    c_exp = (np.sum(w * (m - f)) + c0 / s0 ** 2) / (np.sum(w) + 1.0 / s0 ** 2)
+    assert out["flux_loop_offset_prior"][0] == pytest.approx(((c_exp - c0) / s0) ** 2, rel=1e-9)

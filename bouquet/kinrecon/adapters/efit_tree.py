@@ -577,6 +577,8 @@ def source_fit_chi2(ms, groups=None):
         m, f = np.asarray(g.measured, float), np.asarray(fit, float)
         prior_term = None
         if name == "flux_loop" and g.meta.get("flux_offset") == "fitted":
+            # the fitted values are stored in the measured values' form; the model the scorer offsets is absolute
+            f = f + float(g.meta.get("absolute_offset", 0.0))
             u0 = g.valid & (g.weight != 0) & np.isfinite(f)
             w = (g.weight[u0] / g.sigma[u0]) ** 2
             num, den = float(np.sum(w * (m[u0] - f[u0]))), float(np.sum(w))

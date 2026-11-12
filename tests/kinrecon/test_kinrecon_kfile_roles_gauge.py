@@ -11,6 +11,7 @@ from bouquet.kinrecon.measurements import MachineBundle
 
 _BASE = """\
  &IN1
+ ISHOT = 1
  ITIME = 1500
  PLASMA = 1.0D+06
  FWTCUR = 1.0
@@ -36,11 +37,13 @@ def _machine():
     sensors = {"flux_loop": {"labels": ["L0", "L1", "L2"], "r": [1.0, 1.1, 1.2], "z": [0.0, 0.5, -0.5]},
                "pf_current": {"labels": ["F0", "F1", "E0", "E1"]}}
     return MachineBundle(machine="toy", sensors=sensors,
-                         channel_maps={"BRSP": ["F0", "F1"], "ECURRT": ["E0", "E1"]})
+                         channel_maps={"BRSP": ["F0", "F1"], "ECURRT": ["E0", "E1"]},
+                         meta={"vbit_by_shot": [[0, 10.0]]})          # made-up default (VBIT not in the file)
 
 
 def _ms(coils="0.0 -0.2 0.3", siref="SIREF = 0.5", iecurr="IECURR = 1", **kw):
     text = _BASE.format(coils=coils, siref=siref, iecurr=iecurr)
+    kw.setdefault("sigma_model", "efit_vbit")
     return measurements_from_kfile(parse_namelists(text), _machine(), flux_reference="L0", **kw)
 
 
@@ -72,7 +75,7 @@ def test_relative_storage_with_siref():
 
 def _ms_noref(coils, siref):
     text = _BASE.format(coils=coils, siref=siref, iecurr="IECURR = 1")
-    return measurements_from_kfile(parse_namelists(text), _machine())
+    return measurements_from_kfile(parse_namelists(text), _machine(), sigma_model="efit_vbit")
 
 
 def test_absolute_storage_and_undetermined():

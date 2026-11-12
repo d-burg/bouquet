@@ -49,12 +49,27 @@ DD has no flag for "already E_r-corrected", so ``mse_er_corrected`` must be
 stated by the caller; building MSE without it is refused.  Coefficients come
 from the ``active_spatial_resolution`` entry nearest the window centre when
 those entries carry a ``time``, else from entry 0.
+
+**Conventions** (documented defaults; the shared list is in :mod:`..adapters`):
+
+* sentinels: samples with ``data_error_upper >= 1e29`` (OMAS writes 1e30 for
+  an excluded channel), a non-finite value or sigma, or ``validity_timed`` < 0
+  are not used; a channel with no usable sample, or with ``validity`` < 0, stays
+  in the group, invalid, with NaN value and sigma (the reason is in
+  ``meta["invalid_reason"]`` when no sample was usable; a negative channel
+  ``validity`` is not given a reason there);
+* exclusions: channels named in ``exclude`` are made invalid and recorded in
+  the group's ``meta["excluded"]``;
+* window reduction: ``window_mean`` is the default (per-sample sigma kept,
+  not divided by sqrt(N)); ``window_sem`` and ``window_spread`` are named
+  alternatives; the name is recorded in ``meta["sigma_model"]``.
 """
 
 import numpy as np
 
 from ..interfaces import ConstraintGroup, MeasurementSet
 from ..measurements import MachineBundle, probe_direction
+from . import apply_exclusions
 
 REDUCTIONS = ("window_mean", "window_sem", "window_spread")
 
@@ -201,7 +216,7 @@ ALL_GROUPS = ("flux_loop", "bpol_probe", "ip", "diamagnetic_flux", "pf_current",
 
 def measurements_from_imas(ids, time, time_window, machine="", groups=None,
                            reduction="window_mean", min_samples=1,
-                           mse_er_corrected=None, meta=None):
+                           mse_er_corrected=None, meta=None, exclude=None):
     """Build a :class:`MeasurementSet` from an IMAS-style dict.
 
     Parameters
@@ -218,6 +233,11 @@ def measurements_from_imas(ids, time, time_window, machine="", groups=None,
     mse_er_corrected : bool, optional
         Whether the MSE angles are already E_r-corrected.  Required when MSE
         is built.
+    exclude : dict, optional
+        ``{group: {label: reason}}``: channels excluded by default (e.g. the
+        channels a device's own reconstruction gives fit weight 0), applied
+        as recorded exclusions (:func:`.apply_exclusions`; listed in
+        ``meta["channel_exclusions_applied"]``).
     """
     t0, t1 = time - 0.5 * time_window, time + 0.5 * time_window
     mag = ids.get("magnetics", {})
@@ -266,6 +286,8 @@ def measurements_from_imas(ids, time, time_window, machine="", groups=None,
                    transform=transform, extra_meta=extra)
         if g is not None:
             ms.groups[name] = g
+    if exclude:
+        ms.meta["channel_exclusions_applied"] = apply_exclusions(ms, exclude)
     return ms
 
 

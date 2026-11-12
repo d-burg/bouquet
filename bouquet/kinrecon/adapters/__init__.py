@@ -10,6 +10,28 @@ Every group an adapter builds records the name of its uncertainty convention
 in ``meta["sigma_model"]`` (and its parameters in ``meta["sigma_params"]``).
 σ models are conventions, not calibrations; they are chosen explicitly and
 never changed silently.  The named models below are shared by the adapters.
+
+Conventions (shared by the adapters and the scorer; documented defaults, not
+tunable choices):
+
+* **No-data sentinels.**  A channel the source marks as having no data is
+  invalid, never zero-filled: EFIT MSE ``|TGAMMA| <= 1e-8`` (EFIT writes 0
+  for chords without data); OMAS / IMAS ``data_error_upper >= 1e29`` (OMAS
+  writes 1e30 for an excluded channel); a sigma that is not finite and > 0.
+  Invalid channels keep their position and label (values NaN where the
+  source has none).
+* **Exclusions are recorded, never silent.**  A channel left out of a fit or
+  a score is listed with a reason: by an adapter in the group's
+  ``meta["excluded"]`` (:func:`apply_exclusions`, ``(label, reason)``) or
+  ``meta["invalid_reason"]``; by the scorer in ``ResidualTable.excluded``.
+  Channels with fit weight 0 in the source (EFIT ``FWT* = 0``) are invalid
+  for magnetics and MSE; coil currents are the stated exception (scored with
+  weight 1 by default, see :mod:`.efit_kfile`).
+* **Window reduction.**  Sources with time samples are reduced to one value
+  per channel over the window; the IMAS route's default ``window_mean`` keeps
+  the per-sample sigma undivided (no 1/sqrt(N)): the source sigma is treated
+  as a convention, not as independent noise (:mod:`.imas_json`).  The EFIT
+  k-file carries values EFIT already averaged over ``ITIME +/- IAVEM``.
 """
 
 import numpy as np
@@ -42,8 +64,9 @@ def _efit_serror_bit(values, serror, bit):
 
 def _efit_vbit(values, serror, bit, vbit):
     # EFIT-aligned form: sigma = max(SERROR |value|, VBIT * bit), VBIT read
-    # from the k-file's &IN1 (10 when absent).  Reproduces the sigma arrays
-    # EFIT writes to its m-file channel by channel; see adapters.efit_kfile.
+    # from the k-file's &IN1 (EFIT's shot-number default when absent).  EFIT's
+    # sigma for probes and coils; not for flux loops in general (see
+    # adapters.efit_kfile).
     return np.maximum(serror * np.abs(values), float(vbit) * np.asarray(bit, dtype=float))
 
 
@@ -69,7 +92,7 @@ def sigma_from_model(name, values, **params):
     10-bit floor, the OMAS mapping constant);
     ``efit_vbit``: sigma = max(``serror`` |v|, ``vbit`` ``bit``) (EFIT k-file
     convention for magnetics with the file's own ``VBIT``, see
-    :mod:`.efit_kfile`; the k-file adapter's default).
+    :mod:`.efit_kfile`; a named k-file model, no longer its default).
     """
     if name not in SIGMA_MODELS:
         raise ValueError(f"unknown sigma model {name!r}; known: {sorted(SIGMA_MODELS)}")
@@ -83,4 +106,31 @@ def sigma_from_model(name, values, **params):
     return np.asarray(fn(values, **params), dtype=float)
 
 
-__all__ = ["SIGMA_MODELS", "sigma_from_model"]
+def apply_exclusions(ms, exclusions):
+    """Exclude channels by default, as recorded exclusions (never by deleting them).
+
+    ``exclusions`` is ``{group: {label: reason}}``.  Each listed channel of a group present in ``ms`` is made
+    invalid (``valid = False``; its value and sigma are kept) and ``(label, reason)`` is appended to the
+    group's ``meta["excluded"]`` -- the same ``(label, reason)`` form the scorer uses for
+    ``ResidualTable.excluded``.  A label that is not a channel of its group raises (a misspelled exclusion
+    must not be a silent no-op); groups absent from ``ms`` are skipped and reported.  Returns
+    ``{group: [labels excluded]}`` plus ``"_groups_absent"`` when any were skipped.
+    """
+    done = {}
+    for name, items in (exclusions or {}).items():
+        g = ms.groups.get(name)
+        if g is None:
+            done.setdefault("_groups_absent", []).append(name)
+            continue
+        rec = g.meta.setdefault("excluded", [])
+        for label, reason in dict(items).items():
+            if label not in g.labels:
+                raise ValueError(f"exclusion of '{label}': not a channel of group '{name}'")
+            i = g.labels.index(label)
+            g.valid[i] = False
+            rec.append((label, str(reason)))
+            done.setdefault(name, []).append(label)
+    return done
+
+
+__all__ = ["SIGMA_MODELS", "apply_exclusions", "sigma_from_model"]

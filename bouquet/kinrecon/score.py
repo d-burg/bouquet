@@ -41,6 +41,30 @@ of their modelable channels.  :func:`chi2_report` reports chi^2 with the
 channel count and the degrees of freedom separately and names the sigma
 conventions; on real data the sigma are conventions (e.g. EFIT's), not
 standard deviations, so chi^2/dof is not a pass/fail quantity.
+:func:`chi2_under_sigma_convention` gives the per-group (chi^2, N, chi^2/N)
+and names the sigma convention of each group; every number it returns holds
+only under those conventions.
+
+Conventions (documented defaults of the scorer):
+
+* a channel enters chi^2 when it is valid in the measurement set, model-valid
+  and has a weight != 0; its sigma must then be finite and > 0
+  (:meth:`.interfaces.ResidualTable.residual` raises otherwise);
+* a channel that cannot be modeled is excluded with a recorded reason
+  (``table.excluded``), never silently: off the mesh (point-in-triangle
+  test), a finite-length probe whose segment leaves the mesh, a Thomson
+  channel outside the LCFS (unless ``kinetics["thomson_outside"] =
+  "extrapolate"``), a non-finite model value;
+* no gauge is applied inside :func:`score`: flux loops are modeled in the
+  form the data are stored in (relative to ``meta["flux_reference"]`` when it
+  is named);
+* E_r is never counted twice: an MSE group declared E_r-corrected with an
+  E_r supplied is refused;
+* an orientation mismatch between the equilibrium and the discharge is
+  refused (above);
+* the measurement set is neither copied nor changed; the adapters' own
+  conventions (no-data sentinels, recorded exclusions, window reduction) are
+  listed in :mod:`.adapters`.
 """
 
 import numpy as np
@@ -339,25 +363,55 @@ def chi2_report(table, n_params=0):
     for name in table.model:
         g = table.measurements.groups[name]
         groups[name] = dict(chi2=table.chi2(name), n_channels=table.n_valid(name),
-                            sigma_model=g.meta.get("sigma_model"))
+                            sigma_model=g.meta.get("sigma_model"), sigma_model_id=_sigma_id(g))
     n = table.n_valid()
     dof = n - int(n_params)
     total = dict(chi2=table.chi2(), n_channels=n, n_params=int(n_params), dof=dof,
                  chi2_per_dof=(table.chi2() / dof) if dof > 0 else float("nan"))
+    ids = sorted({str(v["sigma_model_id"]) for v in groups.values()})
+    total["sigma_models"] = ids
     return dict(groups=groups, total=total,
                 interpretation=("chi^2 under the stated sigma conventions (diagonal, correlations ignored); "
                                 "not a pass/fail quantity on real data -- compare equilibria on the same channels"))
 
 
-def chi2_summary(table):
-    """``{group: (chi2, n_valid, chi2/n)}`` plus ``'total'`` for a table.
+def _sigma_id(group):
+    """The sigma convention a group was built under: ``meta["sigma_model_id"]`` (model and reading), else
+    ``meta["sigma_model"]``, else ``"unstated"``."""
+    return group.meta.get("sigma_model_id") or group.meta.get("sigma_model") or "unstated"
 
-    Kept for existing callers.  ``chi2/n`` divides by the channel count, not the degrees of freedom, and is
-    descriptive only (module docstring); use :func:`chi2_report` for dof and the sigma conventions."""
-    out = {}
+
+class Chi2UnderSigmaConvention(dict):
+    """``{group: (chi2, n, chi2/n)}`` plus ``"total"``, with :attr:`sigma_conventions` ``{group: id}`` naming the
+    sigma convention each number holds under (``"total"`` maps to the sorted list of the conventions it
+    mixes).  A plain ``dict`` otherwise, so existing tuple unpacking keeps working."""
+
+    sigma_conventions = None
+
+    @property
+    def mixed(self):
+        """True when the total adds groups built under different sigma conventions."""
+        return len(self.sigma_conventions.get("total", [])) > 1
+
+
+def chi2_under_sigma_convention(table):
+    """``{group: (chi2, n_valid, chi2/n)}`` plus ``'total'`` for a table, under the groups' sigma conventions.
+
+    The returned mapping carries ``.sigma_conventions`` (``{group: sigma_model_id}``, ``"total"``: the list of
+    conventions summed).  ``chi2/n`` divides by the channel count, not the degrees of freedom, and is
+    descriptive only (module docstring); use :func:`chi2_report` for dof."""
+    out = Chi2UnderSigmaConvention()
+    conv = {}
     for name in table.model:
         c, n = table.chi2(name), table.n_valid(name)
         out[name] = (c, n, c / n if n else float("nan"))
+        conv[name] = _sigma_id(table.measurements.groups[name])
     c, n = table.chi2(), table.n_valid()
     out["total"] = (c, n, c / n if n else float("nan"))
+    conv["total"] = sorted(set(conv.values()))
+    out.sigma_conventions = conv
     return out
+
+
+#: Deprecated name of :func:`chi2_under_sigma_convention` (same return value), kept for existing callers.
+chi2_summary = chi2_under_sigma_convention

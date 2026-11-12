@@ -133,3 +133,42 @@ def test_segment_points_helper_and_score_meta():
     g.meta["probe_model"] = "point"
     tab = score(eq, MeasurementSet("synthetic", 1.0, 0.01, {"bpol_probe": g}))
     assert tab.chi2("bpol_probe") > 0.0
+
+
+# --- the same probe model from a field function, and the per-signal reproduction check ----------------------
+def test_field_function_route_matches_the_midpoint_formula_and_bpol_probe():
+    # B_R = 0, B_Z = Z^2 + R^2: along Z (L > 0, vertical probe) the n-point midpoint mean of Z^2 is
+    # z0^2 + (L^2 / 12)(1 - 1/n^2); across (L < 0: segment along -R) the same holds for R^2
+    def field(pts):
+        pts = np.asarray(pts, float)
+        return np.zeros(len(pts)), pts[:, 1] ** 2 + pts[:, 0] ** 2
+
+    r0, z0, L = 1.5, 0.2, 0.3
+    geo = {"r": [r0, r0, r0], "z": [z0, z0, z0], "direction_r": [0.0, 0.0, 0.0],
+           "direction_z": [1.0, 1.0, 1.0], "length": [L, -L, 0.0]}
+    for n in (1, 2, 25):
+        got = diag.probe_signals_from_field(field, geo, n_avg=n)
+        mid = r0 ** 2 + z0 ** 2 + (L ** 2 / 12.0) * (1.0 - 1.0 / n ** 2)
+        np.testing.assert_allclose(got, [mid, mid, r0 ** 2 + z0 ** 2], rtol=1e-14)
+    np.testing.assert_allclose(diag.probe_signals_from_field(field, geo, model="point"), r0 ** 2 + z0 ** 2,
+                               rtol=1e-15)
+    # identical to bpol_probe on an equilibrium whose field is that function
+    eq = FakeEq()
+    g2 = {"r": [2.2, 1.3], "z": [0.3, -0.1], "direction_r": [0.6, 0.0], "direction_z": [0.8, 1.0],
+          "length": [0.2, -0.14]}
+
+    def f_eq(pts):
+        br, _, bz = _B(np.asarray(pts)[:, 0], np.asarray(pts)[:, 1])
+        return br, bz
+
+    np.testing.assert_allclose(diag.probe_signals_from_field(f_eq, g2), diag.bpol_probe(eq, g2).value, rtol=1e-14)
+
+
+def test_probe_reproduction_record():
+    out = diag.probe_reproduction([1.0, 2.0, np.nan, 4.0], [1.0, 2.1, 3.0, 4.0], [0.1, 0.1, 0.1, 0.0], 0.6)
+    assert out["n"] == 2 and out["max_abs"] == pytest.approx(1.0, rel=1e-12)
+    assert out["rms"] == pytest.approx(np.sqrt(0.5), rel=1e-12) and not out["passed"]
+    assert np.isnan(out["z"][2]) and np.isnan(out["z"][3])
+    assert diag.probe_reproduction([1.0], [1.0], [1.0], 0.0)["passed"]
+    with pytest.raises(ValueError, match="no channel"):
+        diag.probe_reproduction([np.nan], [1.0], [1.0], 1.0)

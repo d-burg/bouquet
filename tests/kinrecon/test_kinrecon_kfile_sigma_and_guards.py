@@ -128,11 +128,14 @@ def test_kersil_ip_has_the_bit_floor():
     ip = measurements_from_kfile(nl, _machine(), groups=["ip"], sigma_model="efit_kersil", kersil_reference="siref",
                                  efit_constants=CONST, nslref=1).groups["ip"]
     assert ip.sigma[0] == pytest.approx(1000.0, rel=1e-15)
-    ip = measurements_from_kfile(nl, _machine(), groups=["ip"]).groups["ip"]          # efit_vbit: no floor
+    ip = measurements_from_kfile(nl, _machine(), groups=["ip"], sigma_model="efit_vbit").groups["ip"]   # no floor
     assert ip.sigma[0] == pytest.approx(30.0, rel=1e-15)
 
 
 # ----------------------------------------------------------------------------- silent defaults refused
+V = {"sigma_model": "efit_vbit"}           # the guards below do not depend on the sigma model
+
+
 def test_missing_serror_itime_iavem_bits_and_weights_are_refused():
     base = _TEXT.format(coils="0.0 -0.2 0.3", siref="0.5", kersil=3, fitsiref="T", ip="1e6", extra="")
 
@@ -140,39 +143,39 @@ def test_missing_serror_itime_iavem_bits_and_weights_are_refused():
         return parse_namelists("\n".join(ln for ln in base.splitlines() if not ln.strip().startswith(key)) + "\n")
 
     with pytest.raises(ValueError, match="SERROR"):
-        measurements_from_kfile(drop("SERROR"), _machine(), groups=["flux_loop"])
-    g = measurements_from_kfile(drop("SERROR"), _machine(), groups=["flux_loop"], serror=0.03)
+        measurements_from_kfile(drop("SERROR"), _machine(), groups=["flux_loop"], **V)
+    g = measurements_from_kfile(drop("SERROR"), _machine(), groups=["flux_loop"], serror=0.03, **V)
     assert g.meta["SERROR_source"].startswith("caller")
     with pytest.raises(ValueError, match="ITIME"):
-        measurements_from_kfile(drop("ITIME"), _machine(), groups=["flux_loop"])
-    assert measurements_from_kfile(drop("ITIME"), _machine(), groups=["flux_loop"], time=1.5).meta["time_source"] \
+        measurements_from_kfile(drop("ITIME"), _machine(), groups=["flux_loop"], **V)
+    assert measurements_from_kfile(drop("ITIME"), _machine(), groups=["flux_loop"], time=1.5, **V).meta["time_source"] \
         .startswith("caller")
     with pytest.raises(ValueError, match="IAVEM"):
-        measurements_from_kfile(drop("IAVEM"), _machine(), groups=["flux_loop"])
+        measurements_from_kfile(drop("IAVEM"), _machine(), groups=["flux_loop"], **V)
     with pytest.raises(ValueError, match="PSIBIT"):
-        measurements_from_kfile(drop("PSIBIT"), _machine(), groups=["flux_loop"])
-    g = measurements_from_kfile(drop("PSIBIT"), _machine(), groups=["flux_loop"], allow_missing_bits=True)
+        measurements_from_kfile(drop("PSIBIT"), _machine(), groups=["flux_loop"], **V)
+    g = measurements_from_kfile(drop("PSIBIT"), _machine(), groups=["flux_loop"], allow_missing_bits=True, **V)
     assert "allow_missing_bits" in g.groups["flux_loop"].meta["bit_source"]
     with pytest.raises(ValueError, match="FWTSI"):
-        measurements_from_kfile(drop("FWTSI"), _machine(), groups=["flux_loop"])
+        measurements_from_kfile(drop("FWTSI"), _machine(), groups=["flux_loop"], **V)
 
 
 def test_arrays_longer_than_the_bundle():
     nl = _nl(coils="0.0 -0.2 0.3 0.0 0.0")
     nl["IN1"]["FWTSI"] = [1.0, 1.0, 1.0, 0.0, 0.0]
-    ms = measurements_from_kfile(nl, _machine(), groups=["flux_loop"])
+    ms = measurements_from_kfile(nl, _machine(), groups=["flux_loop"], **V)
     assert ms.meta["truncated_trailing_zeros"]["COILS"] == 2
     nl = _nl(coils="0.0 -0.2 0.3 0.7")
     with pytest.raises(ValueError, match="beyond"):
-        measurements_from_kfile(nl, _machine(), groups=["flux_loop"])
+        measurements_from_kfile(nl, _machine(), groups=["flux_loop"], **V)
 
 
 def test_null_entries_are_positional_and_recorded():
     nl = _nl(coils="0.0, , 0.3")
     with pytest.raises(ValueError, match="2 values for 3 sensors"):
-        measurements_from_kfile(nl, _machine(), groups=["flux_loop"])
+        measurements_from_kfile(nl, _machine(), groups=["flux_loop"], **V)
     nl = _nl(extra="AA1GAM = 1.0, , 3.0")
-    ms = measurements_from_kfile(nl, _machine(), groups=["flux_loop"])
+    ms = measurements_from_kfile(nl, _machine(), groups=["flux_loop"], **V)
     assert ms.meta["namelist_null_entries"] == {"IN1.AA1GAM": [1]}
 
 

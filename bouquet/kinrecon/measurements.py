@@ -552,6 +552,22 @@ class MachineBundle:
 
     ``mesh_file`` is the TokaMaker mesh (relative paths resolve against the
     bundle file's directory, see :meth:`mesh_path`); ``mesh_sha256`` pins it.
+
+    ``meta`` keys read by this package (all optional):
+
+    * ``provenance`` -- where the geometry came from: ``era`` (the device era
+      the tables belong to), ``era_rule``, ``source_tables`` (file name ->
+      sha256) and ``generator`` (``{"name", "version"}`` of the tool whose
+      tables were used), as built by :func:`machine_provenance` and checked by
+      :func:`verify_machine_provenance`;
+    * ``probe_n_avg`` (+ ``probe_n_avg_source``) -- averaging points of
+      finite-length probes, read from the device file (EFIT ``NSMP2``);
+    * ``channel_exclusions`` -- ``{group: {label: reason}}`` excluded by
+      default, applied by the adapters as recorded exclusions;
+    * ``efit_sigma_constants`` (``ERRSIL``, ``SICONT``, ``ERSIL8``,
+      ``NSLREF``) and ``vbit_by_shot`` (``[[first_shot, value], ...]``, with an
+      optional ``vbit_by_shot_source``) -- inputs of the EFIT k-file sigma
+      rules (:mod:`.adapters.efit_kfile`).
     """
 
     machine: str
@@ -608,6 +624,40 @@ def file_sha256(path):
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def machine_provenance(source_tables, era=None, era_rule=None, generator=None):
+    """Provenance record for ``MachineBundle.meta["provenance"]``.
+
+    ``source_tables`` is a list of paths (or ``{name: path}``) of the files the geometry was built from; each
+    is hashed (sha256) and recorded under its base name (or the given name).  ``era``, ``era_rule`` and
+    ``generator`` (``{"name": ..., "version": ...}``) are recorded as given.
+    """
+    items = source_tables.items() if isinstance(source_tables, dict) else \
+        ((os.path.basename(str(p)), p) for p in source_tables)
+    tables = {}
+    for name, path in items:
+        if name in tables:
+            raise ValueError(f"machine_provenance: two source tables named {name!r}; pass a dict with unique names")
+        tables[name] = {"sha256": file_sha256(path), "path": os.path.basename(str(path))}
+    return {"era": era, "era_rule": era_rule, "source_tables": tables, "generator": dict(generator or {})}
+
+
+def verify_machine_provenance(bundle, paths):
+    """Check the source tables of a bundle's ``meta["provenance"]`` against files on disk.
+
+    ``paths`` maps each recorded table name to a path.  Returns ``{name: True/False}``; raises when the
+    bundle has no provenance record or a recorded table has no path.
+    """
+    prov = (bundle.meta or {}).get("provenance")
+    if not prov or not prov.get("source_tables"):
+        raise ValueError("machine bundle has no provenance record (meta['provenance']['source_tables'])")
+    out = {}
+    for name, rec in prov["source_tables"].items():
+        if name not in paths:
+            raise ValueError(f"no path given for the recorded source table {name!r}")
+        out[name] = file_sha256(paths[name]) == rec["sha256"]
+    return out
 
 
 def write_machine(path, bundle):

@@ -147,6 +147,9 @@ def test_score_common_uses_the_intersection_and_report_states_dof():
     assert any(r == "not modelable in every compared equilibrium" for _, r in tabs[0].excluded["flux_loop"])
     rep = chi2_report(tabs[0], n_params=0)
     assert rep["total"]["n_channels"] == 1 and rep["total"]["dof"] == 1 and "not a pass/fail" in rep["interpretation"]
+    gid = data.groups["flux_loop"].meta.get("sigma_model_id") or data.groups["flux_loop"].meta.get("sigma_model")
+    assert rep["groups"]["flux_loop"]["sigma_model_id"] == (gid or "unstated")
+    assert rep["total"]["sigma_models"] == [gid or "unstated"]
     assert chi2_report(t_alone, n_params=1)["total"]["dof"] == t_alone.n_valid() - 1
 
 

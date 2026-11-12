@@ -18,7 +18,7 @@ if _REPO not in sys.path:
 
 from bouquet.kinrecon import diagnostics as diag  # noqa: E402
 from bouquet.kinrecon.interfaces import ConstraintGroup, MeasurementSet  # noqa: E402
-from bouquet.kinrecon.score import chi2_summary, score  # noqa: E402
+from bouquet.kinrecon.score import chi2_summary, chi2_under_sigma_convention, score  # noqa: E402
 
 R0, Z0, A = 1.7, 0.0, 0.5      # analytic axis and LCFS minor radius [m]
 PSI_AX, PSI_B = -1.0, -0.2     # psi on axis and at the LCFS [Wb/rad]
@@ -259,9 +259,29 @@ def test_score_noise_closure_fake():
     eq = FakeEq()
     rng = np.random.default_rng(20261110)
     ms, prof = _measurement_set(eq, rng=rng)
-    summ = chi2_summary(score(eq, ms, kinetics={"n_e": prof}))
+    summ = chi2_under_sigma_convention(score(eq, ms, kinetics={"n_e": prof}))
     c, n, _ = summ["total"]
     assert abs(c / n - 1.0) < 4.0 * np.sqrt(2.0 / n)
+
+
+def test_chi2_summary_names_its_sigma_conventions():
+    eq = FakeEq()
+    ms, prof = _measurement_set(eq)
+    for g in ms.groups.values():
+        g.meta.pop("sigma_model_id", None)
+    first = next(iter(ms.groups))
+    ms.groups[first].meta["sigma_model_id"] = "model_a:reading"
+    tab = score(eq, ms, kinetics={"n_e": prof})
+    summ = chi2_under_sigma_convention(tab)
+    assert chi2_summary is chi2_under_sigma_convention                 # deprecated name, same function
+    assert set(summ.sigma_conventions) == set(summ)                     # every row named, total included
+    assert summ.sigma_conventions[first] == "model_a:reading"
+    others = {k: v for k, v in summ.sigma_conventions.items() if k not in (first, "total")}
+    assert all(v == (ms.groups[k].meta.get("sigma_model") or "unstated") for k, v in others.items())
+    assert summ.sigma_conventions["total"] == sorted(set(summ.sigma_conventions[k] for k in tab.model))
+    assert summ.mixed == (len(summ.sigma_conventions["total"]) > 1)
+    c, n, r = summ[first]                                               # tuple rows unchanged
+    assert n == tab.n_valid(first)
 
 
 def test_residual_table_model_valid_mask():

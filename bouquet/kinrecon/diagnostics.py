@@ -377,6 +377,51 @@ def probe_segment_points(geometry, n_avg=PROBE_N_AVG_DEFAULT):
     return points, ends
 
 
+def probe_signals_from_field(field, geometry, model="finite_length", n_avg=PROBE_N_AVG_DEFAULT):
+    """Probe signals ``B . n`` [T] from a poloidal-field function, by the same rule as :func:`bpol_probe`.
+
+    ``field(pts)`` takes ``(N, 2)`` points ``(R, Z)`` and returns ``(B_R, B_Z)`` (two length-N arrays).  This
+    is the probe model without a TokaMaker equilibrium -- e.g. for checking a machine bundle against another
+    code's calculated probe signals from that code's flux map.  Finite-length probes use
+    :func:`probe_segment_points` and the mean over the ``n_avg`` midpoints; ``model="point"`` or a geometry
+    without ``length`` gives the field at the centers.  No mesh test is made.
+    """
+    if model not in PROBE_MODELS:
+        raise ValueError(f"probe_signals_from_field: model must be one of {PROBE_MODELS}")
+    pts = _points(geometry)
+    nr = np.atleast_1d(np.asarray(geometry["direction_r"], dtype=float)).ravel()
+    nz = np.atleast_1d(np.asarray(geometry["direction_z"], dtype=float)).ravel()
+    norm = np.hypot(nr, nz)
+    if nr.shape != (pts.shape[0],) or np.any(~np.isfinite(norm) | (norm <= 0.0)):
+        raise ValueError("probe_signals_from_field: one finite, non-zero direction per probe")
+    nr, nz = nr / norm, nz / norm
+    if model == "point" or "length" not in geometry:
+        br, bz = (np.asarray(x, dtype=float) for x in field(pts))
+        return br * nr + bz * nz
+    seg, _ = probe_segment_points(geometry, n_avg)
+    n, m = seg.shape[0], seg.shape[1]
+    br, bz = (np.asarray(x, dtype=float).reshape(n, m) for x in field(seg.reshape(-1, 2)))
+    return np.mean(br * nr[:, None] + bz * nz[:, None], axis=1)
+
+
+def probe_reproduction(model, reference, sigma, tolerance_rms):
+    """Per-signal agreement of modeled probe signals with a reference (e.g. EFIT's calculated signals).
+
+    ``z = (model - reference) / sigma`` over channels with finite values and ``sigma > 0``; returns ``{"z",
+    "rms", "max_abs", "n", "tolerance_rms", "passed"}`` with ``passed = rms <= tolerance_rms``.  The tolerance
+    is the caller's stated criterion; it is recorded, not chosen here.
+    """
+    model, reference, sigma = (np.asarray(x, dtype=float).ravel() for x in (model, reference, sigma))
+    use = np.isfinite(model) & np.isfinite(reference) & np.isfinite(sigma) & (sigma > 0.0)
+    if not np.any(use):
+        raise ValueError("probe_reproduction: no channel with finite values and sigma > 0")
+    z = np.full(model.shape, np.nan)
+    z[use] = (model[use] - reference[use]) / sigma[use]
+    rms = float(np.sqrt(np.mean(z[use] ** 2)))
+    return {"z": z, "rms": rms, "max_abs": float(np.max(np.abs(z[use]))), "n": int(use.sum()),
+            "tolerance_rms": float(tolerance_rms), "passed": bool(rms <= tolerance_rms)}
+
+
 def bpol_probe(eq, geometry, model="finite_length", n_avg=PROBE_N_AVG_DEFAULT):
     """Poloidal-field probe signal ``B . n`` [T].
 

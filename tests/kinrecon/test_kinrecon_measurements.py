@@ -219,3 +219,28 @@ def test_machine_bundle_validates_shapes():
     with pytest.raises(ValueError, match="shape"):
         M.MachineBundle(machine="toy", sensors={"flux_loop": {"labels": ["a", "b"],
                                                               "r": [1.0]}})
+
+
+def test_machine_provenance_record_and_check(tmp_path):
+    a, b = tmp_path / "table_a.json", tmp_path / "table_b.dat"
+    a.write_text('{"x": 1}\n')
+    b.write_text("1 2 3\n")
+    prov = M.machine_provenance([a, b], era="era-2", era_rule="inclusive start",
+                                generator={"name": "maptool", "version": "1.2.3"})
+    assert prov["era"] == "era-2" and prov["generator"]["version"] == "1.2.3"
+    assert prov["source_tables"]["table_a.json"]["sha256"] == M.file_sha256(a)
+    bundle = M.MachineBundle(machine="toy", sensors={"flux_loop": {"labels": ["L0"]}}, meta={"provenance": prov})
+    path = tmp_path / "bundle.json"
+    M.write_machine(path, bundle)
+    back = M.read_machine(path)
+    assert back.meta["provenance"] == prov
+    assert M.verify_machine_provenance(back, {"table_a.json": a, "table_b.dat": b}) == \
+        {"table_a.json": True, "table_b.dat": True}
+    b.write_text("1 2 4\n")
+    assert M.verify_machine_provenance(back, {"table_a.json": a, "table_b.dat": b})["table_b.dat"] is False
+    with pytest.raises(ValueError, match="no path"):
+        M.verify_machine_provenance(back, {"table_a.json": a})
+    with pytest.raises(ValueError, match="no provenance"):
+        M.verify_machine_provenance(M.MachineBundle(machine="toy"), {})
+    with pytest.raises(ValueError, match="unique names"):
+        M.machine_provenance([a, tmp_path / "x" / ".." / "table_a.json"])

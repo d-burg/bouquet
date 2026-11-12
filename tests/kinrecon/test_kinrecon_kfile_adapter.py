@@ -53,7 +53,7 @@ KFILE = """\
  AA5GAM = 3*0.4
  AA6GAM = 3*0.0
  AA7GAM = 3*0.02
- TGAMMAUNCOR = 0.09 -0.04 0.0
+ TGAMMAUNCOR = 0.11 -0.04 0.0
  MSE_USECER = 1
  DTMSEFULL = 5.0
  /
@@ -72,7 +72,14 @@ def _machine(with_maps=False):
         "pf_current": {"labels": ["E0", "F0", "F1"], "turns": [1.0, 10.0, 20.0]},
     }
     maps = {"BRSP": ["F0", "F1"], "ECURRT": ["E0"]} if with_maps else {}
-    return MachineBundle(machine="toy", sensors=sensors, channel_maps=maps)
+    # VBIT is absent from the made-up k-file: the bundle states a made-up piecewise default by shot
+    return MachineBundle(machine="toy", sensors=sensors, channel_maps=maps, meta={"vbit_by_shot": [[0, 10.0]]})
+
+
+# The fixture's MSE block is labeled E_r-corrected (MSE_USECER = 1) but its D = TGAMMA - TGAMMAUNCOR has
+# sign(D) sign(TGAMMA) uniform on only half of the active chords, which the E_r status rule refuses
+# (test_mse_block); tests about other groups state the status (er_corrected=True) instead of relying on it.
+VBIT_MODEL = {"sigma_model": "efit_vbit"}
 
 
 @pytest.fixture
@@ -99,7 +106,7 @@ def test_namelist_parser():
 def test_magnetics_sigma_and_weights(kfile):
     nl = read_kfile(kfile)
     nl["IN1"]["FWTSI"] = [1.0, 0.0, 1.0]  # undo the lowercase override for this test
-    ms = measurements_from_kfile(nl, _machine())
+    ms = measurements_from_kfile(nl, _machine(), er_corrected=True, **VBIT_MODEL)
     fl = ms.groups["flux_loop"]
     two_pi = 2 * np.pi
     # default flux_scale is -2 pi (the k-files tested store COILS in the solver's psi sign)
@@ -127,23 +134,25 @@ def test_flux_sign_and_reference(kfile):
     nl["IN1"]["FWTSI"] = [1.0, 1.0, 1.0]
     # this slice stores ABSOLUTE fluxes (no SIREF, reference entry nonzero): a reference is refused
     with pytest.raises(ValueError, match="not in relative form"):
-        measurements_from_kfile(nl, _machine(), groups=["flux_loop"], flux_reference="L0")
-    g = measurements_from_kfile(nl, _machine(), groups=["flux_loop"], flux_scale=+2 * np.pi).groups["flux_loop"]
+        measurements_from_kfile(nl, _machine(), groups=["flux_loop"], flux_reference="L0", **VBIT_MODEL)
+    g = measurements_from_kfile(nl, _machine(), groups=["flux_loop"], flux_scale=+2 * np.pi,
+                                **VBIT_MODEL).groups["flux_loop"]
     np.testing.assert_allclose(g.measured, 2 * np.pi * np.array([0.1, -0.2, 0.3]))   # a stated scale is applied
     # relative storage (reference entry 0, SIREF set): the reference is accepted
     nl["IN1"]["COILS"] = [0.0, -0.2, 0.3]
     nl["IN1"]["SIREF"] = [0.4]
-    g = measurements_from_kfile(nl, _machine(), groups=["flux_loop"], flux_reference="L0").groups["flux_loop"]
+    g = measurements_from_kfile(nl, _machine(), groups=["flux_loop"], flux_reference="L0",
+                                **VBIT_MODEL).groups["flux_loop"]
     np.testing.assert_allclose(g.measured, -2 * np.pi * np.array([0.0, -0.2, 0.3]))
     assert (g.sigma > 0).all()                     # sigma uses |scale|
     assert g.meta["flux_reference"] == "L0" and g.meta["coils_form"] == "relative"
     with pytest.raises(ValueError, match="flux_reference"):
-        measurements_from_kfile(nl, _machine(), groups=["flux_loop"], flux_reference="nope")
+        measurements_from_kfile(nl, _machine(), groups=["flux_loop"], flux_reference="nope", **VBIT_MODEL)
 
 
 def test_lowercase_repeat_disables_loops(kfile):
     # Fortran semantics: the later 'fwtsi' in the same block overrides FWTSI
-    ms = measurements_from_kfile(kfile, _machine(), groups=["flux_loop"])
+    ms = measurements_from_kfile(kfile, _machine(), groups=["flux_loop"], **VBIT_MODEL)
     assert not ms.groups["flux_loop"].valid.any()
 
 
@@ -175,15 +184,20 @@ def test_coils_split_and_per_turn(kfile):
 
 
 def test_mse_block(kfile):
-    ms = measurements_from_kfile(kfile, _machine(), groups=["mse"])
+    # the E_r status rule refuses this fixture in "auto": D != 0 on both active chords but sign(D) sign(TGAMMA)
+    # agrees on only 1 of 2 (consistency 0.5 < 0.9)
+    with pytest.raises(ValueError, match="inconsistent"):
+        measurements_from_kfile(kfile, _machine(), groups=["mse"])
+    ms = measurements_from_kfile(kfile, _machine(), groups=["mse"], er_corrected=True)
     g = ms.groups["mse"]
     assert len(g.labels) == 3                       # FWTGAM padding dropped
     np.testing.assert_array_equal(g.measured, [0.1, -0.05, 0.0])
     np.testing.assert_array_equal(g.sigma, [0.002] * 3)
     assert g.valid.tolist() == [True, True, False]  # zero TGAMMA = no data
     assert g.meta["er_corrected"] is True and g.meta["quantity"] == "tan_polarisation_angle"
-    np.testing.assert_array_equal(g.meta["tan_gamma_uncorrected"], [0.09, -0.04, 0.0])
-    assert g.meta["er_status"] == "pre_corrected" and g.meta["er_route"] == "efit_internal"
+    np.testing.assert_array_equal(g.meta["tan_gamma_uncorrected"], [0.11, -0.04, 0.0])
+    assert g.meta["er_status"] == "inconsistent" and g.meta["er_route"] == "caller_stated"
+    assert g.meta["er_evidence"]["sign_consistency"] == 0.5
     want = efit_to_imas_coefficients([0.7] * 3, [-0.6] * 3, [0.1] * 3, [0.05] * 3,
                                      [0.4] * 3, [0.0] * 3, [0.02] * 3)
     np.testing.assert_array_equal(g.geometry["coefficients"], want)
@@ -192,17 +206,17 @@ def test_mse_block(kfile):
 
 
 def test_mse_er_flag_rules(kfile):
-    # MSE_USECER absent no longer decides anything: the D rule still applies
-    # (D != 0 and E_r-shaped -> pre-corrected, route 'external')
+    # MSE_USECER absent decides nothing: the D rule still applies (here it refuses, as with MSE_USECER = 1)
     nl = read_kfile(kfile)
     del nl["INS"]["MSE_USECER"]
-    g = measurements_from_kfile(nl, _machine(), groups=["mse"]).groups["mse"]
-    assert g.meta["er_corrected"] is True and g.meta["er_route"] == "external"
+    with pytest.raises(ValueError, match="inconsistent"):
+        measurements_from_kfile(nl, _machine(), groups=["mse"])
     g = measurements_from_kfile(nl, _machine(), groups=["mse"], er_corrected=False).groups["mse"]
     assert g.meta["er_corrected"] is False
     assert g.meta["er_corrected_source"] == "caller override"
     assert g.meta["er_route"] == "caller_stated"
-    assert g.meta["er_status"] == "pre_corrected"      # evidence still recorded
+    assert g.meta["er_status"] == "inconsistent"       # evidence still recorded
+    assert g.meta["er_evidence"]["MSE_USECER"] is None
 
 
 def test_bundle_size_mismatch(kfile):
@@ -229,7 +243,8 @@ def test_vbit_read_from_kfile_sets_the_floor():
     # relative storage (reference entry 0, SIREF set): a reference may be named
     nl["IN1"]["COILS"] = [0.0, -2.0, 0.3]
     nl["IN1"]["SIREF"] = [0.7]
-    ms = measurements_from_kfile(nl, _machine(with_maps=True), flux_reference="L0")
+    ms = measurements_from_kfile(nl, _machine(with_maps=True), flux_reference="L0", er_corrected=True,
+                                 **VBIT_MODEL)
     two_pi = 2 * np.pi
     assert ms.meta["VBIT"] == 40.0 and ms.meta["VBIT_source"] == "k-file &IN1"
     pr = ms.groups["bpol_probe"]
@@ -248,17 +263,21 @@ def test_vbit_read_from_kfile_sets_the_floor():
     np.testing.assert_array_equal(ms.groups["mse"].sigma, [0.002] * 3)      # SGAMMA
 
 
-def test_vbit_absent_defaults_to_ten():
+def test_vbit_absent_taken_from_the_bundle_table():
     ms = measurements_from_kfile(parse_namelists(_with_in1(KFILE, BITMPI="4*2.0E-3")),
-                                 _machine(), groups=["bpol_probe"])
+                                 _machine(), groups=["bpol_probe"], **VBIT_MODEL)
     np.testing.assert_allclose(ms.groups["bpol_probe"].sigma, [0.02, 0.02, 0.02, 0.02])
     assert ms.meta["VBIT"] == 10.0 and "absent" in ms.meta["VBIT_source"]
+    bare = _machine()
+    bare.meta = {}
+    with pytest.raises(ValueError, match="vbit_by_shot"):           # no file value, no caller, no bundle table
+        measurements_from_kfile(parse_namelists(KFILE), bare, groups=["bpol_probe"], **VBIT_MODEL)
 
 
 def test_fixed_ten_bit_model_still_available():
     text = _with_in1(KFILE, VBIT="40.0", BITIP="1.0E+4")
     old = measurements_from_kfile(parse_namelists(text), _machine(with_maps=True),
-                                  sigma_model="efit_serror_bit")
+                                  sigma_model="efit_serror_bit", er_corrected=True)
     np.testing.assert_allclose(old.groups["bpol_probe"].sigma, [0.015, 0.01, 0.01, 0.01])
     np.testing.assert_allclose(old.groups["ip"].sigma, [1.0e5])      # 10 BITIP floor
     assert old.groups["bpol_probe"].meta["sigma_model"] == "efit_serror_bit"

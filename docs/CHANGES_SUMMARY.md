@@ -47,6 +47,13 @@ changes.
   all-versions DOI. `io-and-plotting.md`: the IMAS export's
   `profiles_2d.psi` layout (#101). The docs index lists `draw-methods.md`
   and `current-conventions.md` and says archive schema v3.
+- **Example notebooks re-run on 1.4.1.** The four `examples/D3D-like/`
+  notebooks were executed end to end on the 1.4.1 tree (two of them still
+  printed a 1.3.1 version line). Every stored and in-spec count, every
+  reported number and every figure is unchanged, the figures byte for byte;
+  the differences are the version line, wall times, source line numbers in
+  messages and the reconstruction's report-only pressure line, which the
+  g-file notebooks' outputs predate.
 
 ## 1.4.1 — bug fixes, a template-fallback warning, an opt-in branch-guard diagnostic (2026-10-30)
 

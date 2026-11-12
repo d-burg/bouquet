@@ -127,6 +127,43 @@ def test_q_check_passes_on_identical_profiles_and_fails_on_a_core_mismatch():
     assert CO.q_consistency(r[r < 0.5], q[r < 0.5], r, q)["passed"] is False
 
 
+def test_axis_q_is_the_regular_extrapolation_and_ignores_near_axis_artifacts():
+    """The axis value is the regular-singular extrapolation q0 + q2 rho^2 + q4 rho^4 fitted on the axis
+    window: exact for such a profile, and unaffected by scatter on the innermost surfaces (outside the
+    window), where the raw innermost value is off by percent."""
+    r = np.linspace(0.0244, 0.95, 186)
+    q = 0.87 + 0.9 * r ** 2 - 0.3 * r ** 4
+    a = CO.axis_q(r, q)
+    assert a["q0"] == pytest.approx(0.87, rel=1e-12) and a["rms_rel"] < 1e-13
+    qa = q.copy()
+    inner = r < 0.045
+    qa[inner] *= 1.0 + 0.02 * np.sin(97.0 * r[inner])          # trace scatter near the axis (outside the window)
+    assert abs(qa[0] / 0.87 - 1) > 0.01
+    assert CO.axis_q(r, qa)["q0"] == pytest.approx(0.87, rel=1e-12)
+    with pytest.raises(ValueError):
+        CO.axis_q(r[r < 0.06], q[r < 0.06])                    # too few points in the window
+
+
+def test_q_check_tests_the_extrapolated_axis_at_the_same_criterion():
+    """A model q that agrees with the equilibrium's to < 1 % on the interior range but bends away inside
+    it (axis values differing by > 1 %) fails through the axis test when it is on; by default
+    the axis values are recorded, not tested (the interior criterion is unchanged)."""
+    re = np.linspace(0.0244, 0.95, 186)
+    qe = 1.0 + 0.8 * re ** 2
+    rm = np.linspace(0.0, 1.0, 101)
+    qm = 1.0 + 0.8 * rm ** 2 - 0.025 * np.exp(-(rm / 0.05) ** 2)
+    on = CO.QCheckSettings(test_axis=True)
+    out = CO.q_consistency(re, qe, rm, qm, on)
+    assert out["interior_passed"] is True and out["max_rel"] < 0.01
+    assert out["axis"]["rel"] > 0.01 and out["axis"]["passed"] is False and out["passed"] is False
+    off = CO.q_consistency(re, qe, rm, qm, CO.QCheckSettings(test_axis=False))
+    assert off["passed"] is True and off["axis"]["tested"] is False
+    same = CO.q_consistency(re, qe, rm, 1.0 + 0.8 * rm ** 2, on)
+    assert same["passed"] and same["axis"]["rel"] < 1e-12
+    dflt = CO.q_consistency(re, qe, rm, qm)                   # default: axis values recorded, not tested
+    assert dflt["passed"] is True and dflt["axis"]["tested"] is False and dflt["axis"]["rel"] > 0.01
+
+
 # ============================================================== kinetic inputs
 def _kin_arrays():
     x = np.linspace(0.0, 1.0, 51)

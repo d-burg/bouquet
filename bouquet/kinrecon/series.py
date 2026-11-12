@@ -15,20 +15,29 @@ with, on each interval ``[t_{k-1}, t_k]``,
 * conductivity (Redl 2021 from the kinetic profiles AT EACH SLICE, on that slice's geometry),
   bootstrap (Redl 2021) and driven current (provider) at both ends, linear in time;
 * the plasma current ``Ip(t)`` linear between the slices' measured values, applied at the last closed
-  surface through the lumped outer layer (its conductance and source linear in time; ``|F|`` at the
-  last closed surface fixed at the mean of the two slices' values, stated);
+  surface through the lumped outer layer (its conductance, source and ``|F|`` at the last closed
+  surface linear in time between the two slices' values, so that ``Ip/F`` at both ends of an interval
+  is the slice's own; ``layer_fpol="interval_mean"`` holds ``|F|`` at the mean of the two values, the
+  earlier treatment, kept for comparison);
 * the vacuum field: every slice is solved with its own ``F0 = R0 B0`` (:attr:`SliceData.F0`, the
   measured value at that time; when it is not given the previous slice's value is kept and the
   slice record says so), so ``F`` at the last closed surface differs between the two ends of an
-  interval and the mean above is the interval's value (recorded as ``fpol_lcfs_used`` and
-  ``fpol_lcfs_change``);
+  interval (recorded as ``fpol_lcfs_used`` and ``fpol_lcfs_change``);
 * sawteeth (:mod:`.current.sawtooth`) applied by the reconnection operator, which is the identity
   wherever q >= 1, so there is no sawtooth effect at all on a state with q >= 1 everywhere:
   ``sawtooth="crash_times"`` uses measured crash times; ``sawtooth="periodic"`` places crashes every
-  ``1/nu`` with ``nu`` from the two parameters ``(f, ln Lambda)``.  Phase of the periodic train
+  ``1/nu`` with ``nu`` from the two parameters ``(f, ln Lambda)``; ``ln Lambda`` is fitted at the
+  first slice when the initial state is ``"mse_fit"`` (a free parameter of the first-slice fit by
+  default, as in single-slice fits) and that value sets the train, otherwise it is
+  ``sawtooth_log_strength`` (default: the fit module's prior mean).  Phase of the periodic train
   (stated, not measured): the first slice's state is the CYCLE AVERAGE of the periodic orbit (initial
   ``"relaxed"`` and ``"mse_fit"``), and the first crash of the train is one period AFTER the first
-  slice time (``t_0 + 1/nu``, ``t_0 + 2/nu``, ...); ``"off"``: none.  A slice reports the crash-free end state plus the sawtooth effect averaged
+  slice time (``t_0 + 1/nu``, ``t_0 + 2/nu``, ...; ``sawtooth_first_crash_phase`` moves it to
+  ``t_0 + phase/nu`` for sensitivity studies).  With measured crash times the first slice's state
+  is the window average of the measured-crash slice run of the current model over the window
+  ``[t_0 - (t_1 - t_0), t_0]`` (the first interval's length; the run starts on the periodic orbit at
+  the measured mean interval ``history`` before the window, so the crash record must cover it), and
+  the later crashes are the measured ones; ``"off"``: none.  A slice reports the crash-free end state plus the sawtooth effect averaged
   over the interval since the previous slice (the measurement window): ``psi = psi_end^(no crash) +
   <psi^(crashes)>_window - <psi^(no crash)>_window``.  This is the instantaneous state when the operator
   acted as the identity, is continuous in the state (a switch between averaged and instantaneous states
@@ -64,10 +73,18 @@ Initial state (first slice):
 * ``"auto"``: ``"mse_fit"`` when the first slice has an MSE group declared E_r-corrected, else
   ``"relaxed"`` (recorded).
 
+A first-slice fit must end ``"converged"`` to start a series (the standard the filter applies to its
+fits): any other status -- ``"converged_within_noise"``, stalled, max_iter, a failure -- refuses the
+series with the reason (``status="refused_initial_fit_not_converged"``), unless
+``initial_fit_nonconverged="proceed_labeled"`` was set, in which case the series starts from that
+fit's center and the start is labeled in the result (``initial_fit_nonconverged_start``) and in the
+first slice's fit record (``start_label``).
+
 Fit interaction: (i) default -- the initial state is fitted once; later slices are evolved and
 SCORED with no fitting (a prediction test); (ii) ``filter=True`` -- at every later slice the
 correction amplitudes are re-fitted with the evolved state as the prior mean (corrections
-N(0, sigma) on top of it).  Only a filter fit with status ``"converged"`` is absorbed: the state is
+N(0, sigma) on top of it).  Only a filter fit with status ``"converged"`` is absorbed (not
+``"converged_within_noise"``, whose status is recorded like any other non-absorbed one): the state is
 re-advanced on the ACCEPTED center's own equilibrium (the fit's other solves -- Jacobian columns,
 trials -- also advance the state, on their perturbed equilibria, and none of those is carried),
 the corrections are added to it as their zero-net-current steady response, and that state is
@@ -77,6 +94,16 @@ carried; the record says ``absorbed: False`` with the fit's status.
 
 The vessel/eddy-current contribution through the previous slice's flux is not modeled
 (``vessel_eddy=False``; ``True`` is refused).
+
+Numerical defaults (documented; each a setting): the carried state lives on ``n_cells = 100``
+uniform rho_tor,norm cells (:class:`.current_model.CurrentModelSettings`); the diffusion is advanced
+with TR-BDF2 in steps of at most ``dt_max = 1 ms``; the model profiles are evaluated on a physics grid
+of 201 points uniform in rho_tor,norm plus the outer-layer samples; the pass loop of each slice is
+Anderson-accelerated with depth 3 and falls back to the plain input when a mixed input does not
+solve; the diffusion and the equilibrium are coupled by Picard iteration within each step (holding
+psi(rho) or q(rho) fixed while the geometry iterates was tried and did not converge); the psi_N <->
+rho_tor,norm map is interpolated in rho^2 with a bisection inverse (PCHIP in rho was less accurate
+near the axis).
 """
 
 import copy
@@ -96,6 +123,10 @@ __all__ = ["SliceData", "SeriesSettings", "run_series", "INITIAL_MODES", "SAWTOO
 
 INITIAL_MODES = ("auto", "mse_fit", "relaxed", "from_profile")
 SAWTOOTH_MODES = ("periodic", "crash_times", "off")
+#: What a series does when its first-slice fit (``initial="mse_fit"``) did not end ``"converged"``.
+INITIAL_FIT_POLICIES = ("refuse", "proceed_labeled")
+#: How the lumped outer layer's ``|F|`` at the last closed surface varies over an interval.
+LAYER_FPOL_MODES = ("linear", "interval_mean")
 
 
 @dataclass
@@ -117,7 +148,9 @@ class SeriesSettings:
     """Every setting of the series driver (recorded)."""
     initial: str = "auto"
     initial_profile: Optional[Any] = None                # (rho_tor_norm, <J.B> [A T/m^2]) for "from_profile"
-    initial_fit: _fit.FitSettings = field(default_factory=lambda: _fit.FitSettings(free=("a_corr",)))
+    initial_fit: Optional[_fit.FitSettings] = None       # None: free ("log_strength", "a_corr") with periodic
+    #                                                      sawteeth, ("a_corr",) otherwise
+    initial_fit_nonconverged: str = "refuse"             # INITIAL_FIT_POLICIES
     filter: bool = False
     filter_fit: _fit.FitSettings = field(default_factory=lambda: _fit.FitSettings(free=("a_corr",)))
     dt_max: float = 1.0e-3                               # diffusion step [s]
@@ -125,7 +158,9 @@ class SeriesSettings:
     sawtooth: str = "periodic"
     sawtooth_f: float = _fit.PRIOR_F
     sawtooth_log_strength: Optional[float] = None        # None: the prior mean of the fit module
+    sawtooth_first_crash_phase: float = 1.0              # periodic train: first crash at t0 + phase/nu (0, 1]
     crash_times: Optional[Sequence[float]] = None
+    layer_fpol: str = "linear"                           # LAYER_FPOL_MODES
     vessel_eddy: bool = False
     keep_going_after_failure: bool = False   # True: a failed slice is recorded and skipped; the next interval
     #                                          starts from the last consistent state (recorded per slice)
@@ -139,6 +174,18 @@ class SeriesSettings:
             raise ValueError("sawtooth='crash_times' needs crash_times")
         if self.vessel_eddy:
             raise NotImplementedError("the vessel/eddy-current contribution is not modeled (vessel_eddy=False)")
+        if self.initial_fit_nonconverged not in INITIAL_FIT_POLICIES:
+            raise ValueError(f"initial_fit_nonconverged must be one of {INITIAL_FIT_POLICIES}")
+        if not 0.0 < float(self.sawtooth_first_crash_phase) <= 1.0:
+            raise ValueError("sawtooth_first_crash_phase must lie in (0, 1]")
+        if self.layer_fpol not in LAYER_FPOL_MODES:
+            raise ValueError(f"layer_fpol must be one of {LAYER_FPOL_MODES}")
+        if self.initial_fit is None:
+            free = ("log_strength", "a_corr") if self.sawtooth == "periodic" else ("a_corr",)
+            self.initial_fit = _fit.FitSettings(free=free)
+        if self.sawtooth != "periodic" and "log_strength" in self.initial_fit.free:
+            raise ValueError("log_strength is a free parameter of the first-slice fit only with periodic sawteeth "
+                             "(with measured crash times the rate is measured; with sawteeth off it has no effect)")
 
     def log_strength(self):
         return (_fit.PARAMETERS["log_strength"]["prior"][0] if self.sawtooth_log_strength is None
@@ -151,19 +198,19 @@ class SeriesSettings:
         return d
 
 
-def _period(settings):
-    lam = float(np.exp(settings.log_strength()))
+def _period(settings, log_strength=None):
+    lam = float(np.exp(settings.log_strength() if log_strength is None else log_strength))
     return 1.0 / float(_saw.rate_from_strength(lam, settings.sawtooth_f))
 
 
-def _crash_times(settings, t0, t_end):
+def _crash_times(settings, t0, t_end, log_strength=None):
     if settings.sawtooth == "off":
         return np.zeros(0)
     if settings.sawtooth == "crash_times":
         return np.asarray(settings.crash_times, float)
-    tau = _period(settings)
+    tau = _period(settings, log_strength)
     n = int(np.ceil((t_end - t0) / tau)) + 2
-    return t0 + tau * np.arange(1, n)
+    return t0 + tau * (float(settings.sawtooth_first_crash_phase) + np.arange(0, n - 1))
 
 
 def _layer_integrals(lag, sigma_ge, jni_ge):
@@ -180,9 +227,11 @@ def _jni(lag, kin, src, params):
     return p["s_bs"] * lag["jbs"] + jcd
 
 
-def interval_solver(lag0, lag1, jni0, jni1, t0, t1, ip0, ip1):
+def interval_solver(lag0, lag1, jni0, jni1, t0, t1, ip0, ip1, layer_fpol="linear"):
     """Time-dependent :class:`CurrentDiffusion` on ``[t0, t1]`` between two slices' lagged inputs
-    (module docstring)."""
+    (module docstring).  ``layer_fpol``: the outer layer's ``|F|`` at the last closed surface linear in
+    time between the two slices' values (``"linear"``, default; consistent with the domain's ``F`` at
+    both ends) or held at their mean (``"interval_mean"``, the earlier treatment)."""
     g0, g1 = lag0["geom"], lag1["geom"]
     if not np.array_equal(g0.rho, g1.rho):
         g1 = g1.resample(g0.rho)
@@ -200,10 +249,17 @@ def interval_solver(lag0, lag1, jni0, jni1, t0, t1, ip0, ip1):
     c0, c1 = float(lag0["psi_n_edge"]), float(lag1["psi_n_edge"])
     if abs(c0 - c1) > 1e-12:
         raise ValueError(f"domain edge changed between slices ({c0} -> {c1}): not supported")
-    layer = OuterLayer(c1, 0.5 * (f0 + f1), ((t0, t1), (a0, a1)), ((t0, t1), (b0, b1)))
+    if layer_fpol == "linear":
+        flay = ((t0, t1), (f0, f1))
+    elif layer_fpol == "interval_mean":
+        flay = 0.5 * (f0 + f1)
+    else:
+        raise ValueError(f"layer_fpol must be one of {LAYER_FPOL_MODES}")
+    layer = OuterLayer(c1, flay, ((t0, t1), (a0, a1)), ((t0, t1), (b0, b1)))
     sol = CurrentDiffusion(sched, ((t0, t1), rho, np.vstack((s0, s1))), IpBoundary(((t0, t1), (ip0, ip1))),
                            j_ni=((t0, t1), rho, np.vstack((j0, j1))), outer_layer=layer)
-    return sol, dict(fpol_lcfs_used=0.5 * (f0 + f1), fpol_lcfs_change=f1 - f0, dphib_dt=(g1.phi_b - g0.phi_b) / (t1 - t0),
+    return sol, dict(fpol_lcfs_used=(0.5 * (f0 + f1) if layer_fpol == "interval_mean" else [f0, f1]),
+                     layer_fpol=layer_fpol, fpol_lcfs_change=f1 - f0, dphib_dt=(g1.phi_b - g0.phi_b) / (t1 - t0),
                      layer_A=(a0, a1), layer_B=(b0, b1))
 
 
@@ -258,6 +314,7 @@ def _slice_record(fm, res, sl, label, extra=None):
                pass_trace=[{k: p.get(k) for k in ("k", "dj", "q_max_rel", "solve_status", "its", "anderson_mixed",
                                                   "anderson_fallback", "d_axis_m")} for p in res.record.get("passes", [])],
                q_axis_traced=None if lag is None else lag["phys"].get("q_axis"),
+               q0_axis=((res.record.get("q_check") or {}).get("axis") or {}).get("q0_eq"),
                fractions=asm["fractions"] if asm else None, currents_A=asm["currents_A"] if asm else None,
                v_loop=asm["v_loop"] if asm else None, sawtooth=asm["sawtooth"] if asm else None,
                q_model=dict(rho=np.asarray(asm["q_model"]["rho"]).tolist(), q=np.asarray(asm["q_model"]["q"]).tolist())
@@ -298,12 +355,12 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
         mode = "mse_fit" if (mse is not None and bool(mse.meta.get("er_corrected", False))) else "relaxed"
         out["initial_auto_choice"] = mode
     case = fm.case
-    crash = _crash_times(s, times[0], times[-1])
-    out["crash_times_used"] = crash.tolist() if s.sawtooth != "periodic" else dict(
-        period_s=_period(s), phase="first slice: cycle average of the periodic orbit; first crash one period after "
-                                   "the first slice time", f=s.sawtooth_f,
-        log_strength=s.log_strength())
-    p_relaxed = dict(log_strength=(s.log_strength() if s.sawtooth == "periodic" else None), f=s.sawtooth_f)
+    ls_used = s.log_strength() if s.sawtooth == "periodic" else None
+    ls_source = "series setting (sawtooth_log_strength, or the fit module's prior mean)" if ls_used is not None else None
+    p_relaxed = dict(log_strength=ls_used, f=s.sawtooth_f)
+    cfg0 = cfg
+    if s.sawtooth == "crash_times":
+        cfg0, p_relaxed, out["first_slice_crash_start"] = _measured_crash_start(s, cfg, times)
     # ---------------------------------------------------------------- slice 0
     t0 = time.perf_counter()
     n0 = fm.n_solves
@@ -312,7 +369,7 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
     if start_psi is not None:
         fm.set_psi(start_psi)
     if mode == "mse_fit":
-        fr = _fit.reconstruct(fm, sl0.kinetics, sl0.sources, cfg, s.initial_fit, params0=p_relaxed,
+        fr = _fit.reconstruct(fm, sl0.kinetics, sl0.sources, cfg0, s.initial_fit, params0=p_relaxed,
                               initial_profiles=initial_profiles, label=f"{sl0.label}:mse_fit")
         if fr.record.get("center") is None:
             c0 = fr.record.get("center0") or {}
@@ -329,7 +386,27 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
         res0 = fr.record["center"]["res"]
         fm.restore(fr.record["center"]["snap"])
         fm.probe_correction = fr.record["center"]["probe_correction"].copy()
-        fitrec = dict(status=fr.status, free=list(fr.free), theta=fr.theta.tolist(), sigma=fr.sigma.tolist(),
+        start_note = None
+        if fr.status != "converged":
+            # the same standard as the filter: a series does not start from a fit that is not "converged"
+            # unless the caller asked for it explicitly, and then the start is labeled
+            start_note = (f"the first-slice fit ended '{fr.status}', not 'converged'; the series starts from its "
+                          f"center by explicit option (initial_fit_nonconverged='proceed_labeled')")
+            if s.initial_fit_nonconverged == "refuse":
+                msg = (f"first-slice fit ended '{fr.status}', not 'converged': the series is not started from it "
+                       "(set initial_fit_nonconverged='proceed_labeled' to start from its center, labeled)")
+                out["slices"].append(dict(label=sl0.label, time=sl0.time, status="initial_fit_not_converged",
+                                          fit_status=fr.status, stopping_summary=fr.record.get("stopping_summary"),
+                                          n_solves=fm.n_solves - n0, reason=msg))
+                out.update(status="refused_initial_fit_not_converged", reason=msg, n_solves=fm.n_solves - n_solves0,
+                           wall_s=round(time.perf_counter() - t_all, 2))
+                return out
+            out["initial_fit_nonconverged_start"] = dict(status=fr.status, policy=s.initial_fit_nonconverged,
+                                                         note=start_note)
+        if "log_strength" in fr.free:
+            ls_used = float(fr.params["log_strength"])
+            ls_source = f"fitted at the first slice (status {fr.status})"
+        fitrec = dict(status=fr.status, start_label=start_note, free=list(fr.free), theta=fr.theta.tolist(), sigma=fr.sigma.tolist(),
                       prior={n: fr.record["specs"][n]["prior"] for n in fr.free}, chi2=fr.chi2,
                       n_solves=fr.record["n_solves"], wall_s=fr.record["wall_s"],
                       iterations=len(fr.record["iterations"]), stopping=fr.record.get("final_stopping_tests"),
@@ -341,7 +418,7 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
         if mode == "from_profile":
             def state_fn0(lag):
                 return _given_state(lag, s, cfg, _slice_ip(sl0))
-        res0 = _cm.consistent_solve(fm, sl0.kinetics, sl0.sources, p_relaxed, cfg, label=f"{sl0.label}:{mode}",
+        res0 = _cm.consistent_solve(fm, sl0.kinetics, sl0.sources, p_relaxed, cfg0, label=f"{sl0.label}:{mode}",
                                     initial_profiles=initial_profiles, state_fn=state_fn0)
         params0 = p_relaxed
     rec0 = _slice_record(fm, res0, sl0, sl0.label, dict(initial_mode=mode, fit=fitrec, n_solves=fm.n_solves - n0,
@@ -350,9 +427,17 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
     out["slices"].append(rec0)
     if callback:
         callback(rec0)
+    if res0.converged and mode in ("relaxed", "mse_fit"):
+        out["relaxed_start_guard"] = _relaxed_start_guard(res0, sl0, mode)
     if not res0.converged:
         out.update(status="failed_initial", n_solves=fm.n_solves - n_solves0, wall_s=round(time.perf_counter() - t_all, 2))
         return out
+    crash = _crash_times(s, times[0], times[-1], ls_used)
+    out["crash_times_used"] = crash.tolist() if s.sawtooth != "periodic" else dict(
+        period_s=_period(s, ls_used), phase=("first slice: cycle average of the periodic orbit; first crash "
+                                             f"{s.sawtooth_first_crash_phase:g} period after the first slice time"),
+        first_crash_phase=float(s.sawtooth_first_crash_phase), f=s.sawtooth_f,
+        log_strength=ls_used, log_strength_source=ls_source)
     st0 = res0.assembly["state"]
     carried = CurrentState(st0.rho_faces, st0.psi, st0.psi_boundary, times[0], dict(initial_mode=mode))
     out["slices"][-1]["carried_state"] = _state_record(carried)
@@ -387,7 +472,7 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
         def state_fn(lag, sl=sl, t1=t1, tp=tp, ip0=ip0, ip1=ip1, carried=carried, lag_prev=lag_prev,
                      jni_prev=jni_prev, holder=holder):
             jni1 = _jni(lag, sl.kinetics, sl.sources, p_pred)
-            sol, info = interval_solver(lag_prev, lag, jni_prev, jni1, tp, t1, ip0, ip1)
+            sol, info = interval_solver(lag_prev, lag, jni_prev, jni1, tp, t1, ip0, ip1, s.layer_fpol)
             end, events, states = advance_interval(sol, carried, t1, s, crash, s.dt_max)
             holder.clear()
             holder.update(end=end, events=events, states=states, info=info, jni1=jni1, window_average=False)
@@ -440,6 +525,66 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
     return out
 
 
+#: Relaxed-start applicability guard (warning only): reference q_min and non-inductive fraction limits.
+RELAXED_GUARD_Q_MIN = 1.2
+RELAXED_GUARD_F_NI = 0.5
+
+
+def _relaxed_start_guard(res0, sl0, mode):
+    """Warn when the first slice's relaxed-current start is applied outside its range: reference q_min >
+    :data:`RELAXED_GUARD_Q_MIN` or non-inductive (bootstrap + driven) current fraction >
+    :data:`RELAXED_GUARD_F_NI`.  The reference q_min is ``sl0.meta["reference_q_min"]`` when given (e.g. the
+    reference equilibrium's), else the first slice's solved equilibrium's q on rho_tor,norm <= 0.95.  A
+    warning only (recorded); nothing is refused."""
+    import warnings
+    ph = res0.lag["phys"] if res0.lag is not None else None
+    qmin, qsrc = sl0.meta.get("reference_q_min"), "slice meta reference_q_min"
+    if qmin is None and ph is not None:
+        m = np.asarray(ph["rho"]) <= 0.95
+        qmin, qsrc = float(np.min(np.asarray(ph["q"])[m])), "first slice's solved equilibrium (rho_tor,norm <= 0.95)"
+    fr = (res0.assembly or {}).get("fractions") or {}
+    fni = float(fr.get("bootstrap", 0.0) + fr.get("driven", 0.0)) if fr else None
+    reasons = []
+    if qmin is not None and qmin > RELAXED_GUARD_Q_MIN:
+        reasons.append(f"reference q_min = {qmin:.3g} > {RELAXED_GUARD_Q_MIN}")
+    if fni is not None and fni > RELAXED_GUARD_F_NI:
+        reasons.append(f"non-inductive fraction = {fni:.3g} > {RELAXED_GUARD_F_NI}")
+    rec = dict(mode=mode, q_min=qmin, q_min_source=qsrc, f_ni=fni, q_min_limit=RELAXED_GUARD_Q_MIN,
+               f_ni_limit=RELAXED_GUARD_F_NI, warned=bool(reasons), reasons=reasons)
+    if reasons:
+        warnings.warn(f"the first slice's start rests on a relaxed ohmic current ({mode}) outside its range of "
+                      f"applicability: {'; '.join(reasons)}", RuntimeWarning, stacklevel=3)
+    return rec
+
+
+def _measured_crash_start(s, cfg, times):
+    """First-slice settings with measured crash times: the slice-run state of the current model
+    (:func:`.current.sawtooth.simulate_slice`: periodic start at the measured mean interval, the measured
+    crashes from ``history`` before the window on) averaged over the window ``[t_0 - (t_1 - t_0), t_0]``
+    -- the same window convention as every later slice (the interval since the previous slice).  The
+    strength is the one of the measured mean interval at ``sawtooth_f`` (it sets only the orbit's step).
+    Returns ``(cfg0, params, record)``; a crash record that does not cover the history raises."""
+    import dataclasses
+    if len(times) < 2:
+        raise ValueError("sawtooth='crash_times' needs at least two slices (the first window is the first interval)")
+    window = (float(times[0] - (times[1] - times[0])), float(times[0]))
+    try:
+        sched = _saw.schedule_for_slice(s.crash_times, window, history=cfg.history)
+    except ValueError as exc:
+        raise ValueError(f"measured crash times cannot start the series at its first slice: {exc}") from exc
+    if sched.mean_interval is None:
+        raise ValueError("measured crash times cannot start the series: fewer than two crashes in the history "
+                         f"[{sched.t_start}, {window[1]}]")
+    ls = float(np.log(_saw.crash_strength(s.sawtooth_f, 1.0 / sched.mean_interval)))
+    cfg0 = dataclasses.replace(cfg, crash_times=tuple(float(x) for x in s.crash_times), window=window)
+    rec = dict(window=list(window), history_s=cfg.history, mean_interval_s=sched.mean_interval,
+               n_crashes_history=sched.n_crashes_history, n_crashes_window=sched.n_crashes_window,
+               last_crash_before_history=sched.last_crash_before_start, f=s.sawtooth_f, log_strength=ls,
+               note="first slice: window average of the measured-crash slice run over the first interval's length "
+                    "before the first slice time; the series carries that state")
+    return cfg0, dict(log_strength=ls, f=s.sawtooth_f), rec
+
+
 def _apply_f0(fm, sl):
     """Set the slice's vacuum ``F0`` on the forward model (kept when the slice gives none)."""
     if sl.F0 is None:
@@ -474,7 +619,8 @@ def _filter_slice(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1):
                 n_solves=fr.record["n_solves"], wall_s=fr.record["wall_s"],
                 stopping=fr.record.get("final_stopping_tests"), stopping_summary=fr.record.get("stopping_summary"))
     if c is None or fr.status != "converged":
-        # not absorbed: the slice stays at its evolved, unfitted equilibrium and state
+        # not absorbed (also "converged_within_noise": only "converged" is absorbed): the slice stays at its
+        # evolved, unfitted equilibrium and state
         fm.restore(pred["snap"])
         fm.probe_correction = pred["pc"].copy()
         holder.clear()

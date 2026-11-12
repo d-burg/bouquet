@@ -135,6 +135,22 @@ Sawtooth hooks (the reconnection model itself is :mod:`.sawtooth`)
   used within the step; it is evaluated with the state at the start of the
   step for every stage, so each step stays linear.
 
+Design choices (documented defaults)
+------------------------------------
+* Boundary values in time: ``Ip(t)`` (or ``V(t)``) is evaluated at every stage time from its table
+  (interpolated in time), not held at the end-of-step value.
+* Steady state by direct quadrature of the integrated equation (above), not by time stepping.
+* The Ip condition is a flux condition ``I/F`` at the last face (``Ip/F_lcfs`` with the outer
+  layer); the loop-voltage condition carries ``psi_b`` as an extra unknown with a second-order
+  boundary row.
+* Conductivity tables are interpolated in log space (PCHIP); all coefficients are re-evaluated at the
+  stage times.
+* Tables are evaluated inside their range only; extrapolation must be asked for
+  (``extrapolate=True``).
+* Geometry from an equilibrium (:func:`.geometry.from_tokamaker`): samples uniform in
+  ``sqrt(psi_N)`` from the axis pad to the domain edge (0.995 by the domain-edge rule), the outer
+  layer from its own traced surfaces.
+
 Credits
 -------
 Formulation after B. C. Lyons, "Neoclassical current diffusion solver"
@@ -322,8 +338,12 @@ class OuterLayer:
     Direct form: ``OuterLayer(psi_n_edge, fpol_lcfs, conductance, source)``
     with the layer integrals ``A_layer`` [A s / (Wb T m) = 1/(Ohm T m)] and
     ``B_layer`` [A/(T m)] as constants, callables ``f(t)`` or ``(times,
-    values)``.  Full-plasma q95 / l_i(3) are then not available (no layer
-    profile).
+    values)``.  ``fpol_lcfs`` (``|F|`` at the last closed surface, where the
+    outer flux ``Ip/F_lcfs`` applies) is a constant or, in the direct form, a
+    callable ``f(t)`` or ``(times, values)`` table like the integrals (so that
+    it can follow a time-dependent geometry: :meth:`fpol_at`; the attribute
+    ``fpol_lcfs`` is then ``None``).  Full-plasma q95 / l_i(3) are then not
+    available (no layer profile).
 
     Profile form: :meth:`from_profiles` with an
     :class:`.geometry.OuterLayerGeometry` and the layer's conductivity and
@@ -334,11 +354,16 @@ class OuterLayer:
 
     def __init__(self, psi_n_edge, fpol_lcfs, conductance, source=0.0, extrapolate=False):
         self.psi_n_edge = float(psi_n_edge)
-        self.fpol_lcfs = float(fpol_lcfs)
         if not 0.0 < self.psi_n_edge < 1.0:
             raise ValueError("psi_n_edge must lie in (0, 1)")
-        if not (np.isfinite(self.fpol_lcfs) and self.fpol_lcfs > 0):
-            raise ValueError("fpol_lcfs must be positive (|F| at the last closed surface)")
+        if np.isscalar(fpol_lcfs):
+            self.fpol_lcfs = float(fpol_lcfs)
+            if not (np.isfinite(self.fpol_lcfs) and self.fpol_lcfs > 0):
+                raise ValueError("fpol_lcfs must be positive (|F| at the last closed surface)")
+            self._F = None
+        else:
+            self.fpol_lcfs = None
+            self._F = as_time_function(fpol_lcfs, extrapolate, "outer-layer |F| table")
         self._A = as_time_function(conductance, extrapolate, "outer-layer conductance table")
         self._B = as_time_function(source, extrapolate, "outer-layer source table")
         self.geometry = None
@@ -364,6 +389,15 @@ class OuterLayer:
         obj._A = lambda t: geometry.integral(geometry.conductance_density(obj._sigma(t, geometry.psi_n)))
         obj._B = lambda t: geometry.integral(geometry.source_density(obj._jni(t, geometry.psi_n)))
         return obj
+
+    def fpol_at(self, t):
+        """``|F|`` at the last closed surface at time ``t`` [T m]."""
+        if self._F is None:
+            return self.fpol_lcfs
+        v = float(self._F(t))
+        if not (np.isfinite(v) and v > 0):
+            raise ValueError(f"outer-layer |F|({t!r}) = {v!r} must be positive")
+        return v
 
     def integrals(self, t):
         """``(A_layer, B_layer)`` at time ``t``."""
@@ -730,7 +764,7 @@ class CurrentDiffusion:
         wfac = geo.dphib_dt / (2.0 * geo.phi_b)
         if self.outer_layer is not None:
             lay_a, lay_b = self.outer_layer.integrals(t)
-            f_lcfs = self.outer_layer.fpol_lcfs
+            f_lcfs = self.outer_layer.fpol_at(t)
         else:
             lay_a, lay_b, f_lcfs = 0.0, 0.0, float(gf["fpol"][-1])
         return _Coeffs(t=t, k_f=k_f, F_f=gf["fpol"], m_c=m_c, s_c=s_c, w_c=wfac * rc, w_b=wfac, sigma_c=sigma,

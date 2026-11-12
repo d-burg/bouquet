@@ -52,23 +52,45 @@ q consistency
 -------------
 :func:`q_consistency` compares the solver's q(rho) with the diffusion model's q(rho) on the model
 grid.  Criterion (a setting; :data:`Q_CHECK_DEFAULT`): ``max |q_eq - q_model| / q_model <= tol_rel``
-(1e-2) over ``rho in [rho_min, rho_max]`` = [0.05, 0.95] by default.  Inside rho ~ 0.05 the check
-would compare extrapolations and near-axis traces rather than profiles: the axis values of the two
-q profiles are both extrapolations (different formulas), and the solver's traced q on the innermost
-surfaces is not monotone on smooth equilibria (trace accuracy); the axis values are reported
-separately (``q0_eq_axis`` / ``q0_model_axis``), not tested.  ``rho_min=None`` uses the innermost
-surface of the equilibrium table.  The pass-consistency loop of
-:mod:`.current_model` requires it in addition to the profile-change criterion.
+(1e-2) over ``rho in [rho_min, rho_max]`` = [0.05, 0.95] by default.  ``rho_min=None`` uses the
+innermost surface of the equilibrium table.  The pass-consistency loop of :mod:`.current_model`
+requires it in addition to the profile-change criterion.
+
+Axis.  Neither side's innermost values are usable as the axis q: the solver's traced q on the
+innermost surfaces (rho below ~0.05) scatters by up to ~2 % around a smooth profile (contour
+tracing of small surfaces), a trace at psi_N -> 0 is worse (up to ~27 % off), and the model's q on its
+innermost faces deviates from a smooth profile by a similar amount (finite differences next to the
+axis).  TokaMaker's ``get_stats()['q_0']`` is q at psi_N = 0.02 by its definition, not an axis
+value.  The axis value of each side is therefore the regular-singular extrapolation of its own q
+from surfaces where it is smooth: q is an even, regular function of rho at the magnetic axis, so
+
+.. code-block:: text
+
+    q(rho) = q0 + q2 rho^2 + q4 rho^4 + ...
+
+is fitted by least squares (``axis_degree`` terms in rho^2 after q0) on ``rho in axis_window``
+(default [0.05, 0.15], where both sides deviate from a smooth fit by ~1e-3, measured) and ``q0`` is
+the axis value; the same construction is applied to the equilibrium and to the model.  The axis
+test (``test_axis=True``) applies the SAME criterion as the interior, ``|q0_eq - q0_model| /
+q0_model <= tol_rel``, and is then part of ``passed``.  By default the axis values and their
+difference are computed and recorded on every check but NOT tested: on a peaked public test
+equilibrium (q0 ~ 0.47, no sawteeth) the equilibrium's trace is rough inside the window (rms 0.4 %
+of q0 about the fit) and the extrapolated axis values differ by 1.08 %, so whether the test measures
+the profiles or the trace there is not settled; whether to test the axis is a decision for the
+user.  Because the window starts where the interior range
+starts, the axis test checks that the two profiles extrapolate to the same axis value; a
+disagreement confined to rho < 0.05 is outside what either side resolves.  The fit's rms deviation
+(relative to q0) is recorded for both sides (``axis``).
 """
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
 import numpy as np
 from scipy.interpolate import PchipInterpolator
 
 __all__ = ["RhoMap", "rho_map_from_geometry", "solver_knots", "KNOT_RULES", "KnotSettings", "QCheckSettings",
-           "Q_CHECK_DEFAULT", "q_consistency"]
+           "Q_CHECK_DEFAULT", "q_consistency", "axis_q"]
 
 #: Knot rules understood by :func:`solver_knots`.
 KNOT_RULES = ("rho_tor_uniform", "sqrt_psin_uniform", "psin_uniform")
@@ -248,6 +270,9 @@ class QCheckSettings:
     rho_max: float = 0.95
     n_rho: int = 39
     required: bool = True
+    test_axis: bool = False                   # True: the extrapolated axis values (module docstring) at tol_rel
+    axis_window: Sequence[float] = (0.05, 0.15)
+    axis_degree: int = 2                      # terms in rho^2 after q0
 
     def as_dict(self):
         return asdict(self)
@@ -263,7 +288,8 @@ def q_consistency(rho_eq, q_eq, rho_model, q_model, settings=None):
     model's q on rho_tor,norm.  Both are interpolated (PCHIP) onto ``n_rho`` points uniform in
     ``[rho_min, rho_max]`` (inside both tables; ``rho_min=None``: the larger of the two tables' first
     radii).  Returns a dict with
-    ``passed``, ``max_rel``, where it occurs, the values at the axis and the criterion.
+    ``passed``, ``max_rel``, where it occurs, the axis values and their test (``axis``,
+    :func:`axis_q`), and the criterion.
     """
     s = settings or Q_CHECK_DEFAULT
     re, qe = np.asarray(rho_eq, float), np.abs(np.asarray(q_eq, float))
@@ -287,6 +313,33 @@ def q_consistency(rho_eq, q_eq, rho_model, q_model, settings=None):
     b = PchipInterpolator(rm, qm)(r)
     rel = np.abs(a - b) / np.abs(b)
     i = int(np.argmax(rel))
-    return dict(passed=bool(rel[i] <= s.tol_rel), max_rel=float(rel[i]), rho_at_max=float(r[i]),
+    interior_ok = bool(rel[i] <= s.tol_rel)
+    ax = dict(tested=bool(s.test_axis))
+    try:
+        ae = axis_q(re, qe, s.axis_window, s.axis_degree)
+        am = axis_q(rm, qm, s.axis_window, s.axis_degree)
+        arel = abs(ae["q0"] - am["q0"]) / abs(am["q0"])
+        ax.update(q0_eq=ae["q0"], q0_model=am["q0"], rel=float(arel), passed=bool(arel <= s.tol_rel),
+                  fit_rms_rel_eq=ae["rms_rel"], fit_rms_rel_model=am["rms_rel"], n_eq=ae["n"], n_model=am["n"],
+                  window=list(s.axis_window), degree=int(s.axis_degree))
+    except ValueError as exc:
+        ax.update(passed=False, reason=str(exc))
+    passed = interior_ok and (ax["passed"] or not s.test_axis)
+    return dict(passed=passed, interior_passed=interior_ok, max_rel=float(rel[i]), rho_at_max=float(r[i]),
                 q_eq_at_max=float(a[i]), q_model_at_max=float(b[i]), q0_eq=float(a[0]), q0_model=float(b[0]),
-                criterion=s.as_dict(), rel_profile=dict(rho=r.tolist(), rel=rel.tolist()))
+                axis=ax, criterion=s.as_dict(), rel_profile=dict(rho=r.tolist(), rel=rel.tolist()))
+
+
+def axis_q(rho, q, window=(0.05, 0.15), degree=2):
+    """Axis value of a q profile by regular-singular extrapolation (module docstring): least squares
+    ``q = q0 + sum_{j=1..degree} c_j rho^(2j)`` on ``rho in window``.  Returns ``dict(q0, rms_rel, n)``;
+    fewer than ``degree + 3`` points in the window raises ``ValueError``."""
+    r, qq = np.asarray(rho, float), np.abs(np.asarray(q, float))
+    m = np.isfinite(r) & np.isfinite(qq) & (r >= float(window[0]) - 1e-12) & (r <= float(window[1]) + 1e-12)
+    n = int(np.count_nonzero(m))
+    if n < int(degree) + 3:
+        raise ValueError(f"axis q: {n} points in rho {list(window)} (need >= {int(degree) + 3})")
+    V = np.vander(r[m] ** 2, int(degree) + 1, increasing=True)
+    c, *_ = np.linalg.lstsq(V, qq[m], rcond=None)
+    res = qq[m] - V @ c
+    return dict(q0=float(c[0]), rms_rel=float(np.sqrt(np.mean(res ** 2)) / abs(c[0])), n=n)

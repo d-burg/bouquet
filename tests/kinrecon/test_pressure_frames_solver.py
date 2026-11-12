@@ -51,6 +51,8 @@ _CHILD = textwrap.dedent('''
                    p_sep=p_sep, solver_p_edge=float(p[-1]), back_edge=float(back["pressure"][-1]),
                    back_meta=back["meta"], consistency=P.check_consistency(back["psi"], back["pressure"],
                                                                            back["dpressure_dpsi"]),
+                   back_psi=back["psi"].tolist(), back_p=back["pressure"].tolist(),
+                   back_dp=back["dpressure_dpsi"].tolist(),
                    W_solver=fr["solver"]["W_MHD"], W_full=fr["full"]["W_MHD"], vol=fr["volume"]),
               open({out!r} + "/out.json", "w"))
 ''')
@@ -69,10 +71,41 @@ def test_full_pressure_delivery_round_trip(tmp_path):
     assert d["pprime_equal"]
     # the g-file's last point is psi_N = 1 - lcfs_pad (0.99 by default), so the bare write's
     # edge PRES is the solver pressure there (not 0); the full write adds exactly p_sep
-    assert d["pres_edge_full"] == pytest.approx(d["pres_edge_bare"] + p_sep, rel=1e-8)   # g-file E16.9: 9 digits
+    # Bound derived from the g-file's storage: PRES is written in Fortran (5e16.9), i.e. v = m 10^e with a
+    # 9-digit mantissa m in [0.1, 1) and e = floor(log10|v|) + 1, so each stored value is within half a unit of
+    # its 9th significant digit, h(v) = 0.5 10^(e - 9), of the double it came from.  The full write's edge value
+    # is the bare one plus p_sep (p_sep exact in double), so the two stored values can differ from
+    # stored_bare + p_sep by at most h(full) + h(bare), plus the double-precision rounding of the sum
+    # (2 eps |full|, negligible).  That sum is the bound.
+    def _half_unit_9(v):
+        return 0.5 * 10.0 ** (np.floor(np.log10(abs(v))) + 1 - 9)
+    full, bare = d["pres_edge_full"], d["pres_edge_bare"]
+    bound = _half_unit_9(full) + _half_unit_9(bare) + 2 * np.finfo(float).eps * abs(full)
+    assert abs(full - (bare + p_sep)) <= bound, (full - (bare + p_sep), bound)
     assert d["rec"]["pressure_frame"] == "full" and d["rec"]["p_sep"] == p_sep
     assert d["back_edge"] == pytest.approx(p_sep + d["solver_p_edge"], rel=1e-12)
     assert d["back_meta"]["pressure_frame"] == "full"
     assert d["W_full"] == pytest.approx(d["W_solver"] + 1.5 * p_sep * d["vol"], rel=1e-12)
-    # get_profiles' P' and P are mutually consistent to the trapezoid on 129 points
-    assert d["consistency"] < 1e-2
+    # get_profiles' P' and P are mutually consistent to the trapezoid on 129 points.  Bound derived from the
+    # profile representation: the solve's P' is piecewise LINEAR in psi_N on the 50 uniform knots of
+    # test_score_solver._build_equilibrium (checked below: linear between knots to round-off), so the trapezoid
+    # rule on the 129 samples is exact on every sample interval without a knot inside, and on an interval
+    # [a, b] with a knot xi inside (slope jump ds of P') it errs by ds (xi - a)(b - xi) / 2.  The check's
+    # cumulative error is at most the sum of these over all knots, relative to max |p|.
+    psi, pr, dp = (np.asarray(d[k], float) for k in ("back_psi", "back_p", "back_dp"))
+    span = psi[-1] - psi[0]
+    xs = (psi - psi[0]) / span
+    knots = np.linspace(0.0, 1.0, 50)
+    slopes = []
+    for j in range(knots.size - 1):
+        i = np.nonzero((xs >= knots[j] - 1e-12) & (xs <= knots[j + 1] + 1e-12))[0]
+        sl = (dp[i[-1]] - dp[i[0]]) / (psi[i[-1]] - psi[i[0]])
+        assert np.max(np.abs(dp[i[0]] + sl * (psi[i] - psi[i[0]]) - dp[i])) <= 1e-12 * np.max(np.abs(dp))
+        slopes.append(sl)
+    err = 0.0
+    for j in range(1, knots.size - 1):
+        k = int(np.searchsorted(xs, knots[j])) - 1
+        a, b = xs[k], xs[k + 1]
+        if a + 1e-12 < knots[j] < b - 1e-12:
+            err += abs(slopes[j] - slopes[j - 1]) * (knots[j] - a) * (b - knots[j]) * span ** 2 / 2
+    assert d["consistency"] <= err / np.max(np.abs(pr)), (d["consistency"], err / np.max(np.abs(pr)))

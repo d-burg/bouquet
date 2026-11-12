@@ -395,3 +395,19 @@ def test_spatial_order_truncated_cylinder_with_layer():
         assert abs(sol.profiles(ss)["ip"] / ip - 1.0) < 1e-14
     orders = np.log2(np.array(errs[:-1]) / np.array(errs[1:]))
     assert 1.9 <= orders[-1] <= 2.1, (errs, orders)
+
+
+def test_layer_fpol_time_table():
+    """``|F|`` at the last closed surface as a time table: interpolated linearly, used in the boundary flux
+    ``Ip/F_lcfs`` at every stage time; a constant keeps the scalar attribute; non-positive values raise."""
+    lay = OuterLayer(0.995, ((0.0, 1.0), (2.0, 2.2)), 1.0, 0.0)
+    assert lay.fpol_lcfs is None
+    assert lay.fpol_at(0.0) == 2.0 and lay.fpol_at(1.0) == 2.2
+    assert lay.fpol_at(0.25) == pytest.approx(2.05, rel=1e-14)
+    with pytest.raises(ValueError):
+        lay.fpol_at(1.5)                                   # outside the table: refused (no extrapolation)
+    const = OuterLayer(0.995, 2.1, 1.0, 0.0)
+    assert const.fpol_lcfs == 2.1 and const.fpol_at(0.3) == 2.1
+    bad = OuterLayer(0.995, ((0.0, 1.0), (2.0, -1.0)), 1.0, 0.0)
+    with pytest.raises(ValueError):
+        bad.fpol_at(1.0)

@@ -36,6 +36,15 @@ name               meaning                                     default prior / b
 Every prior, bound, step rule and stopping criterion is an explicit setting recorded in the
 result (they are decisions for the user; the defaults are this package's proposals).
 
+The strength is defined with the cap of :mod:`.current.sawtooth`: ``Lambda = -ln(1 - 0.999 f) nu``.
+Its default prior center is the strength of f = 0.37 and a 60 ms period, so at fixed f it implies
+that period.  A prior that implies no period is available as an option,
+:data:`LOG_STRENGTH_PRIOR_BOUNDS_BROAD` (``FitSettings(priors={"log_strength":
+LOG_STRENGTH_PRIOR_BOUNDS_BROAD})``): a Gaussian in ``ln Lambda`` derived from the parameter's
+bounds alone -- centered on the middle of ``[ln 1e-2, ln 1e4]`` with the bounds at +-2 sigma -- which
+keeps the normal equations regular when the strength has no effect (q >= 1 everywhere) while
+carrying no information beyond the bounds.  It is not the default.
+
 Algorithm (Levenberg-Marquardt, H. B. Nielsen's damping update with the diagonal scaling of
 D. W. Marquardt, J. SIAM 11, 431 (1963)):
 
@@ -68,8 +77,26 @@ D. W. Marquardt, J. SIAM 11, 431 (1963)):
 6. final: the accepted center is consistent and verified by construction; the Laplace covariance
    ``(J_a^T J_a)^-1`` (data and prior rows) uses a fresh consistent-solve Jacobian at that center.
 
-Statuses: ``converged``, ``stalled_no_significant_descent``, ``max_iter``, ``failed_trials``,
-``jacobian_failed``, ``failed_initial_consistency``, ``no_free_parameters``.  The number of forward
+Lagged step columns (``jacobian_steps="lagged"``, an option; default ``"consistent"``).  The
+optimizer's STEPS may use lagged columns: each a single forward solve with the geometry-dependent
+inputs (geometry, conductivity, bootstrap, the supplied state of the time-dependent path) held at
+the center's own values (:func:`.current_model.lagged_solve` on the geometry the center's assembly
+used), differenced against a lagged solve at the center's parameters; the step-size rule and the
+opposite-step retry are those of the consistent columns.  The definition of convergence is
+unchanged: the stopping tests are ALWAYS made on consistent-solve columns.  With lagged steps, the
+tests on the lagged columns only decide when the consistent columns are computed -- when they
+hold, and when no lagged step descends (before a stall is declared) -- and a consistent-column
+Jacobian computed for that purpose is then also used for that iteration's step.  The covariance is
+always from consistent columns, also after ``failed_trials``.
+
+Statuses: ``converged``, ``converged_within_noise``, ``stalled_no_significant_descent``, ``max_iter``,
+``failed_trials``, ``jacobian_failed``, ``failed_initial_consistency``, ``no_free_parameters`` (and
+``<status>_no_final_jacobian`` when the covariance Jacobian failed).  ``converged_within_noise`` is a
+fit that stopped through a stopping test like ``converged`` but whose stop rests on the measured
+noise: test (b) held only through its noise-scaled floor (the Newton decrement is above
+``grad_tol_chi2`` and at or below ``noise_factor * noise_chi2``), or the final Gauss-Newton step was
+kept although it raised chi^2 (by less than the noise).  The stopping criteria are the same for both
+labels; the label says which kind of stop it was (:func:`convergence_label`).  The number of forward
 solves, wall time, every trial (predicted and realized chi^2 change, gain ratio) are recorded, and
 ``stopping_summary`` (:func:`stopping_summary`) states which stopping test ended the fit, the value
 of test (b)'s floor and whether its noise-scaled branch set it, and whether the final Gauss-Newton
@@ -100,9 +127,20 @@ def _lam0():
     return float(math.log(_saw.crash_strength(PRIOR_F, 1.0 / PRIOR_PERIOD_S)))
 
 
+#: Bounds of ``ln Lambda`` (the strength in 1/s).
+LOG_STRENGTH_BOUNDS = (math.log(1e-2), math.log(1e4))
+#: Option: strength prior derived from the bounds alone (module docstring): center at the middle of the
+#: bounds in ln Lambda, sigma = a quarter of their width (bounds at +-2 sigma).
+LOG_STRENGTH_PRIOR_BOUNDS_BROAD = (0.5 * (LOG_STRENGTH_BOUNDS[0] + LOG_STRENGTH_BOUNDS[1]),
+                                   0.25 * (LOG_STRENGTH_BOUNDS[1] - LOG_STRENGTH_BOUNDS[0]))
+
+#: Column kinds the optimizer's steps may use (:attr:`FitSettings.jacobian_steps`).
+JACOBIAN_STEP_KINDS = ("consistent", "lagged")
+
+
 #: Parameter specifications: prior (mean, sigma; sigma None = no prior row), bounds, initial step.
 PARAMETERS = {
-    "log_strength": dict(prior=(_lam0(), 1.0), bounds=(math.log(1e-2), math.log(1e4)), step0=0.1,
+    "log_strength": dict(prior=(_lam0(), 1.0), bounds=LOG_STRENGTH_BOUNDS, step0=0.1,
                          unit="ln(1/s)", note="sawtooth strength along -ln(1-0.999f) nu (MSE-constrained)"),
     "f": dict(prior=(None, None), bounds=(0.1, 1.0), step0=0.05, unit="1",
               note="reconnection fraction at fixed strength (uniform prior 0.1-1: bounds only)"),
@@ -141,7 +179,13 @@ class FitSettings:
     fitted_coil_role: str = "fitted"
     column_retry_opposite: bool = True   # a failed column solve is retried once with the opposite step
     final_gn_step: bool = True           # take the undamped GN step of the converged test (accepted within noise)
+    jacobian_steps: str = "consistent"   # "consistent" or "lagged": the columns used for the optimizer's STEPS
+    #                                      (stopping tests and covariance always use consistent columns)
     taper_restart: bool = False          # NON-DEFAULT: restart the whole reconstruction tapered (module docstring)
+
+    def __post_init__(self):
+        if self.jacobian_steps not in JACOBIAN_STEP_KINDS:
+            raise ValueError(f"jacobian_steps must be one of {JACOBIAN_STEP_KINDS}")
 
     def as_dict(self):
         return asdict(self)
@@ -354,12 +398,34 @@ def stopping_summary(status, stop, log):
         fgn.update(accepted=kept, status=fin.get("status"), chi2_change=dchi,
                    kept_with_chi2_increase=bool(kept and dchi is not None and dchi > 0),
                    chi2_increase=(float(dchi) if (kept and dchi is not None and dchi > 0) else 0.0))
-    return dict(status=status, test=st.get("test") if st.get("converged") else None,
+    within = []
+    if (st.get("converged") and st.get("test") == "b" and st.get("grad_floor_noise_scaled")
+            and st.get("newton_decrement") is not None and st.get("grad_floor_fixed") is not None
+            and st["newton_decrement"] > st["grad_floor_fixed"]):
+        within.append("test (b) held only through its noise-scaled floor")
+    if fgn.get("kept_with_chi2_increase"):
+        within.append("final Gauss-Newton step kept with a chi^2 increase")
+    return dict(status=status, within_noise_reasons=within, test=st.get("test") if st.get("converged") else None,
                 criterion=st.get("criterion") if st.get("converged") else None,
                 grad_floor=st.get("grad_floor"), grad_floor_fixed=st.get("grad_floor_fixed"),
                 grad_floor_noise=st.get("grad_floor_noise"), grad_floor_noise_scaled=st.get("grad_floor_noise_scaled"),
                 newton_decrement=st.get("newton_decrement"), gn_step_sigma=st.get("gn_step_sigma"),
                 final_gn_step=fgn)
+
+
+def convergence_label(stop, final_gn=None):
+    """Status of a fit that stopped through a stopping test (module docstring): ``"converged"``, or
+    ``"converged_within_noise"`` when the stop rests on the measured noise -- test (b) held only through
+    its noise-scaled floor (decrement above ``grad_floor_fixed``), or the final Gauss-Newton step
+    (``final_gn``: its record) was kept although chi^2 rose.  No criterion is applied here beyond the
+    stopping test's own values."""
+    st = stop or {}
+    via_noise_floor = bool(st.get("converged") and st.get("test") == "b" and st.get("grad_floor_noise_scaled")
+                           and st.get("newton_decrement") is not None and st.get("grad_floor_fixed") is not None
+                           and st["newton_decrement"] > st["grad_floor_fixed"])
+    fin = final_gn or {}
+    kept_up = bool(fin.get("accepted") and fin.get("chi2_change") is not None and fin["chi2_change"] > 0)
+    return "converged_within_noise" if (via_noise_floor or kept_up) else "converged"
 
 
 def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, initial_profiles=None, label="fit",
@@ -519,6 +585,26 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
             return None, tres.status, None
         return trial["r_data"], "ok", (state_after, trial)
 
+    def lagged_column_solve(c, theta, lab):
+        """ONE forward solve at theta with the center's geometry-dependent inputs (and, on the
+        time-dependent path, the state supplied on the center's geometry); data residuals or None."""
+        restore_center(c)
+        p = _to_params(theta, names, base)
+        lag = c["res"].lag
+        kw = {}
+        if state_fn is not None:
+            kw["state"] = state_fn(lag)
+        sres, _, why = _cm.lagged_solve(fm, lag, kin, src, p, cfg, z0=c["z0"], label=lab, **kw)
+        if sres is None or not sres.converged:
+            restore_center(c)
+            return None, (why if sres is None else sres.status), None
+        r, idx, _ = residual_vector(fm, ms, groups, settings, coil_roles)
+        state_after = fm.snapshot()
+        restore_center(c)
+        if not _same_index(idx, ref_index):
+            return None, "channel_set_changed", None
+        return r, "ok", (state_after, None)
+
     def measure_noise(c, from_state):
         """chi^2 and residual noise of a consistent re-solve: the center's parameters re-solved from a
         different (nearby) starting state."""
@@ -530,7 +616,14 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
         return dict(status="ok", chi2=abs(trial["chi2"]["objective"] - c["chi2"]["objective"]), r=dr,
                     norm=float(np.linalg.norm(dr)))
 
-    def jacobian(c, lab):
+    def jacobian(c, lab, lagged=False):
+        solve_col = lagged_column_solve if lagged else column_solve
+        r_ref = c["r_data"]
+        if lagged:
+            # reference for the differences: the lagged solve at the center's own parameters
+            r_ref, why, _ = lagged_column_solve(c, c["theta"].copy(), f"{lab}:lagref")
+            if r_ref is None:
+                return None, dict(reason=f"lagged reference solve failed: {why}", columns=[], column_kind="lagged")
         J = np.zeros((c["r_data"].size, len(names)))
         cols = []
         for j, n in enumerate(names):
@@ -540,7 +633,7 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
                 tj = c["theta"].copy()
                 direction = 1.0 if tj[j] + h <= hi[j] else -1.0
                 tj[j] += direction * h
-                rj, why, extra_state = column_solve(c, tj, f"{lab}:col{j}")
+                rj, why, extra_state = solve_col(c, tj, f"{lab}:col{j}")
                 if rj is None and settings.column_retry_opposite and tj[j] - 2 * direction * h >= lo[j] \
                         and tj[j] - 2 * direction * h <= hi[j]:
                     # the column solve failed: one retry with the opposite step (a backward difference); the
@@ -549,7 +642,7 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
                     direction = -direction
                     tj = c["theta"].copy()
                     tj[j] += direction * h
-                    rj, why, extra_state = column_solve(c, tj, f"{lab}:col{j}:opp")
+                    rj, why, extra_state = solve_col(c, tj, f"{lab}:col{j}:opp")
                 if rj is None:
                     info["attempts"].append(dict(h=direction * h, status=why))
                     break
@@ -557,11 +650,12 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
                     m = measure_noise(c, extra_state[0])
                     rec["noise"] = dict(status=m["status"], chi2=m.get("chi2"), norm=m.get("norm"),
                                         method="consistent re-solve of the first center's parameters from the "
-                                               "state of its first Jacobian column")
+                                               "state of its first Jacobian column"
+                                               + (" (a lagged column)" if lagged else ""))
                     if m["status"] != "ok":
                         return None, dict(reason=f"noise measurement failed: {m['status']}", columns=cols)
                     noise.update(chi2=m["chi2"], r=m["r"], norm=m["norm"])
-                dr = rj - c["r_data"]
+                dr = rj - r_ref
                 ok = np.linalg.norm(dr) >= settings.step_noise_factor * noise["norm"]
                 info["attempts"].append(dict(h=direction * h, norm_dr=float(np.linalg.norm(dr)), ok=bool(ok)))
                 J[:, j] = dr / (direction * h)
@@ -572,32 +666,128 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
             info["noise_limited"] = not info["attempts"][-1].get("ok", False)
             cols.append(info)
             if info["attempts"][-1].get("status"):
-                return None, dict(reason=f"column {n} failed: {info['attempts'][-1]['status']}", columns=cols)
+                return None, dict(reason=f"column {n} failed: {info['attempts'][-1]['status']}", columns=cols,
+                                  column_kind="lagged" if lagged else "consistent")
         return J, dict(noise_norm=noise["norm"], noise_chi2=noise["chi2"],
                        noise_source="consistent re-solve (measured once)", columns=cols,
-                       column_kind="consistent solves (no lagged inputs)")
+                       column_kind=("lagged single solves (geometry-dependent inputs of the center)" if lagged
+                                    else "consistent solves (no lagged inputs)"))
 
     lam = settings.lm_lambda0
     fails = 0
     J = None
     jinfo = None
+    J_consistent = False
     status = "max_iter"
     rel_hist = []
     stop = None
+    lagged_steps = settings.jacobian_steps == "lagged"
+
+    def normal_eq(Jm):
+        Ja = np.vstack((Jm, _prior_jac(names, settings)))
+        return Ja.T @ Ja, Ja.T @ center["r"]
+
     for it in range(settings.max_iter):
-        J, jinfo = jacobian(center, f"{label}:it{it}")
-        entry = dict(it=it, theta=center["theta"].tolist(), chi2=center["chi2"]["objective"], jacobian=jinfo)
-        if J is None:
-            entry["status"] = "jacobian_failed"
-            log.append(entry)
-            return finish("jacobian_failed", center, None)
-        Ja = np.vstack((J, _prior_jac(names, settings)))
-        g = Ja.T @ center["r"]
-        A = Ja.T @ Ja
-        stop = stopping_tests(A, g, settings, noise["chi2"] or 0.0, rel_hist)
-        entry["stopping_tests"] = stop
-        if stop.get("converged"):
-            status = "converged"
+        entry = dict(it=it, theta=center["theta"].tolist(), chi2=center["chi2"]["objective"])
+        need_consistent = not lagged_steps
+        if lagged_steps:
+            stop = None                         # only consistent-column tests are recorded as stopping tests
+            Jl, jl_info = jacobian(center, f"{label}:it{it}:lag", lagged=True)
+            entry["jacobian_lagged"] = jl_info
+            if Jl is None:
+                need_consistent = True          # a failed lagged column: this iteration uses consistent columns
+            else:
+                A, g = normal_eq(Jl)
+                stop_l = stopping_tests(A, g, settings, noise["chi2"] or 0.0, rel_hist)
+                entry["stopping_tests_lagged"] = stop_l
+                if stop_l.get("converged"):
+                    need_consistent = True      # convergence is decided on consistent columns only
+                else:
+                    J, jinfo, J_consistent = Jl, jl_info, False
+        converged_now = False
+        if need_consistent:
+            J, jinfo = jacobian(center, f"{label}:it{it}")
+            J_consistent = True
+            entry["jacobian"] = jinfo
+            if J is None:
+                entry["status"] = "jacobian_failed"
+                log.append(entry)
+                return finish("jacobian_failed", center, None)
+            A, g = normal_eq(J)
+            stop = stopping_tests(A, g, settings, noise["chi2"] or 0.0, rel_hist)
+            entry["stopping_tests"] = stop
+            converged_now = bool(stop.get("converged"))
+        else:
+            entry["jacobian"] = jinfo
+        for attempt in range(2):
+            if converged_now:
+                break
+            accepted = False
+            last_delta = None
+            while not accepted:
+                try:
+                    delta, capped = lm_step(A, g, lam, cap)
+                except np.linalg.LinAlgError:
+                    lam *= settings.lm_up
+                    continue
+                tt = np.clip(center["theta"] + delta, lo, hi)
+                step = tt - center["theta"]
+                if last_delta is not None and np.allclose(step, last_delta, rtol=1e-6, atol=1e-12):
+                    # the trust cap binds and the step did not change: raise lambda without a solve
+                    lam *= settings.lm_up
+                    if lam > settings.lm_lambda_max:
+                        break
+                    continue
+                last_delta = step
+                pred = float(-(g @ step) * 2.0 - step @ A @ step)       # predicted chi^2 decrease (quadratic model)
+                trial, tres = evaluate(tt, center["snap"], center["z0"], f"{label}:it{it}:trial",
+                                       ref_index=ref_index)
+                tr = dict(lam=lam, delta=step.tolist(), capped=bool(capped), predicted_dchi2=pred,
+                          status=(tres.status if trial is None else "consistent"), passes=tres.passes,
+                          chi2=(None if trial is None else trial["chi2"]["objective"]), wall_s=tres.wall_s,
+                          columns="consistent" if J_consistent else "lagged")
+                entry.setdefault("trials", []).append(tr)
+                if trial is None:
+                    fails += 1
+                    lam *= settings.lm_up
+                    restore_center(center)
+                    if fails >= settings.max_failed_trials:
+                        log.append(entry)
+                        if not J_consistent:        # the covariance is always from consistent columns
+                            J, jinfo = jacobian(center, f"{label}:it{it}:cov")
+                        return finish("failed_trials", center, J, jinfo=jinfo)
+                    continue
+                dchi = center["chi2"]["objective"] - trial["chi2"]["objective"]
+                tr["realized_dchi2"] = dchi
+                tr["gain_ratio"] = dchi / pred if pred > 0 else None
+                if dchi > settings.noise_factor * (noise["chi2"] or 0.0) and dchi > 0:
+                    rel_hist.append(dchi / max(center["chi2"]["objective"], 1e-300))
+                    center = trial
+                    lam = max(lam * settings.lm_down, settings.lm_lambda_min)
+                    accepted = True
+                    entry.update(accepted=True, dchi2=dchi)
+                else:
+                    lam *= settings.lm_up
+                    restore_center(center)
+                    if lam > settings.lm_lambda_max:
+                        break
+            if accepted or J_consistent:
+                break
+            # no lagged step descended: before a stall is declared, the consistent columns decide (stopping
+            # tests), and when they do not hold, the steps are retried with them
+            J, jinfo = jacobian(center, f"{label}:it{it}:stall_check")
+            J_consistent = True
+            entry["jacobian_stall_check"] = jinfo
+            if J is None:
+                entry["status"] = "jacobian_failed"
+                log.append(entry)
+                return finish("jacobian_failed", center, None)
+            A, g = normal_eq(J)
+            stop = stopping_tests(A, g, settings, noise["chi2"] or 0.0, rel_hist)
+            entry["stopping_tests"] = stop
+            converged_now = bool(stop.get("converged"))
+            lam = settings.lm_lambda0
+        if converged_now:
             entry["stop_rule"] = stop["criterion"]
             # final undamped Gauss-Newton step (the stopping test computed it): taken when it does not
             # raise chi^2 by more than the measured noise; the covariance is then evaluated at the new center
@@ -622,53 +812,9 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
                     fin["accepted"] = False
                     restore_center(center)
                 entry["final_gn_step"] = fin
+            status = convergence_label(stop, entry.get("final_gn_step"))
             log.append(entry)
             break
-        accepted = False
-        last_delta = None
-        while not accepted:
-            try:
-                delta, capped = lm_step(A, g, lam, cap)
-            except np.linalg.LinAlgError:
-                lam *= settings.lm_up
-                continue
-            tt = np.clip(center["theta"] + delta, lo, hi)
-            step = tt - center["theta"]
-            if last_delta is not None and np.allclose(step, last_delta, rtol=1e-6, atol=1e-12):
-                # the trust cap binds and the step did not change: raise lambda without a solve
-                lam *= settings.lm_up
-                if lam > settings.lm_lambda_max:
-                    break
-                continue
-            last_delta = step
-            pred = float(-(g @ step) * 2.0 - step @ A @ step)       # predicted chi^2 decrease (quadratic model)
-            trial, tres = evaluate(tt, center["snap"], center["z0"], f"{label}:it{it}:trial", ref_index=ref_index)
-            tr = dict(lam=lam, delta=step.tolist(), capped=bool(capped), predicted_dchi2=pred,
-                      status=(tres.status if trial is None else "consistent"), passes=tres.passes,
-                      chi2=(None if trial is None else trial["chi2"]["objective"]), wall_s=tres.wall_s)
-            entry.setdefault("trials", []).append(tr)
-            if trial is None:
-                fails += 1
-                lam *= settings.lm_up
-                restore_center(center)
-                if fails >= settings.max_failed_trials:
-                    log.append(entry)
-                    return finish("failed_trials", center, J, jinfo=jinfo)
-                continue
-            dchi = center["chi2"]["objective"] - trial["chi2"]["objective"]
-            tr["realized_dchi2"] = dchi
-            tr["gain_ratio"] = dchi / pred if pred > 0 else None
-            if dchi > settings.noise_factor * (noise["chi2"] or 0.0) and dchi > 0:
-                rel_hist.append(dchi / max(center["chi2"]["objective"], 1e-300))
-                center = trial
-                lam = max(lam * settings.lm_down, settings.lm_lambda_min)
-                accepted = True
-                entry.update(accepted=True, dchi2=dchi)
-            else:
-                lam *= settings.lm_up
-                restore_center(center)
-                if lam > settings.lm_lambda_max:
-                    break
         if not accepted:
             entry["note"] = (f"no trial decreased chi^2 by more than the measured noise up to lambda = "
                              f"{settings.lm_lambda_max:g}; stopping criteria NOT met")
@@ -679,7 +825,8 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
     restore_center(center)
     # Laplace covariance from a FRESH Jacobian of consistent solves at the final, verified center (the
     # convergence test above already computed one at this center when it stopped there)
-    if status == "converged" and J is not None and log and log[-1].get("stopping_tests") is not None \
+    if status in ("converged", "converged_within_noise") and J is not None and J_consistent and log \
+            and log[-1].get("stopping_tests") is not None \
             and log[-1]["theta"] == center["theta"].tolist():
         Jf, jf_info = J, dict(jinfo, reused="Jacobian computed at the final center for the stopping test")
     else:

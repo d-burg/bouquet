@@ -233,7 +233,7 @@ def test_filter_carries_the_accepted_centers_state(monkeypatch):
 
 
 @pytest.mark.parametrize("status", ["stalled_no_significant_descent", "max_iter", "failed_trials", "jacobian_failed",
-                                    "converged_no_final_jacobian"])
+                                    "converged_no_final_jacobian", "converged_within_noise"])
 def test_filter_absorbs_only_converged_fits(monkeypatch, status):
     out, lags, cfg, seen = _filter_setup(monkeypatch, status)
     c0 = _state(out["slices"][0]["carried_state"])
@@ -340,15 +340,17 @@ def _psi0_fn(lag):
     return psi
 
 
-def _series_states(monkeypatch, lag, n_cells, times, ips, psi0_fn):
+def _series_states(monkeypatch, lag, n_cells, times, ips, psi0_fn, dt_max=None):
     rf = CurrentState.uniform_faces(n_cells)
     rc = 0.5 * (rf[1:] + rf[:-1])
     vals = psi0_fn(np.concatenate((rc, [1.0])))
     st0 = CurrentState(rf, vals[:-1], float(vals[-1]), 0.0)
     fm = FakeFM(dict(pred=lag))
     _install(monkeypatch, fm, st0, lambda f: f.lags["pred"])
-    out = SE.run_series(fm, _slices(times, ips), CM.CurrentModelSettings(r0=GEO.R0, n_cells=n_cells),
-                        SE.SeriesSettings(initial="relaxed", sawtooth="off"))
+    st = SE.SeriesSettings(initial="relaxed", sawtooth="off")
+    if dt_max is not None:
+        st.dt_max = float(dt_max)
+    out = SE.run_series(fm, _slices(times, ips), CM.CurrentModelSettings(r0=GEO.R0, n_cells=n_cells), st)
     assert out["status"] == "completed", out["status"]
     return rc, [_state(s["carried_state"]) for s in out["slices"]]
 
@@ -382,12 +384,36 @@ def test_series_chain_matches_an_independent_diffusion_reference(monkeypatch):
     assert max(e_flat) > 10 * 1e-3, e_flat
 
 
+def test_series_chain_converges_in_space_against_the_reference(monkeypatch):
+    """Grid convergence of the same chain against the same reference: at a quarter of the default time
+    step (so the time error does not mask the spatial one), on 200, 400 and 800 cells, both errors (profile
+    and boundary-flux change) fall by at least a factor 2 per doubling of the cells -- the first-order rate
+    that the layer's coupling to the last cell guarantees (diffusion module)."""
+    lag = _lag(sigma_const=SIGMA)
+    times = np.arange(6) * 0.02
+    ips = IP0 * (1.0 + 0.05 * np.arange(6))
+    psi0 = _psi0_fn(lag)
+    x, ref = _reference(lag, psi0, times, ips)
+    dt = 0.25 * SE.SeriesSettings().dt_max
+    errs = {}
+    for n in (200, 400, 800):
+        rc, states = _series_states(monkeypatch, lag, n, times, ips, psi0, dt_max=dt)
+        errs[n] = _errors(rc, states, x, ref)
+    for a, b in ((200, 400), (400, 800)):
+        for i in (0, 1):
+            assert errs[a][i] >= 2.0 * errs[b][i], (a, b, i, errs)
+
+
 # ============================================================== sawteeth inside a series
 def _sawtooth_series(monkeypatch, ip, mode, crash_times=None):
     lag = _lag()
     fm = FakeFM(dict(pred=lag))
     st0 = _steady(lag, ip)
     _install(monkeypatch, fm, st0, lambda f: f.lags["pred"])
+    if crash_times is not None:
+        # a measured crash record that covers the first slice's history (the first-slice model state is
+        # mocked here; the record before t0 only satisfies the coverage requirement)
+        crash_times = [round(-1.6 + 0.05 * k, 6) for k in range(32)] + list(crash_times)
     s = SE.SeriesSettings(initial="relaxed", sawtooth=mode, sawtooth_log_strength=np.log(400.0),
                           crash_times=crash_times)
     times = np.arange(4) * 0.02
@@ -457,3 +483,159 @@ def test_each_slice_is_solved_with_its_own_F0(monkeypatch):
     assert fm.F0_at_solve == [GEO.F0, GEO.F0 * 1.004, GEO.F0 * 1.004, GEO.F0 * 0.997]
     assert [s["vacuum_F0"]["F0"] for s in out["slices"]] == fm.F0_at_solve
     assert out["slices"][2]["vacuum_F0"]["source"].startswith("not given")
+
+
+# ============================================================== first slice: fit status, strength, measured crashes
+def _initial_fit_series(monkeypatch, status, policy="refuse", log_strength=np.log(300.0), sawtooth="periodic"):
+    """Series with ``initial="mse_fit"`` whose first-slice fit is mocked: it ends with ``status`` at the
+    steady state of the slice's geometry and returns ``log_strength`` as its fitted strength."""
+    lag = _lag()
+    fm = FakeFM(dict(pred=lag))
+    st0 = _steady(lag, IP0)
+    _install(monkeypatch, fm, st0, lambda f: f.lags["pred"])
+    seen = {}
+
+    def reconstruct(fm_, kin, src, cfg, settings, params0=None, initial_profiles=None, label="", **kw):
+        seen.update(free=tuple(settings.free), cfg=cfg, params0=dict(params0))
+        names = (["log_strength"] if "log_strength" in settings.free else []) + [f"a_corr_{k}" for k in range(3)]
+        center = dict(res=_result(lag, st0), snap=dict(key="pred"), probe_correction=np.zeros(0))
+        params = dict(log_strength=log_strength, f=params0.get("f"), a_corr=(0.0, 0.0, 0.0))
+        return SimpleNamespace(status=status, theta=np.zeros(len(names)), sigma=np.full(len(names), 0.1), free=names,
+                               params=params, chi2={},
+                               record=dict(center=center, specs={n: dict(prior=(0.0, 1.0)) for n in names},
+                                           n_solves=5, wall_s=0.0, iterations=[], final_stopping_tests=None,
+                                           stopping_summary=dict(status=status)))
+
+    monkeypatch.setattr(SE._fit, "reconstruct", reconstruct)
+    s = SE.SeriesSettings(initial="mse_fit", sawtooth=sawtooth, initial_fit_nonconverged=policy,
+                          crash_times=([round(-1.6 + 0.05 * k, 6) for k in range(33)] if sawtooth == "crash_times"
+                                       else None))
+    out = SE.run_series(fm, _slices(np.arange(3) * 0.02, np.full(3, IP0)), CM.CurrentModelSettings(r0=GEO.R0), s)
+    return out, seen
+
+
+@pytest.mark.parametrize("status", ["stalled_no_significant_descent", "converged_within_noise", "max_iter"])
+def test_series_refuses_to_start_from_a_nonconverged_first_slice_fit(monkeypatch, status):
+    out, _ = _initial_fit_series(monkeypatch, status)
+    assert out["status"] == "refused_initial_fit_not_converged" and status in out["reason"]
+    assert len(out["slices"]) == 1 and out["slices"][0]["status"] == "initial_fit_not_converged"
+    lab, _ = _initial_fit_series(monkeypatch, status, policy="proceed_labeled")
+    assert lab["status"] == "completed" and len(lab["slices"]) == 3
+    assert lab["initial_fit_nonconverged_start"]["status"] == status
+    assert status in lab["slices"][0]["fit"]["start_label"]
+    ok, _ = _initial_fit_series(monkeypatch, "converged")
+    assert ok["status"] == "completed" and ok["slices"][0]["fit"]["start_label"] is None
+    assert "initial_fit_nonconverged_start" not in ok
+    with pytest.raises(ValueError):
+        SE.SeriesSettings(initial_fit_nonconverged="maybe")
+
+
+def test_first_slice_fit_sets_the_periodic_crash_train(monkeypatch):
+    """With periodic sawteeth the first-slice fit has ``log_strength`` free by default, and its fitted value
+    (not the prior) sets the period of the series' crash train."""
+    assert SE.SeriesSettings().initial_fit.free == ("log_strength", "a_corr")
+    assert SE.SeriesSettings(sawtooth="off").initial_fit.free == ("a_corr",)
+    with pytest.raises(ValueError):
+        SE.SeriesSettings(sawtooth="off", initial_fit=SE._fit.FitSettings(free=("log_strength",)))
+    ls = np.log(250.0)
+    out, seen = _initial_fit_series(monkeypatch, "converged", log_strength=ls)
+    assert "log_strength" in seen["free"]
+    ct = out["crash_times_used"]
+    assert ct["log_strength"] == ls and ct["log_strength_source"].startswith("fitted at the first slice")
+    s = SE.SeriesSettings()
+    assert ct["period_s"] == pytest.approx(SE._period(s, ls), rel=1e-15)
+    assert ct["period_s"] != pytest.approx(SE._period(s), rel=1e-3)
+
+
+def test_measured_crash_times_start_the_series(monkeypatch):
+    """With measured crash times the first slice is solved with the measured-crash model state over the
+    first interval's length before t0 (window), the strength of the measured mean interval, and a fit
+    with only the corrections free; a record that does not cover the history is refused with the reason."""
+    out, seen = _initial_fit_series(monkeypatch, "converged", sawtooth="crash_times")
+    assert out["status"] == "completed"
+    assert seen["free"] == ("a_corr",)
+    cfg0 = seen["cfg"]
+    assert tuple(cfg0.window) == pytest.approx((-0.02, 0.0)) and cfg0.crash_times is not None
+    rec = out["first_slice_crash_start"]
+    assert rec["mean_interval_s"] == pytest.approx(0.05, rel=1e-9)
+    from bouquet.kinrecon.current import sawtooth as SAW
+    assert seen["params0"]["log_strength"] == pytest.approx(np.log(SAW.crash_strength(0.37, 1 / 0.05)), rel=1e-12)
+    lag = _lag()
+    fm = FakeFM(dict(pred=lag))
+    _install(monkeypatch, fm, _steady(lag, IP0), lambda f: f.lags["pred"])
+    short = SE.SeriesSettings(initial="relaxed", sawtooth="crash_times", crash_times=[-0.5, -0.4, 0.01])
+    with pytest.raises(ValueError, match="cannot start the series"):
+        SE.run_series(fm, _slices(np.arange(3) * 0.02, np.full(3, IP0)), CM.CurrentModelSettings(r0=GEO.R0), short)
+
+
+def test_measured_crash_start_runs_the_model(monkeypatch):
+    """The first-slice settings of a measured-crash series drive the current model's measured-crash slice
+    run (synthetic geometry, no equilibrium solve): the state is the window average over the window."""
+    lag = _lag()
+    s = SE.SeriesSettings(initial="relaxed", sawtooth="crash_times",
+                          crash_times=[round(-1.6 + 0.05 * k, 6) for k in range(33)])
+    cfg0, p0, rec = SE._measured_crash_start(s, CM.CurrentModelSettings(r0=GEO.R0), np.array([0.0, 0.02]))
+    from bouquet.kinrecon.current import sawtooth as SAW
+    sol = CM.build_solver(lag, lag["jbs"], 1.8 * IP0)
+    rf = CurrentState.uniform_faces(cfg0.n_cells)
+    lam = float(np.exp(p0["log_strength"]))
+    period = 1.0 / float(SAW.rate_from_strength(lam, p0["f"]))
+    assert period == pytest.approx(rec["mean_interval_s"], rel=1e-12)
+    sched = SAW.schedule_for_slice(cfg0.crash_times, cfg0.window, history=cfg0.history)
+    sim = SAW.simulate_slice(sol, rf, sched, p0["f"], dt=period / cfg0.sawtooth_nsteps,
+                             nsteps_orbit=cfg0.sawtooth_nsteps)
+    assert sim["orbit"].converged and sched.n_crashes_history >= 30
+    assert any(e.record.active for e in sim["events"])
+
+
+# ============================================================== outer layer |F| in time
+def test_interval_layer_fpol_is_linear_in_time_and_matches_both_slices():
+    lag0 = _lag()
+    lag1 = _lag()
+    f0 = float(lag0["layer"].fpol_lcfs)
+    lag1["layer"] = SimpleNamespace(**{k: getattr(lag0["layer"], k) for k in dir(lag0["layer"]) if not k.startswith("_")})
+    lag1["layer"].fpol_lcfs = 1.006 * f0
+    lag1["layer"].integral = lag0["layer"].integral
+    lag1["layer"].conductance_density = lag0["layer"].conductance_density
+    lag1["layer"].source_density = lag0["layer"].source_density
+    jni = lag0["jbs"]
+    rf = CurrentState.uniform_faces(100)
+    sol, info = SE.interval_solver(lag0, lag1, jni, jni, 0.0, 0.02, IP0, 1.01 * IP0)
+    c0, c1 = sol.coefficients(0.0, rf), sol.coefficients(0.02, rf)
+    assert c0.F_lcfs == f0 and c1.F_lcfs == 1.006 * f0          # each end has its slice's own |F|
+    assert c0.bc_value / c0.F_lcfs == IP0 / f0 and c1.bc_value / c1.F_lcfs == pytest.approx(1.01 * IP0 / (1.006 * f0),
+                                                                                             rel=1e-15)
+    assert info["layer_fpol"] == "linear" and info["fpol_lcfs_change"] == pytest.approx(0.006 * f0, rel=1e-12)
+    solm, infom = SE.interval_solver(lag0, lag1, jni, jni, 0.0, 0.02, IP0, 1.01 * IP0, "interval_mean")
+    assert solm.coefficients(0.0, rf).F_lcfs == pytest.approx(1.003 * f0, rel=1e-15)
+    with pytest.raises(ValueError):
+        SE.SeriesSettings(layer_fpol="cubic")
+
+
+# ============================================================== relaxed-start guard
+def test_relaxed_start_guard_warns_outside_its_range(monkeypatch):
+    lag = _lag(q0=1.1)
+    fm = FakeFM(dict(pred=lag))
+    _install(monkeypatch, fm, _steady(lag, IP0), lambda f: f.lags["pred"])
+    sl = _slices(np.arange(2) * 0.02, np.full(2, IP0))
+    out = SE.run_series(fm, sl, CM.CurrentModelSettings(r0=GEO.R0), SE.SeriesSettings(initial="relaxed", sawtooth="off"))
+    g = out["relaxed_start_guard"]
+    assert g["warned"] is False and g["q_min"] == pytest.approx(np.min(np.asarray(lag["phys"]["q"])[
+        np.asarray(lag["phys"]["rho"]) <= 0.95]))
+    sl = _slices(np.arange(2) * 0.02, np.full(2, IP0))
+    sl[0].meta["reference_q_min"] = 1.5
+    with pytest.warns(RuntimeWarning, match="q_min = 1.5 > 1.2"):
+        out = SE.run_series(fm, sl, CM.CurrentModelSettings(r0=GEO.R0),
+                            SE.SeriesSettings(initial="relaxed", sawtooth="off"))
+    assert out["relaxed_start_guard"]["warned"] and out["status"] == "completed"
+
+
+def test_first_crash_phase_moves_the_periodic_train():
+    s1 = SE.SeriesSettings(sawtooth_log_strength=np.log(400.0))
+    s4 = SE.SeriesSettings(sawtooth_log_strength=np.log(400.0), sawtooth_first_crash_phase=0.25)
+    tau = SE._period(s1)
+    a, b = SE._crash_times(s1, 0.0, 0.1), SE._crash_times(s4, 0.0, 0.1)
+    assert np.array_equal(a, tau * np.arange(1, a.size + 1))              # the default: one period after t0
+    assert np.allclose(b, a - 0.75 * tau, rtol=0, atol=1e-15)
+    with pytest.raises(ValueError):
+        SE.SeriesSettings(sawtooth_first_crash_phase=0.0)

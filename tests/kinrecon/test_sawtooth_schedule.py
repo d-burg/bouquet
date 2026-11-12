@@ -52,6 +52,21 @@ def test_skipped_crash_raises():
         sv.advance(sv.steady_state(RF), 0.02, dt=1e-3, post_step=sch)  # plain advance steps over 0.0105
 
 
+def test_reused_schedule_reports_only_the_current_runs_crashes():
+    """A schedule reused for a second run from the same start applies the same crashes again and reports
+    only those (it used to accumulate the first run's events as well)."""
+    sv = make_solver()
+    st = sv.steady_state(RF)
+    sch = CrashSchedule([0.005, 0.012], f=0.5)
+    a = advance_with_crashes(sv, st, 0.02, sch, dt=1e-3)
+    first = [e.time for e in sch.events]
+    b = advance_with_crashes(sv, st, 0.02, sch, dt=1e-3)
+    assert first == [0.005, 0.012] and [e.time for e in sch.events] == first
+    assert np.array_equal(a.psi, b.psi)
+    advance_with_crashes(sv, st, 0.008, sch, dt=1e-3)
+    assert [e.time for e in sch.events] == [0.005]
+
+
 def test_crash_at_start_time_is_not_reapplied():
     sv = make_solver()
     st = sv.steady_state(RF, t=0.01)

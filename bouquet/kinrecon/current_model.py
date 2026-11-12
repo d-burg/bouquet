@@ -341,7 +341,8 @@ def evaluate_geometry(gs, kin, cfg):
                 eps=np.asarray(eps, float), ft=1.0 - np.asarray(fc, float))
     dpsi = abs(float(fsa["psi_boundary"]) - float(fsa["psi_axis"]))
     # axis value of the equilibrium's own q profile (limit psi_N -> 0 of the traced q).  TokaMaker's
-    # get_stats()['q_0'] is a different estimate (5-11 % above this limit on the public fixture)
+    # get_stats()['q_0'] is q at psi_N = 0.02 by its definition, not an axis value; this trace is a raw
+    # diagnostic (unreliable near the axis); the q check uses extrapolated axis values (coordinates.axis_q)
     try:
         phys["q_axis"] = float(abs(np.asarray(gs.get_q(psi=np.array([Q_AXIS_PSIN]))[1], float)[0]))
     except Exception:  # noqa: BLE001
@@ -630,9 +631,10 @@ def _state_change(a, b):
 
 def q_check(lag, asm, stats, cfg):
     """q consistency of the solved equilibrium (``lag``: its traced q on the physics grid) against the
-    model q of the assembly that produced it (:func:`.coordinates.q_consistency`); the two axis values
-    (the equilibrium's traced q at psi_N = :data:`Q_AXIS_PSIN`, the model's extrapolated q0) are
-    reported, not tested."""
+    model q of the assembly that produced it (:func:`.coordinates.q_consistency`, which also tests the
+    two sides' extrapolated axis values, ``axis``).  ``q0_eq_axis`` (the traced q at psi_N =
+    :data:`Q_AXIS_PSIN`) and ``q0_model_axis`` (the model's innermost face value) are the raw near-axis
+    values, kept as diagnostics only: neither is an axis estimate the test uses."""
     ph = lag["phys"]
     out = q_consistency(ph["rho"], ph["q"], asm["q_model"]["rho"], asm["q_model"]["q"], cfg.q_check)
     out["q0_eq_axis"] = ph.get("q_axis", np.nan)

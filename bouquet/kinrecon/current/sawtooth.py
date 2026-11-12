@@ -178,7 +178,17 @@ Parameterization
 Two parameters, ``f`` and the mean crash rate ``nu``.  The combination
 ``Lambda = -ln(1 - f_cap f) nu`` (``f_cap = 0.999`` keeps f = 1 finite) is
 what near-axis MSE constrains; :func:`move_along_strength` and
-:func:`move_across_strength` move along and across it.
+:func:`move_across_strength` move along and across it.  The strength is
+DEFINED with the cap: every strength this package fits, records or takes as
+input is ``-ln(1 - 0.999 f) nu``, not ``-ln(1 - f) nu`` (the two differ by
+~0.1 % at f = 0.37 and are finite vs infinite at f = 1).
+
+Numerical defaults (documented; each a module constant or an argument):
+sheet width 0.05 in rho (:data:`DEFAULT_SHEET_WIDTH`), 1,024 samples per
+monotone piece and 2,048 helical-flux levels (:data:`N_SAMPLES`,
+:data:`N_LEVELS`), 1.5 s of crash history before a measurement window
+(:data:`DEFAULT_HISTORY`), the periodic-orbit criterion 1e-9
+(:data:`CYCLE_TOL`).
 
 Window averages
 ---------------
@@ -1126,7 +1136,9 @@ class CrashSchedule:
     Use with :func:`advance_with_crashes`, which makes a step end exactly on every crash time.  If a step
     ends past a pending crash time without landing on it, a ``RuntimeError`` is raised (a crash would
     otherwise be skipped silently).  Crashes at exactly the start time of a run are treated as already
-    applied.  ``events`` lists every applied crash with its :class:`ReconnectionRecord`.
+    applied.  ``events`` lists every crash applied in the CURRENT run with its
+    :class:`ReconnectionRecord`: :meth:`reset` (called by :func:`advance_with_crashes` at the start of
+    every run) clears it, so a schedule reused for another run reports only that run's crashes.
     """
 
     def __init__(self, crash_times: Sequence[float], f=1.0, sheet_width=DEFAULT_SHEET_WIDTH,
@@ -1140,7 +1152,9 @@ class CrashSchedule:
         self._next = 0
 
     def reset(self, t0):
+        """Start a run at ``t0``: crashes after ``t0`` are pending; the event list is cleared."""
         self._next = int(np.searchsorted(self.times, t0, side="right"))
+        self.events = []
 
     def pending(self, t0, t1):
         """Crash times in (t0, t1]."""

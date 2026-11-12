@@ -23,7 +23,9 @@ Checked (bounds fixed before the first run):
     recovers ``A_TRUE`` within 3 Laplace sigma per amplitude, with status ``converged`` (the prior pulls
     the MAP point toward zero; the bound allows for it).  On the seeded noisy set the first forward
     solves of this fit stall at 1.7x the solver tolerance (a flat residual stall of the anchored solve),
-    so the recovery is tested on the noiseless set;
+    so the recovery is tested on the noiseless set; the same check on the noisy set is kept as a STRICT
+    expected failure tied to that stall (it must keep failing until the stall is fixed, and an
+    unexpected pass is reported);
 (d) the pass-consistency q check passed on every reconstructed slice.
 """
 import json
@@ -124,6 +126,13 @@ def child(out, parts="abc"):
         rec["mse_fit"] = dict(status=fr.status, theta=fr.theta, sigma=fr.sigma, chi2=fr.chi2,
                               n_solves=fr.record["n_solves"], wall_s=fr.record["wall_s"],
                               stopping=fr.record.get("final_stopping_tests"), center0=fr.record.get("center0"))
+        fm.restore(snap0)
+        fm.reconfigure(meas_noisy[0], refs[0], roles, case_id="msefit_noisy")
+        fn = FIT.reconstruct(fm, kin, src, cfg, FIT.FitSettings(free=("a_corr",)), params0=dict(log_strength=None),
+                             initial_profiles=init, label="msefit_noisy")
+        rec["mse_fit_noisy"] = dict(status=fn.status, theta=fn.theta, sigma=fn.sigma, chi2=fn.chi2,
+                                    n_solves=fn.record["n_solves"], wall_s=fn.record["wall_s"],
+                                    stopping=fn.record.get("final_stopping_tests"), center0=fn.record.get("center0"))
     with open(out, "w") as fh:
         json.dump(_base._jsonable(rec), fh, indent=1)
 
@@ -164,6 +173,15 @@ def test_relaxed_start_does_not_reproduce(result):
 
 def test_mse_fit_recovers_known_nonrelaxed_initial_state(result):
     f = result["mse_fit"]
+    assert f["status"] == "converged", f
+    for a, th, sg in zip(A_TRUE, f["theta"], f["sigma"]):
+        assert abs(th - a) <= 3.0 * sg, (th, a, sg)
+
+
+@pytest.mark.xfail(strict=True, reason="on the seeded noisy set the first forward solves of the mse_fit start stall "
+                                      "at 1.7x the solver tolerance (flat residual stall of the anchored solve)")
+def test_mse_fit_recovers_known_nonrelaxed_initial_state_noisy(result):
+    f = result["mse_fit_noisy"]
     assert f["status"] == "converged", f
     for a, th, sg in zip(A_TRUE, f["theta"], f["sigma"]):
         assert abs(th - a) <= 3.0 * sg, (th, a, sg)

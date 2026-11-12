@@ -137,7 +137,7 @@ def _measurements(gs, geo, roles, ip, rng):
     sig = {"flux_loop": np.maximum(0.01 * np.abs(model["flux_loop"]), 2e-3),
            "bpol_probe": np.maximum(0.02 * np.abs(model["bpol_probe"]), 2e-3),
            "pf_current": np.maximum(0.01 * np.abs(model["pf_current"]), 200.0),
-           "ip": np.array([1e-3 * ip]), "mse": np.full(16, 3.5e-3)}
+           "ip": np.array([5e-3 * ip]), "mse": np.full(16, 3.5e-3)}
     meta = {"flux_loop": dict(coils_form="absolute", absolute_offset=0.0),
             "mse": dict(er_corrected=True, quantity="tan_polarisation_angle")}
     groups = {}

@@ -1,15 +1,22 @@
-r"""PROPOSED default uncertainty priors for non-inductive sources (status ``"proposed"``; never applied silently).
+r"""Uncertainty priors for non-inductive sources (never applied silently).
 
-The default prior widths are a user decision.  This module only
-collects the proposals with the evidence each rests on, so a caller can attach them
-explicitly::
+Decided defaults (status ``"decided"``): the prior widths of the two source scale factors that
+the reconstruction fits, for sources taken from a transport code --
+
+* :data:`FAST_ION_PRESSURE_SCALE_SIGMA` = 0.20: fast-ion pressure scale ``s_pfast ~ N(1, 0.20)``;
+* :data:`DRIVEN_CURRENT_SCALE_SIGMA` = 0.25: driven-current scale ``s_cd ~ N(1, 0.25)``;
+
+:mod:`..fit` reads these two constants for its ``s_pfast`` / ``s_cd`` priors, and the
+``"transport_code"`` entries below carry them with ``status="decided"``.  Every other width here
+is a proposal (status ``"proposed"``; a user decision).  This module collects them with the
+evidence each rests on, so a caller can attach them explicitly::
 
     s = model.compute(...)
     s.uncertainty = proposed_priors("simple_beam")
 
 Every entry is a :class:`.provider.ScalePrior` / :class:`.provider.ShapePrior` with
 ``status="proposed"`` and a ``basis`` string.  Evidence (this package's development checks,
-not published): the built-in model against a transport code (ONETWO) on 11 discharges / 1363
+not published): the built-in model against a transport code on 11 discharges / 1363
 slices (slowing-down part, given the code's own births) and on 2 discharges / 102 slices
 (full chain with pencil beams); two runs of the transport code on one discharge; and the
 a literature survey (quiet-plasma agreement of classical fast-ion models with
@@ -26,16 +33,23 @@ neutrons, MSE-inferred fast-ion pressure and beam-driven current within ~10-20 %
 
 from .provider import ScalePrior, ShapePrior
 
-__all__ = ["proposed_priors", "PRIOR_KINDS"]
+__all__ = ["proposed_priors", "PRIOR_KINDS", "FAST_ION_PRESSURE_SCALE_SIGMA", "DRIVEN_CURRENT_SCALE_SIGMA"]
 
 PRIOR_KINDS = ("simple_beam", "transport_code", "simple_ec", "mhd_active")
+
+#: Decided default prior width (1 sigma, fraction) of the fast-ion pressure scale (module docstring).
+FAST_ION_PRESSURE_SCALE_SIGMA = 0.20
+#: Decided default prior width (1 sigma, fraction) of the driven-current scale (module docstring).
+DRIVEN_CURRENT_SCALE_SIGMA = 0.25
 
 _B30 = "development check against a transport code"
 
 
 def proposed_priors(kind):
-    """List of proposed priors for ``kind`` (module docstring); all ``status='proposed'``."""
+    """List of priors for ``kind`` (module docstring): the two decided scale widths of the
+    ``"transport_code"`` kind carry ``status='decided'``, every other entry ``status='proposed'``."""
     P = "proposed"
+    D = "decided"
     if kind == "simple_beam":
         return [
             ScalePrior("p_fast", "*", 1.0, 0.20, status=P,
@@ -59,14 +73,14 @@ def proposed_priors(kind):
         ]
     if kind == "transport_code":
         return [
-            ScalePrior("p_fast", "*", 1.0, 0.20, status=P,
-                       basis="literature survey (quiet plasmas, 0.15) widened by the measured run-to-run spread of "
-                             f"two runs of one transport code on one discharge ({_B30}: stored energy per MW 0.81, "
-                             "log-sd 0.14, n=13)"),
+            ScalePrior("p_fast", "*", 1.0, FAST_ION_PRESSURE_SCALE_SIGMA, status=D,
+                       basis="decided default; evidence: literature survey (quiet plasmas, 0.15) widened by the "
+                             "measured run-to-run spread of two runs of one transport code on one discharge "
+                             f"({_B30}: stored energy per MW 0.81, log-sd 0.14, n=13)"),
             ScalePrior("n_fast", "*", 1.0, 0.20, status=P, basis="as p_fast"),
-            ScalePrior("jdotb", "*", 1.0, 0.25, status=P,
-                       basis=f"literature survey (0.20) widened by the run-to-run spread ({_B30}: NBCD per MW 0.78, "
-                             "log-sd 0.28, n=13, one discharge)"),
+            ScalePrior("jdotb", "*", 1.0, DRIVEN_CURRENT_SCALE_SIGMA, status=D,
+                       basis="decided default; evidence: literature survey (0.20) widened by the run-to-run spread "
+                             f"({_B30}: NBCD per MW 0.78, log-sd 0.28, n=13, one discharge)"),
             ShapePrior("jdotb", "*", "shift", 0.05, status=P, basis="literature survey (MSE-based NBCD location)"),
         ]
     if kind == "simple_ec":

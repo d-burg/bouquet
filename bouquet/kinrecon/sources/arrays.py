@@ -1,6 +1,6 @@
 r"""Array provider: wrap profiles from any transport code with EXPLICIT unit/frame declarations.
 
-Use this for ONETWO, TRANSP, RABBIT, FUSE or any code whose output has been read into numpy
+Use this for any transport or integrated-modeling code whose output has been read into numpy
 arrays by the caller.  Nothing is inferred: the radial coordinate, current frame, current
 units and sign convention, pressure form and units, and density units must all be stated;
 an undeclared or unknown value raises :class:`.conventions.AmbiguousConventionError`.
@@ -9,7 +9,8 @@ Current frames (declared with ``current_frame``; equations in :mod:`.conventions
 
 ``"jdotb"``      <J.B> [A T/m^2] -- stored as is;
 ``"jpar_b0"``    <J.B>/B0 (IMAS ``j_parallel``) -- multiplied by B0 (C2);
-``"j_r0"``       R0 <J_phi/R> (ONETWO ``<Jtor R0/R>``; AutoONETWO ``J_NBCD``) -- converted
+``"j_r0"``       R0 <J_phi/R> (the transport-code ``<J_tor R0/R>`` form, which integrates to
+                 the current with ``dV / (2 pi R0)``) -- converted
                  with (C3)-(C4), needs ``geometry`` with ``avg_b2``;
 ``"j_tor"``      <J_phi/R>/<1/R> (IMAS ``j_tor``) -- (C3), (C5), needs ``avg_inv_r`` too;
 ``"jphi_avg"``   <J_phi> -- (C6), needs ``avg_inv_r`` and ``avg_b2``.

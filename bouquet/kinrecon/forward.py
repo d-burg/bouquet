@@ -33,8 +33,10 @@ Grad-Shafranov equation with
   - isoflux rows on every ``isoflux_stride``-th point of a supplied REFERENCE boundary (from a
     prior magnetic equilibrium, e.g. EFIT01), weight ``anchor_factor * 2 pi median(1/sigma_loop)``
     (default factor 10; converged and verified on 5/5 magnetics cases at 10 and 30; working
-    window 3-30, measured).  This makes the solve "magnetics + reference boundary", not a
-    free-boundary shape reconstruction;
+    window 3-30, measured).  The default is CONVERGENCE-SELECTED: 10 is the center of the window
+    in which the solves converge, not a value derived from the measurement uncertainty, and it is
+    kept provisionally; results quote their sensitivity to it across the 3-30 window.  This makes
+    the solve "magnetics + reference boundary", not a free-boundary shape reconstruction;
 * the edge-P' taper policy ``auto`` (:func:`.edge.solve_with_edge_taper`) with one
   :class:`.edge.EdgeTaperCase` per forward model, so the taper is uniform within a case;
 * OFT's default solver settings, never set: ``nl_tol``, ``urf``, ``maxits`` are read back and
@@ -108,7 +110,7 @@ class ForwardSettings:
     coil_lambda: float = 1.0                    # coil row weight = lambda / (mu0 sigma)
     coil_rows_vsc_aware: bool = True            # rows act on the total current incl. the VSC share
     held_halfwidth_A: float = 1.0e-3            # hard bounds of "held" coils
-    anchor_factor: float = 10.0                 # isoflux weight = factor * 2 pi median(1/sigma_loop)
+    anchor_factor: float = 10.0                 # isoflux weight = factor * 2 pi median(1/sigma_loop); convergence-selected
     isoflux_stride: int = 4
     flux_gauge: str = "absolute"                # loops in the solve: "absolute" (SIREF route)
     probe_in_solve: str = "corrected_point"     # or "point"

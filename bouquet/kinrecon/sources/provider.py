@@ -169,7 +169,7 @@ class Provenance:
     """Where the numbers came from.  Every field is required except ``notes``.
 
     ``provider`` -- the kinrecon provider (``"arrays"``, ``"imas"``, ``"simple_beam"``, ...);
-    ``source_code`` / ``source_version`` -- the producing code (e.g. ``"ONETWO"`` /
+    ``source_code`` / ``source_version`` -- the producing code (its name /
     ``"5.9.7"``, ``"kinrecon.sources.beam"`` / :data:`SOURCES_VERSION`); ``inputs`` -- what was
     read (paths, hashes, time window); ``conventions`` -- the declared units/frames/pressure
     form of the inputs; ``settings`` -- every model setting, defaults included;

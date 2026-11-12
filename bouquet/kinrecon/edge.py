@@ -40,6 +40,20 @@ frames and the solver's axis target are defined once in :mod:`.pressure`.
 This module imports only numpy and the standard library and never imports a solver: the
 policy helper :func:`solve_with_edge_taper` drives a caller-supplied solve callable.
 
+Where the taper acts: only on ``[start - band_width, 1]`` in psi_N (default ``[0.975, 1]``
+for ``pressure_conserving``, ``[0.995, 1]`` for ``edge_pinned``), i.e. outside rho_tor,norm of
+about 0.97-0.99 on the equilibria met so far; it cannot move current between interior
+surfaces.
+
+Defaults of the machinery around it (stated so they are not mistaken for physics): every solve
+attempt starts from the same saved solver state (:class:`.forward.ForwardModel` restores its
+snapshot before the untapered and before the tapered attempt; the solver object itself is not
+rebuilt); the residual history is read from the solver's own unit-6 output, which needs
+``GFORTRAN_UNBUFFERED_PRECONNECTED=y`` before the solver library loads (:mod:`.forward` sets
+it at import); a history is passed to the detector only when the number of residuals parsed
+equals the solver's own iteration count -- otherwise ``auto`` reports the solve as
+``failed`` without tapering it.
+
 Conventions
 -----------
 * ``psi_n`` is normalized poloidal flux, 0 on axis and 1 at the boundary; knots must start

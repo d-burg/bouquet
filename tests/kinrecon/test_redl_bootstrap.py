@@ -84,3 +84,50 @@ def test_matches_oft_python_redl_to_round_off():
                                nu_i_star_override=parts["nu_i_star"], use_legacy_L34=False, use_sign_q=False,
                                formula_form="jboot1")
     np.testing.assert_allclose(ours, theirs, rtol=1e-12, atol=1e-12 * np.max(np.abs(theirs)))
+
+
+def test_impurity_enters_the_ion_pressure_only():
+    """With an impurity density the ion pressure (and its gradient) is (n_i + n_imp) T_i, the same thermal
+    pressure as the equilibrium's; the collisionality still uses the main ions.  Without it the earlier
+    result is reproduced bit for bit."""
+    x, te, ti, ne, ni, zeff, q, R, eps, ft, F = _profiles()
+    nimp = ne * (zeff - 1.0) / 30.0
+    j0, p0 = redl_jdotb(x, te, ti, ne, ni, zeff, q, R, eps, ft, F, 0.45)
+    jn, _ = redl_jdotb(x, te, ti, ne, ni, zeff, q, R, eps, ft, F, 0.45, nimp=None)
+    np.testing.assert_array_equal(j0, jn)
+    jz, pz = redl_jdotb(x, te, ti, ne, ni, zeff, q, R, eps, ft, F, 0.45, nimp=nimp)
+    np.testing.assert_array_equal(pz["nu_i_star"], p0["nu_i_star"])
+    np.testing.assert_array_equal(pz["ln_lambda_ii"], p0["ln_lambda_ii"])
+    assert "impurity" in pz["settings"]["ion_pressure"] and "only" in p0["settings"]["ion_pressure"]
+    # the same as the main-ion formula with the ion pressure built from n_i + n_imp, written out
+    from bouquet.kinrecon.current.bootstrap import redl_coefficients
+    c = redl_coefficients(ft, zeff, pz["nu_e_star"], pz["nu_i_star"])
+    d = lambda y: np.gradient(y, x, edge_order=2) / 0.45  # noqa: E731
+    pe, pi = EC * ne * te, EC * (ni + nimp) * ti
+    dp = EC * (ne * d(te) + te * d(ne) + (ni + nimp) * d(ti) + ti * d(ni + nimp))
+    ref = -F * pe * (c["L31"] * dp / pe + c["L32"] * d(te) / te + c["L31"] * c["alpha"] * pi / pe * d(ti) / ti)
+    np.testing.assert_allclose(jz, ref, rtol=1e-12, atol=1e-12 * np.max(np.abs(ref)))
+    # more ion pressure at the same gradients: a larger bootstrap here (falling profiles)
+    assert np.median(jz[5:-5] / j0[5:-5]) > 1.0
+    with pytest.raises(ValueError):
+        redl_jdotb(x, te, ti, ne, ni, zeff, q, R, eps, ft, F, 0.45, nimp=-nimp)
+
+
+def test_impurity_ion_pressure_matches_oft_with_its_pressure_inputs():
+    redl_bootstrap = _oft_bootstrap()
+    if redl_bootstrap is None:
+        pytest.skip("OpenFUSIONToolkit not importable")
+    x, te, ti, ne, ni, zeff, q, R, eps, ft, F = _profiles()
+    nimp = ne * (zeff - 1.0) / 30.0
+    dpsi = 0.45
+    ours, parts = redl_jdotb(x, te, ti, ne, ni, zeff, q, R, eps, ft, F, dpsi, nimp=nimp)
+    d = lambda y: np.gradient(y, x, edge_order=2) / dpsi  # noqa: E731
+    nit = ni + nimp
+    theirs, _ = redl_bootstrap(psi_N=x, Te=te, Ti=ti, ne=ne, ni=ni, pe=EC * ne * te, pi=EC * nit * ti, Zeff=zeff,
+                               R=R, q=q, eps=eps, fT=ft, I_psi=F, dT_e_dpsi=d(te), dT_i_dpsi=d(ti),
+                               dn_e_dpsi=d(ne), dn_i_dpsi=d(ni),
+                               dp_dpsi=EC * (ne * d(te) + te * d(ne) + nit * d(ti) + ti * d(nit)),
+                               ln_lambda_e=parts["ln_lambda_e"], ln_lambda_ii=parts["ln_lambda_ii"],
+                               nu_e_star_override=parts["nu_e_star"], nu_i_star_override=parts["nu_i_star"],
+                               use_legacy_L34=False, use_sign_q=False, formula_form="jboot1")
+    np.testing.assert_allclose(ours, theirs, rtol=1e-12, atol=1e-12 * np.max(np.abs(theirs)))

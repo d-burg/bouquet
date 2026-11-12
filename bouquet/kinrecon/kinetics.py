@@ -21,9 +21,26 @@ once as thermal ions at ``T_i`` and again in the fast-ion pressure.  The impurit
 turned into a Z_eff candidate with (K2)-(K1): ``Z_eff = 1 + Z (Z - 1) n_imp / n_e``.
 
 Z_eff source: there is no default.  Every candidate the caller has (e.g. a visible-bremsstrahlung
-Z_eff and a CER impurity density) is recorded with the pairwise disagreement, and the caller names
-the one used (``zeff_source``); a run that omits it is refused.  Nothing is clipped: ``Z_eff < 1``,
-``Z_eff > Z`` or a non-positive ``n_i`` inside the plasma is refused with the location.
+Z_eff and a CER impurity density) is recorded with the pairwise disagreement, and the caller
+either names the one used (``zeff_source=<name>``, the candidate is taken as given) or asks for the
+checked-source rule (``zeff_source="checked"``); a run that omits it is refused.  Nothing is
+clipped: ``Z_eff < 1``, ``Z_eff > Z`` or a non-positive ``n_i`` inside the plasma is refused with
+the location.
+
+Checked source (``zeff_source="checked"``): the rule of :mod:`.zeff_sources` (a verbatim copy of
+the bouquet reader's rule module) tests each candidate per slice -- an impurity density: I-1
+coverage of its measurement points, I-2 not a placeholder, I-3 positive main-ion density with the
+fast ions in quasineutrality, I-4 consistency with supplied raw analyses; a line-integrated Z_eff:
+L-1 own uncertainty, L-2 median relative uncertainty <= 0.25, L-3 not a copy of the
+impurity-derived value, L-4 not radially flat -- and decides: a qualified impurity source, else a
+qualified line-integrated value, else an unverified impurity source (used, labeled and warned),
+else refuse.  A test that cannot be evaluated (no points, no uncertainty, no raw analyses) leaves
+its candidate "unverified", never "qualified"; a missing fast-ion density does not (I-3 is then
+recorded as evaluated without fast ions).  A candidate named explicitly on the checked route
+(``zeff_rule={"override": <name>}``) is used only if it does not fail its tests, unless the caller
+also accepts that explicitly (``"accept_failed": True``, recorded and warned).  The full rule record
+(every candidate, test value, verdict, threshold and the decision) is stored in
+``KineticInputs.record["zeff_rule"]`` and summarized in the provenance.
 
 Coordinate (the working coordinate is rho_tor,norm):
 
@@ -37,18 +54,32 @@ The result evaluates on any equilibrium through :meth:`KineticInputs.profiles_at
 equilibrium's ``(psi_N, rho)`` pair; :mod:`.current_model` calls it on every pass.
 """
 
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 import numpy as np
 from scipy.interpolate import PchipInterpolator
 
+from . import zeff_sources as _zr
+
 EC = 1.602176634e-19
 
-__all__ = ["KineticInputs", "assemble_kinetic_inputs", "zeff_from_impurity_density", "COORDINATES"]
+__all__ = ["KineticInputs", "assemble_kinetic_inputs", "zeff_from_impurity_density", "COORDINATES",
+           "CHECKED", "ZEFF_RULE_OPTIONS"]
 
 #: Coordinates a kinetic table can carry.
 COORDINATES = ("rho_tor_norm", "psi_n")
+#: The ``zeff_source`` value that applies the checked-source rule (module docstring).
+CHECKED = "checked"
+#: Keys of the ``zeff_rule`` options (all optional): ``psi_n`` (psi_N of every ``x``, needed for a
+#: ``rho_tor_norm`` table: the rule's regions are in psi_N), ``slice_time`` [s], ``slice_window``
+#: ``(t0, t1)`` [s], ``override`` (a candidate name), ``accept_failed`` (bool), ``fast_ions``
+#: (``"none"``: the caller declares there are no fast ions; otherwise the ``n_fast`` given is used,
+#: or I-3 is evaluated without fast ions when ``n_fast`` is None).
+ZEFF_RULE_OPTIONS = ("psi_n", "slice_time", "slice_window", "override", "accept_failed", "fast_ions")
+#: Keys a candidate may carry when given as a dict (``value`` and ``kind`` required).
+_CANDIDATE_KEYS = ("kind", "value", "sigma", "fit_points", "raw_points", "provenance", "core_median_series")
 
 
 def zeff_from_impurity_density(ne, nimp, z_imp):
@@ -111,7 +142,7 @@ class KineticInputs:
 def assemble_kinetic_inputs(x, ne, te, ti, *, zeff_candidates, zeff_source, z_imp, coordinate="rho_tor_norm",
                             n_fast=None, n_fast_source="none (no fast ions given)", psi_n_to_rho=None,
                             mapping_source=None, provenance=None, ni_reference=None, source="",
-                            disagreement_range=(0.0, 0.9)):
+                            disagreement_range=(0.0, 0.9), zeff_rule=None):
     """Build :class:`KineticInputs` (module docstring).
 
     Parameters
@@ -122,9 +153,17 @@ def assemble_kinetic_inputs(x, ne, te, ti, *, zeff_candidates, zeff_source, z_im
     ne, te, ti : arrays on x
         [m^-3], [eV], [eV].
     zeff_candidates : dict
-        ``name -> ("zeff", array)`` or ``name -> ("impurity_density", array)``; at least one entry.
+        ``name -> ("zeff", array)`` or ``name -> ("impurity_density", array)``, or ``name -> dict``
+        with ``kind`` and ``value`` and, for the checked route, optionally ``sigma`` (1-sigma on x),
+        ``fit_points`` (the points the profile was fitted to: a :class:`.zeff_sources.MeasurementPoints`
+        or its dict), ``raw_points`` (raw analyses with times, for I-1 / I-4), ``provenance`` (str,
+        recorded) and, for a line-integrated value, ``core_median_series`` (the advisory); at least
+        one entry.  The checked route takes at most one candidate of each kind.
     zeff_source : str
-        The candidate used (required: there is no default).
+        The candidate used, or ``"checked"`` for the checked-source rule (required: there is no
+        default).
+    zeff_rule : dict, optional
+        Options of the checked route (:data:`ZEFF_RULE_OPTIONS`); refused with a named source.
     z_imp : float
         Charge of the single impurity species (> 1).
     n_fast : array on x, optional
@@ -139,9 +178,14 @@ def assemble_kinetic_inputs(x, ne, te, ti, *, zeff_candidates, zeff_source, z_im
         raise ValueError(f"coordinate must be one of {COORDINATES}")
     if not zeff_candidates:
         raise ValueError("give at least one Z_eff candidate")
-    if zeff_source is None or zeff_source not in zeff_candidates:
-        raise ValueError(f"zeff_source must name one of the candidates {sorted(zeff_candidates)}: there is no "
-                         "default Z_eff source")
+    if CHECKED in zeff_candidates:
+        raise ValueError(f"{CHECKED!r} is reserved for the checked-source rule; rename that candidate")
+    checked = zeff_source == CHECKED
+    if zeff_source is None or not (checked or zeff_source in zeff_candidates):
+        raise ValueError(f"zeff_source must name one of the candidates {sorted(zeff_candidates)} or be "
+                         f"{CHECKED!r}: there is no default Z_eff source")
+    if zeff_rule is not None and not checked:
+        raise ValueError(f"zeff_rule options apply only with zeff_source={CHECKED!r}")
     z = float(z_imp)
     if not z > 1.0:
         raise ValueError("z_imp must be > 1")
@@ -164,8 +208,19 @@ def assemble_kinetic_inputs(x, ne, te, ti, *, zeff_candidates, zeff_source, z_im
         raise ValueError("n_fast must be finite, >= 0 and on x")
     rec = dict(z_imp=z, n_fast_source=n_fast_source, zeff_source=zeff_source, candidates={})
     cand = {}
+    specs = {}
     for name, spec in zeff_candidates.items():
-        kind, arr = spec
+        if isinstance(spec, dict):
+            unknown = set(spec) - set(_CANDIDATE_KEYS)
+            if unknown or "kind" not in spec or "value" not in spec:
+                raise ValueError(f"Z_eff candidate {name!r}: a dict needs 'kind' and 'value' and may carry only "
+                                 f"{_CANDIDATE_KEYS} (got {sorted(spec)})")
+            spec = dict(spec)
+        else:
+            kind_, arr_ = spec
+            spec = dict(kind=kind_, value=arr_)
+        specs[name] = spec
+        kind, arr = spec["kind"], spec["value"]
         arr = np.asarray(arr, dtype=float)
         if arr.shape != x.shape or not np.all(np.isfinite(arr)):
             raise ValueError(f"Z_eff candidate {name!r} must be finite and on x")
@@ -181,6 +236,8 @@ def assemble_kinetic_inputs(x, ne, te, ti, *, zeff_candidates, zeff_source, z_im
         sel = inside & (x >= disagreement_range[0]) & (x <= disagreement_range[1])
         rec["candidates"][name] = dict(kind=kind, min=float(zc[inside].min()), max=float(zc[inside].max()),
                                        median=float(np.median(zc[sel])) if np.any(sel) else None)
+        if spec.get("provenance") is not None:
+            rec["candidates"][name]["provenance"] = str(spec["provenance"])
     names = sorted(cand)
     pairs = {}
     sel = inside & (x >= disagreement_range[0]) & (x <= disagreement_range[1])
@@ -190,6 +247,10 @@ def assemble_kinetic_inputs(x, ne, te, ti, *, zeff_candidates, zeff_source, z_im
             pairs[f"{a} vs {b}"] = dict(median_rel=float(np.median(d[sel])), max_abs_rel=float(np.max(np.abs(d[sel]))),
                                         range=list(disagreement_range), coordinate=coordinate)
     rec["pairwise_disagreement"] = pairs
+    if checked:
+        zeff_source = _checked_source(x, coordinate, out["ne"], nf, n_fast is None, z, specs, cand, psi_n_to_rho,
+                                      dict(zeff_rule or {}), rec)
+        rec["zeff_source"] = zeff_source
     zeff = cand[zeff_source]
     if np.any(zeff[inside] < 1.0):
         i = int(np.argmin(np.where(inside, zeff, np.inf)))
@@ -215,6 +276,14 @@ def assemble_kinetic_inputs(x, ne, te, ti, *, zeff_candidates, zeff_source, z_im
     prov.setdefault("te", "caller")
     prov.setdefault("ti", "caller")
     prov["zeff"] = f"candidate {zeff_source!r}"
+    if checked:
+        d = rec["zeff_rule"]["decision"]
+        prov["zeff"] += (f" chosen by the checked-source rule ({d['source']}, {d['source_state']}"
+                         + (", explicit override" if d.get("override") else "") + f"; {d['row']})")
+    elif specs[zeff_source].get("provenance") is not None:
+        prov["zeff"] += f" ({specs[zeff_source]['provenance']}; named by the caller, not tested)"
+    else:
+        prov["zeff"] += " (named by the caller, not tested)"
     prov["nimp"] = f"(K3) from n_e and Z_eff ({zeff_source}), Z = {z:g}"
     prov["ni"] = "(K4) quasineutrality with fast ions"
     prov["n_fast"] = n_fast_source
@@ -247,3 +316,88 @@ def assemble_kinetic_inputs(x, ne, te, ti, *, zeff_candidates, zeff_source, z_im
                          "no extrapolation is done")
     return KineticInputs(coordinate=coord, x=xs, ne=out["ne"], te=out["te"], ti=out["ti"], zeff=zeff, ni=ni,
                          nimp=nimp, n_fast=nf, z_imp=z, provenance=prov, record=rec, source=source)
+
+
+def _checked_source(x, coordinate, ne, n_fast, n_fast_missing, z, specs, cand, psi_n_to_rho, opts, rec):
+    """The checked-source rule on the candidates (module docstring); returns the chosen candidate's
+    name and stores the rule record in ``rec["zeff_rule"]``.  Refusals raise
+    :class:`.zeff_sources.ZeffSourceRefused` with the record attached."""
+    unknown = set(opts) - set(ZEFF_RULE_OPTIONS)
+    if unknown:
+        raise ValueError(f"unknown zeff_rule option(s) {sorted(unknown)}; known: {ZEFF_RULE_OPTIONS}")
+    by_kind = {}
+    for name, spec in specs.items():
+        by_kind.setdefault(spec["kind"], []).append(name)
+    for kind, names in by_kind.items():
+        if len(names) > 1:
+            raise ValueError(f"the checked route takes at most one candidate of each kind; {kind!r}: {names}")
+    imp_name = (by_kind.get("impurity_density") or [None])[0]
+    line_name = (by_kind.get("zeff") or [None])[0]
+    # the rule's regions are in psi_N; its point positions in rho_tor,norm
+    if coordinate == "psi_n":
+        psi = np.asarray(x, dtype=float)
+        if opts.get("psi_n") is not None:
+            raise ValueError("zeff_rule 'psi_n' is for a rho_tor_norm table; this table is on psi_N already")
+        rho_map = None if psi_n_to_rho is None else tuple(np.asarray(v, dtype=float) for v in psi_n_to_rho)
+    else:
+        if opts.get("psi_n") is None:
+            raise ValueError("the checked route on a rho_tor_norm table needs zeff_rule['psi_n'] (psi_N of every x, "
+                             "from the producing equilibrium): the rule's test regions are in psi_N")
+        psi = np.asarray(opts["psi_n"], dtype=float)
+        if psi.shape != np.shape(x) or np.any(np.diff(psi) <= 0):
+            raise ValueError("zeff_rule['psi_n'] must be on x and increase strictly")
+        inside = psi <= 1.0
+        rho_map = (psi[inside], np.asarray(x, dtype=float)[inside])
+    fast = opts.get("fast_ions")
+    if fast not in (None, "none"):
+        raise ValueError("zeff_rule['fast_ions'] must be 'none' (declared absent) or omitted")
+    if fast == "none":
+        if not n_fast_missing and np.any(n_fast > 0):
+            raise ValueError("zeff_rule declares no fast ions but a non-zero n_fast was given")
+        nf_rule = "none"
+    else:
+        nf_rule = None if n_fast_missing else n_fast
+    st, sw = opts.get("slice_time"), opts.get("slice_window")
+    imp = line = None
+    sig_zimp = zimp = None
+    if imp_name is not None:
+        sp = specs[imp_name]
+        nimp = np.asarray(sp["value"], dtype=float)
+        sig = None if sp.get("sigma") is None else np.asarray(sp["sigma"], dtype=float)
+        imp = _zr.impurity_tests(psi, ne, nimp, sig, impurity_Z=z, n_fast=nf_rule, rho_map=rho_map,
+                                 fit_points=sp.get("fit_points"), raw_points=sp.get("raw_points"), slice_time=st,
+                                 slice_window=sw)
+        zimp = cand[imp_name]
+        if sig is not None:
+            sig_zimp = z * (z - 1.0) * sig / ne
+    if line_name is not None:
+        sp = specs[line_name]
+        line = _zr.line_tests(psi, cand[line_name], sp.get("sigma"), zeff_impurity=zimp,
+                              core_median_series=sp.get("core_median_series"))
+    names = {_zr.IMPURITY: imp_name, _zr.LINE: line_name}
+    override = opts.get("override")
+    ov_kind = None
+    if override is not None:
+        if override not in specs:
+            raise ValueError(f"zeff_rule override {override!r} is not one of the candidates {sorted(specs)}")
+        ov_kind = _zr.IMPURITY if override == imp_name else _zr.LINE
+    record = _zr.zeff_source_record(imp, line, sigma_zeff_imp=sig_zimp, psi_N=psi, zeff_imp=zimp,
+                                    zeff_line=None if line_name is None else cand[line_name],
+                                    sigma_zeff_line=None if line_name is None else specs[line_name].get("sigma"),
+                                    override=ov_kind, time=st)
+    record["candidate_names"] = dict(names)
+    record["accept_failed"] = bool(opts.get("accept_failed", False))
+    rec["zeff_rule"] = record
+    dec = record["decision"]
+    if dec["source"] is None:
+        raise _zr.ZeffSourceRefused("Z_eff source refused by the checked-source rule: " + _zr.refusal_message(record),
+                                    record)
+    if dec.get("override") and dec["source_state"] == _zr.FAILED and not record["accept_failed"]:
+        raise _zr.ZeffSourceRefused(
+            f"the named Z_eff candidate {override!r} fails "
+            + ", ".join(dec["override"]["named_failed_tests"])
+            + "; refused (pass zeff_rule={'override': ..., 'accept_failed': True} to use it anyway, recorded)", record)
+    msg = _zr.checked_warning(record)
+    if msg:
+        warnings.warn(msg, _zr.ZeffSourceWarning, stacklevel=3)
+    return names[dec["source"]]

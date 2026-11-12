@@ -25,8 +25,8 @@ name               meaning                                     default prior / b
 ``log_strength``   ln of the sawtooth strength                 N(ln Lambda_0, 1.0); Lambda_0 at f = 0.37
                    ``Lambda = -ln(1 - 0.999 f) nu`` [1/s]      and a 60 ms period; bounds ln(1e-2)..ln(1e4)
 ``f``              reconnection fraction at fixed strength     no Gaussian prior (uniform 0.1-1)
-``s_pfast``        fast-ion pressure scale                     N(1, 0.15); bounds 0.2..3
-``s_cd``           driven-current scale                        N(1, 0.20); bounds 0..3
+``s_pfast``        fast-ion pressure scale                     N(1, 0.20); bounds 0.2..3
+``s_cd``           driven-current scale                        N(1, 0.25); bounds 0..3
 ``s_bs``           bootstrap multiplier                        N(1, 0.5); bounds 0..3
 ``a_corr_k``       current-correction amplitude k (fraction    N(0, 0.02) (fraction of Ip); +-0.2
                    of Ip; Gaussians on rho_tor,norm,
@@ -116,6 +116,7 @@ import numpy as np
 from . import current_model as _cm
 from .current import sawtooth as _saw
 from .score import chi2_summary, score
+from .sources.priors import DRIVEN_CURRENT_SCALE_SIGMA, FAST_ION_PRESSURE_SCALE_SIGMA
 
 #: Reference crash period of the default strength prior (proposal: median 60 ms) [s].
 PRIOR_PERIOD_S = 0.060
@@ -144,8 +145,10 @@ PARAMETERS = {
                          unit="ln(1/s)", note="sawtooth strength along -ln(1-0.999f) nu (MSE-constrained)"),
     "f": dict(prior=(None, None), bounds=(0.1, 1.0), step0=0.05, unit="1",
               note="reconnection fraction at fixed strength (uniform prior 0.1-1: bounds only)"),
-    "s_pfast": dict(prior=(1.0, 0.15), bounds=(0.2, 3.0), step0=0.05, unit="1", note="fast-ion pressure scale"),
-    "s_cd": dict(prior=(1.0, 0.20), bounds=(0.0, 3.0), step0=0.05, unit="1", note="driven-current scale"),
+    "s_pfast": dict(prior=(1.0, FAST_ION_PRESSURE_SCALE_SIGMA), bounds=(0.2, 3.0), step0=0.05, unit="1",
+                    note="fast-ion pressure scale (prior width: sources.priors)"),
+    "s_cd": dict(prior=(1.0, DRIVEN_CURRENT_SCALE_SIGMA), bounds=(0.0, 3.0), step0=0.05, unit="1",
+                 note="driven-current scale (prior width: sources.priors)"),
     "s_bs": dict(prior=(1.0, 0.5), bounds=(0.0, 3.0), step0=0.05, unit="1", note="bootstrap multiplier"),
     "a_corr": dict(prior=(0.0, 0.02), bounds=(-0.2, 0.2), step0=0.005, unit="fraction of Ip",
                    note="model-discrepancy current amplitudes (one per center)"),

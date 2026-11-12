@@ -71,6 +71,11 @@ both primary texts and is not followed.  (The authors' Zenodo dataset cannot
 decide this: it tabulates the fits against nu_e* as an input coordinate.)
 
 Units are SI except temperatures, which are in eV as in the source papers.
+
+Defaults (stated, not physics): no floor is applied to ``ln(Lambda_e)`` in the conductivity
+(OFT's own routines clamp it at 10; the bootstrap module of this package keeps that floor for
+its NRL logarithms); there is no warning for very low ``Te`` (below about 10 eV the
+logarithms leave their range of validity) -- this affects ``sigma_neo`` only in a cold edge.
 """
 
 import numpy as np

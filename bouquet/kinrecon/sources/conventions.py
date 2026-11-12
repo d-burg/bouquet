@@ -33,7 +33,7 @@ Pfirsch-Schlueter part; a non-inductive source current is of that form by constr
     j_par        = <J.B> / B0                         IMAS j_parallel        [A/m^2]   (C2)
     <J_phi / R>  = <J.B> F <1/R^2> / <B^2>                                   [A/m^3]   (C3)
     j_R0         = R0 <J_phi / R>                     transport-code frame   [A/m^2]   (C4)
-                   (ONETWO "<Jtor R0/R>": integrates to I with dV / (2 pi R0))
+                   (the transport-code "<J_tor R0/R>" form: integrates to I with dV / (2 pi R0))
     j_tor        = <J_phi / R> / <1/R>                IMAS j_tor             [A/m^2]   (C5)
     <J_phi>      = <J.B> F <1/R> / <B^2>                                     [A/m^2]   (C6)
     I(rho)       = (1 / 2 pi) int_0^rho <J_phi / R> dV                       [A]       (C7)
@@ -56,9 +56,15 @@ is the isotropic-equivalent pressure
     p_fast = (P_par + 2 P_perp) / 3 = (2/3) W_fast,    W_fast = P_par / 2 + P_perp      (C8)
 
 (``W_fast`` = kinetic-energy density; (C8) is one third of the trace of the pressure
-tensor).  This is the convention of kinetic EFIT (``beam pressure = (2/3) W_beam``), of the
-ONETWO statefile (``pressb = (2/3) wbeam``) and of the AutoONETWO ``PRESS_BEAM`` node
-(measured: ``PRESS_BEAM = (2/3) WBEAM`` to 1e-5).
+tensor).  This is the convention of kinetic EFIT (``beam pressure = (2/3) W_beam``) and of the
+beam-pressure arrays that transport codes write for it (their beam pressure equals (2/3) of
+their beam energy density; measured to 1e-5 on one code's output).
+
+The scalar passed to the equilibrium is (C8), ``(P_par + 2 P_perp) / 3``, NOT the other common
+isotropic stand-in ``(P_par + P_perp) / 2``.  The two differ by ``(P_perp - P_par) / 6``: for a
+perpendicular-heavy beam population about 10 % of ``p_fast``, which was about 4 % of the total
+pressure on the validation case with the largest fast-ion fraction and less on the others
+(recorded as a convention, kept by decision; nothing on the Grad-Shafranov side was measured).
 
 How each stored form maps onto (C8):
 
@@ -74,8 +80,8 @@ IMAS components (p_par, p_perp)    p_par + 2 p_perp   (each component = TRUE/3)
 IMAS components: OMAS and IMAS.jl form the total pressure as
 ``p_thermal + pressure_fast_parallel + 2 pressure_fast_perpendicular``, so each stored
 component holds ONE THIRD of the corresponding true pressure (an isotropic p_fast is stored
-as p_fast/3 in both).  Every OMFIT export (ONETWO, RABBIT, FREYA) writes ``p/3``; the
-TRANSP plasma-state export writes true pressures (checked on the exporters' source).
+as p_fast/3 in both).  Exporters differ: some write ``p/3`` per component, others write true
+pressures (checked on the exporters' source).
 The DD itself cannot tell the two apart, so readers must be TOLD which one a file uses
 (:mod:`.imas` refuses to guess).
 
@@ -121,7 +127,7 @@ PRESSURE_CONVENTION = "isotropic_equivalent"   # (C8)
 CURRENT_FRAMES = {
     "jdotb": "<J.B> [A T/m^2]",
     "jpar_b0": "<J.B>/B0 (IMAS j_parallel) [A/m^2]; needs B0",
-    "j_r0": "R0 <J_phi/R> (ONETWO '<Jtor R0/R>') [A/m^2]; needs R0 and geometry (F, <1/R^2>, <B^2>)",
+    "j_r0": "R0 <J_phi/R> (transport-code '<J_tor R0/R>' form) [A/m^2]; needs R0 and geometry (F, <1/R^2>, <B^2>)",
     "j_tor": "<J_phi/R>/<1/R> (IMAS j_tor) [A/m^2]; needs geometry (F, <1/R^2>, <1/R>, <B^2>)",
     "jphi_avg": "<J_phi> [A/m^2]; needs geometry (F, <1/R>, <B^2>)",
 }

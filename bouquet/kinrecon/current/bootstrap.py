@@ -11,8 +11,15 @@ L32 (eqs. 12-16) and alpha (eqs. 20-21) fits, used in Sauter's (1999) "jboot1" f
                                + L34 alpha (1 - R_pe)/R_pe (1/T_i) dT_i/dpsi ]           (S99 eq. 5)
 
 with ``I(psi) = F = R B_phi``, ``R_pe = p_e / p``, ``p = p_e + p_i`` (thermal), L34 = L31 (Redl
-section II.C).  The transcription follows, term for term, OFT's Python implementation
-``OpenFUSIONToolkit.TokaMaker.bootstrap.redl_bootstrap`` (``formula_form='jboot1'``,
+section II.C).  ``p_i`` is the TOTAL thermal ion pressure: main ions plus the impurity at ``T_i``
+when an impurity density is given (``nimp``), i.e. the same thermal pressure the equilibrium
+carries (:mod:`..kinetics`, (K5)); ``p`` in Sauter's and Redl's formula is the total plasma
+pressure.  The main-ion density alone enters the ion collisionality and ``ln Lambda_ii``.
+Without ``nimp`` the ion pressure is ``n_i T_i`` (the earlier behavior).
+
+The transcription follows, term for term, OFT's Python implementation
+``OpenFUSIONToolkit.TokaMaker.bootstrap.redl_bootstrap`` (``formula_form='jboot1'``, whose ion
+pressure ``pi`` and total-pressure gradient ``dp_dpsi`` are caller inputs,
 ``use_legacy_L34=False``), which agrees with TokaMaker's in-solve Fortran Redl on the same
 equilibria to 4-5e-4 of the peak (the solver-noise level; measured).
 ``tests/kinrecon/test_redl_bootstrap.py`` checks this module against that function to round-off
@@ -107,7 +114,7 @@ def redl_coefficients(ft, zeff, nu_e, nu_i):
 
 
 def redl_jdotb(psi_n, te, ti, ne, ni, zeff, q, R, eps, ft, fpol, dpsi, ion_collisionality="spike",
-               gradient="numpy_second_order"):
+               gradient="numpy_second_order", nimp=None):
     r"""<j_BS . B> [A T / m^2] on the given psi_N samples (module docstring).
 
     Parameters
@@ -115,7 +122,7 @@ def redl_jdotb(psi_n, te, ti, ne, ni, zeff, q, R, eps, ft, fpol, dpsi, ion_colli
     psi_n : array (n,)
         Normalized poloidal flux of the samples (strictly increasing).
     te, ti : array (n,)  [eV];  ne, ni : array (n,)  [m^-3];  zeff : array (n,)
-        Thermal kinetic profiles on the samples.
+        Thermal kinetic profiles on the samples (``ni``: main ions).
     q, R, eps, ft, fpol : array (n,)
         Safety factor, surface major radius [m], inverse aspect ratio, trapped fraction,
         ``|F|`` [T m].
@@ -123,6 +130,9 @@ def redl_jdotb(psi_n, te, ti, ne, ni, zeff, q, R, eps, ft, fpol, dpsi, ion_colli
         ``|psi_boundary - psi_axis|`` [Wb/rad]; derivatives are ``d/dpsi = d/dpsi_N / dpsi``.
     gradient : str
         ``"numpy_second_order"``: ``numpy.gradient(y, psi_n, edge_order=2)`` (the prototype's choice).
+    nimp : array (n,), optional
+        Impurity density [m^-3] at ``T_i``; included in the ion pressure and its gradient
+        (module docstring).  None: ion pressure ``n_i T_i``.
 
     Returns ``(jdotb, parts)`` with ``parts`` holding ``L31``, ``L32``, ``alpha``, ``nu_e_star``,
     ``nu_i_star``, ``ln_lambda_e``, ``ln_lambda_ii`` and the settings used.
@@ -134,6 +144,9 @@ def redl_jdotb(psi_n, te, ti, ne, ni, zeff, q, R, eps, ft, fpol, dpsi, ion_colli
         raise ValueError("psi_n must increase strictly")
     te, ti, ne, ni, zeff, q, R, eps, ft, F = (np.asarray(v, dtype=float)
                                               for v in (te, ti, ne, ni, zeff, q, R, eps, ft, fpol))
+    nz = np.zeros_like(ni) if nimp is None else np.asarray(nimp, dtype=float)
+    if nz.shape != ni.shape or not np.all(np.isfinite(nz)) or np.any(nz < 0):
+        raise ValueError("nimp must be finite, >= 0 and on psi_n")
     if not (np.isfinite(dpsi) and dpsi > 0):
         raise ValueError("dpsi must be |psi_b - psi_a| > 0")
 
@@ -143,15 +156,18 @@ def redl_jdotb(psi_n, te, ti, ne, ni, zeff, q, R, eps, ft, fpol, dpsi, ion_colli
     ln_e, ln_ii = coulomb_logs(te, ti, ne, ni)
     nu_e, nu_i = collisionalities(q, R, eps, te, ti, ne, ni, zeff, ln_e, ln_ii, ion_collisionality)
     c = redl_coefficients(ft, zeff, nu_e, nu_i)
-    pe, pi = EC * ne * te, EC * ni * ti
+    nit = ni + nz                              # thermal ions: main + impurity (both at T_i)
+    pe, pi = EC * ne * te, EC * nit * ti
     rpe = pe / (pe + pi)
-    dte, dti, dne, dni = d(te), d(ti), d(ne), d(ni)
-    dp = (ne * dte + te * dne + ni * dti + ti * dni) * EC
+    dte, dti, dne, dnit = d(te), d(ti), d(ne), d(nit)
+    dp = (ne * dte + te * dne + nit * dti + ti * dnit) * EC
     jb = -np.abs(F) * pe * (c["L31"] * dp / pe + c["L32"] * dte / te
                             + c["L34"] * c["alpha"] * (1 - rpe) / rpe * dti / ti)
     parts = dict(c, nu_e_star=nu_e, nu_i_star=nu_i, ln_lambda_e=ln_e, ln_lambda_ii=ln_ii,
                  settings=dict(model="redl2021", form="jboot1 (Sauter 1999 eq. 5), L34 = L31",
                                ln_lambda_e="NRL, floor 10", ln_lambda_ii="Zavg, floor 10",
                                ion_collisionality=ion_collisionality, gradient=gradient,
+                               ion_pressure=("(n_i + n_imp) T_i (main ions and impurity)" if nimp is not None
+                                             else "n_i T_i (main ions only; no impurity density given)"),
                                frame="positive (|F|, psi increasing outward)"))
     return jb, parts

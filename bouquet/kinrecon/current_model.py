@@ -38,7 +38,11 @@ the current equilibrium) plus the outer-layer samples; kinetic inputs and source
 at those surfaces by the coordinate they carry (:class:`.kinetics.KineticInputs`,
 ``SourceProfiles.coordinate``).  The current-correction Gaussians are on rho_tor,norm.  TokaMaker
 receives psi_N knots from :func:`.coordinates.solver_knots` (default: uniform in rho through the
-current pass's equilibrium, plus the domain-edge rule's outer-layer knots).
+current pass's equilibrium, plus the domain-edge rule's outer-layer knots).  Default: the outer
+layer (psi_N > 0.995) is resolved for the solver by the domain-edge knot and two interior knots in
+it; four layer knots gave the same reliability and cost on the public fixture, and the flat
+solver stall seen on some real cases is not lifted by them (the stall gate of :mod:`.edge` is
+unchanged).
 
 Pass-consistency loop (:func:`consistent_solve`): evaluate (1)-(4) on the current equilibrium,
 solve (:class:`.forward.ForwardModel`), repeat, until
@@ -168,7 +172,7 @@ class SourceProfiles:
 
     ``jdotb_cd`` [A T/m^2]: flux-surface-averaged driven current density <j_CD . B>, signed relative
     to Ip (positive = co-current).  Alternatively ``jtor_r0_cd`` [A/m^2] with ``r0_cd`` [m]: the
-    transport-code form ``<J_phi R0/R>`` (ONETWO; ``I = int J dV / (2 pi R0)``), converted on the
+    transport-code form ``<J_phi R0/R>`` (``I = int J dV / (2 pi R0)``), converted on the
     CURRENT geometry for a parallel driven current ``J = (<J.B>/<B^2>) B``:
     ``<J.B> = J <B^2> / (F R0 <1/R^2>)``.  ``p_fast`` [Pa]: fast-ion pressure as an isotropic-equivalent
     scalar ``(p_par + 2 p_perp)/3`` (what enters the Grad-Shafranov P' in the isotropic model),
@@ -352,7 +356,8 @@ def evaluate_geometry(gs, kin, cfg):
                                             phys["eps"], model=cfg.conductivity_model,
                                             ln_lambda_model=cfg.ln_lambda_model)
     jbs, bparts = redl_jdotb(ge, k["te"], k["ti"], k["ne"], k["ni"], k["zeff"], phys["q"], phys["r_geo"],
-                             phys["eps"], phys["ft"], F, dpsi, ion_collisionality=cfg.ion_collisionality)
+                             phys["eps"], phys["ft"], F, dpsi, ion_collisionality=cfg.ion_collisionality,
+                             nimp=k.get("nimp"))
     return dict(geom=geom, layer=layer, psi_n_edge=c, to_rho=to_rho, to_psin=to_psin, rho_map=rmap, phys=phys,
                 dpsi=dpsi, sigma=np.asarray(sig, float), jbs=np.asarray(jbs, float), kin=k,
                 kinetics_coordinate=getattr(kin, "coordinate", "psi_n"),

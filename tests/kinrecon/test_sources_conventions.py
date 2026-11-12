@@ -177,9 +177,16 @@ def test_on_psi_n_resampling():
 
 def test_proposed_priors_are_explicit_and_complete():
     from bouquet.kinrecon.sources import PRIOR_KINDS, proposed_priors
+    from bouquet.kinrecon.sources.priors import DRIVEN_CURRENT_SCALE_SIGMA, FAST_ION_PRESSURE_SCALE_SIGMA
     for kind in PRIOR_KINDS:
         pri = proposed_priors(kind)
-        assert pri and all(p.status == "proposed" and p.basis for p in pri)
+        assert pri and all(p.status in ("proposed", "decided") and p.basis for p in pri)
+        decided = [(p.quantity, p.sigma_log) for p in pri if p.status == "decided"]
+        if kind == "transport_code":
+            assert sorted(decided) == [("jdotb", DRIVEN_CURRENT_SCALE_SIGMA), ("p_fast", FAST_ION_PRESSURE_SCALE_SIGMA)]
+        else:
+            assert decided == []
+    assert (FAST_ION_PRESSURE_SCALE_SIGMA, DRIVEN_CURRENT_SCALE_SIGMA) == (0.20, 0.25)
     s = NonInductiveSources(rho=RHO, time=1.0, time_window=0.0, B0=B0, R0=R0, jdotb={"nbi": np.ones(51)},
                             p_fast={"D": np.ones(51)}, n_fast={"D": np.ones(51)}, provenance=_prov(),
                             uncertainty=proposed_priors("simple_beam"))

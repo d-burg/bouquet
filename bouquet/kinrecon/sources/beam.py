@@ -43,6 +43,13 @@ reading it raises until the caller acknowledges it
 (:meth:`.provider.NonInductiveSources.acknowledge_not_validated`).  No calibration factor is
 applied.  The fast-ion pressure, density and heating are unaffected by this flag.
 
+**The stored-energy validation depends on the beam-ion Coulomb logarithm.**  The fast-ion
+stored energy agrees with a transport code to about 2 % (ratio 1.02) with the default separate
+NRL beam-ion Coulomb logarithm (``ln_lambda_i="nrl_beam_ion"``, chosen before the comparison);
+with the beam-ion logarithm set equal to the electron one the same comparison gives about 1.17
+(ion heating 0.97 against 0.87).  The validation is therefore a statement about the model WITH
+that default, not about the slowing-down model alone.
+
 **Dropped FUSE feature (declared difference).**  FUSE ``ActorSimpleNB`` shifts each birth
 inward by ``banana_width (1 - xi) banana_shift_fraction`` (default fraction 0.5), a crude
 finite-orbit correction of the deposition.  It is not reproduced here (births are mapped to

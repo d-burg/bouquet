@@ -31,7 +31,19 @@ name               meaning                                     default prior / b
 ``a_corr_k``       current-correction amplitude k (fraction    N(0, 0.02) (fraction of Ip); +-0.2
                    of Ip; Gaussians on rho_tor,norm,
                    ``current_model.correction_shapes``)
+``ip_rel``         plasma-current target relative to the       no prior row (its datum is the Ip
+                   measured Ip: target = Ip_meas (1 + ip_rel)  measurement row); +-0.2
 =================  ==========================================  ======================================
+
+The plasma current is fitted, not pinned (``FitSettings.ip_target = "fitted"``, default): whenever the
+Ip measurement row is one of the fit groups, ``ip_rel`` joins the parameters (also when it is not named
+in ``free``), so the forward solve's Ip target is a fit parameter whose datum is the Ip row with its own
+sigma -- one datum, one parameter, no prior row.  This is the least invasive form for the solver, which
+takes Ip as a target and renormalizes the current profile to it; on the time-dependent path the supplied
+state's current density is scaled by the same factor.  ``ip_target = "measured"`` holds the target at
+the measured value (the earlier behavior: the Ip noise then enters as an unmodeled input error).  Every
+result records the measured Ip, the fitted Ip (the solved equilibrium's) and ``(measured -
+fitted)/sigma`` (``record["ip_fit"]``).
 
 Every prior, bound, step rule and stopping criterion is an explicit setting recorded in the
 result (they are decisions for the user; the defaults are this package's proposals).
@@ -115,7 +127,7 @@ import numpy as np
 
 from . import current_model as _cm
 from .current import sawtooth as _saw
-from .score import chi2_summary, score
+from .score import chi2_summary, flux_offset_record, score
 from .sources.priors import DRIVEN_CURRENT_SCALE_SIGMA, FAST_ION_PRESSURE_SCALE_SIGMA
 
 #: Reference crash period of the default strength prior (proposal: median 60 ms) [s].
@@ -152,7 +164,13 @@ PARAMETERS = {
     "s_bs": dict(prior=(1.0, 0.5), bounds=(0.0, 3.0), step0=0.05, unit="1", note="bootstrap multiplier"),
     "a_corr": dict(prior=(0.0, 0.02), bounds=(-0.2, 0.2), step0=0.005, unit="fraction of Ip",
                    note="model-discrepancy current amplitudes (one per center)"),
+    "ip_rel": dict(prior=(None, None), bounds=(-0.2, 0.2), step0=0.002, unit="fraction of the measured Ip",
+                   note="plasma-current target relative to the measured Ip; no prior row: the Ip measurement row "
+                        "(its own sigma) is its datum"),
 }
+
+#: How the plasma-current target of the forward solve is treated by a fit (:attr:`FitSettings.ip_target`).
+IP_TARGETS = ("fitted", "measured")
 
 
 @dataclass
@@ -178,17 +196,23 @@ class FitSettings:
     max_failed_trials: int = 4
     fit_groups: Sequence[str] = ("flux_loop", "bpol_probe", "pf_current", "ip", "mse")
     max_step: Dict[str, float] = field(default_factory=lambda: dict(log_strength=0.5, f=0.1, s_pfast=0.1, s_cd=0.1,
-                                                                    s_bs=0.2, a_corr=0.01))
+                                                                    s_bs=0.2, a_corr=0.01, ip_rel=0.02))
     fitted_coil_role: str = "fitted"
     column_retry_opposite: bool = True   # a failed column solve is retried once with the opposite step
     final_gn_step: bool = True           # take the undamped GN step of the converged test (accepted within noise)
     jacobian_steps: str = "consistent"   # "consistent" or "lagged": the columns used for the optimizer's STEPS
     #                                      (stopping tests and covariance always use consistent columns)
     taper_restart: bool = False          # NON-DEFAULT: restart the whole reconstruction tapered (module docstring)
+    ip_target: str = "fitted"            # "fitted": ip_rel joins the parameters (Ip row its datum); "measured":
+    #                                      the Ip target is held at the measured value (the earlier behavior)
 
     def __post_init__(self):
         if self.jacobian_steps not in JACOBIAN_STEP_KINDS:
             raise ValueError(f"jacobian_steps must be one of {JACOBIAN_STEP_KINDS}")
+        if self.ip_target not in IP_TARGETS:
+            raise ValueError(f"ip_target must be one of {IP_TARGETS}")
+        if self.ip_target == "measured" and "ip_rel" in self.free:
+            raise ValueError("ip_rel is free but ip_target='measured' holds the Ip target: choose one")
 
     def as_dict(self):
         return asdict(self)
@@ -450,6 +474,7 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
     ms = fm.ms
     coil_roles = {n: v["role"] for n, v in fm.rows_record["coils"]["per_coil"].items()}
     groups, excluded = fit_groups(ms, settings)
+    ip_note = _ip_parameter(names, groups, ms, settings)
     given = dict(params0 or {})
     base = _cm.full_params(given)
     th = np.zeros(len(names))
@@ -468,7 +493,9 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
     lo = np.array([_spec(n, settings)["bounds"][0] for n in names])
     hi = np.array([_spec(n, settings)["bounds"][1] for n in names])
     th = np.clip(th, lo, hi)
-    cap = np.array([settings.max_step["a_corr" if n.startswith("a_corr_") else n] for n in names])
+    cap = np.array([settings.max_step.get("a_corr" if n.startswith("a_corr_") else n,
+                                          FitSettings().max_step["a_corr" if n.startswith("a_corr_") else n])
+                    for n in names])
     n0 = fm.n_solves
     log = []
     rec = dict(label=label, free=names, specs={n: _spec(n, settings) for n in names}, settings=settings.as_dict(),
@@ -476,7 +503,7 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
                forward=None, kinetics_source=getattr(kin, "source", ""), sources_source=src.source,
                sources_convention=dict(src.convention),
                kinetics_provenance=dict(getattr(kin, "provenance", {}) or {}),
-               kinetics_record=dict(getattr(kin, "record", {}) or {}))
+               kinetics_record=dict(getattr(kin, "record", {}) or {}), ip_target=ip_note)
 
     def finish(status, center, J=None, extra=None, jinfo=None):
         rec["status"] = status
@@ -487,6 +514,9 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
         rec["forward"] = fm.settings_record()
         if extra:
             rec.update(extra)
+        rec["ip_fit"] = ip_record(center["all_tab"] if center is not None else None, ms,
+                                  center["params"] if center is not None else _to_params(th, names, base),
+                                  "ip_rel" in names)
         cov = np.full((len(names), len(names)), np.nan)
         sig = np.full(len(names), np.nan)
         chi = {}
@@ -511,7 +541,7 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
 
     def evaluate(theta, start_state, z0, lab, init_prof=None, ref_index=None):
         p = _to_params(theta, names, base)
-        res = _consistent(fm, kin, src, p, cfg, start_state, z0, lab, init_prof, state_fn)
+        res = _consistent(fm, kin, src, p, cfg, start_state, z0, lab, init_prof, _scaled_state_fn(state_fn, p))
         if not res.converged:
             return None, res
         r, idx, tab = residual_vector(fm, ms, groups, settings, coil_roles)
@@ -525,6 +555,7 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
         all_groups = [g for g in ms.groups if g in ("flux_loop", "bpol_probe", "ip", "pf_current", "mse")]
         all_tab = score(fm.gs, ms, groups=all_groups)
         summ = {k: dict(chi2=v[0], n=v[1], chi2_per_n=v[2]) for k, v in chi2_summary(all_tab).items()}
+        summ_offset = flux_offset_record(all_tab)
         fit_chi = {g: float(np.sum(r[[i for i, (gg, _) in enumerate(idx) if gg == g]] ** 2)) for g in groups}
         c = dict(theta=np.array(theta, float), params=p, res=res, r=full, r_data=r, index=idx, prior_index=lp,
                  chi2=dict(objective=float(full @ full), data=float(r @ r), prior=float(rp @ rp), fit_groups=fit_chi,
@@ -533,7 +564,8 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
                                                dof=summ["total"]["n"] - len(names),
                                                note="chi2/n in scored_all is descriptive (sigma are "
                                                     "conventions); the n_params were fitted to the fit "
-                                                    "groups, a subset of these channels")),
+                                                    "groups, a subset of these channels"),
+                           flux_offset=summ_offset),
                  tab=tab, all_tab=all_tab, snap=fm.snapshot(), probe_correction=fm.probe_correction.copy(),
                  z0=res.assembly["orbit_z"] if res.assembly else None)
         return c, res
@@ -596,7 +628,7 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
         lag = c["res"].lag
         kw = {}
         if state_fn is not None:
-            kw["state"] = state_fn(lag)
+            kw["state"] = _scaled_state_fn(state_fn, p)(lag)
         sres, _, why = _cm.lagged_solve(fm, lag, kin, src, p, cfg, z0=c["z0"], label=lab, **kw)
         if sres is None or not sres.converged:
             restore_center(c)
@@ -650,11 +682,20 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
                     info["attempts"].append(dict(h=direction * h, status=why))
                     break
                 if noise["norm"] is None:
-                    m = measure_noise(c, extra_state[0])
+                    # the same measurement in both column modes: the starting state is that of a CONSISTENT solve
+                    # at the first column's step (in lagged mode that solve is made for this purpose; a lagged
+                    # column's state would make the noise -- and every threshold built on it -- depend on the mode)
+                    from_state, why_n = (extra_state[0] if not lagged else None), None
+                    if lagged:
+                        _, why_n, es_c = column_solve(c, tj, f"{lab}:noise_state")
+                        from_state = None if es_c is None else es_c[0]
+                    m = (measure_noise(c, from_state) if from_state is not None
+                         else dict(status=f"noise starting state failed: {why_n}"))
                     rec["noise"] = dict(status=m["status"], chi2=m.get("chi2"), norm=m.get("norm"),
                                         method="consistent re-solve of the first center's parameters from the "
-                                               "state of its first Jacobian column"
-                                               + (" (a lagged column)" if lagged else ""))
+                                               "state of a consistent solve at its first Jacobian column's step"
+                                               + (" (made for the noise measurement: the columns are lagged)"
+                                                  if lagged else ""))
                     if m["status"] != "ok":
                         return None, dict(reason=f"noise measurement failed: {m['status']}", columns=cols)
                     noise.update(chi2=m["chi2"], r=m["r"], norm=m["norm"])
@@ -841,6 +882,56 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
     out = finish(status if Jf is not None else status + "_no_final_jacobian", center, Jf, extra, jinfo=jf_info)
     out.record["center"] = center
     return out
+
+
+def _ip_parameter(names, groups, ms, settings):
+    """Add ``ip_rel`` to the parameter list when the Ip target is fitted (``settings.ip_target``); returns the
+    record of what was done.  The parameter has no prior row: its datum is the Ip measurement row of the fit
+    groups (one datum, one parameter).  Without an Ip row in the fit groups the target stays at the measured
+    value (recorded)."""
+    if settings.ip_target == "measured":
+        return dict(mode="measured", note="Ip target held at the measured value (ip_target='measured')")
+    if "ip" not in groups:
+        if "ip_rel" in names:
+            raise ValueError("ip_rel is free but the fit groups have no Ip measurement row to constrain it")
+        return dict(mode="measured", note="no Ip measurement row in the fit groups: the Ip target is held at the "
+                                          "measured value")
+    if "ip_rel" not in names:
+        names.append("ip_rel")
+    g = ms.groups["ip"]
+    return dict(mode="fitted", parameter="ip_rel",
+                rule="Ip target = measured Ip x (1 + ip_rel); ip_rel has no prior row, its datum is the Ip "
+                     "measurement row with its own sigma; on the time-dependent path the supplied state's current "
+                     "density is scaled by the same factor (the solver renormalizes to its Ip target alike)",
+                sigma_model=g.meta.get("sigma_model_id", g.meta.get("sigma_model")))
+
+
+def _scaled_state_fn(state_fn, params):
+    """``state_fn`` with the supplied state scaled to the fitted Ip target (``params['ip_rel']``); unchanged
+    when there is no state function or the target is the measured Ip."""
+    k = float(_cm.full_params(params).get("ip_rel", 0.0))
+    if state_fn is None or k == 0.0:
+        return state_fn
+
+    def fn(lag):
+        return _cm.scale_state(state_fn(lag), 1.0 + k)
+    return fn
+
+
+def ip_record(tab, ms, params, fitted):
+    """Measured, fitted (the solved equilibrium's Ip) and ``(measured - fitted)/sigma`` of the plasma current,
+    with the target rule (``fitted``: ``ip_rel`` was a fit parameter)."""
+    g = ms.groups.get("ip") if ms is not None else None
+    if g is None:
+        return dict(available=False, note="no Ip group in the measurement set")
+    meas, sig = float(np.asarray(g.measured, float)[0]), float(np.asarray(g.sigma, float)[0])
+    model = None
+    if tab is not None and "ip" in getattr(tab, "model", {}):
+        mv = np.asarray(tab.model["ip"], float)
+        model = float(mv[0]) if mv.size and np.isfinite(mv[0]) else None
+    rel = float(_cm.full_params(params).get("ip_rel", 0.0))
+    return dict(available=True, measured_A=meas, sigma_A=sig, fitted_A=model, ip_rel=rel, ip_target_fitted=bool(fitted),
+                pull_measured_minus_fitted_sigma=(None if model is None or not sig > 0 else (meas - model) / sig))
 
 
 def _final_extra(center, fm, ms):

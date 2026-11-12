@@ -277,6 +277,7 @@ class CurrentModelSettings:
     sawtooth_sheet_width: float = _saw.DEFAULT_SHEET_WIDTH
     crash_times: Optional[Sequence[float]] = None   # measured crash times [s] (None: periodic orbit)
     window: Optional[Sequence[float]] = None        # measurement window [t0, t1] [s] (with crash times)
+    crash_record_start: Optional[float] = None      # [s] start of the crash detection (default: first crash)
     history: float = _saw.DEFAULT_HISTORY
     corr_centers_rho: Sequence[float] = (0.2, 0.5, 0.8)   # current-correction Gaussians, centers in rho_tor,norm
     corr_width_rho: float = 0.1                           # their width (standard deviation) in rho_tor,norm
@@ -292,14 +293,30 @@ class CurrentModelSettings:
 
 
 #: Model parameters and their defaults (the fit decides which are free).
-DEFAULT_PARAMS = dict(log_strength=None, f=0.37, s_bs=1.0, s_cd=1.0, s_pfast=1.0, a_corr=(0.0, 0.0, 0.0))
+DEFAULT_PARAMS = dict(log_strength=None, f=0.37, s_bs=1.0, s_cd=1.0, s_pfast=1.0, a_corr=(0.0, 0.0, 0.0),
+                      ip_rel=0.0)
 
 
 def full_params(params):
     p = dict(DEFAULT_PARAMS)
     p.update(params or {})
     p["a_corr"] = tuple(float(v) for v in p["a_corr"])
+    p["ip_rel"] = float(p["ip_rel"] if p.get("ip_rel") is not None else 0.0)
     return p
+
+
+def ip_target(base_ip, params):
+    """The forward solve's Ip target [A]: ``|base_ip| (1 + ip_rel)`` (``ip_rel`` = 0: the measured value)."""
+    return abs(float(base_ip)) * (1.0 + full_params(params)["ip_rel"])
+
+
+def scale_state(state, factor):
+    """A :class:`.current.diffusion.CurrentState` with its current density scaled uniformly by ``factor``: psi
+    differences scaled about the boundary value, which is kept (only differences of psi are physical)."""
+    f = float(factor)
+    pb = float(state.psi_boundary)
+    return CurrentState(state.rho_faces, pb + f * (np.asarray(state.psi, float) - pb), pb, state.time,
+                        dict(state.meta or {}, current_scale=f))
 
 
 # ============================================================== geometry / physics on the current state
@@ -508,7 +525,8 @@ def assemble(lag, kin, src, params, cfg, ip, z0=None, state=None):
         if cfg.crash_times is not None:
             if cfg.window is None:
                 raise ValueError("crash_times need the measurement window")
-            sched = _saw.schedule_for_slice(cfg.crash_times, cfg.window, history=cfg.history)
+            sched = _saw.schedule_for_slice(cfg.crash_times, cfg.window, history=cfg.history,
+                                            record_start=cfg.crash_record_start)
             sim = _saw.simulate_slice(sol, rf, sched, p["f"], dt=min(sched.mean_interval, period) / cfg.sawtooth_nsteps,
                                       nsteps_orbit=cfg.sawtooth_nsteps, sheet_width=cfg.sawtooth_sheet_width,
                                       orbit_z0=z0)
@@ -636,8 +654,10 @@ def _state_change(a, b):
 
 def q_check(lag, asm, stats, cfg):
     """q consistency of the solved equilibrium (``lag``: its traced q on the physics grid) against the
-    model q of the assembly that produced it (:func:`.coordinates.q_consistency`, which also tests the
-    two sides' extrapolated axis values, ``axis``).  ``q0_eq_axis`` (the traced q at psi_N =
+    model q of the assembly that produced it (:func:`.coordinates.q_consistency`).  The two sides'
+    extrapolated axis values are always computed and recorded (``axis``), but they enter the pass/fail
+    verdict only with ``QCheckSettings(test_axis=True)``; the default (``test_axis=False``) tests the
+    interior only, and ``axis["tested"]`` says which.  ``q0_eq_axis`` (the traced q at psi_N =
     :data:`Q_AXIS_PSIN`) and ``q0_model_axis`` (the model's innermost face value) are the raw near-axis
     values, kept as diagnostics only: neither is an axis estimate the test uses."""
     ph = lag["phys"]
@@ -674,7 +694,7 @@ def consistent_solve(fm, kin, src, params, cfg, ip=None, start=None, z0=None, la
     ``converged=False`` and the reason; the solver is then left in its last state (the caller
     restores a snapshot)."""
     t0 = time.perf_counter()
-    ipv = abs(fm.ip_measured if ip is None else float(ip))
+    ipv = ip_target(fm.ip_measured if ip is None else ip, params)
     if start is not None:
         if isinstance(start, np.ndarray):
             fm.set_psi(start)
@@ -791,7 +811,7 @@ def consistent_solve(fm, kin, src, params, cfg, ip=None, start=None, z0=None, la
 def lagged_solve(fm, lag, kin, src, params, cfg, ip=None, start=None, z0=None, label="column", state=None):
     """One forward solve with the geometry-dependent inputs lagged from ``lag``.  Returns
     ``(SolveResult or None, assembly or None, reason)``."""
-    ipv = abs(fm.ip_measured if ip is None else float(ip))
+    ipv = ip_target(fm.ip_measured if ip is None else ip, params)
     if start is not None:
         fm.restore(start)
     try:

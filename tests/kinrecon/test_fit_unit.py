@@ -278,3 +278,119 @@ def test_lagged_step_columns_keep_the_convergence_definition(monkeypatch, scale)
     assert out.record["final_jacobian"]["column_kind"].startswith("consistent")
     with pytest.raises(ValueError):
         FIT.FitSettings(jacobian_steps="bogus")
+
+
+# ============================================================== plasma current fitted, not pinned
+SIG_IP = 0.01          # sigma of the Ip row as a fraction of Ip
+Z_IP = 1.7             # the "measured" Ip lies Z_IP sigma above the model's Ip at ip_rel = 0
+C_IP = np.array([0.4, -0.3, 0.2, 0.6])     # data-row response to ip_rel (per unit ip_rel / SIG_IP)
+
+
+class FakeFMIp(FakeFM):
+    def __init__(self):
+        super().__init__()
+        self.ms.groups["ip"] = ConstraintGroup("ip", ["ip"], np.array([1.0]), np.array([SIG_IP]), np.array([True]))
+        self.ip_state = 0.0
+
+
+def _install_ip(monkeypatch, fm):
+    _install(monkeypatch, fm)
+
+    def consistent(fm_, kin, src, params, cfg, start, z0, label, initial_profiles=None, state_fn=None):
+        fm_.n_solves += 3
+        fm_.theta_state = params["log_strength"]
+        fm_.ip_state = CM.full_params(params)["ip_rel"]
+        solve = SimpleNamespace(stats={"q_0": 1.0}, status="converged",
+                                record={"policy": {"verification": {"verdict": "PASS"}}})
+        return CM.ConsistentResult(True, "consistent", 3, {"orbit_z": None, "fractions": {}}, {"lag": True}, solve,
+                                   {"passes": [], "reason": None}, 0.01)
+
+    def residual_vector(fm_, ms, groups, settings, roles):
+        x = fm_.ip_state / SIG_IP
+        r = A[:, 0] * (fm_.theta_state - TRUE) + B + C_IP * x
+        rows, idx = [r], [("flux_loop", s) for s in "abcd"]
+        if "ip" in groups:
+            rows.append(np.array([x - Z_IP]))
+            idx.append(("ip", "ip"))
+        return np.concatenate(rows), idx, SimpleNamespace(model={}, excluded={}, notes=[])
+
+    monkeypatch.setattr(FIT, "_consistent", consistent)
+    monkeypatch.setattr(FIT, "residual_vector", residual_vector)
+
+
+def test_ip_target_is_a_fit_parameter_with_its_measurement_row(monkeypatch):
+    """The Ip row is the datum of ``ip_rel`` (no prior row); the fit reaches the linear MAP point of the joint
+    problem, and ``ip_target='measured'`` keeps the earlier pinned target."""
+    kin, src = _kin()
+    cfg = CM.CurrentModelSettings(r0=1.0)
+    fm = FakeFMIp()
+    _install_ip(monkeypatch, fm)
+    out = FIT.reconstruct(fm, kin, src, cfg, FIT.FitSettings(free=("log_strength",)), params0=dict(log_strength=0.5))
+    assert out.free == ["log_strength", "ip_rel"] and out.record["ip_target"]["mode"] == "fitted"
+    assert out.status == "converged" and out.record["specs"]["ip_rel"]["prior"] == (None, None)
+    mu, sp = FIT.PARAMETERS["log_strength"]["prior"]
+    # linear model in (theta, x = ip_rel/SIG_IP): rows A theta + C x + (B - A TRUE), x - Z_IP, (theta - mu)/sp
+    J = np.vstack((np.column_stack((A[:, 0], C_IP)), [[0.0, 1.0]], [[1.0 / sp, 0.0]]))
+    r0 = np.concatenate((B - A[:, 0] * TRUE, [-Z_IP], [-mu / sp]))
+    th = -np.linalg.lstsq(J, r0, rcond=None)[0]
+    assert out.theta[0] == pytest.approx(th[0], abs=1e-6)
+    assert out.theta[1] == pytest.approx(th[1] * SIG_IP, abs=1e-8)
+    assert out.chi2["n_params"] == 2
+    fm2 = FakeFMIp()
+    _install_ip(monkeypatch, fm2)
+    pinned = FIT.reconstruct(fm2, kin, src, cfg, FIT.FitSettings(free=("log_strength",), ip_target="measured"),
+                             params0=dict(log_strength=0.5))
+    assert pinned.free == ["log_strength"] and pinned.record["ip_target"]["mode"] == "measured"
+    with pytest.raises(ValueError, match="ip_target"):
+        FIT.FitSettings(free=("ip_rel",), ip_target="measured")
+    with pytest.raises(ValueError, match="ip_target"):
+        FIT.FitSettings(ip_target="pinned")
+
+
+def test_ip_record_and_target():
+    ms = MeasurementSet("toy", 0, 0, {"ip": ConstraintGroup("ip", ["ip"], [1.0e6], [3.0e4], [True])})
+    tab = SimpleNamespace(model={"ip": np.array([0.97e6])})
+    rec = FIT.ip_record(tab, ms, dict(ip_rel=-0.03), True)
+    assert rec["pull_measured_minus_fitted_sigma"] == pytest.approx(1.0, rel=1e-12)
+    assert rec["fitted_A"] == 0.97e6 and rec["ip_target_fitted"] and rec["ip_rel"] == -0.03
+    assert CM.ip_target(-1.0e6, dict(ip_rel=-0.03)) == pytest.approx(0.97e6, rel=1e-15)
+    assert FIT.ip_record(None, MeasurementSet("toy", 0, 0, {}), {}, False)["available"] is False
+
+
+def test_noise_is_the_same_measurement_with_lagged_columns(monkeypatch):
+    """The noise measurement re-solves the center from a CONSISTENT state in both column modes: here a
+    re-solve from a lagged column's state would carry an offset (the mocked lagged state is not a
+    consistent one), so the lagged mode would otherwise measure a larger noise."""
+    kin, src = _kin()
+    cfg = CM.CurrentModelSettings(r0=1.0)
+    out = {}
+    for mode in ("consistent", "lagged"):
+        fm = FakeFM()
+        _install(monkeypatch, fm)
+
+        def consistent(fm_, kin_, src_, params, cfg_, start, z0, label, initial_profiles=None, state_fn=None):
+            fm_.n_solves += 3
+            lagged_start = isinstance(start, dict) and start.get("kind") == "lagged"
+            fm_.theta_state = params["log_strength"] + (0.05 if lagged_start else 0.0)
+            fm_.kind = "consistent"
+            solve = SimpleNamespace(stats={"q_0": 1.0}, status="converged",
+                                    record={"policy": {"verification": {"verdict": "PASS"}}})
+            return CM.ConsistentResult(True, "consistent", 3, {"orbit_z": None, "fractions": {}}, {"lag": True},
+                                       solve, {"passes": [], "reason": None}, 0.01)
+
+        def lagged(fm_, lag, kin_, src_, params, cfg_, ip=None, start=None, z0=None, label="", state=None):
+            fm_.n_solves += 1
+            fm_.theta_state = params["log_strength"]
+            fm_.kind = "lagged"
+            return SimpleNamespace(converged=True, status="converged"), {}, "converged"
+
+        fm.kind = "consistent"
+        fm.snapshot = (lambda f=fm: dict(theta=f.theta_state, kind=f.kind))
+        monkeypatch.setattr(FIT, "_consistent", consistent)
+        monkeypatch.setattr(FIT._cm, "lagged_solve", lagged)
+        res = FIT.reconstruct(fm, kin, src, cfg, FIT.FitSettings(jacobian_steps=mode), params0=dict(log_strength=0.5))
+        out[mode] = res.record["noise"]
+    assert out["consistent"]["status"] == out["lagged"]["status"] == "ok"
+    assert out["lagged"]["chi2"] == out["consistent"]["chi2"] == 0.0
+    assert out["lagged"]["norm"] == out["consistent"]["norm"]
+    assert "consistent solve" in out["lagged"]["method"]

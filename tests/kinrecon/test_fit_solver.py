@@ -15,7 +15,8 @@ two F-coils free, the rest fitted.
 
 Checked:
 (a) noisy closure: |theta_fit - theta_true| <= 3 Laplace sigma, and the data chi^2 inside the
-    two-sided 1e-4 band of chi^2(N - 1) (N data rows, one free parameter);
+    two-sided 1e-4 band of chi^2(N - n_params) (N data rows; the free parameters of the fit, log_strength and
+    the plasma-current target);
 (b) zero noise: theta recovered to < 0.5 Laplace sigma (the Gaussian prior on log_strength pulls the
     MAP point toward the prior mean; with zero noise the data still dominate), data chi^2 < 0.1;
 (c) sigma = 0 identity: the consistent solve of the reconstruction configuration at the TRUE
@@ -284,7 +285,8 @@ def test_noisy_closure_within_laplace_and_chi2_band(result):
     assert n["status"].startswith("converged"), n["status"]
     assert abs(n["theta"][0] - result["ls_true"]) <= 3.0 * n["sigma"][0]
     N = n["chi2"]["n_data"]
-    lo, hi = chi2.ppf(1e-4, N - 1), chi2.ppf(1 - 1e-4, N - 1)
+    dof = N - n["chi2"]["n_params"]          # every fitted parameter counted (log_strength and the Ip target)
+    lo, hi = chi2.ppf(1e-4, dof), chi2.ppf(1 - 1e-4, dof)
     assert lo <= n["chi2"]["data"] <= hi, (n["chi2"]["data"], lo, hi)
 
 

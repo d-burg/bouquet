@@ -310,13 +310,18 @@ def ip_target(base_ip, params):
     return abs(float(base_ip)) * (1.0 + full_params(params)["ip_rel"])
 
 
-def scale_state(state, factor):
+def scale_state(state, factor, ip_A=None):
     """A :class:`.current.diffusion.CurrentState` with its current density scaled uniformly by ``factor``: psi
-    differences scaled about the boundary value, which is kept (only differences of psi are physical)."""
+    differences scaled about the boundary value, which is kept (only differences of psi are physical).  The
+    state's recorded current ``meta["ip_A"]`` is scaled too (or set to ``ip_A`` when given)."""
     f = float(factor)
     pb = float(state.psi_boundary)
-    return CurrentState(state.rho_faces, pb + f * (np.asarray(state.psi, float) - pb), pb, state.time,
-                        dict(state.meta or {}, current_scale=f))
+    meta = dict(state.meta or {}, current_scale=f)
+    if ip_A is not None:
+        meta["ip_A"] = float(ip_A)
+    elif meta.get("ip_A") is not None:
+        meta["ip_A"] = float(meta["ip_A"]) * f
+    return CurrentState(state.rho_faces, pb + f * (np.asarray(state.psi, float) - pb), pb, state.time, meta)
 
 
 # ============================================================== geometry / physics on the current state

@@ -336,6 +336,90 @@ def test_filter_with_a_fitted_ip_carries_the_state_at_the_fitted_current(monkeyp
     assert s1["filter"]["absorbed"] is True
 
 
+def _ip_offset_series(monkeypatch, ip_rel, ip_meas, n, filt=True, sigma_scale=1.0):
+    """Stand-in filter fit (after a review's toy): it returns ``ip_rel`` and no corrections, and evaluates the state the
+    way the fit does (``fit._scaled_state_fn``: to the target from the state's own recorded current)."""
+    lag = _lag(sigma_scale=sigma_scale)
+    fm = FakeFM(dict(pred=lag))
+
+    def consistent(fm_, kin, src, params, cfg, ip=None, start=None, z0=None, label="", initial_profiles=None,
+                   state_fn=None):
+        fm_.n_solves += 1
+        fm_.F0_at_solve.append(fm_.F0)
+        if state_fn is None:
+            return _result(lag, _steady(lag, ip_meas))
+        fn = SE._fit._scaled_state_fn(state_fn, params, fm_.ip_measured)
+        fn(lag)
+        return _result(lag, fn(lag))
+
+    def reconstruct(fm_, kin, src, cfg, settings, params0=None, start=None, label="", state_fn=None, **kw):
+        p = dict(a_corr=(0.0, 0.0, 0.0), ip_rel=ip_rel)
+        st = SE._fit._scaled_state_fn(state_fn, p, fm_.ip_measured)(lag)
+        center = dict(res=_result(lag, st), snap=dict(key="pred"), probe_correction=np.zeros(0))
+        names = [f"a_corr_{k}" for k in range(3)] + ["ip_rel"]
+        return SimpleNamespace(status="converged", theta=np.zeros(4), sigma=np.full(4, 0.01), free=names, params=p,
+                               chi2={}, record=dict(center=center, specs={nm: dict(prior=(0.0, 0.02)) for nm in names},
+                                                    n_solves=1, wall_s=0.0, final_stopping_tests=None,
+                                                    stopping_summary=dict(status="converged")))
+
+    monkeypatch.setattr(SE._cm, "consistent_solve", consistent)
+    monkeypatch.setattr(SE._fit, "reconstruct", reconstruct)
+    cfg = CM.CurrentModelSettings(r0=GEO.R0)
+    out = SE.run_series(fm, _slices(np.arange(n) * 0.02, np.full(n, ip_meas)), cfg,
+                        SE.SeriesSettings(initial="relaxed", sawtooth="off", filter=filt))
+    assert out["status"] == "completed"
+    return out, lag
+
+
+@pytest.mark.parametrize("sigma_scale", [1.0, 10.0])
+def test_a_constant_ip_offset_recovers_the_consistent_evolution(monkeypatch, sigma_scale):
+    """Filter fits that find a constant fitted Ip 1 % below the measured one at every slice give the evolution of a
+    series driven with that current all along (to round-off): the carried state is rescaled once, not at every
+    slice, and the interval's Ip boundary follows the fitted current."""
+    n, eps = 30, -0.01
+    b, lag = _ip_offset_series(monkeypatch, eps, IP0, n, sigma_scale=sigma_scale)
+    c, _ = _ip_offset_series(monkeypatch, 0.0, (1 + eps) * IP0, n, sigma_scale=sigma_scale)
+    for sb, sc in zip(b["slices"][1:], c["slices"][1:]):
+        pb, pc = _state(sb["carried_state"]), _state(sc["carried_state"])
+        span = np.ptp(pc.psi)
+        assert np.max(np.abs((pb.psi - pb.psi_boundary) - (pc.psi - pc.psi_boundary))) <= 1e-10 * span
+        assert sb["ip_carried_A"] == pytest.approx((1 + eps) * IP0, rel=1e-12)
+        assert sb["ip_offset_carried"] == pytest.approx(eps, rel=1e-12)
+        assert sb["ip_convention"].startswith("carried fitted offset")
+    s2 = b["slices"][2]["interval"]
+    assert s2["ip_start_A"] == pytest.approx(s2["ip_end_A"], rel=1e-12)      # no ramp back to the measured Ip
+    assert b["ip_convention"] == SE.IP_CONVENTION
+
+
+def test_prediction_after_a_fitted_first_slice_has_no_ip_step(monkeypatch):
+    """After a first slice whose fitted Ip is 3 % below the measured one, the next interval is driven at the carried
+    offset (no ramp back to the measured Ip, which would put a loop-voltage step at the second slice)."""
+    lag = _lag()
+    fm = FakeFM(dict(pred=lag))
+    st0 = _steady(lag, 0.97 * IP0)
+    _install(monkeypatch, fm, st0, lambda f: f.lags["pred"])
+
+    def reconstruct(fm_, kin, src, cfg, settings, params0=None, initial_profiles=None, label="", **kw):
+        res = _result(lag, st0)
+        res.assembly["ip"] = 0.97 * IP0
+        center = dict(res=res, snap=dict(key="pred"), probe_correction=np.zeros(0))
+        names = [f"a_corr_{k}" for k in range(3)] + ["ip_rel"]
+        return SimpleNamespace(status="converged", theta=np.zeros(4), sigma=np.full(4, 0.1), free=names,
+                               params=dict(a_corr=(0.0, 0.0, 0.0), ip_rel=-0.03), chi2={},
+                               record=dict(center=center, specs={nm: dict(prior=(0.0, 1.0)) for nm in names},
+                                           n_solves=5, wall_s=0.0, iterations=[], final_stopping_tests=None,
+                                           stopping_summary=dict(status="converged")))
+
+    monkeypatch.setattr(SE._fit, "reconstruct", reconstruct)
+    out = SE.run_series(fm, _slices(np.arange(4) * 0.02, np.full(4, IP0)), CM.CurrentModelSettings(r0=GEO.R0),
+                        SE.SeriesSettings(initial="mse_fit", sawtooth="off"))
+    assert out["status"] == "completed"
+    assert out["slices"][0]["ip_carried_A"] == pytest.approx(0.97 * IP0, rel=1e-12)
+    for s_ in out["slices"][1:]:
+        assert s_["interval"]["ip_start_A"] == pytest.approx(0.97 * IP0, rel=1e-12)
+        assert s_["interval"]["ip_end_A"] == pytest.approx(0.97 * IP0, rel=1e-12)
+
+
 def test_scale_state_scales_the_current_and_keeps_the_boundary_value():
     lag = _lag()
     st = _steady(lag, IP0)

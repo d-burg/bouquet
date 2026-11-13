@@ -541,7 +541,8 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
 
     def evaluate(theta, start_state, z0, lab, init_prof=None, ref_index=None):
         p = _to_params(theta, names, base)
-        res = _consistent(fm, kin, src, p, cfg, start_state, z0, lab, init_prof, _scaled_state_fn(state_fn, p))
+        res = _consistent(fm, kin, src, p, cfg, start_state, z0, lab, init_prof,
+                          _scaled_state_fn(state_fn, p, getattr(fm, "ip_measured", None)))
         if not res.converged:
             return None, res
         r, idx, tab = residual_vector(fm, ms, groups, settings, coil_roles)
@@ -628,7 +629,7 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
         lag = c["res"].lag
         kw = {}
         if state_fn is not None:
-            kw["state"] = _scaled_state_fn(state_fn, p)(lag)
+            kw["state"] = _scaled_state_fn(state_fn, p, getattr(fm, "ip_measured", None))(lag)
         sres, _, why = _cm.lagged_solve(fm, lag, kin, src, p, cfg, z0=c["z0"], label=lab, **kw)
         if sres is None or not sres.converged:
             restore_center(c)
@@ -906,15 +907,21 @@ def _ip_parameter(names, groups, ms, settings):
                 sigma_model=g.meta.get("sigma_model_id", g.meta.get("sigma_model")))
 
 
-def _scaled_state_fn(state_fn, params):
-    """``state_fn`` with the supplied state scaled to the fitted Ip target (``params['ip_rel']``); unchanged
-    when there is no state function or the target is the measured Ip."""
-    k = float(_cm.full_params(params).get("ip_rel", 0.0))
-    if state_fn is None or k == 0.0:
-        return state_fn
+def _scaled_state_fn(state_fn, params, base_ip=None):
+    """``state_fn`` with the supplied state scaled to the forward solve's Ip target ``|base_ip| (1 + ip_rel)``.
+    The state's own current is its ``meta["ip_A"]`` (the Ip boundary value it was advanced to; set by the series
+    driver), so a state that already carries the target is NOT rescaled; a state without that record is taken to
+    carry ``base_ip``.  Unchanged when there is no state function."""
+    if state_fn is None:
+        return None
+    k = 1.0 + float(_cm.full_params(params).get("ip_rel", 0.0))
 
     def fn(lag):
-        return _cm.scale_state(state_fn(lag), 1.0 + k)
+        st = state_fn(lag)
+        ip_s = (st.meta or {}).get("ip_A")
+        f = (abs(float(base_ip)) * k / abs(float(ip_s))) if (ip_s and base_ip is not None) else k
+        return st if f == 1.0 else _cm.scale_state(st, f, ip_A=None if ip_s is None or base_ip is None
+                                                    else abs(float(base_ip)) * k)
     return fn
 
 

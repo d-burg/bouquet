@@ -14,11 +14,11 @@ with, on each interval ``[t_{k-1}, t_k]``,
   (2 Phi_b)`` from the change of the domain's toroidal flux);
 * conductivity (Redl 2021 from the kinetic profiles AT EACH SLICE, on that slice's geometry),
   bootstrap (Redl 2021) and driven current (provider) at both ends, linear in time;
-* the plasma current ``Ip(t)`` linear between the slices' measured values, applied at the last closed
-  surface through the lumped outer layer (its conductance, source and ``|F|`` at the last closed
-  surface linear in time between the two slices' values, so that ``Ip/F`` at both ends of an interval
-  is the slice's own; ``layer_fpol="interval_mean"`` holds ``|F|`` at the mean of the two values, the
-  earlier treatment, kept for comparison);
+* the plasma current ``Ip(t)`` linear between the slices' values (which values: "Plasma current in a
+  series" below), applied at the last closed surface through the lumped outer layer (its conductance, source
+  and ``|F|`` at the last closed surface linear in time between the two slices' values, so that ``Ip/F`` at
+  both ends of an interval is the slice's own; ``layer_fpol="interval_mean"`` holds ``|F|`` at the mean of
+  the two values, the earlier treatment, kept for comparison);
 * the vacuum field: every slice is solved with its own ``F0 = R0 B0`` (:attr:`SliceData.F0`, the
   measured value at that time; when it is not given the previous slice's value is kept and the
   slice record says so), so ``F`` at the last closed surface differs between the two ends of an
@@ -28,8 +28,9 @@ with, on each interval ``[t_{k-1}, t_k]``,
   ``sawtooth="auto"``: NO prescribed crash train -- the operator acts only at MEASURED crash times
   (``crash_table``, a :class:`.crash_table.CrashTable`, or ``crash_times``), i.e. ``"crash_times"``
   when a table or times are given, and ``"off"`` (no crashes) otherwise; whenever the evolved q falls
-  below 1 on a slice with no crashes applied (no table, or an interval the table's detection did not
-  cover), the slice record carries a ``sawtooth_warning`` and the series lists it in ``warnings``
+  below 1 on a slice with no crashes applied (no table, an interval the table's detection did not
+  cover, or a covered interval with no observed crash -- a model-data inconsistency), the slice record carries
+  a ``sawtooth_warning`` and the series lists it in ``warnings``
   (the choice made is recorded as ``sawtooth_resolved``).  The periodic train is available only as
   the explicit option ``sawtooth="periodic"`` (recorded):
   ``sawtooth="crash_times"`` uses measured crash times; ``sawtooth="periodic"`` places crashes every
@@ -51,6 +52,17 @@ with, on each interval ``[t_{k-1}, t_k]``,
   acted as the identity, is continuous in the state (a switch between averaged and instantaneous states
   made the pass loop oscillate; measured), and carries no smooth time lag.  With a period longer than
   the interval the window does not span a whole period (phase dependence remains; stated).
+
+Plasma current in a series (:data:`IP_CONVENTION`, recorded in the result and per slice).  A fit treats
+the Ip target as a parameter (``ip_rel``, :mod:`.fit`).  The relative offset ``d = (Ip_fitted -
+Ip_measured)/Ip_measured`` of the latest fitted Ip is carried forward as a slowly varying nuisance: each
+interval is driven from the carried state's current to the next slice's measured Ip times ``(1 + d)``, a
+prediction slice is solved to that target, and only an ABSORBED filter fit changes ``d`` (the carried state
+is then rescaled once, by ``(1 + d_new)/(1 + d_old)``, never again for the same offset).  A constant true offset
+of Ip therefore gives the evolution with the offset current all along, and the first interval after a
+first-slice fit has no spurious loop-voltage step.  Every slice record carries the interval's Ip end values
+(``interval.ip_start_A``, ``ip_end_A``, ``ip_offset_used``) and the carried ``ip_carried_A`` /
+``ip_offset_carried``.
 
 Splitting and its order.  Within an interval the end-of-step equilibrium (slice ``k``) is not known
 in advance: each pass of the slice's pass-consistency loop (:func:`.current_model.consistent_solve`
@@ -145,6 +157,11 @@ INITIAL_MODES = ("auto", "mse_fit", "relaxed", "from_profile")
 SAWTOOTH_MODES = ("auto", "crash_times", "off", "periodic")
 #: What a series does when its first-slice fit (``initial="mse_fit"``) did not end ``"converged"``.
 INITIAL_FIT_POLICIES = ("refuse", "proceed_labeled")
+#: The plasma-current convention of a series (module docstring, "Plasma current in a series"; recorded).
+IP_CONVENTION = ("Ip(t) driving each interval: linear from the carried state's current to the next slice's measured "
+                 "Ip x (1 + d), d = the relative offset (fitted - measured)/measured of the last fitted Ip, carried "
+                 "forward (0 before any Ip fit); a prediction slice is solved to that same target; an absorbed filter "
+                 "fit sets d to its own value and rescales the carried state once by (1 + d_new)/(1 + d_old)")
 #: Fit statuses a filter absorbs and a series may start from (each carries its label into the records); stalled,
 #: max_iter, failed-Jacobian, failed-trial and failed fits are not absorbed and do not start a series.
 ACCEPTED_FIT_STATUSES = ("converged", "converged_within_noise")
@@ -193,8 +210,8 @@ class SeriesSettings:
     vessel_eddy: bool = False
     zeff_series_source: Optional[str] = None  # the series' ONE Z_eff source kind for the checked-source rule
     #                                            ("impurity_density" or "line_integrated"; see check_zeff_series)
-    zeff_source_switch_allowed: bool = False  # NON-DEFAULT: accept named Z_eff sources that change between slices
-    #                                            (e.g. by phase of a discharge); every switch is recorded
+    zeff_source_schedule: Optional[Sequence[Dict[str, Any]]] = None  # NON-DEFAULT: declared Z_eff source intervals
+    #                                            (start, end, candidate, source); checked within each interval
     keep_going_after_failure: bool = False   # True: a failed slice is recorded and skipped; the next interval
     #                                          starts from the last consistent state (recorded per slice)
 
@@ -404,6 +421,7 @@ def _slice_record(fm, res, sl, label, extra=None):
                                 psi_boundary=asm["state"].psi_boundary)
     if lag is not None:
         out["q_eq"] = dict(rho=np.asarray(lag["phys"]["rho"]).tolist(), q=np.asarray(lag["phys"]["q"]).tolist())
+    out["ip_convention"] = "carried fitted offset (series.IP_CONVENTION)"
     out.update(extra or {})
     return out
 
@@ -425,8 +443,9 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
     times = np.array([float(x.time) for x in slices])
     if np.any(np.diff(times) <= 0):
         raise ValueError("slice times must increase strictly")
-    out = dict(settings=s.as_dict(), model_settings=cfg.as_dict(), slices=[], times=times.tolist())
-    out["zeff_series"] = check_zeff_series(slices, s.zeff_series_source, s.zeff_source_switch_allowed)
+    out = dict(settings=s.as_dict(), model_settings=cfg.as_dict(), slices=[], times=times.tolist(),
+               ip_convention=IP_CONVENTION)
+    out["zeff_series"] = check_zeff_series(slices, s.zeff_series_source, s.zeff_source_schedule)
     zeff_flags = set(out["zeff_series"].get("failing_slices") or []) | set(out["zeff_series"].get("unverified_slices")
                                                                          or [])
     sl0 = slices[0]
@@ -506,7 +525,14 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
         res0 = _cm.consistent_solve(fm, sl0.kinetics, sl0.sources, p_relaxed, cfg0, label=f"{sl0.label}:{mode}",
                                     initial_profiles=initial_profiles, state_fn=state_fn0)
         params0 = p_relaxed
+    ip_c0 = (float(res0.assembly["ip"]) if res0.converged and res0.assembly and res0.assembly.get("ip")
+             else _slice_ip(sl0))
     rec0 = _slice_record(fm, res0, sl0, sl0.label, dict(initial_mode=mode, fit=fitrec, n_solves=fm.n_solves - n0,
+                                                        ip_carried_A=ip_c0,
+                                                        ip_offset_carried=ip_c0 / _slice_ip(sl0) - 1.0,
+                                                        **({"zeff_flag": "the series' Z_eff source fails its tests or "
+                                                            "is unverified at this slice"}
+                                                           if float(sl0.time) in zeff_flags else {}),
                                                         wall_total_s=round(time.perf_counter() - t0, 2),
                                                         vacuum_F0=f0rec0,
                                                         ip_fitted=bool(fitrec and "ip_rel" in fitrec["free"])))
@@ -533,10 +559,12 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
     out["slices"][-1]["carried_state"] = _state_record(carried)
     lag_prev = res0.lag
     jni_prev = _jni(lag_prev, sl0.kinetics, sl0.sources, params0)
-    # the Ip of the carried state: the first slice's solved target (the fitted Ip after a first-slice fit with
-    # the Ip target fitted, else the measured Ip); later intervals interpolate from it to the next measured Ip
-    ip_carried = float(res0.assembly["ip"]) if res0.assembly and res0.assembly.get("ip") else _slice_ip(sl0)
-    out["slices"][-1]["ip_carried_A"] = ip_carried
+    # Ip convention (module docstring, "Plasma current in a series"): the carried state's current is the first
+    # slice's solved target, and the relative offset of the fitted from the measured Ip (0 without an Ip fit) is
+    # carried forward: every later interval is driven from the carried current to the NEXT measured Ip times
+    # (1 + carried offset); a filter fit that is absorbed updates the offset (one rescale by the change of the offset)
+    ip_carried = ip_c0
+    ip_off = float(ip_carried / _slice_ip(sl0) - 1.0)
     snap_prev = fm.snapshot()
     pc_prev = fm.probe_correction.copy()
     status = "completed"
@@ -558,9 +586,10 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
             fm.reconfigure(sl.measurements, sl.reference_boundary, coil_roles=roles, case_id=case.case_id)
             fm.probe_correction = pc_prev.copy()
         fm.case = case
-        ip0, ip1 = ip_carried, _slice_ip(sl)
+        ip0, ip1 = ip_carried, _slice_ip(sl) * (1.0 + ip_off)
         holder = {}
-        p_pred = dict(log_strength=None, f=s.sawtooth_f, s_bs=params0.get("s_bs", 1.0) if isinstance(params0, dict) else 1.0)
+        p_pred = dict(log_strength=None, f=s.sawtooth_f,
+                      s_bs=params0.get("s_bs", 1.0) if isinstance(params0, dict) else 1.0, ip_rel=ip_off)
 
         def state_fn(lag, sl=sl, t1=t1, tp=tp, ip0=ip0, ip1=ip1, carried=carried, lag_prev=lag_prev,
                      jni_prev=jni_prev, holder=holder):
@@ -568,6 +597,7 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
             sol, info = interval_solver(lag_prev, lag, jni_prev, jni1, tp, t1, ip0, ip1, s.layer_fpol)
             end, events, states = advance_interval(sol, carried, t1, s, crash, s.dt_max)
             holder.clear()
+            end.meta["ip_A"] = float(ip1)
             holder.update(end=end, events=events, states=states, info=info, jni1=jni1, window_average=False)
             use = end
             if events:
@@ -580,7 +610,7 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
                 a0 = _window_state(states0, tp, t1, end.rho_faces)
                 use = CurrentState(end.rho_faces, end0.psi + aw.psi - a0.psi,
                                    end0.psi_boundary + aw.psi_boundary - a0.psi_boundary, t1,
-                                   dict(sawtooth_window=[tp, t1]))
+                                   dict(sawtooth_window=[tp, t1], ip_A=float(ip1)))
                 holder["window_average"] = bool(any(e.record.active for e in events))
             return use
 
@@ -589,7 +619,9 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
         filt = None
         if res.converged and s.filter_at(t1):
             filt, res = _filter_slice(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1)
-        extra = dict(n_solves=fm.n_solves - nk, interval=dict(holder.get("info", {}), start_s=float(tp), end_s=float(t1)),
+        extra = dict(n_solves=fm.n_solves - nk, interval=dict(holder.get("info", {}), start_s=float(tp), end_s=float(t1),
+                                                              ip_start_A=float(ip0), ip_end_A=float(ip1),
+                                                              ip_offset_used=ip_off),
                      ip_fitted=bool(filt and filt.get("absorbed") and "ip_rel" in (filt.get("free") or [])),
                      crashes=[dict(time=e.time, active=bool(e.record.active),
                                    rho_mix=getattr(e.record, "rho_mix", None),
@@ -599,7 +631,13 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
         if res.converged:
             extra["carried_state"] = _state_record(holder["end"])
         # what the next interval starts from (taken before the callback, which may use the solver)
-        nxt = dict(carried=holder.get("end"), jni1=holder.get("jni1"), ip=float(holder.get("ip_end", ip1)))
+        nxt = dict(carried=holder.get("end"), jni1=holder.get("jni1"), ip=float(holder.get("ip_end", ip1)),
+                   ip_off=float(holder.get("ip_offset_end", ip_off)))
+        if res.converged:
+            extra.update(ip_carried_A=nxt["ip"], ip_offset_carried=nxt["ip_off"])
+        else:
+            extra.update(ip_carried_A=None, ip_offset_carried=None,
+                         ip_carry_note="slice not consistent: the previous carried state, current and offset are kept")
         if float(sl.time) in zeff_flags:
             extra["zeff_flag"] = "the series' Z_eff source fails its tests or is unverified at this slice"
         rec = _slice_record(fm, res, sl, sl.label, extra)
@@ -616,8 +654,7 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
                 break
             continue
         carried = nxt["carried"]
-        ip_carried = nxt["ip"]
-        rec["ip_carried_A"] = ip_carried
+        ip_carried, ip_off = nxt["ip"], nxt["ip_off"]
         lag_prev = res.lag
         jni_prev = nxt["jni1"]
         snap_prev = fm.snapshot()
@@ -626,21 +663,51 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
     return out
 
 
-def check_zeff_series(slices, source=None, switch_allowed=False):
+def check_zeff_series(slices, source=None, schedule=None):
     """One Z_eff source for the whole series (the checked-source rule's series provision): every slice's
     kinetic inputs must use the same source, never switched between slices.
 
     * kinetics without a Z_eff record (e.g. :class:`.current_model.KineticProfiles`): nothing to check (recorded);
-    * slices whose kinetic inputs name different Z_eff candidates are refused (``ValueError``), unless the caller
-      allows it explicitly (``switch_allowed=True``, non-default: e.g. named sources by phase of a discharge); the
-      switches are then listed (``switches``: time, from, to) and the check of the checked-source rule is not made;
+    * slices whose kinetic inputs name different Z_eff candidates are refused (``ValueError``);
     * when the slices were assembled with the checked-source rule (``record["zeff_rule"]``), the series needs
       its source named (``source``: ``"impurity_density"`` or ``"line_integrated"``,
       :func:`.zeff_sources.series_source`; without a name it is refused with the per-slice outcomes), every
       slice must have used that source (assemble them with ``zeff_rule={"override": ...}`` when the rule would
       pick another), and the slices on which it fails its tests or is unverified are flagged
       (``failing_slices`` / ``unverified_slices``, slice times), never switched.
+
+    ``schedule`` (NON-DEFAULT; e.g. named sources by phase of a discharge): a list of declared intervals
+    ``{"start": t0, "end": t1, "candidate": name, "source": rule source or None}`` [s] (``start <= t < end``),
+    declared up front.  Every slice must lie in exactly one interval and use that interval's candidate (anything
+    else is refused); the check above -- including the checked-source rule with the interval's ``source`` and
+    its failure / unverified flags -- is applied WITHIN each interval.  The declared list is returned
+    (``schedule``) with the per-interval results; the flags are the union over the intervals.
     """
+    if schedule is not None:
+        decl = [dict(start=float(d["start"]), end=float(d["end"]), candidate=str(d["candidate"]),
+                     source=d.get("source")) for d in schedule]
+        if any(not d["end"] > d["start"] for d in decl):
+            raise ValueError("Z_eff schedule: every interval needs end > start")
+        out = dict(applied=True, schedule=decl, intervals=[], failing_slices=[], unverified_slices=[],
+                   note="NON-DEFAULT: Z_eff sources declared by interval; the one-source check applied within each")
+        for d in decl:
+            sel = [sl for sl in slices if d["start"] <= float(sl.time) < d["end"]]
+            if not sel:
+                out["intervals"].append(dict(d, n_slices=0))
+                continue
+            names = {(getattr(sl.kinetics, "record", None) or {}).get("zeff_source") for sl in sel}
+            if names != {d["candidate"]}:
+                raise ValueError(f"Z_eff schedule: the slices in [{d['start']}, {d['end']}) use "
+                                 f"{sorted(map(str, names))}, declared {d['candidate']!r}")
+            r = check_zeff_series(sel, d["source"])
+            out["intervals"].append(dict(d, n_slices=len(sel), result=r))
+            out["failing_slices"] += list(r.get("failing_slices") or [])
+            out["unverified_slices"] += list(r.get("unverified_slices") or [])
+        outside = [float(sl.time) for sl in slices
+                   if not any(d["start"] <= float(sl.time) < d["end"] for d in decl)]
+        if outside:
+            raise ValueError(f"Z_eff schedule: slices at {outside} lie in no declared interval")
+        return out
     from . import zeff_sources as _zr
     recs = [dict(getattr(sl.kinetics, "record", None) or {}) for sl in slices]
     names = [r.get("zeff_source") for r in recs]
@@ -648,15 +715,9 @@ def check_zeff_series(slices, source=None, switch_allowed=False):
         return dict(applied=False, note="the kinetic inputs carry no Z_eff record: one-source check not applicable")
     if None in names:
         raise ValueError("Z_eff: some slices carry a Z_eff source record and some do not; one source per series")
-    if len(set(names)) > 1 and switch_allowed:
-        sw = [dict(time=float(b.time), source_from=na, source_to=nb)
-              for a, b, na, nb in zip(slices[:-1], slices[1:], names[:-1], names[1:]) if na != nb]
-        return dict(applied=True, switch_allowed=True, candidates=sorted(set(names)), switches=sw,
-                    note="NON-DEFAULT: Z_eff sources change between slices by explicit option (zeff_source_switch_"
-                         "allowed=True); every switch listed", failing_slices=[], unverified_slices=[])
     if len(set(names)) > 1:
         raise ValueError(f"Z_eff source switches within the series ({sorted(set(names))}): a series takes one "
-                         "named source")
+                         "named source (or declare the intervals with zeff_source_schedule)")
     rules = [r.get("zeff_rule") for r in recs]
     out = dict(applied=True, candidate=names[0], failing_slices=[], unverified_slices=[])
     if not any(rr is not None for rr in rules):
@@ -678,8 +739,10 @@ def check_zeff_series(slices, source=None, switch_allowed=False):
 
 def _sawtooth_warning(s, res, t0, t1, events):
     """The recorded warning of the default sawtooth handling (module docstring): the slice's solved q falls below
-    1 and no crash was applied because there is no crash record (``sawtooth="off"``) or the record's detection
-    did not cover the interval (or its coverage was not stated).  None otherwise.  A record only."""
+    1 and no crash was applied -- because there is no crash record (``sawtooth="off"``, kind ``no_record``), the
+    record's detection did not cover the interval or its coverage was not stated (``not_covered``), or the record
+    covers the interval and shows no crash (``covered_no_crash``: a model-data inconsistency).  None otherwise.
+    A record only."""
     if not res.converged or res.lag is None or s.sawtooth == "periodic":
         return None
     q = np.abs(np.asarray(res.lag["phys"]["q"], float))
@@ -691,13 +754,18 @@ def _sawtooth_warning(s, res, t0, t1, events):
     else:
         cov = s.crash_table.covered(t0, t1) if s.crash_table is not None else None
         if cov is True:
-            return None
-        why = ("the crash record's detection did not cover this interval: no crashes applied" if cov is False else
-               "no measured crash in this interval and the record's coverage was not stated")
+            why = ("the crash record covers this interval and shows no crash: model-data inconsistency (the evolved "
+                   "q < 1 where no sawtooth was observed)")
+        else:
+            why = ("the crash record's detection did not cover this interval: no crashes applied" if cov is False else
+                   "no measured crash in this interval and the record's coverage was not stated")
     import warnings
     text = f"evolved q_min = {qmin:.3f} < 1 at t = {t1:.4f} s; {why}"
     warnings.warn(text, RuntimeWarning, stacklevel=3)
-    return dict(q_min=qmin, interval=[t0, t1], text=text)
+    kind = ("no_record" if s.sawtooth == "off" else
+            ("covered_no_crash" if (s.crash_table is not None and s.crash_table.covered(t0, t1) is True)
+             else "not_covered"))
+    return dict(q_min=qmin, interval=[t0, t1], text=text, kind=kind)
 
 
 #: Relaxed-start applicability guard (warning only): reference q_min and non-inductive fraction limits.
@@ -750,6 +818,11 @@ def _measured_crash_start(s, cfg, times):
     n_hist = int(np.count_nonzero((np.asarray(s.crash_times, float) > sched.t_start)
                                   & (np.asarray(s.crash_times, float) <= window[1])))
     if n_hist == 0:
+        # no crash RECORDED in the history: crash-free only where the record says the core was observed
+        if s.crash_table is not None and s.crash_table.covered(sched.t_start, window[1]) is not True:
+            raise ValueError(f"measured crash times cannot start the series: no crash recorded in the history "
+                             f"[{sched.t_start}, {window[1]}], but the crash record did not observe all of it "
+                             "(unobserved interval or coverage not stated): 'no crash recorded' is not 'no crash'")
         # the record covers the history (checked above) and holds no crash in it: the first slice is crash-free
         rec = dict(window=list(window), history_s=cfg.history, record_start=s.crash_record_start, n_crashes_history=0,
                    note="no measured crash in the covered history before the first slice: the first slice is the "
@@ -779,8 +852,9 @@ def _apply_f0(fm, sl):
 
 
 def _state_record(st):
+    m = st.meta or {}
     return dict(time=float(st.time), rho_faces=np.asarray(st.rho_faces).tolist(), psi=np.asarray(st.psi).tolist(),
-                psi_boundary=float(st.psi_boundary))
+                psi_boundary=float(st.psi_boundary), ip_A=m.get("ip_A"), current_scale=m.get("current_scale"))
 
 
 def _psi_shape_diff(a, b):
@@ -818,18 +892,23 @@ def _filter_slice(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1):
     fm.restore(c["snap"])
     fm.probe_correction = c["probe_correction"].copy()
     # re-advance the carried state on the accepted center's own equilibrium (the geometry its assembly used);
-    # with the Ip target fitted, the state is scaled to the fitted Ip as in the fit (fit._scaled_state_fn)
-    k_ip = 1.0 + float(fr.params.get("ip_rel", 0.0) or 0.0)
+    # with the Ip target fitted, the state is brought to the fitted Ip ONCE, by the ratio of the fitted target to
+    # the current it was advanced to (as in the fit, fit._scaled_state_fn), and the fitted offset is carried on
+    ip_meas = _slice_ip(sl)
+    off_new = float(fr.params.get("ip_rel", 0.0) or 0.0)
+    ip_fit = ip_meas * (1.0 + off_new)
     use_c = state_fn(res.lag)
     ac = fr.params["a_corr"]
+    k_ip = ip_fit / float(ip1)
     if k_ip != 1.0:
         use_c = _cm.scale_state(use_c, k_ip)
         holder["end"] = _cm.scale_state(holder["end"], k_ip)
-        holder["ip_end"] = float(ip1) * k_ip
+    holder["ip_end"] = ip_fit
+    holder["ip_offset_end"] = off_new
     e = holder["end"]
     dpsi, dpb = np.zeros_like(e.psi), 0.0
     if any(a != 0.0 for a in ac):
-        shapes = _cm.correction_shapes(res.lag, cfg, float(ip1) * k_ip)
+        shapes = _cm.correction_shapes(res.lag, cfg, ip_fit)
         dpsi, dpb = _cm.correction_response(res.lag, shapes, ac, e.rho_faces)
     holder["end"] = CurrentState(e.rho_faces, e.psi + dpsi, e.psi_boundary + dpb, e.time,
                                  dict(e.meta, filter_corrections_absorbed=list(ac)))

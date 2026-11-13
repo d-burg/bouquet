@@ -98,8 +98,13 @@ def test_crash_table_coverage_gap_is_recorded(monkeypatch):
     out = SE.run_series(fm, SD._slices(np.arange(3) * 0.02, np.full(3, ip)), CM.CurrentModelSettings(r0=SD.GEO.R0),
                         SE.SeriesSettings(initial="relaxed", crash_table=tab))
     assert out["settings"]["sawtooth_resolved"] == "crash_times"
-    assert [w["slice"] for w in out["warnings"]] == [1, 2]
-    assert all("did not cover" in w["sawtooth"] for w in out["warnings"])
+    # slice 0 lies in an observed stretch with no crash: recorded as a model-data inconsistency; 1 and 2 overlap
+    # the unobserved interval
+    assert [w["slice"] for w in out["warnings"]] == [0, 1, 2]
+    kinds = [s_["sawtooth_warning"]["kind"] for s_ in out["slices"]]
+    assert kinds == ["covered_no_crash", "not_covered", "not_covered"]
+    assert "model-data inconsistency" in out["warnings"][0]["sawtooth"]
+    assert all("did not cover" in w["sawtooth"] for w in out["warnings"][1:])
 
 
 def _zrec(source, imp_state="qualified", line_state="qualified"):
@@ -119,9 +124,21 @@ def test_one_zeff_source_per_series():
     assert named["applied"] and named["candidate"] == "carbon"
     with pytest.raises(ValueError, match="switches"):
         SE.check_zeff_series(_zslices([dict(zeff_source="carbon"), dict(zeff_source="file")]))
-    sw = SE.check_zeff_series(_zslices([dict(zeff_source="const"), dict(zeff_source="carbon"),
-                                        dict(zeff_source="carbon")]), switch_allowed=True)
-    assert sw["switch_allowed"] and sw["switches"] == [dict(time=0.02, source_from="const", source_to="carbon")]
+    # declared intervals: the switch is allowed only where declared, and the per-slice checks stay active inside
+    sched = [dict(start=-1.0, end=0.01, candidate="const"), dict(start=0.01, end=1.0, candidate="checked_candidate",
+                                                                 source=ZR.IMPURITY)]
+    mixed = [dict(zeff_source="const"), _zrec(ZR.IMPURITY, imp_state=ZR.FAILED), _zrec(ZR.IMPURITY)]
+    out = SE.check_zeff_series(_zslices(mixed), schedule=sched)
+    assert out["failing_slices"] == [0.02] and out["schedule"][1]["source"] == ZR.IMPURITY
+    assert [iv["n_slices"] for iv in out["intervals"]] == [1, 2]
+    with pytest.raises(ValueError, match="used another source"):           # a candidate switch inside an interval
+        SE.check_zeff_series(_zslices([dict(zeff_source="const"), _zrec(ZR.IMPURITY), _zrec(ZR.LINE)]),
+                             schedule=sched)
+    with pytest.raises(ValueError, match="declared"):                        # an undeclared switch
+        SE.check_zeff_series(_zslices([dict(zeff_source="const"), dict(zeff_source="const"), _zrec(ZR.IMPURITY)]),
+                             schedule=sched)
+    with pytest.raises(ValueError, match="no declared interval"):
+        SE.check_zeff_series(_zslices(mixed), schedule=sched[1:])
     recs = [_zrec(ZR.IMPURITY), _zrec(ZR.IMPURITY, imp_state=ZR.FAILED), _zrec(ZR.IMPURITY, imp_state=ZR.UNVERIFIED)]
     with pytest.raises(ZR.ZeffSourceRefused, match="needs one Z_eff source named"):
         SE.check_zeff_series(_zslices(recs))
@@ -143,3 +160,17 @@ def test_crash_record_with_no_crash_in_the_covered_history_starts_crash_free():
     uncovered = SE.SeriesSettings(initial="relaxed", sawtooth="crash_times", crash_times=[0.03, 0.05])
     with pytest.raises(ValueError, match="cannot start the series"):
         SE._measured_crash_start(uncovered, cfg, np.array([0.0, 0.02]))
+
+
+def test_crash_free_start_respects_unobserved_history():
+    """No crash recorded in a history the record did not observe is not 'no crash': the start is refused."""
+    tab = CrashTable(time=[0.03, 0.05], time_err=[0, 0], rho_inv=[0.2, 0.2], rho_inv_err=[0, 0], confidence="AA",
+                     record_start=-2.0, record_end=1.0, unobserved=[(-1.6, 0.5)])
+    s = SE.SeriesSettings(initial="relaxed", crash_table=tab)
+    with pytest.raises(ValueError, match="not 'no crash'"):
+        SE._measured_crash_start(s, CM.CurrentModelSettings(r0=SD.GEO.R0), np.array([0.0, 0.02]))
+    ok = CrashTable(time=[0.03, 0.05], time_err=[0, 0], rho_inv=[0.2, 0.2], rho_inv_err=[0, 0], confidence="AA",
+                    record_start=-2.0, record_end=1.0)
+    cfg0, p0, rec = SE._measured_crash_start(SE.SeriesSettings(initial="relaxed", crash_table=ok),
+                                             CM.CurrentModelSettings(r0=SD.GEO.R0), np.array([0.0, 0.02]))
+    assert rec["n_crashes_history"] == 0 and p0["log_strength"] is None

@@ -91,6 +91,9 @@ class FakeFM:
     def boundary_distance(self):
         return {}
 
+    def solver_record(self):
+        return dict(build=None, lcfs_cut_cells=None, edge_taper=None)
+
 
 def _assembly(lag, state):
     rho = np.asarray(lag["phys"]["rho"])

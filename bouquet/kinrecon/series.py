@@ -503,7 +503,9 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
     taper stays uniform within the series); ``cfg``: :class:`.current_model.CurrentModelSettings`
     (``n_cells`` sets the carried state's grid); ``start_psi``/``initial_profiles``: first-slice
     starting state of the solver (as :func:`.fit.reconstruct`).  ``callback(record)`` is called after
-    every slice.  Returns a dict with ``slices`` (one record each), ``settings`` and the totals.
+    every slice.  Returns a dict with ``slices`` (one record each), ``settings``, ``solver`` (the solver build,
+    the cut-cell setting in effect and the edge-taper setting, :meth:`.forward.ForwardModel.solver_record`) and
+    the totals.
     """
     s = settings or SeriesSettings()
     t_all = time.perf_counter()
@@ -512,7 +514,7 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
     if np.any(np.diff(times) <= 0):
         raise ValueError("slice times must increase strictly")
     out = dict(settings=s.as_dict(), model_settings=cfg.as_dict(), slices=[], times=times.tolist(),
-               ip_convention=IP_CONVENTION)
+               ip_convention=IP_CONVENTION, solver=fm.solver_record())
     out["zeff_series"] = check_zeff_series(slices, s.zeff_series_source, s.zeff_source_schedule)
     zeff_flags = set(out["zeff_series"].get("failing_slices") or []) | set(out["zeff_series"].get("unverified_slices")
                                                                          or [])

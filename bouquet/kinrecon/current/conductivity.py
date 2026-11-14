@@ -73,8 +73,8 @@ decide this: it tabulates the fits against nu_e* as an input coordinate.)
 Units are SI except temperatures, which are in eV as in the source papers.
 
 Defaults (stated, not physics): no floor is applied to ``ln(Lambda_e)`` in the conductivity
-(OFT's own routines clamp it at 10; the bootstrap module of this package keeps that floor for
-its NRL logarithms); there is no warning for very low ``Te`` (below about 10 eV the
+(OFT's own routines clamp it at 10; the bootstrap module of this package uses the same Sauter
+logarithms, :func:`coulomb_log_e` and :func:`coulomb_log_ii`, also without a floor); there is no warning for very low ``Te`` (below about 10 eV the
 logarithms leave their range of validity) -- this affects ``sigma_neo`` only in a cold edge.
 """
 
@@ -82,6 +82,7 @@ import numpy as np
 
 __all__ = [
     "coulomb_log_e",
+    "coulomb_log_ii",
     "spitzer_conductivity",
     "nu_e_star",
     "f33_effective_trapped_fraction",
@@ -115,6 +116,17 @@ def coulomb_log_e(ne, te_ev, model="sauter"):
     if model == "nrl":
         return 23.5 - np.log(np.sqrt(ne / 1.0e6) * te ** (-1.25)) - np.sqrt(1.0e-5 + (np.log(te) - 2.0) ** 2 / 16.0)
     raise ValueError(f"unknown Coulomb-log model {model!r} (use 'sauter' or 'nrl')")
+
+
+def coulomb_log_ii(ni, ti_ev, z):
+    r"""Ion-ion Coulomb logarithm ``ln(Lambda_ii) = 30 - ln(Z^3 sqrt(n_i) / Ti^1.5)`` (Sauter 1999 eq. 18e, the
+    definition Redl 2021 section III.D requires with eqs. 18a-18d), ``n_i`` in m^-3, ``Ti`` in eV, ``Z`` the ion
+    charge used in it (the caller's convention, e.g. :mod:`.bootstrap`).  No floor is applied (as
+    :func:`coulomb_log_e`)."""
+    ni = np.asarray(ni, dtype=float)
+    ti = np.asarray(ti_ev, dtype=float)
+    z = np.asarray(z, dtype=float)
+    return 30.0 - np.log(z ** 3 * np.sqrt(ni) / ti ** 1.5)
 
 
 def spitzer_conductivity(ne, te_ev, zeff, ln_lambda=None):

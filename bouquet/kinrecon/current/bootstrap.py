@@ -25,13 +25,18 @@ equilibria to 4-5e-4 of the peak (the solver-noise level; measured).
 ``tests/kinrecon/test_redl_bootstrap.py`` checks this module against that function to round-off
 whenever OFT is importable.
 
-Collisionality and Coulomb logarithms (the defaults reproduce the earlier prototype of this
-package; each is a named option of :func:`redl_jdotb`):
+Collisionality and Coulomb logarithms (each a named option of :func:`redl_jdotb`):
 
-* ``ln Lambda_e``: NRL form ``23.5 - ln(sqrt(n_e[cm^-3]) T_e^-5/4) - sqrt(1e-5 + (ln T_e - 2)^2/16)``,
-  floored at 10 (OFT ``calculate_ln_lambda``, ``electron_lnLambda_model='NRL'``);
-* ``ln Lambda_ii``: ``30 - ln(Z^3 sqrt(n_i) / T_i^1.5)`` with ``Z = max(n_e/n_i, 1)``, floored at
-  10 (OFT ``ion_lnLambda_model='Zavg'``);
+* ``ln Lambda_e`` and ``ln Lambda_ii``: Sauter, Angioni and Lin-Liu, Phys. Plasmas 6, 2834 (1999), eqs. (18d)
+  and (18e), ``ln Lambda_e = 31.3 - ln(sqrt(n_e) / T_e)`` and ``ln Lambda_ii = 30 - ln(Z^3 sqrt(n_i) / T_i^1.5)``
+  (n in m^-3, T in eV), with ``Z = max(n_e/n_i, 1)`` in ``ln Lambda_ii`` (the ``"spike"`` convention below), no
+  floor (``ln_lambda_model="sauter"``, default).  Redl et al. 2021 section III.D (p. 022502-8) states that the
+  definitions of f_trap, nu* and Z_eff of S99 eqs. (12) and (18a)-(18e) must be used with their fits; the
+  electron logarithm is the one shared with :mod:`.conductivity` (:func:`.conductivity.coulomb_log_e`,
+  :func:`.conductivity.coulomb_log_ii`), so sigma_neo and the bootstrap see the same nu_e*;
+* ``ln_lambda_model="nrl"`` (the earlier default, kept for comparison): the NRL electron form
+  ``23.5 - ln(sqrt(n_e[cm^-3]) T_e^-5/4) - sqrt(1e-5 + (ln T_e - 2)^2 / 16)`` and the same ion form, both
+  floored at 10 (OFT ``calculate_ln_lambda(..., 'NRL', 'Zavg')``); it gives ``ln Lambda_e`` about 0.4 lower;
 * ``nu_e* = 6.921e-18 |q| R n_e Z_eff ln Lambda_e / (T_e^2 eps^1.5)`` (Sauter 1999 eq. 18b; the
   definition Redl 2021 keeps);
 * ``nu_i* = 4.90e-18 |q| R n_i Z_i^4 ln Lambda_ii / (T_i^2 eps^1.5)`` with
@@ -48,21 +53,31 @@ that INCREASES outward (``dpsi > 0``); a co-current bootstrap then comes out pos
 
 import numpy as np
 
+from .conductivity import coulomb_log_e, coulomb_log_ii
+
 EC = 1.602176634e-19
 
-__all__ = ["coulomb_logs", "collisionalities", "redl_coefficients", "redl_jdotb", "ION_COLLISIONALITY"]
+__all__ = ["coulomb_logs", "collisionalities", "redl_coefficients", "redl_jdotb", "ION_COLLISIONALITY",
+           "LN_LAMBDA_MODELS"]
 
 #: Ion-collisionality charge models (module docstring).
 ION_COLLISIONALITY = ("spike", "zeff", "unity")
+#: Coulomb-logarithm models (module docstring); "sauter" is the default.
+LN_LAMBDA_MODELS = ("sauter", "nrl")
 
 
-def coulomb_logs(te, ti, ne, ni):
-    """``(ln Lambda_e, ln Lambda_ii)``: NRL electron form and the ``Zavg`` ion form, both floored at
-    10 (OFT ``calculate_ln_lambda(..., 'NRL', 'Zavg')``; NRL Plasma Formulary, recalled)."""
+def coulomb_logs(te, ti, ne, ni, model="sauter"):
+    """``(ln Lambda_e, ln Lambda_ii)`` (module docstring).  ``model="sauter"`` (default): S99 eqs. (18d) and (18e)
+    through the functions shared with :mod:`.conductivity`, ``Z = max(n_e/n_i, 1)`` in ``ln Lambda_ii``, no floor;
+    ``model="nrl"``: the earlier NRL electron form and the same ion form, both floored at 10."""
     te, ti, ne, ni = (np.asarray(x, dtype=float) for x in (te, ti, ne, ni))
-    ln_e = 23.5 - np.log(np.sqrt(ne / 1e6) * te ** (-1.25)) - np.sqrt(1e-5 + (np.log(te) - 2.0) ** 2 / 16.0)
+    if model not in LN_LAMBDA_MODELS:
+        raise ValueError(f"ln_lambda_model must be one of {LN_LAMBDA_MODELS}")
     z = np.clip(ne / ni, 1.0, None)
-    ln_ii = 30.0 - np.log(z ** 3 * np.sqrt(ni) / ti ** 1.5)
+    if model == "sauter":
+        return coulomb_log_e(ne, te, model="sauter"), coulomb_log_ii(ni, ti, z)
+    ln_e = coulomb_log_e(ne, te, model="nrl")
+    ln_ii = coulomb_log_ii(ni, ti, z)
     return np.maximum(ln_e, 10.0), np.maximum(ln_ii, 10.0)
 
 
@@ -114,7 +129,7 @@ def redl_coefficients(ft, zeff, nu_e, nu_i):
 
 
 def redl_jdotb(psi_n, te, ti, ne, ni, zeff, q, R, eps, ft, fpol, dpsi, ion_collisionality="spike",
-               gradient="numpy_second_order", nimp=None):
+               gradient="numpy_second_order", nimp=None, ln_lambda_model="sauter"):
     r"""<j_BS . B> [A T / m^2] on the given psi_N samples (module docstring).
 
     Parameters
@@ -133,6 +148,8 @@ def redl_jdotb(psi_n, te, ti, ne, ni, zeff, q, R, eps, ft, fpol, dpsi, ion_colli
     nimp : array (n,), optional
         Impurity density [m^-3] at ``T_i``; included in the ion pressure and its gradient
         (module docstring).  None: ion pressure ``n_i T_i``.
+    ln_lambda_model : str
+        ``"sauter"`` (default; S99 eqs. 18d-18e) or ``"nrl"`` (the earlier default; module docstring).
 
     Returns ``(jdotb, parts)`` with ``parts`` holding ``L31``, ``L32``, ``alpha``, ``nu_e_star``,
     ``nu_i_star``, ``ln_lambda_e``, ``ln_lambda_ii`` and the settings used.
@@ -153,7 +170,7 @@ def redl_jdotb(psi_n, te, ti, ne, ni, zeff, q, R, eps, ft, fpol, dpsi, ion_colli
     def d(y):
         return np.gradient(y, x, edge_order=2) / float(dpsi)
 
-    ln_e, ln_ii = coulomb_logs(te, ti, ne, ni)
+    ln_e, ln_ii = coulomb_logs(te, ti, ne, ni, model=ln_lambda_model)
     nu_e, nu_i = collisionalities(q, R, eps, te, ti, ne, ni, zeff, ln_e, ln_ii, ion_collisionality)
     c = redl_coefficients(ft, zeff, nu_e, nu_i)
     nit = ni + nz                              # thermal ions: main + impurity (both at T_i)
@@ -165,7 +182,11 @@ def redl_jdotb(psi_n, te, ti, ne, ni, zeff, q, R, eps, ft, fpol, dpsi, ion_colli
                             + c["L34"] * c["alpha"] * (1 - rpe) / rpe * dti / ti)
     parts = dict(c, nu_e_star=nu_e, nu_i_star=nu_i, ln_lambda_e=ln_e, ln_lambda_ii=ln_ii,
                  settings=dict(model="redl2021", form="jboot1 (Sauter 1999 eq. 5), L34 = L31",
-                               ln_lambda_e="NRL, floor 10", ln_lambda_ii="Zavg, floor 10",
+                               ln_lambda_model=ln_lambda_model,
+                               ln_lambda_e=("Sauter 1999 eq. 18d, no floor" if ln_lambda_model == "sauter"
+                                            else "NRL, floor 10"),
+                               ln_lambda_ii=("Sauter 1999 eq. 18e with Z = max(n_e/n_i, 1), no floor"
+                                             if ln_lambda_model == "sauter" else "Zavg, floor 10"),
                                ion_collisionality=ion_collisionality, gradient=gradient,
                                ion_pressure=("(n_i + n_imp) T_i (main ions and impurity)" if nimp is not None
                                              else "n_i T_i (main ions only; no impurity density given)"),

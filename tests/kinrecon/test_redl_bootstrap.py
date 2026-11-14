@@ -48,8 +48,25 @@ def test_zero_gradients_give_zero_and_linear_in_F():
 def test_collisionality_and_coulomb_log_forms():
     x, te, ti, ne, ni, zeff, q, R, eps, ft, F = _profiles(5)
     le, li = coulomb_logs(te, ti, ne, ni)
+    # default: Sauter 1999 eqs. (18d) and (18e) (Redl 2021 section III.D), no floor, Z = max(n_e/n_i, 1) in Lambda_ii,
+    # the electron form shared with the conductivity module
+    np.testing.assert_allclose(le, 31.3 - np.log(np.sqrt(ne) / te), rtol=1e-14)
+    z = np.clip(ne / ni, 1.0, None)
+    np.testing.assert_allclose(li, 30.0 - np.log(z ** 3 * np.sqrt(ni) / ti ** 1.5), rtol=1e-14)
+    from bouquet.kinrecon.current.conductivity import coulomb_log_e
+    np.testing.assert_array_equal(le, coulomb_log_e(ne, te))
+    # the earlier default, kept as the option "nrl": NRL electron form and the same ion form, both floored at 10
+    le_n, li_n = coulomb_logs(te, ti, ne, ni, model="nrl")
     exp_e = 23.5 - np.log(np.sqrt(ne / 1e6) * te ** -1.25) - np.sqrt(1e-5 + (np.log(te) - 2) ** 2 / 16)
-    np.testing.assert_allclose(le, np.maximum(exp_e, 10.0), rtol=1e-14)
+    np.testing.assert_allclose(le_n, np.maximum(exp_e, 10.0), rtol=1e-14)
+    np.testing.assert_allclose(li_n, np.maximum(li, 10.0), rtol=1e-14)
+    with pytest.raises(ValueError):
+        coulomb_logs(te, ti, ne, ni, model="spitzer")
+    jb_s, ps = redl_jdotb(x, te, ti, ne, ni, zeff, q, R, eps, ft, F, 1.0)
+    jb_n, pn = redl_jdotb(x, te, ti, ne, ni, zeff, q, R, eps, ft, F, 1.0, ln_lambda_model="nrl")
+    assert ps["settings"]["ln_lambda_model"] == "sauter" and pn["settings"]["ln_lambda_model"] == "nrl"
+    np.testing.assert_array_equal(pn["ln_lambda_e"], le_n)
+    assert not np.array_equal(jb_s, jb_n)
     nue, nui = collisionalities(q, R, eps, te, ti, ne, ni, zeff, le, li)
     np.testing.assert_allclose(nue, 6.921e-18 * q * R * ne * zeff * le / (te ** 2 * eps ** 1.5), rtol=1e-14)
     np.testing.assert_allclose(nui, 4.90e-18 * q * R * ni * (ne / ni * zeff) * li / (ti ** 2 * eps ** 1.5),

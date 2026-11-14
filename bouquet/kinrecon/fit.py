@@ -555,17 +555,28 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
         full = np.concatenate((r, rp))
         all_groups = [g for g in ms.groups if g in ("flux_loop", "bpol_probe", "ip", "pf_current", "mse")]
         all_tab = score(fm.gs, ms, groups=all_groups)
-        summ = {k: dict(chi2=v[0], n=v[1], chi2_per_n=v[2]) for k, v in chi2_summary(all_tab).items()}
+        summ = headline_summary(all_tab, ms, coil_roles, settings.fitted_coil_role)
         summ_offset = flux_offset_record(all_tab)
         fit_chi = {g: float(np.sum(r[[i for i, (gg, _) in enumerate(idx) if gg == g]] ** 2)) for g in groups}
+        inner = _inner_dof_record(fm, groups)
+        dof = float(r.size - len(names) - inner["data"])
         c = dict(theta=np.array(theta, float), params=p, res=res, r=full, r_data=r, index=idx, prior_index=lp,
                  chi2=dict(objective=float(full @ full), data=float(r @ r), prior=float(rp @ rp), fit_groups=fit_chi,
-                           n_data=int(r.size), n_params=len(names), dof=int(r.size) - len(names), scored_all=summ,
+                           n_data=int(r.size), n_params=len(names), n_params_outer=len(names),
+                           inner_dof=inner["data"], inner_dof_record=inner, dof=dof,
+                           dof_outer_only=int(r.size) - len(names), chi2_per_dof=(float(r @ r) / dof if dof > 0
+                                                                                   else float("nan")),
+                           dof_rule="N_data - n_params (outer) - inner_dof (trace of the coil solve's hat matrix "
+                                    "over the data rows of the fit groups)",
+                           scored_all=summ,
                            scored_all_dof=dict(n_channels=summ["total"]["n"], n_params=len(names),
-                                               dof=summ["total"]["n"] - len(names),
+                                               inner_dof=_inner_dof_record(fm, all_groups)["data"],
+                                               dof=summ["total"]["n"] - len(names)
+                                               - _inner_dof_record(fm, all_groups)["data"],
                                                note="chi2/n in scored_all is descriptive (sigma are "
                                                     "conventions); the n_params were fitted to the fit "
-                                                    "groups, a subset of these channels"),
+                                                    "groups, a subset of these channels; free coils are "
+                                                    "reported apart (pf_current_free) and not in the total"),
                            flux_offset=summ_offset),
                  tab=tab, all_tab=all_tab, snap=fm.snapshot(), probe_correction=fm.probe_correction.copy(),
                  z0=res.assembly["orbit_z"] if res.assembly else None)
@@ -911,18 +922,61 @@ def _scaled_state_fn(state_fn, params, base_ip=None):
     """``state_fn`` with the supplied state scaled to the forward solve's Ip target ``|base_ip| (1 + ip_rel)``.
     The state's own current is its ``meta["ip_A"]`` (the Ip boundary value it was advanced to; set by the series
     driver), so a state that already carries the target is NOT rescaled; a state without that record is taken to
-    carry ``base_ip``.  Unchanged when there is no state function."""
+    carry ``base_ip``.  A state function that applies the current corrections over its interval (attribute
+    ``corrections_in_window``, :func:`.current_model.call_state_fn`) receives ``params``.  Unchanged when there is no
+    state function."""
     if state_fn is None:
         return None
     k = 1.0 + float(_cm.full_params(params).get("ip_rel", 0.0))
 
-    def fn(lag):
-        st = state_fn(lag)
+    def fn(lag, _params=None):
+        st = _cm.call_state_fn(state_fn, lag, params)
         ip_s = (st.meta or {}).get("ip_A")
         f = (abs(float(base_ip)) * k / abs(float(ip_s))) if (ip_s and base_ip is not None) else k
         return st if f == 1.0 else _cm.scale_state(st, f, ip_A=None if ip_s is None or base_ip is None
                                                     else abs(float(base_ip)) * k)
+    fn.corrections_in_window = bool(getattr(state_fn, "corrections_in_window", False))
     return fn
+
+
+def _inner_dof_record(fm, groups):
+    """The forward model's inner (coil) degrees of freedom on the data rows of ``groups`` (``fm.inner_dof``), or
+    zero with the reason when the forward model does not provide them."""
+    get = getattr(fm, "inner_dof", None)
+    if get is None:
+        return dict(data=0.0, note="forward model provides no inner degrees of freedom")
+    d = get()
+    if d is None:
+        return dict(data=0.0, note="no data rows in the forward solve (generation mode)")
+    return dict(data=float(fm.inner_dof_data(groups)), by_kind=d["by_kind"], n_rows=d["n_rows"],
+                n_unknowns=d["n_unknowns"], rank=d["rank"], condition=d["condition"], method=d["method"])
+
+
+def headline_summary(tab, ms, coil_roles, fitted_role="fitted"):
+    """Per-group ``{chi2, n, chi2_per_n}`` of a score table and their ``total``, with the coils the source left
+    free (role ``"free"``: no measurement constraint in the solve) taken OUT of ``pf_current`` and of the total
+    and reported apart as ``pf_current_free`` (with the coil names): their residuals are a cross-check, not part
+    of the headline all-channels score."""
+    out = {k: dict(chi2=v[0], n=v[1], chi2_per_n=v[2]) for k, v in chi2_summary(tab).items()}
+    if "pf_current" not in tab.model or "pf_current" not in ms.groups:
+        return out
+    grp = ms.groups["pf_current"]
+    used = tab.used("pf_current")
+    names = [str(n) for n in grp.geometry.get("coil_names", grp.labels)]
+    lab = [names[i] for i in np.nonzero(used)[0]]
+    r = np.asarray(tab.residual("pf_current"), float)
+    free = np.array([coil_roles.get(n, "free") == "free" for n in lab], dtype=bool)
+    c_free, n_free = float(np.sum(r[free] ** 2)), int(free.sum())
+    out["pf_current_free"] = dict(chi2=c_free, n=n_free, chi2_per_n=(c_free / n_free if n_free else float("nan")),
+                                  coils=[n for n, f in zip(lab, free) if f],
+                                  note="coils without a measurement constraint in the solve (free); not in the total")
+    pc = out["pf_current"]
+    c_pf, n_pf = pc["chi2"] - c_free, pc["n"] - n_free
+    out["pf_current"] = dict(chi2=c_pf, n=n_pf, chi2_per_n=(c_pf / n_pf if n_pf else float("nan")))
+    t = out["total"]
+    c_t, n_t = t["chi2"] - c_free, t["n"] - n_free
+    out["total"] = dict(chi2=c_t, n=n_t, chi2_per_n=(c_t / n_t if n_t else float("nan")))
+    return out
 
 
 def ip_record(tab, ms, params, fitted):

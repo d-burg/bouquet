@@ -15,8 +15,10 @@ two F-coils free, the rest fitted.
 
 Checked:
 (a) noisy closure: |theta_fit - theta_true| <= 3 Laplace sigma, and the data chi^2 inside the
-    two-sided 1e-4 band of chi^2(N - n_params) (N data rows; the free parameters of the fit, log_strength and
-    the plasma-current target);
+    two-sided 1e-4 band of chi^2(N - n_params - inner_dof) (N data rows; the free parameters of the fit,
+    log_strength and the plasma-current target; and the effective number of coil parameters the forward
+    solve fits to the same data rows, the trace of its coil solve's hat matrix over them, from the fit's
+    own record);
 (b) zero noise: theta recovered to < 0.5 Laplace sigma (the Gaussian prior on log_strength pulls the
     MAP point toward the prior mean; with zero noise the data still dominate), data chi^2 < 0.1;
 (c) sigma = 0 identity: the consistent solve of the reconstruction configuration at the TRUE
@@ -24,7 +26,10 @@ Checked:
     forward model's verified-convergence criterion) with data chi^2 < 1e-2;
 (d) failure handling: a consistency loop that cannot converge in its pass budget is reported as
     such and the fit refuses to start from it;
-(e) settings-record completeness and the solver settings (OFT defaults, read back).
+(e) settings-record completeness and the solver settings (OFT defaults, read back);
+(f) the inner degrees of freedom: computed without changing the solver's equilibrium (psi and coil currents
+    bit-identical before and after), between 0 and the number of coil unknowns, and the boundary
+    displacement from the anchor recorded in mm.
 
 ``OFT_env`` is a per-process singleton, so all live work runs in ONE child interpreter (one thread)
 that writes JSON; the tests assert on it.  Set ``OFT_PYTHONPATH`` to the OFT build's ``python``
@@ -34,6 +39,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 
 import numpy as np
 import pytest
@@ -222,6 +228,15 @@ def child(out):
                          start=truth_snap, label="noisy")
     rec["noisy"] = dict(status=fn.status, theta=fn.theta, sigma=fn.sigma, chi2=fn.chi2,
                         n_solves=fn.record["n_solves"], wall_s=fn.record["wall_s"])
+    # (f) inner degrees of freedom leave the equilibrium untouched; boundary displacement recorded
+    psi0, cc0 = np.array(gs.get_psi(False)), dict(gs.get_coil_currents()[0])
+    fm._inner_dof = None
+    t0 = time.perf_counter()
+    inner = fm.inner_dof()
+    rec["inner"] = dict(record=inner, wall_s=time.perf_counter() - t0,
+                        psi_identical=bool(np.array_equal(psi0, np.array(gs.get_psi(False)))),
+                        coils_identical=bool(cc0 == dict(gs.get_coil_currents()[0])))
+    rec["boundary"] = fn.record.get("boundary")
     # (e) record keys
     rr = fn.record
     rec["record_keys"] = sorted(rr)
@@ -285,9 +300,27 @@ def test_noisy_closure_within_laplace_and_chi2_band(result):
     assert n["status"].startswith("converged"), n["status"]
     assert abs(n["theta"][0] - result["ls_true"]) <= 3.0 * n["sigma"][0]
     N = n["chi2"]["n_data"]
-    dof = N - n["chi2"]["n_params"]          # every fitted parameter counted (log_strength and the Ip target)
+    # every fitted parameter counted: log_strength and the Ip target, and the coil solve's effective parameters on
+    # the same data rows (trace of its hat matrix, from the fit's own record)
+    dof = N - n["chi2"]["n_params"] - n["chi2"]["inner_dof"]
+    assert n["chi2"]["dof"] == pytest.approx(dof, rel=1e-12) and n["chi2"]["inner_dof"] > 0
     lo, hi = chi2.ppf(1e-4, dof), chi2.ppf(1 - 1e-4, dof)
     assert lo <= n["chi2"]["data"] <= hi, (n["chi2"]["data"], lo, hi)
+
+
+def test_inner_dof_record_and_boundary_displacement(result):
+    inn = result["inner"]
+    assert inn["psi_identical"] and inn["coils_identical"]
+    r = inn["record"]
+    data = r["by_kind"]["flux_loop"] + r["by_kind"]["bpol_probe"] + r["by_kind"]["fitted_coil"]
+    assert 0.0 < data < r["n_unknowns"] and r["rank"] == r["n_unknowns"]
+    assert sum(r["by_kind"].values()) == pytest.approx(r["rank"], rel=1e-9)        # trace of a projector
+    assert result["noisy"]["chi2"]["inner_dof"] == pytest.approx(data, rel=1e-12)
+    d = result["boundary"]["displacement_mm"]
+    assert "error" not in d, d
+    assert np.isfinite(d["rms"]) and d["rms"] == pytest.approx(1e3 * result["boundary"]["rms_m"], rel=1e-12)
+    for k in ("max", "outboard_midplane", "inboard_midplane", "x_points", "strike_points", "anchor_factor"):
+        assert k in d, k
 
 
 def test_failure_handling(result):

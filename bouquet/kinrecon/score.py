@@ -422,35 +422,51 @@ def score_common(equilibria, measurements, kinetics=None, groups=None, orientati
     return tabs, record
 
 
-def chi2_report(table, n_params=0):
+def chi2_report(table, n_params=0, inner_dof=0.0, exclude=None):
     """chi^2 of a table with its channel count, parameter count and degrees of freedom stated separately.
 
     ``n_params`` is the number of parameters fitted to THESE channels (0 for an equilibrium scored without
-    fitting).  Returns ``{"groups": {name: {"chi2", "n_channels", "sigma_model"}}, "total": {"chi2",
-    "n_channels", "n_params", "dof", "chi2_per_dof"}, "interpretation": text}``.  ``chi2_per_dof`` is
-    descriptive: on real data the sigma are conventions (named per group), correlations (a shared
-    reference loop, time-slice-correlated relative errors) are ignored, so it is not a goodness-of-fit
-    test; compare equilibria through :func:`score_common` on the same channels.
+    fitting).  ``inner_dof`` is the effective number of parameters fitted to these channels inside the forward
+    solve (the coil solve's hat-matrix trace over the data rows, :meth:`.forward.ForwardModel.inner_dof`; 0 when
+    not given); it is counted in ``dof`` and stated apart (``inner_dof``; ``dof_outer_only`` without it).
+    ``exclude`` (``{group: bool mask over the group's channels}``) takes channels out of their group and of the
+    total and reports them apart (``excluded``; e.g. coils the source left free).  Returns ``{"groups": {name:
+    {"chi2", "n_channels", "sigma_model"}}, "total": {"chi2", "n_channels", "n_params", "inner_dof", "dof",
+    "chi2_per_dof"}, "excluded", "interpretation"}``.  ``chi2_per_dof`` is descriptive: on real data the sigma
+    are conventions (named per group), correlations (a shared reference loop, time-slice-correlated relative
+    errors) are ignored, so it is not a goodness-of-fit test; compare equilibria through :func:`score_common` on
+    the same channels.
     """
-    groups = {}
+    exclude = dict(exclude or {})
+    groups, excl = {}, {}
+    c_tot, n = 0.0, 0
     for name in table.model:
         g = table.measurements.groups[name]
-        groups[name] = dict(chi2=table.chi2(name), n_channels=table.n_valid(name),
+        use = np.asarray(table.used(name), bool)
+        r2 = np.zeros(use.shape)
+        r2[use] = np.asarray(table.residual(name), float) ** 2
+        drop = (np.asarray(exclude[name], bool) & use) if name in exclude else np.zeros_like(use)
+        keep = use & ~drop
+        groups[name] = dict(chi2=float(np.sum(r2[keep])), n_channels=int(keep.sum()),
                             sigma_model=g.meta.get("sigma_model"), sigma_model_id=_sigma_id(g))
-    n = table.n_valid()
+        c_tot += groups[name]["chi2"]
+        n += groups[name]["n_channels"]
+        if np.any(drop):
+            excl[name] = dict(chi2=float(np.sum(r2[drop])), n_channels=int(drop.sum()),
+                              labels=[g.labels[i] for i in np.nonzero(drop)[0]])
     off = flux_offset_record(table)
-    c_tot, n_par = table.chi2(), int(n_params)
+    n_par = int(n_params)
     if off is not None:
         # the fitted loop offset: one extra parameter, and its prior row (when present) one extra datum
         c_tot += float(off.get("prior_chi2") or 0.0)
         n += int(off["n_extra_data"])
         n_par += int(off["n_extra_params"])
-    dof = n - n_par
-    total = dict(chi2=c_tot, n_channels=n, n_params=n_par, dof=dof,
-                 chi2_per_dof=(c_tot / dof) if dof > 0 else float("nan"))
+    dof = (n - n_par - float(inner_dof)) if inner_dof else n - n_par
+    total = dict(chi2=c_tot, n_channels=n, n_params=n_par, inner_dof=float(inner_dof), dof=dof,
+                 dof_outer_only=n - n_par, chi2_per_dof=(c_tot / dof) if dof > 0 else float("nan"))
     ids = sorted({str(v["sigma_model_id"]) for v in groups.values()})
     total["sigma_models"] = ids
-    return dict(groups=groups, total=total, flux_offset=off,
+    return dict(groups=groups, total=total, flux_offset=off, excluded=excl,
                 interpretation=("chi^2 under the stated sigma conventions (diagonal, correlations ignored); "
                                 "not a pass/fail quantity on real data -- compare equilibria on the same channels"))
 

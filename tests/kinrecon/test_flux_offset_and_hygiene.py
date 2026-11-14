@@ -196,3 +196,28 @@ def test_forward_solve_refuses_a_gauge_from_a_fitted_reference():
     fm.ms, fm.settings, fm.gs, fm.F0 = ms, FW.ForwardSettings(vsc={"F0": 1.0}), None, 1.0
     with pytest.raises(ValueError, match="FITTED reference"):
         fm._setup_rows(np.zeros((10, 2)), None)
+
+
+def test_inner_degrees_of_freedom_and_free_coils_in_the_reports():
+    """The coil solve's effective parameter count enters the degrees of freedom (stated apart), and coils the
+    source left free are reported apart from the headline score, by the report and by the fit's summary."""
+    from bouquet.kinrecon.fit import headline_summary
+    from bouquet.kinrecon.interfaces import ResidualTable
+    coils = ["C0", "C1", "C2", "C3"]
+    pf = ConstraintGroup("pf_current", coils, np.array([1.0, 2.0, 3.0, 4.0]), np.ones(4), np.ones(4, bool),
+                         geometry=dict(coil_names=coils), meta=dict(sigma_model="test"))
+    ip = ConstraintGroup("ip", ["ip"], np.array([1.0e6]), np.array([1.0e4]), np.ones(1, bool), meta=dict(sigma_model="t"))
+    ms = MeasurementSet("toy", 1.0, 0.01, {"pf_current": pf, "ip": ip})
+    tab = ResidualTable(measurements=ms, model={"pf_current": np.array([1.5, 2.0, 5.0, 4.0]),
+                                                 "ip": np.array([1.01e6])})
+    roles = dict(C0="fitted", C1="held", C2="free", C3="fitted")
+    rep = SC.chi2_report(tab, n_params=2, inner_dof=1.5, exclude={"pf_current": np.array([False, False, True, False])})
+    assert rep["groups"]["pf_current"]["n_channels"] == 3 and rep["groups"]["pf_current"]["chi2"] == pytest.approx(0.25)
+    assert rep["excluded"]["pf_current"] == dict(chi2=pytest.approx(4.0), n_channels=1, labels=["C2"])
+    t = rep["total"]
+    assert t["n_channels"] == 4 and t["chi2"] == pytest.approx(1.25)
+    assert t["inner_dof"] == 1.5 and t["dof"] == pytest.approx(0.5) and t["dof_outer_only"] == 2
+    assert SC.chi2_report(tab)["total"]["dof"] == 5                      # unchanged without the new arguments
+    hs = headline_summary(tab, ms, roles)
+    assert hs["pf_current_free"]["coils"] == ["C2"] and hs["pf_current_free"]["chi2"] == pytest.approx(4.0)
+    assert hs["pf_current"]["n"] == 3 and hs["total"]["n"] == 4 and hs["total"]["chi2"] == pytest.approx(1.25)

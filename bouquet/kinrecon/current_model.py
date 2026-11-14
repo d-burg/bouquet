@@ -61,8 +61,14 @@ assembled profiles (the mixing correction is interpolated onto the knots); the f
 criterion are unchanged, and a mixed input that does not solve falls back to the plain one.
 
 A supplied current state (``state_fn``; the time-dependent path of :mod:`.series`) replaces the
-steady state / periodic orbit: the profiles are then those of that state on the current geometry,
-and the corrections act as the zero-net-current steady response ``sum_k a_k psi_k`` added to it.
+steady state / periodic orbit: the profiles are then those of that state on the current geometry.
+The corrections then act as a non-inductive SOURCE over the interval that ends at the slice: a state
+function marked ``corrections_in_window`` (:func:`call_state_fn`) receives the parameters and advances
+the flux-diffusion equation with ``sum_k a_k g_k`` among its sources, so the scored state already holds
+their response over that interval (the state records the source amplitudes, ``meta["correction_source"]``).
+A state function without that mark gets the earlier treatment, the zero-net-current STEADY response
+``sum_k a_k psi_k`` (:func:`correction_response`, the response after infinitely many resistive times)
+added to its state; :mod:`.series` keeps that form only as a comparison option.
 
 :func:`lagged_solve` (geometry-dependent inputs lagged from a center) is kept for callers that
 want it; the fit (:mod:`.fit`) now takes its Jacobian columns from consistent solves.
@@ -270,6 +276,7 @@ class CurrentModelSettings:
     conductivity_model: str = "redl2021"
     ln_lambda_model: str = "sauter"          # for sigma_neo (conductivity module default)
     ion_collisionality: str = "spike"        # for the bootstrap (current.bootstrap)
+    bootstrap_ln_lambda_model: str = "sauter"   # bootstrap Coulomb logarithms: "sauter" (S99 18d-e) or "nrl" (earlier)
     pass_acceleration: str = "anderson"      # "anderson" (depth anderson_depth) or "none"
     anderson_depth: int = 3
     sawtooth: bool = True
@@ -322,6 +329,16 @@ def scale_state(state, factor, ip_A=None):
     elif meta.get("ip_A") is not None:
         meta["ip_A"] = float(meta["ip_A"]) * f
     return CurrentState(state.rho_faces, pb + f * (np.asarray(state.psi, float) - pb), pb, state.time, meta)
+
+
+def call_state_fn(state_fn, lag, params):
+    """The supplied state of a time-dependent pass: ``state_fn(lag, params)`` for a state function that applies the
+    current corrections over its interval itself (attribute ``corrections_in_window = True``: the corrections are a
+    non-inductive source of the flux diffusion over the interval, so the state depends on the parameters), else
+    ``state_fn(lag)``."""
+    if getattr(state_fn, "corrections_in_window", False):
+        return state_fn(lag, params)
+    return state_fn(lag)
 
 
 # ============================================================== geometry / physics on the current state
@@ -379,7 +396,7 @@ def evaluate_geometry(gs, kin, cfg):
                                             ln_lambda_model=cfg.ln_lambda_model)
     jbs, bparts = redl_jdotb(ge, k["te"], k["ti"], k["ne"], k["ni"], k["zeff"], phys["q"], phys["r_geo"],
                              phys["eps"], phys["ft"], F, dpsi, ion_collisionality=cfg.ion_collisionality,
-                             nimp=k.get("nimp"))
+                             nimp=k.get("nimp"), ln_lambda_model=cfg.bootstrap_ln_lambda_model)
     return dict(geom=geom, layer=layer, psi_n_edge=c, to_rho=to_rho, to_psin=to_psin, rho_map=rmap, phys=phys,
                 dpsi=dpsi, sigma=np.asarray(sig, float), jbs=np.asarray(jbs, float), kin=k,
                 kinetics_coordinate=getattr(kin, "coordinate", "psi_n"),
@@ -442,7 +459,9 @@ def build_solver(lag, jni_ge, ip, sigma=None):
 def correction_response(lag, shapes, amplitudes, rho_faces):
     """Zero-net-current steady response of the corrections: ``sum_k a_k psi_k`` where ``psi_k`` is the
     steady state with ``<J_NI.B> = g_k`` and Ip = 0 (the ohmic current compensates with a uniform
-    E_par).  Returns cell values and the boundary value to add to a state's psi."""
+    E_par).  Returns cell values and the boundary value to add to a state's psi.  This is the response
+    of a source that has acted for infinitely many resistive times (the limit of the in-window
+    response of :mod:`.series`); on the time-dependent path it is used only by the comparison option."""
     dpsi = np.zeros(len(rho_faces) - 1)
     dpb = 0.0
     for a, g in zip(amplitudes, shapes):
@@ -478,9 +497,11 @@ def assemble(lag, kin, src, params, cfg, ip, z0=None, state=None):
     The corrections are non-inductive sources ``sum_k a_k g_k`` of the diffusion solver.  Without
     ``state`` they enter the steady state / periodic orbit (the ohmic part keeps Ip).  With ``state``
     (a :class:`.current.diffusion.CurrentState` on ``n_cells`` cells of the domain rho, the
-    time-dependent path) that state replaces the steady state / orbit and the corrections are added
-    to it as their zero-net-current steady response (:func:`correction_response`), which by
-    linearity is what they add to a steady state.
+    time-dependent path) that state replaces the steady state / orbit.  A state that carries
+    ``meta["correction_source"]`` was advanced with the corrections as an in-window source
+    (module docstring): nothing is added, and the non-inductive profile uses those source amplitudes.
+    Otherwise (earlier treatment, comparison option) the corrections are added as their
+    zero-net-current steady response (:func:`correction_response`).
 
     Returns a dict with the knots ``x`` (psi_N) and their ``rho_knots``, ``jphi`` [A/m^2] and the
     full-frame pressure ``p`` [Pa] on them, ``jphi_cmp`` on the fixed comparison grid ``rho_cmp``, the
@@ -499,13 +520,21 @@ def assemble(lag, kin, src, params, cfg, ip, z0=None, state=None):
     jcorr = np.zeros_like(ge)
     corr_shapes = []
     shapes = None
-    if any(a != 0.0 for a in p["a_corr"]):
-        if len(p["a_corr"]) != len(cfg.corr_centers_rho):
+    # the corrections' source amplitudes at this slice: the parameters, or -- for a supplied state that already
+    # carries them as an in-window source (time-dependent path, ``meta["correction_source"]``) -- the source
+    # amplitudes that state was advanced with (held amplitudes plus the parameters' increments)
+    src_amp = None if state is None else (state.meta or {}).get("correction_source")
+    amps = tuple(float(v) for v in (p["a_corr"] if src_amp is None else src_amp))
+    if len(p["a_corr"]) != len(cfg.corr_centers_rho) and any(a != 0.0 for a in p["a_corr"]):
+        raise ValueError("a_corr needs one amplitude per correction center")
+    if any(a != 0.0 for a in amps) or any(a != 0.0 for a in p["a_corr"]):
+        if len(amps) != len(cfg.corr_centers_rho):
             raise ValueError("a_corr needs one amplitude per correction center")
         shapes = correction_shapes(lag, cfg, ipv)
-        for a, g, rc0 in zip(p["a_corr"], shapes, cfg.corr_centers_rho):
-            jcorr = jcorr + a * g
-            corr_shapes.append(dict(center_rho_tor=rc0, width_rho_tor=cfg.corr_width_rho, amplitude_fraction_of_ip=a))
+        for a, sa, g, rc0 in zip(p["a_corr"], amps, shapes, cfg.corr_centers_rho):
+            jcorr = jcorr + sa * g
+            corr_shapes.append(dict(center_rho_tor=rc0, width_rho_tor=cfg.corr_width_rho, amplitude_fraction_of_ip=a,
+                                    source_amplitude_fraction_of_ip=sa))
     jni_ge = jbs + jcd + jcorr
     sol = build_solver(lag, jni_ge, ipv)
     lx = layer.psi_n
@@ -513,14 +542,21 @@ def assemble(lag, kin, src, params, cfg, ip, z0=None, state=None):
     rf = CurrentState.uniform_faces(cfg.n_cells)
     saw = dict(active=False)
     orbit_z = None
+    corr_form = None
     if state is not None:
         if state.psi.size != cfg.n_cells:
             raise ValueError("the supplied state must be on n_cells cells")
         rf = state.rho_faces
         st_use = state
-        if shapes is not None:
+        if src_amp is not None:
+            # in-window form: the corrections acted as a non-inductive source over the interval that ends at this
+            # slice; the flux diffusion of that interval already put their response into the state
+            corr_form = "in-window source over the interval ending at this slice (in the supplied state)"
+        elif any(a != 0.0 for a in p["a_corr"]):
+            # steady form (the earlier treatment, kept for comparison): the zero-net-current steady response
             dpsi, dpb = correction_response(lag, shapes, p["a_corr"], rf)
             st_use = CurrentState(rf, state.psi + dpsi, state.psi_boundary + dpb, state.time, dict(state.meta))
+            corr_form = "zero-net-current steady response added to the supplied state"
         state = st_use
         saw.update(mode="supplied state (time-dependent path)")
     elif cfg.sawtooth and p["log_strength"] is not None:
@@ -631,6 +667,8 @@ def assemble(lag, kin, src, params, cfg, ip, z0=None, state=None):
                                  **{f"jdotb_{kk}": v for kk, v in parts_c.items()}),
                li3_diffusion=float(prof["li3"]), outer_layer_current_A=float(prof["outer_layer_current"]),
                sawtooth=saw, orbit_z=orbit_z, corrections=corr_shapes, params=p, state=state,
+               correction_form=(corr_form if state is not None and corr_form is not None else
+                                ("source of the steady state / periodic orbit" if corr_shapes else None)),
                p_sep=float(pk[-1]), pax=float(pk[0] - pk[-1]), wall_s=round(time.perf_counter() - t0, 4))
     return out
 
@@ -731,7 +769,7 @@ def consistent_solve(fm, kin, src, params, cfg, ip=None, start=None, z0=None, la
     for k in range(int(cfg.max_passes)):
         try:
             lag_k = evaluate_geometry(fm.gs, kin, cfg)
-            st_k = state_fn(lag_k) if state_fn is not None else None
+            st_k = call_state_fn(state_fn, lag_k, params) if state_fn is not None else None
             asm_k = assemble(lag_k, kin, src, params, cfg, ipv, z0=z0, state=st_k)
         except (ModelFailure, ValueError, RuntimeError) as exc:
             return ConsistentResult(False, "model_failure", k, asm, lag, res,

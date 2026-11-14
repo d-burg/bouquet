@@ -837,15 +837,26 @@ class ForwardModel:
         n_lo = float(np.asarray(gs.abspsi_to_normalized(np.array([lo])), float).ravel()[0])
         return lo if abs(n_lo - 1.0) < abs(n_lo) else hi
 
-    def _lcfs_crossing(self, r_ref, z, r_axis):
+    def _psi_direct(self):
+        """``psi(pts)`` [Wb/rad] with TokaMaker's own interpolator, for points that lie inside the mesh region by
+        construction (the horizontal line from the axis to just beyond the boundary, the limiter contour), without
+        the per-point mesh test of :mod:`.diagnostics` (whose cost grows with points x triangles and is paid again
+        for every new point set).  Non-finite values come back as NaN.  Returns ``(function, release)``."""
+        fe = self.gs.get_field_eval("PSI")
+
+        def f(pts):
+            v = np.asarray(fe.eval(np.ascontiguousarray(np.asarray(pts, float).reshape(-1, 2))), float).reshape(-1)
+            return np.where(np.isfinite(v), v, np.nan)
+        return f, fe
+
+    def _lcfs_crossing(self, r_ref, z, r_axis, psi_fn):
         """R [m] where the solved psi_N = 1 crosses the horizontal line Z = z on the side of ``r_ref`` (from the
         axis outward), by a scan in 1 mm steps from the axis and bisection; NaN when there is none."""
         gs = self.gs
         sgn = 1.0 if r_ref >= r_axis else -1.0
         r = r_axis + sgn * np.arange(0.002, 1.5 * abs(r_ref - r_axis) + 0.1, 0.001)
-        pts = np.column_stack((r, np.full_like(r, z)))
-        pn, _ = _diag.psi_n_at(gs, pts)
-        pn = np.asarray(pn, float)
+        r = r[r > 0.0]
+        pn = np.asarray(gs.abspsi_to_normalized(psi_fn(np.column_stack((r, np.full_like(r, z))))), float)
         ok = np.isfinite(pn)
         idx = np.nonzero(ok[:-1] & ok[1:] & (pn[:-1] < 1.0) & (pn[1:] >= 1.0))[0]
         if not idx.size:
@@ -854,13 +865,13 @@ class ForwardModel:
         a, b = r[i], r[i + 1]
         for _ in range(30):
             m = 0.5 * (a + b)
-            if float(np.asarray(_diag.psi_n_at(gs, np.array([[m, z]]))[0], float)[0]) < 1.0:
+            if float(np.asarray(gs.abspsi_to_normalized(psi_fn(np.array([[m, z]]))), float).ravel()[0]) < 1.0:
                 a = m
             else:
                 b = m
         return 0.5 * (a + b)
 
-    def _strike_points(self, xpts):
+    def _strike_points(self, xpts, psi_fn):
         """Limiter crossings of the solved psi = psi_b nearest each X-point, on its inner and outer side and on
         the far side of the X-point from the axis; ``{"<lower|upper>_<inner|outer>": (R, Z)}``."""
         gs = self.gs
@@ -873,7 +884,7 @@ class ForwardModel:
         n = max(200, int(s[-1] * STRIKE_SEARCH_POINTS_PER_M))
         ss = np.linspace(0.0, s[-1], n)
         pts = np.column_stack((np.interp(ss, s, lim[:, 0]), np.interp(ss, s, lim[:, 1])))
-        v = np.asarray(_diag.psi_at(gs, pts)[0], float) - self._psi_bry()
+        v = psi_fn(pts) - self._psi_bry()
         ok = np.isfinite(v)
         idx = np.nonzero(ok[:-1] & ok[1:] & (v[:-1] * v[1:] < 0))[0]
         cross = np.array([pts[i] + (pts[i + 1] - pts[i]) * v[i] / (v[i] - v[i + 1]) for i in idx]).reshape(-1, 2)
@@ -918,9 +929,10 @@ class ForwardModel:
             if c[1] != a[1]:
                 rx.append(a[0] + (za - a[1]) / (c[1] - a[1]) * (c[0] - a[0]))
         rx = np.array(sorted(rx))
+        psi_fn, fe = self._psi_direct()
         if rx.size >= 2:
-            r_out = self._lcfs_crossing(rx[-1], za, ra)
-            r_in = self._lcfs_crossing(rx[0], za, ra)
+            r_out = self._lcfs_crossing(rx[-1], za, ra, psi_fn)
+            r_in = self._lcfs_crossing(rx[0], za, ra, psi_fn)
             out["outboard_midplane"] = 1e3 * (r_out - rx[-1])
             out["inboard_midplane"] = 1e3 * (rx[0] - r_in)
             out["midplane_z_m"] = za
@@ -946,7 +958,8 @@ class ForwardModel:
             used.append(cand[k])
         out["x_points"] = xrec
         out["x_points_reference"] = x_src
-        sp = self._strike_points(used)
+        sp = self._strike_points(used, psi_fn)
+        del fe
         ref_sp = self.reference_points.get("strike_points") or {}
         srec = {}
         for name, xy in sp.items():

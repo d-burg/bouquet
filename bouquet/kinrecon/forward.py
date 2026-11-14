@@ -1,5 +1,6 @@
 r"""Anchored forward solve: one magnetics-constrained TokaMaker equilibrium for a fully specified
-current and pressure profile (the anchored recipe with an isoflux boundary target, weight factor 10).
+current and pressure profile (the anchored recipe with an isoflux boundary target, weight factor
+:data:`ISOFLUX_WEIGHT_FACTOR` = 3, an interim value).
 
 What one solve is
 -----------------
@@ -34,12 +35,10 @@ Grad-Shafranov equation with
     the vertical-stability coil (VSC), ``"free"`` coils (EFIT weight 0) unconstrained; plus a VSC
     gauge row (target 0);
   - isoflux rows on every ``isoflux_stride``-th point of a supplied REFERENCE boundary (from a
-    prior magnetic equilibrium, e.g. EFIT01), weight ``anchor_factor * 2 pi median(1/sigma_loop)``
-    (default factor 10; converged and verified on 5/5 magnetics cases at 10 and 30; working
-    window 3-30, measured).  The default is CONVERGENCE-SELECTED: 10 is the center of the window
-    in which the solves converge, not a value derived from the measurement uncertainty, and it is
-    kept provisionally; results quote their sensitivity to it across the 3-30 window.  This makes
-    the solve "magnetics + reference boundary", not a free-boundary shape reconstruction;
+    prior magnetic equilibrium), weight ``anchor_factor * 2 pi median(1/sigma_loop)`` (default
+    factor :data:`ISOFLUX_WEIGHT_FACTOR`; see there for what the value trades).  This makes the
+    solve "magnetics + reference boundary", not a free-boundary shape reconstruction; every result
+    records how far the achieved boundary moved from the reference (:meth:`ForwardModel.boundary_distance`);
 * the edge-P' taper policy ``auto`` (:func:`.edge.solve_with_edge_taper`) with one
   :class:`.edge.EdgeTaperCase` per forward model, so the taper is uniform within a case;
 * OFT's default solver settings, never set: ``nl_tol``, ``urf``, ``maxits`` are read back and
@@ -98,6 +97,20 @@ COIL_ROLES = ("held", "fitted", "free")
 #: Verified-convergence criterion (decided, fixed): warm re-solve reproduces these.
 VERIFY_AXIS_M = 5.0e-4
 VERIFY_REL = 1.0e-3
+#: Default isoflux (boundary-anchor) weight factor: the isoflux rows carry weight
+#: ``factor * 2 pi median(1/sigma_loop)``.  INTERIM value 3 (the earlier default was 10, convergence-selected as
+#: the center of the 3-30 window in which the anchored solves converged on the magnetics cases).  What it
+#: trades: a stiff anchor holds the boundary on the reference and pushes any disagreement between the model's
+#: interior and the reference boundary into the sensor misfit (loops and probes); a weak anchor lets the sensors
+#: move the boundary.  Measured on four first-slice fits with a kinetic interior: 10 -> 3 lowered the loop
+#: chi^2/N by 0.2-1.0 and the probe chi^2/N by 0.1-0.6 and moved the fitted boundary 4-8 mm rms from the
+#: reference (1.5-4 mm at 10); 3 is the lowest factor at which all four converged (1 failed on one).  The
+#: factor is not derived from the boundary's own uncertainty; it is a recorded option
+#: (:attr:`ForwardSettings.anchor_factor`) so that it can be varied, and every result records the boundary
+#: displacement it produced (:meth:`ForwardModel.boundary_distance`).
+ISOFLUX_WEIGHT_FACTOR = 3.0
+#: Points of the limiter contour per meter when the strike points of a solved state are located.
+STRIKE_SEARCH_POINTS_PER_M = 500
 
 
 @dataclass
@@ -113,7 +126,7 @@ class ForwardSettings:
     coil_lambda: float = 1.0                    # coil row weight = lambda / (mu0 sigma)
     coil_rows_vsc_aware: bool = True            # rows act on the total current incl. the VSC share
     held_halfwidth_A: float = 1.0e-3            # hard bounds of "held" coils
-    anchor_factor: float = 10.0                 # isoflux weight = factor * 2 pi median(1/sigma_loop); convergence-selected
+    anchor_factor: float = ISOFLUX_WEIGHT_FACTOR   # isoflux weight = factor * 2 pi median(1/sigma_loop); interim
     isoflux_stride: int = 4
     flux_gauge: str = "absolute"                # loops in the solve: "absolute" (SIREF route)
     probe_in_solve: str = "corrected_point"     # or "point"
@@ -324,13 +337,19 @@ class ForwardModel:
         zero with the raw OFT weight ``generation_coil_reg`` (the closure tests use 1e-2);
         isoflux rows on ``reference_boundary`` with weight 1.  Never used for a
         reconstruction.
+    reference_points : dict, optional
+        Points of the reference equilibrium that its boundary polygon does not carry, used only to
+        RECORD the displacement of the achieved boundary (:meth:`boundary_distance`), never as rows:
+        ``"x_points"`` -- list of (R, Z) [m] (default: the lowest and highest polygon points, an
+        estimate, labeled), ``"strike_points"`` -- dict name -> (R, Z) [m] on the limiter (names
+        ``"<lower|upper>_<inner|outer>"``; no default).
 
     :meth:`reconfigure` rebuilds the rows on the same TokaMaker object (one OFT environment and
     one TokaMaker object per process is the safe use of OFT).
     """
 
     def __init__(self, mesh, F0, measurements, reference_boundary, coil_roles=None, settings=None,
-                 oft_env=None, case_id="case", ip=None, generation_coil_reg=None):
+                 oft_env=None, case_id="case", ip=None, generation_coil_reg=None, reference_points=None):
         from OpenFUSIONToolkit import OFT_env
         from OpenFUSIONToolkit.TokaMaker import TokaMaker
         import OpenFUSIONToolkit
@@ -355,14 +374,16 @@ class ForwardModel:
         self.history = []
         self.taper_restarts = []
         self.reconfigure(measurements, reference_boundary, coil_roles, case_id=case_id, ip=ip,
-                         generation_coil_reg=generation_coil_reg)
+                         generation_coil_reg=generation_coil_reg, reference_points=reference_points)
 
     def reconfigure(self, measurements, reference_boundary, coil_roles=None, case_id="case", ip=None,
-                    generation_coil_reg=None):
+                    generation_coil_reg=None, reference_points=None):
         """(Re)build the constraint rows and start a new edge-taper case on the same solver."""
         self.ms = measurements
         self.case = _edge.EdgeTaperCase(case_id=case_id, setting=self.settings.edge_taper)
         self.case_id = case_id
+        self.reference_points = dict(reference_points or {})
+        self._inner_dof = None
         if measurements is None:
             if ip is None or generation_coil_reg is None:
                 raise ValueError("generation mode (measurements=None) needs ip and generation_coil_reg")
@@ -702,11 +723,95 @@ class ForwardModel:
         return SolveResult(status=status, converged=converged, verified=ver, stats=stats, record=rec,
                            wall_s=round(time.perf_counter() - t_all, 4))
 
+    # ---------------------------------------------------------------- inner (coil) degrees of freedom
+    def inner_dof(self):
+        """Effective number of parameters the coil solve inside every forward solve fits to the data rows.
+
+        The coil currents of the non-held coils and the VSC are solved inside each Picard step of TokaMaker
+        (``gs_fit_isoflux``) by linear least squares on the rows of :meth:`_apply_rows` at fixed plasma current:
+        flux loops ``w (2 pi psi)``, probes ``w B.n``, isoflux rows ``w (psi_j - psi_0)`` and the coil rows
+        ``weight mu0 (coffs . I)``.  Its design matrix ``A`` holds, per unknown, the vacuum response of each row
+        to a unit coil current (``vac_solve`` of that coil alone; the VSC column is the gain-weighted sum); the
+        hat matrix ``H = A (A^T A)^-1 A^T`` (rank-revealing SVD) is plasma-independent.  Its trace splits by row
+        kind: ``flux_loop``, ``bpol_probe``, ``fitted_coil`` (data rows), ``isoflux`` and ``vsc_gauge`` (not
+        data).  Returns ``{"by_kind", "n_rows", "rank", "n_unknowns", "condition", "method"}``, cached until the
+        rows are rebuilt (:meth:`reconfigure`); the solver's equilibrium is restored afterwards.  None in
+        generation mode (no data rows)."""
+        if self.ms is None:
+            return None
+        if self._inner_dof is not None:
+            return self._inner_dof
+        gs = self.gs
+        fl, pr, iso = self._fl, self._probe, self._iso
+        held = set(self._coils["bounds"])
+        coils = [n for n in gs.coil_sets if n not in held]
+        snap = self.snapshot()
+        cols = {}
+        try:
+            for c in coils:
+                gs.set_coil_currents({c: 1.0})
+                with FortranStdout():          # the vacuum solves' iteration output is not kept
+                    eq = gs.vac_solve()
+                col = {}
+                col["flux_loop"] = (2.0 * np.pi * _diag.psi_at(eq, fl["loc"])[0] * fl["weight"]
+                                    if fl["loc"].shape[0] else np.zeros(0))
+                if pr["n"]:
+                    B, _ = _diag.field_at(eq, pr["loc"])
+                    col["bpol_probe"] = (B[:, 0] * pr["norm"][:, 0] + B[:, 2] * pr["norm"][:, 1]) * pr["weight"]
+                else:
+                    col["bpol_probe"] = np.zeros(0)
+                piso = _diag.psi_at(eq, iso["points"])[0]
+                col["isoflux"] = (piso[1:] - piso[0]) * iso["weight"]
+                cols[c] = col
+        finally:
+            gs.set_coil_currents({})
+            self.restore(snap)
+        names = coils + ["#VSC"]
+        cols["#VSC"] = {k: sum(float(g) * cols[n][k] for n, g in self.settings.vsc.items() if n in cols)
+                        for k in ("flux_loop", "bpol_probe", "isoflux")}
+        regs = self._coils["regs"]
+        R = np.array([[float(r.coffs.get(n, 0.0)) * float(r.weight) * MU0 for n in names] for r in regs])
+        kinds = (["flux_loop"] * fl["loc"].shape[0] + ["bpol_probe"] * int(pr["n"])
+                 + ["isoflux"] * (iso["points"].shape[0] - 1)
+                 + ["fitted_coil" if any(k != "#VSC" for k in r.coffs) else "vsc_gauge" for r in regs])
+        A = np.vstack([np.column_stack([cols[n][k] for n in names]).reshape(-1, len(names))
+                       for k in ("flux_loop", "bpol_probe", "isoflux")] + [R.reshape(-1, len(names))])
+        if not np.all(np.isfinite(A)):
+            raise RuntimeError("inner coil design matrix is not finite")
+        U, s, _ = np.linalg.svd(A, full_matrices=False)
+        rank = int(np.sum(s > s[0] * 1.0e-12))
+        h = np.sum(U[:, :rank] ** 2, axis=1)
+        kinds = np.array(kinds)
+        self._inner_dof = dict(
+            by_kind={k: float(h[kinds == k].sum()) for k in ("flux_loop", "bpol_probe", "fitted_coil", "isoflux",
+                                                             "vsc_gauge")},
+            n_rows={k: int(np.count_nonzero(kinds == k)) for k in ("flux_loop", "bpol_probe", "fitted_coil",
+                                                                    "isoflux", "vsc_gauge")},
+            rank=rank, n_unknowns=len(names), unknowns=names, condition=float(s[0] / s[rank - 1]),
+            method="trace of the hat matrix of the in-solve linear coil least squares (vacuum response per unit coil "
+                   "current, rows and weights as installed); the data rows are flux_loop, bpol_probe, fitted_coil")
+        return self._inner_dof
+
+    def inner_dof_data(self, groups):
+        """Sum of :meth:`inner_dof` over the data-row kinds whose measurement groups are in ``groups`` (flux
+        loops -> ``flux_loop``, probes -> ``bpol_probe``, fitted coils -> ``pf_current``).  0.0 when not
+        available (generation mode)."""
+        d = self.inner_dof()
+        if d is None:
+            return 0.0
+        gmap = dict(flux_loop="flux_loop", bpol_probe="bpol_probe", fitted_coil="pf_current")
+        return float(sum(v for k, v in d["by_kind"].items() if k in gmap and gmap[k] in set(groups)))
+
     # ---------------------------------------------------------------- geometry metrics
     def boundary_distance(self):
-        """First-order normal distance [m] of the solved LCFS from the reference boundary points:
-        ``(psi_N - 1) |psi_b - psi_a| / (R |B_p|)`` at each reference point; points with
-        ``|B_p| < 0.2 median`` (X-point region) are excluded.  Returns rms, max, mean, counts."""
+        """Displacement of the solved boundary from the reference (anchor) boundary.
+
+        * ``rms_m``, ``max_m``, ``mean_m``: first-order normal distance at each reference point,
+          ``(psi_N - 1) |psi_b - psi_a| / (R |B_p|)`` (positive: the solved boundary lies outside); points with
+          ``|B_p| < 0.2 median`` (X-point region) are excluded;
+        * ``displacement_mm`` (:meth:`boundary_displacement`): the same rms and maximum in mm, the outboard and
+          inboard midplane displacement, the X-point(s) and strike points.
+        """
         gs = self.gs
         pb = self.reference_boundary
         pn = np.asarray(_diag.psi_n_at(gs, pb)[0], float)
@@ -715,7 +820,146 @@ class ForwardModel:
         lo, hi = gs.psi_bounds
         dist = (pn - 1.0) * abs(hi - lo) / np.maximum(pb[:, 0] * bp, 1e-30)
         good = np.isfinite(dist) & (bp > 0.2 * np.nanmedian(bp))
-        return dict(rms_m=float(np.sqrt(np.mean(dist[good] ** 2))), max_m=float(np.max(np.abs(dist[good]))),
-                    mean_m=float(np.mean(dist[good])), n_used=int(good.sum()), n=int(len(pb)),
-                    method="(psi_N - 1) |psi_b - psi_a| / (R |B_p|) at the reference points; |B_p| < 0.2 median "
-                           "excluded")
+        out = dict(rms_m=float(np.sqrt(np.mean(dist[good] ** 2))), max_m=float(np.max(np.abs(dist[good]))),
+                   mean_m=float(np.mean(dist[good])), n_used=int(good.sum()), n=int(len(pb)),
+                   method="(psi_N - 1) |psi_b - psi_a| / (R |B_p|) at the reference points; |B_p| < 0.2 median "
+                          "excluded")
+        try:
+            out["displacement_mm"] = self.boundary_displacement(out)
+        except Exception as exc:  # noqa: BLE001
+            out["displacement_mm"] = dict(error=f"{type(exc).__name__}: {exc}"[:300])
+        return out
+
+    def _psi_bry(self):
+        """The solver's LCFS flux value [Wb/rad] (the ``psi_bounds`` entry that maps to psi_N = 1)."""
+        gs = self.gs
+        lo, hi = (float(v) for v in gs.psi_bounds)
+        n_lo = float(np.asarray(gs.abspsi_to_normalized(np.array([lo])), float).ravel()[0])
+        return lo if abs(n_lo - 1.0) < abs(n_lo) else hi
+
+    def _lcfs_crossing(self, r_ref, z, r_axis):
+        """R [m] where the solved psi_N = 1 crosses the horizontal line Z = z on the side of ``r_ref`` (from the
+        axis outward), by a scan in 1 mm steps from the axis and bisection; NaN when there is none."""
+        gs = self.gs
+        sgn = 1.0 if r_ref >= r_axis else -1.0
+        r = r_axis + sgn * np.arange(0.002, 1.5 * abs(r_ref - r_axis) + 0.1, 0.001)
+        pts = np.column_stack((r, np.full_like(r, z)))
+        pn, _ = _diag.psi_n_at(gs, pts)
+        pn = np.asarray(pn, float)
+        ok = np.isfinite(pn)
+        idx = np.nonzero(ok[:-1] & ok[1:] & (pn[:-1] < 1.0) & (pn[1:] >= 1.0))[0]
+        if not idx.size:
+            return np.nan
+        i = int(idx[0])
+        a, b = r[i], r[i + 1]
+        for _ in range(30):
+            m = 0.5 * (a + b)
+            if float(np.asarray(_diag.psi_n_at(gs, np.array([[m, z]]))[0], float)[0]) < 1.0:
+                a = m
+            else:
+                b = m
+        return 0.5 * (a + b)
+
+    def _strike_points(self, xpts):
+        """Limiter crossings of the solved psi = psi_b nearest each X-point, on its inner and outer side and on
+        the far side of the X-point from the axis; ``{"<lower|upper>_<inner|outer>": (R, Z)}``."""
+        gs = self.gs
+        lim = getattr(gs, "lim_contour", None)
+        if lim is None or not len(xpts):
+            return {}
+        lim = np.asarray(lim, float)[:, :2]
+        seg = np.hypot(*np.diff(lim, axis=0).T)
+        s = np.concatenate(([0.0], np.cumsum(seg)))
+        n = max(200, int(s[-1] * STRIKE_SEARCH_POINTS_PER_M))
+        ss = np.linspace(0.0, s[-1], n)
+        pts = np.column_stack((np.interp(ss, s, lim[:, 0]), np.interp(ss, s, lim[:, 1])))
+        v = np.asarray(_diag.psi_at(gs, pts)[0], float) - self._psi_bry()
+        ok = np.isfinite(v)
+        idx = np.nonzero(ok[:-1] & ok[1:] & (v[:-1] * v[1:] < 0))[0]
+        cross = np.array([pts[i] + (pts[i + 1] - pts[i]) * v[i] / (v[i] - v[i + 1]) for i in idx]).reshape(-1, 2)
+        za = float(gs.o_point[1])
+        out = {}
+        for xp in xpts:
+            pos = "lower" if xp[1] < za else "upper"
+            far = cross[(cross[:, 1] < xp[1]) if pos == "lower" else (cross[:, 1] > xp[1])]
+            for side, sel in (("inner", far[:, 0] < xp[0]), ("outer", far[:, 0] >= xp[0])):
+                cand = far[sel]
+                if len(cand):
+                    k = int(np.argmin(np.hypot(cand[:, 0] - xp[0], cand[:, 1] - xp[1])))
+                    out[f"{pos}_{side}"] = (float(cand[k, 0]), float(cand[k, 1]))
+        return out
+
+    def boundary_displacement(self, normal=None):
+        """Displacement of the solved boundary from the reference boundary, in mm (recorded with every solve and fit
+        result through :meth:`boundary_distance`):
+
+        * ``rms``, ``max``, ``mean``: the first-order normal distances of :meth:`boundary_distance` (X-point region
+          excluded);
+        * ``outboard_midplane``, ``inboard_midplane``: signed (positive outward) difference of the solved LCFS
+          crossing from the reference polygon's crossing along the horizontal line through the solved magnetic
+          axis;
+        * ``x_points``: per reference X-point (``reference_points["x_points"]``, else the reference polygon's
+          lowest and highest point -- an estimate, labeled), the distance to the nearest solved X-point
+          (TokaMaker ``get_xpoints``) on the same side of the axis, with both positions;
+        * ``strike_points``: per reference strike point (``reference_points["strike_points"]``; none by default)
+          the distance to the solved strike point of the same name (limiter crossing of psi = psi_b nearest the
+          solved X-point); the solved strike points are listed in any case.
+        """
+        gs = self.gs
+        nd = normal if normal is not None else self.boundary_distance()
+        out = dict(rms=1e3 * nd["rms_m"], max=1e3 * nd["max_m"], mean=1e3 * nd["mean_m"],
+                   anchor_factor=float(self.settings.anchor_factor))
+        b = self.reference_boundary
+        ra, za = (float(v) for v in gs.o_point)
+        p, q = b, np.roll(b, -1, axis=0)
+        sel = (p[:, 1] - za) * (q[:, 1] - za) <= 0
+        rx = []
+        for a, c in zip(p[sel], q[sel]):
+            if c[1] != a[1]:
+                rx.append(a[0] + (za - a[1]) / (c[1] - a[1]) * (c[0] - a[0]))
+        rx = np.array(sorted(rx))
+        if rx.size >= 2:
+            r_out = self._lcfs_crossing(rx[-1], za, ra)
+            r_in = self._lcfs_crossing(rx[0], za, ra)
+            out["outboard_midplane"] = 1e3 * (r_out - rx[-1])
+            out["inboard_midplane"] = 1e3 * (rx[0] - r_in)
+            out["midplane_z_m"] = za
+        xs, _div = gs.get_xpoints()
+        xs = np.zeros((0, 2)) if xs is None else np.asarray(xs, float).reshape(-1, 2)
+        ref_x = self.reference_points.get("x_points")
+        x_src = "reference_points" if ref_x is not None else "estimate: lowest / highest reference polygon point"
+        if ref_x is None:
+            ref_x = [b[int(np.argmin(b[:, 1]))], b[int(np.argmax(b[:, 1]))]]
+        xrec, used = [], []
+        for xr in ref_x:
+            xr = np.asarray(xr, float)
+            pos = "lower" if xr[1] < za else "upper"
+            cand = xs[(xs[:, 1] < za) if pos == "lower" else (xs[:, 1] > za)] if len(xs) else xs
+            if not len(cand):
+                xrec.append(dict(position=pos, reference=xr.tolist(), solved=None, distance=None,
+                                 note="no solved X-point on this side"))
+                continue
+            k = int(np.argmin(np.hypot(cand[:, 0] - xr[0], cand[:, 1] - xr[1])))
+            xrec.append(dict(position=pos, reference=xr.tolist(), solved=cand[k].tolist(),
+                             distance=1e3 * float(np.hypot(*(cand[k] - xr))), dR=1e3 * float(cand[k, 0] - xr[0]),
+                             dZ=1e3 * float(cand[k, 1] - xr[1])))
+            used.append(cand[k])
+        out["x_points"] = xrec
+        out["x_points_reference"] = x_src
+        sp = self._strike_points(used)
+        ref_sp = self.reference_points.get("strike_points") or {}
+        srec = {}
+        for name, xy in sp.items():
+            r = dict(solved=list(xy))
+            if name in ref_sp:
+                rr = np.asarray(ref_sp[name], float)
+                r.update(reference=rr.tolist(), distance=1e3 * float(np.hypot(xy[0] - rr[0], xy[1] - rr[1])))
+            srec[name] = r
+        for name in ref_sp:
+            if name not in srec:
+                srec[name] = dict(reference=list(ref_sp[name]), solved=None, distance=None,
+                                  note="no solved strike point of this name")
+        out["strike_points"] = srec
+        out["strike_points_reference"] = ("reference_points" if ref_sp else
+                                          "none given: solved strike points listed without a displacement")
+        return out

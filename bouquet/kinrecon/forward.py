@@ -340,9 +340,9 @@ class ForwardModel:
     reference_points : dict, optional
         Points of the reference equilibrium that its boundary polygon does not carry, used only to
         RECORD the displacement of the achieved boundary (:meth:`boundary_distance`), never as rows:
-        ``"x_points"`` -- list of (R, Z) [m] (default: the lowest and highest polygon points, an
-        estimate, labeled), ``"strike_points"`` -- dict name -> (R, Z) [m] on the limiter (names
-        ``"<lower|upper>_<inner|outer>"``; no default).
+        ``"x_points"`` -- list of (R, Z) [m], ``"strike_points"`` -- dict name -> (R, Z) [m] on the
+        limiter (names ``"<lower|upper>_<inner|outer>"``); no defaults (without them the solved
+        X-points and strike points are listed without a displacement).
 
     :meth:`reconfigure` rebuilds the rows on the same TokaMaker object (one OFT environment and
     one TokaMaker object per process is the safe use of OFT).
@@ -909,9 +909,10 @@ class ForwardModel:
         * ``outboard_midplane``, ``inboard_midplane``: signed (positive outward) difference of the solved LCFS
           crossing from the reference polygon's crossing along the horizontal line through the solved magnetic
           axis;
-        * ``x_points``: per reference X-point (``reference_points["x_points"]``, else the reference polygon's
-          lowest and highest point -- an estimate, labeled), the distance to the nearest solved X-point
-          (TokaMaker ``get_xpoints``) on the same side of the axis, with both positions;
+        * ``x_points``: per reference X-point (``reference_points["x_points"]``; none by default: the polygon
+          alone does not say whether its extreme points are X-points) the distance to the nearest solved X-point
+          (TokaMaker ``get_xpoints``) on the same side of the axis, with both positions; the solved X-points are
+          listed in any case (``x_points_solved``);
         * ``strike_points``: per reference strike point (``reference_points["strike_points"]``; none by default)
           the distance to the solved strike point of the same name (limiter crossing of psi = psi_b nearest the
           solved X-point); the solved strike points are listed in any case.
@@ -939,11 +940,11 @@ class ForwardModel:
         xs, _div = gs.get_xpoints()
         xs = np.zeros((0, 2)) if xs is None else np.asarray(xs, float).reshape(-1, 2)
         ref_x = self.reference_points.get("x_points")
-        x_src = "reference_points" if ref_x is not None else "estimate: lowest / highest reference polygon point"
-        if ref_x is None:
-            ref_x = [b[int(np.argmin(b[:, 1]))], b[int(np.argmax(b[:, 1]))]]
+        x_src = ("reference_points" if ref_x is not None else
+                 "none given: solved X-points listed without a displacement")
+        out["x_points_solved"] = xs.tolist()
         xrec, used = [], []
-        for xr in ref_x:
+        for xr in (ref_x or []):
             xr = np.asarray(xr, float)
             pos = "lower" if xr[1] < za else "upper"
             cand = xs[(xs[:, 1] < za) if pos == "lower" else (xs[:, 1] > za)] if len(xs) else xs
@@ -958,6 +959,12 @@ class ForwardModel:
             used.append(cand[k])
         out["x_points"] = xrec
         out["x_points_reference"] = x_src
+        if ref_x is None:
+            # strike points of the solved state's own X-points nearest the plasma (one per side of the axis)
+            for pos, sel in (("lower", xs[:, 1] < za), ("upper", xs[:, 1] > za)):
+                if len(xs) and np.any(sel):
+                    cand = xs[sel]
+                    used.append(cand[int(np.argmin(np.abs(cand[:, 1] - za)))])
         sp = self._strike_points(used, psi_fn)
         del fe
         ref_sp = self.reference_points.get("strike_points") or {}

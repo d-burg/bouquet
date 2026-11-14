@@ -189,10 +189,12 @@ def _fake_reconstruct(status, lags, center_key="center", after=("col0", "col1", 
     return reconstruct
 
 
-def _filter_setup(monkeypatch, status, form="in_window", noninductive=False):
+def _filter_setup(monkeypatch, status, form="in_window", noninductive=False, center_q0=None):
+    """``center_q0``: the center's geometry also differs in shape (q0, hence V' and the rho map), not only in
+    conductivity, so that quantities taken on the start and on the end geometry of an interval differ."""
     mk = _lag_ni if noninductive else _lag
-    lags = dict(pred=mk(), center=mk(sigma_scale=1.3), col0=mk(sigma_scale=0.7), col1=mk(sigma_scale=1.6),
-                trial=mk(sigma_scale=0.5))
+    lags = dict(pred=mk(), center=mk(sigma_scale=1.3) if center_q0 is None else mk(sigma_scale=1.3, q0=center_q0),
+                col0=mk(sigma_scale=0.7), col1=mk(sigma_scale=1.6), trial=mk(sigma_scale=0.5))
     fm = FakeFM(lags)
     st0 = _steady(lags["pred"], IP0)
     _install(monkeypatch, fm, st0, lambda f: f.lags[f.key])
@@ -270,6 +272,84 @@ def test_filter_carries_the_accepted_centers_state(monkeypatch, noninductive):
     held = _advance(lags["center"], lags["center"], got, 0.02, 0.04, 1.01 * IP0, 1.02 * IP0,
                     amps=tuple(2.0 * a for a in CENTER_A), cfg=cfg)
     assert np.max(np.abs((held.psi - held.psi[0]) - (got2.psi - got2.psi[0]))) > 1e-6 * np.ptp(e2.psi)
+
+
+def test_filter_interval_source_uses_each_end_geometry_at_its_end(monkeypatch):
+    """The in-window source over [t_(k-1), t_k] is the corrections' shapes on the START geometry at the start and on
+    the END geometry at the end (linear between): with a center geometry that differs in shape, the carried state
+    equals that advance, and using the end geometry at both ends gives a measurably different state."""
+    out, lags, cfg, seen = _filter_setup(monkeypatch, "converged", center_q0=1.4)
+    s1 = out["slices"][1]
+    assert s1["filter"]["absorbed"] is True
+    c0 = _state(out["slices"][0]["carried_state"])
+    e = _advance(lags["pred"], lags["center"], c0, 0.0, 0.02, IP0, 1.01 * IP0, amps=CENTER_A, cfg=cfg)
+    got = _state(s1["carried_state"])
+    span = np.ptp(e.psi)
+    assert np.max(np.abs(got.psi - e.psi)) <= 1e-12 * span
+    assert abs(got.psi_boundary - e.psi_boundary) <= 1e-12 * span
+    # discrimination: the end geometry's shapes also at the start
+    g1 = CM.correction_shapes(lags["center"], cfg, 1.01 * IP0)
+    gs0 = CM.correction_shapes(lags["center"], cfg, IP0)
+    j0 = lags["pred"]["jbs"] + sum(a * g for a, g in zip(CENTER_A, gs0))
+    j1 = lags["center"]["jbs"] + sum(a * g for a, g in zip(CENTER_A, g1))
+    sol, _ = SE.interval_solver(lags["pred"], lags["center"], j0, j1, 0.0, 0.02, IP0, 1.01 * IP0)
+    both_end = sol.advance(c0, 0.02, dt=SE.SeriesSettings().dt_max, scheme="trbdf2")
+    assert np.max(np.abs((both_end.psi - both_end.psi[0]) - (e.psi - e.psi[0]))) > 1e-6 * span
+
+
+def test_assemble_adds_nothing_to_a_state_that_carries_the_corrections_in_window():
+    """``current_model.assemble`` with a supplied state that was advanced with the corrections as an in-window
+    source (``meta["correction_source"]``) uses that state as it is: the corrections are not added a second time
+    as their steady response.  Without that meta (the comparison form) the steady response IS added, which shows
+    the check can see a double count."""
+    lag = _lag()
+    lag["phys"]["r_avg"] = np.full_like(lag["phys"]["psi_n"], GEO.R0)        # assemble's <R> and <1/R> (circular
+    lag["phys"]["inv_r"] = np.full_like(lag["phys"]["psi_n"], 1.0 / GEO.R0)  # large-aspect values suffice here)
+    lag["dpsi"] = GEO.DPSI
+    cfg = CM.CurrentModelSettings(r0=GEO.R0)
+    st = _steady(lag, IP0, n=cfg.n_cells)
+    kin = SimpleNamespace(thermal_pressure_at=lambda psi_n, rho=None: 1.0e4 * (1.0 - np.asarray(psi_n, float)))
+    src = SimpleNamespace(jdotb_at=lambda ge, **kw: np.zeros_like(np.asarray(ge, float)),
+                          p_fast_at=lambda x, rho=None: np.zeros_like(np.asarray(x, float)))
+    carried = CurrentState(st.rho_faces, st.psi.copy(), st.psi_boundary, 0.02, dict(correction_source=CENTER_A))
+    asm = CM.assemble(lag, kin, src, dict(a_corr=CENTER_A), cfg, IP0, state=carried)
+    assert np.array_equal(asm["state"].psi, st.psi) and asm["state"].psi_boundary == st.psi_boundary
+    assert asm["correction_form"].startswith("in-window source")
+    assert [c["source_amplitude_fraction_of_ip"] for c in asm["corrections"]] == list(CENTER_A)
+    plain = CurrentState(st.rho_faces, st.psi.copy(), st.psi_boundary, 0.02)
+    cmp_ = CM.assemble(lag, kin, src, dict(a_corr=CENTER_A), cfg, IP0, state=plain)
+    assert cmp_["correction_form"].startswith("zero-net-current steady response")
+    assert np.max(np.abs((cmp_["state"].psi - cmp_["state"].psi[0]) - (st.psi - st.psi[0]))) > 1e-6 * np.ptp(st.psi)
+
+
+def test_series_slice_counts_the_parameters_of_the_fit_it_scores(monkeypatch):
+    """The slice record's chi^2 report counts the free parameters of the fit whose center the slice scores: an
+    absorbed filter fit's, the first-slice fit's, and none for a filter fit that was not absorbed or an evolved,
+    unfitted slice.  The scorer is stubbed (the mocked forward model has no equilibrium to score); the count passed
+    to ``chi2_report`` is what is checked."""
+    seen = []
+    monkeypatch.setattr(SE, "score", lambda gs, ms, groups=None: SimpleNamespace(model={}, excluded={}, notes=[]))
+    monkeypatch.setattr(SE._fit, "headline_summary", lambda tab, ms, roles: {})
+    monkeypatch.setattr(SE._fit, "ip_record", lambda *a, **k: None)
+    monkeypatch.setattr(SE, "flux_offset_record", lambda tab: None)
+
+    def report(tab, n_params=0, inner_dof=0.0, exclude=None):
+        seen.append(n_params)
+        return dict(total=dict(n_params=n_params))
+    monkeypatch.setattr(SE, "chi2_report", report)
+    lag = _lag()
+    fm = FakeFM(dict(pred=lag))
+    res = _result(lag, _steady(lag, IP0))
+    sl = SE.SliceData(time=0.02, measurements=SimpleNamespace(groups={"flux_loop": None, "ip": None}),
+                      reference_boundary=np.zeros((8, 2)), kinetics=None, sources=_src(), label="s1")
+    free4 = ["a_corr_0", "a_corr_1", "a_corr_2", "ip_rel"]
+    cases = [(dict(filter=dict(absorbed=True, free=free4)), 4),
+             (dict(filter=dict(absorbed=False, free=free4)), 0),
+             (dict(fit=dict(free=["a_corr_0", "a_corr_1"])), 2),
+             ({}, 0)]
+    for extra, n in cases:
+        rec = SE._slice_record(fm, res, sl, "s1", extra)
+        assert seen[-1] == n and rec["chi2_report"]["total"]["n_params"] == n, (extra, seen[-1])
 
 
 def test_filter_steady_response_comparison_option(monkeypatch):

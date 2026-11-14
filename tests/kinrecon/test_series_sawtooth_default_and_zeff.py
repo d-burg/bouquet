@@ -156,8 +156,12 @@ def test_crash_record_with_no_crash_in_the_covered_history_starts_crash_free():
     one = SE.SeriesSettings(initial="relaxed", sawtooth="crash_times", crash_table=SD._table([-0.3, 0.05], start=-2.0))
     with pytest.raises(ValueError, match="one crash in the history"):
         SE._measured_crash_start(one, cfg, np.array([0.0, 0.02]))
-    uncovered = SE.SeriesSettings(initial="relaxed", sawtooth="crash_times", crash_times=[0.03, 0.05])
-    with pytest.raises(ValueError, match="cannot start the series"):
+    # a crash TABLE whose detection starts after the history begins: refused for its coverage (the bare-times
+    # refusal below cannot be what raises here, since a table is given)
+    uncovered = SE.SeriesSettings(initial="relaxed", sawtooth="crash_times",
+                                  crash_table=SD._table([0.03, 0.05], start=-0.6))
+    with pytest.raises(ValueError, match="cannot start the series at its first slice: crash record starts at -0.6 "
+                                         "but the history requires coverage from"):
         SE._measured_crash_start(uncovered, cfg, np.array([0.0, 0.02]))
     # bare crash times with a stated detection start still state no coverage (no record end, no gaps): refused
     bare = SE.SeriesSettings(initial="relaxed", sawtooth="crash_times", crash_times=[0.03, 0.05],
@@ -217,7 +221,7 @@ def test_q_below_one_warning_fires_only_for_the_inconsistency_it_names():
     assert SE._sawtooth_warning(s, _q_res(1.1), 0.22, 0.24, []) is None          # q >= 1: nothing
 
 
-def test_q_below_one_between_crashes_is_recorded_but_not_warned_in_a_series(monkeypatch):
+def test_q_below_one_in_a_series_names_each_slice_and_warns_only_at_the_recorded_crash_that_did_not_act(monkeypatch):
     ip = SD.IP0
     lag = SD._lag(q0=0.9)
     fm = SD.FakeFM(dict(pred=lag))

@@ -28,9 +28,11 @@ forward model whose "equilibrium" is one of a few known geometries, and a mocked
   stated in the diffusion module; measured 7e-4 at 100 cells, 2e-4 at 200, 3e-5 at 400.)
 * The sawtooth operator inside a series: with ``sawtooth="periodic"`` and a state with q >= 1 the
   crashes are recorded and change nothing (states identical to ``sawtooth="off"``); with q < 1 on axis
-  a crash acts (the carried, instantaneous state jumps), and the reported slice state is continuous
-  in the crash time: a crash moved from just before a slice time to just after it changes the slice
-  state by about its share of the interval, not by the whole jump.
+  a crash acts and every slice scores exactly the state it carries (the instantaneous end state, after
+  the crash; identical arrays, prediction and filter, also when the pass loop's last state-function call
+  is on another equilibrium); the comparison option ``crash_slice_state="window_average"`` scores the
+  window-averaged sawtooth effect instead, which is continuous in the crash time (a crash moved from just
+  before a slice time to just after it changes the slice state by about its share of the interval).
 * Time-varying ``F0``: each slice's ``F0`` is set on the forward model before its solve.
 """
 import os
@@ -646,7 +648,7 @@ def test_series_chain_converges_in_space_against_the_reference(monkeypatch):
 
 
 # ============================================================== sawteeth inside a series
-def _sawtooth_series(monkeypatch, ip, mode, crash_times=None):
+def _sawtooth_series(monkeypatch, ip, mode, crash_times=None, crash_slice_state="instantaneous"):
     lag = _lag()
     fm = FakeFM(dict(pred=lag))
     st0 = _steady(lag, ip)
@@ -656,7 +658,7 @@ def _sawtooth_series(monkeypatch, ip, mode, crash_times=None):
         # mocked here; the record before t0 only satisfies the coverage requirement)
         crash_times = [round(-1.6 + 0.05 * k, 6) for k in range(32)] + list(crash_times)
     s = SE.SeriesSettings(initial="relaxed", sawtooth=mode, sawtooth_log_strength=np.log(400.0),
-                          crash_times=crash_times)
+                          crash_times=crash_times, crash_slice_state=crash_slice_state)
     times = np.arange(4) * 0.02
     out = SE.run_series(fm, _slices(times, np.full(4, ip)), CM.CurrentModelSettings(r0=GEO.R0), s)
     assert out["status"] == "completed"
@@ -690,16 +692,19 @@ def test_sawteeth_in_a_series_identity_where_q_at_least_one(monkeypatch):
                 assert abs(a[key]["psi_boundary"] - b[key]["psi_boundary"]) <= 1e-12 * span, key
 
 
-def test_sawteeth_in_a_series_act_where_q_below_one_and_slice_state_is_continuous(monkeypatch):
-    """One measured crash just BEFORE the first evolved slice time (t1 - eps) or just AFTER it (t1 + eps):
-    the carried (instantaneous) state jumps by the whole crash, the reported slice state only by the
-    crash's share of the interval (about eps/interval = 0.5 %; bound 5 %, set before the first run)."""
+def test_sawteeth_window_average_comparison_option_is_continuous_in_the_crash_time(monkeypatch):
+    """COMPARISON OPTION ``crash_slice_state="window_average"``: one measured crash just BEFORE the first evolved slice
+    time (t1 - eps) or just AFTER it (t1 + eps): the carried (instantaneous) state jumps by the whole crash, the
+    reported slice state only by the crash's share of the interval (about eps/interval = 0.5 %; bound 5 %, set before
+    the first run); the slice with the crash is recorded as not self-consistent."""
     eps = 1.0e-4
     t1 = 0.02
     ip = 1.8 * IP0                                          # q < 1 on axis in the steady state
-    before, lag, st0 = _sawtooth_series(monkeypatch, ip, "crash_times", crash_times=[t1 - eps])
+    before, lag, st0 = _sawtooth_series(monkeypatch, ip, "crash_times", crash_times=[t1 - eps],
+                                        crash_slice_state="window_average")
     assert np.min(_q(lag, st0, ip)) < 1.0
-    after, _, _ = _sawtooth_series(monkeypatch, ip, "crash_times", crash_times=[t1 + eps])
+    after, _, _ = _sawtooth_series(monkeypatch, ip, "crash_times", crash_times=[t1 + eps],
+                                   crash_slice_state="window_average")
     off, _, _ = _sawtooth_series(monkeypatch, ip, "off")
     b1, a1, o1 = before["slices"][1], after["slices"][1], off["slices"][1]
     assert [c["active"] for c in b1["crashes"]] == [True] and a1["crashes"] == []
@@ -711,6 +716,75 @@ def test_sawteeth_in_a_series_act_where_q_below_one_and_slice_state_is_continuou
     assert np.array_equal(np.asarray(a1["state_psi"]["psi"]), np.asarray(o1["state_psi"]["psi"]))
     d_slice = np.max(np.abs(_gauge_free(b1["state_psi"]) - _gauge_free(a1["state_psi"])))
     assert d_slice <= 0.05 * jump, (d_slice, jump)
+    assert b1["scored_vs_carried_state"]["same_state"] is False and a1["scored_vs_carried_state"]["same_state"]
+
+
+def _assert_self_consistent(out):
+    """Every evolved slice scored exactly the state it carried (identical arrays)."""
+    for s_ in out["slices"][1:]:
+        sc, ca = s_["state_psi"], s_["carried_state"]
+        assert np.array_equal(np.asarray(sc["psi"]), np.asarray(ca["psi"])), s_["label"]
+        assert sc["psi_boundary"] == ca["psi_boundary"], s_["label"]
+        assert s_["scored_vs_carried_state"]["same_state"] is True
+        assert s_["scored_vs_carried_state"]["max_dpsi_rel"] == 0.0
+
+
+def test_slices_with_a_crash_score_the_state_they_carry(monkeypatch):
+    """Default ``crash_slice_state="instantaneous"``: a crash just before the slice time shows in that slice in full,
+    and the slice scores exactly the instantaneous end state it carries."""
+    eps = 1.0e-4
+    t1 = 0.02
+    ip = 1.8 * IP0
+    before, lag, st0 = _sawtooth_series(monkeypatch, ip, "crash_times", crash_times=[t1 - eps, 0.05])
+    assert [c["active"] for c in before["slices"][1]["crashes"]] == [True]
+    assert [c["active"] for c in before["slices"][3]["crashes"]] == [True]
+    _assert_self_consistent(before)
+    off, _, _ = _sawtooth_series(monkeypatch, ip, "off")
+    span = np.ptp(_gauge_free(off["slices"][1]["carried_state"]))
+    # the scored state holds the whole crash (it is the post-crash state), not a share of it
+    jump = np.max(np.abs(_gauge_free(before["slices"][1]["state_psi"]) - _gauge_free(off["slices"][1]["state_psi"])))
+    assert jump > 1e-3 * span
+
+
+def _crash_filter_series(monkeypatch, last_call_elsewhere):
+    """Filter series on q < 1 geometries with measured crashes inside the intervals; the mocked pass loop either
+    makes its last state-function call on the returned equilibrium or (as the real loop does) on the equilibrium of
+    a further solve that is not returned."""
+    lags = dict(pred=_lag(), center=_lag(sigma_scale=1.3), col0=_lag(sigma_scale=0.7), col1=_lag(sigma_scale=1.6),
+                trial=_lag(sigma_scale=0.5), nxt=_lag(sigma_scale=1.1))
+    fm = FakeFM(lags)
+    ip = 1.8 * IP0
+    st0 = _steady(lags["pred"], ip)
+
+    def consistent(fm_, kin, src, params, cfg, ip=None, start=None, z0=None, label="", initial_profiles=None,
+                   state_fn=None):
+        fm_.n_solves += 1
+        lag = fm_.lags[fm_.key]
+        if state_fn is None:
+            return _result(lag, st0)
+        st = CM.call_state_fn(state_fn, lag, params)
+        if last_call_elsewhere:
+            CM.call_state_fn(state_fn, fm_.lags["nxt"], params)
+        return _result(lag, st)
+
+    monkeypatch.setattr(SE._cm, "consistent_solve", consistent)
+    monkeypatch.setattr(SE._fit, "reconstruct", _fake_reconstruct("converged", lags))
+    crash = [round(-1.6 + 0.05 * k, 6) for k in range(32)] + [0.015, 0.035, 0.0599]
+    out = SE.run_series(fm, _slices([0.0, 0.02, 0.04, 0.06], np.full(4, ip)), CM.CurrentModelSettings(r0=GEO.R0),
+                        SE.SeriesSettings(initial="relaxed", sawtooth="crash_times", crash_times=crash, filter=True,
+                                          filter_times=(0.02, 0.06)))
+    assert out["status"] == "completed"
+    return out
+
+
+@pytest.mark.parametrize("last_call_elsewhere", [False, True])
+def test_every_slice_scores_the_state_it_carries_with_crashes_in_the_intervals(monkeypatch, last_call_elsewhere):
+    """Absorbed filter slices and evolved-only slices, each with an active crash in its interval: the scored state is
+    the carried state to the last bit."""
+    out = _crash_filter_series(monkeypatch, last_call_elsewhere)
+    assert all(any(c["active"] for c in s_["crashes"]) for s_ in out["slices"][1:])
+    assert [s_["filter"] is not None and s_["filter"]["absorbed"] for s_ in out["slices"][1:]] == [True, False, True]
+    _assert_self_consistent(out)
 
 
 # ============================================================== time-varying F0

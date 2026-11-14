@@ -49,12 +49,16 @@ with, on each interval ``[t_{k-1}, t_k]``,
   the measured mean interval ``history`` before the window, so the crash record must cover it; a record
   that covers the history and holds no crash in it starts the series crash-free, recorded; a record that did
 not observe the whole history is refused whatever the number of crashes recorded in it), and
-  the later crashes are the measured ones; ``"off"``: none.  A slice reports the crash-free end state plus the sawtooth effect averaged
-  over the interval since the previous slice (the measurement window): ``psi = psi_end^(no crash) +
-  <psi^(crashes)>_window - <psi^(no crash)>_window``.  This is the instantaneous state when the operator
-  acted as the identity, is continuous in the state (a switch between averaged and instantaneous states
-  made the pass loop oscillate; measured), and carries no smooth time lag.  With a period longer than
-  the interval the window does not span a whole period (phase dependence remains; stated).
+  the later crashes are the measured ones; ``"off"``: none.  Every evolved slice is self-consistent: the state it
+  scores is the state it carries forward, the instantaneous end state of its interval at the slice time, after
+  every crash in the interval and (filter) with the fit's corrections (``crash_slice_state="instantaneous"``,
+  default; recorded per slice in ``scored_vs_carried_state``).  A crash just before a slice time therefore shows
+  in that slice in full.  ``crash_slice_state="window_average"`` is the earlier treatment, kept as a comparison
+  option only: the slice scores the crash-free end state plus the sawtooth effect averaged over the interval
+  (``psi = psi_end^(no crash) + <psi^(crashes)>_window - <psi^(no crash)>_window``) while it carries the
+  instantaneous state, so on a slice whose interval holds an active crash the scored and the carried states
+  differ (``same_state = False``).  With a periodic train whose period is longer than the interval the scored
+  state depends on the phase (stated).
 
 Plasma current in a series (:data:`IP_CONVENTION`, recorded in the result and per slice).  A fit treats
 the Ip target as a parameter (``ip_rel``, :mod:`.fit`).  The relative offset ``d = (Ip_fitted -
@@ -78,7 +82,9 @@ implicit (Picard) coupling of the diffusion and the equilibrium within each step
 seen by the TR-BDF2 stages are linear interpolants between consistent end states, so the coupled
 step is second order in ``Delta t`` in the converged limit (the diffusion integrator itself is
 second order; the outer-layer ``|F|`` freeze is first order in its small variation).  The state
-carried to the next interval is the instantaneous end state of the last pass.
+carried to the next interval is the state the slice scored: after the loop the interval is re-advanced on the
+equilibrium of the accepted pass (the loop's last state-function call is made on the equilibrium of the
+following solve, which is not the scored one).
 
 Initial state (first slice):
 
@@ -189,6 +195,10 @@ IP_CONVENTION = ("Ip(t) driving each interval: linear from the carried state's c
 ACCEPTED_FIT_STATUSES = ("converged", "converged_within_noise")
 #: How the lumped outer layer's ``|F|`` at the last closed surface varies over an interval.
 LAYER_FPOL_MODES = ("linear", "interval_mean")
+#: Which state an evolved slice scores when a sawtooth crash acted in its interval (module docstring):
+#: ``"instantaneous"`` (default) -- the instantaneous end state, the state carried forward; ``"window_average"`` --
+#: the earlier treatment (crash-free end state plus the interval's averaged sawtooth effect), comparison only.
+CRASH_SLICE_STATES = ("instantaneous", "window_average")
 #: How an absorbed filter fit's current corrections enter the evolution (module docstring, "Fit interaction"):
 #: ``"in_window"`` (default) -- a non-inductive source over the interval that ends at the slice only (not carried
 #: into later intervals); ``"steady_response"`` -- the earlier treatment (the zero-net-current
@@ -244,6 +254,7 @@ class SeriesSettings:
     crash_table: Optional[Any] = None                    # a crash_table.CrashTable (times and detection coverage)
     crash_record_start: Optional[float] = None           # [s] start of the crash detection (default: the table's)
     layer_fpol: str = "linear"                           # LAYER_FPOL_MODES
+    crash_slice_state: str = "instantaneous"             # CRASH_SLICE_STATES ("window_average": comparison only)
     vessel_eddy: bool = False
     zeff_series_source: Optional[str] = None  # the series' ONE Z_eff source kind for the checked-source rule
     #                                            ("impurity_density" or "line_integrated"; see check_zeff_series)
@@ -284,6 +295,8 @@ class SeriesSettings:
             raise ValueError("sawtooth_first_crash_phase must lie in (0, 1]")
         if self.layer_fpol not in LAYER_FPOL_MODES:
             raise ValueError(f"layer_fpol must be one of {LAYER_FPOL_MODES}")
+        if self.crash_slice_state not in CRASH_SLICE_STATES:
+            raise ValueError(f"crash_slice_state must be one of {CRASH_SLICE_STATES}")
         if self.filter_correction not in FILTER_CORRECTION_FORMS:
             raise ValueError(f"filter_correction must be one of {FILTER_CORRECTION_FORMS}")
         if self.filter_times is not None:
@@ -675,11 +688,10 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
             holder.update(end=end, events=events, states=states, info=info, jni1=jni1, window_average=False,
                           amps=amps)
             use = end
-            if events:
-                # sawtooth effect over the interval (the measurement window): the interval average WITH the
-                # crashes minus the same average WITHOUT them, added to the crash-free end state.  Identical to the
-                # instantaneous state when the operator acted as the identity (q >= 1), continuous in the state
-                # (the operator is), and free of the smooth time lag a plain window average would add.
+            if events and s.crash_slice_state == "window_average":
+                # COMPARISON OPTION (the earlier treatment): the sawtooth effect over the interval -- the interval
+                # average WITH the crashes minus the same average WITHOUT them -- added to the crash-free end state;
+                # the instantaneous end state is still the one carried, so the slice is not self-consistent
                 end0, _, states0 = advance_interval(sol, carried, t1, s, np.zeros(0), s.dt_max)
                 aw = _window_state(states, tp, t1, end.rho_faces)
                 a0 = _window_state(states0, tp, t1, end.rho_faces)
@@ -694,6 +706,10 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
         state_fn.corrections_in_window = in_window
         res = _cm.consistent_solve(fm, sl.kinetics, sl.sources, p_pred, cfg, label=f"{sl.label}:evolve",
                                    state_fn=state_fn)
+        if res.converged:
+            # the loop's last state-function call was made on the equilibrium of the solve AFTER the accepted pass;
+            # re-advance on the accepted pass's equilibrium, so that the state carried on is the state scored
+            _cm.call_state_fn(state_fn, res.lag, p_pred)
         filt = None
         if res.converged and s.filter_at(t1):
             filt, res = _filter_slice(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1)
@@ -716,12 +732,16 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
                                      "interval starts from the last consistent state")
         if res.converged:
             extra["carried_state"] = _state_record(holder["end"])
+            sc, ca = res.assembly["state"], holder["end"]
+            same = bool(np.array_equal(np.asarray(sc.psi), np.asarray(ca.psi)) and sc.psi_boundary == ca.psi_boundary)
             extra["scored_vs_carried_state"] = dict(
-                zip(("max_dpsi_rel", "dpsi_boundary"), _psi_shape_diff(holder["end"], res.assembly["state"])),
-                same_state=bool(not holder.get("window_average", False)),
-                note=("the scored state is the carried end state" if not holder.get("window_average", False) else
-                      "an active crash in the interval: the scored state is the crash-free end state plus the "
-                      "interval's sawtooth effect; the carried state is the instantaneous end state"))
+                zip(("max_dpsi_rel", "dpsi_boundary"), _psi_shape_diff(ca, sc)), same_state=same,
+                crash_slice_state=s.crash_slice_state,
+                note=("the scored state is the carried end state (identical arrays)" if same else
+                      "COMPARISON OPTION crash_slice_state='window_average' with an active crash in the interval: the "
+                      "scored state is the crash-free end state plus the interval's sawtooth effect; the carried "
+                      "state is the instantaneous end state" if holder.get("window_average") else
+                      "the scored and the carried states differ"))
         # what the next interval starts from (taken before the callback, which may use the solver)
         nxt = dict(carried=holder.get("end"), jni1=holder.get("jni1"), ip=float(holder.get("ip_end", ip1)),
                    ip_off=float(holder.get("ip_offset_end", ip_off)))

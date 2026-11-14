@@ -48,7 +48,8 @@ with, on each interval ``[t_{k-1}, t_k]``,
   ``[t_0 - (t_1 - t_0), t_0]`` (the first interval's length; the run starts on the periodic orbit at
   the measured mean interval ``history`` before the window, so the crash record must cover it; a record
   that covers the history and holds no crash in it starts the series crash-free, recorded; a record that did
-not observe the whole history is refused whatever the number of crashes recorded in it), and
+  not observe the whole history is refused whatever the number of crashes recorded in it, and so are bare
+  ``crash_times`` without a table, which state no coverage), and
   the later crashes are the measured ones; ``"off"``: none.  Every evolved slice is self-consistent: the state it
   scores is the state it carries forward, the instantaneous end state of its interval at the slice time, after
   every crash in the interval and (filter) with the fit's corrections (``crash_slice_state="instantaneous"``,
@@ -455,7 +456,11 @@ def _slice_record(fm, res, sl, label, extra=None):
             names = [str(n) for n in grp.geometry.get("coil_names", grp.labels)]
             excl["pf_current"] = np.array([roles.get(n, "free") == "free" for n in names], dtype=bool)
         inner = fm.inner_dof_data(groups) if hasattr(fm, "inner_dof_data") else 0.0
-        rep = chi2_report(tab, inner_dof=inner, exclude=excl)
+        # the parameters fitted to these channels: the free parameters of the fit whose center the slice scores (the
+        # first-slice fit, or an absorbed filter fit), none on an evolved, unfitted slice
+        filt, fit0 = (extra or {}).get("filter") or {}, (extra or {}).get("fit") or {}
+        n_fit = (len(filt.get("free") or ()) if filt.get("absorbed") else len(fit0.get("free") or ()))
+        rep = chi2_report(tab, n_params=n_fit, inner_dof=inner, exclude=excl)
     asm = res.assembly
     st = res.solve.stats if res.solve is not None else {}
     lag = res.lag
@@ -973,10 +978,17 @@ def _measured_crash_start(s, cfg, times):
     crashes from ``history`` before the window on) averaged over the window ``[t_0 - (t_1 - t_0), t_0]``
     -- the same window convention as every later slice (the interval since the previous slice).  The
     strength is the one of the measured mean interval at ``sawtooth_f`` (it sets only the orbit's step).
-    Returns ``(cfg0, params, record)``; a crash record that does not cover the history raises."""
+    Returns ``(cfg0, params, record)``; a crash record that does not cover the history raises, and so do bare
+    ``crash_times`` (no table: the detection coverage is not stated)."""
     import dataclasses
     if len(times) < 2:
         raise ValueError("sawtooth='crash_times' needs at least two slices (the first window is the first interval)")
+    if s.crash_table is None:
+        # bare crash times state no detection coverage, so the history before the first slice was not shown to be
+        # observed: refused like a table whose coverage is not stated
+        raise ValueError("measured crash times cannot start the series: crash times given without a crash table state "
+                         "no detection coverage ('no crash recorded' is not 'no crash'); give crash_table= a "
+                         "crash_table.CrashTable with its record_start / record_end (and unobserved intervals)")
     window = (float(times[0] - (times[1] - times[0])), float(times[0]))
     try:
         sched = _saw.schedule_for_slice(s.crash_times, window, history=cfg.history, record_start=s.crash_record_start)

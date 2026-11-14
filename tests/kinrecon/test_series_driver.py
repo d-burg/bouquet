@@ -648,6 +648,14 @@ def test_series_chain_converges_in_space_against_the_reference(monkeypatch):
 
 
 # ============================================================== sawteeth inside a series
+def _table(times, start=-1.7, end=1.0):
+    """A measured crash record of ``times`` [s] whose detection covered ``[start, end]`` without gaps."""
+    n = len(times)
+    from bouquet.kinrecon.crash_table import CrashTable
+    return CrashTable(time=list(times), time_err=np.zeros(n), rho_inv=np.zeros(n), rho_inv_err=np.zeros(n),
+                      confidence=["A"] * n, record_start=start, record_end=end)
+
+
 def _sawtooth_series(monkeypatch, ip, mode, crash_times=None, crash_slice_state="instantaneous"):
     lag = _lag()
     fm = FakeFM(dict(pred=lag))
@@ -658,7 +666,8 @@ def _sawtooth_series(monkeypatch, ip, mode, crash_times=None, crash_slice_state=
         # mocked here; the record before t0 only satisfies the coverage requirement)
         crash_times = [round(-1.6 + 0.05 * k, 6) for k in range(32)] + list(crash_times)
     s = SE.SeriesSettings(initial="relaxed", sawtooth=mode, sawtooth_log_strength=np.log(400.0),
-                          crash_times=crash_times, crash_slice_state=crash_slice_state)
+                          crash_table=None if crash_times is None else _table(crash_times),
+                          crash_slice_state=crash_slice_state)
     times = np.arange(4) * 0.02
     out = SE.run_series(fm, _slices(times, np.full(4, ip)), CM.CurrentModelSettings(r0=GEO.R0), s)
     assert out["status"] == "completed"
@@ -771,8 +780,8 @@ def _crash_filter_series(monkeypatch, last_call_elsewhere):
     monkeypatch.setattr(SE._fit, "reconstruct", _fake_reconstruct("converged", lags))
     crash = [round(-1.6 + 0.05 * k, 6) for k in range(32)] + [0.015, 0.035, 0.0599]
     out = SE.run_series(fm, _slices([0.0, 0.02, 0.04, 0.06], np.full(4, ip)), CM.CurrentModelSettings(r0=GEO.R0),
-                        SE.SeriesSettings(initial="relaxed", sawtooth="crash_times", crash_times=crash, filter=True,
-                                          filter_times=(0.02, 0.06)))
+                        SE.SeriesSettings(initial="relaxed", sawtooth="crash_times", crash_table=_table(crash),
+                                          filter=True, filter_times=(0.02, 0.06)))
     assert out["status"] == "completed"
     return out
 
@@ -823,8 +832,8 @@ def _initial_fit_series(monkeypatch, status, policy="refuse", log_strength=np.lo
 
     monkeypatch.setattr(SE._fit, "reconstruct", reconstruct)
     s = SE.SeriesSettings(initial="mse_fit", sawtooth=sawtooth, initial_fit_nonconverged=policy,
-                          crash_times=([round(-1.6 + 0.05 * k, 6) for k in range(33)] if sawtooth == "crash_times"
-                                       else None))
+                          crash_table=(_table([round(-1.6 + 0.05 * k, 6) for k in range(33)])
+                                       if sawtooth == "crash_times" else None))
     out = SE.run_series(fm, _slices(np.arange(3) * 0.02, np.full(3, IP0)), CM.CurrentModelSettings(r0=GEO.R0), s)
     return out, seen
 
@@ -887,9 +896,15 @@ def test_measured_crash_times_start_the_series(monkeypatch):
     lag = _lag()
     fm = FakeFM(dict(pred=lag))
     _install(monkeypatch, fm, _steady(lag, IP0), lambda f: f.lags["pred"])
-    short = SE.SeriesSettings(initial="relaxed", sawtooth="crash_times", crash_times=[-0.5, -0.4, 0.01])
+    short = SE.SeriesSettings(initial="relaxed", sawtooth="crash_times",       # detection starts after the history
+                              crash_table=_table([-0.5, -0.4, 0.01], start=-0.6))
     with pytest.raises(ValueError, match="cannot start the series"):
         SE.run_series(fm, _slices(np.arange(3) * 0.02, np.full(3, IP0)), CM.CurrentModelSettings(r0=GEO.R0), short)
+    # bare crash times (no table) state no detection coverage: refused, whatever they hold
+    bare = SE.SeriesSettings(initial="relaxed", sawtooth="crash_times",
+                             crash_times=[round(-1.6 + 0.05 * k, 6) for k in range(33)], crash_record_start=-1.7)
+    with pytest.raises(ValueError, match="without a crash table state no detection coverage"):
+        SE.run_series(fm, _slices(np.arange(3) * 0.02, np.full(3, IP0)), CM.CurrentModelSettings(r0=GEO.R0), bare)
 
 
 def test_measured_crash_start_runs_the_model(monkeypatch):
@@ -897,7 +912,7 @@ def test_measured_crash_start_runs_the_model(monkeypatch):
     run (synthetic geometry, no equilibrium solve): the state is the window average over the window."""
     lag = _lag()
     s = SE.SeriesSettings(initial="relaxed", sawtooth="crash_times",
-                          crash_times=[round(-1.6 + 0.05 * k, 6) for k in range(33)])
+                          crash_table=_table([round(-1.6 + 0.05 * k, 6) for k in range(33)]))
     cfg0, p0, rec = SE._measured_crash_start(s, CM.CurrentModelSettings(r0=GEO.R0), np.array([0.0, 0.02]))
     from bouquet.kinrecon.current import sawtooth as SAW
     sol = CM.build_solver(lag, lag["jbs"], 1.8 * IP0)

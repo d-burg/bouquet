@@ -149,17 +149,21 @@ def test_one_zeff_source_per_series():
 
 
 def test_crash_record_with_no_crash_in_the_covered_history_starts_crash_free():
-    s = SE.SeriesSettings(initial="relaxed", sawtooth="crash_times", crash_times=[0.03, 0.05],
-                          crash_record_start=-2.0)
+    s = SE.SeriesSettings(initial="relaxed", sawtooth="crash_times", crash_table=SD._table([0.03, 0.05], start=-2.0))
     cfg = CM.CurrentModelSettings(r0=SD.GEO.R0)
     cfg0, p0, rec = SE._measured_crash_start(s, cfg, np.array([0.0, 0.02]))
     assert cfg0 is cfg and p0["log_strength"] is None and rec["n_crashes_history"] == 0
-    one = SE.SeriesSettings(initial="relaxed", sawtooth="crash_times", crash_times=[-0.3, 0.05], crash_record_start=-2.0)
+    one = SE.SeriesSettings(initial="relaxed", sawtooth="crash_times", crash_table=SD._table([-0.3, 0.05], start=-2.0))
     with pytest.raises(ValueError, match="one crash in the history"):
         SE._measured_crash_start(one, cfg, np.array([0.0, 0.02]))
     uncovered = SE.SeriesSettings(initial="relaxed", sawtooth="crash_times", crash_times=[0.03, 0.05])
     with pytest.raises(ValueError, match="cannot start the series"):
         SE._measured_crash_start(uncovered, cfg, np.array([0.0, 0.02]))
+    # bare crash times with a stated detection start still state no coverage (no record end, no gaps): refused
+    bare = SE.SeriesSettings(initial="relaxed", sawtooth="crash_times", crash_times=[0.03, 0.05],
+                             crash_record_start=-2.0)
+    with pytest.raises(ValueError, match="without a crash table state no detection coverage"):
+        SE._measured_crash_start(bare, cfg, np.array([0.0, 0.02]))
 
 
 def test_crash_free_start_respects_unobserved_history():
@@ -223,10 +227,14 @@ def test_q_below_one_between_crashes_is_recorded_but_not_warned_in_a_series(monk
                      confidence=["A"] * 34, record_start=-1.7, record_end=1.0)
     out = SE.run_series(fm, SD._slices(np.arange(3) * 0.02, np.full(3, ip)), CM.CurrentModelSettings(r0=SD.GEO.R0),
                         SE.SeriesSettings(initial="relaxed", crash_table=tab))
-    for s_ in out["slices"]:
-        if "q_below_one" in s_:
-            assert s_["q_below_one"]["kind"] in ("between_crashes", "crash_recorded_not_active")
-    assert not any(w_["sawtooth"].find("model-data inconsistency") >= 0 for w_ in out.get("warnings", []))
+    # the mocked equilibrium has q < 1 on every slice while the evolved state keeps q >= 1, so the recorded crash at
+    # 0.01 s does not act: slices 0 and 2 lie within the recorded crash spacing (recorded, NOT warned); slice 1 is
+    # named for what it is (a recorded crash that did not act), the only warning
+    kinds = [(s_.get("q_below_one") or {}).get("kind") for s_ in out["slices"]]
+    assert kinds == ["between_crashes", "crash_recorded_not_active", "between_crashes"], kinds
+    assert [s_["q_below_one"]["warn"] for s_ in out["slices"]] == [False, True, False]
+    assert [w_["slice"] for w_ in out["warnings"]] == [1]
+    assert not any(w_["sawtooth"].find("model-data inconsistency") >= 0 for w_ in out["warnings"])
 
 
 def test_crash_start_refuses_an_unobserved_history_whatever_the_crash_count():

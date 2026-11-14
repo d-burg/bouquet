@@ -148,3 +148,15 @@ def test_impurity_ion_pressure_matches_oft_with_its_pressure_inputs():
                                nu_e_star_override=parts["nu_e_star"], nu_i_star_override=parts["nu_i_star"],
                                use_legacy_L34=False, use_sign_q=False, formula_form="jboot1")
     np.testing.assert_allclose(ours, theirs, rtol=1e-12, atol=1e-12 * np.max(np.abs(theirs)))
+
+
+def test_sauter_coulomb_logarithm_is_the_default_everywhere():
+    """The bootstrap uses Sauter's Coulomb logarithms by default, in the module and in the current model's settings
+    (the NRL pair is a comparison option only)."""
+    import inspect
+
+    from bouquet.kinrecon.current import bootstrap as _bs
+    from bouquet.kinrecon.current_model import CurrentModelSettings
+    assert inspect.signature(_bs.redl_jdotb).parameters["ln_lambda_model"].default == "sauter"
+    assert inspect.signature(_bs.coulomb_logs).parameters["model"].default == "sauter"
+    assert CurrentModelSettings(r0=1.7).bootstrap_ln_lambda_model == "sauter"

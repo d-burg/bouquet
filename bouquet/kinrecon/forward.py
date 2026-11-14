@@ -732,7 +732,10 @@ class ForwardModel:
         flux loops ``w (2 pi psi)``, probes ``w B.n``, isoflux rows ``w (psi_j - psi_0)`` and the coil rows
         ``weight mu0 (coffs . I)``.  Its design matrix ``A`` holds, per unknown, the vacuum response of each row
         to a unit coil current (``vac_solve`` of that coil alone; the VSC column is the gain-weighted sum); the
-        hat matrix ``H = A (A^T A)^-1 A^T`` (rank-revealing SVD) is plasma-independent.  Its trace splits by row
+        hat matrix ``H = A (A^T A)^-1 A^T`` (rank-revealing SVD) is plasma-independent.  It leaves out the plasma's
+        own response to the coil currents (the Picard iterations re-solve the plasma with the coils): measured by
+        finite differences on a synthetic case (each data row moved by one sigma, the anchored solve repeated at
+        fixed profiles), the full response is about 1 % below this vacuum trace.  The trace of ``H`` splits by row
         kind: ``flux_loop``, ``bpol_probe``, ``fitted_coil`` (data rows), ``isoflux`` and ``vsc_gauge`` (not
         data).  Returns ``{"by_kind", "n_rows", "rank", "n_unknowns", "condition", "method"}``, cached until the
         rows are rebuilt (:meth:`reconfigure`); the solver's equilibrium is restored afterwards.  None in
@@ -806,9 +809,13 @@ class ForwardModel:
     def boundary_distance(self):
         """Displacement of the solved boundary from the reference (anchor) boundary.
 
+        Sign convention (every signed displacement of this class): POSITIVE when the solved boundary lies OUTSIDE the
+        anchor boundary (the solved plasma extends beyond it), negative when it lies inside.
+
         * ``rms_m``, ``max_m``, ``mean_m``: first-order normal distance at each reference point,
-          ``(psi_N - 1) |psi_b - psi_a| / (R |B_p|)`` (positive: the solved boundary lies outside); points with
-          ``|B_p| < 0.2 median`` (X-point region) are excluded;
+          ``(1 - psi_N) |psi_b - psi_a| / (R |B_p|)`` (psi_N of the solved equilibrium at the reference point: below 1
+          where the reference point lies inside the solved boundary, i.e. where the solved boundary lies outside);
+          points with ``|B_p| < 0.2 median`` (X-point region) are excluded;
         * ``displacement_mm`` (:meth:`boundary_displacement`): the same rms and maximum in mm, the outboard and
           inboard midplane displacement, the X-point(s) and strike points.
         """
@@ -818,12 +825,13 @@ class ForwardModel:
         B, _ = _diag.field_at(gs, pb)
         bp = np.hypot(B[:, 0], B[:, 2])
         lo, hi = gs.psi_bounds
-        dist = (pn - 1.0) * abs(hi - lo) / np.maximum(pb[:, 0] * bp, 1e-30)
+        dist = (1.0 - pn) * abs(hi - lo) / np.maximum(pb[:, 0] * bp, 1e-30)     # positive: solved boundary outside
         good = np.isfinite(dist) & (bp > 0.2 * np.nanmedian(bp))
         out = dict(rms_m=float(np.sqrt(np.mean(dist[good] ** 2))), max_m=float(np.max(np.abs(dist[good]))),
                    mean_m=float(np.mean(dist[good])), n_used=int(good.sum()), n=int(len(pb)),
-                   method="(psi_N - 1) |psi_b - psi_a| / (R |B_p|) at the reference points; |B_p| < 0.2 median "
-                          "excluded")
+                   method="(1 - psi_N) |psi_b - psi_a| / (R |B_p|) at the reference points; |B_p| < 0.2 median "
+                          "excluded",
+                   sign="positive: the solved boundary lies outside the anchor boundary")
         try:
             out["displacement_mm"] = self.boundary_displacement(out)
         except Exception as exc:  # noqa: BLE001
@@ -904,11 +912,13 @@ class ForwardModel:
         """Displacement of the solved boundary from the reference boundary, in mm (recorded with every solve and fit
         result through :meth:`boundary_distance`):
 
+        Sign: positive when the solved boundary lies OUTSIDE the anchor boundary (:meth:`boundary_distance`).
+
         * ``rms``, ``max``, ``mean``: the first-order normal distances of :meth:`boundary_distance` (X-point region
-          excluded);
-        * ``outboard_midplane``, ``inboard_midplane``: signed (positive outward) difference of the solved LCFS
-          crossing from the reference polygon's crossing along the horizontal line through the solved magnetic
-          axis;
+          excluded; ``mean`` signed);
+        * ``outboard_midplane``, ``inboard_midplane``: signed distance of the solved LCFS crossing from the reference
+          polygon's crossing along the horizontal line through the solved magnetic axis, positive outside the anchor
+          (outboard: the solved crossing at larger R; inboard: at smaller R);
         * ``x_points``: per reference X-point (``reference_points["x_points"]``; none by default: the polygon
           alone does not say whether its extreme points are X-points) the distance to the nearest solved X-point
           (TokaMaker ``get_xpoints``) on the same side of the axis, with both positions; the solved X-points are
@@ -920,7 +930,8 @@ class ForwardModel:
         gs = self.gs
         nd = normal if normal is not None else self.boundary_distance()
         out = dict(rms=1e3 * nd["rms_m"], max=1e3 * nd["max_m"], mean=1e3 * nd["mean_m"],
-                   anchor_factor=float(self.settings.anchor_factor))
+                   anchor_factor=float(self.settings.anchor_factor),
+                   sign="positive: the solved boundary lies outside the anchor boundary")
         b = self.reference_boundary
         ra, za = (float(v) for v in gs.o_point)
         p, q = b, np.roll(b, -1, axis=0)

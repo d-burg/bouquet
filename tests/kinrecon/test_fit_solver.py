@@ -18,7 +18,9 @@ Checked:
     two-sided 1e-4 band of chi^2(N - n_params - inner_dof) (N data rows; the free parameters of the fit,
     log_strength and the plasma-current target; and the effective number of coil parameters the forward
     solve fits to the same data rows, the trace of its coil solve's hat matrix over them, from the fit's
-    own record);
+    own record); the band is a consistency check with little power against a mis-scaled noise level: with
+    about 130 degrees of freedom a noise sigma off by +/-15 % leaves the band in fewer than 1 draw in 10,
+    by +/-30 % in most draws (chi^2 scaled by the square of the factor);
 (b) zero noise: theta recovered to < 0.5 Laplace sigma (the Gaussian prior on log_strength pulls the
     MAP point toward the prior mean; with zero noise the data still dominate), data chi^2 < 0.1;
 (c) sigma = 0 identity: the consistent solve of the reconstruction configuration at the TRUE

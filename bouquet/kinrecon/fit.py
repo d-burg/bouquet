@@ -555,7 +555,7 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
         full = np.concatenate((r, rp))
         all_groups = [g for g in ms.groups if g in ("flux_loop", "bpol_probe", "ip", "pf_current", "mse")]
         all_tab = score(fm.gs, ms, groups=all_groups)
-        summ = headline_summary(all_tab, ms, coil_roles, settings.fitted_coil_role)
+        summ = headline_summary(all_tab, ms, coil_roles)
         summ_offset = flux_offset_record(all_tab)
         fit_chi = {g: float(np.sum(r[[i for i, (gg, _) in enumerate(idx) if gg == g]] ** 2)) for g in groups}
         inner = _inner_dof_record(fm, groups)
@@ -952,7 +952,7 @@ def _inner_dof_record(fm, groups):
                 n_unknowns=d["n_unknowns"], rank=d["rank"], condition=d["condition"], method=d["method"])
 
 
-def headline_summary(tab, ms, coil_roles, fitted_role="fitted"):
+def headline_summary(tab, ms, coil_roles):
     """Per-group ``{chi2, n, chi2_per_n}`` of a score table and their ``total``, with the coils the source left
     free (role ``"free"``: no measurement constraint in the solve) taken OUT of ``pf_current`` and of the total
     and reported apart as ``pf_current_free`` (with the coil names): their residuals are a cross-check, not part

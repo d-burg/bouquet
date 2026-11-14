@@ -80,7 +80,21 @@ pytestmark = [
 # ---------------------------------------------------------------------------
 # child
 # ---------------------------------------------------------------------------
-def _setup():
+def edge_remedy_for_this_build():
+    """``ForwardSettings`` keywords for a solve whose pressure gradient is finite at the boundary, chosen for the
+    solver build that is loaded: none on a build with the cut-cell setting (the forward model turns it on by
+    default, no taper), else the explicit edge taper ``on`` (the workaround for a build without it).  The one place
+    where a test selects between the two.  Returns ``(label, keywords)``."""
+    from bouquet.kinrecon import edge as E
+    from bouquet.kinrecon import forward as FW
+    if FW.solver_build()["provides_lcfs_cut_cells"]:
+        return "cut_cells", {}
+    return "taper_on", dict(edge_taper=E.EdgeTaperSetting("on"))
+
+
+def _setup(**forward_kw):
+    """The public synthetic case in generation mode; ``forward_kw`` are extra ``ForwardSettings`` keywords (none
+    by default)."""
     import bouquet as bq
     from bouquet.adapters import gfile_parallel_current
     from bouquet.kinrecon import current_model as CM
@@ -92,7 +106,7 @@ def _setup():
     pn = np.asarray(ida.psi_N)
     kin = CM.KineticProfiles(pn, ida.ne, ida.te, ida.ni, ida.ti, ida.Zeff, source="public synthetic L-mode IDA")
     src = CM.SourceProfiles(pn, source="none (no driven current, no fast ions)")
-    st = FW.ForwardSettings(vsc={"F9A": 1.0, "F9B": -1.0})
+    st = FW.ForwardSettings(vsc={"F9A": 1.0, "F9B": -1.0}, **forward_kw)
     ip = abs(float(g["ip"]))
     fm = FW.ForwardModel(load_gs_mesh(_MESH), g["rcentr"] * g["bcentr"], None, np.asarray(g["rzout"], float),
                          settings=st, case_id="truth", ip=ip, generation_coil_reg=1e-2)
@@ -335,13 +349,13 @@ def test_settings_record_complete(result):
     for k in ("free", "specs", "settings", "model_settings", "fit_groups", "iterations", "forward", "n_solves",
               "wall_s", "constraints", "chi2_detail", "assembly", "final_center", "boundary"):
         assert k in result["record_keys"], k
-    for k in ("settings", "oft_defaults", "oft_settings_now", "rows", "edge_taper_case", "oft_python"):
+    for k in ("settings", "oft_defaults", "oft_settings_now", "rows", "edge_taper_case", "oft_python", "solver"):
         assert k in result["forward_keys"], k
     for k in ("flux_loops", "probes", "coils", "anchor", "ip_target"):
         assert k in result["forward_rows_keys"], k
     fs = result["forward_settings"]
     for k in ("anchor_factor", "coil_lambda", "vsc", "held_halfwidth_A", "flux_gauge", "probe_in_solve",
-              "edge_taper", "verify_criterion"):
+              "edge_taper", "lcfs_cut_cells", "verify_criterion"):
         assert k in fs, k
     assert set(result["constraint_groups"]) >= {"flux_loop", "bpol_probe", "ip", "pf_current", "mse_polarisation_angle"}
 

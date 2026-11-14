@@ -1,4 +1,5 @@
-"""``bouquet.kinrecon.edge``: explicit edge P' taper, limit-cycle detector, auto policy.
+"""``bouquet.kinrecon.edge``: explicit edge P' taper, limit-cycle detector, taper policy (default off; the
+named mode ``auto`` is requested explicitly where its behavior is tested).
 
 Synthetic inputs only; no solver.  Hand calculations are written out next to each check.
 """
@@ -239,7 +240,7 @@ class FakeSolve:
 
 def test_policy_auto_converged_untapered():
     f = FakeSolve((True, CONV), (True, CONV))
-    o = E.solve_with_edge_taper(f)            # default setting: auto
+    o = E.solve_with_edge_taper(f, E.EdgeTaperSetting("auto"))     # the named opt-in mode (default: off)
     assert o.record["mode"] == "auto" and o.record["status"] == E.STATUS_CONVERGED
     assert f.calls == [None] and not o.record["taper_applied"] and o.payload == ("state", False)
     json.dumps(o.record)
@@ -259,7 +260,7 @@ def test_policy_auto_limit_cycle_then_tapered():
 
 def test_policy_auto_limit_cycle_tapered_also_fails_keeps_both_histories():
     f = FakeSolve((False, CYCLE), (False, SLOW))
-    o = E.solve_with_edge_taper(f)
+    o = E.solve_with_edge_taper(f, E.EdgeTaperSetting("auto"))
     assert o.record["status"] == E.STATUS_FAILED and o.record["taper_applied"]
     a, b = o.record["attempts"]
     assert a["history"]["n"] == 40 and b["history"]["n"] == 40
@@ -269,7 +270,7 @@ def test_policy_auto_limit_cycle_tapered_also_fails_keeps_both_histories():
 @pytest.mark.parametrize("hist", [SLOW, [3.979e-3] * 40])
 def test_policy_auto_other_failure_is_not_tapered(hist):
     f = FakeSolve((False, hist), (True, CONV))
-    o = E.solve_with_edge_taper(f)
+    o = E.solve_with_edge_taper(f, E.EdgeTaperSetting("auto"))
     assert o.record["status"] == E.STATUS_FAILED and not o.record["taper_applied"]
     assert f.calls == [None] and "taper not applied" in o.record["reason"]
 
@@ -288,7 +289,7 @@ def test_policy_off_and_on():
 
 
 def test_case_uniformity_tapered_lock():
-    case = E.EdgeTaperCase("caseA")
+    case = E.EdgeTaperCase("caseA", setting=E.EdgeTaperSetting("auto"))
     ref = FakeSolve((False, CYCLE), (True, CONV))
     o = E.solve_with_edge_taper(ref, case=case, label="reference")
     assert o.record["status"] == E.STATUS_CONVERGED_TAPER
@@ -303,14 +304,14 @@ def test_case_uniformity_tapered_lock():
 
 
 def test_case_uniformity_untapered_lock_and_undecided_after_failure():
-    case = E.EdgeTaperCase("caseB")
+    case = E.EdgeTaperCase("caseB", setting=E.EdgeTaperSetting("auto"))
     E.solve_with_edge_taper(FakeSolve((True, CONV), (True, CONV)), case=case, label="reference")
     assert case.locked is False and case.taper_for_later_solves() is None
     draw = FakeSolve((False, CYCLE), (True, CONV))
     o = E.solve_with_edge_taper(draw, case=case, label="draw_001")
     assert draw.calls == [None] and o.record["status"] == E.STATUS_FAILED and not o.record["taper_applied"]
     # a failed reference leaves the case undecided
-    c2 = E.EdgeTaperCase("caseC")
+    c2 = E.EdgeTaperCase("caseC", setting=E.EdgeTaperSetting("auto"))
     E.solve_with_edge_taper(FakeSolve((False, SLOW), (True, CONV)), case=c2, label="reference")
     assert c2.locked is None
     with pytest.raises(ValueError):
@@ -320,7 +321,7 @@ def test_case_uniformity_untapered_lock_and_undecided_after_failure():
 def test_policy_accepts_mapping_results():
     def solve(taper):
         return dict(converged=taper is not None, residuals=CYCLE[:40] if taper is None else CONV, info={"its": 7})
-    o = E.solve_with_edge_taper(solve)
+    o = E.solve_with_edge_taper(solve, E.EdgeTaperSetting("auto"))
     assert o.record["status"] == E.STATUS_CONVERGED_TAPER
     assert o.record["attempts"][1]["info"] == {"its": 7}
 

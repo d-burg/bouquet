@@ -53,7 +53,7 @@ def _policy(history, converged_tapered, **kw):
         if taper is None:
             return E.SolveAttempt(converged=False, residuals=history)
         return E.SolveAttempt(converged=converged_tapered, residuals=[1e-7])
-    return E.solve_with_edge_taper(solve, E.EdgeTaperSetting(), tol=1e-6, **kw).record
+    return E.solve_with_edge_taper(solve, E.EdgeTaperSetting("auto"), tol=1e-6, **kw).record
 
 
 def test_stall_policy_default_reports_and_option_tapers():

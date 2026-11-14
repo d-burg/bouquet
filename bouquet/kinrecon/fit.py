@@ -114,8 +114,11 @@ solves, wall time, every trial (predicted and realized chi^2 change, gain ratio)
 of test (b)'s floor and whether its noise-scaled branch set it, and whether the final Gauss-Newton
 step was kept with a chi^2 increase (and by how much).
 
-Edge taper: the whole-reconstruction tapered restart after a limit cycle in the first center is a
-NON-DEFAULT option (``taper_restart=False`` by default); without it such a center is a failure.
+Edge taper: the taper is off unless the forward model's settings ask for it
+(:class:`.edge.EdgeTaperSetting`; a workaround for solver builds without the cut-cell quadrature at
+the boundary).  The whole-reconstruction tapered restart after a limit cycle in the first center is a
+NON-DEFAULT option (``taper_restart=False`` by default) that acts only with the taper in the named
+mode ``auto``; without it such a center is a failure.
 """
 
 import math

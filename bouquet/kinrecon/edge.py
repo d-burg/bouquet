@@ -1,7 +1,21 @@
-"""Explicit edge P' taper, nonlinear-residual limit-cycle detector, and the ``auto`` policy.
+"""Explicit edge P' taper, nonlinear-residual limit-cycle detector, and the taper policy.
 
-Why this exists
----------------
+What the taper does, and when it is used
+----------------------------------------
+The taper CHANGES THE INPUT pressure gradient: P'(psi_N) is ramped to zero over the outermost
+layer (default start psi_N = 0.995; the policy's default variant also re-shapes P' in a band
+just inside it so that the pressure inside the band is kept), so the solved equilibrium is that
+of a modified pressure profile.  Every use is recorded with its parameters and bookkeeping
+(pressure, I_p and stored energy moved).  It is a WORKAROUND for solver builds without a
+continuous treatment of the plasma source at the boundary: with TokaMaker's cut-cell quadrature
+(setting ``lcfs_cut_cells``, which :mod:`.forward` uses whenever the build provides it) the
+problem described below does not arise.  The taper is therefore OFF by default and applied only
+when the caller asks for it (:class:`EdgeTaperSetting`): ``on`` (every solve tapered) or the
+named mode ``auto`` (taper only after a detected limit cycle; the earlier default, kept as an
+explicit choice so that earlier results can be reproduced).
+
+Why it exists
+-------------
 A pressure-gradient input P'(psi_N) that is still large at the separatrix gives a
 pressure-driven toroidal current density that steps from a finite value to zero at the
 last closed flux surface.  On a discrete mesh the set of plasma nodes changes as the
@@ -19,9 +33,10 @@ iteration count, and never silent.  Project decisions (stated in neutral words):
   beyond 0.999); the region outside is a lumped outer layer.  The taper is confined to that
   layer: it has its own knot at the taper start, which must lie at or outside the domain
   edge, and P' ramps linearly to zero at psi_N = 1;
-* setting ``off`` / ``auto`` / ``on`` (default ``auto``).  ``auto`` applies the taper only
-  after the untapered solve was detected to be in a limit cycle, never to a solve that
-  converges without it, and never to a solve that fails for another reason;
+* setting ``off`` / ``auto`` / ``on`` (default ``off``: no taper unless the caller asks).
+  ``auto`` applies the taper only after the untapered solve was detected to be in a limit
+  cycle, never to a solve that converges without it, and never to a solve that fails for
+  another reason;
 * the taper is applied uniformly within a case: if the reference solve of a case needed
   it, every later solve of that case (every draw) gets the same taper;
 * every use is recorded (flag, taper width, change in pedestal and axis pressure, fraction
@@ -29,7 +44,7 @@ iteration count, and never silent.  Project decisions (stated in neutral words):
   are distinct statuses.
 
 Three named variants (:data:`TAPER_VARIANTS`): ``edge_pinned`` (described below; the
-default of :func:`apply_edge_taper`, while the ``auto`` policy defaults to
+default of :func:`apply_edge_taper`, while the policy (``on`` / ``auto``) defaults to
 ``pressure_conserving``, see :class:`EdgeTaperSetting`),
 ``last_node`` (exactly ``pprime[-1] = 0`` on the caller's grid, the standard TokaMaker
 practice; its width is the grid's last interval) and ``pressure_conserving`` (the ramp plus
@@ -484,8 +499,8 @@ def no_taper_record(reason):
 
 # ============================================================== setting
 class EdgeTaperMode(str, Enum):
-    """``off``: never taper.  ``auto`` (default): taper only after a detected limit cycle.
-    ``on``: always taper."""
+    """``off`` (default): never taper.  ``auto`` (named opt-in, the earlier default): taper only after a
+    detected limit cycle.  ``on`` (opt-in): always taper."""
     OFF = "off"
     AUTO = "auto"
     ON = "on"
@@ -495,12 +510,17 @@ class EdgeTaperMode(str, Enum):
 class EdgeTaperSetting:
     """Mode plus the taper geometry used when the taper is applied.
 
+    The default mode is ``off``: the taper modifies the input P' and is a workaround for solver
+    builds without the cut-cell quadrature at the boundary, so it is applied only on request
+    (``on``, or ``auto`` after a detected limit cycle); the mode and the taper parameters are
+    recorded (:meth:`as_dict`) with every result.
+
     The policy's default taper is ``pressure_conserving`` with the default band width
     (:data:`BAND_WIDTH_DEFAULT`): it keeps the pedestal-top and core pressure and the
     stored energy, at the price of modifying P' in the band just inside the taper start.
     :func:`apply_edge_taper` called directly still defaults to ``edge_pinned``.
     """
-    mode: EdgeTaperMode = EdgeTaperMode.AUTO
+    mode: EdgeTaperMode = EdgeTaperMode.OFF
     spec: EdgeTaperSpec = field(default_factory=lambda: EdgeTaperSpec(variant="pressure_conserving"))
 
     def __post_init__(self):
@@ -761,6 +781,8 @@ def solve_with_edge_taper(solve: Callable[[Optional[EdgeTaperSpec]], Any], setti
     own settings, and return a :class:`SolveAttempt` (or a mapping with ``converged``,
     ``residuals``, ``payload``, ``info``).  ``tol`` is recorded only; convergence is the
     solver's own flag.
+
+    ``setting`` None means the default :class:`EdgeTaperSetting` (mode ``off``).
 
     * ``off``:  one untapered solve -> ``converged`` or ``failed``.
     * ``on``:   one tapered solve -> ``converged_with_edge_taper`` or ``failed``.

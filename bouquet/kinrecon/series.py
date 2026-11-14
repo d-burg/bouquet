@@ -28,10 +28,12 @@ with, on each interval ``[t_{k-1}, t_k]``,
   ``sawtooth="auto"``: NO prescribed crash train -- the operator acts only at MEASURED crash times
   (``crash_table``, a :class:`.crash_table.CrashTable`, or ``crash_times``), i.e. ``"crash_times"``
   when a table or times are given, and ``"off"`` (no crashes) otherwise; whenever the evolved q falls
-  below 1 on a slice with no crashes applied (no table, an interval the table's detection did not
-  cover, or a covered interval with no observed crash -- a model-data inconsistency), the slice record carries
-  a ``sawtooth_warning`` and the series lists it in ``warnings``
-  (the choice made is recorded as ``sawtooth_resolved``).  The periodic train is available only as
+  below 1 on a slice with no crash acting, the slice record carries ``q_below_one`` with its kind
+  (:func:`_sawtooth_warning`), and it is a ``sawtooth_warning`` listed in the series' ``warnings`` unless the
+  record shows sawtoothing that covers it (q < 1 within the measured crash spacing since the last recorded
+  crash is normal between crashes; a recorded crash that did not act, an uncovered interval, no record, or a
+  covered crash-free stretch longer than any recorded crash interval -- a model-data inconsistency -- are
+  warnings) (the choice made is recorded as ``sawtooth_resolved``).  The periodic train is available only as
   the explicit option ``sawtooth="periodic"`` (recorded):
   ``sawtooth="crash_times"`` uses measured crash times; ``sawtooth="periodic"`` places crashes every
   ``1/nu`` with ``nu`` from the two parameters ``(f, ln Lambda)``; ``ln Lambda`` is fitted at the
@@ -45,7 +47,8 @@ with, on each interval ``[t_{k-1}, t_k]``,
   is the window average of the measured-crash slice run of the current model over the window
   ``[t_0 - (t_1 - t_0), t_0]`` (the first interval's length; the run starts on the periodic orbit at
   the measured mean interval ``history`` before the window, so the crash record must cover it; a record
-  that covers the history and holds no crash in it starts the series crash-free, recorded), and
+  that covers the history and holds no crash in it starts the series crash-free, recorded; a record that did
+not observe the whole history is refused whatever the number of crashes recorded in it), and
   the later crashes are the measured ones; ``"off"``: none.  A slice reports the crash-free end state plus the sawtooth effect averaged
   over the interval since the previous slice (the measurement window): ``psi = psi_end^(no crash) +
   <psi^(crashes)>_window - <psi^(no crash)>_window``.  This is the instantaneous state when the operator
@@ -116,13 +119,38 @@ correction amplitudes are re-fitted with the evolved state as the prior mean (co
 N(0, sigma) on top of it); with ``filter_times`` given, only at the slices whose time lies within
 ``filter_time_tol`` of one of those times (anchor fits; every other slice is evolved and scored
 without fitting, and its record says ``filter: None``).  A filter fit with status ``"converged"`` or
-``"converged_within_noise"`` is absorbed (the label is kept in the slice's ``filter.status``): the state is
-re-advanced on the ACCEPTED center's own equilibrium (the fit's other solves -- Jacobian columns,
-trials -- also advance the state, on their perturbed equilibria, and none of those is carried),
-the corrections are added to it as their zero-net-current steady response, and that state is
-carried forward and the center is the slice's answer.  Any other fit status (stalled, max_iter,
-failed) leaves the slice at its evolved, unfitted equilibrium and state, which are scored and
-carried; the record says ``absorbed: False`` with the fit's status.
+``"converged_within_noise"`` is absorbed (the label is kept in the slice's ``filter.status``); any other fit
+status (stalled, max_iter, failed) leaves the slice at its evolved, unfitted equilibrium and state, which are
+scored and carried; the record says ``absorbed: False`` with the fit's status.
+
+How the corrections enter the evolution (``filter_correction="in_window"``, default).  The corrections are
+a non-inductive current SOURCE ``sum_k A_k g_k`` (Gaussians on rho_tor,norm, amplitudes fractions of Ip,
+:func:`.current_model.correction_shapes`, on each end's geometry) of the flux-diffusion equation over the
+interval that ends at the slice: the diffusion over that interval decides their response (a source acting
+for a time short against the resistive time changes the current near its own location with a local return;
+only after many resistive times does the response approach the zero-net-current steady form,
+:func:`.current_model.correction_response`, with its return distributed like the conductivity).  The net
+current is unchanged by construction: the interval is driven at the same Ip boundary value with or without
+the source, so the ohmic current returns what the source adds.  A filter fit's parameters are INCREMENTS of
+the source amplitudes held from the last absorbed fit (``A_k = A_{k-1} + a_k``, the prior N(0, sigma) on the
+increment); the fit evaluates every trial state by advancing the interval with that source, so the state a
+fit's center scored and the state carried on from the slice are the same state (re-advanced on the accepted
+center's equilibrium with the center's parameters; the fit's other solves -- Jacobian columns, trials --
+also advance the state, on their perturbed equilibria, and none of those is carried).  The only exception is
+an interval with an active sawtooth crash, whose scored state is the crash-free end state plus the interval's
+sawtooth effect while the instantaneous end state is carried (the sawtooth convention above; recorded in
+``scored_vs_carried_state``).  After its slice an absorbed amplitude is HELD as the source over the
+following intervals (zero-order hold) until a later absorbed fit changes it; prediction slices and
+non-absorbed fits keep it unchanged.  Assumption: the model discrepancy the corrections stand for (a missing
+or misestimated current source, a conductivity error) persists at its last estimated value; a persistent
+discrepancy then builds up the steady response over the resistive time instead of being dropped after each
+interval.  Not chosen (recorded): stopping the source at its slice (each interval's corrections then only
+kick the state and a persistent discrepancy has to be re-found at every slice), or a decaying source (needs a
+decay time that nothing measures).  The first slice (and every single-slice fit) has no preceding interval:
+its corrections are sources of the steady state / periodic orbit (the relaxed treatment) and start the
+series inside its state; they are not held as a source (``A = 0`` for the first interval).
+``filter_correction="steady_response"`` is the earlier treatment, kept as a comparison option: an absorbed
+fit adds the corrections' zero-net-current steady response to the carried state and nothing is held.
 
 The vessel/eddy-current contribution through the previous slice's flux is not modeled
 (``vessel_eddy=False``; ``True`` is refused).
@@ -149,7 +177,7 @@ from . import current_model as _cm
 from . import fit as _fit
 from .current import sawtooth as _saw
 from .current.diffusion import CurrentDiffusion, CurrentState, GeometrySchedule, IpBoundary, OuterLayer
-from .score import chi2_report, chi2_summary, flux_offset_record, score
+from .score import chi2_report, flux_offset_record, score
 
 __all__ = ["SliceData", "SeriesSettings", "run_series", "INITIAL_MODES", "SAWTOOTH_MODES"]
 
@@ -167,6 +195,20 @@ IP_CONVENTION = ("Ip(t) driving each interval: linear from the carried state's c
 ACCEPTED_FIT_STATUSES = ("converged", "converged_within_noise")
 #: How the lumped outer layer's ``|F|`` at the last closed surface varies over an interval.
 LAYER_FPOL_MODES = ("linear", "interval_mean")
+#: How an absorbed filter fit's current corrections enter the evolution (module docstring, "Fit interaction"):
+#: ``"in_window"`` (default) -- a non-inductive source over the interval that ends at the slice, held at its value
+#: until a later absorbed fit changes it; ``"steady_response"`` -- the earlier treatment (the zero-net-current
+#: steady response added to the state), kept for comparison.
+FILTER_CORRECTION_FORMS = ("in_window", "steady_response")
+#: What each form does (recorded in every series result).
+FILTER_CORRECTION_RULES = {
+    "in_window": ("current corrections are a non-inductive source over the interval that ends at the slice (the flux "
+                  "diffusion of that interval gives their response); a filter fit fits increments of the source "
+                  "amplitudes held from the last absorbed fit; an absorbed fit's amplitudes are held (zero-order hold) "
+                  "over the following intervals until a later absorbed fit changes them; the first slice's "
+                  "corrections are in its starting state (steady form) and are not held as a source"),
+    "steady_response": ("COMPARISON OPTION (the earlier treatment): an absorbed fit adds the corrections' zero-net-"
+                        "current steady response to the carried state; nothing is held as a source")}
 
 
 @dataclass
@@ -197,6 +239,7 @@ class SeriesSettings:
     filter_fit: _fit.FitSettings = field(default_factory=lambda: _fit.FitSettings(free=("a_corr",)))
     filter_times: Optional[Sequence[float]] = None       # with filter=True: fit only at these slice times [s]
     filter_time_tol: float = 1.0e-6                      # [s] match tolerance of filter_times
+    filter_correction: str = "in_window"                 # FILTER_CORRECTION_FORMS ("steady_response": comparison)
     dt_max: float = 1.0e-3                               # diffusion step [s]
     scheme: str = "trbdf2"
     sawtooth: str = "auto"                               # SAWTOOTH_MODES; "periodic" only as an explicit option
@@ -247,6 +290,8 @@ class SeriesSettings:
             raise ValueError("sawtooth_first_crash_phase must lie in (0, 1]")
         if self.layer_fpol not in LAYER_FPOL_MODES:
             raise ValueError(f"layer_fpol must be one of {LAYER_FPOL_MODES}")
+        if self.filter_correction not in FILTER_CORRECTION_FORMS:
+            raise ValueError(f"filter_correction must be one of {FILTER_CORRECTION_FORMS}")
         if self.filter_times is not None:
             if not self.filter:
                 raise ValueError("filter_times select the slices of the filter: they need filter=True")
@@ -388,16 +433,27 @@ def _slice_record(fm, res, sl, label, extra=None):
     """Distilled record of one solved slice (no measured values)."""
     ms = sl.measurements
     tab = rep = None
+    summ = None
     if ms is not None and res.converged:
         groups = [g for g in ("flux_loop", "bpol_probe", "ip", "pf_current", "mse") if g in ms.groups]
         tab = score(fm.gs, ms, groups=groups)
-        rep = chi2_report(tab)
+        # headline scores without the coils the source left free (reported apart), and the degrees of freedom with
+        # the coil solve's effective parameter count (forward.ForwardModel.inner_dof) on these channels
+        roles = {n: v.get("role") for n, v in (getattr(fm, "rows_record", {}) or {}).get("coils", {})
+                 .get("per_coil", {}).items()}
+        summ = _fit.headline_summary(tab, ms, roles)
+        excl = {}
+        if "pf_current" in tab.model:
+            grp = ms.groups["pf_current"]
+            names = [str(n) for n in grp.geometry.get("coil_names", grp.labels)]
+            excl["pf_current"] = np.array([roles.get(n, "free") == "free" for n in names], dtype=bool)
+        inner = fm.inner_dof_data(groups) if hasattr(fm, "inner_dof_data") else 0.0
+        rep = chi2_report(tab, inner_dof=inner, exclude=excl)
     asm = res.assembly
     st = res.solve.stats if res.solve is not None else {}
     lag = res.lag
     out = dict(label=label, time=sl.time, status=res.status, passes=res.passes, wall_s=res.wall_s,
-               chi2=None if tab is None else {k: dict(chi2=v[0], n=v[1], chi2_per_n=v[2])
-                                              for k, v in chi2_summary(tab).items()},
+               chi2=summ,
                chi2_report=rep, stats=st, q_check=res.record.get("q_check"), reason=res.record.get("reason"),
                pass_trace=[{k: p.get(k) for k in ("k", "dj", "q_max_rel", "solve_status", "its", "anderson_mixed",
                                                   "anderson_fallback", "d_axis_m")} for p in res.record.get("passes", [])],
@@ -538,8 +594,10 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
                                                         ip_fitted=bool(fitrec and "ip_rel" in fitrec["free"])))
     w0 = _sawtooth_warning(s, res0, float(times[0]), float(times[0]), [])
     if w0 is not None:
-        rec0["sawtooth_warning"] = w0
-        out.setdefault("warnings", []).append(dict(slice=0, time=float(times[0]), sawtooth=w0["text"]))
+        rec0["q_below_one"] = w0
+        if w0["warn"]:
+            rec0["sawtooth_warning"] = w0
+            out.setdefault("warnings", []).append(dict(slice=0, time=float(times[0]), sawtooth=w0["text"]))
     out["slices"].append(rec0)
     if callback:
         callback(rec0)
@@ -555,10 +613,16 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
         first_crash_phase=float(s.sawtooth_first_crash_phase), f=s.sawtooth_f,
         log_strength=ls_used, log_strength_source=ls_source)
     st0 = res0.assembly["state"]
-    carried = CurrentState(st0.rho_faces, st0.psi, st0.psi_boundary, times[0], dict(initial_mode=mode))
+    carried = CurrentState(st0.rho_faces, st0.psi, st0.psi_boundary, times[0], dict(initial_mode=mode, ip_A=ip_c0))
     out["slices"][-1]["carried_state"] = _state_record(carried)
     lag_prev = res0.lag
     jni_prev = _jni(lag_prev, sl0.kinetics, sl0.sources, params0)
+    # current corrections in the evolution (module docstring, "Fit interaction"): the source amplitudes held from the
+    # last absorbed filter fit (none at the start: the first slice's corrections are in its state)
+    in_window = s.filter_correction == "in_window"
+    n_corr = len(cfg.corr_centers_rho)
+    a_src = (0.0,) * n_corr
+    out["filter_correction"] = dict(form=s.filter_correction, rule=FILTER_CORRECTION_RULES[s.filter_correction])
     # Ip convention (module docstring, "Plasma current in a series"): the carried state's current is the first
     # slice's solved target, and the relative offset of the fitted from the measured Ip (0 without an Ip fit) is
     # carried forward: every later interval is driven from the carried current to the NEXT measured Ip times
@@ -583,22 +647,41 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
             roles = sl.meta.get("coil_roles") or (pf.meta.get("coil_roles") if pf is not None else None)
             if not roles:      # no roles stated for this slice: the previous slice's roles are kept (recorded)
                 roles = {n: v["role"] for n, v in fm.rows_record.get("coils", {}).get("per_coil", {}).items()}
-            fm.reconfigure(sl.measurements, sl.reference_boundary, coil_roles=roles, case_id=case.case_id)
+            fm.reconfigure(sl.measurements, sl.reference_boundary, coil_roles=roles, case_id=case.case_id,
+                           **_reference_points_kw(sl))
             fm.probe_correction = pc_prev.copy()
         fm.case = case
         ip0, ip1 = ip_carried, _slice_ip(sl) * (1.0 + ip_off)
         holder = {}
         p_pred = dict(log_strength=None, f=s.sawtooth_f,
                       s_bs=params0.get("s_bs", 1.0) if isinstance(params0, dict) else 1.0, ip_rel=ip_off)
+        shapes_prev = {}
 
-        def state_fn(lag, sl=sl, t1=t1, tp=tp, ip0=ip0, ip1=ip1, carried=carried, lag_prev=lag_prev,
-                     jni_prev=jni_prev, holder=holder):
+        def state_fn(lag, params=None, sl=sl, t1=t1, tp=tp, ip0=ip0, ip1=ip1, carried=carried, lag_prev=lag_prev,
+                     jni_prev=jni_prev, holder=holder, a_src=a_src, shapes_prev=shapes_prev):
             jni1 = _jni(lag, sl.kinetics, sl.sources, p_pred)
-            sol, info = interval_solver(lag_prev, lag, jni_prev, jni1, tp, t1, ip0, ip1, s.layer_fpol)
+            j0, j1, amps, inc = jni_prev, jni1, None, None
+            if in_window:
+                # the corrections as a non-inductive source over this interval: the held amplitudes plus the
+                # increments of the parameters (a fit's free a_corr; zero for a prediction), on each end's geometry
+                inc = (tuple(float(v) for v in _cm.full_params(params)["a_corr"]) if params is not None
+                       else (0.0,) * n_corr)
+                amps = tuple(a + b for a, b in zip(a_src, inc))
+                if any(a != 0.0 for a in amps):
+                    if "g" not in shapes_prev:
+                        shapes_prev["g"] = _cm.correction_shapes(lag_prev, cfg, ip0)
+                    g1 = _cm.correction_shapes(lag, cfg, ip1)
+                    j0 = jni_prev + sum(a * g for a, g in zip(amps, shapes_prev["g"]))
+                    j1 = jni1 + sum(a * g for a, g in zip(amps, g1))
+            sol, info = interval_solver(lag_prev, lag, j0, j1, tp, t1, ip0, ip1, s.layer_fpol)
             end, events, states = advance_interval(sol, carried, t1, s, crash, s.dt_max)
             holder.clear()
             end.meta["ip_A"] = float(ip1)
-            holder.update(end=end, events=events, states=states, info=info, jni1=jni1, window_average=False)
+            end.meta["current_scale"] = None          # this interval made no rescale
+            if in_window:
+                end.meta.update(correction_source=amps, correction_increment=inc)
+            holder.update(end=end, events=events, states=states, info=info, jni1=jni1, window_average=False,
+                          amps=amps)
             use = end
             if events:
                 # sawtooth effect over the interval (the measurement window): the interval average WITH the
@@ -608,31 +691,49 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
                 end0, _, states0 = advance_interval(sol, carried, t1, s, np.zeros(0), s.dt_max)
                 aw = _window_state(states, tp, t1, end.rho_faces)
                 a0 = _window_state(states0, tp, t1, end.rho_faces)
+                meta = dict(sawtooth_window=[tp, t1], ip_A=float(ip1))
+                if in_window:
+                    meta.update(correction_source=amps, correction_increment=inc)
                 use = CurrentState(end.rho_faces, end0.psi + aw.psi - a0.psi,
-                                   end0.psi_boundary + aw.psi_boundary - a0.psi_boundary, t1,
-                                   dict(sawtooth_window=[tp, t1], ip_A=float(ip1)))
+                                   end0.psi_boundary + aw.psi_boundary - a0.psi_boundary, t1, meta)
                 holder["window_average"] = bool(any(e.record.active for e in events))
             return use
 
+        state_fn.corrections_in_window = in_window
         res = _cm.consistent_solve(fm, sl.kinetics, sl.sources, p_pred, cfg, label=f"{sl.label}:evolve",
                                    state_fn=state_fn)
         filt = None
         if res.converged and s.filter_at(t1):
             filt, res = _filter_slice(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1)
+        crash_rec = [dict(time=e.time, active=bool(e.record.active), rho_mix=getattr(e.record, "rho_mix", None),
+                          dpsi_max=getattr(e.record, "dpsi_max", None)) for e in holder.get("events", [])]
         extra = dict(n_solves=fm.n_solves - nk, interval=dict(holder.get("info", {}), start_s=float(tp), end_s=float(t1),
                                                               ip_start_A=float(ip0), ip_end_A=float(ip1),
-                                                              ip_offset_used=ip_off),
+                                                              ip_offset_used=ip_off,
+                                                              correction_source=(list(holder["amps"])
+                                                                                 if holder.get("amps") is not None
+                                                                                 else None)),
                      ip_fitted=bool(filt and filt.get("absorbed") and "ip_rel" in (filt.get("free") or [])),
-                     crashes=[dict(time=e.time, active=bool(e.record.active),
-                                   rho_mix=getattr(e.record, "rho_mix", None),
-                                   dpsi_max=getattr(e.record, "dpsi_max", None)) for e in holder.get("events", [])],
+                     crashes=crash_rec if res.converged else [],
                      window_average=holder.get("window_average", False), filter=filt, vacuum_F0=f0rec,
                      wall_total_s=round(time.perf_counter() - tk0, 2))
+        if not res.converged and crash_rec:
+            # the crashes of the failed slice's last attempt were never applied to a carried state
+            extra["crashes_of_failed_attempt"] = crash_rec
+            extra["crashes_note"] = ("slice not consistent: the crashes of its last attempt were not applied; the next "
+                                     "interval starts from the last consistent state")
         if res.converged:
             extra["carried_state"] = _state_record(holder["end"])
+            extra["scored_vs_carried_state"] = dict(
+                zip(("max_dpsi_rel", "dpsi_boundary"), _psi_shape_diff(holder["end"], res.assembly["state"])),
+                same_state=bool(not holder.get("window_average", False)),
+                note=("the scored state is the carried end state" if not holder.get("window_average", False) else
+                      "an active crash in the interval: the scored state is the crash-free end state plus the "
+                      "interval's sawtooth effect; the carried state is the instantaneous end state"))
         # what the next interval starts from (taken before the callback, which may use the solver)
         nxt = dict(carried=holder.get("end"), jni1=holder.get("jni1"), ip=float(holder.get("ip_end", ip1)),
-                   ip_off=float(holder.get("ip_offset_end", ip_off)))
+                   ip_off=float(holder.get("ip_offset_end", ip_off)),
+                   a_src=(tuple(holder["amps"]) if holder.get("amps") is not None else a_src))
         if res.converged:
             extra.update(ip_carried_A=nxt["ip"], ip_offset_carried=nxt["ip_off"])
         else:
@@ -643,8 +744,10 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
         rec = _slice_record(fm, res, sl, sl.label, extra)
         w = _sawtooth_warning(s, res, float(tp), float(t1), holder.get("events", []))
         if w is not None:
-            rec["sawtooth_warning"] = w
-            out.setdefault("warnings", []).append(dict(slice=k, time=float(t1), sawtooth=w["text"]))
+            rec["q_below_one"] = w
+            if w["warn"]:
+                rec["sawtooth_warning"] = w
+                out.setdefault("warnings", []).append(dict(slice=k, time=float(t1), sawtooth=w["text"]))
         out["slices"].append(rec)
         if callback:
             callback(rec)
@@ -655,10 +758,12 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
             continue
         carried = nxt["carried"]
         ip_carried, ip_off = nxt["ip"], nxt["ip_off"]
+        a_src = nxt["a_src"]
         lag_prev = res.lag
         jni_prev = nxt["jni1"]
         snap_prev = fm.snapshot()
         pc_prev = fm.probe_correction.copy()
+    out["boundary_displacement"] = boundary_displacement_history(out["slices"])
     out.update(status=status, n_solves=fm.n_solves - n_solves0, wall_s=round(time.perf_counter() - t_all, 2))
     return out
 
@@ -688,6 +793,12 @@ def check_zeff_series(slices, source=None, schedule=None):
                      source=d.get("source")) for d in schedule]
         if any(not d["end"] > d["start"] for d in decl):
             raise ValueError("Z_eff schedule: every interval needs end > start")
+        srt = sorted(decl, key=lambda d: d["start"])
+        over = [(a, b) for a, b in zip(srt[:-1], srt[1:]) if b["start"] < a["end"]]
+        if over:
+            raise ValueError("Z_eff schedule: intervals overlap ("
+                             + "; ".join(f"[{a['start']}, {a['end']}) and [{b['start']}, {b['end']})" for a, b in over)
+                             + "): every slice must lie in exactly one declared interval")
         out = dict(applied=True, schedule=decl, intervals=[], failing_slices=[], unverified_slices=[],
                    note="NON-DEFAULT: Z_eff sources declared by interval; the one-source check applied within each")
         for d in decl:
@@ -738,34 +849,80 @@ def check_zeff_series(slices, source=None, schedule=None):
 
 
 def _sawtooth_warning(s, res, t0, t1, events):
-    """The recorded warning of the default sawtooth handling (module docstring): the slice's solved q falls below
-    1 and no crash was applied -- because there is no crash record (``sawtooth="off"``, kind ``no_record``), the
-    record's detection did not cover the interval or its coverage was not stated (``not_covered``), or the record
-    covers the interval and shows no crash (``covered_no_crash``: a model-data inconsistency).  None otherwise.
-    A record only."""
+    """The q < 1 record of the default sawtooth handling (module docstring), or None when the slice's solved q
+    stays >= 1 or a crash acted in the interval.  ``warn`` says whether it is a WARNING (listed in the series'
+    ``warnings``); ``kind``:
+
+    * ``no_record`` (warning): no crash record, no crashes applied (``sawtooth="off"``);
+    * ``not_covered`` (warning): the record's detection did not cover the interval (or since the last recorded
+      crash), or its coverage was not stated;
+    * ``crash_recorded_not_active`` (warning): a crash was recorded in the interval but the operator acted as the
+      identity (the evolved q >= 1 at its time) and q < 1 at the slice -- the model's q fell below 1 later than
+      the measured crash;
+    * ``covered_no_crash`` (warning, a model-data inconsistency): the record covers the time since the last
+      recorded crash (or since its start, when no crash was recorded yet) and that crash-free stretch is longer
+      than the longest interval between consecutive recorded crashes over covered time (or fewer than two
+      crashes are recorded, so no crash spacing is measured);
+    * ``between_crashes`` (no warning): q < 1 within the measured crash spacing since the last recorded crash --
+      normal between sawtooth crashes.
+
+    The record holds ``q_min``, the gap since the last recorded crash and the longest recorded interval used."""
     if not res.converged or res.lag is None or s.sawtooth == "periodic":
         return None
     q = np.abs(np.asarray(res.lag["phys"]["q"], float))
     qmin = float(np.min(q[np.isfinite(q)])) if np.any(np.isfinite(q)) else None
     if qmin is None or qmin >= 1.0 or any(bool(e.record.active) for e in events):
         return None
+    rec = dict(q_min=qmin, interval=[t0, t1])
+    tab = s.crash_table
     if s.sawtooth == "off":
-        why = "no crash record: no crashes applied (sawtooth off)"
+        kind, why = "no_record", "no crash record: no crashes applied (sawtooth off)"
+    elif events:
+        kind = "crash_recorded_not_active"
+        why = (f"a crash was recorded in this interval (t = {', '.join(f'{e.time:.4f}' for e in events)} s) but the "
+               "operator acted as the identity (the evolved q >= 1 at its time): the model's q fell below 1 later "
+               "than the measured crash")
     else:
-        cov = s.crash_table.covered(t0, t1) if s.crash_table is not None else None
-        if cov is True:
-            why = ("the crash record covers this interval and shows no crash: model-data inconsistency (the evolved "
-                   "q < 1 where no sawtooth was observed)")
-        else:
-            why = ("the crash record's detection did not cover this interval: no crashes applied" if cov is False else
+        cov = tab.covered(t0, t1) if tab is not None else None
+        ct = np.asarray(s.crash_times if s.crash_times is not None else (), float)
+        last = ct[ct <= t1]
+        t_ref = float(last[-1]) if last.size else (tab.record_start if tab is not None else None)
+        cov_gap = (tab.covered(t_ref, t1) if (tab is not None and t_ref is not None) else None)
+        longest = None
+        if tab is not None and ct.size >= 2:
+            iv = [float(b - a) for a, b in zip(ct[:-1], ct[1:]) if tab.covered(float(a), float(b)) is True]
+            longest = max(iv) if iv else None
+        gap = None if t_ref is None else float(t1 - t_ref)
+        rec.update(last_recorded_crash=(float(last[-1]) if last.size else None), gap_since_last_crash_s=gap,
+                   longest_recorded_interval_s=longest)
+        if cov is not True or cov_gap is not True:
+            kind = "not_covered"
+            why = ("the crash record's detection did not cover this interval (or the time since the last recorded "
+                   "crash): no crashes applied" if (cov is False or cov_gap is False) else
                    "no measured crash in this interval and the record's coverage was not stated")
-    import warnings
+        elif not last.size:
+            kind = "covered_no_crash"
+            why = ("the crash record covers the time since its start and shows no crash at all: model-data "
+                   "inconsistency (the evolved q < 1 where no sawtooth was observed)")
+        elif longest is None:
+            kind = "covered_no_crash"
+            why = (f"no crash recorded for {gap:.4f} s and fewer than two crashes over covered time (no measured "
+                   "crash spacing): model-data inconsistency (the evolved q < 1 where no sawtooth was observed)")
+        elif gap > longest:
+            kind = "covered_no_crash"
+            why = (f"no crash recorded for {gap:.4f} s, longer than the longest recorded interval between crashes "
+                   f"({longest:.4f} s): model-data inconsistency (the evolved q < 1 where no sawtooth was observed)")
+        else:
+            kind = "between_crashes"
+            why = (f"q < 1 {gap:.4f} s after the last recorded crash, within the longest recorded interval between "
+                   f"crashes ({longest:.4f} s): normal between sawtooth crashes (no warning)")
+    warn = kind != "between_crashes"
     text = f"evolved q_min = {qmin:.3f} < 1 at t = {t1:.4f} s; {why}"
-    warnings.warn(text, RuntimeWarning, stacklevel=3)
-    kind = ("no_record" if s.sawtooth == "off" else
-            ("covered_no_crash" if (s.crash_table is not None and s.crash_table.covered(t0, t1) is True)
-             else "not_covered"))
-    return dict(q_min=qmin, interval=[t0, t1], text=text, kind=kind)
+    if warn:
+        import warnings
+        warnings.warn(text, RuntimeWarning, stacklevel=3)
+    rec.update(text=text, kind=kind, warn=warn)
+    return rec
 
 
 #: Relaxed-start applicability guard (warning only): reference q_min and non-inductive fraction limits.
@@ -817,12 +974,16 @@ def _measured_crash_start(s, cfg, times):
         raise ValueError(f"measured crash times cannot start the series at its first slice: {exc}") from exc
     n_hist = int(np.count_nonzero((np.asarray(s.crash_times, float) > sched.t_start)
                                   & (np.asarray(s.crash_times, float) <= window[1])))
+    # the record must have OBSERVED the whole history, whatever the number of crashes recorded in it: 'no crash
+    # recorded' is not 'no crash', and 'fewer crashes recorded' is not 'fewer crashes' (the starting crash rate is
+    # set from the recorded ones)
+    if s.crash_table is not None and s.crash_table.covered(sched.t_start, window[1]) is not True:
+        raise ValueError(f"measured crash times cannot start the series: {n_hist} crash(es) recorded in the history "
+                         f"[{sched.t_start}, {window[1]}], but the crash record did not observe all of it (unobserved "
+                         "interval or coverage not stated): 'no crash recorded' is not 'no crash', and a crash count "
+                         "over unobserved time is not a measured crash rate")
     if n_hist == 0:
-        # no crash RECORDED in the history: crash-free only where the record says the core was observed
-        if s.crash_table is not None and s.crash_table.covered(sched.t_start, window[1]) is not True:
-            raise ValueError(f"measured crash times cannot start the series: no crash recorded in the history "
-                             f"[{sched.t_start}, {window[1]}], but the crash record did not observe all of it "
-                             "(unobserved interval or coverage not stated): 'no crash recorded' is not 'no crash'")
+        # no crash RECORDED in the covered history
         # the record covers the history (checked above) and holds no crash in it: the first slice is crash-free
         rec = dict(window=list(window), history_s=cfg.history, record_start=s.crash_record_start, n_crashes_history=0,
                    note="no measured crash in the covered history before the first slice: the first slice is the "
@@ -897,9 +1058,31 @@ def _filter_slice(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1):
     ip_meas = _slice_ip(sl)
     off_new = float(fr.params.get("ip_rel", 0.0) or 0.0)
     ip_fit = ip_meas * (1.0 + off_new)
-    use_c = state_fn(res.lag)
     ac = fr.params["a_corr"]
     k_ip = ip_fit / float(ip1)
+    asm_st = res.assembly["state"]
+    if s.filter_correction == "in_window":
+        # the corrections acted as a source over the interval: re-advancing with the center's parameters (the same
+        # function the fit evaluated, fit._scaled_state_fn) gives the state the center scored; its instantaneous
+        # end state is carried, and the source amplitudes are held for the next interval
+        use_c = _fit._scaled_state_fn(state_fn, fr.params, ip_meas)(res.lag)
+        if k_ip != 1.0:
+            holder["end"] = _cm.scale_state(holder["end"], k_ip)
+        holder["ip_end"] = ip_fit
+        holder["ip_offset_end"] = off_new
+        e = holder["end"]
+        holder["end"] = CurrentState(e.rho_faces, e.psi, e.psi_boundary, e.time,
+                                     dict(e.meta, filter_corrections_absorbed=list(ac)))
+        filt.update(absorbed=True,
+                    carried_from=("state re-advanced on the accepted center's equilibrium with the corrections as a "
+                                  "source over the interval (in-window); the source amplitudes are held"),
+                    correction_increments=list(ac), correction_source=list(holder.get("amps") or ()),
+                    center_state_check=dict(zip(("max_dpsi_rel", "dpsi_boundary"), _psi_shape_diff(use_c, asm_st))),
+                    last_solve_state_vs_center=(dict(zip(("max_dpsi_rel", "dpsi_boundary"),
+                                                         _psi_shape_diff(stale, holder["end"])))
+                                                if stale is not None else None))
+        return filt, res
+    use_c = state_fn(res.lag)
     if k_ip != 1.0:
         use_c = _cm.scale_state(use_c, k_ip)
         holder["end"] = _cm.scale_state(holder["end"], k_ip)
@@ -914,15 +1097,50 @@ def _filter_slice(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1):
                                  dict(e.meta, filter_corrections_absorbed=list(ac)))
     # checks (recorded): the re-advanced, corrected state is the center's own assembly state, and the size
     # of the difference to the state of the fit's last solve (which is not carried)
-    asm_st = res.assembly["state"]
     chk = CurrentState(e.rho_faces, use_c.psi + dpsi, use_c.psi_boundary + dpb, e.time)
     filt.update(absorbed=True,
-                carried_from="state re-advanced on the accepted center's equilibrium, plus the corrections' steady "
-                             "response",
+                carried_from="COMPARISON OPTION: state re-advanced on the accepted center's equilibrium, plus the "
+                             "corrections' steady response",
                 center_state_check=dict(zip(("max_dpsi_rel", "dpsi_boundary"), _psi_shape_diff(chk, asm_st))),
                 last_solve_state_vs_center=(dict(zip(("max_dpsi_rel", "dpsi_boundary"), _psi_shape_diff(stale, e)))
                                             if stale is not None else None))
     return filt, res
+
+
+def _reference_points_kw(sl):
+    """``reference_points`` of a slice (``sl.meta["reference_points"]``) for :meth:`.forward.ForwardModel.reconfigure`
+    (records only); empty when the slice gives none."""
+    rp = (sl.meta or {}).get("reference_points")
+    return {} if rp is None else dict(reference_points=rp)
+
+
+#: Boundary-displacement quantities summarized over a series (mm; :meth:`.forward.ForwardModel.boundary_displacement`).
+BOUNDARY_SUMMARY_KEYS = ("rms", "max", "mean", "outboard_midplane", "inboard_midplane")
+
+
+def boundary_displacement_history(slice_records):
+    """Per-slice history of the boundary displacement from the anchor boundary (mm) and its summary statistics over
+    the slices that have one (median, mean, max |.|, n; also for each X-point and strike point by name)."""
+    hist = []
+    for r in slice_records:
+        d = (r.get("boundary") or {}).get("displacement_mm") if isinstance(r, dict) else None
+        if not d or "error" in d:
+            continue
+        h = dict(time=r.get("time"), **{k: d.get(k) for k in BOUNDARY_SUMMARY_KEYS})
+        for x in d.get("x_points") or []:
+            h[f"x_point_{x['position']}"] = x.get("distance")
+        for name, v in (d.get("strike_points") or {}).items():
+            h[f"strike_{name}"] = v.get("distance")
+        hist.append(h)
+    keys = sorted({k for h in hist for k in h if k != "time"})
+    summ = {}
+    for k in keys:
+        v = np.array([h[k] for h in hist if h.get(k) is not None and np.isfinite(h[k])], float)
+        if v.size:
+            summ[k] = dict(median=float(np.median(v)), mean=float(np.mean(v)), max_abs=float(np.max(np.abs(v))),
+                           n=int(v.size))
+    return dict(units="mm", history=hist, summary=summ,
+                note="displacement of the achieved boundary from the anchor (reference) boundary per consistent slice")
 
 
 def _given_state(lag, s, cfg, ip):

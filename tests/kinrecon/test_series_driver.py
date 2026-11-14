@@ -2,11 +2,14 @@
 (no OFT): analytic separatrix-like geometry (as ``test_coordinates_kinetics_series.py``), a mocked
 forward model whose "equilibrium" is one of a few known geometries, and a mocked fit.
 
-* Filter mode carries the state of the ACCEPTED center: the mocked filter fit advances the state on
-  several perturbed geometries (Jacobian columns, a trial) after reaching its center, so the last
-  state the fit computed is not the center's.  The carried state must equal the state advanced from
-  the previous slice on the center's geometry plus the corrections' steady response, computed here
-  directly with the interval solver (exact to round-off: same operations, same inputs).
+* Filter mode carries the state of the ACCEPTED center: the mocked filter fit evaluates its states the
+  way the fit does (``fit._scaled_state_fn``) and advances the state on several perturbed geometries
+  (Jacobian columns, a trial) after reaching its center, so the last state the fit computed is not the
+  center's.  The carried state must equal the state advanced from the previous slice on the center's
+  geometry with the corrections as a source over the interval (in-window form; held amplitudes plus the
+  fit's increments), computed here directly with the interval solver (exact to round-off: same
+  operations, same inputs), and it is the state the slice scored; the comparison option
+  ``filter_correction="steady_response"`` adds the corrections' steady response instead.
 * Filter mode absorbs only a converged fit: for every other status the slice keeps its evolved,
   unfitted equilibrium (the solver is restored to it) and state, and the record says
   ``absorbed: False``.
@@ -146,25 +149,32 @@ def _steady(lag, ip, n=100):
 CENTER_A = (0.01, -0.02, 0.015)
 
 
-def _fake_reconstruct(status, lags, center_key="center", after=("col0", "col1", "trial")):
+def _fake_reconstruct(status, lags, center_key="center", after=("col0", "col1", "trial"), extra_params=None):
     """A filter fit that reaches its center on ``lags[center_key]`` and then advances the state on the
-    geometries ``after`` (as the fit's Jacobian columns / trials do), leaving the solver at the last one."""
+    geometries ``after`` (as the fit's Jacobian columns / trials do), leaving the solver at the last one.
+    States are evaluated as the fit evaluates them (``fit._scaled_state_fn`` with the parameters); with a
+    state function that does not take the corrections in-window, the assembly's steady response is added
+    (as ``current_model.assemble`` does)."""
     calls = []
 
     def reconstruct(fm, kin, src, cfg, settings, params0=None, start=None, label="", state_fn=None, **kw):
-        names = [f"a_corr_{k}" for k in range(3)]
+        names = [f"a_corr_{k}" for k in range(3)] + sorted(extra_params or {})
         lag_c = lags[center_key]
-        st_c = state_fn(lag_c)
-        shapes = CM.correction_shapes(lag_c, cfg, fm.ip_measured)
-        dpsi, dpb = CM.correction_response(lag_c, shapes, CENTER_A, st_c.rho_faces)
-        asm_state = CurrentState(st_c.rho_faces, st_c.psi + dpsi, st_c.psi_boundary + dpb, st_c.time)
+        p = dict(a_corr=CENTER_A, **(extra_params or {}))
+        st_c = SE._fit._scaled_state_fn(state_fn, p, fm.ip_measured)(lag_c)
+        if getattr(state_fn, "corrections_in_window", False):
+            asm_state = st_c
+        else:
+            shapes = CM.correction_shapes(lag_c, cfg, fm.ip_measured)
+            dpsi, dpb = CM.correction_response(lag_c, shapes, CENTER_A, st_c.rho_faces)
+            asm_state = CurrentState(st_c.rho_faces, st_c.psi + dpsi, st_c.psi_boundary + dpb, st_c.time)
         center = dict(res=_result(lag_c, asm_state), snap=dict(key=center_key), probe_correction=np.zeros(0))
         for k in after:
-            state_fn(lags[k])
+            SE._fit._scaled_state_fn(state_fn, dict(a_corr=tuple(0.5 * a for a in CENTER_A)), fm.ip_measured)(lags[k])
             fm.key = k
         calls.append(label)
         return SimpleNamespace(status=status, theta=np.array(CENTER_A), sigma=np.full(3, 0.01), free=names,
-                               params=dict(a_corr=CENTER_A), chi2={},
+                               params=dict(p), chi2={},
                                record=dict(center=None if status in ("failed_initial_consistency",) else center,
                                            specs={n: dict(prior=(0.0, 0.02)) for n in names}, n_solves=7,
                                            wall_s=0.0, final_stopping_tests=None,
@@ -174,9 +184,10 @@ def _fake_reconstruct(status, lags, center_key="center", after=("col0", "col1", 
     return reconstruct
 
 
-def _filter_setup(monkeypatch, status):
-    lags = dict(pred=_lag(), center=_lag(sigma_scale=1.3), col0=_lag(sigma_scale=0.7), col1=_lag(sigma_scale=1.6),
-                trial=_lag(sigma_scale=0.5))
+def _filter_setup(monkeypatch, status, form="in_window", noninductive=False):
+    mk = _lag_ni if noninductive else _lag
+    lags = dict(pred=mk(), center=mk(sigma_scale=1.3), col0=mk(sigma_scale=0.7), col1=mk(sigma_scale=1.6),
+                trial=mk(sigma_scale=0.5))
     fm = FakeFM(lags)
     st0 = _steady(lags["pred"], IP0)
     _install(monkeypatch, fm, st0, lambda f: f.lags[f.key])
@@ -185,13 +196,25 @@ def _filter_setup(monkeypatch, status):
     cfg = CM.CurrentModelSettings(r0=GEO.R0)
     seen = []
     out = SE.run_series(fm, _slices([0.0, 0.02, 0.04], [IP0, 1.01 * IP0, 1.02 * IP0]), cfg,
-                        SE.SeriesSettings(initial="relaxed", sawtooth="off", filter=True),
+                        SE.SeriesSettings(initial="relaxed", sawtooth="off", filter=True, filter_correction=form),
                         callback=lambda r: seen.append(fm.key))
     return out, lags, cfg, seen
 
 
-def _advance(lag_prev, lag, carried, t0, t1, ip0, ip1):
-    sol, _ = SE.interval_solver(lag_prev, lag, lag_prev["jbs"], lag["jbs"], t0, t1, ip0, ip1)
+def _lag_ni(sigma_scale=1.0, q0=1.1):
+    """The analytic geometry WITH its non-inductive (edge bootstrap-like) current kept."""
+    return GEO._lag(q0=q0, sigma_scale=sigma_scale)
+
+
+def _advance(lag_prev, lag, carried, t0, t1, ip0, ip1, amps=None, cfg=None):
+    """The interval advance, with the corrections ``amps`` as a source over it (in-window form) when given."""
+    j0, j1 = lag_prev["jbs"], lag["jbs"]
+    if amps is not None and any(a != 0.0 for a in amps):
+        g0 = CM.correction_shapes(lag_prev, cfg, ip0)
+        g1 = CM.correction_shapes(lag, cfg, ip1)
+        j0 = j0 + sum(a * g for a, g in zip(amps, g0))
+        j1 = j1 + sum(a * g for a, g in zip(amps, g1))
+    sol, _ = SE.interval_solver(lag_prev, lag, j0, j1, t0, t1, ip0, ip1)
     return sol.advance(carried, t1, dt=SE.SeriesSettings().dt_max, scheme="trbdf2")
 
 
@@ -199,14 +222,53 @@ def _state(d):
     return CurrentState(np.asarray(d["rho_faces"]), np.asarray(d["psi"]), d["psi_boundary"], d["time"])
 
 
-def test_filter_carries_the_accepted_centers_state(monkeypatch):
-    out, lags, cfg, seen = _filter_setup(monkeypatch, "converged")
+@pytest.mark.parametrize("noninductive", [False, True])
+def test_filter_carries_the_accepted_centers_state(monkeypatch, noninductive):
+    out, lags, cfg, seen = _filter_setup(monkeypatch, "converged", noninductive=noninductive)
     assert out["status"] == "completed"
+    assert out["filter_correction"]["form"] == "in_window"
     s1 = out["slices"][1]
     f = s1["filter"]
     assert f["status"] == "converged" and f["absorbed"] is True
     # expected: carried state of slice 0 advanced over [0, 0.02] between slice 0's geometry (pred) and the
-    # center's geometry, plus the corrections' steady response on the center's geometry
+    # center's geometry with the corrections as a source over the interval (held 0 + the fit's increments)
+    c0 = _state(out["slices"][0]["carried_state"])
+    e = _advance(lags["pred"], lags["center"], c0, 0.0, 0.02, IP0, 1.01 * IP0, amps=CENTER_A, cfg=cfg)
+    got = _state(s1["carried_state"])
+    span = np.ptp(e.psi)
+    assert np.max(np.abs(got.psi - e.psi)) <= 1e-12 * span
+    assert abs(got.psi_boundary - e.psi_boundary) <= 1e-12 * span
+    assert s1["interval"]["correction_source"] == list(CENTER_A)
+    assert f["correction_increments"] == list(CENTER_A) and f["correction_source"] == list(CENTER_A)
+    # the slice is self-consistent: the state it scored (the center's assembly state) is the carried state
+    scored = _state(dict(s1["state_psi"], time=0.02))
+    assert np.max(np.abs(scored.psi - got.psi)) <= 1e-12 * span and abs(scored.psi_boundary - got.psi_boundary) <= \
+        1e-12 * span
+    assert s1["scored_vs_carried_state"]["max_dpsi_rel"] <= 1e-12 and s1["scored_vs_carried_state"]["same_state"]
+    # the state of the fit's last solve (the "trial" geometry) is measurably different: the check above
+    # would fail if that state were carried
+    last = _advance(lags["pred"], lags["trial"], c0, 0.0, 0.02, IP0, 1.01 * IP0, amps=CENTER_A, cfg=cfg)
+    assert np.max(np.abs((last.psi - last.psi[0]) - (e.psi - e.psi[0]))) > 1e-6 * span
+    assert f["last_solve_state_vs_center"]["max_dpsi_rel"] > 1e-6
+    assert f["center_state_check"]["max_dpsi_rel"] <= 1e-12
+    # the solver holds the center's equilibrium when the slice is recorded, and the next interval starts from it
+    assert seen[1] == "center"
+    # slice 2: the absorbed amplitudes are held as the source and the second fit adds its increments
+    s2 = out["slices"][2]
+    assert s2["filter"]["absorbed"] is True
+    a2 = tuple(2.0 * a for a in CENTER_A)
+    e2 = _advance(lags["center"], lags["center"], got, 0.02, 0.04, 1.01 * IP0, 1.02 * IP0, amps=a2, cfg=cfg)
+    got2 = _state(s2["carried_state"])
+    assert np.max(np.abs(got2.psi - e2.psi)) <= 1e-12 * np.ptp(e2.psi)
+    assert s2["interval"]["correction_source"] == pytest.approx(list(a2), rel=1e-15)
+
+
+def test_filter_steady_response_comparison_option(monkeypatch):
+    """The earlier treatment, kept as an option: the absorbed state is the evolved state plus the corrections'
+    steady response, and nothing is held as a source."""
+    out, lags, cfg, seen = _filter_setup(monkeypatch, "converged", form="steady_response")
+    assert out["filter_correction"]["form"] == "steady_response"
+    s1 = out["slices"][1]
     c0 = _state(out["slices"][0]["carried_state"])
     e = _advance(lags["pred"], lags["center"], c0, 0.0, 0.02, IP0, 1.01 * IP0)
     shapes = CM.correction_shapes(lags["center"], cfg, 1.01 * IP0)
@@ -215,21 +277,16 @@ def test_filter_carries_the_accepted_centers_state(monkeypatch):
     span = np.ptp(e.psi + dpsi)
     assert np.max(np.abs(got.psi - (e.psi + dpsi))) <= 1e-12 * span
     assert abs(got.psi_boundary - (e.psi_boundary + dpb)) <= 1e-12 * span
-    # the state of the fit's last solve (the "trial" geometry) is measurably different: the check above
-    # would fail if that state were carried
-    last = _advance(lags["pred"], lags["trial"], c0, 0.0, 0.02, IP0, 1.01 * IP0)
-    assert np.max(np.abs((last.psi - last.psi[0]) - (e.psi - e.psi[0]))) > 1e-6 * span
-    assert f["last_solve_state_vs_center"]["max_dpsi_rel"] > 1e-6
-    assert f["center_state_check"]["max_dpsi_rel"] <= 1e-12
-    # the solver holds the center's equilibrium when the slice is recorded, and the next interval starts from it
-    assert seen[1] == "center"
+    assert s1["filter"]["center_state_check"]["max_dpsi_rel"] <= 1e-12
+    assert s1["interval"]["correction_source"] is None
     s2 = out["slices"][2]
-    assert s2["filter"]["absorbed"] is True
     e2 = _advance(lags["center"], lags["center"], got, 0.02, 0.04, 1.01 * IP0, 1.02 * IP0)
     sh2 = CM.correction_shapes(lags["center"], cfg, 1.02 * IP0)
     d2, b2 = CM.correction_response(lags["center"], sh2, CENTER_A, e2.rho_faces)
     got2 = _state(s2["carried_state"])
     assert np.max(np.abs(got2.psi - (e2.psi + d2))) <= 1e-12 * np.ptp(e2.psi + d2)
+    with pytest.raises(ValueError, match="filter_correction"):
+        SE.SeriesSettings(filter_correction="decay")
 
 
 def test_filter_times_fit_only_at_the_anchor_slices(monkeypatch):
@@ -292,6 +349,9 @@ def test_filter_absorbs_only_converged_fits(monkeypatch, status):
     got = _state(out["slices"][1]["carried_state"])
     assert np.max(np.abs(got.psi - e.psi)) <= 1e-12 * np.ptp(e.psi)
     assert got.psi_boundary == pytest.approx(e.psi_boundary, abs=1e-12 * np.ptp(e.psi))
+    # no rescale happened on these slices: no current scale is recorded; the first carried state records its current
+    assert all(s_["carried_state"]["current_scale"] is None for s_ in out["slices"][1:])
+    assert out["slices"][0]["carried_state"]["ip_A"] == pytest.approx(IP0, rel=1e-12)
 
 
 def test_filter_absorbs_a_within_noise_fit_with_its_label(monkeypatch):
@@ -313,27 +373,21 @@ def test_filter_with_a_fitted_ip_carries_the_state_at_the_fitted_current(monkeyp
     fm = FakeFM(lags)
     _install(monkeypatch, fm, _steady(lags["pred"], IP0), lambda f: f.lags[f.key])
     k_ip = 1.004
-    base = _fake_reconstruct("converged", lags)
-
-    def rec(*a, **kw):
-        out = base(*a, **kw)
-        out.free = list(out.free) + ["ip_rel"]
-        out.params = dict(out.params, ip_rel=k_ip - 1.0)
-        return out
-
-    monkeypatch.setattr(SE._fit, "reconstruct", rec)
+    monkeypatch.setattr(SE._fit, "reconstruct", _fake_reconstruct("converged", lags, extra_params=dict(ip_rel=k_ip - 1.0)))
     cfg = CM.CurrentModelSettings(r0=GEO.R0)
     out = SE.run_series(fm, _slices([0.0, 0.02, 0.04], [IP0, 1.01 * IP0, 1.02 * IP0]), cfg,
                         SE.SeriesSettings(initial="relaxed", sawtooth="off", filter=True))
     s1 = out["slices"][1]
     c0 = _state(out["slices"][0]["carried_state"])
-    e = CM.scale_state(_advance(lags["pred"], lags["center"], c0, 0.0, 0.02, IP0, 1.01 * IP0), k_ip)
-    shapes = CM.correction_shapes(lags["center"], cfg, 1.01 * IP0 * k_ip)
-    dpsi, dpb = CM.correction_response(lags["center"], shapes, CENTER_A, e.rho_faces)
+    e = CM.scale_state(_advance(lags["pred"], lags["center"], c0, 0.0, 0.02, IP0, 1.01 * IP0, amps=CENTER_A, cfg=cfg),
+                       k_ip)
     got = _state(s1["carried_state"])
-    assert np.max(np.abs(got.psi - (e.psi + dpsi))) <= 1e-12 * np.ptp(e.psi + dpsi)
+    assert np.max(np.abs(got.psi - e.psi)) <= 1e-12 * np.ptp(e.psi)
     assert s1["ip_carried_A"] == pytest.approx(1.01 * IP0 * k_ip, rel=1e-14)
     assert s1["filter"]["absorbed"] is True
+    assert s1["carried_state"]["current_scale"] == pytest.approx(k_ip, rel=1e-14)
+    scored = np.asarray(s1["state_psi"]["psi"])
+    assert np.max(np.abs(scored - got.psi)) <= 1e-12 * np.ptp(e.psi)
 
 
 def _ip_offset_series(monkeypatch, ip_rel, ip_meas, n, filt=True, sigma_scale=1.0):

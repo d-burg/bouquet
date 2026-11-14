@@ -92,14 +92,14 @@ def test_crash_table_coverage_gap_is_recorded(monkeypatch):
     lag = SD._lag(q0=0.9)
     fm = SD.FakeFM(dict(pred=lag))
     SD._install(monkeypatch, fm, SD._steady(lag, ip), lambda f: f.lags["pred"])
-    ct = [round(-1.6 + 0.05 * k, 6) for k in range(32)]
-    tab = CrashTable(time=ct, time_err=np.zeros(32), rho_inv=np.zeros(32), rho_inv_err=np.zeros(32),
-                     confidence=["A"] * 32, record_start=-1.7, record_end=1.0, unobserved=[(0.015, 0.05)])
+    ct = [round(-1.6 + 0.05 * k, 6) for k in range(30)]                 # last recorded crash at -0.15 s
+    tab = CrashTable(time=ct, time_err=np.zeros(30), rho_inv=np.zeros(30), rho_inv_err=np.zeros(30),
+                     confidence=["A"] * 30, record_start=-1.7, record_end=1.0, unobserved=[(0.015, 0.05)])
     out = SE.run_series(fm, SD._slices(np.arange(3) * 0.02, np.full(3, ip)), CM.CurrentModelSettings(r0=SD.GEO.R0),
                         SE.SeriesSettings(initial="relaxed", crash_table=tab))
     assert out["settings"]["sawtooth_resolved"] == "crash_times"
-    # slice 0 lies in an observed stretch with no crash: recorded as a model-data inconsistency; 1 and 2 overlap
-    # the unobserved interval
+    # slice 0 lies in an observed stretch 0.15 s after the last recorded crash, three times the recorded crash
+    # interval: recorded as a model-data inconsistency; 1 and 2 overlap the unobserved interval
     assert [w["slice"] for w in out["warnings"]] == [0, 1, 2]
     kinds = [s_["sawtooth_warning"]["kind"] for s_ in out["slices"]]
     assert kinds == ["covered_no_crash", "not_covered", "not_covered"]
@@ -174,3 +174,78 @@ def test_crash_free_start_respects_unobserved_history():
     cfg0, p0, rec = SE._measured_crash_start(SE.SeriesSettings(initial="relaxed", crash_table=ok),
                                              CM.CurrentModelSettings(r0=SD.GEO.R0), np.array([0.0, 0.02]))
     assert rec["n_crashes_history"] == 0 and p0["log_strength"] is None
+
+
+class _Ev(SimpleNamespace):
+    pass
+
+
+def _q_res(q0):
+    lag = SD._lag(q0=q0)
+    return SimpleNamespace(converged=True, lag=lag)
+
+
+def test_q_below_one_warning_fires_only_for_the_inconsistency_it_names():
+    """Sawtoothing covered by the record: q < 1 within the recorded crash spacing since the last crash is normal
+    (recorded, no warning); a crash-free covered stretch longer than any recorded interval is the inconsistency;
+    a recorded crash that did not act is named as such (never 'shows no crash')."""
+    ct = [0.0, 0.05, 0.11, 0.16]                                   # recorded intervals 0.05, 0.06, 0.05 s
+    tab = CrashTable(time=ct, time_err=np.zeros(4), rho_inv=np.zeros(4), rho_inv_err=np.zeros(4), confidence="AAAA",
+                     record_start=-1.0, record_end=1.0)
+    s = SE.SeriesSettings(initial="relaxed", crash_table=tab)
+    res = _q_res(0.9)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        normal = SE._sawtooth_warning(s, res, 0.18, 0.20, [])     # 0.04 s after the last crash
+        overdue = SE._sawtooth_warning(s, res, 0.20, 0.22, [])    # 0.06 s: equal to the longest interval
+        late = SE._sawtooth_warning(s, res, 0.22, 0.24, [])       # 0.08 s: longer than any recorded interval
+        ev = [_Ev(time=0.21, record=SimpleNamespace(active=False))]
+        inactive = SE._sawtooth_warning(s, res, 0.20, 0.22, ev)
+        early = SE._sawtooth_warning(s, res, -0.1, -0.08, [])     # covered, before any recorded crash
+    assert normal["kind"] == "between_crashes" and normal["warn"] is False
+    assert normal["gap_since_last_crash_s"] == pytest.approx(0.04) and normal["longest_recorded_interval_s"] == \
+        pytest.approx(0.06)
+    assert overdue["kind"] == "between_crashes" and overdue["warn"] is False
+    assert late["kind"] == "covered_no_crash" and late["warn"] is True and "longer than the longest" in late["text"]
+    assert inactive["kind"] == "crash_recorded_not_active" and inactive["warn"] is True
+    assert "shows no crash" not in inactive["text"] and "0.2100" in inactive["text"]
+    assert early["kind"] == "covered_no_crash" and "shows no crash at all" in early["text"]
+    assert SE._sawtooth_warning(s, _q_res(1.1), 0.22, 0.24, []) is None          # q >= 1: nothing
+
+
+def test_q_below_one_between_crashes_is_recorded_but_not_warned_in_a_series(monkeypatch):
+    ip = SD.IP0
+    lag = SD._lag(q0=0.9)
+    fm = SD.FakeFM(dict(pred=lag))
+    SD._install(monkeypatch, fm, SD._steady(lag, ip), lambda f: f.lags["pred"])
+    ct = [round(-1.6 + 0.05 * k, 6) for k in range(32)] + [0.01, 0.06]     # a crash train through the series
+    tab = CrashTable(time=ct, time_err=np.zeros(34), rho_inv=np.zeros(34), rho_inv_err=np.zeros(34),
+                     confidence=["A"] * 34, record_start=-1.7, record_end=1.0)
+    out = SE.run_series(fm, SD._slices(np.arange(3) * 0.02, np.full(3, ip)), CM.CurrentModelSettings(r0=SD.GEO.R0),
+                        SE.SeriesSettings(initial="relaxed", crash_table=tab))
+    for s_ in out["slices"]:
+        if "q_below_one" in s_:
+            assert s_["q_below_one"]["kind"] in ("between_crashes", "crash_recorded_not_active")
+    assert not any(w_["sawtooth"].find("model-data inconsistency") >= 0 for w_ in out.get("warnings", []))
+
+
+def test_crash_start_refuses_an_unobserved_history_whatever_the_crash_count():
+    """Crashes listed in a history the record did not fully observe do not set the starting crash rate."""
+    tab = CrashTable(time=[-1.45, -1.40, 0.03], time_err=[0, 0, 0], rho_inv=[0.2] * 3, rho_inv_err=[0.0] * 3,
+                     confidence="AAA", record_start=-2.0, record_end=1.0, unobserved=[(-1.3, 0.0)])
+    s = SE.SeriesSettings(initial="relaxed", crash_table=tab)
+    with pytest.raises(ValueError, match="did not observe all of it"):
+        SE._measured_crash_start(s, CM.CurrentModelSettings(r0=SD.GEO.R0), np.array([0.0, 0.02]))
+    ok = CrashTable(time=[-1.45, -1.40, 0.03], time_err=[0, 0, 0], rho_inv=[0.2] * 3, rho_inv_err=[0.0] * 3,
+                    confidence="AAA", record_start=-2.0, record_end=1.0)
+    cfg0, p0, rec = SE._measured_crash_start(SE.SeriesSettings(initial="relaxed", crash_table=ok),
+                                             CM.CurrentModelSettings(r0=SD.GEO.R0), np.array([0.0, 0.02]))
+    assert rec["n_crashes_history"] >= 2
+
+
+def test_overlapping_zeff_intervals_are_refused():
+    sched = [dict(start=-1.0, end=0.03, candidate="const"), dict(start=0.01, end=1.0, candidate="const")]
+    with pytest.raises(ValueError, match="overlap"):
+        SE.check_zeff_series(_zslices([dict(zeff_source="const")] * 3), schedule=sched)
+    touching = [dict(start=-1.0, end=0.01, candidate="const"), dict(start=0.01, end=1.0, candidate="const")]
+    assert SE.check_zeff_series(_zslices([dict(zeff_source="const")] * 3), schedule=touching)["applied"]

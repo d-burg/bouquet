@@ -131,24 +131,18 @@ for a time short against the resistive time changes the current near its own loc
 only after many resistive times does the response approach the zero-net-current steady form,
 :func:`.current_model.correction_response`, with its return distributed like the conductivity).  The net
 current is unchanged by construction: the interval is driven at the same Ip boundary value with or without
-the source, so the ohmic current returns what the source adds.  A filter fit's parameters are INCREMENTS of
-the source amplitudes held from the last absorbed fit (``A_k = A_{k-1} + a_k``, the prior N(0, sigma) on the
-increment); the fit evaluates every trial state by advancing the interval with that source, so the state a
-fit's center scored and the state carried on from the slice are the same state (re-advanced on the accepted
-center's equilibrium with the center's parameters; the fit's other solves -- Jacobian columns, trials --
-also advance the state, on their perturbed equilibria, and none of those is carried).  The only exception is
-an interval with an active sawtooth crash, whose scored state is the crash-free end state plus the interval's
-sawtooth effect while the instantaneous end state is carried (the sawtooth convention above; recorded in
-``scored_vs_carried_state``).  After its slice an absorbed amplitude is HELD as the source over the
-following intervals (zero-order hold) until a later absorbed fit changes it; prediction slices and
-non-absorbed fits keep it unchanged.  Assumption: the model discrepancy the corrections stand for (a missing
-or misestimated current source, a conductivity error) persists at its last estimated value; a persistent
-discrepancy then builds up the steady response over the resistive time instead of being dropped after each
-interval.  Not chosen (recorded): stopping the source at its slice (each interval's corrections then only
-kick the state and a persistent discrepancy has to be re-found at every slice), or a decaying source (needs a
-decay time that nothing measures).  The first slice (and every single-slice fit) has no preceding interval:
-its corrections are sources of the steady state / periodic orbit (the relaxed treatment) and start the
-series inside its state; they are not held as a source (``A = 0`` for the first interval).
+the source, so the ohmic current returns what the source adds.  A filter fit's parameters ARE the source
+amplitudes ``a_k`` over the interval that ends at its slice (the prior N(0, sigma) on each); the fit's response
+to them is the in-window response over that interval: the fit evaluates every trial state by advancing the
+interval with that source, so the state a fit's center scored and the state carried on from the slice are the
+same state (re-advanced on the accepted center's equilibrium with the center's parameters; the fit's other
+solves -- Jacobian columns, trials -- also advance the state, on their perturbed equilibria, and none of those
+is carried).  The source acts over its own interval ONLY: it is not carried into later intervals (no hold), so
+every later interval starts with no correction source and only the response the source left in the carried
+state, which then evolves under the model's own sources.  A prediction slice and a non-absorbed fit apply no
+source.  The first slice (and every single-slice fit) has no preceding interval: its corrections are sources
+of the steady state / periodic orbit (the steady treatment) and start the series inside its state; they are
+not a source of the first interval.
 ``filter_correction="steady_response"`` is the earlier treatment, kept as a comparison option: an absorbed
 fit adds the corrections' zero-net-current steady response to the carried state and nothing is held.
 
@@ -196,17 +190,17 @@ ACCEPTED_FIT_STATUSES = ("converged", "converged_within_noise")
 #: How the lumped outer layer's ``|F|`` at the last closed surface varies over an interval.
 LAYER_FPOL_MODES = ("linear", "interval_mean")
 #: How an absorbed filter fit's current corrections enter the evolution (module docstring, "Fit interaction"):
-#: ``"in_window"`` (default) -- a non-inductive source over the interval that ends at the slice, held at its value
-#: until a later absorbed fit changes it; ``"steady_response"`` -- the earlier treatment (the zero-net-current
+#: ``"in_window"`` (default) -- a non-inductive source over the interval that ends at the slice only (not carried
+#: into later intervals); ``"steady_response"`` -- the earlier treatment (the zero-net-current
 #: steady response added to the state), kept for comparison.
 FILTER_CORRECTION_FORMS = ("in_window", "steady_response")
 #: What each form does (recorded in every series result).
 FILTER_CORRECTION_RULES = {
     "in_window": ("current corrections are a non-inductive source over the interval that ends at the slice (the flux "
-                  "diffusion of that interval gives their response); a filter fit fits increments of the source "
-                  "amplitudes held from the last absorbed fit; an absorbed fit's amplitudes are held (zero-order hold) "
-                  "over the following intervals until a later absorbed fit changes them; the first slice's "
-                  "corrections are in its starting state (steady form) and are not held as a source"),
+                  "diffusion of that interval gives their response); a filter fit's parameters are the source "
+                  "amplitudes over that interval; the source is not carried into later intervals (no hold); the "
+                  "first slice's corrections are in its starting state (steady form) and are not a source of the "
+                  "first interval"),
     "steady_response": ("COMPARISON OPTION (the earlier treatment): an absorbed fit adds the corrections' zero-net-"
                         "current steady response to the carried state; nothing is held as a source")}
 
@@ -617,11 +611,10 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
     out["slices"][-1]["carried_state"] = _state_record(carried)
     lag_prev = res0.lag
     jni_prev = _jni(lag_prev, sl0.kinetics, sl0.sources, params0)
-    # current corrections in the evolution (module docstring, "Fit interaction"): the source amplitudes held from the
-    # last absorbed filter fit (none at the start: the first slice's corrections are in its state)
+    # current corrections in the evolution (module docstring, "Fit interaction"): a filter fit's amplitudes are a
+    # source over the interval ending at its slice only (the first slice's corrections are in its state)
     in_window = s.filter_correction == "in_window"
     n_corr = len(cfg.corr_centers_rho)
-    a_src = (0.0,) * n_corr
     out["filter_correction"] = dict(form=s.filter_correction, rule=FILTER_CORRECTION_RULES[s.filter_correction])
     # Ip convention (module docstring, "Plasma current in a series"): the carried state's current is the first
     # slice's solved target, and the relative offset of the fitted from the measured Ip (0 without an Ip fit) is
@@ -658,15 +651,14 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
         shapes_prev = {}
 
         def state_fn(lag, params=None, sl=sl, t1=t1, tp=tp, ip0=ip0, ip1=ip1, carried=carried, lag_prev=lag_prev,
-                     jni_prev=jni_prev, holder=holder, a_src=a_src, shapes_prev=shapes_prev):
+                     jni_prev=jni_prev, holder=holder, shapes_prev=shapes_prev):
             jni1 = _jni(lag, sl.kinetics, sl.sources, p_pred)
             j0, j1, amps, inc = jni_prev, jni1, None, None
             if in_window:
-                # the corrections as a non-inductive source over this interval: the held amplitudes plus the
-                # increments of the parameters (a fit's free a_corr; zero for a prediction), on each end's geometry
-                inc = (tuple(float(v) for v in _cm.full_params(params)["a_corr"]) if params is not None
-                       else (0.0,) * n_corr)
-                amps = tuple(a + b for a, b in zip(a_src, inc))
+                # the corrections as a non-inductive source over this interval only: the parameters' amplitudes (a
+                # fit's free a_corr; zero for a prediction), on each end's geometry; nothing from earlier intervals
+                amps = (tuple(float(v) for v in _cm.full_params(params)["a_corr"]) if params is not None
+                        else (0.0,) * n_corr)
                 if any(a != 0.0 for a in amps):
                     if "g" not in shapes_prev:
                         shapes_prev["g"] = _cm.correction_shapes(lag_prev, cfg, ip0)
@@ -679,7 +671,7 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
             end.meta["ip_A"] = float(ip1)
             end.meta["current_scale"] = None          # this interval made no rescale
             if in_window:
-                end.meta.update(correction_source=amps, correction_increment=inc)
+                end.meta.update(correction_source=amps)
             holder.update(end=end, events=events, states=states, info=info, jni1=jni1, window_average=False,
                           amps=amps)
             use = end
@@ -693,7 +685,7 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
                 a0 = _window_state(states0, tp, t1, end.rho_faces)
                 meta = dict(sawtooth_window=[tp, t1], ip_A=float(ip1))
                 if in_window:
-                    meta.update(correction_source=amps, correction_increment=inc)
+                    meta.update(correction_source=amps)
                 use = CurrentState(end.rho_faces, end0.psi + aw.psi - a0.psi,
                                    end0.psi_boundary + aw.psi_boundary - a0.psi_boundary, t1, meta)
                 holder["window_average"] = bool(any(e.record.active for e in events))
@@ -732,8 +724,7 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
                       "interval's sawtooth effect; the carried state is the instantaneous end state"))
         # what the next interval starts from (taken before the callback, which may use the solver)
         nxt = dict(carried=holder.get("end"), jni1=holder.get("jni1"), ip=float(holder.get("ip_end", ip1)),
-                   ip_off=float(holder.get("ip_offset_end", ip_off)),
-                   a_src=(tuple(holder["amps"]) if holder.get("amps") is not None else a_src))
+                   ip_off=float(holder.get("ip_offset_end", ip_off)))
         if res.converged:
             extra.update(ip_carried_A=nxt["ip"], ip_offset_carried=nxt["ip_off"])
         else:
@@ -758,7 +749,6 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
             continue
         carried = nxt["carried"]
         ip_carried, ip_off = nxt["ip"], nxt["ip_off"]
-        a_src = nxt["a_src"]
         lag_prev = res.lag
         jni_prev = nxt["jni1"]
         snap_prev = fm.snapshot()
@@ -1063,8 +1053,8 @@ def _filter_slice(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1):
     asm_st = res.assembly["state"]
     if s.filter_correction == "in_window":
         # the corrections acted as a source over the interval: re-advancing with the center's parameters (the same
-        # function the fit evaluated, fit._scaled_state_fn) gives the state the center scored; its instantaneous
-        # end state is carried, and the source amplitudes are held for the next interval
+        # function the fit evaluated, fit._scaled_state_fn) gives the state the center scored; that end state is
+        # carried, and the source stops at this slice (not carried into the next interval)
         use_c = _fit._scaled_state_fn(state_fn, fr.params, ip_meas)(res.lag)
         if k_ip != 1.0:
             holder["end"] = _cm.scale_state(holder["end"], k_ip)
@@ -1075,8 +1065,8 @@ def _filter_slice(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1):
                                      dict(e.meta, filter_corrections_absorbed=list(ac)))
         filt.update(absorbed=True,
                     carried_from=("state re-advanced on the accepted center's equilibrium with the corrections as a "
-                                  "source over the interval (in-window); the source amplitudes are held"),
-                    correction_increments=list(ac), correction_source=list(holder.get("amps") or ()),
+                                  "source over the interval (in-window); the source stops at the slice"),
+                    correction_source=list(holder.get("amps") or ()),
                     center_state_check=dict(zip(("max_dpsi_rel", "dpsi_boundary"), _psi_shape_diff(use_c, asm_st))),
                     last_solve_state_vs_center=(dict(zip(("max_dpsi_rel", "dpsi_boundary"),
                                                          _psi_shape_diff(stale, holder["end"])))

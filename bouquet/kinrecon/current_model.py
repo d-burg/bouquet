@@ -522,7 +522,7 @@ def assemble(lag, kin, src, params, cfg, ip, z0=None, state=None):
     shapes = None
     # the corrections' source amplitudes at this slice: the parameters, or -- for a supplied state that already
     # carries them as an in-window source (time-dependent path, ``meta["correction_source"]``) -- the source
-    # amplitudes that state was advanced with (held amplitudes plus the parameters' increments)
+    # amplitudes that state was advanced with (the parameters' amplitudes over the interval ending at this slice)
     src_amp = None if state is None else (state.meta or {}).get("correction_source")
     amps = tuple(float(v) for v in (p["a_corr"] if src_amp is None else src_amp))
     if len(p["a_corr"]) != len(cfg.corr_centers_rho) and any(a != 0.0 for a in p["a_corr"]):

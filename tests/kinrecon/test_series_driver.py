@@ -6,9 +6,9 @@ forward model whose "equilibrium" is one of a few known geometries, and a mocked
   way the fit does (``fit._scaled_state_fn``) and advances the state on several perturbed geometries
   (Jacobian columns, a trial) after reaching its center, so the last state the fit computed is not the
   center's.  The carried state must equal the state advanced from the previous slice on the center's
-  geometry with the corrections as a source over the interval (in-window form; held amplitudes plus the
-  fit's increments), computed here directly with the interval solver (exact to round-off: same
-  operations, same inputs), and it is the state the slice scored; the comparison option
+  geometry with the fit's corrections as a source over that interval only (in-window form, no hold),
+  computed here directly with the interval solver (exact to round-off: same operations, same inputs),
+  and it is the state the slice scored; the next interval carries no source from it; the comparison option
   ``filter_correction="steady_response"`` adds the corrections' steady response instead.
 * Filter mode absorbs only a converged fit: for every other status the slice keeps its evolved,
   unfitted equilibrium (the solver is restored to it) and state, and the record says
@@ -231,7 +231,7 @@ def test_filter_carries_the_accepted_centers_state(monkeypatch, noninductive):
     f = s1["filter"]
     assert f["status"] == "converged" and f["absorbed"] is True
     # expected: carried state of slice 0 advanced over [0, 0.02] between slice 0's geometry (pred) and the
-    # center's geometry with the corrections as a source over the interval (held 0 + the fit's increments)
+    # center's geometry with the fit's corrections as a source over the interval
     c0 = _state(out["slices"][0]["carried_state"])
     e = _advance(lags["pred"], lags["center"], c0, 0.0, 0.02, IP0, 1.01 * IP0, amps=CENTER_A, cfg=cfg)
     got = _state(s1["carried_state"])
@@ -239,7 +239,7 @@ def test_filter_carries_the_accepted_centers_state(monkeypatch, noninductive):
     assert np.max(np.abs(got.psi - e.psi)) <= 1e-12 * span
     assert abs(got.psi_boundary - e.psi_boundary) <= 1e-12 * span
     assert s1["interval"]["correction_source"] == list(CENTER_A)
-    assert f["correction_increments"] == list(CENTER_A) and f["correction_source"] == list(CENTER_A)
+    assert f["correction_source"] == list(CENTER_A) and "correction_increments" not in f
     # the slice is self-consistent: the state it scored (the center's assembly state) is the carried state
     scored = _state(dict(s1["state_psi"], time=0.02))
     assert np.max(np.abs(scored.psi - got.psi)) <= 1e-12 * span and abs(scored.psi_boundary - got.psi_boundary) <= \
@@ -253,14 +253,18 @@ def test_filter_carries_the_accepted_centers_state(monkeypatch, noninductive):
     assert f["center_state_check"]["max_dpsi_rel"] <= 1e-12
     # the solver holds the center's equilibrium when the slice is recorded, and the next interval starts from it
     assert seen[1] == "center"
-    # slice 2: the absorbed amplitudes are held as the source and the second fit adds its increments
+    # slice 2: no source is carried from slice 1 (no hold); the second fit's own amplitudes are its interval's source
     s2 = out["slices"][2]
     assert s2["filter"]["absorbed"] is True
-    a2 = tuple(2.0 * a for a in CENTER_A)
+    a2 = CENTER_A
     e2 = _advance(lags["center"], lags["center"], got, 0.02, 0.04, 1.01 * IP0, 1.02 * IP0, amps=a2, cfg=cfg)
     got2 = _state(s2["carried_state"])
     assert np.max(np.abs(got2.psi - e2.psi)) <= 1e-12 * np.ptp(e2.psi)
-    assert s2["interval"]["correction_source"] == pytest.approx(list(a2), rel=1e-15)
+    assert s2["interval"]["correction_source"] == list(a2)
+    # discrimination: the held form (slice 1's amplitudes added to the second fit's) gives a measurably different state
+    held = _advance(lags["center"], lags["center"], got, 0.02, 0.04, 1.01 * IP0, 1.02 * IP0,
+                    amps=tuple(2.0 * a for a in CENTER_A), cfg=cfg)
+    assert np.max(np.abs((held.psi - held.psi[0]) - (got2.psi - got2.psi[0]))) > 1e-6 * np.ptp(e2.psi)
 
 
 def test_filter_steady_response_comparison_option(monkeypatch):

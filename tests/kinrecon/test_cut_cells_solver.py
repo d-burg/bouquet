@@ -13,7 +13,15 @@ and a pressure whose gradient is finite at the boundary: ``p = p_gfile + c p_gfi
     setting is recorded, not asserted;
 (c) the off-switch ``lcfs_cut_cells="off"``: the value in effect is False on a build with the setting (None
     without), recorded in the settings record and in each solve record, and the control case still converges;
-(d) the taper is off unless requested: the default forward settings never taper.
+    and the value reaches the solver: on a build with the setting the edge gradient case, which converges with cut
+    cells and no taper (b), does NOT converge under ``"off"`` (the observable behavior of the solver without the
+    cut-cell quadrature; the recorded value alone is the Python-side setting, which the solver cannot report back).
+    Skipped on a build without the setting, where ``"off"`` changes nothing that could be observed;
+(d) the taper is off unless requested: the default forward settings never taper;
+(e) ``q_90`` is q on the psi_N = 0.9 surface: on the converged control state it equals the package's q routine
+    (TokaMaker ``get_q``) at psi_N 0.9 to round-off, differs from q at psi_N 0.1 and 0.95, lies between ``q_0``
+    and ``q_95``, and ``get_q`` at psi_N 0.95 reproduces ``q_95`` to 1e-3 (relative; same trace, sign and
+    convention).
 """
 import json
 import os
@@ -50,7 +58,7 @@ def _solve(fm, init, ip, c, label):
                 solver=r.record["solver"], cut_at_solve=[a["info"].get("lcfs_cut_cells_at_solve") for a in att],
                 cut_check=[a["info"].get("lcfs_cut_cells_check") for a in att],
                 verdicts=[(a.get("detector") or {}).get("verdict") for a in att],
-                q_90=r.stats.get("q_90"), q_95=r.stats.get("q_95"))
+                q_90=r.stats.get("q_90"), q_95=r.stats.get("q_95"), q_0=r.stats.get("q_0"))
 
 
 def child(out, kind):
@@ -69,6 +77,12 @@ def child(out, kind):
     rec["forward_settings"] = fm.settings.as_dict()
     if kind == "off":
         rec["control"] = _solve(fm, init, ip, 0.0, "control")
+        if rec["control"]["converged"]:
+            # the package's q routine on the converged control state, at q_90's label and at two other labels
+            qs = np.asarray(fm.gs.get_q(psi=np.array([0.1, FW.Q_90_PSIN, 0.95]))[1], float)
+            rec["q_labels"] = dict(q_at_0p1=float(qs[0]), q_at_0p9=float(qs[1]), q_at_0p95=float(qs[2]),
+                                   q_0=rec["control"].get("q_0"))
+        rec["edge"] = _solve(fm, init, ip, EDGE_C, "edge_off")
     else:
         rec["edge"] = _solve(fm, init, ip, EDGE_C, "edge")
     with open(out, "w") as fh:
@@ -145,6 +159,27 @@ def test_off_switch(off):
     assert k["status"] == "converged", k
     assert k["solver"]["lcfs_cut_cells"] is c["in_effect"] and k["solver"]["lcfs_cut_cells_option"] == "off"
     assert all(v is c["in_effect"] for v in k["cut_at_solve"])
+
+
+def test_off_reaches_the_solver(off, default):
+    if not off["build"]["provides_lcfs_cut_cells"]:
+        pytest.skip("this solver build has no cut-cell setting: 'off' changes nothing observable on it")
+    # with cut cells (default) the edge gradient case converges untapered; with the setting turned off it must not
+    assert default["edge"]["status"] == "converged" and not default["edge"]["taper_applied"], default["edge"]
+    e = off["edge"]
+    assert not e["converged"] and not e["taper_applied"], e
+    assert e["solver"]["lcfs_cut_cells"] is False and all(v is False for v in e["cut_at_solve"])
+
+
+def test_q_90_is_q_at_psin_0p9(off):
+    k, q = off["control"], off.get("q_labels")
+    assert k["converged"] and q is not None, k
+    assert k["q_90"] == pytest.approx(q["q_at_0p9"], rel=1e-12, abs=0.0)
+    assert abs(k["q_90"] - q["q_at_0p1"]) > 1e-3 * abs(k["q_90"])
+    assert abs(k["q_90"] - q["q_at_0p95"]) > 1e-3 * abs(k["q_90"])
+    lo, hi = sorted((abs(k["q_0"]), abs(k["q_95"])))
+    assert lo < abs(k["q_90"]) < hi
+    assert q["q_at_0p95"] == pytest.approx(k["q_95"], rel=1e-3)
 
 
 if __name__ == "__main__":

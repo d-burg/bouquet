@@ -407,8 +407,10 @@ def psi_on_nodes(nodes_rz, r_grid, z_grid, psi_grid, map_sign):
 
 
 def read_cut_cells(gs):
-    """``lcfs_cut_cells`` of a TokaMaker instance's settings (Python side, sent by ``update_settings``); None when
-    its build has no such setting."""
+    """``lcfs_cut_cells`` of a TokaMaker instance's settings: the Python-side value that ``update_settings`` sends to
+    the solver; None when its build has no such setting.  The solver offers no way to read the value back from its
+    own (Fortran) settings, so this is what can be recorded; whether the value reached the solver is shown by
+    behavior (the live tests: a case that converges only with cut cells stalls under ``"off"``)."""
     v = vars(gs.settings)
     return bool(v[CUT_CELL_SETTING]) if CUT_CELL_SETTING in v else None
 
@@ -452,7 +454,9 @@ def configure_cut_cells(gs, option, build):
     else:
         reason = "on: the solver build provides the setting"
     return dict(option=option, provided=bool(provided), requested=want if provided else None,
-                in_effect=read_cut_cells(gs), reason=reason, liboftpy_sha256=build.get("liboftpy_sha256"))
+                in_effect=read_cut_cells(gs), reason=reason, liboftpy_sha256=build.get("liboftpy_sha256"),
+                in_effect_source=("the Python-side settings value sent by update_settings (the solver has no "
+                                  "getter for its own settings)"))
 
 
 class ForwardModel:

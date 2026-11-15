@@ -7,9 +7,11 @@ layer (default start psi_N = 0.995; the policy's default variant also re-shapes 
 just inside it so that the pressure inside the band is kept), so the solved equilibrium is that
 of a modified pressure profile.  Every use is recorded with its parameters and bookkeeping
 (pressure, I_p and stored energy moved).  It is a WORKAROUND for solver builds without a
-continuous treatment of the plasma source at the boundary: with TokaMaker's cut-cell quadrature
-(setting ``lcfs_cut_cells``, which :mod:`.forward` uses whenever the build provides it) the
-problem described below does not arise.  The taper is therefore OFF by default and applied only
+continuous treatment of the plasma source at the boundary: TokaMaker's cut-cell quadrature
+(setting ``lcfs_cut_cells``, which :mod:`.forward` uses whenever the build provides it) removes
+the discontinuity described below at its source, the boundary.  Other discontinuities of the
+solver's discrete problem remain, so on such a build the taper can still change an outcome.  The
+taper is OFF by default and applied only
 when the caller asks for it (:class:`EdgeTaperSetting`): ``on`` (every solve tapered) or the
 named mode ``auto`` (taper only after a detected limit cycle; the earlier default, kept as an
 explicit choice so that earlier results can be reproduced).

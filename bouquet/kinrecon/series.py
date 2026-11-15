@@ -149,7 +149,10 @@ every later interval starts with no correction source and only the response the 
 state, which then evolves under the model's own sources.  A prediction slice and a non-absorbed fit apply no
 source.  The first slice (and every single-slice fit) has no preceding interval: its corrections are sources
 of the steady state / periodic orbit (the steady treatment) and start the series inside its state; they are
-not a source of the first interval.
+not a source of the first interval (with ``CurrentModelSettings.corr_return="local"`` those steady-form
+corrections are the zero-net local-return shapes; the in-window source always uses the plain Gaussians).  Every
+slice records what its corrections did to the core (``correction_core_effect``: the first slice's fit record; an
+absorbed filter fit's slice evaluated in the form it used; none on a prediction slice).
 ``filter_correction="steady_response"`` is the earlier treatment, kept as a comparison option: an absorbed
 fit adds the corrections' zero-net-current steady response to the carried state and nothing is held.
 
@@ -168,6 +171,7 @@ near the axis).
 """
 
 import copy
+import functools
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
@@ -586,6 +590,7 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
                       stopping_summary=fr.record.get("stopping_summary"),
                       noise=fr.record.get("noise"), column_flags=fr.record.get("covariance_column_flags"),
                       ip_fit=fr.record.get("ip_fit"))
+        cce0 = fr.record.get("correction_core_effect")
         params0 = fr.params
     else:
         state_fn0 = None
@@ -595,6 +600,7 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
         res0 = _cm.consistent_solve(fm, sl0.kinetics, sl0.sources, p_relaxed, cfg0, label=f"{sl0.label}:{mode}",
                                     initial_profiles=initial_profiles, state_fn=state_fn0)
         params0 = p_relaxed
+        cce0 = dict(computed=False, reason=f"no fit at the first slice (initial mode '{mode}'): no corrections")
     ip_c0 = (float(res0.assembly["ip"]) if res0.converged and res0.assembly and res0.assembly.get("ip")
              else _slice_ip(sl0))
     rec0 = _slice_record(fm, res0, sl0, sl0.label, dict(initial_mode=mode, fit=fitrec, n_solves=fm.n_solves - n0,
@@ -604,7 +610,7 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
                                                             "is unverified at this slice"}
                                                            if float(sl0.time) in zeff_flags else {}),
                                                         wall_total_s=round(time.perf_counter() - t0, 2),
-                                                        vacuum_F0=f0rec0,
+                                                        vacuum_F0=f0rec0, correction_core_effect=cce0,
                                                         ip_fitted=bool(fitrec and "ip_rel" in fitrec["free"])))
     w0 = _sawtooth_warning(s, res0, float(times[0]), float(times[0]), [])
     if w0 is not None:
@@ -720,6 +726,7 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
         filt = None
         if res.converged and s.filter_at(t1):
             filt, res = _filter_slice(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1)
+        cce = _interval_correction_effect(sl, cfg, s, state_fn, res, filt)
         crash_rec = [dict(time=e.time, active=bool(e.record.active), rho_mix=getattr(e.record, "rho_mix", None),
                           dpsi_max=getattr(e.record, "dpsi_max", None)) for e in holder.get("events", [])]
         extra = dict(n_solves=fm.n_solves - nk, interval=dict(holder.get("info", {}), start_s=float(tp), end_s=float(t1),
@@ -731,7 +738,7 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
                      ip_fitted=bool(filt and filt.get("absorbed") and "ip_rel" in (filt.get("free") or [])),
                      crashes=crash_rec if res.converged else [],
                      window_average=holder.get("window_average", False), filter=filt, vacuum_F0=f0rec,
-                     wall_total_s=round(time.perf_counter() - tk0, 2))
+                     correction_core_effect=cce, wall_total_s=round(time.perf_counter() - tk0, 2))
         if not res.converged and crash_rec:
             # the crashes of the failed slice's last attempt were never applied to a carried state
             extra["crashes_of_failed_attempt"] = crash_rec
@@ -1129,6 +1136,40 @@ def _filter_slice(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1):
                 last_solve_state_vs_center=(dict(zip(("max_dpsi_rel", "dpsi_boundary"), _psi_shape_diff(stale, e)))
                                             if stale is not None else None))
     return filt, res
+
+
+def _interval_correction_effect(sl, cfg, s, state_fn, res, filt):
+    """The corrections' effect on the core at an evolved slice (:func:`.current_model.correction_core_effect`; a
+    record only), in the form the slice used: for an absorbed filter fit, the slice's state re-made with the
+    correction amplitudes set to zero -- in-window: the interval re-advanced from the same carried state with no
+    correction source, on the accepted center's geometry and Ip target; steady comparison option: the same
+    re-advanced state without the corrections' steady response -- and assembled on the same geometry.  Nothing the
+    series carries is touched (a separate state holder).  A prediction slice or a fit that was not absorbed applies
+    no correction in its interval; the response of EARLIER corrections carried in the state is not separated here
+    (that would need the history re-run without them)."""
+    if not res.converged:
+        return dict(computed=False, reason="slice not consistent")
+    if not (filt and filt.get("absorbed")):
+        return dict(computed=False, reason=("no correction source in this interval (" +
+                                            ("prediction slice" if filt is None else "filter fit not absorbed") +
+                                            "); the response of earlier corrections carried in the state is not "
+                                            "separated (that needs the history re-run without them)"))
+    try:
+        asm = res.assembly
+        p0 = _cm.zero_corrections(asm["params"])
+        fn0 = functools.partial(state_fn, holder={})
+        fn0.corrections_in_window = bool(getattr(state_fn, "corrections_in_window", False))
+        st0 = _fit._scaled_state_fn(fn0, p0, _slice_ip(sl))(res.lag)
+        asm0 = _cm.assemble(res.lag, sl.kinetics, sl.sources, p0, cfg, asm["ip"], state=st0)
+        how = (("in-window form: the interval re-advanced from the same carried state with no correction source, on "
+                "the accepted center's geometry and Ip target, and assembled there; no new equilibrium solve")
+               if fn0.corrections_in_window else
+               ("steady comparison option: the re-advanced state of the accepted center without the corrections' "
+                "steady response, assembled on its geometry; no new equilibrium solve"))
+        return _cm.correction_core_effect(res.lag, asm, asm0, cfg, _fit.correction_prior_sigmas(cfg, s.filter_fit),
+                                          how)
+    except Exception as exc:  # noqa: BLE001 -- a record must never end a series
+        return dict(computed=False, reason=f"{type(exc).__name__}: {exc}"[:300])
 
 
 def _reference_points_kw(sl):

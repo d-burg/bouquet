@@ -28,7 +28,8 @@ Checked:
     forward model's verified-convergence criterion) with data chi^2 < 1e-2;
 (d) failure handling: a consistency loop that cannot converge in its pass budget is reported as
     such and the fit refuses to start from it;
-(e) settings-record completeness and the solver settings (OFT defaults, read back);
+(e) settings-record completeness (including the record of what the current corrections did to the core) and the
+    solver settings (OFT defaults, read back);
 (f) the inner degrees of freedom: computed without changing the solver's equilibrium (psi and coil currents
     bit-identical before and after), between 0 and the number of coil unknowns, and the boundary
     displacement from the anchor recorded in mm.
@@ -260,6 +261,7 @@ def child(out):
     rec["forward_settings"] = rr["forward"]["settings"]
     rec["forward_rows_keys"] = sorted(rr["forward"]["rows"])
     rec["constraint_groups"] = sorted(rr["constraints"])
+    rec["correction_core_effect"] = rr["correction_core_effect"]
     rec["settings_after"] = fm._read_settings()
     with open(out, "w") as fh:
         json.dump(_jsonable(rec), fh, indent=1)
@@ -347,8 +349,11 @@ def test_failure_handling(result):
 
 def test_settings_record_complete(result):
     for k in ("free", "specs", "settings", "model_settings", "fit_groups", "iterations", "forward", "n_solves",
-              "wall_s", "constraints", "chi2_detail", "assembly", "final_center", "boundary"):
+              "wall_s", "constraints", "chi2_detail", "assembly", "final_center", "boundary", "correction_core_effect"):
         assert k in result["record_keys"], k
+    # the corrections are not free in this fit (amplitudes zero): the record is computed and shows no effect
+    cce = result["correction_core_effect"]
+    assert cce["computed"] and cce["d_axis_jdotb_rel"] == 0.0 and cce["flagged"] is False, cce
     for k in ("settings", "oft_defaults", "oft_settings_now", "rows", "edge_taper_case", "oft_python", "solver"):
         assert k in result["forward_keys"], k
     for k in ("flux_loops", "probes", "coils", "anchor", "ip_target"):

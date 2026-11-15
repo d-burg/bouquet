@@ -70,6 +70,22 @@ A state function without that mark gets the earlier treatment, the zero-net-curr
 ``sum_k a_k psi_k`` (:func:`correction_response`, the response after infinitely many resistive times)
 added to its state; :mod:`.series` keeps that form only as a comparison option.
 
+Where a steady-form correction's current returns (:attr:`CurrentModelSettings.corr_return`,
+:data:`CORRECTION_RETURNS`).  Default ``"conductivity"``: each correction ``a_k g_k`` is a Gaussian
+non-inductive source carrying ``a_k Ip``; at fixed Ip the steady ohmic current gives that current back with a
+uniform loop voltage, i.e. distributed like ``sigma_neo F <1/R^2>`` -- mostly on the axis.  On a relaxed state the
+axis current then moves by about ``-sum_k a_k`` (relative) whatever the corrections' centers, so every correction
+is also a lever on the axis current.  Option ``"local"``: each correction is the Gaussian minus a co-centered
+Gaussian ``corr_return_width_ratio`` times wider, scaled to carry zero net current (:func:`correction_shapes` gives
+the equations).  A zero-net source leaves the steady loop voltage, hence the ohmic current, unchanged, so the steady
+change of ``<J.B>`` is the shape itself: a correction centered at rho 0.2 still changes the core (it is a core
+basis function by position), while one at rho 0.5 or 0.8 changes the axis ``<J.B>`` by at most
+``exp(-c^2/(2 (r w)^2))`` of its own peak (4.4 % at 0.5, 0.03 % at 0.8 with the default widths) -- its negative
+flank does reach inside rho 0.3 for a center at 0.5.  With the sawtooth periodic state the reconnection can still
+move current in the q < 1 region when a correction moves the q = 1 surface.  The in-window source of the
+time-dependent path always uses the plain Gaussians.  Every fit and series slice records what its corrections did
+to the core (:func:`correction_core_effect`).
+
 :func:`lagged_solve` (geometry-dependent inputs lagged from a center) is kept for callers that
 want it; the fit (:mod:`.fit`) now takes its Jacobian columns from consistent solves.
 """
@@ -96,6 +112,21 @@ from .pressure import pressure_gradient
 DEFAULT_KNOTS = np.linspace(0.0, 1.0, 129)
 #: psi_N at which the solved equilibrium's axis q is taken for the q-consistency check (traced q limit).
 Q_AXIS_PSIN = 1.0e-6
+#: Where the net current of a current correction returns in its STEADY form (single-slice fits, the first slice of
+#: a series, the series' steady comparison option; :attr:`CurrentModelSettings.corr_return`, module docstring):
+#: ``"conductivity"`` (default) -- each correction is a Gaussian non-inductive source and the ohmic current of the
+#: steady state returns its net current with a uniform loop voltage, i.e. distributed like the conductivity (mostly
+#: on the axis); ``"local"`` -- each correction is the Gaussian minus a wider co-centered Gaussian scaled to zero net
+#: current, so the steady ohmic current is unchanged and the return sits in the correction's own flanks.
+CORRECTION_RETURNS = ("conductivity", "local")
+#: rho_tor,norm inside which the corrections' change of the enclosed current is reported
+#: (:func:`correction_core_effect`).
+CORRECTION_CORE_RHO = 0.3
+#: rho_tor,norm at which the corrections' change of q is reported beside the axis value.
+CORRECTION_Q_RHO = 0.2
+#: REPORTING level (not an acceptance criterion; nothing is rejected or changed by it): a result whose corrections
+#: change the axis <J.B> by more than this fraction of its uncorrected value carries a plain flag.
+CORRECTION_AXIS_REPORT_LEVEL = 0.05
 
 
 class ModelFailure(RuntimeError):
@@ -288,6 +319,8 @@ class CurrentModelSettings:
     history: float = _saw.DEFAULT_HISTORY
     corr_centers_rho: Sequence[float] = (0.2, 0.5, 0.8)   # current-correction Gaussians, centers in rho_tor,norm
     corr_width_rho: float = 0.1                           # their width (standard deviation) in rho_tor,norm
+    corr_return: str = "conductivity"     # CORRECTION_RETURNS: how a steady-form correction's net current returns
+    corr_return_width_ratio: float = 2.0  # "local": width of the compensating Gaussian / corr_width_rho
 
     def as_dict(self):
         d = asdict(self)
@@ -410,17 +443,38 @@ def _interp(x, y, xq, log=False):
     return np.exp(v) if log else v
 
 
-def correction_shapes(lag, cfg, ip):
+def correction_shapes(lag, cfg, ip, form="steady"):
     """Unit current-correction shapes ``g_k`` on the physics grid (``<J.B>`` [A T/m^2] per unit
     amplitude): Gaussians in rho_tor,norm, centers ``corr_centers_rho``, width ``corr_width_rho``,
     each normalized so that it carries ``I = Ip`` (``I = F_lcfs int <J.B>/(2 pi F^2) dV`` over the
-    domain and the outer layer).  An amplitude ``a_k`` is therefore a fraction of Ip."""
+    domain and the outer layer).  An amplitude ``a_k`` is therefore a fraction of Ip.
+
+    ``form``: ``"steady"`` (the corrections are sources of a steady state / periodic orbit) or ``"in_window"``
+    (a source over one interval of the time-dependent path).  With ``cfg.corr_return = "local"`` the STEADY
+    shapes are zero-net (:data:`CORRECTION_RETURNS`, :func:`local_return_shape`):
+
+    .. code-block:: text
+
+        g_k = Ip / (F_lcfs I_1) [G(rho; c_k, w) - (I_1 / I_r) G(rho; c_k, r w)]
+        G(rho; c, s) = exp(-(rho - c)^2 / (2 s^2)),   I_s = int G(rho; c_k, s) dV / (2 pi F^2)  (domain + layer)
+
+    with ``w = corr_width_rho`` and ``r = corr_return_width_ratio``: the first term is the default shape (the
+    amplitude stays the fraction of Ip it carries) and the second returns that current in the correction's own
+    flanks.  The in-window shapes are always the plain Gaussians (over a short interval the flux diffusion
+    already returns their current near their location)."""
+    if cfg.corr_return not in CORRECTION_RETURNS:
+        raise ValueError(f"corr_return must be one of {CORRECTION_RETURNS}")
+    if form not in ("steady", "in_window"):
+        raise ValueError("form must be 'steady' or 'in_window'")
     geom, layer = lag["geom"], lag["layer"]
     rmap = lag["rho_map"]
     ge, rho_ge = lag["phys"]["psi_n"], lag["phys"]["rho"]
     gc = geom.evaluate(geom.rho, ["dvol_drho", "fpol"])
     rho_std_g = geom.rho * rmap.rho_edge
     rho_l = rmap.rho_of_psin(layer.psi_n)
+    local = cfg.corr_return == "local" and form == "steady"
+    if local and not float(cfg.corr_return_width_ratio) > 1.0:
+        raise ValueError("corr_return_width_ratio must be > 1")
     out = []
     for rc0 in cfg.corr_centers_rho:
         w = float(cfg.corr_width_rho)
@@ -428,8 +482,24 @@ def correction_shapes(lag, cfg, ip):
                            / (2 * np.pi * gc["fpol"] ** 2), geom.rho)
         lay = layer.integral(layer.source_density(np.exp(-0.5 * ((rho_l - rc0) / w) ** 2)))
         norm = abs(float(ip)) / (layer.fpol_lcfs * (dom + lay))
-        out.append(np.exp(-0.5 * ((rho_ge - rc0) / w) ** 2) * norm)
+        if not local:
+            out.append(np.exp(-0.5 * ((rho_ge - rc0) / w) ** 2) * norm)
+            continue
+        wr = float(cfg.corr_return_width_ratio) * w
+        dom_r = np.trapezoid(gc["dvol_drho"] * np.exp(-0.5 * ((rho_std_g - rc0) / wr) ** 2)
+                             / (2 * np.pi * gc["fpol"] ** 2), geom.rho)
+        lay_r = layer.integral(layer.source_density(np.exp(-0.5 * ((rho_l - rc0) / wr) ** 2)))
+        out.append(local_return_shape(rho_ge, rc0, w, wr, (dom + lay) / (dom_r + lay_r)) * norm)
     return out
+
+
+def local_return_shape(rho, center, width, return_width, lam):
+    """``G(rho; center, width) - lam G(rho; center, return_width)`` (unnormalized local-return correction shape,
+    :func:`correction_shapes`); ``lam = I_1 / I_r`` makes it carry zero net current.  Since ``return_width >
+    width``, ``G(rho; c, return_width) >= G(rho; c, width)`` everywhere, so ``I_r >= I_1`` and ``0 < lam <= 1``; at
+    the axis ``|shape(0)| <= exp(-center^2 / (2 return_width^2))`` (the larger of the two terms there)."""
+    rho = np.asarray(rho, float)
+    return np.exp(-0.5 * ((rho - center) / width) ** 2) - lam * np.exp(-0.5 * ((rho - center) / return_width) ** 2)
 
 
 def _domain_arrays(lag, values_ge, log=False):
@@ -530,7 +600,7 @@ def assemble(lag, kin, src, params, cfg, ip, z0=None, state=None):
     if any(a != 0.0 for a in amps) or any(a != 0.0 for a in p["a_corr"]):
         if len(amps) != len(cfg.corr_centers_rho):
             raise ValueError("a_corr needs one amplitude per correction center")
-        shapes = correction_shapes(lag, cfg, ipv)
+        shapes = correction_shapes(lag, cfg, ipv, form="steady" if src_amp is None else "in_window")
         for a, sa, g, rc0 in zip(p["a_corr"], amps, shapes, cfg.corr_centers_rho):
             jcorr = jcorr + sa * g
             corr_shapes.append(dict(center_rho_tor=rc0, width_rho_tor=cfg.corr_width_rho, amplitude_fraction_of_ip=a,
@@ -671,6 +741,95 @@ def assemble(lag, kin, src, params, cfg, ip, z0=None, state=None):
                                 ("source of the steady state / periodic orbit" if corr_shapes else None)),
                p_sep=float(pk[-1]), pax=float(pk[0] - pk[-1]), wall_s=round(time.perf_counter() - t0, 4))
     return out
+
+
+# ============================================================== the corrections' effect on the core (recording only)
+def zero_corrections(params):
+    """``params`` (full) with every current-correction amplitude set to zero."""
+    p = full_params(params)
+    p["a_corr"] = tuple(0.0 for _ in p["a_corr"])
+    return p
+
+
+def _enclosed_current(lag, asm, rho):
+    """Current [A] inside rho_tor,norm = ``rho`` of an assembly's diffusion state: ``F_lcfs int <J.B>/(2 pi F^2) dV``
+    over the state's cells (the definition of the assembly's current fractions), linear between cell faces."""
+    rf = np.asarray(asm["state"].rho_faces, float)
+    rc = np.asarray(asm["profiles_rho"]["rho"], float) / lag["rho_map"].rho_edge
+    gc = lag["geom"].evaluate(rc, ["dvol_drho", "fpol"])
+    dens = gc["dvol_drho"] / (2 * np.pi * gc["fpol"] ** 2) * np.diff(rf) * np.asarray(asm["profiles_rho"]["jdotb"], float)
+    cum = lag["layer"].fpol_lcfs * np.concatenate(([0.0], np.cumsum(dens)))
+    return float(np.interp(rho, rf * lag["rho_map"].rho_edge, cum))
+
+
+def correction_core_effect(lag, asm, asm0, cfg, prior_sigmas, how):
+    """What the current corrections do to the core of one result (a RECORD; nothing is changed or rejected).
+
+    ``asm`` is the result's assembly (with its corrections) and ``asm0`` the assembly of the same state with the
+    correction amplitudes set to zero, both on the geometry ``lag`` (no new equilibrium solve: the geometry is held);
+    ``how`` says how ``asm0`` was made.  Recorded: each correction's amplitude (fraction of Ip), its prior sigma and
+    their ratio; the change of the current inside rho_tor,norm = :data:`CORRECTION_CORE_RHO` (as a fraction of Ip
+    and of the uncorrected value); the change of the axis current density -- ``<J.B>`` of the innermost cell of the
+    diffusion state and the solver input ``<j_phi>`` at psi_N = 0, as fractions of their uncorrected values; the
+    change of the model q (diffusion q on the held geometry) at the axis face and at rho_tor,norm =
+    :data:`CORRECTION_Q_RHO`.  ``flags`` lists, in plain words, every amplitude above its prior sigma and an axis
+    ``<J.B>`` change above :data:`CORRECTION_AXIS_REPORT_LEVEL` of its uncorrected value -- a REPORTING level, not an
+    acceptance criterion."""
+    amps = [float(a) for a in full_params(asm["params"])["a_corr"]]
+    rc = CORRECTION_CORE_RHO
+    ip = float(asm["ip"])
+    i1, i0 = _enclosed_current(lag, asm, rc), _enclosed_current(lag, asm0, rc)
+    jb1, jb0 = (float(np.asarray(a["profiles_rho"]["jdotb"], float)[0]) for a in (asm, asm0))
+    jp1, jp0 = (float(np.asarray(a.get("jphi_assembled", a["jphi"]), float)[0]) for a in (asm, asm0))
+    q1, q0 = (np.asarray(a["q_model"]["q"], float) for a in (asm, asm0))
+    r1, r0 = (np.asarray(a["q_model"]["rho"], float) for a in (asm, asm0))
+    qr1, qr0 = float(np.interp(CORRECTION_Q_RHO, r1, q1)), float(np.interp(CORRECTION_Q_RHO, r0, q0))
+    corr = []
+    flags = []
+    for c, a, s in zip(cfg.corr_centers_rho, amps, prior_sigmas):
+        ratio = (abs(a) / float(s)) if (s is not None and float(s) > 0) else None
+        corr.append(dict(center_rho=float(c), amplitude_fraction_of_ip=a,
+                         prior_sigma=None if s is None else float(s), ratio_to_prior_sigma=ratio))
+        if ratio is not None and ratio > 1.0:
+            flags.append(f"correction at rho {c:g}: amplitude {a:+.4f} of Ip is {ratio:.2f} prior sigmas")
+    d_axis = (jb1 - jb0) / jb0 if jb0 != 0.0 else float("nan")
+    if not abs(d_axis) <= CORRECTION_AXIS_REPORT_LEVEL:
+        flags.append(f"the corrections change the axis <J.B> by {100 * d_axis:+.1f} % (reporting level "
+                     f"{100 * CORRECTION_AXIS_REPORT_LEVEL:g} %)")
+    return dict(computed=True, how=how, basis=dict(corr_return=cfg.corr_return,
+                                                   corr_return_width_ratio=float(cfg.corr_return_width_ratio),
+                                                   corr_width_rho=float(cfg.corr_width_rho)),
+                corrections=corr, ip_A=ip,
+                core_rho=rc, current_inside_core_A=dict(corrected=i1, uncorrected=i0),
+                d_current_inside_core_over_ip=(i1 - i0) / ip,
+                d_current_inside_core_over_uncorrected=((i1 - i0) / i0 if i0 != 0.0 else float("nan")),
+                axis_jdotb=dict(corrected=jb1, uncorrected=jb0, rho=float(np.asarray(asm["profiles_rho"]["rho"])[0])),
+                d_axis_jdotb_rel=d_axis,
+                axis_jphi=dict(corrected=jp1, uncorrected=jp0),
+                d_axis_jphi_rel=((jp1 - jp0) / jp0 if jp0 != 0.0 else float("nan")),
+                q_axis_model=dict(corrected=float(q1[0]), uncorrected=float(q0[0])), d_q_axis_model=float(q1[0] - q0[0]),
+                q_rho=CORRECTION_Q_RHO, q_at_rho=dict(corrected=qr1, uncorrected=qr0), d_q_at_rho=qr1 - qr0,
+                reporting_level_axis=CORRECTION_AXIS_REPORT_LEVEL, flags=flags, flagged=bool(flags),
+                note="recording only: the reporting level is not an acceptance criterion")
+
+
+def steady_correction_effect(lag, asm, kin, src, cfg, prior_sigmas, z0=None):
+    """:func:`correction_core_effect` of a single-slice result (corrections in the steady state / periodic orbit):
+    the current model re-evaluated on the result's geometry with the amplitudes set to zero (the steady state, or
+    the sawtooth periodic orbit or measured-crash run as the result used, from the orbit continuation ``z0``).  A
+    re-evaluation that fails is recorded with its reason."""
+    how = ("steady re-evaluation: the current model (steady state, or the sawtooth periodic state the fit used) "
+           "re-evaluated on the fitted equilibrium's geometry with the correction amplitudes set to zero; no new "
+           "equilibrium solve")
+    p = full_params(asm["params"])
+    if not any(a != 0.0 for a in p["a_corr"]):
+        return correction_core_effect(lag, asm, asm, cfg, prior_sigmas, how + " (all amplitudes are zero)")
+    try:
+        asm0 = assemble(lag, kin, src, zero_corrections(p), cfg, asm["ip"], z0=z0)
+    except (ModelFailure, ValueError, RuntimeError) as exc:
+        return dict(computed=False, how=how, reason=f"{type(exc).__name__}: {exc}"[:300],
+                    amplitudes=list(p["a_corr"]), prior_sigmas=list(prior_sigmas))
+    return correction_core_effect(lag, asm, asm0, cfg, prior_sigmas, how)
 
 
 # ============================================================== pass-consistency loop

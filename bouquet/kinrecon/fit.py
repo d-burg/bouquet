@@ -45,6 +45,13 @@ the measured value (the earlier behavior: the Ip noise then enters as an unmodel
 result records the measured Ip, the fitted Ip (the solved equilibrium's) and ``(measured -
 fitted)/sigma`` (``record["ip_fit"]``).
 
+Every result also records what its current corrections did to the core (``record["correction_core_effect"]``,
+:func:`.current_model.correction_core_effect`; a record only): each amplitude against its prior sigma, and the
+change of the current inside rho_tor,norm 0.3, of the axis current density and of q at the axis and at rho 0.2
+between the final center and the same center with the amplitudes set to zero (the current model re-evaluated on the
+center's geometry).  Where the corrections' current returns in the steady form is a model setting
+(:attr:`.current_model.CurrentModelSettings.corr_return`).
+
 Every prior, bound, step rule and stopping criterion is an explicit setting recorded in the
 result (they are decisions for the user; the defaults are this package's proposals).
 
@@ -520,6 +527,7 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
         rec["ip_fit"] = ip_record(center["all_tab"] if center is not None else None, ms,
                                   center["params"] if center is not None else _to_params(th, names, base),
                                   "ip_rel" in names)
+        rec["correction_core_effect"] = _correction_effect_record(center, kin, src, cfg, settings, state_fn)
         cov = np.full((len(names), len(names)), np.nan)
         sig = np.full(len(names), np.nan)
         chi = {}
@@ -919,6 +927,27 @@ def _ip_parameter(names, groups, ms, settings):
                      "measurement row with its own sigma; on the time-dependent path the supplied state's current "
                      "density is scaled by the same factor (the solver renormalizes to its Ip target alike)",
                 sigma_model=g.meta.get("sigma_model_id", g.meta.get("sigma_model")))
+
+
+def correction_prior_sigmas(cfg, settings):
+    """The prior sigma of each current-correction amplitude under ``settings`` (None where there is no prior row)."""
+    return [_spec(f"a_corr_{k}", settings)["prior"][1] for k in range(len(cfg.corr_centers_rho))]
+
+
+def _correction_effect_record(center, kin, src, cfg, settings, state_fn):
+    """``record["correction_core_effect"]`` (:func:`.current_model.correction_core_effect`; a record only): for a
+    single-slice fit, the steady re-evaluation at the final center; on the time-dependent path (``state_fn``) the
+    series records it per slice in the form the slice used, so the fit leaves it to the series."""
+    if center is None or center["res"].assembly is None:
+        return dict(computed=False, reason="no consistent center")
+    if state_fn is not None:
+        return dict(computed=False, reason="time-dependent path: recorded by the series in the slice record "
+                                           "(filter.correction_core_effect)")
+    try:
+        return _cm.steady_correction_effect(center["res"].lag, center["res"].assembly, kin, src, cfg,
+                                            correction_prior_sigmas(cfg, settings), z0=center["z0"])
+    except Exception as exc:  # noqa: BLE001 -- a record must never end a fit
+        return dict(computed=False, reason=f"{type(exc).__name__}: {exc}"[:300])
 
 
 def _scaled_state_fn(state_fn, params, base_ip=None):

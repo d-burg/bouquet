@@ -23,17 +23,28 @@ with, on each interval ``[t_{k-1}, t_k]``,
   measured value at that time; when it is not given the previous slice's value is kept and the
   slice record says so), so ``F`` at the last closed surface differs between the two ends of an
   interval (recorded as ``fpol_lcfs_used`` and ``fpol_lcfs_change``);
-* sawteeth (:mod:`.current.sawtooth`) applied by the reconnection operator, which is the identity
-  wherever q >= 1, so there is no sawtooth effect at all on a state with q >= 1 everywhere.  Default
-  ``sawtooth="auto"``: NO prescribed crash train -- the operator acts only at MEASURED crash times
-  (``crash_table``, a :class:`.crash_table.CrashTable`, or ``crash_times``), i.e. ``"crash_times"``
-  when a table or times are given, and ``"off"`` (no crashes) otherwise; whenever the evolved q falls
-  below 1 on a slice with no crash acting, the slice record carries ``q_below_one`` with its kind
-  (:func:`_sawtooth_warning`), and it is a ``sawtooth_warning`` listed in the series' ``warnings`` unless the
-  record shows sawtoothing that covers it (q < 1 within the measured crash spacing since the last recorded
-  crash is normal between crashes; a recorded crash that did not act, an uncovered interval, no record, or a
-  covered crash-free stretch longer than any recorded crash interval -- a model-data inconsistency -- are
-  warnings) (the choice made is recorded as ``sawtooth_resolved``).  The periodic train is available only as
+* the core treatment.  Default ``sawtooth="q_floor"``: the TIME-AVERAGED state -- after every diffusion step
+  the model state is held at ``q >= q_floor`` (:func:`.current.sawtooth.floor_q` through the ``post_step``
+  hook; ``q_floor`` is :attr:`.current_model.CurrentModelSettings.q_floor`, default 1): wherever the evolved
+  q is below the floor the core current is flattened to hold q there, Ip conserved; a state whose q at the
+  domain edge is below the floor is refused.  No sawtooth detection, crash time or amplitude is used.  The
+  first slice starts from the same floored state as a single-slice fit (``core_relaxation="q_floor"``).  An
+  interval's in-window current corrections (below) are NOT floored: their response over the interval (the
+  advance with them among the sources minus the advance without them, neither floored; the flux diffusion is
+  linear in its sources) is added to the floored model state at the end of the interval, so the floor acts on
+  the model state first and the corrections after it, as in a single-slice fit; from the next interval on
+  that state is the model state and the floor acts on it.  Every slice records its core treatment (``core``: ``core_relaxation``, ``q_floor``, whether
+  the floor acted during the interval, the floor radius at its end and the minimum of the scored q).
+  The reconnection operator (:mod:`.current.sawtooth`, the identity wherever q >= 1) is an explicit opt-in:
+  ``sawtooth="crash_times"`` applies it at MEASURED crash times (``crash_table``, a
+  :class:`.crash_table.CrashTable`, or ``crash_times``; a table or times given with another mode are
+  refused); whenever the evolved q falls below 1 on a slice with no crash acting, the slice record carries
+  ``q_below_one`` with its kind (:func:`_sawtooth_warning`), and it is a ``sawtooth_warning`` listed in the
+  series' ``warnings`` unless the record shows sawtoothing that covers it (q < 1 within the measured crash
+  spacing since the last recorded crash is normal between crashes; a recorded crash that did not act, an
+  uncovered interval, or a covered crash-free stretch longer than any recorded crash interval -- a model-data
+  inconsistency -- are warnings).  ``sawtooth="off"``: no core treatment at all (q may fall below 1; recorded
+  as ``q_below_one`` of kind ``no_record`` with a warning).  The periodic train is available only as
   the explicit option ``sawtooth="periodic"`` (recorded):
   ``sawtooth="crash_times"`` uses measured crash times; ``sawtooth="periodic"`` places crashes every
   ``1/nu`` with ``nu`` from the two parameters ``(f, ln Lambda)``; ``ln Lambda`` is fitted at the
@@ -91,10 +102,11 @@ Initial state (first slice):
 
 * ``"mse_fit"``: the first slice's current is fitted to magnetics and E_r-corrected MSE by
   :func:`.fit.reconstruct` with the current-correction Gaussians on top of the relaxed model shape
-  (steady state, or the sawtooth periodic state when it is active); the fitted state (whose ohmic
+  (the first slice's core treatment: the q-floor state by default, an opt-in sawtooth state otherwise);
+  the fitted state (whose ohmic
   part then carries the corrections, i.e. is NOT relaxed) starts the evolution, and the
   corrections are not applied again;
-* ``"relaxed"``: the steady (or periodic) model state of the first slice;
+* ``"relaxed"``: the model state of the first slice under its core treatment (the q-floor state by default);
 * ``"from_profile"``: a supplied current profile ``<J.B>(rho_tor,norm)`` (e.g. from a prior
   equilibrium; controlled tests), held as a profile through the first slice's pass loop, the state
   being the one with that current on the converged geometry.  By default the profile is used as
@@ -171,6 +183,7 @@ near the axis).
 """
 
 import copy
+import dataclasses
 import functools
 import time
 from dataclasses import asdict, dataclass, field
@@ -187,7 +200,12 @@ from .score import chi2_report, flux_offset_record, score
 __all__ = ["SliceData", "SeriesSettings", "run_series", "INITIAL_MODES", "SAWTOOTH_MODES"]
 
 INITIAL_MODES = ("auto", "mse_fit", "relaxed", "from_profile")
-SAWTOOTH_MODES = ("auto", "crash_times", "off", "periodic")
+#: Core treatments of a series (module docstring): ``"q_floor"`` (default), and the opt-ins ``"crash_times"``,
+#: ``"periodic"`` and ``"off"``.
+SAWTOOTH_MODES = ("q_floor", "crash_times", "off", "periodic")
+#: The first slice's ``CurrentModelSettings.core_relaxation`` under each series mode (``"crash_times"``: replaced
+#: by ``"crash_times"`` when the covered history holds measured crashes, :func:`_measured_crash_start`).
+FIRST_SLICE_CORE = dict(q_floor="q_floor", crash_times="none", off="none", periodic="periodic_orbit")
 #: What a series does when its first-slice fit (``initial="mse_fit"``) did not end ``"converged"``.
 INITIAL_FIT_POLICIES = ("refuse", "proceed_labeled")
 #: The plasma-current convention of a series (module docstring, "Plasma current in a series"; recorded).
@@ -251,7 +269,7 @@ class SeriesSettings:
     filter_correction: str = "in_window"                 # FILTER_CORRECTION_FORMS ("steady_response": comparison)
     dt_max: float = 1.0e-3                               # diffusion step [s]
     scheme: str = "trbdf2"
-    sawtooth: str = "auto"                               # SAWTOOTH_MODES; "periodic" only as an explicit option
+    sawtooth: str = "q_floor"                            # SAWTOOTH_MODES; the others only as explicit options
     sawtooth_f: float = _fit.PRIOR_F
     sawtooth_log_strength: Optional[float] = None        # None: the prior mean of the fit module
     sawtooth_first_crash_phase: float = 1.0              # periodic train: first crash at t0 + phase/nu (0, 1]
@@ -274,14 +292,15 @@ class SeriesSettings:
         if self.sawtooth not in SAWTOOTH_MODES:
             raise ValueError(f"sawtooth must be one of {SAWTOOTH_MODES}")
         self.sawtooth_requested = self.sawtooth
+        if (self.crash_table is not None or self.crash_times is not None) and self.sawtooth != "crash_times":
+            raise ValueError(f"a crash table or crash times are given but sawtooth is {self.sawtooth!r}: measured "
+                             "crash times are an explicit opt-in (sawtooth='crash_times')")
         if self.crash_table is not None:
             if self.crash_times is not None:
                 raise ValueError("give crash_table or crash_times, not both")
             self.crash_times = tuple(float(t) for t in self.crash_table.times())
             if self.crash_record_start is None:
                 self.crash_record_start = self.crash_table.record_start
-        if self.sawtooth == "auto":
-            self.sawtooth = "crash_times" if self.crash_times else "off"
         if self.sawtooth == "crash_times" and not self.crash_times:
             raise ValueError("sawtooth='crash_times' needs crash_times")
         if self.vessel_eddy:
@@ -336,9 +355,13 @@ class SeriesSettings:
         d["sawtooth_requested"] = self.sawtooth_requested
         d["sawtooth_resolved"] = self.sawtooth
         d["sawtooth_rule"] = {
-            "crash_times": "operator at the measured crash times only (identity where q >= 1)",
-            "off": "no crashes (a warning is recorded on every slice whose evolved q falls below 1)",
+            "q_floor": ("time-averaged core: q held at the q floor (CurrentModelSettings.q_floor) after every "
+                        "diffusion step, the in-window corrections added after the floor"),
+            "crash_times": "EXPLICIT OPTION: operator at the measured crash times only (identity where q >= 1)",
+            "off": "EXPLICIT OPTION: no core treatment (a warning is recorded on every slice whose evolved q falls "
+                   "below 1)",
             "periodic": "EXPLICIT OPTION: prescribed periodic crash train (not the default)"}[self.sawtooth]
+        d["first_slice_core_relaxation"] = FIRST_SLICE_CORE[self.sawtooth]
         d["sawtooth_log_strength_used"] = self.log_strength() if self.sawtooth == "periodic" else None
         return d
 
@@ -349,7 +372,7 @@ def _period(settings, log_strength=None):
 
 
 def _crash_times(settings, t0, t_end, log_strength=None):
-    if settings.sawtooth == "off":
+    if settings.sawtooth in ("off", "q_floor"):
         return np.zeros(0)
     if settings.sawtooth == "crash_times":
         return np.asarray(settings.crash_times, float)
@@ -419,6 +442,40 @@ def advance_interval(sol, state, t1, settings, crash_times, dt):
     return end, sch.events, traj.states
 
 
+def advance_q_floor(sol, state, t1, settings, dt, q_floor, sol_all=None):
+    """Advance ``state`` to ``t1`` with the q floor (:func:`.current.sawtooth.floor_q`) applied after every step
+    (the default core treatment, module docstring); ``sol`` carries the MODEL sources only.  ``sol_all``
+    (optional): the interval's solver with the current corrections added to the sources; their response over the
+    interval (``sol_all`` minus ``sol``, both advanced from ``state`` without the floor in the same steps) is added
+    to the floored end state (the corrections after the floor).  Where the floor does not act the end state is the
+    advance with the corrections among the sources, to round-off.  Returns ``(end_state, core_record)``; the
+    record holds the floor record of the last step (whether it acted, the floor radius on the domain's rho), the
+    number of steps and of steps on which the floor acted, and the largest change of the enclosed current made by
+    the floor over the interval (fraction of Ip)."""
+    acc = dict(n_steps=0, n_acted=0, d_i_max=0.0, last=None)
+
+    def hook(st, t, solver):
+        st2, rec = _saw.floor_q(st, solver, q_floor)
+        acc["n_steps"] += 1
+        if rec["acted"]:
+            acc["n_acted"] += 1
+            acc["d_i_max"] = max(acc["d_i_max"], float(rec["d_enclosed_current_max_over_ip"]))
+        acc["last"] = rec
+        return st2
+
+    end = sol.advance(state, t1, dt=dt, scheme=settings.scheme, post_step=hook)
+    if sol_all is not None:
+        e_all = sol_all.advance(state, t1, dt=dt, scheme=settings.scheme)
+        e_mod = sol.advance(state, t1, dt=dt, scheme=settings.scheme)
+        end = CurrentState(end.rho_faces, end.psi + (e_all.psi - e_mod.psi),
+                           end.psi_boundary + (e_all.psi_boundary - e_mod.psi_boundary), end.time, dict(end.meta))
+    core = dict(acc["last"] or {}, core_relaxation="q_floor", q_floor=float(q_floor), n_steps=acc["n_steps"],
+                n_steps_floor_acted=acc["n_acted"], acted_in_interval=bool(acc["n_acted"]),
+                d_enclosed_current_max_over_ip_interval=acc["d_i_max"],
+                corrections="in-window response added after the floor" if sol_all is not None else None)
+    return end, core
+
+
 def _window_state(history, t_a, t_b, rf):
     """Trapezoid time average of psi over [t_a, t_b] from stored states (crash jumps stored as two states
     at one time)."""
@@ -476,6 +533,7 @@ def _slice_record(fm, res, sl, label, extra=None):
                q_axis_traced=None if lag is None else lag["phys"].get("q_axis"),
                q0_axis=((res.record.get("q_check") or {}).get("axis") or {}).get("q0_eq"),
                fractions=asm["fractions"] if asm else None, currents_A=asm["currents_A"] if asm else None,
+               core=asm.get("core") if asm else None,
                v_loop=asm["v_loop"] if asm else None, sawtooth=asm["sawtooth"] if asm else None,
                q_model=dict(rho=np.asarray(asm["q_model"]["rho"]).tolist(), q=np.asarray(asm["q_model"]["q"]).tolist())
                if asm else None,
@@ -531,10 +589,13 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
     case = fm.case
     ls_used = s.log_strength() if s.sawtooth == "periodic" else None
     ls_source = "series setting (sawtooth_log_strength, or the fit module's prior mean)" if ls_used is not None else None
-    p_relaxed = dict(log_strength=ls_used, f=s.sawtooth_f)
-    cfg0 = cfg
+    p_relaxed = dict(log_strength=ls_used, f=s.sawtooth_f) if s.sawtooth == "periodic" else dict(log_strength=None)
+    # the first slice's core treatment follows the series' mode (recorded; FIRST_SLICE_CORE)
+    cfg0 = dataclasses.replace(cfg, core_relaxation=FIRST_SLICE_CORE[s.sawtooth])
+    out["first_slice_core_relaxation"] = cfg0.core_relaxation
     if s.sawtooth == "crash_times":
-        cfg0, p_relaxed, out["first_slice_crash_start"] = _measured_crash_start(s, cfg, times)
+        cfg0, p_relaxed, out["first_slice_crash_start"] = _measured_crash_start(s, cfg0, times)
+        out["first_slice_core_relaxation"] = cfg0.core_relaxation
     # ---------------------------------------------------------------- slice 0
     t0 = time.perf_counter()
     n0 = fm.n_solves
@@ -680,6 +741,7 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
                      jni_prev=jni_prev, holder=holder, shapes_prev=shapes_prev):
             jni1 = _jni(lag, sl.kinetics, sl.sources, p_pred)
             j0, j1, amps, inc = jni_prev, jni1, None, None
+            c0 = c1 = None
             if in_window:
                 # the corrections as a non-inductive source over this interval only: the parameters' amplitudes (a
                 # fit's free a_corr; zero for a prediction), on each end's geometry; nothing from earlier intervals
@@ -689,13 +751,25 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
                     if "g" not in shapes_prev:
                         shapes_prev["g"] = _cm.correction_shapes(lag_prev, cfg, ip0)
                     g1 = _cm.correction_shapes(lag, cfg, ip1)
-                    j0 = jni_prev + sum(a * g for a, g in zip(amps, shapes_prev["g"]))
-                    j1 = jni1 + sum(a * g for a, g in zip(amps, g1))
+                    c0 = sum(a * g for a, g in zip(amps, shapes_prev["g"]))
+                    c1 = sum(a * g for a, g in zip(amps, g1))
+                    if s.sawtooth != "q_floor":
+                        j0, j1 = jni_prev + c0, jni1 + c1
             sol, info = interval_solver(lag_prev, lag, j0, j1, tp, t1, ip0, ip1, s.layer_fpol)
-            end, events, states = advance_interval(sol, carried, t1, s, crash, s.dt_max)
+            core = None
+            if s.sawtooth == "q_floor":
+                # the floor acts on the model state after every step; the corrections' in-window response (the
+                # advance with them among the sources minus the one without) is added after it (module docstring)
+                sol_a = (interval_solver(lag_prev, lag, jni_prev + c0, jni1 + c1, tp, t1, ip0, ip1, s.layer_fpol)[0]
+                         if c0 is not None else None)
+                end, core = advance_q_floor(sol, carried, t1, s, s.dt_max, cfg.q_floor, sol_all=sol_a)
+                events, states = [], []
+            else:
+                end, events, states = advance_interval(sol, carried, t1, s, crash, s.dt_max)
             holder.clear()
             end.meta["ip_A"] = float(ip1)
             end.meta["current_scale"] = None          # this interval made no rescale
+            end.meta["core"] = core if core is not None else dict(core_relaxation=f"series mode {s.sawtooth!r}")
             if in_window:
                 end.meta.update(correction_source=amps)
             holder.update(end=end, events=events, states=states, info=info, jni1=jni1, window_average=False,
@@ -873,9 +947,9 @@ def check_zeff_series(slices, source=None, schedule=None):
 
 
 def _sawtooth_warning(s, res, t0, t1, events):
-    """The q < 1 record of the default sawtooth handling (module docstring), or None when the slice's solved q
-    stays >= 1 or a crash acted in the interval.  ``warn`` says whether it is a WARNING (listed in the series'
-    ``warnings``); ``kind``:
+    """The q < 1 record of the opt-in modes ``"crash_times"`` and ``"off"`` (module docstring), or None when the
+    slice's solved q stays >= 1, a crash acted in the interval, or the mode is ``"q_floor"`` or ``"periodic"``.
+    ``warn`` says whether it is a WARNING (listed in the series' ``warnings``); ``kind``:
 
     * ``no_record`` (warning): no crash record, no crashes applied (``sawtooth="off"``);
     * ``not_covered`` (warning): the record's detection did not cover the interval (or since the last recorded
@@ -891,7 +965,9 @@ def _sawtooth_warning(s, res, t0, t1, events):
       normal between sawtooth crashes.
 
     The record holds ``q_min``, the gap since the last recorded crash and the longest recorded interval used."""
-    if not res.converged or res.lag is None or s.sawtooth == "periodic":
+    if not res.converged or res.lag is None or s.sawtooth in ("periodic", "q_floor"):
+        # q_floor: the model q is held at the floor; a q below it can come only from the fitted corrections and is
+        # recorded in the slice's core record (q_min_model_minus_floor), not classified here
         return None
     q = np.abs(np.asarray(res.lag["phys"]["q"], float))
     qmin = float(np.min(q[np.isfinite(q)])) if np.any(np.isfinite(q)) else None
@@ -1024,8 +1100,8 @@ def _measured_crash_start(s, cfg, times):
         raise ValueError("measured crash times cannot start the series: one crash in the history "
                          f"[{sched.t_start}, {window[1]}] (two are needed to set the starting orbit)")
     ls = float(np.log(_saw.crash_strength(s.sawtooth_f, 1.0 / sched.mean_interval)))
-    cfg0 = dataclasses.replace(cfg, crash_times=tuple(float(x) for x in s.crash_times), window=window,
-                               crash_record_start=s.crash_record_start)
+    cfg0 = dataclasses.replace(cfg, core_relaxation="crash_times", crash_times=tuple(float(x) for x in s.crash_times),
+                               window=window, crash_record_start=s.crash_record_start)
     rec = dict(window=list(window), history_s=cfg.history, mean_interval_s=sched.mean_interval,
                record_start=s.crash_record_start,
                n_crashes_history=sched.n_crashes_history, n_crashes_window=sched.n_crashes_window,

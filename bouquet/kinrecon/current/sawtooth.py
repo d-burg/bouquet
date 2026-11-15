@@ -165,6 +165,16 @@ in the positive frame, which is enforced: Ip <= 0, Phi_b <= 0 or a state with
 (a negative denominator would let any negative residual pass).  Both the matrix form and the
 real stepping (``advance`` then ``reconnect``) must meet it.
 
+Time-averaged core (the default core treatment of the package)
+--------------------------------------------------------------
+:func:`floor_q` holds q at a floor (``q_floor``, default :data:`DEFAULT_Q_FLOOR` = 1) wherever the state's own q is
+below it: on those faces ``psi'`` is set to ``Phi_b rho / (pi q_floor)``, so the current inside the region is
+flattened and its total returns at the region's outer face (Ip conserved).  It needs no sawtooth parameter, crash
+time or amplitude: it is the time average over sawtooth cycles that the reconnection model resolves, the limit of a
+reset after every step (OFT's ``saw_reset_1d``, rule 2).  :mod:`..current_model` applies it to the steady model
+state of a single slice and :mod:`..series` after every diffusion step; the periodic orbit, the measured-crash runs
+and the crash tables below are opt-ins.
+
 Time-dependent mode
 -------------------
 Crash times from data are applied by :class:`CrashSchedule` through
@@ -212,6 +222,9 @@ from .diffusion import CurrentDiffusion, CurrentState, PositiveFrameError
 
 __all__ = [
     "CYCLE_TOL",
+    "DEFAULT_Q_FLOOR",
+    "QFloorRefused",
+    "floor_q",
     "DEFAULT_SHEET_WIDTH",
     "DEFAULT_HISTORY",
     "F_CAP",
@@ -243,6 +256,82 @@ F_CAP = 0.999               # cap in -ln(1 - F_CAP f) so that f = 1 is finite
 N_SAMPLES = 1024            # samples per monotone piece (fixed relative positions)
 N_LEVELS = 2048             # helical-flux levels of the rearranged profile (fixed relative positions)
 _HALF_PI = 0.5 * np.pi
+
+
+#: Default floor of the time-averaged q-floor core treatment (:func:`floor_q`; one documented setting).
+DEFAULT_Q_FLOOR = 1.0
+
+
+class QFloorRefused(ValueError):
+    """:func:`floor_q` cannot hold q at the floor without changing the current at the domain edge (q below the floor
+    at the domain edge or on the last interior face, which the boundary gradient uses)."""
+
+
+def floor_q(state, solver, q_floor=DEFAULT_Q_FLOOR):
+    r"""Time-averaged core state: q held at ``q_floor`` wherever the state's own q is below it.
+
+    On every interior face where ``q = Phi_b rho / (pi psi')`` (positive frame,
+    :meth:`.diffusion.CurrentDiffusion.profiles`) is below ``q_floor``, ``psi'`` is replaced by
+    ``Phi_b rho / (pi q_floor)``; ``psi`` is rebuilt from the outermost cell inward, so the outermost cell value and
+    ``psi_boundary`` (the boundary gauge) are kept.  The enclosed current ``I = k psi' F`` changes only on the floored
+    faces: the current inside a floored region is flattened and its total returns at the outer face of the region, so
+    ``Ip`` is conserved without a separate correction (``q I`` is a function of rho alone on fixed surfaces).
+    ``q_new = max(q, q_floor)`` on every interior face, so q is continuous across the floor radius (the slope breaks
+    there).  It is the identity on a state with ``q >= q_floor`` on every interior face.
+
+    Refused (:class:`QFloorRefused`): q below the floor at the domain edge, or on the last interior face (the second-
+    order boundary gradient uses the two outer cells, so flooring there would change the edge current).
+
+    Returns ``(state, record)`` (the input state itself when nothing changes).  ``record``: ``acted`` (the state
+    changed), ``q_floor``, ``q_min_before`` and its ``rho``, ``q_edge``, the number of floored faces, ``rho_floor``
+    (the outer crossing ``q = q_floor`` of the outermost floored region, interpolated linearly in q between the last
+    floored face and the next face; the domain's rho, 0..1), the largest change of the enclosed current as a fraction
+    of ``Ip`` and the flux moved on the axis cell [Wb/rad].
+    """
+    qf = float(q_floor)
+    if not (np.isfinite(qf) and qf > 0.0):
+        raise ValueError("q_floor must be finite and > 0")
+    rf = np.asarray(state.rho_faces, dtype=float)
+    rc = state.rho_cells
+    n = rc.size
+    prof = solver.profiles(state)
+    q = np.asarray(prof["q"], dtype=float)
+    i_f = np.asarray(prof["I_enclosed"], dtype=float)
+    ip = float(prof["ip"])
+    phi_b = solver.geometry_at(state.time).phi_b
+    dpsi = np.zeros(n + 1)
+    dpsi[1:n] = np.diff(state.psi) / np.diff(rc)
+    inner = np.arange(1, n)
+    below = ~(q[inner] >= qf)
+    jmin = int(np.argmin(np.where(np.isfinite(q), q, np.inf)))
+    rec = dict(core_relaxation="q_floor", q_floor=qf, q_min_before=float(q[jmin]), rho_q_min_before=float(rf[jmin]),
+               q_edge=float(q[n]), acted=bool(np.any(below)), n_faces_floored=int(np.count_nonzero(below)),
+               rho_floor=None, d_enclosed_current_max_over_ip=0.0, d_psi_axis_cell=0.0)
+    if not q[n] >= qf or not q[n - 1] >= qf:
+        raise QFloorRefused(f"q = {q[n]:.4g} at the domain edge and {q[n - 1]:.4g} on the last interior face: below "
+                            f"the floor q_floor = {qf:g} there, so the core cannot be floored at fixed edge current")
+    if not rec["acted"]:
+        return state, rec
+    fl = inner[below]
+    new = dpsi.copy()
+    new[fl] = phi_b * rf[fl] / (np.pi * qf)
+    psi = np.empty(n)
+    psi[-1] = state.psi[-1]
+    psi[:-1] = state.psi[-1] - np.cumsum((new[1:n] * np.diff(rc))[::-1])[::-1]
+    if np.array_equal(psi, state.psi):
+        # faces already at the floor to round-off (e.g. a state floored before): nothing changes
+        rec["acted"] = False
+        return state, rec
+    k = int(fl[-1])
+    q0_, q1_ = q[k], q[k + 1]
+    rho1 = float(rf[k] + (qf - q0_) * (rf[k + 1] - rf[k]) / (q1_ - q0_)) if q1_ != q0_ else float(rf[k])
+    with np.errstate(divide="ignore", invalid="ignore"):
+        di = np.where(dpsi[fl] != 0.0, i_f[fl] * (new[fl] / dpsi[fl] - 1.0), np.nan)
+    rec.update(rho_floor=rho1, d_psi_axis_cell=float(psi[0] - state.psi[0]),
+               d_enclosed_current_max_over_ip=(float(np.nanmax(np.abs(di))) / ip if ip else float("nan")))
+    meta = dict(state.meta or {})
+    meta["q_floor"] = dict(q_floor=qf, acted=True, rho_floor=rho1)
+    return CurrentState(rf, psi, state.psi_boundary, state.time, meta), rec
 
 
 # ====================================================================== interpolant of chi(s)
@@ -909,17 +998,6 @@ def _affine_power(S, s0, k):
     return R, r
 
 
-def _flat_q1_state(solver, rf, t_ref, phi_b):
-    """Relaxed (steady) state with q floored at 1: the default initial guess for the orbit."""
-    st = solver.steady_state(rf, t=t_ref)
-    q = solver.profiles(st)["q"]
-    qf = np.maximum(q, 1.0)
-    rc = 0.5 * (rf[1:] + rf[:-1])
-    dp = phi_b * rf / (np.pi * qf)
-    psi = np.concatenate(([0.0], np.cumsum(dp[1:-1] * np.diff(rc))))
-    return _gauge(psi)
-
-
 def _anderson(resid, z, nrm, tol, max_evals, hist, verbose, depth=5):
     """Anderson acceleration (type II, depth ``depth``) of the physical map z -> z + r(z).  An accelerated step
     is accepted only if it lowers the residual measure below the current one; otherwise the history is
@@ -1040,7 +1118,9 @@ def solve_periodic_orbit(solver: CurrentDiffusion, rho_faces, f, period, nsteps=
         J = M + DM
         return J - J[-1:, :]
 
-    z = _gauge(_flat_q1_state(solver, rf, t_ref, phi_b) if z0 is None else np.asarray(z0, dtype=float))
+    # default initial guess: the relaxed (steady) state with q floored at 1
+    z = _gauge(floor_q(solver.steady_state(rf, t=t_ref), solver, 1.0)[0].psi if z0 is None
+               else np.asarray(z0, dtype=float))
     r, y, info, nrm = resid(z)
     hist = [nrm]
     n_plain = 0

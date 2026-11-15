@@ -1,7 +1,7 @@
 r"""The kinetic reconstruction: a MAP fit over a small set of physical parameters.
 
-Model: :mod:`.current_model` (ohmic + bootstrap + driven current with the sawtooth periodic state,
-thermal + fast-ion pressure) iterated to consistency with the anchored forward solve
+Model: :mod:`.current_model` (ohmic + bootstrap + driven current with the time-averaged q-floor core state by
+default, thermal + fast-ion pressure) iterated to consistency with the anchored forward solve
 (:mod:`.forward`).  Data: the residuals of :func:`.score.score` for the fit groups
 
 * ``flux_loop`` and ``bpol_probe``: every channel the measurement set marks valid (for the EFIT
@@ -13,11 +13,17 @@ thermal + fast-ion pressure) iterated to consistency with the anchored forward s
 * ``mse``: only when the group is declared E_r-corrected (``meta['er_corrected']``) -- MSE whose
   E_r status is not established is not a fit constraint;
 
-plus one prior row ``(theta_j - mu_j)/sigma_j`` per free parameter with a Gaussian prior.  Thomson
-is never a weight.  The objective is ``chi^2 = sum r^2`` (diagonal Gaussian likelihood
-+ Gaussian priors); the MAP point is found by Levenberg-Marquardt with a forward-difference Jacobian.
+plus one prior row ``(theta_j - mu_j)/sigma_j`` per free parameter with a Gaussian prior, and -- when the
+flux loops are scored with a fitted additive offset that carries a reference prior row
+(:func:`.score.score`, ``flux_offset_prior``) -- that prior row ``(c - c0)/s0`` as one more datum, with the
+offset counted as one more parameter in the degrees of freedom (the offset is solved in closed form inside
+the score, so the objective is the full chi^2 minimized over it, the same footing as
+:func:`.score.chi2_report`).  Thomson is never a weight.  The objective is ``chi^2 = sum r^2`` (diagonal Gaussian
+likelihood + Gaussian priors); the MAP point is found by Levenberg-Marquardt with a forward-difference Jacobian.
 
-Parameters (:data:`PARAMETERS`; default free set: ``log_strength`` and the ``a_corr`` current corrections):
+Parameters (:data:`PARAMETERS`; default free set: the ``a_corr`` current corrections; ``log_strength`` and ``f``
+are parameters of the opt-in sawtooth core treatments only, ``CurrentModelSettings.core_relaxation`` =
+``"periodic_orbit"`` or ``"crash_times"``):
 
 =================  ==========================================  ======================================
 name               meaning                                     default prior / bounds
@@ -45,6 +51,9 @@ the measured value (the earlier behavior: the Ip noise then enters as an unmodel
 result records the measured Ip, the fitted Ip (the solved equilibrium's) and ``(measured -
 fitted)/sigma`` (``record["ip_fit"]``).
 
+Every result records its core treatment (``record["core"]``, :func:`.current_model.core_record`: the
+``core_relaxation``, ``q_floor``, whether the floor acted and the floor radius in rho_tor,norm).
+
 Every result also records what its current corrections did to the core (``record["correction_core_effect"]``,
 :func:`.current_model.correction_core_effect`; a record only): each amplitude against its prior sigma, and the
 change of the current inside rho_tor,norm 0.3, of the axis current density and of q at the axis and at rho 0.2
@@ -55,8 +64,9 @@ center's geometry).  Where the corrections' current returns in the steady form i
 Every prior, bound, step rule and stopping criterion is an explicit setting recorded in the
 result (they are decisions for the user; the defaults are this package's proposals).
 
-The strength is defined with the cap of :mod:`.current.sawtooth`: ``Lambda = -ln(1 - 0.999 f) nu``.
-Its default prior center is the strength of f = 0.37 and a 60 ms period, so at fixed f it implies
+The strength (opt-in sawtooth treatments only; no default path uses it) is defined with the cap of
+:mod:`.current.sawtooth`: ``Lambda = -ln(1 - 0.999 f) nu``.  Its prior center, used only when the strength is a
+free parameter of an opt-in treatment, is the strength of f = 0.37 and a 60 ms period, so at fixed f it implies
 that period.  A prior that implies no period is available as an option,
 :data:`LOG_STRENGTH_PRIOR_BOUNDS_BROAD` (``FitSettings(priors={"log_strength":
 LOG_STRENGTH_PRIOR_BOUNDS_BROAD})``): a Gaussian in ``ln Lambda`` derived from the parameter's
@@ -140,9 +150,9 @@ from .current import sawtooth as _saw
 from .score import chi2_summary, flux_offset_record, score
 from .sources.priors import DRIVEN_CURRENT_SCALE_SIGMA, FAST_ION_PRESSURE_SCALE_SIGMA
 
-#: Reference crash period of the default strength prior (proposal: median 60 ms) [s].
+#: Reference crash period of the strength prior of the OPT-IN sawtooth treatments (proposal: median 60 ms) [s].
 PRIOR_PERIOD_S = 0.060
-#: Reference reconnection fraction (Bateman et al. 2006 hint) used by the prior center.
+#: Reference reconnection fraction (Bateman et al. 2006 hint) used by that prior center (opt-in treatments only).
 PRIOR_F = 0.37
 
 
@@ -186,7 +196,7 @@ IP_TARGETS = ("fitted", "measured")
 @dataclass
 class FitSettings:
     """Free parameters, priors and the algorithm's settings (all recorded; all decisions)."""
-    free: Sequence[str] = ("log_strength", "a_corr")
+    free: Sequence[str] = ("a_corr",)
     priors: Dict[str, Any] = field(default_factory=dict)        # overrides: name -> (mean, sigma)
     bounds: Dict[str, Any] = field(default_factory=dict)        # overrides: name -> (lo, hi)
     max_iter: int = 12
@@ -302,7 +312,19 @@ def residual_vector(fm, ms, groups, settings, coil_roles):
             lab = [grp.labels[i] for i in np.nonzero(tab.used(g))[0]]
         parts.append(r)
         index += [(g, s) for s in lab]
+    off = flux_offset_record(tab) if "flux_loop" in groups else None
+    if off is not None and off.get("prior") is not None:
+        # the fitted loop offset's reference prior row (module docstring): one more datum of the objective
+        c0, s0 = (float(v) for v in off["prior"])
+        parts.append(np.array([(float(off["offset"]) - c0) / s0]))
+        index.append(("flux_offset_prior", "offset"))
     return (np.concatenate(parts) if parts else np.zeros(0)), index, tab
+
+
+def _offset_params(tab, groups):
+    """Number of fitted loop-offset parameters in the fit groups' score table (0 or 1; module docstring)."""
+    off = flux_offset_record(tab) if "flux_loop" in groups else None
+    return 0 if off is None else int(off["n_extra_params"])
 
 
 def _prior_rows(theta, names, settings):
@@ -480,6 +502,10 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
     """
     t_all = time.perf_counter()
     settings = settings or FitSettings()
+    saw_free = [n for n in settings.free if n in ("log_strength", "f")]
+    if saw_free and state_fn is None and cfg.core_relaxation not in _cm.SAWTOOTH_RELAXATIONS:
+        raise ValueError(f"{saw_free} are parameters of the opt-in sawtooth core treatments "
+                         f"{_cm.SAWTOOTH_RELAXATIONS}; core_relaxation is {cfg.core_relaxation!r}")
     names = _expand(settings.free, cfg)
     ms = fm.ms
     coil_roles = {n: v["role"] for n, v in fm.rows_record["coils"]["per_coil"].items()}
@@ -528,6 +554,10 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
                                   center["params"] if center is not None else _to_params(th, names, base),
                                   "ip_rel" in names)
         rec["correction_core_effect"] = _correction_effect_record(center, kin, src, cfg, settings, state_fn)
+        # the core treatment of the final center: core_relaxation, q_floor, whether the floor acted, the floor radius
+        rec["core"] = ((center["res"].assembly or {}).get("core") if center is not None and center["res"].assembly
+                       else dict(core_relaxation=cfg.core_relaxation, q_floor=float(cfg.q_floor),
+                                 note="no consistent center"))
         cov = np.full((len(names), len(names)), np.nan)
         sig = np.full(len(names), np.nan)
         chi = {}
@@ -569,15 +599,21 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
         summ = headline_summary(all_tab, ms, coil_roles)
         summ_offset = flux_offset_record(all_tab)
         fit_chi = {g: float(np.sum(r[[i for i, (gg, _) in enumerate(idx) if gg == g]] ** 2)) for g in groups}
+        n_off = _offset_params(tab, groups)
+        off_rows = [i for i, (gg, _) in enumerate(idx) if gg == "flux_offset_prior"]
+        if off_rows:
+            fit_chi["flux_offset_prior"] = float(np.sum(r[off_rows] ** 2))
         inner = _inner_dof_record(fm, groups)
-        dof = float(r.size - len(names) - inner["data"])
+        dof = float(r.size - len(names) - n_off - inner["data"])
         c = dict(theta=np.array(theta, float), params=p, res=res, r=full, r_data=r, index=idx, prior_index=lp,
                  chi2=dict(objective=float(full @ full), data=float(r @ r), prior=float(rp @ rp), fit_groups=fit_chi,
-                           n_data=int(r.size), n_params=len(names), n_params_outer=len(names),
+                           n_data=int(r.size), n_params=len(names) + n_off, n_params_outer=len(names),
+                           n_params_flux_offset=n_off, n_data_flux_offset_prior=len(off_rows),
                            inner_dof=inner["data"], inner_dof_record=inner, dof=dof,
-                           dof_outer_only=int(r.size) - len(names), chi2_per_dof=(float(r @ r) / dof if dof > 0
-                                                                                   else float("nan")),
-                           dof_rule="N_data - n_params (outer) - inner_dof (trace of the coil solve's hat matrix "
+                           dof_outer_only=int(r.size) - len(names) - n_off,
+                           chi2_per_dof=(float(r @ r) / dof if dof > 0 else float("nan")),
+                           dof_rule="N_data (with the loop offset's prior row when present) - n_params (outer, with "
+                                    "the fitted loop offset) - inner_dof (trace of the coil solve's hat matrix "
                                     "over the data rows of the fit groups)",
                            scored_all=summ,
                            scored_all_dof=dict(n_channels=summ["total"]["n"], n_params=len(names),

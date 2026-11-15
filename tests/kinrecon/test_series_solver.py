@@ -63,7 +63,7 @@ def child(out, parts="abc"):
     from bouquet.kinrecon import series as SE
     rec = {}
     fm, kin, src, cfg, init, ip = _base._setup()
-    cfg = dataclasses.replace(cfg, sawtooth=False)
+    cfg = dataclasses.replace(cfg, core_relaxation="none")
     # ---- truth initial state: relaxed shape + corrections as sources
     tr0 = CM.consistent_solve(fm, kin, src, dict(log_strength=None, a_corr=A_TRUE), cfg, label="truth0",
                               initial_profiles=init)

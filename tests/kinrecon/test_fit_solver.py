@@ -4,8 +4,8 @@ Public synthetic fixture only: the sawtoothing L-mode slice ``tests/data/g_synth
 with its IDA-layout kinetics ``tests/data/ida_synthetic_lmode.cdf``, on the public D3D-like mesh
 ``examples/D3D-like/DIIID_mesh.h5``, OFT default solver settings.
 
-Truth: the current model of ``bouquet.kinrecon.current_model`` (ohmic + Redl bootstrap, sawtooth
-periodic state at a known strength) iterated to consistency with a suite-like generation solve
+Truth: the current model of ``bouquet.kinrecon.current_model`` (ohmic + Redl bootstrap, the opt-in sawtooth
+periodic state at a known strength, ``core_relaxation="periodic_orbit"``) iterated to consistency with a suite-like generation solve
 (isoflux on the g-file boundary, coils regularized toward zero).  Synthetic measurements are
 evaluated on the truth state (40 flux loops in the absolute gauge, 60 finite-length probes, coils,
 Ip, a 16-chord MSE fan with made-up coefficients, declared E_r-corrected), with Gaussian noise at
@@ -121,7 +121,8 @@ def _setup(**forward_kw):
     xj = np.linspace(0.0, 1.0, 129)
     init = (xj, np.interp(xj, np.asarray(eqg.psi_N), np.asarray(parts["jphi_in"])),
             np.interp(xj, np.linspace(0.0, 1.0, len(g["pres"])), g["pres"]))
-    cfg = CM.CurrentModelSettings(r0=float(g["rcentr"]))
+    # the truth is a sawtoothing slice made with the opt-in periodic orbit (the fits free its strength)
+    cfg = CM.CurrentModelSettings(r0=float(g["rcentr"]), core_relaxation="periodic_orbit")
     return fm, kin, src, cfg, init, ip
 
 

@@ -1,5 +1,6 @@
-"""Series defaults: no prescribed sawtooth train (measured crash tables only, a recorded warning when the evolved q
-falls below 1 without crashes), the crash-table reader, and one Z_eff source per series.
+"""Series core treatment: the q floor by default (no sawtooth train, no crash table); measured crash tables and the
+q < 1 records of the opt-in modes (a recorded warning when the evolved q falls below 1 without crashes); the
+crash-table reader; one Z_eff source per series.
 
 Mocked forward model and synthetic geometry as in ``test_series_driver.py`` (no OFT).
 """
@@ -49,23 +50,32 @@ def test_crash_table_reader():
         read_crash_table(TABLE, columns=dict(bogus="x"))
 
 
-def test_default_sawtooth_handling_is_no_prescribed_train():
+def test_default_core_treatment_is_the_q_floor():
     s = SE.SeriesSettings()
-    assert s.sawtooth == "off" and s.sawtooth_requested == "auto"
+    assert s.sawtooth == "q_floor" and s.sawtooth_requested == "q_floor" and s.initial_fit.free == ("a_corr",)
     d = s.as_dict()
-    assert d["sawtooth_resolved"] == "off" and "warning" in d["sawtooth_rule"]
+    assert d["sawtooth_resolved"] == "q_floor" and "time-averaged" in d["sawtooth_rule"]
+    assert d["first_slice_core_relaxation"] == "q_floor" and d["sawtooth_log_strength_used"] is None
     tab = CrashTable(time=[-0.5, -0.4, 0.01], time_err=[0, 0, 0], rho_inv=[0.2] * 3, rho_inv_err=[0.0] * 3,
                      confidence="AAA", record_start=-2.0, record_end=1.0)
-    s2 = SE.SeriesSettings(crash_table=tab)
+    # a crash table never switches the mode by itself: it needs the explicit opt-in
+    for kw in (dict(crash_table=tab), dict(crash_times=[0.1]), dict(sawtooth="off", crash_table=tab)):
+        with pytest.raises(ValueError, match="explicit opt-in"):
+            SE.SeriesSettings(**kw)
+    with pytest.raises(ValueError, match="sawtooth must be one of"):
+        SE.SeriesSettings(sawtooth="auto")
+    s2 = SE.SeriesSettings(sawtooth="crash_times", crash_table=tab)
     assert s2.sawtooth == "crash_times" and s2.crash_times == (-0.5, -0.4, 0.01) and s2.crash_record_start == -2.0
-    assert s2.as_dict()["crash_table"]["n"] == 3
+    assert s2.as_dict()["crash_table"]["n"] == 3 and "EXPLICIT OPTION" in s2.as_dict()["sawtooth_rule"]
     p = SE.SeriesSettings(sawtooth="periodic")
     assert p.sawtooth == "periodic" and "EXPLICIT OPTION" in p.as_dict()["sawtooth_rule"]
+    assert p.as_dict()["first_slice_core_relaxation"] == "periodic_orbit"
+    assert SE.SeriesSettings(sawtooth="off").as_dict()["first_slice_core_relaxation"] == "none"
     with pytest.raises(ValueError, match="not both"):
-        SE.SeriesSettings(crash_table=tab, crash_times=[0.1])
+        SE.SeriesSettings(sawtooth="crash_times", crash_table=tab, crash_times=[0.1])
 
 
-def test_q_below_one_without_crashes_is_recorded(monkeypatch):
+def test_q_below_one_without_crashes_is_recorded_only_with_the_floor_off(monkeypatch):
     ip = SD.IP0
     lag = SD._lag(q0=0.9)                                    # the solved equilibrium's q < 1 on axis
     fm = SD.FakeFM(dict(pred=lag))
@@ -73,17 +83,25 @@ def test_q_below_one_without_crashes_is_recorded(monkeypatch):
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         out = SE.run_series(fm, SD._slices(np.arange(3) * 0.02, np.full(3, ip)), CM.CurrentModelSettings(r0=SD.GEO.R0),
-                            SE.SeriesSettings(initial="relaxed"))
+                            SE.SeriesSettings(initial="relaxed", sawtooth="off"))
     assert out["status"] == "completed" and out["settings"]["sawtooth_resolved"] == "off"
     assert len(out["warnings"]) == 3 and all("no crash record" in x["sawtooth"] for x in out["warnings"])
     assert all("sawtooth_warning" in s for s in out["slices"])
     assert any("q_min" in str(x.message) for x in w)
+    # the default (q floor): no crash-coverage classification and no warning; every slice records its core treatment
+    fm1 = SD.FakeFM(dict(pred=lag))
+    SD._install(monkeypatch, fm1, SD._steady(lag, ip), lambda f: f.lags["pred"])
+    out1 = SE.run_series(fm1, SD._slices(np.arange(3) * 0.02, np.full(3, ip)), CM.CurrentModelSettings(r0=SD.GEO.R0),
+                         SE.SeriesSettings(initial="relaxed"))
+    assert out1["status"] == "completed" and "warnings" not in out1
+    assert not any("q_below_one" in s_ or "sawtooth_warning" in s_ for s_ in out1["slices"])
+    assert out1["first_slice_core_relaxation"] == "q_floor"
     # no warning when q >= 1
     lag1 = SD._lag(q0=1.1)
     fm2 = SD.FakeFM(dict(pred=lag1))
     SD._install(monkeypatch, fm2, SD._steady(lag1, SD.IP0), lambda f: f.lags["pred"])
     out2 = SE.run_series(fm2, SD._slices(np.arange(3) * 0.02, np.full(3, SD.IP0)),
-                         CM.CurrentModelSettings(r0=SD.GEO.R0), SE.SeriesSettings(initial="relaxed"))
+                         CM.CurrentModelSettings(r0=SD.GEO.R0), SE.SeriesSettings(initial="relaxed", sawtooth="off"))
     assert "warnings" not in out2
 
 
@@ -96,7 +114,7 @@ def test_crash_table_coverage_gap_is_recorded(monkeypatch):
     tab = CrashTable(time=ct, time_err=np.zeros(30), rho_inv=np.zeros(30), rho_inv_err=np.zeros(30),
                      confidence=["A"] * 30, record_start=-1.7, record_end=1.0, unobserved=[(0.015, 0.05)])
     out = SE.run_series(fm, SD._slices(np.arange(3) * 0.02, np.full(3, ip)), CM.CurrentModelSettings(r0=SD.GEO.R0),
-                        SE.SeriesSettings(initial="relaxed", crash_table=tab))
+                        SE.SeriesSettings(initial="relaxed", sawtooth="crash_times", crash_table=tab))
     assert out["settings"]["sawtooth_resolved"] == "crash_times"
     # slice 0 lies in an observed stretch 0.15 s after the last recorded crash, three times the recorded crash
     # interval: recorded as a model-data inconsistency; 1 and 2 overlap the unobserved interval
@@ -174,12 +192,12 @@ def test_crash_free_start_respects_unobserved_history():
     """No crash recorded in a history the record did not observe is not 'no crash': the start is refused."""
     tab = CrashTable(time=[0.03, 0.05], time_err=[0, 0], rho_inv=[0.2, 0.2], rho_inv_err=[0, 0], confidence="AA",
                      record_start=-2.0, record_end=1.0, unobserved=[(-1.6, 0.5)])
-    s = SE.SeriesSettings(initial="relaxed", crash_table=tab)
+    s = SE.SeriesSettings(initial="relaxed", sawtooth="crash_times", crash_table=tab)
     with pytest.raises(ValueError, match="not 'no crash'"):
         SE._measured_crash_start(s, CM.CurrentModelSettings(r0=SD.GEO.R0), np.array([0.0, 0.02]))
     ok = CrashTable(time=[0.03, 0.05], time_err=[0, 0], rho_inv=[0.2, 0.2], rho_inv_err=[0, 0], confidence="AA",
                     record_start=-2.0, record_end=1.0)
-    cfg0, p0, rec = SE._measured_crash_start(SE.SeriesSettings(initial="relaxed", crash_table=ok),
+    cfg0, p0, rec = SE._measured_crash_start(SE.SeriesSettings(initial="relaxed", sawtooth="crash_times", crash_table=ok),
                                              CM.CurrentModelSettings(r0=SD.GEO.R0), np.array([0.0, 0.02]))
     assert rec["n_crashes_history"] == 0 and p0["log_strength"] is None
 
@@ -200,7 +218,7 @@ def test_q_below_one_warning_fires_only_for_the_inconsistency_it_names():
     ct = [0.0, 0.05, 0.11, 0.16]                                   # recorded intervals 0.05, 0.06, 0.05 s
     tab = CrashTable(time=ct, time_err=np.zeros(4), rho_inv=np.zeros(4), rho_inv_err=np.zeros(4), confidence="AAAA",
                      record_start=-1.0, record_end=1.0)
-    s = SE.SeriesSettings(initial="relaxed", crash_table=tab)
+    s = SE.SeriesSettings(initial="relaxed", sawtooth="crash_times", crash_table=tab)
     res = _q_res(0.9)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -230,7 +248,7 @@ def test_q_below_one_in_a_series_names_each_slice_and_warns_only_at_the_recorded
     tab = CrashTable(time=ct, time_err=np.zeros(34), rho_inv=np.zeros(34), rho_inv_err=np.zeros(34),
                      confidence=["A"] * 34, record_start=-1.7, record_end=1.0)
     out = SE.run_series(fm, SD._slices(np.arange(3) * 0.02, np.full(3, ip)), CM.CurrentModelSettings(r0=SD.GEO.R0),
-                        SE.SeriesSettings(initial="relaxed", crash_table=tab))
+                        SE.SeriesSettings(initial="relaxed", sawtooth="crash_times", crash_table=tab))
     # the mocked equilibrium has q < 1 on every slice while the evolved state keeps q >= 1, so the recorded crash at
     # 0.01 s does not act: slices 0 and 2 lie within the recorded crash spacing (recorded, NOT warned); slice 1 is
     # named for what it is (a recorded crash that did not act), the only warning
@@ -245,12 +263,12 @@ def test_crash_start_refuses_an_unobserved_history_whatever_the_crash_count():
     """Crashes listed in a history the record did not fully observe do not set the starting crash rate."""
     tab = CrashTable(time=[-1.45, -1.40, 0.03], time_err=[0, 0, 0], rho_inv=[0.2] * 3, rho_inv_err=[0.0] * 3,
                      confidence="AAA", record_start=-2.0, record_end=1.0, unobserved=[(-1.3, 0.0)])
-    s = SE.SeriesSettings(initial="relaxed", crash_table=tab)
+    s = SE.SeriesSettings(initial="relaxed", sawtooth="crash_times", crash_table=tab)
     with pytest.raises(ValueError, match="did not observe all of it"):
         SE._measured_crash_start(s, CM.CurrentModelSettings(r0=SD.GEO.R0), np.array([0.0, 0.02]))
     ok = CrashTable(time=[-1.45, -1.40, 0.03], time_err=[0, 0, 0], rho_inv=[0.2] * 3, rho_inv_err=[0.0] * 3,
                     confidence="AAA", record_start=-2.0, record_end=1.0)
-    cfg0, p0, rec = SE._measured_crash_start(SE.SeriesSettings(initial="relaxed", crash_table=ok),
+    cfg0, p0, rec = SE._measured_crash_start(SE.SeriesSettings(initial="relaxed", sawtooth="crash_times", crash_table=ok),
                                              CM.CurrentModelSettings(r0=SD.GEO.R0), np.array([0.0, 0.02]))
     assert rec["n_crashes_history"] >= 2
 

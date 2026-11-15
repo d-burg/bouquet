@@ -37,7 +37,7 @@ def child(out):
     from bouquet.kinrecon import current_model as CM
     from bouquet.kinrecon import series as SE
     fm, kin, src, cfg, init, ip = _base._setup()
-    cfg = dataclasses.replace(cfg, sawtooth=False)
+    cfg = dataclasses.replace(cfg, core_relaxation="none")
     F00 = float(fm.F0)
     rec = dict(F0_0=F00)
     tr0 = CM.consistent_solve(fm, kin, src, dict(log_strength=None), cfg, label="f0truth0", initial_profiles=init)

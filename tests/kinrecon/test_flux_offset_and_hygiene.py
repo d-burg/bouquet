@@ -221,3 +221,27 @@ def test_inner_degrees_of_freedom_and_free_coils_in_the_reports():
     hs = headline_summary(tab, ms, roles)
     assert hs["pf_current_free"]["coils"] == ["C2"] and hs["pf_current_free"]["chi2"] == pytest.approx(4.0)
     assert hs["pf_current"]["n"] == 3 and hs["total"]["n"] == 4 and hs["total"]["chi2"] == pytest.approx(1.25)
+
+
+@pytest.mark.parametrize("prior", [(2.5, 0.4), None])
+def test_fit_objective_carries_the_offset_prior_row_and_counts_the_offset(monkeypatch, prior):
+    """The fit's residual vector holds the offset's prior row (one datum) and its dof count the offset (one parameter),
+    so the fit objective and degrees of freedom are those of ``chi2_report`` on the same table."""
+    from bouquet.kinrecon import fit as FIT
+    model = MEAS - 3.0 + np.array([0.2, -0.4, 0.3, 0.1, -0.2])
+    _install(monkeypatch, {0: model})
+    ms = _set(prior=prior, ref="L0" if prior else None)
+    r, idx, tab = FIT.residual_vector(SimpleNamespace(gs=0), ms, ["flux_loop"], FIT.FitSettings(), {})
+    rep = SC.chi2_report(tab, n_params=0)
+    off = SC.flux_offset_record(tab)
+    assert float(r @ r) == pytest.approx(rep["total"]["chi2"], rel=1e-14)
+    assert r.size == rep["total"]["n_channels"] and FIT._offset_params(tab, ["flux_loop"]) == off["n_extra_params"] == 1
+    assert r.size - FIT._offset_params(tab, ["flux_loop"]) == rep["total"]["dof"]
+    if prior:
+        assert idx[-1] == ("flux_offset_prior", "offset")
+        assert r[-1] == pytest.approx((off["offset"] - prior[0]) / prior[1], rel=1e-14)
+        assert r[-1] ** 2 == pytest.approx(off["prior_chi2"], rel=1e-14)
+    else:
+        assert all(g == "flux_loop" for g, _ in idx) and r.size == 5
+    # without the flux loops among the fit groups nothing is added
+    assert FIT._offset_params(tab, ["bpol_probe"]) == 0

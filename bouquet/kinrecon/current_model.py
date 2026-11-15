@@ -5,21 +5,37 @@ Physics (all in Python, iterated with the geometry):
 .. code-block:: text
 
     <J.B>      = <J.B>_ohm + s_bs <J.B>_BS + s_cd <J.B>_CD (+ sum_k a_k g_k)                      (1)
-    <J.B>_ohm  = sigma_neo <E.B>,   <E.B> from the steady state (or the sawtooth periodic state)
-                 of the flux-diffusion equation with I(LCFS) = Ip                                   (2)
+    <J.B>_ohm  = sigma_neo <E.B>,   <E.B> from the steady state of the flux-diffusion equation with
+                 I(LCFS) = Ip, held at the q floor (or an opt-in sawtooth state)                   (2)
     <J_phi>    = kappa <J.B> - (dp/dpsi) (<R> - F^2 <1/R> / <B^2>),  kappa = F <1/R> / <B^2>        (3)
     p          = p_thermal(n_e, T_e, n_i, T_i, n_imp) + s_pf p_fast                                (4)
 
 * (2): :class:`.current.diffusion.CurrentDiffusion` in steady-state mode on the geometry of the
   CURRENT equilibrium (:func:`.current.geometry.from_tokamaker`), domain to psi_N = 0.995 with the
   lumped outer layer; ``sigma_neo`` from :func:`.current.conductivity.neoclassical_conductivity`
-  (Redl 2021 by default) on the kinetic profiles.  With the sawtooth model on, the periodic orbit
-  of "diffuse for one period, reconnect with fraction f" (:func:`.current.sawtooth.solve_periodic_orbit`)
-  replaces the steady state and its cycle average is used (the window average over an unknown
-  phase, averaged over phases, equals the cycle average); with measured crash times the
-  time-dependent slice run (:func:`.current.sawtooth.simulate_slice`) averaged over the
-  measurement window is used instead.  The sawtooth parameters are the strength
-  ``Lambda = -ln(1 - 0.999 f) nu`` (nu the mean crash rate) and ``f``.
+  (Redl 2021 by default) on the kinetic profiles.  The core treatment is
+  :attr:`CurrentModelSettings.core_relaxation` (:data:`CORE_RELAXATIONS`):
+
+  - ``"q_floor"`` (default): the time-averaged state.  The steady state of the MODEL sources
+    (bootstrap and driven current) is held at ``q >= q_floor`` (:func:`.current.sawtooth.floor_q`,
+    ``q_floor`` default 1, one documented setting): wherever its own q is below the floor the core
+    current is flattened to hold q there, Ip conserved; a state whose q at the domain edge is below
+    the floor is refused.  The current corrections are added AFTER the floor, as their steady
+    response (the steady state with them among the sources minus the one without), so the floor
+    never cancels them and the fit may pull q below the floor where the data demand it; where the
+    floor does not act the state is the steady state with the corrections among the sources, to the
+    bit.  No sawtooth parameter, crash time or amplitude is used;
+  - ``"periodic_orbit"`` (opt-in): the periodic orbit of "diffuse for one period, reconnect with
+    fraction f" (:func:`.current.sawtooth.solve_periodic_orbit`) replaces the steady state and its
+    cycle average is used (the window average over an unknown phase, averaged over phases, equals
+    the cycle average); its parameters are the strength ``Lambda = -ln(1 - 0.999 f) nu`` (nu the mean
+    crash rate) and ``f``, which must then be given;
+  - ``"crash_times"`` (opt-in): with measured crash times the time-dependent slice run
+    (:func:`.current.sawtooth.simulate_slice`) averaged over the measurement window;
+  - ``"none"``: the plain steady state, q unconstrained.
+
+  Every assembly records the treatment, ``q_floor``, whether the floor acted and the floor radius
+  (``assembly["core"]``).
 * ``<J.B>_BS``: Redl 2021 (:mod:`.current.bootstrap`), multiplier ``s_bs = 1`` by default.
 * ``<J.B>_CD`` and ``p_fast`` are supplied as arrays (:class:`SourceProfiles`) with optional
   scale factors; this module never computes them.
@@ -127,6 +143,12 @@ CORRECTION_Q_RHO = 0.2
 #: REPORTING level (not an acceptance criterion; nothing is rejected or changed by it): a result whose corrections
 #: change the axis <J.B> by more than this fraction of its uncorrected value carries a plain flag.
 CORRECTION_AXIS_REPORT_LEVEL = 0.05
+#: Core treatments of the current model (:attr:`CurrentModelSettings.core_relaxation`, module docstring):
+#: ``"q_floor"`` (default; time-averaged, q held at ``q_floor``), the opt-ins ``"periodic_orbit"`` and
+#: ``"crash_times"`` (they need the sawtooth parameters ``log_strength`` and ``f``), and ``"none"``.
+CORE_RELAXATIONS = ("q_floor", "periodic_orbit", "crash_times", "none")
+#: Core treatments that use the sawtooth parameters ``log_strength`` and ``f``.
+SAWTOOTH_RELAXATIONS = ("periodic_orbit", "crash_times")
 
 
 class ModelFailure(RuntimeError):
@@ -310,10 +332,11 @@ class CurrentModelSettings:
     bootstrap_ln_lambda_model: str = "sauter"   # bootstrap Coulomb logarithms: "sauter" (S99 18d-e) or "nrl" (earlier)
     pass_acceleration: str = "anderson"      # "anderson" (depth anderson_depth) or "none"
     anderson_depth: int = 3
-    sawtooth: bool = True
+    core_relaxation: str = "q_floor"         # CORE_RELAXATIONS: the core treatment (module docstring)
+    q_floor: float = _saw.DEFAULT_Q_FLOOR    # floor of the "q_floor" treatment
     sawtooth_nsteps: int = 40
     sawtooth_sheet_width: float = _saw.DEFAULT_SHEET_WIDTH
-    crash_times: Optional[Sequence[float]] = None   # measured crash times [s] (None: periodic orbit)
+    crash_times: Optional[Sequence[float]] = None   # measured crash times [s] ("crash_times" treatment)
     window: Optional[Sequence[float]] = None        # measurement window [t0, t1] [s] (with crash times)
     crash_record_start: Optional[float] = None      # [s] start of the crash detection (default: first crash)
     history: float = _saw.DEFAULT_HISTORY
@@ -321,6 +344,16 @@ class CurrentModelSettings:
     corr_width_rho: float = 0.1                           # their width (standard deviation) in rho_tor,norm
     corr_return: str = "conductivity"     # CORRECTION_RETURNS: how a steady-form correction's net current returns
     corr_return_width_ratio: float = 2.0  # "local": width of the compensating Gaussian / corr_width_rho
+
+    def __post_init__(self):
+        if self.core_relaxation not in CORE_RELAXATIONS:
+            raise ValueError(f"core_relaxation must be one of {CORE_RELAXATIONS}")
+        qf = float(self.q_floor)
+        if not (np.isfinite(qf) and qf > 0.0):
+            raise ValueError("q_floor must be finite and > 0")
+        if self.crash_times is not None and self.core_relaxation != "crash_times":
+            raise ValueError(f"crash_times are given but core_relaxation is {self.core_relaxation!r}: measured crash "
+                             "times are an opt-in treatment (core_relaxation='crash_times')")
 
     def as_dict(self):
         d = asdict(self)
@@ -565,7 +598,9 @@ def assemble(lag, kin, src, params, cfg, ip, z0=None, state=None):
     (:func:`evaluate_geometry`) and the parameters.
 
     The corrections are non-inductive sources ``sum_k a_k g_k`` of the diffusion solver.  Without
-    ``state`` they enter the steady state / periodic orbit (the ohmic part keeps Ip).  With ``state``
+    ``state`` they enter the core treatment of ``cfg.core_relaxation`` (the ohmic part keeps Ip): with the
+    default ``"q_floor"`` their steady response is added to the floored model state (module docstring), otherwise
+    they are sources of the steady state / periodic orbit.  With ``state``
     (a :class:`.current.diffusion.CurrentState` on ``n_cells`` cells of the domain rho, the
     time-dependent path) that state replaces the steady state / orbit.  A state that carries
     ``meta["correction_source"]`` was advanced with the corrections as an in-window source
@@ -576,7 +611,8 @@ def assemble(lag, kin, src, params, cfg, ip, z0=None, state=None):
     Returns a dict with the knots ``x`` (psi_N) and their ``rho_knots``, ``jphi`` [A/m^2] and the
     full-frame pressure ``p`` [Pa] on them, ``jphi_cmp`` on the fixed comparison grid ``rho_cmp``, the
     parts of <J.B> and the current fractions, the model q on rho (``q_model``), the sawtooth record,
-    the diffusion ``state`` used, and ``orbit_z`` (continuation for the next orbit)."""
+    the core-treatment record (``core``, :func:`core_record`), the diffusion ``state`` used, and ``orbit_z``
+    (continuation for the next orbit)."""
     t0 = time.perf_counter()
     p = full_params(params)
     geom, layer, c = lag["geom"], lag["layer"], lag["psi_n_edge"]
@@ -629,11 +665,16 @@ def assemble(lag, kin, src, params, cfg, ip, z0=None, state=None):
             corr_form = "zero-net-current steady response added to the supplied state"
         state = st_use
         saw.update(mode="supplied state (time-dependent path)")
-    elif cfg.sawtooth and p["log_strength"] is not None:
+        floor_rec = dict((state.meta or {}).get("core") or dict(core_relaxation="supplied state (no core record)"))
+    elif cfg.core_relaxation in SAWTOOTH_RELAXATIONS:
+        if p["log_strength"] is None:
+            raise ValueError(f"core_relaxation={cfg.core_relaxation!r} needs the sawtooth parameter log_strength")
         lam = float(np.exp(p["log_strength"]))
         rate = float(_saw.rate_from_strength(lam, p["f"]))
         period = 1.0 / rate
-        if cfg.crash_times is not None:
+        if cfg.core_relaxation == "crash_times":
+            if cfg.crash_times is None:
+                raise ValueError("core_relaxation='crash_times' needs crash_times")
             if cfg.window is None:
                 raise ValueError("crash_times need the measurement window")
             sched = _saw.schedule_for_slice(cfg.crash_times, cfg.window, history=cfg.history,
@@ -668,9 +709,31 @@ def assemble(lag, kin, src, params, cfg, ip, z0=None, state=None):
                    orbit_residual=float(orb.residual), orbit_residual_stepping=float(orb.residual_stepping),
                    n_newton=int(orb.n_newton), n_plain_cycles=int(orb.n_plain_cycles),
                    orbit_wall_s=round(orb.wall_time, 4))
+        floor_rec = dict(core_relaxation=cfg.core_relaxation)
     else:
-        state = sol.steady_state(rf)
-        saw.update(mode="off (steady state)" if not cfg.sawtooth else "off (log_strength None)")
+        if p["log_strength"] is not None:
+            raise ValueError(f"log_strength is a parameter of the opt-in sawtooth treatments {SAWTOOTH_RELAXATIONS}; "
+                             f"core_relaxation is {cfg.core_relaxation!r}")
+        if cfg.core_relaxation == "q_floor":
+            # the time-averaged state: the MODEL's steady state (bootstrap + driven current) held at the q floor FIRST,
+            # then the corrections' steady response -- the steady state with them among the sources minus the one
+            # without -- added, so the floor never cancels a correction; where the floor does not act this is the
+            # steady state with the corrections among the sources, to the bit
+            sol_m = build_solver(lag, jbs + jcd, ipv)
+            st_m = sol_m.steady_state(rf)
+            st_f, floor_rec = _saw.floor_q(st_m, sol_m, cfg.q_floor)
+            state = st_f
+            if any(a != 0.0 for a in p["a_corr"]):
+                st_c = sol.steady_state(rf)
+                state = CurrentState(rf, st_c.psi + (st_f.psi - st_m.psi),
+                                     st_c.psi_boundary + (st_f.psi_boundary - st_m.psi_boundary), st_c.time,
+                                     dict(st_c.meta, **({"q_floor": st_f.meta["q_floor"]} if "q_floor" in st_f.meta
+                                                        else {})))
+            saw.update(mode="q floor (time-averaged state; the corrections added after the floor)")
+        else:
+            state = sol.steady_state(rf)
+            floor_rec = dict(core_relaxation="none")
+            saw.update(mode="none (steady state, q unconstrained)")
     prof = sol.profiles(state)
     rate_layer = prof["v_loop_boundary"] / (2.0 * np.pi)
     # knots of this pass (from this pass's equilibrium) and the fixed comparison grid
@@ -727,6 +790,7 @@ def assemble(lag, kin, src, params, cfg, ip, z0=None, state=None):
            for kk in parts_c}
     tot = sum(cur.values())
     rho_faces_std = prof["rho_faces"] * rmap.rho_edge
+    core = core_record(floor_rec, cfg, prof["q"], rho_faces_std, rmap.rho_edge)
     out = dict(x=xk, rho_knots=rmap.rho_of_psin(xk), jphi=jphi, p=pk, jdotb=jb, jdotb_ni=jb_ni, kappa=kap,
                jphi_pressure_term=jpd, rho_cmp=rho_cmp, jphi_cmp=jphi_cmp, knots=krec,
                currents_A=cur, current_sum_A=tot, ip=ipv,
@@ -736,11 +800,36 @@ def assemble(lag, kin, src, params, cfg, ip, z0=None, state=None):
                profiles_rho=dict(rho=prof["rho_cells"] * rmap.rho_edge, jdotb=prof["jdotb"],
                                  **{f"jdotb_{kk}": v for kk, v in parts_c.items()}),
                li3_diffusion=float(prof["li3"]), outer_layer_current_A=float(prof["outer_layer_current"]),
-               sawtooth=saw, orbit_z=orbit_z, corrections=corr_shapes, params=p, state=state,
+               sawtooth=saw, core=core, orbit_z=orbit_z, corrections=corr_shapes, params=p, state=state,
                correction_form=(corr_form if state is not None and corr_form is not None else
                                 ("source of the steady state / periodic orbit" if corr_shapes else None)),
                p_sep=float(pk[-1]), pax=float(pk[0] - pk[-1]), wall_s=round(time.perf_counter() - t0, 4))
     return out
+
+
+def core_record(floor_rec, cfg, q_model, rho_tor, rho_edge):
+    """The core-treatment record of an assembly (``assembly["core"]``; a record only): the treatment, ``q_floor``,
+    whether the floor acted, the floor radius in rho_tor,norm (``rho_floor``; ``rho_floor_domain`` on the
+    diffusion domain's rho) and q_min before the floor (from :func:`.current.sawtooth.floor_q`), and the minimum of the
+    scored model q (after the corrections) with its rho_tor,norm and its difference from the floor (negative where the
+    corrections pull q below it; round-off at the floor itself)."""
+    rec = dict(floor_rec or {})
+    rec.setdefault("core_relaxation", cfg.core_relaxation)
+    rec.setdefault("q_floor", float(cfg.q_floor) if rec["core_relaxation"] == "q_floor" else None)
+    if "rho_floor" in rec and "rho_floor_domain" not in rec:
+        # floor_q works on the diffusion domain's rho (0..1 at the domain edge): rho_tor,norm = rho * rho_edge
+        rec["rho_floor_domain"] = rec["rho_floor"]
+        for k in ("rho_floor", "rho_q_min_before"):
+            if rec.get(k) is not None:
+                rec[k] = float(rec[k]) * float(rho_edge)
+    q = np.asarray(q_model, float)
+    ok = np.isfinite(q)
+    if np.any(ok):
+        j = int(np.argmin(np.where(ok, q, np.inf)))
+        rec.update(q_min_model=float(q[j]), rho_q_min_model=float(np.asarray(rho_tor, float)[j]))
+        if rec.get("q_floor") is not None:
+            rec["q_min_model_minus_floor"] = float(q[j] - rec["q_floor"])
+    return rec
 
 
 # ============================================================== the corrections' effect on the core (recording only)
@@ -815,12 +904,13 @@ def correction_core_effect(lag, asm, asm0, cfg, prior_sigmas, how):
 
 def steady_correction_effect(lag, asm, kin, src, cfg, prior_sigmas, z0=None):
     """:func:`correction_core_effect` of a single-slice result (corrections in the steady state / periodic orbit):
-    the current model re-evaluated on the result's geometry with the amplitudes set to zero (the steady state, or
-    the sawtooth periodic orbit or measured-crash run as the result used, from the orbit continuation ``z0``).  A
+    the current model re-evaluated on the result's geometry with the amplitudes set to zero (the core treatment the
+    result used: the q-floor state, the steady state, or the opt-in periodic orbit or measured-crash run from the
+    orbit continuation ``z0``).  A
     re-evaluation that fails is recorded with its reason."""
-    how = ("steady re-evaluation: the current model (steady state, or the sawtooth periodic state the fit used) "
-           "re-evaluated on the fitted equilibrium's geometry with the correction amplitudes set to zero; no new "
-           "equilibrium solve")
+    how = ("steady re-evaluation: the current model (the core treatment the fit used: the q-floor state, the plain "
+           "steady state or an opt-in sawtooth state) re-evaluated on the fitted equilibrium's geometry with the "
+           "correction amplitudes set to zero; no new equilibrium solve")
     p = full_params(asm["params"])
     if not any(a != 0.0 for a in p["a_corr"]):
         return correction_core_effect(lag, asm, asm, cfg, prior_sigmas, how + " (all amplitudes are zero)")

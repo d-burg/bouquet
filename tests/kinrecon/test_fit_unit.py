@@ -14,6 +14,9 @@ from bouquet.kinrecon import current_model as CM
 from bouquet.kinrecon import fit as FIT
 from bouquet.kinrecon.interfaces import ConstraintGroup, MeasurementSet
 
+#: The mocked model is linear in ``log_strength``: the fits free it as under the opt-in periodic-orbit core treatment
+#: (``core_relaxation="periodic_orbit"``, whose free set was the package default before the q floor).
+SAW_FREE = ("log_strength", "a_corr")
 A = np.array([[2.0], [-1.0], [0.5], [3.0]])
 B = np.array([0.3, -0.2, 0.1, 0.05])
 TRUE = 2.0
@@ -97,8 +100,8 @@ def test_lm_reaches_the_linear_map_point_and_laplace_covariance(monkeypatch):
     fm = FakeFM()
     _install(monkeypatch, fm)
     kin, src = _kin()
-    cfg = CM.CurrentModelSettings(r0=1.0)
-    out = FIT.reconstruct(fm, kin, src, cfg, FIT.FitSettings(), params0=dict(log_strength=0.5, f=0.37))
+    cfg = CM.CurrentModelSettings(r0=1.0, core_relaxation="periodic_orbit")
+    out = FIT.reconstruct(fm, kin, src, cfg, FIT.FitSettings(free=SAW_FREE), params0=dict(log_strength=0.5, f=0.37))
     th, cov = _expected(FIT.PARAMETERS["log_strength"]["prior"][1])
     assert out.status == "converged", out.status
     # forward differences of a linear model are exact, and the stopping tests are made on the
@@ -113,7 +116,8 @@ def test_failed_trial_is_a_rejected_step(monkeypatch):
     fm = FakeFM()
     calls = _install(monkeypatch, fm, fail_trials=(1,))      # the first LM trial fails
     kin, src = _kin()
-    out = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=1.0), FIT.FitSettings(),
+    out = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=1.0, core_relaxation="periodic_orbit"),
+                          FIT.FitSettings(free=SAW_FREE),
                           params0=dict(log_strength=0.5, f=0.37))
     trials = out.record["iterations"][0]["trials"]
     assert trials[0]["status"] == "solve_failed" and trials[0]["chi2"] is None
@@ -131,12 +135,14 @@ def test_failed_center_and_too_many_failures(monkeypatch):
     fm = FakeFM()
     _install(monkeypatch, fm, fail_calls=(1,))
     kin, src = _kin()
-    out = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=1.0), FIT.FitSettings(),
+    out = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=1.0, core_relaxation="periodic_orbit"),
+                          FIT.FitSettings(free=SAW_FREE),
                           params0=dict(log_strength=0.5))
     assert out.status == "failed_initial_consistency" and np.all(np.isnan(out.sigma))
     fm = FakeFM()
     _install(monkeypatch, fm, fail_trials=(1, 2, 3, 4))
-    out = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=1.0), FIT.FitSettings(),
+    out = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=1.0, core_relaxation="periodic_orbit"),
+                          FIT.FitSettings(free=SAW_FREE),
                           params0=dict(log_strength=0.5))
     assert out.status == "failed_trials"
     assert out.theta[0] == 0.5            # never moved: no failed trial was accepted
@@ -146,7 +152,8 @@ def test_settings_record_is_complete(monkeypatch):
     fm = FakeFM()
     _install(monkeypatch, fm)
     kin, src = _kin()
-    out = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=1.0), FIT.FitSettings(),
+    out = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=1.0, core_relaxation="periodic_orbit"),
+                          FIT.FitSettings(free=SAW_FREE),
                           params0=dict(log_strength=0.5))
     rec = out.record
     for key in ("free", "specs", "settings", "model_settings", "fit_groups", "excluded_groups", "iterations",
@@ -158,7 +165,8 @@ def test_settings_record_is_complete(monkeypatch):
         assert key in rec["settings"], key
     spec = rec["specs"]["log_strength"]
     assert spec["prior"] == FIT.PARAMETERS["log_strength"]["prior"] and len(spec["bounds"]) == 2
-    for key in ("pass_tol", "max_passes", "conductivity_model", "sawtooth", "pass_acceleration", "knots"):
+    for key in ("pass_tol", "max_passes", "conductivity_model", "core_relaxation", "q_floor", "pass_acceleration",
+                "knots"):
         assert key in rec["model_settings"], key
     # MSE that is not declared E_r-corrected never enters the fit
     ms = MeasurementSet("toy", 0, 0, {"mse": ConstraintGroup("mse", ["m"], [0.1], [0.01], [True],
@@ -171,7 +179,8 @@ def test_stopping_summary_records_which_test_fired(monkeypatch):
     fm = FakeFM()
     _install(monkeypatch, fm)
     kin, src = _kin()
-    out = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=1.0), FIT.FitSettings(),
+    out = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=1.0, core_relaxation="periodic_orbit"),
+                          FIT.FitSettings(free=SAW_FREE),
                           params0=dict(log_strength=0.5, f=0.37))
     sm = out.record["stopping_summary"]
     assert out.status == "converged" and sm["test"] == "a"
@@ -194,7 +203,7 @@ def test_stopping_summary_records_which_test_fired(monkeypatch):
 
 
 def test_parameter_expansion_and_unknown():
-    cfg = CM.CurrentModelSettings(r0=1.0)
+    cfg = CM.CurrentModelSettings(r0=1.0, core_relaxation="periodic_orbit")
     assert FIT._expand(("log_strength", "a_corr"), cfg) == ["log_strength", "a_corr_0", "a_corr_1", "a_corr_2"]
     with pytest.raises(ValueError):
         FIT._expand(("nope",), cfg)
@@ -259,13 +268,13 @@ def test_lagged_step_columns_keep_the_convergence_definition(monkeypatch, scale)
     the fit ends at the same MAP point with the same covariance as the consistent route even when the
     lagged columns are off by 40 %."""
     kin, src = _kin()
-    cfg = CM.CurrentModelSettings(r0=1.0)
+    cfg = CM.CurrentModelSettings(r0=1.0, core_relaxation="periodic_orbit")
     fm0 = FakeFM()
     _install(monkeypatch, fm0)
-    ref = FIT.reconstruct(fm0, kin, src, cfg, FIT.FitSettings(), params0=dict(log_strength=0.5, f=0.37))
+    ref = FIT.reconstruct(fm0, kin, src, cfg, FIT.FitSettings(free=SAW_FREE), params0=dict(log_strength=0.5, f=0.37))
     fm = FakeFM()
     _install_lagged_bias(monkeypatch, fm, scale)
-    out = FIT.reconstruct(fm, kin, src, cfg, FIT.FitSettings(jacobian_steps="lagged"),
+    out = FIT.reconstruct(fm, kin, src, cfg, FIT.FitSettings(free=SAW_FREE, jacobian_steps="lagged"),
                           params0=dict(log_strength=0.5, f=0.37))
     th, cov = _expected(FIT.PARAMETERS["log_strength"]["prior"][1])
     assert out.status == ref.status == "converged"
@@ -322,7 +331,7 @@ def test_ip_target_is_a_fit_parameter_with_its_measurement_row(monkeypatch):
     """The Ip row is the datum of ``ip_rel`` (no prior row); the fit reaches the linear MAP point of the joint
     problem, and ``ip_target='measured'`` keeps the earlier pinned target."""
     kin, src = _kin()
-    cfg = CM.CurrentModelSettings(r0=1.0)
+    cfg = CM.CurrentModelSettings(r0=1.0, core_relaxation="periodic_orbit")
     fm = FakeFMIp()
     _install_ip(monkeypatch, fm)
     out = FIT.reconstruct(fm, kin, src, cfg, FIT.FitSettings(free=("log_strength",)), params0=dict(log_strength=0.5))
@@ -362,7 +371,7 @@ def test_noise_is_the_same_measurement_with_lagged_columns(monkeypatch):
     re-solve from a lagged column's state would carry an offset (the mocked lagged state is not a
     consistent one), so the lagged mode would otherwise measure a larger noise."""
     kin, src = _kin()
-    cfg = CM.CurrentModelSettings(r0=1.0)
+    cfg = CM.CurrentModelSettings(r0=1.0, core_relaxation="periodic_orbit")
     out = {}
     for mode in ("consistent", "lagged"):
         fm = FakeFM()
@@ -388,7 +397,8 @@ def test_noise_is_the_same_measurement_with_lagged_columns(monkeypatch):
         fm.snapshot = (lambda f=fm: dict(theta=f.theta_state, kind=f.kind))
         monkeypatch.setattr(FIT, "_consistent", consistent)
         monkeypatch.setattr(FIT._cm, "lagged_solve", lagged)
-        res = FIT.reconstruct(fm, kin, src, cfg, FIT.FitSettings(jacobian_steps=mode), params0=dict(log_strength=0.5))
+        res = FIT.reconstruct(fm, kin, src, cfg, FIT.FitSettings(free=SAW_FREE, jacobian_steps=mode),
+                              params0=dict(log_strength=0.5))
         out[mode] = res.record["noise"]
     assert out["consistent"]["status"] == out["lagged"]["status"] == "ok"
     assert out["lagged"]["chi2"] == out["consistent"]["chi2"] == 0.0

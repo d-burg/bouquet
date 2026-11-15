@@ -66,17 +66,20 @@ from . import zeff_sources as _zr
 EC = 1.602176634e-19
 
 __all__ = ["KineticInputs", "assemble_kinetic_inputs", "zeff_from_impurity_density", "COORDINATES",
-           "CHECKED", "ZEFF_RULE_OPTIONS"]
+           "CHECKED", "ZEFF_RULE_OPTIONS", "FAST_IONS_NONE"]
 
 #: Coordinates a kinetic table can carry.
 COORDINATES = ("rho_tor_norm", "psi_n")
 #: The ``zeff_source`` value that applies the checked-source rule (module docstring).
 CHECKED = "checked"
+#: ``n_fast`` value that declares the absence of fast ions (:func:`assemble_kinetic_inputs`; the zero density is
+#: then a stated input, recorded, never a silent default).
+FAST_IONS_NONE = "none"
 #: Keys of the ``zeff_rule`` options (all optional): ``psi_n`` (psi_N of every ``x``, needed for a
 #: ``rho_tor_norm`` table: the rule's regions are in psi_N), ``slice_time`` [s], ``slice_window``
 #: ``(t0, t1)`` [s], ``override`` (a candidate name), ``accept_failed`` (bool), ``fast_ions``
-#: (``"none"``: the caller declares there are no fast ions; otherwise the ``n_fast`` given is used,
-#: or I-3 is evaluated without fast ions when ``n_fast`` is None).
+#: (``"none"``: the caller declares there are no fast ions, as ``n_fast="none"`` does; otherwise the ``n_fast``
+#: given is used).
 ZEFF_RULE_OPTIONS = ("psi_n", "slice_time", "slice_window", "override", "accept_failed", "fast_ions")
 #: Keys a candidate may carry when given as a dict (``value`` and ``kind`` required).
 _CANDIDATE_KEYS = ("kind", "value", "sigma", "fit_points", "raw_points", "provenance", "core_median_series")
@@ -140,7 +143,7 @@ class KineticInputs:
 
 
 def assemble_kinetic_inputs(x, ne, te, ti, *, zeff_candidates, zeff_source, z_imp, coordinate="rho_tor_norm",
-                            n_fast=None, n_fast_source="none (no fast ions given)", psi_n_to_rho=None,
+                            n_fast=None, n_fast_source=None, psi_n_to_rho=None,
                             mapping_source=None, provenance=None, ni_reference=None, source="",
                             disagreement_range=(0.0, 0.9), zeff_rule=None):
     """Build :class:`KineticInputs` (module docstring).
@@ -166,8 +169,12 @@ def assemble_kinetic_inputs(x, ne, te, ti, *, zeff_candidates, zeff_source, z_im
         Options of the checked route (:data:`ZEFF_RULE_OPTIONS`); refused with a named source.
     z_imp : float
         Charge of the single impurity species (> 1).
-    n_fast : array on x, optional
-        Fast-ion density [m^-3] from the source provider (zero when None, recorded).
+    n_fast : array on x, or ``"none"``
+        Fast-ion density [m^-3] from the source provider, or :data:`FAST_IONS_NONE` (``"none"``) to declare that
+        there are no fast ions (the zero density is then a stated input, recorded).  Required: ``None`` is
+        refused (a missing fast-ion density is never taken as zero silently).
+    n_fast_source : str, optional
+        Name of the fast-ion source, recorded (default: what was declared).
     psi_n_to_rho : (psi_n, rho), optional
         With ``coordinate="psi_n"``: the producing equilibrium's own psi_N -> rho_tor,norm table; the
         inputs are then placed by rho (``mapping_source`` names that equilibrium).
@@ -203,9 +210,17 @@ def assemble_kinetic_inputs(x, ne, te, ti, *, zeff_candidates, zeff_source, z_im
     for k in ("ne", "te", "ti"):
         if np.any(out[k][inside] <= 0):
             raise ValueError(f"'{k}' must be positive inside the plasma")
-    nf = np.zeros_like(x) if n_fast is None else np.asarray(n_fast, dtype=float)
+    if n_fast is None:
+        raise ValueError("n_fast is required: the fast-ion density on x, or n_fast='none' to declare that there are "
+                         "no fast ions (a missing fast-ion density is never taken as zero silently)")
+    declared_none = isinstance(n_fast, str)
+    if declared_none and n_fast != FAST_IONS_NONE:
+        raise ValueError(f"n_fast must be an array on x or {FAST_IONS_NONE!r} (declared: no fast ions)")
+    nf = np.zeros_like(x) if declared_none else np.asarray(n_fast, dtype=float)
     if nf.shape != x.shape or not np.all(np.isfinite(nf)) or np.any(nf < 0):
         raise ValueError("n_fast must be finite, >= 0 and on x")
+    if n_fast_source is None:
+        n_fast_source = "declared by the caller: no fast ions" if declared_none else "supplied (source not named)"
     rec = dict(z_imp=z, n_fast_source=n_fast_source, zeff_source=zeff_source, candidates={})
     cand = {}
     specs = {}
@@ -248,7 +263,7 @@ def assemble_kinetic_inputs(x, ne, te, ti, *, zeff_candidates, zeff_source, z_im
                                         range=list(disagreement_range), coordinate=coordinate)
     rec["pairwise_disagreement"] = pairs
     if checked:
-        zeff_source = _checked_source(x, coordinate, out["ne"], nf, n_fast is None, z, specs, cand, psi_n_to_rho,
+        zeff_source = _checked_source(x, coordinate, out["ne"], nf, declared_none, z, specs, cand, psi_n_to_rho,
                                       dict(zeff_rule or {}), rec)
         rec["zeff_source"] = zeff_source
     zeff = cand[zeff_source]
@@ -318,7 +333,7 @@ def assemble_kinetic_inputs(x, ne, te, ti, *, zeff_candidates, zeff_source, z_im
                          nimp=nimp, n_fast=nf, z_imp=z, provenance=prov, record=rec, source=source)
 
 
-def _checked_source(x, coordinate, ne, n_fast, n_fast_missing, z, specs, cand, psi_n_to_rho, opts, rec):
+def _checked_source(x, coordinate, ne, n_fast, n_fast_none, z, specs, cand, psi_n_to_rho, opts, rec):
     """The checked-source rule on the candidates (module docstring); returns the chosen candidate's
     name and stores the rule record in ``rec["zeff_rule"]``.  Refusals raise
     :class:`.zeff_sources.ZeffSourceRefused` with the record attached."""
@@ -351,12 +366,12 @@ def _checked_source(x, coordinate, ne, n_fast, n_fast_missing, z, specs, cand, p
     fast = opts.get("fast_ions")
     if fast not in (None, "none"):
         raise ValueError("zeff_rule['fast_ions'] must be 'none' (declared absent) or omitted")
-    if fast == "none":
-        if not n_fast_missing and np.any(n_fast > 0):
+    if fast == "none" or n_fast_none:
+        if np.any(n_fast > 0):
             raise ValueError("zeff_rule declares no fast ions but a non-zero n_fast was given")
         nf_rule = "none"
     else:
-        nf_rule = None if n_fast_missing else n_fast
+        nf_rule = n_fast
     st, sw = opts.get("slice_time"), opts.get("slice_window")
     imp = line = None
     sig_zimp = zimp = None

@@ -113,8 +113,11 @@ def test_mse_tan_gamma_and_er_flag():
     ids = _ids()
     with pytest.raises(ValueError, match="mse_er_corrected"):
         measurements_from_imas(ids, 0.5, 0.1, groups=["mse"])
-    # not requested explicitly: skipped rather than guessed
-    assert "mse" not in measurements_from_imas(ids, 0.5, 0.1).groups
+    # not requested explicitly: refused as well, never skipped silently; left out of groups it is absent by choice
+    with pytest.raises(ValueError, match="mse_er_corrected"):
+        measurements_from_imas(ids, 0.5, 0.1)
+    rest = [g for g in measurements_from_imas(ids, 0.5, 0.1, mse_er_corrected=False).groups if g != "mse"]
+    assert "mse" not in measurements_from_imas(ids, 0.5, 0.1, groups=rest).groups
     g = measurements_from_imas(ids, 0.5, 0.1, groups=["mse"], mse_er_corrected=False).groups["mse"]
     np.testing.assert_allclose(g.measured, [0.2], rtol=1e-12)
     np.testing.assert_allclose(g.sigma, [1e-3 * (1 + 0.2 ** 2)], rtol=1e-12)

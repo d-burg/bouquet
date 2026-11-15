@@ -190,6 +190,9 @@ def test_proposed_priors_are_explicit_and_complete():
     s = NonInductiveSources(rho=RHO, time=1.0, time_window=0.0, B0=B0, R0=R0, jdotb={"nbi": np.ones(51)},
                             p_fast={"D": np.ones(51)}, n_fast={"D": np.ones(51)}, provenance=_prov(),
                             uncertainty=proposed_priors("simple_beam"))
-    assert s.completeness() == []
+    # no scale prior is proposed for the built-in beam's driven current (a known bias, not a width): the gap is named
+    assert s.completeness() == ["no scale prior for jdotb['nbi']"]
+    assert not any(p.quantity == "jdotb" and p.center != 1.0 for p in proposed_priors("simple_beam")
+                   if hasattr(p, "center"))
     with pytest.raises(ValueError):
         proposed_priors("default")

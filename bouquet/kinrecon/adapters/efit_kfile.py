@@ -65,8 +65,7 @@ scoring convention, recorded in the group's ``meta``) -- the diamagnetic flux
     KERSIL = 2, 3:  sigma_m = max(ERRSIL |psi_m - psi_ref|, SICONT R_m |Ip|, VBIT PSIBIT_m)
                     reference loop: KERSIL = 3 -> max(ERRSIL |psi_ref|, SICONT R_ref |Ip|, VBIT PSIBIT_ref)
                                     KERSIL = 2 -> ERSIL8
-    otherwise:      sigma_m = max(SERROR |psi_m|, VBIT PSIBIT_m)
-                    (reference loop with zero bit: SERROR max |psi|)
+    otherwise:      refused (the rule of any other KERSIL was never checked against EFIT output)
 
 with ``R_m`` the loop radii of the machine bundle and the reference loop
 ``|NSLREF|``.  ``ERRSIL``, ``SICONT``, ``ERSIL8`` are EFIT inputs whose
@@ -244,16 +243,14 @@ array, e.g. ``("BRSP",)``; ``True`` means every array).
 truncated to the common length of the core arrays (EFIT zero-pads FWTGAM etc.
 to the namelist dimension).
 
-Whether ``TGAMMA`` is already E_r-corrected is decided by
-:func:`mse_er_status` from ``D = TGAMMA - TGAMMAUNCOR`` on the active chords,
-never from ``MSE_USECER`` alone (k-files with ``MSE_USECER = 0`` can carry an
-externally pre-corrected ``TGAMMA``, e.g. OMFIT ``MSEerCorrection``, which
-writes ``TGAMMA = TGAMMAUNCOR - A5 E_R / (A2 B_phi)`` and keeps
-``TGAMMAUNCOR`` raw).  ``er_corrected="auto"`` applies the rule and raises
-when it cannot decide; ``True`` / ``False`` states the status explicitly (the
-rule's evidence is still recorded).  The AA5..AA7GAM coefficients are
-geometry, set whether or not a correction was applied, and are not used as
-evidence.
+Whether ``TGAMMA`` is already E_r-corrected is STATED by the caller
+(``er_corrected=True`` / ``False``, required whenever the MSE group is built): this adapter does not classify
+it from the data.  ``MSE_USECER`` alone does not establish it (k-files with ``MSE_USECER = 0`` can carry an
+externally pre-corrected ``TGAMMA``, e.g. OMFIT ``MSEerCorrection``, which writes ``TGAMMA = TGAMMAUNCOR -
+A5 E_R / (A2 B_phi)`` and keeps ``TGAMMAUNCOR`` raw).  The group records, as evidence only, ``MSE_USECER``,
+``KEECUR``, the number of active chords and on how many of them ``TGAMMA`` differs from ``TGAMMAUNCOR``
+(exact comparison; nothing is decided from it); ``TGAMMAUNCOR`` itself is kept in ``meta``.  The AA5..AA7GAM
+coefficients are geometry, set whether or not a correction was applied.
 
 **Time.**  ``ITIME`` [ms] -> ``time`` [s].  EFIT averages the magnetics over
 ``ITIME +/- IAVEM`` [ms] (``IAVEM`` is a half-width: the EFIT snap-file
@@ -467,7 +464,7 @@ VBIT_BY_SHOT_KEY = "vbit_by_shot"
 
 
 def measurements_from_kfile(kfile, machine, groups=None, time_window=None,
-                            er_corrected="auto", flux_scale=-2.0 * np.pi,
+                            er_corrected=None, flux_scale=-2.0 * np.pi,
                             coil_current_per_turn=(), flux_reference=None, meta=None,
                             sigma_model=DEFAULT_SIGMA_MODEL, score_unfitted_coils=True, *,
                             serror=None, time=None, allow_missing_bits=False,
@@ -491,9 +488,9 @@ def measurements_from_kfile(kfile, machine, groups=None, time_window=None,
     time_window : float, optional
         Full window width [s]; default ``2 IAVEM`` [ms] / 1e3 (EFIT averages
         over ``ITIME +/- IAVEM``).
-    er_corrected : {"auto", True, False}
-        Whether ``TGAMMA`` is E_r-corrected; ``auto`` applies
-        :func:`mse_er_status` and raises when the status cannot be decided.
+    er_corrected : {True, False}
+        Whether ``TGAMMA`` is E_r-corrected, stated by the caller; required when the MSE group is built
+        (there is no default classification; module docstring).
     flux_scale : float
         Multiplies ``COILS`` and ``PSIBIT``; default ``-2 pi`` (module
         docstring, "Units and sign").
@@ -949,8 +946,8 @@ def kersil_loop_sigma(in1, coils, psibit, r_loop, plasma, vbit, serror, consts, 
         sigma_ref = max(ERRSIL |psi_ref|,         SICONT R_ref |Ip|, VBIT PSIBIT_ref)   (KERSIL = 3)
         sigma_ref = ERSIL8                                                               (KERSIL = 2)
 
-    any other ``KERSIL``: ``max(SERROR |psi_m|, VBIT PSIBIT_m)``, and when the reference loop's bit is zero its
-    sigma is ``SERROR max_m |psi_m|``.  ``R_m`` [m] are the loop radii of the machine bundle, ``Ip`` = |PLASMA|
+    any other ``KERSIL`` is refused (its rule was never checked against EFIT output).  ``R_m`` [m] are the loop
+    radii of the machine bundle, ``Ip`` = |PLASMA|
     [A].  The reference loop is ``|NSLREF|`` (1-based; from the file, else ``nslref``).
 
     ``reading`` says what ``psi`` and ``psi_ref`` are (both readings are stated assumptions):
@@ -1021,13 +1018,10 @@ def kersil_loop_sigma(in1, coils, psibit, r_loop, plasma, vbit, serror, consts, 
         rule = (f"KERSIL = {kersil:g}: max(ERRSIL |psi_m - psi_ref|, SICONT R_m |Ip|, VBIT PSIBIT_m); reference loop "
                 f"{rtext}; reading '{reading}'")
     else:
-        psi = coils
-        sig = np.maximum(serror * np.abs(psi), bit)
-        if abs(psibit[iref]) <= EFIT_SIGMA_FLOOR:
-            sig[iref] = serror * float(np.nanmax(np.abs(psi)))
-        basis = "COILS as stored"
-        rule = (f"KERSIL = {kersil:g}: max(SERROR |psi_m|, VBIT PSIBIT_m); reference loop SERROR max|psi| when its "
-                "bit is zero (this branch was not checked against EFIT output)")
+        # EFIT's rule for any other KERSIL was never checked against EFIT output: refused rather than guessed
+        raise ValueError(f"KERSIL = {kersil:g}: the flux-loop sigma rule of this switch has not been checked against "
+                         "EFIT output and is refused; choose another sigma model explicitly (e.g. 'efit_stored' "
+                         "with an m-file, or 'efit_serror_bit')")
     rec.update(rule=rule, basis=basis)
     return sig, rec
 
@@ -1293,20 +1287,8 @@ def _coils(in1, machine, efit_group, per_turn, score_unfitted, arrays=None, trun
 
 
 # ---------------------------------------------------------------------------
-# MSE E_r-correction status
+# MSE E_r-correction evidence (recorded only)
 # ---------------------------------------------------------------------------
-
-#: |TGAMMA - TGAMMAUNCOR| <= ER_D_RTOL max(|TGAMMA|, |TGAMMAUNCOR|) counts as D = 0.
-ER_D_RTOL = 1e-7
-#: An E_r correction from a smooth E_r profile changes the sign of the implied
-#: E_R along major radius at most this many times (axis crossing + one zero).
-ER_MAX_SIGN_CHANGES = 2
-#: Minimum fraction of active chords on which sign(D) sign(TGAMMA) agrees.
-ER_MIN_SIGN_CONSISTENCY = 0.9
-
-#: Outcomes of :func:`mse_er_status`.
-ER_STATUSES = ("uncorrected", "pre_corrected", "inconsistent", "unknown", "no_active_chords")
-
 
 def _flag(nl, key, blocks=("INS", "EFITIN", "IN1")):
     """First value of ``key`` found in ``blocks`` (in that order), else None."""
@@ -1317,92 +1299,18 @@ def _flag(nl, key, blocks=("INS", "EFITIN", "IN1")):
     return None
 
 
-def mse_er_status(tgamma, tgamma_uncor, a2, a5, r, active, usecer=None, keecur=None):
-    """Decide whether k-file ``TGAMMA`` is already E_r-corrected.
-
-    Rule (this package's convention, checked against k-files of known
-    provenance), on the active chords with ``D = TGAMMA - TGAMMAUNCOR``:
-
-    0. No active chord -> ``"no_active_chords"`` (nothing to decide).
-    1. ``TGAMMAUNCOR`` absent -> ``"unknown"``.
-    2. ``D = 0`` on every active chord (|D| <= :data:`ER_D_RTOL` x
-       max(|TGAMMA|, |TGAMMAUNCOR|)) -> ``"uncorrected"``, whatever
-       ``MSE_USECER`` says (``MSE_USECER = 1`` is flagged as "requested, not
-       applied").
-    3. ``D != 0`` on every active chord AND E_r-shaped -> ``"pre_corrected"``,
-       route ``"efit_internal"`` when ``MSE_USECER = 1`` (EFIT's CER
-       high-rotation correction at k-file generation) and ``"external"``
-       otherwise (e.g. OMFIT ``MSEerCorrection``).  E_r-shaped means: the
-       implied ``E_R``, which is proportional to ``-D A2 B_phi / A5`` (from
-       ``TGAMMA = TGAMMAUNCOR - A5 E_R / (A2 B_phi)``, OMFIT
-       ``MSEerCorrection``; B. W. Rice et al., Rev. Sci. Instrum. 70 (1999)),
-       changes sign at most :data:`ER_MAX_SIGN_CHANGES` times between
-       neighboring chords ordered by major radius (``B_phi`` has one sign,
-       so ``D A2 / A5`` is used), and ``sign(D) sign(TGAMMA)`` takes one
-       value on at least :data:`ER_MIN_SIGN_CONSISTENCY` of the chords.
-    4. Anything else (D mixed zero / nonzero, shape test failed, ``A5 = 0``
-       on an active chord, or ``KEECUR > 0`` -- the in-fit E_r route, where
-       TGAMMA should be raw -- with ``D != 0``) -> ``"inconsistent"``.
-
-    The nonzero AA5..AA7GAM coefficients are geometry and never used as
-    evidence.  ``MSE_USECER`` only selects the route of an established
-    correction.  The thresholds (:data:`ER_D_RTOL`,
-    :data:`ER_MAX_SIGN_CHANGES`, :data:`ER_MIN_SIGN_CONSISTENCY`) are those
-    of the rule as specified; they are a heuristic checked against k-files
-    with known provenance, not derived from EFIT source.
-
-    Returns ``{"status", "route", "evidence"}``; ``evidence`` holds counts and
-    fractions only.
-    """
+def mse_er_evidence(tgamma, tgamma_uncor, active, usecer=None, keecur=None):
+    """What the k-file says about the E_r correction of ``TGAMMA`` (a RECORD; nothing is decided from it): the flags
+    ``MSE_USECER`` and ``KEECUR``, the number of active chords, whether ``TGAMMAUNCOR`` is present and on how many
+    active chords ``TGAMMA`` differs from it (exact comparison)."""
     active = np.asarray(active, dtype=bool)
-    ev = {"rule": "D = TGAMMA - TGAMMAUNCOR on active chords",
-          "MSE_USECER": usecer, "KEECUR": keecur, "n_active": int(active.sum()),
-          "d_rtol": ER_D_RTOL, "max_sign_changes": ER_MAX_SIGN_CHANGES,
-          "min_sign_consistency": ER_MIN_SIGN_CONSISTENCY}
-    if not active.any():
-        ev["reason"] = "no active MSE chord"
-        return {"status": "no_active_chords", "route": "none", "evidence": ev}
-    if tgamma_uncor is None:
-        ev["reason"] = "TGAMMAUNCOR absent: the raw pitch angle is not in the file"
-        return {"status": "unknown", "route": None, "evidence": ev}
-    t, u = np.asarray(tgamma, float)[active], np.asarray(tgamma_uncor, float)[active]
-    d = t - u
-    zero = np.abs(d) <= ER_D_RTOL * np.maximum(np.abs(t), np.abs(u))
-    ev["n_d_nonzero"] = int(np.count_nonzero(~zero))
-    in_fit = keecur is not None and keecur > 0
-    if zero.all():
-        ev["reason"] = "TGAMMA == TGAMMAUNCOR on every active chord"
-        if usecer == 1.0:
-            ev["flag"] = "MSE_USECER = 1 but TGAMMA == TGAMMAUNCOR: correction requested, not applied"
-        if in_fit:
-            ev["flag_in_fit"] = "KEECUR > 0: in-fit E_r route; the forward model must include E_r"
-        return {"status": "uncorrected", "route": "none", "evidence": ev}
-    if not (~zero).all():
-        ev["reason"] = "TGAMMA differs from TGAMMAUNCOR on some active chords but not all"
-        return {"status": "inconsistent", "route": None, "evidence": ev}
-    a2a, a5a = np.asarray(a2, float)[active], np.asarray(a5, float)[active]
-    order = np.argsort(np.asarray(r, float)[active], kind="stable")
-    with np.errstate(divide="ignore", invalid="ignore"):
-        e = (d * a2a / a5a)[order]
-    if not np.all(np.isfinite(e)) or np.any(e == 0):
-        ev["reason"] = "implied E_R undefined (A5 = 0 or non-finite on an active chord)"
-        return {"status": "inconsistent", "route": None, "evidence": ev}
-    s = np.sign(e)
-    changes = int(np.count_nonzero(s[1:] != s[:-1]))
-    prod = np.sign(d) * np.sign(t)
-    consistency = float(max(np.mean(prod > 0), np.mean(prod < 0)))
-    ev.update({"sign_changes": changes, "sign_consistency": consistency})
-    shaped = changes <= ER_MAX_SIGN_CHANGES and consistency >= ER_MIN_SIGN_CONSISTENCY
-    if not shaped:
-        ev["reason"] = "TGAMMA - TGAMMAUNCOR is not E_r-shaped"
-        return {"status": "inconsistent", "route": None, "evidence": ev}
-    if in_fit:
-        ev["reason"] = ("KEECUR > 0 (in-fit E_r route) but TGAMMA is already altered: "
-                        "E_r would be counted twice")
-        return {"status": "inconsistent", "route": None, "evidence": ev}
-    ev["reason"] = "TGAMMA - TGAMMAUNCOR nonzero on every active chord and E_r-shaped"
-    route = "efit_internal" if usecer == 1.0 else "external"
-    return {"status": "pre_corrected", "route": route, "evidence": ev}
+    ev = {"MSE_USECER": usecer, "KEECUR": keecur, "n_active": int(active.sum()),
+          "tgammauncor_present": tgamma_uncor is not None,
+          "note": "evidence only: the E_r status is stated by the caller (er_corrected)"}
+    if tgamma_uncor is not None:
+        t, u = np.asarray(tgamma, float)[active], np.asarray(tgamma_uncor, float)[active]
+        ev["n_tgamma_differs_from_uncorrected"] = int(np.count_nonzero(t != u))
+    return ev
 
 
 def _mse(nl, machine, er_corrected, stored=None):
@@ -1425,21 +1333,12 @@ def _mse(nl, machine, er_corrected, stored=None):
         unc = _num(ins, "TGAMMAUNCOR", n)
     usecer = _flag(nl, "MSE_USECER")
     keecur = _flag(nl, "KEECUR", ("IN1", "EFITIN", "INS"))
-    st = mse_er_status(tg, unc, a[2], a[5], _num(ins, "RRRGAM", n), valid,
-                       usecer=usecer, keecur=keecur)
-    if er_corrected == "auto":
-        if st["status"] in ("unknown", "inconsistent"):
-            ev = st["evidence"]
-            raise ValueError(
-                f"MSE E_r status is {st['status']!r} ({ev.get('reason')}; "
-                f"MSE_USECER={usecer}, {ev.get('n_d_nonzero', '?')}/{ev['n_active']} "
-                f"chords differ, sign changes {ev.get('sign_changes', '-')}, "
-                f"sign consistency {ev.get('sign_consistency', '-')}): state it "
-                "explicitly with er_corrected=True/False")
-        erc = st["status"] == "pre_corrected"
-        how, route = "TGAMMA - TGAMMAUNCOR rule", st["route"]
-    else:
-        erc, how, route = bool(er_corrected), "caller override", "caller_stated"
+    if er_corrected is None or not isinstance(er_corrected, (bool, np.bool_)):
+        raise ValueError("MSE in the k-file: state er_corrected=True or False (whether TGAMMA is E_r-corrected); "
+                         f"got {er_corrected!r}.  The adapter does not classify it from the data; leave 'mse' out of "
+                         "groups to build the set without MSE")
+    ev = mse_er_evidence(tg, unc, valid, usecer=usecer, keecur=keecur)
+    erc = bool(er_corrected)
     if "mse" in machine.sensors and len(machine.labels("mse")) == n:
         labels, lab_src = machine.labels("mse"), "machine bundle"
     else:
@@ -1450,8 +1349,7 @@ def _mse(nl, machine, er_corrected, stored=None):
             "sigma_model_id": "efit_sgamma" if stored is None else "efit_stored", "sigma_params": {},
             "sigma_rule": "SGAMMA" if stored is None else "EFIT's stored sigma (siggam)", "labels_source": lab_src,
             "source": "efit_kfile", "quantity": "tan_polarisation_angle",
-            "er_corrected": bool(erc), "er_corrected_source": how, "er_route": route,
-            "er_status": st["status"], "er_evidence": st["evidence"],
+            "er_corrected": bool(erc), "er_corrected_source": "stated by the caller", "er_evidence": ev,
             "coefficient_source": "AA1GAM..AA7GAM"}
     if keecur is not None and keecur > 0:
         meta["er_in_fit"] = True

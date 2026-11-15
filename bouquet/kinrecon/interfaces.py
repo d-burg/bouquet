@@ -53,8 +53,9 @@ class ConstraintGroup:
       measurement (MSE: ``"polarisation_angle"`` [rad, default] or
       ``"tan_polarisation_angle"``);
     * MSE ``er_corrected`` (bool: the data already have the E_r term removed,
-      so the forward model must use E_R = 0), with ``er_route`` /
-      ``er_status`` / ``er_evidence`` when an adapter decided it;
+      so the forward model must use E_R = 0), always stated by the caller (no
+      adapter classifies it), with the source's evidence in ``er_evidence``
+      where an adapter records it;
     * MSE ``field_orientation`` -- ``(sign_pol, sign_tor)``, default
       ``(1, 1)``: a STATED map from the equilibrium's orientation to the
       discharge's.  ``sign_pol`` multiplies the modeled ``B_R`` and ``B_Z``,

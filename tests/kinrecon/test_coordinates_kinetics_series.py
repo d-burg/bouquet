@@ -182,9 +182,17 @@ def test_quasineutrality_with_fast_ions_and_zeff_identity():
     np.testing.assert_allclose(k.ni + 6.0 * k.nimp + k.n_fast, ne, rtol=1e-14)                       # (K1)
     np.testing.assert_allclose((k.ni + 36.0 * k.nimp + k.n_fast) / ne, zvb, rtol=1e-13)               # (K2)
     # the fast ions are removed from the thermal ions, not from the impurity
-    k0 = KI.assemble_kinetic_inputs(x, ne, te, ti, zeff_candidates={"vb": ("zeff", zvb)}, zeff_source="vb", z_imp=6.0)
+    k0 = KI.assemble_kinetic_inputs(x, ne, te, ti, zeff_candidates={"vb": ("zeff", zvb)}, zeff_source="vb", z_imp=6.0,
+                                    n_fast="none")
     np.testing.assert_allclose(k0.ni - k.ni, nf, rtol=1e-12)
     np.testing.assert_allclose(k0.nimp, k.nimp, rtol=1e-14)
+    assert k0.provenance["n_fast"] == "declared by the caller: no fast ions"
+    # a missing fast-ion density is refused, never taken as zero silently
+    with pytest.raises(ValueError, match="n_fast is required"):
+        KI.assemble_kinetic_inputs(x, ne, te, ti, zeff_candidates={"vb": ("zeff", zvb)}, zeff_source="vb", z_imp=6.0)
+    with pytest.raises(ValueError, match="declared: no fast ions"):
+        KI.assemble_kinetic_inputs(x, ne, te, ti, zeff_candidates={"vb": ("zeff", zvb)}, zeff_source="vb", z_imp=6.0,
+                                   n_fast="zero")
     p = k.thermal_pressure_at(rho=x)
     np.testing.assert_allclose(p, KI.EC * (ne * te + (k.ni + k.nimp) * ti), rtol=1e-12)
     assert k.coordinate == "rho_tor_norm" and "quasineutrality" in k.provenance["ni"]
@@ -197,7 +205,7 @@ def test_zeff_source_is_required_and_disagreement_recorded():
     cands = {"vb": ("zeff", zvb), "cer": ("impurity_density", nc)}
     with pytest.raises(ValueError, match="no\\s+default"):
         KI.assemble_kinetic_inputs(x, ne, te, ti, zeff_candidates=cands, zeff_source=None, z_imp=6.0)
-    k = KI.assemble_kinetic_inputs(x, ne, te, ti, zeff_candidates=cands, zeff_source="cer", z_imp=6.0)
+    k = KI.assemble_kinetic_inputs(x, ne, te, ti, zeff_candidates=cands, zeff_source="cer", z_imp=6.0, n_fast="none")
     np.testing.assert_allclose(k.zeff, 1.6, rtol=1e-13)
     d = k.record["pairwise_disagreement"]["cer vs vb"]
     assert d["median_rel"] == pytest.approx(1.6 / 2.4 - 1.0, rel=1e-12)
@@ -207,13 +215,14 @@ def test_kinetic_refusals_without_clipping():
     x, ne, te, ti, nf = _kin_arrays()
     with pytest.raises(ValueError, match="< 1"):
         KI.assemble_kinetic_inputs(x, ne, te, ti, zeff_candidates={"z": ("zeff", np.full_like(x, 0.9))},
-                                   zeff_source="z", z_imp=6.0)
+                                   zeff_source="z", z_imp=6.0, n_fast="none")
     with pytest.raises(ValueError, match="<= 0"):
         KI.assemble_kinetic_inputs(x, ne, te, ti, zeff_candidates={"z": ("zeff", np.full_like(x, 1.5))},
                                    zeff_source="z", z_imp=6.0, n_fast=0.99 * ne)
     with pytest.raises(ValueError, match="cover"):
         KI.assemble_kinetic_inputs(x[:40], ne[:40], te[:40], ti[:40],
-                                   zeff_candidates={"z": ("zeff", np.full(40, 1.5))}, zeff_source="z", z_imp=6.0)
+                                   zeff_candidates={"z": ("zeff", np.full(40, 1.5))}, zeff_source="z", z_imp=6.0,
+                                   n_fast="none")
 
 
 def test_psi_n_inputs_mapped_through_the_producers_table_or_kept():
@@ -221,10 +230,11 @@ def test_psi_n_inputs_mapped_through_the_producers_table_or_kept():
     tab = (np.linspace(0, 1, 101), np.sqrt(np.linspace(0, 1, 101)) ** 1.0)       # rho = sqrt(psi_N)
     z = {"z": ("zeff", np.full_like(x, 1.5))}
     k = KI.assemble_kinetic_inputs(x, ne, te, ti, zeff_candidates=z, zeff_source="z", z_imp=6.0, coordinate="psi_n",
-                                   psi_n_to_rho=tab, mapping_source="the profile fit's equilibrium")
+                                   psi_n_to_rho=tab, mapping_source="the profile fit's equilibrium", n_fast="none")
     assert k.coordinate == "rho_tor_norm" and "own table" in k.record["mapping"]
     np.testing.assert_allclose(k.profiles_at(rho=np.sqrt(0.36))["ne"], np.interp(0.36, x, ne), rtol=2e-3)
-    k2 = KI.assemble_kinetic_inputs(x, ne, te, ti, zeff_candidates=z, zeff_source="z", z_imp=6.0, coordinate="psi_n")
+    k2 = KI.assemble_kinetic_inputs(x, ne, te, ti, zeff_candidates=z, zeff_source="z", z_imp=6.0, coordinate="psi_n",
+                                    n_fast="none")
     assert k2.coordinate == "psi_n" and "ours" in k2.record["mapping"]
 
 
@@ -237,7 +247,8 @@ def test_one_damped_step_is_not_convergence(monkeypatch):
     TU._install(monkeypatch, fm)
     kin, src = TU._kin()
     st = FIT.FitSettings(free=("log_strength",), lm_lambda0=1e4, max_iter=40)
-    out = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=1.0), st, params0=dict(log_strength=0.5))
+    out = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=1.0, core_relaxation="periodic_orbit"), st,
+                          params0=dict(log_strength=0.5))
     th, cov = TU._expected(FIT.PARAMETERS["log_strength"]["prior"][1])
     it0 = out.record["iterations"][0]
     acc = [t for t in it0["trials"] if t["status"] == "consistent"][-1]

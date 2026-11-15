@@ -24,7 +24,10 @@ neutrons, MSE-inferred fast-ion pressure and beam-driven current within ~10-20 %
 
 ``kind``:
 
-``"simple_beam"``       built-in :class:`.beam.SimpleBeamModel` (bug-fixed tier 0);
+``"simple_beam"``       built-in :class:`.beam.SimpleBeamModel` (bug-fixed tier 0); no scale prior is proposed
+                        for its driven current (development check: 1.9-2.1x the transport code per MW, without a
+                        fast-ion trapping model -- a bias, not a width), so a set that carries it reports the gap
+                        (:meth:`.provider.NonInductiveSources.completeness`);
 ``"transport_code"``    a transport-code result read through :mod:`.arrays` / :mod:`.imas`;
 ``"simple_ec"``         built-in :class:`.ec.SimpleECModel` with zeta0 from a tracer;
 ``"mhd_active"``        one-sided anomalous-loss branch for fast-ion-transporting MHD
@@ -58,10 +61,6 @@ def proposed_priors(kind):
                              "0.15 for the transport code's own error (literature survey)"),
             ScalePrior("n_fast", "*", 1.0, 0.20, status=P,
                        basis=f"{_B30}: built-in/transport-code fast-ion content 1.01 (log-sd 0.08); as p_fast"),
-            ScalePrior("jdotb", "*", 0.5, 0.35, status=P,
-                       basis=f"{_B30}: built-in NBCD (SI normalization, no fast-ion trapping) is 1.9-2.1x the "
-                             "transport code per MW (log-sd 0.25); center 0.5 is a CALIBRATION PROPOSAL pending a "
-                             "fast-ion trapping model; transport-code run-to-run log-sd 0.28"),
             ShapePrior("p_fast", "*", "shift", 0.04, status=P,
                        basis=f"{_B30}: built-in fast-pressure centroid +0.016 (slowing down only) to +0.04-0.06 "
                              "(full chain) in rho outward of the transport code"),

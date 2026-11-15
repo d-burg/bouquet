@@ -265,6 +265,7 @@ def measurements_from_imas(ids, time, time_window, machine="", groups=None,
     ms.meta.setdefault("source", "imas_json")
     ms.meta["time_window_s"] = [t0, t1]
     ms.meta["window_reduction"] = reduction
+    absent = []
     for name in groups:
         if name not in sources:
             raise ValueError(f"unknown group {name!r}")
@@ -272,20 +273,25 @@ def measurements_from_imas(ids, time, time_window, machine="", groups=None,
         if not entries:
             if requested:
                 raise ValueError(f"group '{name}' requested but absent from the IDS dict")
+            absent.append(name)
             continue
         transform, extra = None, None
         if name == "mse":
             if mse_er_corrected is None:
-                if requested:
-                    raise ValueError("MSE present: state mse_er_corrected=True/False "
-                                     "(the data dictionary does not record it)")
-                continue
+                # never skipped silently: the status is stated, or MSE is left out of ``groups`` explicitly
+                raise ValueError("MSE present: state mse_er_corrected=True/False (the data dictionary does not "
+                                 "record it), or leave 'mse' out of groups to build the set without MSE")
             transform = _tan_transform
             extra = {"quantity": "tan_polarisation_angle", "er_corrected": bool(mse_er_corrected)}
         g = _build(name, entries, qty, t0, t1, reduction, min_samples, geom_fn,
                    transform=transform, extra_meta=extra)
         if g is not None:
             ms.groups[name] = g
+        elif requested:
+            raise ValueError(f"group '{name}' requested but no entry carries its quantity")
+        else:
+            absent.append(name)
+    ms.meta["groups_absent_from_source"] = absent
     if exclude:
         ms.meta["channel_exclusions_applied"] = apply_exclusions(ms, exclude)
     return ms

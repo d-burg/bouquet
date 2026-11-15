@@ -86,12 +86,13 @@ def test_kersil3_source_reading_adds_siref_when_not_fitsiref():
     np.testing.assert_allclose(g2.sigma, want2, rtol=1e-14)
 
 
-def test_kersil2_reference_is_ersil8_and_other_kersil_uses_serror():
+def test_kersil2_reference_is_ersil8_and_other_kersil_is_refused():
     g = _loops(_nl(kersil=2), kersil_reference="siref", efit_constants=CONST, nslref=1)
     assert g.sigma[0] == pytest.approx(7.0e-3, rel=1e-15)
-    g = _loops(_nl(kersil=1, coils="0.0 -0.2 0.3"), kersil_reference="siref", efit_constants=CONST, nslref=1)
-    np.testing.assert_allclose(g.sigma, np.maximum(0.03 * np.abs([0.0, -0.2, 0.3]), 10 * np.array([1e-4, 2e-4, 1e-4])),
-                               rtol=1e-14)
+    # any other KERSIL: its rule was never checked against EFIT output, so it is refused rather than guessed
+    for k in (0, 1, 4):
+        with pytest.raises(ValueError, match="not been checked against EFIT"):
+            _loops(_nl(kersil=k, coils="0.0 -0.2 0.3"), kersil_reference="siref", efit_constants=CONST, nslref=1)
 
 
 def test_kersil_constants_and_reading_are_required_not_assumed():

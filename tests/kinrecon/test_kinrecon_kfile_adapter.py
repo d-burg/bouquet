@@ -184,9 +184,8 @@ def test_coils_split_and_per_turn(kfile):
 
 
 def test_mse_block(kfile):
-    # the E_r status rule refuses this fixture in "auto": D != 0 on both active chords but sign(D) sign(TGAMMA)
-    # agrees on only 1 of 2 (consistency 0.5 < 0.9)
-    with pytest.raises(ValueError, match="inconsistent"):
+    # the E_r status is stated by the caller: without it the MSE group is refused (no default classification)
+    with pytest.raises(ValueError, match="state er_corrected"):
         measurements_from_kfile(kfile, _machine(), groups=["mse"])
     ms = measurements_from_kfile(kfile, _machine(), groups=["mse"], er_corrected=True)
     g = ms.groups["mse"]
@@ -196,8 +195,8 @@ def test_mse_block(kfile):
     assert g.valid.tolist() == [True, True, False]  # zero TGAMMA = no data
     assert g.meta["er_corrected"] is True and g.meta["quantity"] == "tan_polarisation_angle"
     np.testing.assert_array_equal(g.meta["tan_gamma_uncorrected"], [0.11, -0.04, 0.0])
-    assert g.meta["er_status"] == "inconsistent" and g.meta["er_route"] == "caller_stated"
-    assert g.meta["er_evidence"]["sign_consistency"] == 0.5
+    assert g.meta["er_corrected_source"] == "stated by the caller" and "er_status" not in g.meta
+    assert g.meta["er_evidence"]["n_active"] == 2 and g.meta["er_evidence"]["n_tgamma_differs_from_uncorrected"] == 2
     want = efit_to_imas_coefficients([0.7] * 3, [-0.6] * 3, [0.1] * 3, [0.05] * 3,
                                      [0.4] * 3, [0.0] * 3, [0.02] * 3)
     np.testing.assert_array_equal(g.geometry["coefficients"], want)
@@ -206,17 +205,19 @@ def test_mse_block(kfile):
 
 
 def test_mse_er_flag_rules(kfile):
-    # MSE_USECER absent decides nothing: the D rule still applies (here it refuses, as with MSE_USECER = 1)
+    # MSE_USECER decides nothing: the status is the caller's, the flags are recorded as evidence only
     nl = read_kfile(kfile)
     del nl["INS"]["MSE_USECER"]
-    with pytest.raises(ValueError, match="inconsistent"):
+    with pytest.raises(ValueError, match="state er_corrected"):
         measurements_from_kfile(nl, _machine(), groups=["mse"])
+    with pytest.raises(ValueError, match="state er_corrected"):
+        measurements_from_kfile(nl, _machine(), groups=["mse"], er_corrected="auto")
     g = measurements_from_kfile(nl, _machine(), groups=["mse"], er_corrected=False).groups["mse"]
     assert g.meta["er_corrected"] is False
-    assert g.meta["er_corrected_source"] == "caller override"
-    assert g.meta["er_route"] == "caller_stated"
-    assert g.meta["er_status"] == "inconsistent"       # evidence still recorded
+    assert g.meta["er_corrected_source"] == "stated by the caller"
     assert g.meta["er_evidence"]["MSE_USECER"] is None
+    # a set built without MSE needs no statement
+    assert "mse" not in measurements_from_kfile(nl, _machine(), groups=["ip"]).groups
 
 
 def test_bundle_size_mismatch(kfile):
@@ -329,76 +330,27 @@ def _mse_meta(nl, **kw):
     return measurements_from_kfile(nl, _machine(), groups=["mse"], **kw).groups["mse"].meta
 
 
-def test_er_status_uncorrected_when_d_is_zero():
-    tg = np.array([0.1, 0.12, -0.05, -0.08])
-    r = np.array([1.8, 1.9, 2.0, 2.1])
-    for usecer in (0, 1):
-        m = _mse_meta(_ins_kfile(tg, tg.copy(), r, usecer=usecer))
-        assert m["er_corrected"] is False and m["er_status"] == "uncorrected"
-        assert m["er_route"] == "none"
-        assert ("flag" in m["er_evidence"]) == (usecer == 1)   # requested, not applied
-
-
-def test_er_status_pre_corrected_and_route():
-    r = np.array([2.1, 1.8, 2.0, 1.9])                  # deliberately unsorted in R
+def test_er_status_is_stated_never_classified():
+    """Whatever TGAMMA - TGAMMAUNCOR looks like (zero, E_r-shaped, mixed, absent), the adapter takes the stated
+    status and records the evidence only; without a statement the MSE group is refused."""
+    r = np.array([2.1, 1.8, 2.0, 1.9])
     tg = np.array([-0.08, 0.1, -0.05, 0.12])
-    d = 0.05 * tg                                       # |tan gamma| increased on every chord
-    for usecer, route in ((1, "efit_internal"), (0, "external"), (None, "external")):
-        m = _mse_meta(_ins_kfile(tg, tg - d, r, usecer=usecer))
-        assert m["er_corrected"] is True and m["er_status"] == "pre_corrected"
-        assert m["er_route"] == route
-        assert m["er_evidence"]["sign_changes"] == 1 and m["er_evidence"]["sign_consistency"] == 1.0
+    cases = dict(zero=tg.copy(), shaped=tg - 0.05 * tg, mixed=tg - np.array([0.0, 0.0, 0.004, 0.006]), absent=None)
+    for name, unc in cases.items():
+        for usecer in (0, 1, None):
+            nl = _ins_kfile(tg, unc, r, usecer=usecer)
+            with pytest.raises(ValueError, match="state er_corrected"):
+                _mse_meta(nl)
+            for stated in (True, False):
+                m = _mse_meta(nl, er_corrected=stated)
+                assert m["er_corrected"] is stated and m["er_corrected_source"] == "stated by the caller"
+                ev = m["er_evidence"]
+                assert ev["MSE_USECER"] == (None if usecer is None else float(usecer)) and ev["n_active"] == 4
+                assert ev["tgammauncor_present"] is (unc is not None)
+                if unc is not None:
+                    assert ev["n_tgamma_differs_from_uncorrected"] == int(np.count_nonzero(tg != unc))
+                assert not any(k in m for k in ("er_status", "er_route"))
+    # the in-fit E_r route is recorded with the stated status
+    m = _mse_meta(_ins_kfile(tg, tg - 0.01, r, usecer=0, extra_in1=" KEECUR = 2"), er_corrected=False)
+    assert m["er_in_fit"] is True and m["er_evidence"]["KEECUR"] == 2.0
 
-
-def test_er_status_inconsistent_refused_unless_stated():
-    r = np.linspace(1.8, 2.2, 8)
-    tg = np.full(8, 0.1)
-    d = 0.01 * np.array([1, -1, 1, -1, 1, -1, 1, -1])  # 7 sign changes, half the signs
-    nl = _ins_kfile(tg, tg - d, r, usecer=0)
-    with pytest.raises(ValueError, match="inconsistent"):
-        _mse_meta(nl)
-    m = _mse_meta(nl, er_corrected=True)
-    assert m["er_corrected"] is True and m["er_status"] == "inconsistent"
-    assert m["er_route"] == "caller_stated" and m["er_evidence"]["sign_changes"] == 7
-    # D zero on some active chords but not all
-    d2 = np.where(np.arange(8) < 4, 0.0, 0.005)
-    with pytest.raises(ValueError, match="some active chords"):
-        _mse_meta(_ins_kfile(tg, tg - d2, r, usecer=1))
-    # in-fit E_r route with an altered TGAMMA
-    with pytest.raises(ValueError, match="KEECUR"):
-        _mse_meta(_ins_kfile(tg, tg - 0.01, r, usecer=0, extra_in1=" KEECUR = 2"))
-
-
-def test_er_status_unknown_without_tgammauncor():
-    tg = np.array([0.1, 0.12, -0.05])
-    nl = _ins_kfile(tg, None, np.array([1.8, 1.9, 2.0]), usecer=1)
-    with pytest.raises(ValueError, match="unknown"):
-        _mse_meta(nl)
-    m = _mse_meta(nl, er_corrected=False)
-    assert m["er_status"] == "unknown" and m["er_corrected"] is False
-
-
-def test_er_status_thresholds():
-    from bouquet.kinrecon.adapters.efit_kfile import mse_er_status
-    a2, a5, act = np.full(10, -0.6), np.full(10, 0.4), np.ones(10, bool)
-    r = np.linspace(1.8, 2.25, 10)
-
-    def status(tg, d):
-        return mse_er_status(tg, tg - d, a2, a5, r, act)["status"]
-
-    # sign changes of D A2/A5 along R: 2 accepted, 3 refused (T has D's sign)
-    two = np.array([1, 1, 1, -1, -1, -1, 1, 1, 1, 1], float)
-    three = np.array([1, 1, -1, -1, 1, 1, -1, -1, -1, -1], float)
-    assert status(0.1 * two, 0.01 * two) == "pre_corrected"
-    assert status(0.1 * three, 0.01 * three) == "inconsistent"
-    # sign consistency of sign(D) sign(TGAMMA): 9/10 accepted, 8/10 refused
-    d = np.full(10, 0.01)
-    tg9 = np.where(np.arange(10) == 4, -0.1, 0.1)
-    tg8 = np.where(np.isin(np.arange(10), (4, 7)), -0.1, 0.1)
-    assert status(tg9, d) == "pre_corrected"
-    assert status(tg8, d) == "inconsistent"
-    # no active chord: nothing to decide, nothing refused
-    out = mse_er_status(tg9, tg9, a2, a5, r, np.zeros(10, bool))
-    assert out["status"] == "no_active_chords"
-    assert mse_er_status(tg9, None, a2, a5, r, np.zeros(10, bool))["status"] == "no_active_chords"
-    assert mse_er_status(tg9, None, a2, a5, r, act)["status"] == "unknown"

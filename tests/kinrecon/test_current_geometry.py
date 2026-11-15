@@ -108,26 +108,27 @@ def test_no_equilibrium_solver_import():
 
 # ----------------------------------------------------------------------------- domain-edge rule
 from bouquet.kinrecon.current import (OuterLayerGeometry, check_psi_samples, choose_psi_n_edge,  # noqa: E402
-                                      PSI_N_EDGE_DEFAULT, PSI_N_EDGE_FALLBACK, PSI_N_EDGE_MAX)
+                                      PSI_N_EDGE_DEFAULT, PSI_N_EDGE_MAX)
 
 
-def test_edge_rule_default_and_fallbacks():
+def test_edge_rule_has_no_data_dependent_fallback():
     c, why = choose_psi_n_edge()
-    assert c == PSI_N_EDGE_DEFAULT == 0.995 and "default" in why and "not checked" in why
-    assert choose_psi_n_edge(grid_shape=(129, 129)).psi_n_edge == 0.995
-    for shape in ((65, 65), (33, 33), (65, 129)):
-        c, why = choose_psi_n_edge(grid_shape=shape)
-        assert c == PSI_N_EDGE_FALLBACK == 0.99 and "65^2" in why
-    assert choose_psi_n_edge(route_disagreement=9.9e-4).psi_n_edge == 0.995
-    c, why = choose_psi_n_edge(route_disagreement=1.5e-3)
-    assert c == 0.99 and "disagree" in why
-    ch = choose_psi_n_edge(grid_shape=(257, 257), route_disagreement=2e-4)
-    assert ch.psi_n_edge == 0.995 and ch.checks["route_disagreement"]["value"] == 2e-4
-    # closed with margin: X-point 1e-3 beyond the cutoff
+    assert c == PSI_N_EDGE_DEFAULT == 0.995 and "default" in why
+    # the grid shape and the route disagreement are recorded, never acted on
+    for shape in ((129, 129), (65, 65), (33, 33), (65, 129)):
+        ch = choose_psi_n_edge(grid_shape=shape)
+        assert ch.psi_n_edge == 0.995 and ch.checks["grid_shape"]["shape"] == shape
+    for d in (9.9e-4, 1.5e-3, 0.1):
+        ch = choose_psi_n_edge(route_disagreement=d)
+        assert ch.psi_n_edge == 0.995 and ch.checks["route_disagreement"]["value"] == d
+    with pytest.raises(ValueError, match="non-negative"):
+        choose_psi_n_edge(route_disagreement=-1e-3)
+    # closed with margin: an X-point within 1e-3 of the cutoff is refused (no switch to another cutoff)
     assert choose_psi_n_edge(psi_n_xpoint=1.0000001).psi_n_edge == 0.995
-    assert choose_psi_n_edge(psi_n_xpoint=0.9955).psi_n_edge == 0.99
-    with pytest.raises(ValueError, match="no cutoff"):
-        choose_psi_n_edge(psi_n_xpoint=0.9905)
+    for xp in (0.9955, 0.9905):
+        with pytest.raises(ValueError, match="not closed with margin"):
+            choose_psi_n_edge(psi_n_xpoint=xp)
+    assert choose_psi_n_edge(psi_n_xpoint=0.9955, requested=0.99).psi_n_edge == 0.99
 
 
 def test_edge_rule_never_beyond_0p999():
@@ -138,7 +139,7 @@ def test_edge_rule_never_beyond_0p999():
         with pytest.raises(ValueError):
             choose_psi_n_edge(requested=bad)
     c, why = choose_psi_n_edge(requested=0.98, grid_shape=(65, 65))
-    assert c == 0.98 and "0.99" in why
+    assert c == 0.98 and "0.995" in why
 
 
 # ----------------------------------------------------------------------------- duplicate-sample guard

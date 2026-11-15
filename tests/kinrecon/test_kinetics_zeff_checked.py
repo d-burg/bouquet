@@ -61,7 +61,7 @@ def _line_spec(level=1.9, ptp=0.5, rel_sigma=0.08, sigma=True):
     return d
 
 
-def _build(cands, rule=None, n_fast=None, source=CHECKED, **kw):
+def _build(cands, rule=None, n_fast="none", source=CHECKED, **kw):
     return assemble_kinetic_inputs(PSI, NE, TE, TI, zeff_candidates=cands, zeff_source=source, z_imp=6.0,
                                    coordinate="psi_n", psi_n_to_rho=RHO_MAP, n_fast=n_fast,
                                    zeff_rule=dict(dict(slice_time=1.0), **(rule or {})) if source == CHECKED else None,
@@ -154,7 +154,9 @@ def test_the_fast_ion_density_reaches_i3():
     nimp = _nimp(fc0=0.08, slope=0.2)                # n_i/n_e >= 0.42 without fast ions
     k = _quiet(cands={"cer": _imp_spec(n_imp=nimp)})
     assert k.record["zeff_rule"]["candidates"][Z.IMPURITY]["tests"]["I-3"]["verdict"] == Z.PASS
-    assert k.record["zeff_rule"]["candidates"][Z.IMPURITY]["tests"]["I-3"]["fast_ions"] == Z.FAST_IONS_NOT_AVAILABLE
+    assert k.record["zeff_rule"]["candidates"][Z.IMPURITY]["tests"]["I-3"]["fast_ions"] == Z.FAST_IONS_DECLARED_NONE
+    with pytest.raises(ValueError, match="n_fast is required"):
+        _quiet(cands={"cer": _imp_spec(n_imp=nimp)}, n_fast=None)
     nf = 0.5 * NE                                    # with fast ions: n_i/n_e < 0 on axis
     with pytest.raises(Z.ZeffSourceRefused):
         _quiet(cands={"cer": _imp_spec(n_imp=nimp)}, n_fast=nf)
@@ -180,27 +182,27 @@ def test_a_rho_table_needs_the_psi_n_of_its_points():
                          fit_points=Z.MeasurementPoints(value=np.interp(np.linspace(0.05, 0.95, 10), rho, nimp),
                                                         sigma=None, rho=np.linspace(0.05, 0.95, 10)))}
     with pytest.raises(ValueError, match="psi_n"):
-        assemble_kinetic_inputs(rho, ne, te, ti, zeff_candidates=cands, zeff_source=CHECKED, z_imp=6.0)
+        assemble_kinetic_inputs(rho, ne, te, ti, zeff_candidates=cands, zeff_source=CHECKED, z_imp=6.0, n_fast="none")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", Z.ZeffSourceWarning)
         k = assemble_kinetic_inputs(rho, ne, te, ti, zeff_candidates=cands, zeff_source=CHECKED, z_imp=6.0,
-                                    zeff_rule=dict(psi_n=psi))
+                                    zeff_rule=dict(psi_n=psi), n_fast="none")
     assert k.record["zeff_source"] == "cer"
     assert k.record["zeff_rule"]["candidates"][Z.IMPURITY]["tests"]["I-1"]["verdict"] == Z.PASS
 
 
 def test_the_named_route_is_unchanged_and_refuses_rule_options():
     old = assemble_kinetic_inputs(PSI, NE, TE, TI, zeff_candidates={"vb": ("zeff", _zline())}, zeff_source="vb",
-                                  z_imp=6.0, coordinate="psi_n", psi_n_to_rho=RHO_MAP)
+                                  z_imp=6.0, coordinate="psi_n", psi_n_to_rho=RHO_MAP, n_fast="none")
     new = assemble_kinetic_inputs(PSI, NE, TE, TI, zeff_candidates={"vb": dict(kind="zeff", value=_zline())},
-                                  zeff_source="vb", z_imp=6.0, coordinate="psi_n", psi_n_to_rho=RHO_MAP)
+                                  zeff_source="vb", z_imp=6.0, coordinate="psi_n", psi_n_to_rho=RHO_MAP, n_fast="none")
     np.testing.assert_array_equal(old.zeff, new.zeff)
     np.testing.assert_array_equal(old.ni, new.ni)
     assert "zeff_rule" not in old.record
     assert "not tested" in old.provenance["zeff"]
     with pytest.raises(ValueError, match="only with zeff_source"):
         assemble_kinetic_inputs(PSI, NE, TE, TI, zeff_candidates={"vb": ("zeff", _zline())}, zeff_source="vb",
-                                z_imp=6.0, coordinate="psi_n", zeff_rule=dict(override="vb"))
+                                z_imp=6.0, coordinate="psi_n", zeff_rule=dict(override="vb"), n_fast="none")
 
 
 def test_no_default_and_bad_inputs_are_refused():

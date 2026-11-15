@@ -64,10 +64,9 @@ the null; measured b = 0.4-2.8 on the equilibria examined), while ``V'``,
 ``<1/R^2>``, ``F`` and ``f_t`` stay finite.  The diffusion domain therefore ends
 at a closed surface ``psi_N = c`` inside the boundary:
 
-* ``c = 0.995`` by default;
-* ``c = 0.99`` when the 2-D psi grid is 65 x 65 or coarser, or when two
-  independent geometry routes disagree by more than 1e-3 (relative, in q,
-  dV/dpsi or <B_p^2>) at 0.995;
+* ``c = 0.995`` (no data-dependent switch: the grid shape and the
+  disagreement of two geometry routes are recorded, not acted on; a surface
+  that is not closed with margin before an X-point is refused);
 * never beyond 0.999 (beyond it independent geometry routes disagree at the
   percent level and the layer outside holds < 0.1 % of Ip).
 
@@ -99,7 +98,7 @@ import numpy as np
 from scipy.interpolate import PchipInterpolator
 
 __all__ = ["FluxSurfaceGeometry", "OuterLayerGeometry", "EdgeChoice", "choose_psi_n_edge", "check_psi_samples",
-           "from_tokamaker", "PSI_N_EDGE_DEFAULT", "PSI_N_EDGE_FALLBACK", "PSI_N_EDGE_MAX"]
+           "from_tokamaker", "PSI_N_EDGE_DEFAULT", "PSI_N_EDGE_MAX"]
 
 MU0 = 4.0e-7 * np.pi  # vacuum permeability as fixed in QED.jl and OFT [H/m]
 
@@ -107,12 +106,9 @@ _REQUIRED = ("rho", "dvol_drho", "avg_grad_rho2_r2", "avg_inv_r2", "fpol")
 _OPTIONAL_PROFILES = ("avg_inv_r", "avg_r", "avg_b2", "trapped_fraction", "eps", "r_geo")
 
 # ----------------------------------------------------------------------------- domain-edge rule
-PSI_N_EDGE_DEFAULT = 0.995    # default cutoff
-PSI_N_EDGE_FALLBACK = 0.99    # coarse 2-D grid, or geometry routes disagree at the default
+PSI_N_EDGE_DEFAULT = 0.995    # the cutoff
 PSI_N_EDGE_MAX = 0.999        # never beyond
-COARSE_GRID_MAX = 65          # "2-D grid <= 65^2": either grid dimension <= 65 points
-ROUTE_TOLERANCE = 1.0e-3      # relative disagreement of two geometry routes at the default cutoff
-XPOINT_MARGIN = 1.0e-3        # closed with margin: psi_N(X) - c >= 1e-3
+XPOINT_MARGIN = 1.0e-3        # closed with margin: psi_N(X) - c >= 1e-3 (else refused)
 
 # ----------------------------------------------------------------------------- sample guard (from_psi_coordinates)
 MIN_SAMPLE_GAP = 1.0e-10      # psi_N gap below which two samples are treated as the same surface
@@ -139,83 +135,64 @@ class EdgeChoice:
 def choose_psi_n_edge(grid_shape=None, route_disagreement=None, psi_n_xpoint=None, requested=None):
     r"""Diffusion-domain cutoff ``psi_N = c`` by the domain-edge rule, with the reason.
 
+    The rule: ``c = 0.995`` (:data:`PSI_N_EDGE_DEFAULT`), never beyond 0.999 (q, ``drho/dpsi_N`` and the metric
+    diverge logarithmically at a separatrix, and tracing noise near it grows).  Nothing about the data moves the
+    cutoff: the grid shape and the disagreement of two geometry routes, when given, are RECORDED in ``checks``
+    only (the earlier rule switched to 0.99 on them).
+
     Parameters
     ----------
     grid_shape : (int, int), optional
-        Shape of the 2-D psi grid the geometry was traced from (g-file
-        ``nw x nh``, IDS ``profiles_2d``).  ``None`` (e.g. a finite-element
-        TokaMaker state, which has no such grid): the grid criterion does not
-        apply, and the reason says so.  "65^2 or coarser" is taken as either
-        dimension <= 65 (the conservative reading; the evidence was 65 x 65).
+        Shape of the 2-D psi grid the geometry was traced from (recorded only).
     route_disagreement : float, optional
-        Largest relative disagreement, at ``psi_N = 0.995``, between two
-        independent geometry routes (e.g. TokaMaker ``get_fsa`` vs a trace of
-        the 2-D psi, or IDS ``profiles_1d`` vs a trace of ``profiles_2d``) in
-        q, dV/dpsi or <B_p^2>.  ``None``: not checked (stated in the reason).
+        Largest relative disagreement, at ``psi_N = 0.995``, between two independent geometry routes in q,
+        dV/dpsi or <B_p^2> (recorded only; must be finite and non-negative).
     psi_n_xpoint : float, optional
-        psi_N of the first X-point inside the limiter (file normalization).  When
-        given, the cutoff must satisfy ``psi_N(X) - c >= 1e-3`` (closed with
-        margin).  If even 0.99 fails, a ``ValueError`` is
-        raised: no admissible cutoff exists and the caller must decide.
+        psi_N of the first X-point inside the limiter (file normalization).  When given, the cutoff must be a
+        closed surface with margin, ``psi_N(X) - c >= 1e-3`` (:data:`XPOINT_MARGIN`); otherwise a ``ValueError`` is
+        raised: no admissible cutoff exists and the caller must choose the domain.
     requested : float, optional
-        A cutoff chosen by the caller.  It is validated (``0 < c <= 0.999``;
-        anything beyond 0.999 raises) and returned with reason
-        ``"requested"``; if the rule would have chosen a smaller value the
-        reason says so (it is not overridden silently in either direction).
+        A cutoff chosen by the caller.  It is validated (``0 < c <= 0.999``; anything beyond 0.999 raises) and
+        returned with reason ``"requested"`` (stating the rule's value; it is not overridden silently).
 
     Returns
     -------
     EdgeChoice
-        ``psi_n_edge`` in {0.995, 0.99} (or the validated request), ``reason``
-        and ``checks`` (what was and was not checked).
-
-    The rule: 0.995 by default, 0.99 on a 2-D grid of 65^2 or coarser, when two
-    geometry routes disagree by more than 1e-3 at 0.995, or when an X-point is
-    within 1e-3 of 0.995; never beyond 0.999 (q, ``drho/dpsi_N`` and the metric
-    diverge logarithmically at a separatrix, and tracing noise near it grows).
+        ``psi_n_edge`` (0.995 or the validated request), ``reason`` and ``checks`` (what was recorded).
     """
     checks = {}
-    triggers = []
     if grid_shape is not None:
         shape = tuple(int(v) for v in grid_shape)
-        coarse = min(shape) <= COARSE_GRID_MAX
-        checks["grid_shape"] = dict(shape=shape, coarse=coarse)
-        if coarse:
-            triggers.append(f"2-D psi grid {shape[0]}x{shape[1]} is {COARSE_GRID_MAX}^2 or coarser")
+        checks["grid_shape"] = dict(shape=shape, note="recorded only (does not move the cutoff)")
     else:
-        checks["grid_shape"] = "not applicable / not given"
+        checks["grid_shape"] = "not given"
     if route_disagreement is not None:
         d = float(route_disagreement)
         if not np.isfinite(d) or d < 0:
             raise ValueError("route_disagreement must be a finite, non-negative relative difference")
-        checks["route_disagreement"] = dict(value=d, tolerance=ROUTE_TOLERANCE, at=PSI_N_EDGE_DEFAULT)
-        if d > ROUTE_TOLERANCE:
-            triggers.append(f"geometry routes disagree by {d:.2e} > {ROUTE_TOLERANCE:g} at psi_N = {PSI_N_EDGE_DEFAULT}")
+        checks["route_disagreement"] = dict(value=d, at=PSI_N_EDGE_DEFAULT,
+                                            note="recorded only (does not move the cutoff)")
     else:
-        checks["route_disagreement"] = "not checked (no second geometry route given)"
+        checks["route_disagreement"] = "not given (no second geometry route)"
+    rule = PSI_N_EDGE_DEFAULT
+    c = rule if requested is None else float(requested)
+    if requested is not None and not 0.0 < c <= PSI_N_EDGE_MAX:
+        raise ValueError(f"psi_n_edge = {c} is outside (0, {PSI_N_EDGE_MAX}] (the domain edge is never beyond "
+                         f"{PSI_N_EDGE_MAX})")
     if psi_n_xpoint is not None:
         xp = float(psi_n_xpoint)
         checks["psi_n_xpoint"] = dict(value=xp, margin=XPOINT_MARGIN)
-        if xp - PSI_N_EDGE_FALLBACK < XPOINT_MARGIN:
-            raise ValueError(f"X-point at psi_N = {xp:.6f}: no cutoff in {{{PSI_N_EDGE_DEFAULT}, {PSI_N_EDGE_FALLBACK}}} "
-                             f"is closed with margin {XPOINT_MARGIN:g}; choose the domain explicitly")
-        if xp - PSI_N_EDGE_DEFAULT < XPOINT_MARGIN:
-            triggers.append(f"X-point at psi_N = {xp:.6f} is within {XPOINT_MARGIN:g} of {PSI_N_EDGE_DEFAULT}")
+        if xp - c < XPOINT_MARGIN:
+            raise ValueError(f"X-point at psi_N = {xp:.6f}: the cutoff {c} is not closed with margin "
+                             f"{XPOINT_MARGIN:g}; choose the domain explicitly")
     else:
         checks["psi_n_xpoint"] = "not checked (no X-point location given)"
-    rule = PSI_N_EDGE_FALLBACK if triggers else PSI_N_EDGE_DEFAULT
-    rule_reason = ("fallback (domain-edge rule): " + "; ".join(triggers)) if triggers else "default (domain-edge rule)"
-    unchecked = [k for k, v in checks.items() if isinstance(v, str)]
-    if unchecked:
-        rule_reason += "; not checked: " + ", ".join(unchecked)
+    rule_reason = "default (domain-edge rule)"
     if requested is not None:
-        c = float(requested)
-        if not 0.0 < c <= PSI_N_EDGE_MAX:
-            raise ValueError(f"psi_n_edge = {c} is outside (0, {PSI_N_EDGE_MAX}] (the domain edge is never beyond {PSI_N_EDGE_MAX})")
-        reason = f"requested by the caller (rule would give {rule}: {rule_reason})"
+        checks["rule_choice"] = rule
+        reason = f"requested by the caller (rule would give {rule})"
         if c > rule:
             reason += "; WARNING: the request is beyond the rule's choice"
-        checks["rule_choice"] = rule
         return EdgeChoice(c, reason, checks)
     return EdgeChoice(rule, rule_reason, checks)
 
@@ -801,9 +778,8 @@ def from_tokamaker(gs, R0, B0=None, npsi=200, psi_pad_axis=1.0e-3, psi_n_edge="a
     Domain edge (module docstring)
     ------------------------------
     ``psi_n_edge="auto"`` (default): ``c`` from :func:`choose_psi_n_edge`
-    (0.995 unless ``route_disagreement`` -- measured by the caller between
-    ``get_fsa`` and an independent route at 0.995 -- exceeds 1e-3; a
-    TokaMaker state has no 2-D grid, so the grid criterion does not apply).
+    (0.995; a ``route_disagreement`` measured by the caller between ``get_fsa``
+    and an independent route at 0.995 is recorded only).
     A number: that cutoff (validated: never beyond 0.999).  The domain samples
     run (uniform in sqrt(psi_N)) from ``psi_pad_axis`` to exactly ``c``; ``rho``
     is normalized to Phi(c).  The layer ``c < psi_N < 1`` is traced on

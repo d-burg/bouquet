@@ -249,8 +249,12 @@ it from the data.  ``MSE_USECER`` alone does not establish it (k-files with ``MS
 externally pre-corrected ``TGAMMA``, e.g. OMFIT ``MSEerCorrection``, which writes ``TGAMMA = TGAMMAUNCOR -
 A5 E_R / (A2 B_phi)`` and keeps ``TGAMMAUNCOR`` raw).  The group records, as evidence only, ``MSE_USECER``,
 ``KEECUR``, the number of active chords and on how many of them ``TGAMMA`` differs from ``TGAMMAUNCOR``
-(exact comparison; nothing is decided from it); ``TGAMMAUNCOR`` itself is kept in ``meta``.  The AA5..AA7GAM
-coefficients are geometry, set whether or not a correction was applied.
+(exact comparison; the status is not decided from it); ``TGAMMAUNCOR`` itself is kept in ``meta``.  The AA5..AA7GAM
+coefficients are geometry, set whether or not a correction was applied.  Two input-consistency checks refuse a block
+that is not well formed (:func:`mse_input_consistency`; they check the input, they do not classify the plasma):
+``TGAMMA`` differing from ``TGAMMAUNCOR`` on only some of the active chords (an E_r correction on part of the
+chords), and ``KEECUR > 0`` (EFIT's in-fit E_r route, which needs the raw measurement) with an already-altered
+``TGAMMA`` (differing from ``TGAMMAUNCOR``, or stated E_r-corrected).
 
 **Time.**  ``ITIME`` [ms] -> ``time`` [s].  EFIT averages the magnetics over
 ``ITIME +/- IAVEM`` [ms] (``IAVEM`` is a half-width: the EFIT snap-file
@@ -1313,6 +1317,31 @@ def mse_er_evidence(tgamma, tgamma_uncor, active, usecer=None, keecur=None):
     return ev
 
 
+def mse_input_consistency(evidence, er_corrected):
+    """Refuse an MSE block that is not well formed for the stated E_r status (input checks; they do not classify the
+    plasma or decide the status):
+
+    * ``TGAMMA`` differs from ``TGAMMAUNCOR`` on some active chords but not on all (exact comparison): an E_r
+      correction applied to only part of the chords;
+    * ``KEECUR > 0`` (EFIT's in-fit E_r route, where ``TGAMMA`` must be the raw measurement) together with an
+      already-altered ``TGAMMA`` -- differing from ``TGAMMAUNCOR`` on the active chords, or stated E_r-corrected by
+      the caller: the E_r effect would be counted twice.
+
+    ``evidence``: :func:`mse_er_evidence`."""
+    n_act = int(evidence.get("n_active", 0))
+    n_diff = evidence.get("n_tgamma_differs_from_uncorrected")
+    if n_diff is not None and 0 < n_diff < n_act:
+        raise ValueError(f"MSE in the k-file: TGAMMA differs from TGAMMAUNCOR on {n_diff} of {n_act} active chords, "
+                         "i.e. an E_r correction on only some chords; the block is not consistent and is refused "
+                         "(leave 'mse' out of groups, or supply a consistent TGAMMA)")
+    keecur = evidence.get("KEECUR")
+    if keecur is not None and keecur > 0 and (er_corrected or (n_diff or 0) > 0):
+        why = ("TGAMMA is stated E_r-corrected" if er_corrected else
+               f"TGAMMA differs from TGAMMAUNCOR on {n_diff} of {n_act} active chords")
+        raise ValueError(f"MSE in the k-file: KEECUR = {keecur:g} (E_r fitted inside EFIT, on the raw TGAMMA) but {why}: "
+                         "the E_r effect would be counted twice; the block is refused")
+
+
 def _mse(nl, machine, er_corrected, stored=None):
     ins = nl.get("INS", {})
     sig_key = "SGAMMA" if ins.get("SGAMMA") else "SIGGAM"
@@ -1339,6 +1368,7 @@ def _mse(nl, machine, er_corrected, stored=None):
                          "groups to build the set without MSE")
     ev = mse_er_evidence(tg, unc, valid, usecer=usecer, keecur=keecur)
     erc = bool(er_corrected)
+    mse_input_consistency(ev, erc)
     if "mse" in machine.sensors and len(machine.labels("mse")) == n:
         labels, lab_src = machine.labels("mse"), "machine bundle"
     else:

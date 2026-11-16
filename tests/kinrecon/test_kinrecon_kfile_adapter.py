@@ -331,11 +331,12 @@ def _mse_meta(nl, **kw):
 
 
 def test_er_status_is_stated_never_classified():
-    """Whatever TGAMMA - TGAMMAUNCOR looks like (zero, E_r-shaped, mixed, absent), the adapter takes the stated
-    status and records the evidence only; without a statement the MSE group is refused."""
+    """Whatever TGAMMA - TGAMMAUNCOR looks like (zero, E_r-shaped, absent), the adapter takes the stated status and
+    records the evidence only; without a statement the MSE group is refused.  (An E_r correction on only some chords
+    is refused as malformed input: test_mse_input_consistency_refusals.)"""
     r = np.array([2.1, 1.8, 2.0, 1.9])
     tg = np.array([-0.08, 0.1, -0.05, 0.12])
-    cases = dict(zero=tg.copy(), shaped=tg - 0.05 * tg, mixed=tg - np.array([0.0, 0.0, 0.004, 0.006]), absent=None)
+    cases = dict(zero=tg.copy(), shaped=tg - 0.05 * tg, absent=None)
     for name, unc in cases.items():
         for usecer in (0, 1, None):
             nl = _ins_kfile(tg, unc, r, usecer=usecer)
@@ -350,7 +351,36 @@ def test_er_status_is_stated_never_classified():
                 if unc is not None:
                     assert ev["n_tgamma_differs_from_uncorrected"] == int(np.count_nonzero(tg != unc))
                 assert not any(k in m for k in ("er_status", "er_route"))
-    # the in-fit E_r route is recorded with the stated status
-    m = _mse_meta(_ins_kfile(tg, tg - 0.01, r, usecer=0, extra_in1=" KEECUR = 2"), er_corrected=False)
+    # the in-fit E_r route on the raw measurement is recorded with the stated status
+    m = _mse_meta(_ins_kfile(tg, tg.copy(), r, usecer=0, extra_in1=" KEECUR = 2"), er_corrected=False)
     assert m["er_in_fit"] is True and m["er_evidence"]["KEECUR"] == 2.0
+
+
+def test_mse_input_consistency_refusals():
+    """Two input checks (they check the block, they do not classify the plasma): an E_r correction on only some of
+    the active chords, and the in-fit E_r route (KEECUR > 0) with an already-altered TGAMMA -- differing from
+    TGAMMAUNCOR, or stated E_r-corrected -- are refused whatever the stated status; the well-formed blocks pass."""
+    r = np.array([2.1, 1.8, 2.0, 1.9])
+    tg = np.array([-0.08, 0.1, -0.05, 0.12])
+    mixed = tg - np.array([0.0, 0.0, 0.004, 0.006])
+    for usecer in (0, 1, None):
+        for stated in (True, False):
+            with pytest.raises(ValueError, match="only some chords"):
+                _mse_meta(_ins_kfile(tg, mixed, r, usecer=usecer), er_corrected=stated)
+    # an inactive chord does not count: the same difference on a chord with zero fit weight is accepted
+    nl = _ins_kfile(tg, mixed, r)
+    nl["INS"]["FWTGAM"] = [1.0, 1.0, 0.0, 0.0]
+    assert _mse_meta(nl, er_corrected=False)["er_evidence"]["n_tgamma_differs_from_uncorrected"] == 0
+    # in-fit E_r with an altered TGAMMA (differing on every chord), or stated E_r-corrected: refused
+    for stated in (True, False):
+        with pytest.raises(ValueError, match="counted twice"):
+            _mse_meta(_ins_kfile(tg, tg - 0.01, r, usecer=0, extra_in1=" KEECUR = 2"), er_corrected=stated)
+    with pytest.raises(ValueError, match="counted twice"):
+        _mse_meta(_ins_kfile(tg, tg.copy(), r, usecer=0, extra_in1=" KEECUR = 2"), er_corrected=True)
+    with pytest.raises(ValueError, match="counted twice"):
+        _mse_meta(_ins_kfile(tg, None, r, usecer=0, extra_in1=" KEECUR = 2"), er_corrected=True)
+    # well formed: a correction on every active chord, or none; KEECUR > 0 on the raw TGAMMA
+    assert _mse_meta(_ins_kfile(tg, tg - 0.05 * tg, r), er_corrected=True)["er_corrected"] is True
+    assert _mse_meta(_ins_kfile(tg, tg.copy(), r), er_corrected=False)["er_corrected"] is False
+    assert _mse_meta(_ins_kfile(tg, None, r, extra_in1=" KEECUR = 2"), er_corrected=False)["er_in_fit"] is True
 

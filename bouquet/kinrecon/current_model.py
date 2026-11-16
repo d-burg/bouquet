@@ -85,9 +85,11 @@ The passes may be Anderson-accelerated (``pass_acceleration="anderson"``, defaul
 comparison-grid profile: the input of the next solve is a mixture of the recent inputs and
 assembled profiles (the mixing correction is interpolated onto the knots); the fixed point and the
 criterion are unchanged, and a mixed input that does not solve falls back to the plain one.  Safeguard:
-when the max-norm of the pass residual (assembled minus input profile on the comparison grid) grew
-against the previous pass, the history is restarted and that pass takes the plain input (recorded as
-``anderson_restart`` in the pass record); the residual and the convergence measure are the same.
+when the input of the previous pass was a mixture and the max-norm of the pass residual (assembled
+minus input profile on the comparison grid) grew against the pass before, the history is restarted and
+that pass takes the plain input (recorded as ``anderson_restart`` in the pass record); growth after a
+plain input does not restart (where the plain passes themselves diverge, the mixing is what converges);
+the residual and the convergence measure are the same.
 
 A supplied current state (``state_fn``; the time-dependent path of :mod:`.series`) replaces the
 steady state / periodic orbit: the profiles are then those of that state on the current geometry.
@@ -1065,6 +1067,7 @@ def consistent_solve(fm, kin, src, params, cfg, ip=None, start=None, z0=None, la
         raise ValueError("pass_acceleration must be 'anderson' or 'none'")
     hx, hf = [], []          # Anderson histories: inputs and residuals G(x) - x on the comparison grid
     x_prev = None
+    prev_mixed = False       # whether the input of the previous pass was an Anderson mixture
     qrec = None
     for k in range(int(cfg.max_passes)):
         try:
@@ -1109,9 +1112,10 @@ def consistent_solve(fm, kin, src, params, cfg, ip=None, start=None, z0=None, la
             hx.append(x_prev)
             hf.append(asm_k["jphi_cmp"] - x_prev)
             del hx[:-(cfg.anderson_depth + 1)], hf[:-(cfg.anderson_depth + 1)]
-            if (cfg.pass_acceleration == "anderson" and len(hf) >= 2
+            if (cfg.pass_acceleration == "anderson" and prev_mixed and len(hf) >= 2
                     and np.max(np.abs(hf[-1])) > np.max(np.abs(hf[-2]))):
-                # safeguard: the residual grew -> restart the history; this pass takes the plain input
+                # safeguard: the Anderson-mixed input of the previous pass made the residual grow -> restart the
+                # history; this pass takes the plain input
                 del hx[:-1], hf[:-1]
                 rec["anderson_restart"] = True
             if cfg.pass_acceleration == "anderson" and len(hf) >= 2:
@@ -1149,6 +1153,7 @@ def consistent_solve(fm, kin, src, params, cfg, ip=None, start=None, z0=None, la
                                     dict(passes=passes, reason=str(exc)), round(time.perf_counter() - t0, 3))
         prev_j = x_in
         x_prev = x_in
+        prev_mixed = mixed
         used = dict(asm_k, jphi=jk, jphi_assembled=asm_k["jphi"], jphi_cmp_used=x_in) if mixed else asm_k
         lag, asm = lag_k, asm_k
     return ConsistentResult(False, "max_passes", int(cfg.max_passes), used, lag, res,

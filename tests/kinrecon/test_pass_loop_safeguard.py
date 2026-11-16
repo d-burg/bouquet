@@ -3,7 +3,9 @@
 The equilibrium solve and the model evaluation are replaced by a fixed map ``G`` of the comparison-grid profile
 (the "solve" stores its input; the next "assembly" returns ``G`` of it), so the loop is a fixed-point iteration whose
 residuals are known.  Checked: the history is restarted -- and that pass takes the plain input -- exactly on the
-passes whose residual max-norm grew against the previous pass's; the loop still stops by the unchanged criterion
+passes whose residual max-norm grew against the previous pass's after a MIXED input (growth after a plain input does
+not restart: on a map whose plain passes diverge the mixing is what converges); the loop still stops by the unchanged
+criterion
 (``max |j_k - j_{k-1}| / max |j_k| < pass_tol`` with the other consistency tests) at the map's fixed point; plain
 passes never restart.
 """
@@ -87,8 +89,34 @@ def test_history_restarts_exactly_when_the_residual_grows(monkeypatch, accel):
         return
     r = [np.max(np.abs(G(xs[k - 1]) - xs[k - 1])) for k in range(1, len(xs))]       # residual seen at pass k
     for k in range(2, len(xs)):
-        grew = r[k - 1] > r[k - 2]
-        assert restarts[k] == bool(grew), (k, r[k - 2], r[k - 1])
+        grew = bool(r[k - 1] > r[k - 2]) and bool(recs[k - 1].get("anderson_mixed"))
+        assert restarts[k] == grew, (k, r[k - 2], r[k - 1])
         if grew:
             assert recs[k]["anderson_mixed"] is False
     assert any(restarts) and any(r_.get("anderson_mixed") for r_ in recs)
+
+
+def test_growth_after_a_plain_input_does_not_restart(monkeypatch):
+    """A map whose plain passes DIVERGE (an eigenvalue -1.5): the plain loop fails, the mixing converges it, and no
+    restart is made on the growth of the plain passes before the first mixture."""
+    global G
+    saved = G
+
+    def expanding(x):
+        return XSTAR - 1.5 * (x - XSTAR)
+
+    try:
+        G = expanding
+        out = {}
+        for accel in ("anderson", "none"):
+            fm = FakeFM()
+            _install(monkeypatch, fm)
+            out[accel] = CM.consistent_solve(fm, None, None, {}, CM.CurrentModelSettings(r0=1.0, pass_acceleration=accel),
+                                             ip=1.0)
+        assert out["none"].status == "max_passes"
+        assert out["anderson"].status == "consistent"
+        recs = out["anderson"].record["passes"]
+        first_mixed = next(i for i, r_ in enumerate(recs) if r_.get("anderson_mixed"))
+        assert not any(r_.get("anderson_restart") for r_ in recs[:first_mixed + 1])
+    finally:
+        G = saved

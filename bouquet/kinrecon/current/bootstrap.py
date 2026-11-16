@@ -43,7 +43,13 @@ Collisionality and Coulomb logarithms (each a named option of :func:`redl_jdotb`
   ``Z_i^4 = (n_e / n_i) Z_eff`` (``ion_collisionality="spike"``, named after that prototype:
   ``Z_ion = ((n_e/n_i) Z_eff)^(1/4)``); ``"zeff"`` uses ``Z_eff^4`` and ``"unity"`` 1, as OFT's
   ``ion_collisionality_model`` options.  Sauter 1999 eq. 18c defines nu_i* with Z^4 of the main
-  ion; the choice matters only through alpha.
+  ion; the choice matters only through alpha.  The published forms do not fix one choice for a plasma with
+  impurities: eq. 18c is written for a single ion species of charge Z, which can be read as Z_eff or as the
+  main-ion charge, and Redl 2021 points to main-ion quantities without stating Z_i = 1.  Between the default and
+  Z = 1 in both eqs. 18c and 18e the local bootstrap current differs by 2.5-9 % (core to pedestal foot, measured
+  on a Z_eff = 2 deuterium-carbon profile).  The default ``"spike"`` is kept, and that spread is carried as a
+  model-form uncertainty inside the bootstrap multiplier's prior (``s_bs``, N(1, 0.5), :mod:`..fit`), not
+  chosen from the data.
 
 ``R`` is the surface major radius ``(R_max + R_min)/2`` and ``eps = (R_max - R_min)/(R_max +
 R_min)`` (as OFT and IMAS.jl).  Units: SI, temperatures in eV, psi per radian.  Sign convention:

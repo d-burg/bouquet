@@ -878,7 +878,8 @@ def floor_effect_record(core, q_check=None, q_equilibrium=None):
     From the core record (:func:`core_record`; for a series slice the interval's record of
     :func:`.series.advance_q_floor`): the form, the branch (:data:`.current.sawtooth.FLOOR_BRANCHES`), whether it acted
     and met the floor, the outer and inner edges of the flattening region (rho_tor,norm), the change of the loop
-    voltage (relative) and of l_i (``li3``) against the same model without the floor and the fraction of Ip the floor
+    voltage (relative) and of l_i (``li3``, the full plasma, NaN in a series; ``li3_domain``, the diffusion domain)
+    against the same model without the floor and the fraction of Ip the floor
     moved from inside its outer edge to outside it.  The reference: for a single slice the steady state of the same
     model sources (before the corrections) with the plain resistivity; for a series slice the same interval advanced
     from the same carried state without the floor (the floor's effect over this interval, not its history).  Also the
@@ -894,7 +895,7 @@ def floor_effect_record(core, q_check=None, q_equilibrium=None):
                 rho_floor=core.get("rho_floor"), rho_floor_inner=core.get("rho_floor_inner"),
                 q_axis_achieved=ax.get("q0_eq"), q_min_achieved=q_min_eq,
                 q_axis_model=core.get("q_axis_model"), q_min_model=core.get("q_min_model"),
-                d_v_loop_rel=core.get("d_v_loop_rel"), d_li3=core.get("d_li3"),
+                d_v_loop_rel=core.get("d_v_loop_rel"), d_li3=core.get("d_li3"), d_li3_domain=core.get("d_li3_domain"),
                 current_moved_outside_over_ip=core.get("current_moved_outside_over_ip"),
                 reference=core.get("floor_effect_reference",
                                    "steady state of the same model sources without the floor (before the corrections)"),

@@ -611,8 +611,10 @@ def _min_face_q(q):
 
 def _floor_effect(solver, st0, sol_f, st_f, r_out):
     """Record of what the floor did against the same sources without it (``st0``, plain resistivity): the loop
-    voltage and l_i (``li3``) of both, and the fraction of Ip moved from inside ``r_out`` to outside it (the enclosed
-    current at ``r_out``, linear between faces, plain minus floored, over Ip)."""
+    voltage and l_i of both (``li3``, the full plasma, NaN where the outer layer carries no reference surfaces; and
+    ``li3_domain``, the diffusion domain normalized with its edge current, always available), and the fraction of Ip
+    moved from inside ``r_out`` to outside it (the enclosed current at ``r_out``, linear between faces, plain minus
+    floored, over Ip)."""
     p0, p1 = solver.profiles(st0), sol_f.profiles(st_f)
     rf = np.asarray(st0.rho_faces, float)
     ip = float(p0["ip"])
@@ -621,6 +623,8 @@ def _floor_effect(solver, st0, sol_f, st_f, r_out):
     v0, v1 = float(st0.meta.get("v_loop", p0["v_loop_boundary"])), float(st_f.meta.get("v_loop", p1["v_loop_boundary"]))
     return dict(v_loop_plain=v0, v_loop_floor=v1, d_v_loop_rel=(v1 / v0 - 1.0) if v0 else float("nan"),
                 li3_plain=float(p0["li3"]), li3_floor=float(p1["li3"]), d_li3=float(p1["li3"] - p0["li3"]),
+                li3_domain_plain=float(p0["li3_domain"]), li3_domain_floor=float(p1["li3_domain"]),
+                d_li3_domain=float(p1["li3_domain"] - p0["li3_domain"]),
                 current_moved_outside_over_ip=(i0 - i1) / ip if ip else float("nan"),
                 d_enclosed_current_max_over_ip=(float(np.max(np.abs(np.asarray(p1["I_enclosed"]) -
                                                                     np.asarray(p0["I_enclosed"])))) / ip

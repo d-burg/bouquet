@@ -367,3 +367,26 @@ def test_series_records_the_floor_effect_per_slice_and_the_record_cannot_change_
     assert abs(core["d_v_loop_rel"]) <= 1e-12 and core["current_moved_outside_over_ip"] == 0.0
     # l_i needs the outer layer's geometry, which this mocked geometry lacks (NaN on both sides)
     assert (np.isnan(core["li3_plain"]) and np.isnan(core["d_li3"])) or abs(core["d_li3"]) <= 1e-12
+
+
+def test_the_domain_li_change_is_recorded_where_the_full_plasma_li_is_not_available():
+    """The full-plasma l_i needs the outer layer's reference surfaces, which a series interval solver does not carry
+    (NaN there); the record also carries the diffusion domain's l_i change, which is always available, in a single
+    slice and in a series interval, recomputed from the same two states."""
+    sol = _solver(IP_LOW_Q)
+    rf = CurrentState.uniform_faces(100)
+    st0 = sol.steady_state(rf)
+    st, rec, s2 = SAW.resistive_floor_steady(sol, rf, 1.0)
+    want = s2.profiles(st)["li3_domain"] - sol.profiles(st0)["li3_domain"]
+    assert np.isfinite(rec["d_li3_domain"]) and rec["d_li3_domain"] == pytest.approx(want, rel=1e-12)
+    assert rec["d_li3_domain"] < 0.0                    # the broader current lowers l_i
+    lag = SD._lag()
+    isol, _ = SE.interval_solver(lag, lag, lag["jbs"], lag["jbs"], 0.0, 0.02, IP_LOW_Q, IP_LOW_Q)
+    st_in = CurrentState(*(lambda s_: (s_.rho_faces, s_.psi, s_.psi_boundary, 0.0))(SD._steady(lag, IP_LOW_Q)))
+    end, core = SE.advance_q_floor(isol, st_in, 0.02, SE.SeriesSettings(), 1e-3, 1.0)
+    plain = isol.advance(st_in, 0.02, dt=1e-3, scheme=SE.SeriesSettings().scheme)
+    mod_sol = SAW.ResistiveFloor(isol, 1.0).with_solver()
+    want_s = mod_sol.profiles(end)["li3_domain"] - isol.profiles(plain)["li3_domain"]
+    assert core["n_steps_floor_acted"] > 0 and np.isfinite(core["d_li3_domain"])
+    assert core["d_li3_domain"] == pytest.approx(want_s, rel=1e-12, abs=1e-15)
+    assert CM.floor_effect_record(core)["d_li3_domain"] == core["d_li3_domain"]

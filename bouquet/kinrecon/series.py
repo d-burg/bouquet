@@ -495,7 +495,9 @@ def advance_q_floor(sol, state, t1, settings, dt, q_floor, sol_all=None, form="r
     largest over the interval, sharp the last step's floor record and the largest change of the enclosed current
     made by the floor (fraction of Ip).  RECORD only, both forms: the model end state's axis q and minimum q against
     the same interval advanced from ``state`` without the floor (plain resistivity, model sources), and the change of
-    the boundary loop voltage (relative), of ``li3`` and the fraction of Ip moved from inside the end state's outer
+    the boundary loop voltage (relative), of ``li3`` (NaN in a series: the interval solver's outer layer carries no
+    reference surfaces) and of the domain's ``li3_domain`` (always available), and the fraction of Ip moved from
+    inside the end state's outer
     edge (resistive: the region at the end time; sharp: the outermost upward crossing of the end state's q) to outside
     it (0 where there is no region)."""
     if form not in _saw.Q_FLOOR_FORMS:
@@ -575,6 +577,8 @@ def _interval_floor_effect(sol, sol_f, plain_end, end, q_end, q_floor, r_out="cr
                     q_min_no_floor_end=float(np.nanmin(q0)),
                     v_loop_plain=v0, v_loop_floor=v1, d_v_loop_rel=(v1 / v0 - 1.0) if v0 else float("nan"),
                     li3_plain=float(p0["li3"]), li3_floor=float(p1["li3"]), d_li3=float(p1["li3"] - p0["li3"]),
+                    li3_domain_plain=float(p0["li3_domain"]), li3_domain_floor=float(p1["li3_domain"]),
+                    d_li3_domain=float(p1["li3_domain"] - p0["li3_domain"]),
                     current_moved_outside_over_ip=moved,
                     floor_effect_reference="the same interval advanced from the same carried state without the floor "
                                            "(model sources, before the corrections)")

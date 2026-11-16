@@ -18,21 +18,24 @@ Physics (all in Python, iterated with the geometry):
 
   - ``"q_floor"`` (default): the time-averaged state.  The steady state of the MODEL sources
     (bootstrap and driven current) with the RESISTIVE q floor (``q_floor`` default 1, one documented
-    setting; :func:`.current.sawtooth.resistive_floor_steady`, the stationary-sawtooth treatment of
-    FUSE's current-diffusion actor): where that steady state's q is below the floor, the resistivity
-    inside a flattening radius is set to its value at that radius, the radius scanned outward over the
-    diffusion faces to the first whose steady state has q >= floor everywhere (at most to the outermost
-    face where the plain state's q is below the floor; FUSE's rule).  The current stays continuous
-    (no jump at that radius), Ip is the steady state's own, and q ends AT OR SLIGHTLY ABOVE the floor
-    -- or somewhat below it where even the outermost radius does not reach it (recorded as
-    ``q_floor_met``).  The flattening radius is a grid face, so the state is piecewise constant in its
-    inputs where the chosen face changes (FUSE's scan has the same property).  A state whose q at the
-    domain edge is below the floor is refused.  The current corrections are added AFTER the floor, as
-    their steady response with the plain resistivity (the steady state with them among the sources
-    minus the one without), so the floor never cancels them and the fit may pull q below the floor
-    where the data demand it; where the floor does not act the state is the steady state with the
-    corrections among the sources, to the bit.  No sawtooth parameter, crash time or amplitude is
-    used.  ``q_floor_form="sharp"`` (opt-in, comparison) is the earlier clamp ``q -> max(q, q_floor)``
+    setting; :func:`.current.sawtooth.resistive_floor_steady`, the resistivity step of the
+    stationary-sawtooth treatment FUSE runs; FUSE also flattens the non-inductive current in a separate
+    sawtooth source actor, which this package does not): where that steady state's q is below the
+    floor ON AXIS, the resistivity inside a flattening region from the axis is set to its value at the
+    region's outer edge, the outer edge being the smallest whose steady state has q >= floor everywhere,
+    found to round-off (cut cells overlap-weighted, so the state is continuous in it and converges with
+    the grid); where the model q is below the floor off axis only (reversed shear) the floor does not
+    act and the record says so (the branches depend on the model state's q only).  The current
+    stays continuous (no jump at the edges), Ip is the steady state's own, q_min ends AT the floor and
+    q0 above it (the non-inductive current inside is left hollow) -- or q_min below the floor where
+    even the plain state's outermost crossing does not reach it (recorded as ``q_floor_met``).  A
+    state whose q at the domain edge is below the floor is refused.  The current corrections are added
+    AFTER the floor, as their steady response with the plain resistivity (the steady state with them
+    among the sources minus the one without), so the floor never cancels them and the fit may pull q
+    below the floor where the data demand it; where the floor does not act the state is the steady
+    state with the corrections among the sources, to the bit.  No sawtooth parameter, crash time or
+    amplitude is used.  What the floor did is recorded (``core``; :func:`floor_effect_record`).
+    ``q_floor_form="sharp"`` (opt-in, comparison) is the earlier clamp ``q -> max(q, q_floor)``
     (:func:`.current.sawtooth.floor_q`), which makes ``<J.B>`` jump at the floor radius;
   - ``"periodic_orbit"`` (opt-in): the periodic orbit of "diffuse for one period, reconnect with
     fraction f" (:func:`.current.sawtooth.solve_periodic_orbit`) replaces the steady state and its
@@ -849,7 +852,9 @@ def core_record(floor_rec, cfg, q_model, rho_tor, rho_edge):
     if "rho_floor" in rec and "rho_floor_domain" not in rec:
         # the floor works on the diffusion domain's rho (0..1 at the domain edge): rho_tor,norm = rho * rho_edge
         rec["rho_floor_domain"] = rec["rho_floor"]
-        for k in ("rho_floor", "rho_q_min_before", "rho_q_min_after"):
+        if rec.get("rho_floor_inner") is not None:
+            rec["rho_floor_inner_domain"] = rec["rho_floor_inner"]
+        for k in ("rho_floor", "rho_floor_inner", "rho_q_min_before", "rho_q_min_after"):
             if rec.get(k) is not None:
                 rec[k] = float(rec[k]) * float(rho_edge)
         if rec.get("rho_floor_crossings"):
@@ -865,6 +870,35 @@ def core_record(floor_rec, cfg, q_model, rho_tor, rho_edge):
             rec["q_min_model_minus_floor"] = float(q[j] - rec["q_floor"])
             rec["q_axis_model_minus_floor"] = float(q[0] - rec["q_floor"])
     return rec
+
+
+def floor_effect_record(core, q_check=None, q_equilibrium=None):
+    """What the q floor did in one result -- a RECORD for the reader (nothing reads it; it cannot change a result).
+
+    From the core record (:func:`core_record`; for a series slice the interval's record of
+    :func:`.series.advance_q_floor`): the form, the branch (:data:`.current.sawtooth.FLOOR_BRANCHES`), whether it acted
+    and met the floor, the outer and inner edges of the flattening region (rho_tor,norm), the change of the loop
+    voltage (relative) and of l_i (``li3``) against the same model without the floor and the fraction of Ip the floor
+    moved from inside its outer edge to outside it.  The reference: for a single slice the steady state of the same
+    model sources (before the corrections) with the plain resistivity; for a series slice the same interval advanced
+    from the same carried state without the floor (the floor's effect over this interval, not its history).  Also the
+    ACHIEVED q: the solved equilibrium's axis q (``q_check``'s ``axis.q0_eq``) and the minimum of its traced q
+    (``q_equilibrium``), next to the scored model q's axis value and minimum (after the corrections)."""
+    core = core or {}
+    ax = ((q_check or {}).get("axis") or {})
+    qe = None if q_equilibrium is None else np.asarray(q_equilibrium, float)
+    q_min_eq = float(np.min(qe[np.isfinite(qe)])) if qe is not None and np.any(np.isfinite(qe)) else None
+    return dict(q_floor=core.get("q_floor"), q_floor_form=core.get("q_floor_form"),
+                floor_rule=core.get("floor_rule"), floor_branch=core.get("floor_branch"),
+                acted=core.get("acted"), q_floor_met=core.get("q_floor_met"),
+                rho_floor=core.get("rho_floor"), rho_floor_inner=core.get("rho_floor_inner"),
+                q_axis_achieved=ax.get("q0_eq"), q_min_achieved=q_min_eq,
+                q_axis_model=core.get("q_axis_model"), q_min_model=core.get("q_min_model"),
+                d_v_loop_rel=core.get("d_v_loop_rel"), d_li3=core.get("d_li3"),
+                current_moved_outside_over_ip=core.get("current_moved_outside_over_ip"),
+                reference=core.get("floor_effect_reference",
+                                   "steady state of the same model sources without the floor (before the corrections)"),
+                note="record only: nothing reads it")
 
 
 def core_vs_floor_record(core, correction_effect):

@@ -55,8 +55,10 @@ Every result records its core treatment (``record["core"]``, :func:`.current_mod
 ``core_relaxation``, ``q_floor`` and its form, whether the floor acted, the floor radius and the floor crossings in
 rho_tor,norm) and, as a record for the reader with no threshold, whether the data pull the core below the floor
 (``record["core_vs_floor"]``, :func:`.current_model.core_vs_floor_record`: the fitted model q at the axis and its
-minimum against the floor, and the signed change the corrections made to the core current and the axis q); nothing
-reads it.
+minimum against the floor, and the signed change the corrections made to the core current and the axis q) and what the
+floor did (``record["floor_effect"]``, :func:`.current_model.floor_effect_record`: the achieved q0 and q_min of the
+solved equilibrium, the flattening region, and the change of the loop voltage and of l_i and the fraction of Ip moved
+outside the region against the same model without the floor); nothing reads them.
 
 Every result also records what its current corrections did to the core (``record["correction_core_effect"]``,
 :func:`.current_model.correction_core_effect`; a record only): each amplitude against its prior sigma, and the
@@ -566,6 +568,19 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
             rec["core_vs_floor"] = _cm.core_vs_floor_record(rec["core"], rec["correction_core_effect"])
         except Exception as exc:  # noqa: BLE001 -- a record must never end a fit
             rec["core_vs_floor"] = dict(computed=False, reason=f"{type(exc).__name__}: {exc}"[:300])
+        # what the q floor did (achieved q0 / q_min, region, loop voltage, l_i, current moved): a record only
+        q_chk = q_eq = None
+        try:
+            res_c = center["res"] if center is not None else None
+            q_chk = (getattr(res_c, "record", None) or {}).get("q_check")
+            lag_c = getattr(res_c, "lag", None)
+            q_eq = None if lag_c is None else lag_c["phys"].get("q")
+        except Exception:  # noqa: BLE001 -- the achieved q is then not recorded
+            pass
+        try:
+            rec["floor_effect"] = _cm.floor_effect_record(rec["core"], q_chk, q_eq)
+        except Exception as exc:  # noqa: BLE001 -- a record must never end a fit
+            rec["floor_effect"] = dict(computed=False, reason=f"{type(exc).__name__}: {exc}"[:300])
         cov = np.full((len(names), len(names)), np.nan)
         sig = np.full(len(names), np.nan)
         chi = {}

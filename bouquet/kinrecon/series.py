@@ -23,17 +23,19 @@ with, on each interval ``[t_{k-1}, t_k]``,
   measured value at that time; when it is not given the previous slice's value is kept and the
   slice record says so), so ``F`` at the last closed surface differs between the two ends of an
   interval (recorded as ``fpol_lcfs_used`` and ``fpol_lcfs_change``);
-* the core treatment.  Default ``sawtooth="q_floor"``: the TIME-AVERAGED state, with the q floor of FUSE's
-  current-diffusion actor (:class:`.current.sawtooth.ResistiveFloor`; ``q_floor`` is
-  :attr:`.current_model.CurrentModelSettings.q_floor`, default 1): on every diffusion step, the resistivity inside
-  the outermost face where the q of the state at the START of the step is below the floor is set to its value at that
-  face, so the core current relaxes toward a flatter profile and q toward the floor; the current stays continuous
-  and Ip is the interval's Ip condition.  q is NOT held at the floor: it can stay below it for a resistive time and
-  dithers about it once there.  A state whose q at the domain edge is below the floor is refused.  No sawtooth
-  detection, crash time or amplitude is used.  The flattening is decided once per step from the step's starting
-  state, so the state near the floor radius depends on the step ``dt_max`` at first order.  The first slice starts
-  from the same treatment as a single-slice fit (``core_relaxation="q_floor"``, its steady-state form).  An
-  interval's in-window current corrections (below) are NOT floored: their response over the interval (the advance
+* the core treatment.  Default ``sawtooth="q_floor"``: the TIME-AVERAGED state, with the resistive q floor
+  (:class:`.current.sawtooth.ResistiveFloor`, the resistivity step of the stationary-sawtooth treatment FUSE runs;
+  ``q_floor`` is :attr:`.current_model.CurrentModelSettings.q_floor`, default 1): on every diffusion step, from the q
+  of the state at the START of the step, where that q is below the floor on axis the resistivity inside the region
+  from the axis to the outermost upward crossing of the floor is set to its value there (cut cells overlap-weighted;
+  where q is below the floor off axis only, nothing changes), so the core current relaxes toward a flatter profile
+  and q_min toward the floor; the current
+  stays continuous and Ip is the interval's Ip condition.  q is NOT held at the floor: it can stay below it for a
+  resistive time and dithers about it once there.  A state whose q at the domain edge is below the floor is refused.
+  No sawtooth detection, crash time or amplitude is used.  The flattening is decided once per step from the step's
+  starting state, so the state near the region's edge depends on the step ``dt_max`` at first order.  The first
+  slice starts from the same treatment as a single-slice fit (``core_relaxation="q_floor"``, its steady-state form).
+  An interval's in-window current corrections (below) are NOT floored: their response over the interval (the advance
   with them among the sources minus the advance without them, both with the plain resistivity; the flux diffusion
   is linear in its sources) is added to the model end state, so the floor acts on the model state first and the
   corrections after it, as in a single-slice fit.  From the next interval on that state is the model state: where a
@@ -43,7 +45,9 @@ with, on each interval ``[t_{k-1}, t_k]``,
   (:func:`.current.sawtooth.floor_q` after every step; opt-in, comparison).  Every slice records its core treatment
   (``core``: ``core_relaxation``, ``q_floor`` and its form, whether the floor acted during the interval, the
   flattening radius at its end, every crossing of the floor by the model end state's q, inner and outer, and the
-  minimum of the scored q) and ``core_vs_floor`` (:func:`.current_model.core_vs_floor_record`, a record only).
+  minimum of the scored q; the floor's effect over the interval against the same interval advanced without it),
+  ``core_vs_floor`` (:func:`.current_model.core_vs_floor_record`) and ``floor_effect``
+  (:func:`.current_model.floor_effect_record`), both records only.
   The reconnection operator (:mod:`.current.sawtooth`, the identity wherever q >= 1) is an explicit opt-in:
   ``sawtooth="crash_times"`` applies it at MEASURED crash times (``crash_table``, a
   :class:`.crash_table.CrashTable`, or ``crash_times``; a table or times given with another mode are
@@ -462,10 +466,12 @@ def advance_q_floor(sol, state, t1, settings, dt, q_floor, sol_all=None, form="r
     MODEL sources only.
 
     ``form="resistive"`` (default): every step uses the resistivity of :class:`.current.sawtooth.ResistiveFloor` --
-    inside the outermost face where the q of the state at the START of the step is below ``q_floor``, the
-    resistivity set to its value at that face (FUSE's time-dependent rule) -- so the current stays continuous and Ip
-    is the interval's Ip condition; q is not held at the floor but relaxed toward it.  ``form="sharp"`` (opt-in): the
-    earlier clamp :func:`.current.sawtooth.floor_q` after every step.
+    from the q of the state at the START of the step, where it is below the floor on axis, inside the region from the
+    axis to the outermost upward crossing of the floor the resistivity set to its value there (FUSE's time-dependent
+    rule with a continuous edge; no change where q is below the floor off axis only) -- so the current stays
+    continuous and Ip is the interval's
+    Ip condition; q is not held at the floor but relaxed toward it.  ``form="sharp"`` (opt-in): the earlier clamp
+    :func:`.current.sawtooth.floor_q` after every step.
 
     ``sol_all`` (optional): the interval's solver with the current corrections added to the sources; their response
     over the interval (``sol_all`` minus ``sol``, both advanced from ``state`` in the same steps with the plain
@@ -476,16 +482,21 @@ def advance_q_floor(sol, state, t1, settings, dt, q_floor, sol_all=None, form="r
     clamps it away).
 
     The floor is decided once per step, so the series state depends on the step ``dt`` (``SeriesSettings.dt_max``)
-    at first order near the floor radius.
+    at first order near the region's edge.
 
     Returns ``(end_state, core_record)``: the form, ``q_floor``, the number of steps and of steps on which the floor
-    acted, and at the end of the interval the floor radius the end state gives (``rho_floor``, the domain's rho; None
-    when q >= floor everywhere) with every crossing of the floor by the model end state's q (``rho_floor_crossings``,
-    inner and outer); resistive also the radius used on the last step and the largest over the interval, sharp the
-    last step's floor record and the largest change of the enclosed current made by the floor (fraction of Ip)."""
+    acted, and at the end of the interval the region the end state gives (``rho_floor`` and ``rho_floor_inner``, the
+    domain's rho; None when q >= floor everywhere; ``floor_branch``) with every crossing of the floor by the model end
+    state's q (``rho_floor_crossings``, inner and outer); resistive also the outer edge used on the last step and the
+    largest over the interval, sharp the last step's floor record and the largest change of the enclosed current
+    made by the floor (fraction of Ip).  RECORD only, both forms: the model end state's axis q and minimum q against
+    the same interval advanced from ``state`` without the floor (plain resistivity, model sources), and the change of
+    the boundary loop voltage (relative), of ``li3`` and the fraction of Ip moved from inside the end state's outer
+    edge to outside it (0 where there is no region)."""
     if form not in _saw.Q_FLOOR_FORMS:
         raise ValueError(f"form must be one of {_saw.Q_FLOOR_FORMS}")
     acc = dict(n_steps=0, n_acted=0, d_i_max=0.0, last=None, regions=[])
+    sol_f = sol
     if form == "sharp":
         def hook(st, t, solver):
             st2, rec = _saw.floor_q(st, solver, q_floor)
@@ -500,22 +511,23 @@ def advance_q_floor(sol, state, t1, settings, dt, q_floor, sol_all=None, form="r
     else:
         mod = _saw.ResistiveFloor(sol, q_floor)
         sol_f = mod.with_solver()
-        acc["regions"].append(mod.region(state))
+        acc["regions"].append(mod.region_info(state))
 
         def hook(st, t, solver):
             # the region of each step's END state is the one the next step uses (the last one: the end of the interval)
             acc["n_steps"] += 1
-            acc["regions"].append(mod.region(st))
+            acc["regions"].append(mod.region_info(st))
             return st
 
         end = sol_f.advance(state, t1, dt=dt, scheme=settings.scheme, post_step=hook)
         used = acc["regions"][:-1]
-        acc["n_acted"] = sum(1 for k, _ in used if k > 0)
+        acc["n_acted"] = sum(1 for r in used if r["k"] > 0)
     q_end = _saw.face_q(end, sol.geometry_at(end.time).phi_b)
     model_end_crossings = _saw.floor_crossings(end.rho_faces, q_end, q_floor)     # the model end state's q
+    e_mod = sol.advance(state, t1, dt=dt, scheme=settings.scheme)                 # the same interval, no floor
+    effect = _interval_floor_effect(sol, sol_f, e_mod, end, q_end, q_floor)
     if sol_all is not None:
         e_all = sol_all.advance(state, t1, dt=dt, scheme=settings.scheme)
-        e_mod = sol.advance(state, t1, dt=dt, scheme=settings.scheme)
         end = CurrentState(end.rho_faces, end.psi + (e_all.psi - e_mod.psi),
                            end.psi_boundary + (e_all.psi_boundary - e_mod.psi_boundary), end.time, dict(end.meta))
     common = dict(core_relaxation="q_floor", q_floor_form=form, q_floor=float(q_floor), n_steps=acc["n_steps"],
@@ -524,14 +536,42 @@ def advance_q_floor(sol, state, t1, settings, dt, q_floor, sol_all=None, form="r
     if form == "sharp":
         core = dict(acc["last"] or {}, **common, d_enclosed_current_max_over_ip_interval=acc["d_i_max"])
     else:
-        radii = [r for _, r in acc["regions"][:-1] if r is not None]
-        k_end, r_end = acc["regions"][-1]
-        core = dict(common, acted=bool(acc["n_acted"]), rho_floor=r_end, n_cells_flattened=int(k_end),
-                    rho_floor_crossings=model_end_crossings,
-                    rho_floor_last_step=acc["regions"][-2][1] if len(acc["regions"]) > 1 else None,
+        radii = [r["rho_inv"] for r in acc["regions"][:-1] if r["rho_inv"] is not None]
+        r_end = acc["regions"][-1]
+        core = dict(common, acted=bool(acc["n_acted"]), rho_floor=r_end["rho_inv"],
+                    rho_floor_inner=r_end["rho_inner"], floor_branch=r_end["branch"], floor_rule=mod.rule,
+                    n_cells_flattened=int(r_end["k"]), rho_floor_crossings=model_end_crossings,
+                    rho_floor_last_step=acc["regions"][-2]["rho_inv"] if len(acc["regions"]) > 1 else None,
                     rho_floor_max_interval=max(radii) if radii else None,
                     q_min_model_end=float(np.nanmin(q_end)))
+    core.update(effect)
     return end, core
+
+
+def _interval_floor_effect(sol, sol_f, plain_end, end, q_end, q_floor):
+    """RECORD of the floor's effect over one interval: the model end state (``end``, with the floor; ``sol_f`` the
+    solver that made it) against the same interval advanced without the floor (``plain_end``, ``sol``).  Never raises
+    (a record must not end a series)."""
+    try:
+        p0, p1 = sol.profiles(plain_end), sol_f.profiles(end)
+        q0 = np.asarray(p0["q"], float)
+        reg = _saw.floor_region(end.rho_faces, q_end, q_floor)
+        r_out = reg["rho_outer"]
+        ip = float(p0["ip"])
+        moved = 0.0
+        if r_out is not None and ip:
+            rf = np.asarray(end.rho_faces, float)
+            moved = float((np.interp(r_out, rf, p0["I_enclosed"]) - np.interp(r_out, rf, p1["I_enclosed"])) / ip)
+        v0, v1 = float(p0["v_loop_boundary"]), float(p1["v_loop_boundary"])
+        return dict(q_axis_model_end=float(q_end[0]), q_axis_no_floor_end=float(q0[0]),
+                    q_min_no_floor_end=float(np.nanmin(q0)),
+                    v_loop_plain=v0, v_loop_floor=v1, d_v_loop_rel=(v1 / v0 - 1.0) if v0 else float("nan"),
+                    li3_plain=float(p0["li3"]), li3_floor=float(p1["li3"]), d_li3=float(p1["li3"] - p0["li3"]),
+                    current_moved_outside_over_ip=moved,
+                    floor_effect_reference="the same interval advanced from the same carried state without the floor "
+                                           "(model sources, before the corrections)")
+    except Exception as exc:  # noqa: BLE001 -- a record must never end a series
+        return dict(floor_effect_error=f"{type(exc).__name__}: {exc}"[:300])
 
 
 def _window_state(history, t_a, t_b, rf):
@@ -616,6 +656,11 @@ def _slice_record(fm, res, sl, label, extra=None):
         out["core_vs_floor"] = _cm.core_vs_floor_record(out.get("core"), out.get("correction_core_effect"))
     except Exception as exc:  # noqa: BLE001 -- a record must never end a series
         out["core_vs_floor"] = dict(computed=False, reason=f"{type(exc).__name__}: {exc}"[:300])
+    try:      # a record only: nothing reads it
+        out["floor_effect"] = _cm.floor_effect_record(out.get("core"), out.get("q_check"),
+                                                      None if lag is None else lag["phys"].get("q"))
+    except Exception as exc:  # noqa: BLE001 -- a record must never end a series
+        out["floor_effect"] = dict(computed=False, reason=f"{type(exc).__name__}: {exc}"[:300])
     return out
 
 

@@ -167,51 +167,89 @@ real stepping (``advance`` then ``reconnect``) must meet it.
 
 Time-averaged core (the default core treatment of the package)
 --------------------------------------------------------------
-The default holds the core at a minimum q (``q_floor``, default :data:`DEFAULT_Q_FLOOR` = 1) through the
-RESISTIVITY, as the current-diffusion actor of FUSE does with the stationary-sawtooth model it attributes to Jardin
-(FUSE ``ActorQED``, parameter ``qmin_desired``, default 1.0, ``src/actors/current/qed_actor.jl``; the resistivity
-change is ``QED.eta_JBni_sawteeth`` in ``ext/IMAS_Ext.jl`` of QED.jl; both public, ProjectTorreyPines on GitHub; the
-rule below is re-implemented here, no code is taken from there):
+The default holds the minimum of the core q at a floor (``q_floor``, default :data:`DEFAULT_Q_FLOOR` = 1) through the
+RESISTIVITY, with the stationary-sawtooth model that FUSE attributes to Jardin:
 
 .. code-block:: text
 
-    eta(rho) -> eta(rho_inv)   for rho < rho_inv,   unchanged outside                       (F1)
+    eta(rho) -> eta(rho_inv)   inside the flattening region,   unchanged outside                (F1)
 
-i.e. the resistivity inside the flattening radius ``rho_inv`` is set to its own value AT that radius.  Inside, the
+i.e. the resistivity inside the region is set to its own value at the region's outer edge ``rho_inv``.  Inside, the
 ohmic current then follows the (flat) resistivity instead of the peaked one, so the core current is flatter and q
-higher; the resistivity is continuous across ``rho_inv`` (its slope breaks), so ``<J.B>`` has no jump there, and Ip
-is untouched (the diffusion keeps its Ip condition).  The non-inductive sources are NOT changed: FUSE's function
-also returns a flattened non-inductive current, but its actor discards that return value and keeps the unflattened
-sources (``eta_jardin, _ = ...`` and ``JBni`` set from the unflattened sources), and this module follows the actor.
-``rho_inv`` is chosen as in FUSE:
+higher; the resistivity is continuous across the edges (its slope breaks), so ``<J.B>`` has no jump there, and Ip is
+untouched (the diffusion keeps its Ip condition).
 
+What FUSE does, and what this module takes from it.  FUSE's sawtooth treatment is TWO steps that its compound
+actors (``ActorStationaryPlasma``, ``ActorDynamicPlasma``) run together: (1) its current-diffusion actor
+(``ActorQED``, ``src/actors/current/qed_actor.jl``, parameter ``qmin_desired``, default 1.0) flattens the
+RESISTIVITY inside the inversion radius as in (F1) (``QED.eta_JBni_sawteeth`` in ``ext/IMAS_Ext.jl`` of QED.jl);
+(2) a separate sawtooth source actor (``ActorSawteethSource``, ``src/actors/hcd/sawteeth_source_actor.jl``) writes
+a ``sawteeth`` source that FLATTENS THE NON-INDUCTIVE CURRENT inside the same radius (its parameters: the
+flattening factor ``flat_factor``, default 0.5; a smoothing width ``min(rho/4, 0.05)``; ``period``, infinite by
+default), and ``ActorQED`` reads that source back as part of the non-inductive current.  (FUSE and QED.jl are public,
+ProjectTorreyPines on GitHub; the rule is re-implemented here, no code is taken from there.)  THIS MODULE IMPLEMENTS
+STEP (1), THE RESISTIVITY, ALONE; the non-inductive (mostly bootstrap) current is left as the sources give it.  What
+that implies for q: the bootstrap current inside the radius is usually hollow, so the total current dips toward the
+axis, q_min sits near the outer edge of the region (at the floor, where the floor is met) and the axis q0 lies ABOVE
+the floor; with FUSE's step (2) as well, q would be nearly flat at the floor inside the radius.  Read a q0 above the
+floor as a property of this one-step model, not as a measurement of the core.
+
+The flattening region is decided by the MODEL STATE's q, never by classifying data.  For the q of the plain state
+(:func:`floor_region`; the face q of :func:`face_q`, the axis value extrapolated):
+
+* (a) q below the floor ON AXIS: the region is ``[0, rho_inv]`` (FUSE's rule, with a continuous edge, below);
+* (b) q at or above the floor on axis and below it OFF AXIS only (reversed shear): the floor does NOT act; the state
+  is left as it is and the record says so (``floor_branch = "off_axis"``, ``acted = False``, ``q_floor_met =
+  False``, the crossings of the sub-floor region kept).  Reason: a resistivity floor can only take OHMIC current out
+  of the region it flattens.  Flattening from the axis out past an off-axis minimum (FUSE's rule in this case) sets
+  the whole core's resistivity to its value outside the minimum; the core's current is then mostly the ohmic one,
+  it falls by about that resistivity ratio (times the rise of the loop voltage) and q0 rises by about the same
+  factor, several times the floor where the minimum is carried by non-inductive current.  Flattening only the
+  annulus between the crossings leaves such a minimum where it is (the current inside it is non-inductive) and
+  lowers q0 through the higher loop voltage.  The stationary-sawtooth model is a model of a core with q below the
+  floor on axis, which an off-axis minimum is not;
+* (c) q at or above the floor everywhere: nothing changes.
+
+Limitation (not removed by this rule): in case (a), where the current that holds q below the floor off axis is
+largely non-inductive (a strong off-axis source), the region must still reach past that minimum and q0 rises far
+above the floor by the mechanism of (b); the record shows it (``q_axis_after``, ``eta_ratio_inv_to_axis``).  At the
+boundary between (a) and (b) -- q0 crossing the floor while an off-axis minimum lies below it -- the state is not
+continuous: on the (a) side the region reaches past the minimum, on the (b) side nothing acts; the jump is of the
+size of what the floor must lift there.
+
+``rho_inv`` (and ``rho_in``) are continuous, not grid faces (rule ``"continuous"``, the default):
+
+* steady state (:func:`resistive_floor_steady`, the single-slice state of :mod:`..current_model`): ``rho_inv`` is the
+  smallest outer edge whose steady state has q >= floor on every face, searched from the axis out to the plain
+  state's outermost upward crossing of the floor: the faces in between are scanned outward to bracket
+  the first such edge and the edge is then bisected to round-off (:data:`RADIUS_ROUND_OFF`) inside the bracket, so
+  where the floor is met q_min equals it to round-off.  If even the outermost crossing does not meet it, that
+  crossing is kept (as FUSE keeps its outermost node) and recorded (``q_floor_met = False``);
 * time-dependent (:class:`ResistiveFloor` as the ``resistivity_modifier`` of a diffusion step, :mod:`..series`):
-  from the state at the START of the step, ``rho_inv`` is the outermost face where q is below the floor (no change
-  when q >= floor everywhere).  FUSE takes it from the previous time step's q; so does this, per diffusion step.  q is
-  NOT held at the floor: the flattened resistivity relaxes the core toward it over the resistive time, so q may stay
-  below the floor for a while and dithers about it once there;
-* steady state (:func:`resistive_floor_steady`, the single-slice state of :mod:`..current_model`): the plain steady
-  state first; where its q is below the floor anywhere, ``rho_inv`` is scanned outward over the grid's faces, from
-  the first interior face to the outermost face where that plain state's q is below the floor, and the first face
-  whose steady state has q >= floor on every face is taken.  The result has q >= floor but not exactly at it (it is
-  above by up to one face's step), and ``rho_inv`` is a grid face: the state is piecewise constant in its inputs
-  where the chosen face changes (FUSE's scan has the same property on its own grid).  If no face up to that
-  outermost one reaches the floor, FUSE keeps the outermost; so does this, and the record says so
-  (``q_floor_met = False``).
+  from the state at the START of the step, in case (a) the region ``[0, rho_inv]`` with ``rho_inv`` the outermost
+  upward crossing of the floor by its q (linear in q between faces); in cases (b) and (c) no change.  FUSE takes
+  the radius from the previous time step's q; so does this, per diffusion step.  q is NOT held at the floor: the
+  flattened resistivity relaxes the core toward it over the resistive time;
+* the resistivity enters the diffusion per cell (the cell integral of the conductivity, midpoint rule); a cell cut
+  by an edge of the region takes the OVERLAP-WEIGHTED conductivity ``w sigma(rho_inv) + (1 - w) sigma_cell``
+  (``w`` the fraction of the cell inside the region; 1 or 0 exactly for a cell wholly inside or outside), so the
+  state is continuous in ``rho_inv`` and converges with the grid instead of stepping with it.
+
+``rule="grid"`` (an argument of :func:`resistive_floor_steady` and :class:`ResistiveFloor` only, for comparison) is
+FUSE's own grid rule as built earlier: the radius snapped to a grid face (the first face whose steady state meets the
+floor; in time the outermost face below it) and the region always starting at the axis.
 
 This is not the reconnection model of this module and needs no sawtooth parameter, crash time or amplitude.  It is a
-time-averaged model of a sawtoothing core, not a clamp: q need not equal the floor anywhere.  A state whose q is
-below the floor at the domain edge is refused (:class:`QFloorRefused`; FUSE has no such refusal).  Where this
-differs from FUSE's actor (none of it adds a number):
+time-averaged model of a sawtoothing core, not a clamp.  A state whose q is below the floor at the domain edge is
+refused (:class:`QFloorRefused`; FUSE has no such refusal).  Further differences from FUSE's actor (none adds a
+number): the grid is this diffusion grid (``n_cells`` uniform cells) and the resistivity is set per cell, where FUSE
+sets it on the nodes of its core-profile grid and interpolates log(eta) between them; in time the region is decided
+on every diffusion step, where FUSE decides it once per actor step (a step of ``Nt`` sub-steps) when it solves for
+Ip, and on every sub-step in its loop-voltage-controller mode.
 
-* the grid: the flattening radius runs over this diffusion grid's faces (where q lives; ``n_cells`` uniform cells),
-  FUSE's over its core-profile grid; the resistivity is set per cell (cells whose center lies inside the radius take
-  the value at the radius, from the conductivity profile itself), where FUSE sets it on grid nodes and interpolates
-  log(eta) between them (cubic finite elements);
-* the q tested in the steady-state scan is this module's face q including the axis value extrapolated as in
-  :meth:`.diffusion.CurrentDiffusion.profiles`; FUSE evaluates its own iota on its grid, axis included;
-* time-dependent: the flattening radius is decided on every diffusion step; FUSE decides it once per actor step
-  (a step of ``Nt`` sub-steps) when it solves for Ip, and on every sub-step in its loop-voltage-controller mode.
+Record only (nothing reads it): the floor's branch, both edges, q0 and q_min before and after, and its effect against
+the same model without the floor -- the loop voltage, l_i (``li3``) and the fraction of Ip moved from inside
+``rho_inv`` to outside it.
 
 :func:`floor_q` (opt-in, ``q_floor_form="sharp"``) is the earlier construction: q clamped to ``max(q, q_floor)`` on
 the faces, which makes ``<J.B>`` jump at the floor radius (q is continuous there, its slope breaks); it is kept for
@@ -273,6 +311,10 @@ __all__ = [
     "Q_FLOOR_FORMS",
     "floor_q",
     "floor_crossings",
+    "floor_region",
+    "FLOOR_BRANCHES",
+    "RESISTIVE_FLOOR_RULES",
+    "RADIUS_ROUND_OFF",
     "face_q",
     "ResistiveFloor",
     "resistive_floor_steady",
@@ -310,8 +352,22 @@ _HALF_PI = 0.5 * np.pi
 
 
 #: Default floor of the time-averaged q-floor core treatment (one documented setting).  The value is FUSE's
-#: ``ActorQED`` default ``qmin_desired = 1.0`` (``src/actors/current/qed_actor.jl``; module docstring).
+#: ``ActorQED`` default ``qmin_desired = 1.0`` (``src/actors/current/qed_actor.jl``), which FUSE's compound actors
+#: also pass to its separate sawtooth source actor (``ActorSawteethSource``: non-inductive current flattened inside the
+#: same radius; ``flat_factor`` 0.5, width ``min(rho/4, 0.05)``, ``period`` infinite by default).  This package applies
+#: the floor through the resistivity alone (module docstring), so q_min sits at the floor and q0 above it.
 DEFAULT_Q_FLOOR = 1.0
+#: Branches of the resistive floor, decided by the model state's q (:func:`floor_region`): ``"axis"`` (q below the
+#: floor on axis: the region from the axis), ``"off_axis"`` (q below it off axis only: no change, recorded),
+#: ``"none"``.
+FLOOR_BRANCHES = ("axis", "off_axis", "none")
+#: Rules for the flattening radius of the resistive floor: ``"continuous"`` (default; the radius to round-off, the cut
+#: cells overlap-weighted, the region by :func:`floor_region`) and ``"grid"`` (FUSE's grid rule: the radius snapped
+#: to a face, the region from the axis; comparison only).
+RESISTIVE_FLOOR_RULES = ("continuous", "grid")
+#: Bisection stop of the steady-state flattening radius, in rho (0..1): round-off, not a tolerance.
+RADIUS_ROUND_OFF = 1e-14
+_RADIUS_BISECTIONS = 80     # loop bound only: the bracket is at most one cell wide, 2^-80 of it is far below round-off
 #: Forms of the q floor: ``"resistive"`` (default; the resistivity inside the flattening radius set to its value
 #: there, :class:`ResistiveFloor`, :func:`resistive_floor_steady`) and ``"sharp"`` (opt-in; q clamped,
 #: :func:`floor_q`).
@@ -365,56 +421,145 @@ def face_q(state, phi_b):
     return q
 
 
+def floor_region(rho_faces, q, q_floor):
+    """The region the resistive floor flattens, from a state's face q (module docstring, branches (a)-(c)).
+
+    Returns ``dict(branch, rho_inner, rho_outer, crossings)``: ``branch`` one of :data:`FLOOR_BRANCHES` -- ``"axis"``
+    where q is below the floor on the axis face (the extrapolated axis value): the floor acts on ``[0, rho_outer]``;
+    ``"off_axis"`` where q is at or above it on axis and below it on some other face: the floor does not act, and
+    ``[rho_inner, rho_outer]`` (``rho_inner`` the innermost downward crossing) is the extent of the sub-floor region,
+    for the record; ``"none"`` where q >= floor on every face (both edges None).  ``rho_outer`` is the outermost upward
+    crossing.  Crossings are linear in q between faces
+    (:func:`floor_crossings`, also returned).  A q below the floor at the last face is refused
+    (:class:`QFloorRefused`).  A face q that is not finite counts as below the floor."""
+    qf = _check_q_floor(q_floor)
+    rf = np.asarray(rho_faces, float)
+    q = np.asarray(q, float)
+    if not q[-1] >= qf:
+        raise QFloorRefused(f"q = {q[-1]:.4g} at the domain edge is below the floor q_floor = {qf:g}: the core "
+                            "cannot be held at the floor")
+    cr = floor_crossings(rf, q, qf)
+    below = ~(q >= qf)
+    if not np.any(below):
+        return dict(branch="none", rho_inner=None, rho_outer=None, crossings=cr)
+    ups = [c["rho"] for c in cr if c["direction"] == "up"]
+    if below[0]:
+        return dict(branch="axis", rho_inner=0.0, rho_outer=float(ups[-1]), crossings=cr)
+    downs = [c["rho"] for c in cr if c["direction"] == "down"]
+    return dict(branch="off_axis", rho_inner=float(downs[0]), rho_outer=float(ups[-1]), crossings=cr)
+
+
+def _faces_from_cells(rho_cells):
+    """Faces of a grid from its cell centers (the centers are face midpoints; the first face is the axis)."""
+    rc = np.asarray(rho_cells, float)
+    f = np.empty(rc.size + 1)
+    f[0] = 0.0
+    for i in range(rc.size):
+        f[i + 1] = 2.0 * rc[i] - f[i]
+    return f
+
+
+def _overlap_weights(faces, r_in, r_out):
+    """Fraction of each cell ``[f_i, f_i+1]`` inside ``[r_in, r_out]``: exactly 1 for a cell wholly inside, exactly 0
+    for a cell wholly outside, the overlap over the cell width for a cut cell."""
+    f = np.asarray(faces, float)
+    lo, hi = f[:-1], f[1:]
+    w = np.clip(np.minimum(hi, r_out) - np.maximum(lo, r_in), 0.0, None) / (hi - lo)
+    w[(lo >= r_in) & (hi <= r_out)] = 1.0
+    w[(hi <= r_in) | (lo >= r_out)] = 0.0
+    return w
+
+
 class ResistiveFloor:
-    r"""Resistivity modifier of the resistive q floor (module docstring, eq. F1): the resistivity on every cell
-    inside the flattening radius ``rho_inv`` is set to the solver's resistivity AT ``rho_inv``.
+    r"""Resistivity modifier of the resistive q floor (module docstring, eq. F1): inside the flattening region the
+    conductivity is the solver's conductivity AT the region's outer edge ``rho_inv``; a cell cut by an edge of the
+    region takes the overlap-weighted conductivity (``rule="continuous"``).
 
     For :class:`~.diffusion.CurrentDiffusion` (``resistivity_modifier``; :meth:`with_solver` attaches it to a copy
-    of a solver).  ``rho_inv`` is either fixed (``rho_inv=...``; the steady state, :func:`resistive_floor_steady`)
-    or, with ``rho_inv=None``, taken from the state the diffusion passes in -- the state at the start of the step --
-    as the outermost face where its q (:func:`face_q`) is below ``q_floor`` (the time-dependent rule; no change
-    where q >= floor on every face).  A state with q below the floor at the domain edge is refused
-    (:class:`QFloorRefused`).  The outer layer is never touched (the diffusion's ``resistivity_modifier`` acts on
-    the domain cells only).
+    of a solver).  The region is either fixed (``rho_inv=...`` with ``rho_inner``, default 0: the steady state,
+    :func:`resistive_floor_steady`) or, with ``rho_inv=None``, taken from the state the diffusion passes in -- the
+    state at the start of the step -- by :func:`floor_region` (``rule="continuous"``: in its ``"axis"`` branch the
+    region from the axis to the outermost upward crossing; no change in its ``"off_axis"`` branch) or by FUSE's grid
+    rule (``rule="grid"``: the region from
+    the axis to the outermost FACE where q is below the floor; comparison only).  No change where q >= floor on every
+    face.  A state with q below the floor at the domain edge is refused (:class:`QFloorRefused`).  The outer layer is
+    never touched (the diffusion's ``resistivity_modifier`` acts on the domain cells only).  ``rho_faces``: the grid's
+    faces where no state is passed (the steady state); otherwise the state's own, and without either they are rebuilt
+    from the cell centers.
 
-    ``last`` holds the region of the latest state examined (:meth:`region`).
+    ``last`` holds the region of the latest state examined (:meth:`region_info`).
     """
 
-    def __init__(self, solver, q_floor=DEFAULT_Q_FLOOR, rho_inv=None):
+    def __init__(self, solver, q_floor=DEFAULT_Q_FLOOR, rho_inv=None, rho_inner=0.0, rho_faces=None,
+                 rule="continuous"):
+        if rule not in RESISTIVE_FLOOR_RULES:
+            raise ValueError(f"rule must be one of {RESISTIVE_FLOOR_RULES}")
         self.solver = solver
         self.q_floor = _check_q_floor(q_floor)
         self.rho_inv = None if rho_inv is None else float(rho_inv)
+        self.rho_inner = float(rho_inner)
+        self.rho_faces = None if rho_faces is None else np.asarray(rho_faces, float)
+        self.rule = rule
         self._seen = None
         self.last = None
 
-    def region(self, state):
-        """``(k, rho_inv)`` of ``state`` under the time-dependent rule: ``k`` the index of the outermost face where q
-        is below the floor (0 when none, or when only the extrapolated axis value is), ``rho_inv`` that face's rho
-        (None when ``k`` is 0)."""
+    def region_info(self, state):
+        """The region of ``state`` under the time-dependent rule: ``dict(k, rho_inv, rho_inner, branch, q)`` with
+        ``k`` the number of cells whose resistivity is changed (cut cells included; 0 when none, and under the grid
+        rule also when only the extrapolated axis value is below the floor), ``rho_inv`` the outer edge (None when
+        ``k`` is 0), ``rho_inner`` the inner edge (0) and ``branch`` one of :data:`FLOOR_BRANCHES` (the continuous
+        rule's ``"off_axis"`` changes nothing)."""
         if self._seen is not None and self._seen[0] is state:
             return self._seen[1]
         q = face_q(state, self.solver.geometry_at(state.time).phi_b)
-        if not q[-1] >= self.q_floor:
-            raise QFloorRefused(f"q = {q[-1]:.4g} at the domain edge is below the floor q_floor = {self.q_floor:g}: "
-                                "the core cannot be held at the floor")
-        below = np.flatnonzero(~(q >= self.q_floor))
-        k = int(below[-1]) if below.size else 0
-        out = (k, float(state.rho_faces[k]) if k > 0 else None)
+        rf = np.asarray(state.rho_faces, float)
+        if self.rule == "grid":
+            if not q[-1] >= self.q_floor:
+                raise QFloorRefused(f"q = {q[-1]:.4g} at the domain edge is below the floor q_floor = "
+                                    f"{self.q_floor:g}: the core cannot be held at the floor")
+            below = np.flatnonzero(~(q >= self.q_floor))
+            k = int(below[-1]) if below.size else 0
+            out = dict(k=k, rho_inv=float(rf[k]) if k > 0 else None, rho_inner=0.0,
+                       branch="axis" if k > 0 else "none", q=q)
+        else:
+            reg = floor_region(rf, q, self.q_floor)
+            if reg["branch"] != "axis":           # nothing below the floor, or below it off axis only: no change
+                out = dict(k=0, rho_inv=None, rho_inner=None, branch=reg["branch"], q=q)
+            else:
+                w = _overlap_weights(rf, reg["rho_inner"], reg["rho_outer"])
+                out = dict(k=int(np.count_nonzero(w > 0.0)), rho_inv=reg["rho_outer"], rho_inner=reg["rho_inner"],
+                           branch=reg["branch"], q=q)
         self._seen = (state, out)
-        self.last = dict(k=out[0], rho_inv=out[1], q=q)
+        self.last = out
         return out
 
+    def region(self, state):
+        """``(k, rho_inv)`` of :meth:`region_info`."""
+        info = self.region_info(state)
+        return info["k"], info["rho_inv"]
+
     def __call__(self, t, rho_cells, eta, state):
-        r_inv = self.rho_inv
-        if r_inv is None:
+        if self.rho_inv is not None:
+            r_in, r_out = self.rho_inner, self.rho_inv
+        else:
             if state is None:
                 raise ValueError("the time-dependent q floor needs the state at the start of the step")
-            r_inv = self.region(state)[1]
-        if r_inv is None:
+            info = self.region_info(state)
+            if info["rho_inv"] is None:
+                return eta
+            r_in, r_out = info["rho_inner"], info["rho_inv"]
+        rc = np.asarray(rho_cells, float)
+        faces = (np.asarray(state.rho_faces, float) if state is not None else
+                 (self.rho_faces if self.rho_faces is not None else _faces_from_cells(rc)))
+        w = _overlap_weights(faces, r_in, r_out)
+        if not np.any(w > 0.0):
             return eta
         eta = np.array(eta, dtype=float)
-        eta[np.asarray(rho_cells, float) < r_inv] = 1.0 / float(np.asarray(self.solver.sigma_fn(t, np.array([r_inv])),
-                                                                          float).ravel()[0])
+        s_r = float(np.asarray(self.solver.sigma_fn(t, np.array([r_out])), float).ravel()[0])
+        full = w == 1.0
+        cut = (w > 0.0) & ~full
+        eta[full] = 1.0 / s_r
+        eta[cut] = 1.0 / (w[cut] * s_r + (1.0 - w[cut]) / eta[cut])
         return eta
 
     def with_solver(self):
@@ -427,65 +572,144 @@ class ResistiveFloor:
         return s
 
 
-def resistive_floor_steady(solver, rho_faces, q_floor=DEFAULT_Q_FLOOR, t=0.0, psi_boundary=0.0):
+def _min_face_q(q):
+    q = np.asarray(q, float)
+    return float(np.min(np.where(np.isfinite(q), q, -np.inf)))
+
+
+def _floor_effect(solver, st0, sol_f, st_f, r_out):
+    """Record of what the floor did against the same sources without it (``st0``, plain resistivity): the loop
+    voltage and l_i (``li3``) of both, and the fraction of Ip moved from inside ``r_out`` to outside it (the enclosed
+    current at ``r_out``, linear between faces, plain minus floored, over Ip)."""
+    p0, p1 = solver.profiles(st0), sol_f.profiles(st_f)
+    rf = np.asarray(st0.rho_faces, float)
+    ip = float(p0["ip"])
+    i0 = float(np.interp(r_out, rf, p0["I_enclosed"]))
+    i1 = float(np.interp(r_out, rf, p1["I_enclosed"]))
+    v0, v1 = float(st0.meta.get("v_loop", p0["v_loop_boundary"])), float(st_f.meta.get("v_loop", p1["v_loop_boundary"]))
+    return dict(v_loop_plain=v0, v_loop_floor=v1, d_v_loop_rel=(v1 / v0 - 1.0) if v0 else float("nan"),
+                li3_plain=float(p0["li3"]), li3_floor=float(p1["li3"]), d_li3=float(p1["li3"] - p0["li3"]),
+                current_moved_outside_over_ip=(i0 - i1) / ip if ip else float("nan"),
+                d_enclosed_current_max_over_ip=(float(np.max(np.abs(np.asarray(p1["I_enclosed"]) -
+                                                                    np.asarray(p0["I_enclosed"])))) / ip
+                                                if ip else float("nan")))
+
+
+def resistive_floor_steady(solver, rho_faces, q_floor=DEFAULT_Q_FLOOR, t=0.0, psi_boundary=0.0, rule="continuous"):
     r"""Steady state of ``solver`` with the resistive q floor (module docstring, eq. F1 and the steady-state rule).
 
-    The plain steady state first.  Where its q (:func:`face_q`, every face including the extrapolated axis value) is
-    below ``q_floor`` anywhere, the flattening radius is scanned outward over the faces ``k = 1 ... k_max``
-    (``k_max`` the outermost face where the plain state's q is below the floor), the steady state with the
-    resistivity flattened inside ``rho_faces[k]`` (:class:`ResistiveFloor`) is formed for each, and the first whose
-    q is >= ``q_floor`` on every face is taken; if none is, the one at ``k_max`` (as FUSE's actor does), recorded as
-    ``q_floor_met = False``.  Ip is the solver's Ip condition throughout.  Refused (:class:`QFloorRefused`): q below
-    the floor at the domain edge.
+    The plain steady state first.  The branch is the one of :func:`floor_region` (``rule="continuous"``, default):
+    where the plain q is below ``q_floor`` on axis (:func:`face_q`, the extrapolated axis value), the region starts at
+    the axis and its outer edge ``rho_inv`` is the smallest one whose steady state (:class:`ResistiveFloor` with that
+    fixed region) has q >= ``q_floor`` on every face, searched from the axis out to the plain state's outermost
+    upward crossing; where it is below the floor off axis only, or nowhere, the plain state is returned (recorded as
+    ``floor_branch`` ``"off_axis"`` with ``q_floor_met = False``, or ``"none"``).  The search: the faces between the
+    axis and that crossing are scanned outward, the first one that meets the floor brackets the edge with the point
+    before it, and the edge is bisected inside the bracket to :data:`RADIUS_ROUND_OFF`; the upper end of the final
+    bracket (which meets the floor) is taken.  If not even the outermost crossing meets the floor, that crossing is
+    taken (as FUSE's actor keeps its outermost node), recorded as ``q_floor_met = False``.  ``rule="grid"``
+    (comparison only): FUSE's grid rule as built earlier -- the region from the axis, its edge scanned over the faces
+    ``k = 1 ... k_max`` (``k_max`` the outermost face where the plain state's q is below the floor), the first face
+    whose steady state meets the floor, else ``k_max``.  Ip is the solver's Ip condition throughout.  Refused
+    (:class:`QFloorRefused`): q below the floor at the domain edge.
 
     Returns ``(state, record, solver_used)``: the state (the plain steady state itself where nothing is flattened),
     ``solver_used`` the solver whose conductivity made it (``solver`` itself, or a copy carrying the modifier).
-    ``record``: ``core_relaxation``, ``q_floor_form``, ``q_floor``, ``acted`` (the resistivity was changed),
-    ``q_min_before`` and its ``rho``, ``q_edge``, every crossing of the floor by the plain state's q
-    (``rho_floor_crossings``: inner and outer edges of each region below the floor), ``rho_floor`` (the flattening
-    radius ``rho_inv``; the domain's rho, 0..1) and its face index ``n_cells_flattened`` (the number of cells whose
-    resistivity was set; 0 when nothing acted), the resistivity ratio ``eta(rho_inv)/eta(axis cell)`` of the plain
-    profile, ``q_min_after`` and its rho, ``q_floor_met``, the number of steady states formed, the largest change of
-    the enclosed current against the plain state as a fraction of Ip, and the flux moved on the axis cell.
+    ``record``: ``core_relaxation``, ``q_floor_form``, ``q_floor``, ``floor_rule``, ``floor_branch``
+    (:data:`FLOOR_BRANCHES`), ``acted`` (the resistivity was changed), ``q_min_before`` and its ``rho``,
+    ``q_axis_before``, ``q_edge``, every crossing of the floor by the plain state's q (``rho_floor_crossings``: inner
+    and outer edges of each region below the floor), ``rho_floor`` (the outer edge ``rho_inv``; the domain's rho,
+    0..1), ``rho_floor_inner`` (the inner edge), ``n_cells_flattened`` (the number of cells whose resistivity was
+    changed, cut cells included; 0 when nothing acted) and ``n_cells_cut``, the resistivity ratio
+    ``eta(rho_inv)/eta(axis cell)`` of the plain profile, ``q_min_after`` and its rho, ``q_axis_after``,
+    ``q_floor_met``, the number of steady states formed, the flux moved on the axis cell, and -- a RECORD of the
+    floor's effect against the plain steady state of the same sources -- the loop voltage and ``li3`` of both and their
+    changes (``d_v_loop_rel``, ``d_li3``), the fraction of Ip moved from inside ``rho_inv`` to outside it
+    (``current_moved_outside_over_ip``) and the largest change of the enclosed current (fraction of Ip).
     """
+    if rule not in RESISTIVE_FLOOR_RULES:
+        raise ValueError(f"rule must be one of {RESISTIVE_FLOOR_RULES}")
     qf = _check_q_floor(q_floor)
     rf = np.asarray(rho_faces, dtype=float)
     st0 = solver.steady_state(rf, t=t, psi_boundary=psi_boundary)
     phi_b = solver.geometry_at(t).phi_b
     q0 = face_q(st0, phi_b)
     jmin = int(np.argmin(np.where(np.isfinite(q0), q0, np.inf)))
-    rec = dict(core_relaxation="q_floor", q_floor_form="resistive", q_floor=qf, q_min_before=float(q0[jmin]),
-               rho_q_min_before=float(rf[jmin]), q_edge=float(q0[-1]),
-               rho_floor_crossings=floor_crossings(rf, q0, qf), acted=False, n_cells_flattened=0, rho_floor=None,
-               eta_ratio_inv_to_axis=None, q_min_after=float(q0[jmin]), rho_q_min_after=float(rf[jmin]),
+    rec = dict(core_relaxation="q_floor", q_floor_form="resistive", q_floor=qf, floor_rule=rule, floor_branch="none",
+               q_min_before=float(q0[jmin]), rho_q_min_before=float(rf[jmin]), q_axis_before=float(q0[0]),
+               q_edge=float(q0[-1]), rho_floor_crossings=floor_crossings(rf, q0, qf), acted=False,
+               n_cells_flattened=0, n_cells_cut=0, rho_floor=None, rho_floor_inner=None, eta_ratio_inv_to_axis=None,
+               q_min_after=float(q0[jmin]), rho_q_min_after=float(rf[jmin]), q_axis_after=float(q0[0]),
                q_floor_met=bool(np.all(q0 >= qf)), n_steady_states=1, d_enclosed_current_max_over_ip=0.0,
-               d_psi_axis_cell=0.0)
+               d_psi_axis_cell=0.0, d_v_loop_rel=0.0, d_li3=0.0, current_moved_outside_over_ip=0.0)
     if not q0[-1] >= qf:
         raise QFloorRefused(f"q = {q0[-1]:.4g} at the domain edge is below the floor q_floor = {qf:g}: the core "
                             "cannot be held at the floor")
-    below = np.flatnonzero(~(q0 >= qf))
-    k_max = int(below[-1]) if below.size else 0
-    if k_max < 1:
-        return st0, rec, solver
-    st = sol = q = None
-    for k in range(1, k_max + 1):
-        sol = ResistiveFloor(solver, qf, rho_inv=rf[k]).with_solver()
-        st = sol.steady_state(rf, t=t, psi_boundary=psi_boundary)
-        rec["n_steady_states"] += 1
-        q = face_q(st, phi_b)
-        if np.all(q >= qf):
-            break
+    if rule == "grid":
+        below = np.flatnonzero(~(q0 >= qf))
+        k_max = int(below[-1]) if below.size else 0
+        if k_max < 1:
+            return st0, rec, solver
+        st = sol = q = None
+        for k in range(1, k_max + 1):
+            sol = ResistiveFloor(solver, qf, rho_inv=rf[k], rho_faces=rf).with_solver()
+            st = sol.steady_state(rf, t=t, psi_boundary=psi_boundary)
+            rec["n_steady_states"] += 1
+            q = face_q(st, phi_b)
+            if np.all(q >= qf):
+                break
+        r_in, r_use, branch = 0.0, float(rf[k]), "axis"
+    else:
+        reg = floor_region(rf, q0, qf)
+        if reg["branch"] == "none":
+            return st0, rec, solver
+        if reg["branch"] == "off_axis":
+            # below the floor off axis only: the floor does not act (module docstring, case (b)); recorded
+            rec.update(floor_branch="off_axis", q_floor_met=False)
+            return st0, rec, solver
+        r_in, r_max, branch = 0.0, reg["rho_outer"], "axis"
+
+        def ev(r):
+            s_ = ResistiveFloor(solver, qf, rho_inv=r, rho_inner=r_in, rho_faces=rf).with_solver()
+            st_ = s_.steady_state(rf, t=t, psi_boundary=psi_boundary)
+            rec["n_steady_states"] += 1
+            q_ = face_q(st_, phi_b)
+            return _min_face_q(q_) - qf, (st_, s_, q_)
+
+        lo, hi, best = r_in, None, None
+        for r in [float(x) for x in rf if r_in < x < r_max] + [r_max]:
+            fr, cand = ev(r)
+            best = cand
+            if fr >= 0.0:
+                hi = r
+                break
+            lo = r
+        if hi is None:
+            r_use = r_max                    # not even the outermost crossing meets the floor: keep it (as FUSE)
+        else:
+            for _ in range(_RADIUS_BISECTIONS):
+                mid = 0.5 * (lo + hi)
+                if hi - lo <= RADIUS_ROUND_OFF or not lo < mid < hi:
+                    break
+                fm, cand = ev(mid)
+                if fm >= 0.0:
+                    hi, best = mid, cand
+                else:
+                    lo = mid
+            r_use = hi
+        st, sol, q = best
     rc = 0.5 * (rf[1:] + rf[:-1])
-    sig = np.asarray(solver.sigma_fn(t, np.array([rc[0], rf[k]])), float)
-    i0 = solver.profiles(st0)["I_enclosed"]
-    i1 = sol.profiles(st)["I_enclosed"]
-    ip = float(st0.meta.get("ip", np.nan))
+    w = _overlap_weights(rf, r_in, r_use)
+    sig = np.asarray(solver.sigma_fn(t, np.array([rc[0], r_use])), float)
     j1 = int(np.argmin(np.where(np.isfinite(q), q, np.inf)))
-    rec.update(acted=True, n_cells_flattened=int(k), rho_floor=float(rf[k]), eta_ratio_inv_to_axis=float(sig[0] / sig[1]),
-               q_min_after=float(q[j1]), rho_q_min_after=float(rf[j1]), q_floor_met=bool(np.all(q >= qf)),
-               d_enclosed_current_max_over_ip=float(np.max(np.abs(i1 - i0)) / ip) if ip else float("nan"),
+    rec.update(acted=True, floor_branch=branch, n_cells_flattened=int(np.count_nonzero(w > 0.0)),
+               n_cells_cut=int(np.count_nonzero((w > 0.0) & (w < 1.0))), rho_floor=float(r_use),
+               rho_floor_inner=float(r_in), eta_ratio_inv_to_axis=float(sig[0] / sig[1]), q_min_after=float(q[j1]),
+               rho_q_min_after=float(rf[j1]), q_axis_after=float(q[0]), q_floor_met=bool(np.all(q >= qf)),
                d_psi_axis_cell=float(st.psi[0] - st0.psi[0]))
-    st.meta = dict(st.meta or {}, q_floor=dict(q_floor=qf, form="resistive", acted=True, rho_floor=float(rf[k]),
+    rec.update(_floor_effect(solver, st0, sol, st, r_use))
+    st.meta = dict(st.meta or {}, q_floor=dict(q_floor=qf, form="resistive", rule=rule, branch=branch, acted=True,
+                                               rho_floor=float(r_use), rho_floor_inner=float(r_in),
                                                q_floor_met=rec["q_floor_met"]))
     return st, rec, sol
 

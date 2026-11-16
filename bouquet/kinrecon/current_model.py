@@ -349,7 +349,13 @@ class CurrentModelSettings:
     anderson_depth: int = 3
     core_relaxation: str = "q_floor"         # CORE_RELAXATIONS: the core treatment (module docstring)
     q_floor: float = _saw.DEFAULT_Q_FLOOR    # floor of the "q_floor" treatment (FUSE ActorQED qmin_desired default)
-    q_floor_form: str = "resistive"          # Q_FLOOR_FORMS: "resistive" (default) or "sharp" (opt-in, comparison)
+    q_floor_form: str = "resistive"          # Q_FLOOR_FORMS: "resistive" (default), "sharp" or "reset" (opt-ins)
+    # EXPERIMENTAL "reset" form only (the solver's own q reset, current.sawtooth.q_reset); the solver's defaults
+    q_reset_rule: int = _saw.Q_RESET_RULE
+    q_reset_dq: float = _saw.Q_RESET_DQ
+    q_reset_ramp: float = _saw.Q_RESET_RAMP
+    q_reset_smooth: int = _saw.Q_RESET_SMOOTH
+    q_reset_series: str = "projection"       # Q_RESET_SERIES_FORMS: how the reset enters a time-dependent advance
     sawtooth_nsteps: int = 40
     sawtooth_sheet_width: float = _saw.DEFAULT_SHEET_WIDTH
     crash_times: Optional[Sequence[float]] = None   # measured crash times [s] ("crash_times" treatment)
@@ -369,6 +375,10 @@ class CurrentModelSettings:
             raise ValueError("q_floor must be finite and > 0")
         if self.q_floor_form not in _saw.Q_FLOOR_FORMS:
             raise ValueError(f"q_floor_form must be one of {_saw.Q_FLOOR_FORMS}")
+        if int(self.q_reset_rule) not in (1, 2):
+            raise ValueError("q_reset_rule must be 1 or 2")
+        if self.q_reset_series not in _saw.Q_RESET_SERIES_FORMS:
+            raise ValueError(f"q_reset_series must be one of {_saw.Q_RESET_SERIES_FORMS}")
         if self.crash_times is not None and self.core_relaxation != "crash_times":
             raise ValueError(f"crash_times are given but core_relaxation is {self.core_relaxation!r}: measured crash "
                              "times are an opt-in treatment (core_relaxation='crash_times')")
@@ -741,6 +751,14 @@ def assemble(lag, kin, src, params, cfg, ip, z0=None, state=None):
             st_m = sol_m.steady_state(rf)
             if cfg.q_floor_form == "sharp":
                 st_f, floor_rec = _saw.floor_q(st_m, sol_m, cfg.q_floor)
+            elif cfg.q_floor_form == "reset":
+                # EXPERIMENTAL: the solver's q reset of the model steady state, re-evaluated on every assembly (the
+                # reset current is relative to this pass's model state, never accumulated); in steady state it is
+                # identical to the steady response of a zero-net non-inductive source carrying it (the loop voltage
+                # is unchanged), but no term of the diffusion equation drives it
+                st_f, floor_rec = reset_state(st_m, sol_m, cfg)
+                st_f.meta = dict(st_f.meta or {}, q_reset_base=dict(psi=np.array(st_m.psi, float),
+                                                                     psi_boundary=float(st_m.psi_boundary)))
             else:
                 st_f, floor_rec, _ = _saw.resistive_floor_steady(sol_m, rf, cfg.q_floor)
             state = st_f
@@ -748,8 +766,8 @@ def assemble(lag, kin, src, params, cfg, ip, z0=None, state=None):
                 st_c = sol.steady_state(rf)
                 state = CurrentState(rf, st_c.psi + (st_f.psi - st_m.psi),
                                      st_c.psi_boundary + (st_f.psi_boundary - st_m.psi_boundary), st_c.time,
-                                     dict(st_c.meta, **({"q_floor": st_f.meta["q_floor"]} if "q_floor" in st_f.meta
-                                                        else {})))
+                                     dict(st_c.meta, **{k: st_f.meta[k] for k in ("q_floor", "q_reset_base")
+                                                         if k in (st_f.meta or {})}))
             saw.update(mode=f"q floor, {cfg.q_floor_form} (time-averaged state; the corrections added after the floor)")
         else:
             state = sol.steady_state(rf)
@@ -833,6 +851,16 @@ def assemble(lag, kin, src, params, cfg, ip, z0=None, state=None):
     return out
 
 
+def reset_state(state, solver, cfg):
+    """:func:`.current.sawtooth.q_reset` with the numbers of ``cfg`` (``q_floor`` the level, ``q_reset_*``); the
+    record drops the bulky ``dI_faces`` array."""
+    st, rec = _saw.q_reset(state, solver, cfg.q_floor, rule=cfg.q_reset_rule, dq=cfg.q_reset_dq,
+                           ramp=cfg.q_reset_ramp, smooth=cfg.q_reset_smooth)
+    rec = dict(rec)
+    rec.pop("dI_faces", None)
+    return st, rec
+
+
 def core_record(floor_rec, cfg, q_model, rho_tor, rho_edge):
     """The core-treatment record of an assembly (``assembly["core"]``; a record only): the treatment, ``q_floor``,
     its form, whether the floor acted, the floor (flattening) radius in rho_tor,norm (``rho_floor``;
@@ -849,7 +877,7 @@ def core_record(floor_rec, cfg, q_model, rho_tor, rho_edge):
     if "rho_floor" in rec and "rho_floor_domain" not in rec:
         # the floor works on the diffusion domain's rho (0..1 at the domain edge): rho_tor,norm = rho * rho_edge
         rec["rho_floor_domain"] = rec["rho_floor"]
-        for k in ("rho_floor", "rho_q_min_before", "rho_q_min_after"):
+        for k in ("rho_floor", "rho_q_min_before", "rho_q_min_after", "rho_s", "rho_m", "rho_out"):
             if rec.get(k) is not None:
                 rec[k] = float(rec[k]) * float(rho_edge)
         if rec.get("rho_floor_crossings"):

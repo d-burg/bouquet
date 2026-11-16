@@ -457,7 +457,7 @@ def advance_interval(sol, state, t1, settings, crash_times, dt):
     return end, sch.events, traj.states
 
 
-def advance_q_floor(sol, state, t1, settings, dt, q_floor, sol_all=None, form="resistive"):
+def advance_q_floor(sol, state, t1, settings, dt, q_floor, sol_all=None, form="resistive", reset_cfg=None):
     """Advance ``state`` to ``t1`` with the q floor (the default core treatment, module docstring); ``sol`` carries the
     MODEL sources only.
 
@@ -486,7 +486,56 @@ def advance_q_floor(sol, state, t1, settings, dt, q_floor, sol_all=None, form="r
     if form not in _saw.Q_FLOOR_FORMS:
         raise ValueError(f"form must be one of {_saw.Q_FLOOR_FORMS}")
     acc = dict(n_steps=0, n_acted=0, d_i_max=0.0, last=None, regions=[])
-    if form == "sharp":
+    reset_base = None
+    if form == "reset":
+        # EXPERIMENTAL: the solver's q reset (current.sawtooth.q_reset) with the numbers of reset_cfg
+        rc_ = reset_cfg if reset_cfg is not None else _cm.CurrentModelSettings()
+        rkw = dict(rule=rc_.q_reset_rule, dq=rc_.q_reset_dq, ramp=rc_.q_reset_ramp, smooth=rc_.q_reset_smooth)
+        if rc_.q_reset_series == "projection":
+            # PROJECTION: the reset applied to the state after every step; no term of the diffusion equation knows
+            # about it (it moves flux at the end of each step, which the next step's diffusion partly undoes)
+            def hook(st, t, solver):
+                st2, rec = _saw.q_reset(st, solver, q_floor, **rkw)
+                acc["n_steps"] += 1
+                if rec["acted"]:
+                    acc["n_acted"] += 1
+                    acc["d_i_max"] = max(acc["d_i_max"], float(rec["d_enclosed_current_max_over_ip"]))
+                rec.pop("dI_faces", None)
+                acc["last"] = rec
+                return st2
+
+            end = sol.advance(state, t1, dt=dt, scheme=settings.scheme, post_step=hook)
+        else:
+            # SOURCE: the reset current of the MODEL base state (the same sources advanced without the reset; carried
+            # in meta["q_reset_base"], or the state itself where none is carried) at the start of each step is a
+            # zero-net non-inductive source of that step; the base is advanced alongside with no source
+            base = (state.meta or {}).get("q_reset_base")
+            if base is not None:
+                bst = CurrentState(state.rho_faces, np.array(base["psi"], float), float(base["psi_boundary"]),
+                                   state.time, {})
+                acc["base_from"] = "carried base"
+            else:
+                bst = state
+                acc["base_from"] = "the state itself (no base carried)"
+            cur, t = state, float(state.time)
+            while t < t1 - 1e-12 * max(1.0, abs(t1)):
+                tn = min(t + dt, t1)
+                _, rec = _saw.q_reset(bst, sol, q_floor, **rkw)
+                acc["n_steps"] += 1
+                if rec["acted"]:
+                    acc["n_acted"] += 1
+                    acc["d_i_max"] = max(acc["d_i_max"], float(rec["d_enclosed_current_max_over_ip"]))
+                    s_src = _saw.reset_source_solver(sol, rec["dI_faces"], state.rho_faces, t)
+                else:
+                    s_src = sol
+                rec.pop("dI_faces", None)
+                acc["last"] = rec
+                cur = s_src.advance(cur, tn, dt=dt, scheme=settings.scheme)
+                bst = sol.advance(bst, tn, dt=dt, scheme=settings.scheme)
+                t = tn
+            end = cur
+            reset_base = dict(psi=np.array(bst.psi, float), psi_boundary=float(bst.psi_boundary))
+    elif form == "sharp":
         def hook(st, t, solver):
             st2, rec = _saw.floor_q(st, solver, q_floor)
             acc["n_steps"] += 1
@@ -521,7 +570,13 @@ def advance_q_floor(sol, state, t1, settings, dt, q_floor, sol_all=None, form="r
     common = dict(core_relaxation="q_floor", q_floor_form=form, q_floor=float(q_floor), n_steps=acc["n_steps"],
                   n_steps_floor_acted=acc["n_acted"], acted_in_interval=bool(acc["n_acted"]), dt=float(dt),
                   corrections="in-window response added after the floor" if sol_all is not None else None)
-    if form == "sharp":
+    if reset_base is not None:
+        end.meta = dict(end.meta or {}, q_reset_base=reset_base)
+    if form == "reset":
+        core = dict(acc["last"] or {}, **common, d_enclosed_current_max_over_ip_interval=acc["d_i_max"],
+                    q_reset_series=rc_.q_reset_series, base_from=acc.get("base_from"),
+                    rho_floor_crossings=model_end_crossings, q_min_model_end=float(np.nanmin(q_end)))
+    elif form == "sharp":
         core = dict(acc["last"] or {}, **common, d_enclosed_current_max_over_ip_interval=acc["d_i_max"])
     else:
         radii = [r for _, r in acc["regions"][:-1] if r is not None]
@@ -758,6 +813,8 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
         log_strength=ls_used, log_strength_source=ls_source)
     st0 = res0.assembly["state"]
     carried = CurrentState(st0.rho_faces, st0.psi, st0.psi_boundary, times[0], dict(initial_mode=mode, ip_A=ip_c0))
+    if (st0.meta or {}).get("q_reset_base") is not None:      # EXPERIMENTAL reset form, source variant: its base
+        carried.meta["q_reset_base"] = st0.meta["q_reset_base"]
     out["slices"][-1]["carried_state"] = _state_record(carried)
     lag_prev = res0.lag
     jni_prev = _jni(lag_prev, sl0.kinetics, sl0.sources, params0)
@@ -826,7 +883,7 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
                 sol_a = (interval_solver(lag_prev, lag, jni_prev + c0, jni1 + c1, tp, t1, ip0, ip1, s.layer_fpol)[0]
                          if c0 is not None else None)
                 end, core = advance_q_floor(sol, carried, t1, s, s.dt_max, cfg.q_floor, sol_all=sol_a,
-                                            form=cfg.q_floor_form)
+                                            form=cfg.q_floor_form, reset_cfg=cfg)
                 events, states = [], []
             else:
                 end, events, states = advance_interval(sol, carried, t1, s, crash, s.dt_max)

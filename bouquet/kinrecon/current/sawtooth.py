@@ -276,6 +276,14 @@ __all__ = [
     "face_q",
     "ResistiveFloor",
     "resistive_floor_steady",
+    "Q_RESET_DQ",
+    "Q_RESET_RAMP",
+    "Q_RESET_RULE",
+    "Q_RESET_SMOOTH",
+    "Q_RESET_SERIES_FORMS",
+    "quad_smooth",
+    "q_reset",
+    "reset_source_solver",
     "DEFAULT_SHEET_WIDTH",
     "DEFAULT_HISTORY",
     "F_CAP",
@@ -313,9 +321,23 @@ _HALF_PI = 0.5 * np.pi
 #: ``ActorQED`` default ``qmin_desired = 1.0`` (``src/actors/current/qed_actor.jl``; module docstring).
 DEFAULT_Q_FLOOR = 1.0
 #: Forms of the q floor: ``"resistive"`` (default; the resistivity inside the flattening radius set to its value
-#: there, :class:`ResistiveFloor`, :func:`resistive_floor_steady`) and ``"sharp"`` (opt-in; q clamped,
-#: :func:`floor_q`).
-Q_FLOOR_FORMS = ("resistive", "sharp")
+#: there, :class:`ResistiveFloor`, :func:`resistive_floor_steady`), ``"sharp"`` (opt-in; q clamped,
+#: :func:`floor_q`) and ``"reset"`` (opt-in, EXPERIMENTAL comparison; the Grad-Shafranov solver's own zero-net-current
+#: q reset applied to the model state, :func:`q_reset`).
+Q_FLOOR_FORMS = ("resistive", "sharp", "reset")
+#: Numbers of the solver's q reset (``q_floor_form="reset"``), each the solver's own default (TokaMaker
+#: ``boot_ops``: ``saw_dq``, ``saw_ramp``, ``saw_rule``; ``saw_nsmooth`` of its wrapper ``saw_redistribute``):
+#: the shoulder height above the level, the trigger ramp below it, the rule (1: from the axis to the mixing radius;
+#: 2: each dip about its own minimum) and the half-width, in grid points, of the quadratic smoothing of q before
+#: the reset (0: none).  None of them is a physical constant or a measurement; they belong on the ledger.
+Q_RESET_DQ = 0.03
+Q_RESET_RAMP = 0.01
+Q_RESET_RULE = 2
+Q_RESET_SMOOTH = 8
+#: How the reset enters a time-dependent advance (:mod:`..series`): ``"projection"`` -- applied to the state after
+#: every diffusion step (the equation does not know about it); ``"source"`` -- the reset current of the state at
+#: the start of each step is a zero-net non-inductive source of that step (the equation carries it).
+Q_RESET_SERIES_FORMS = ("projection", "source")
 
 
 class QFloorRefused(ValueError):
@@ -561,6 +583,155 @@ def floor_q(state, solver, q_floor=DEFAULT_Q_FLOOR):
     meta = dict(state.meta or {})
     meta["q_floor"] = dict(q_floor=qf, form="sharp", acted=True, rho_floor=rho1)
     return CurrentState(rf, psi, state.psi_boundary, state.time, meta), rec
+
+
+def quad_smooth(x, y, hw):
+    """Least-squares quadratic over ``+-hw`` points about each point (Savitzky-Golay on a non-uniform grid; exact
+    for quadratics); if ``x[0] == 0`` the points are mirrored about it (``y`` even in ``x``).  A re-implementation of
+    the smoothing the Grad-Shafranov solver applies to q before its sawtooth reset; ``hw < 1`` returns a copy of
+    ``y``."""
+    x = np.asarray(x, float)
+    y = np.asarray(y, float)
+    n = x.size
+    hw = int(hw)
+    if hw < 1 or n < 3:
+        return y.copy()
+    nm = min(hw, n - 1) if x[0] == 0.0 else 0
+    xe = np.concatenate((-x[1:nm + 1][::-1], x))
+    ye = np.concatenate((y[1:nm + 1][::-1], y))
+    out = y.copy()
+    for i in range(n):
+        lo, hi = max(i - hw, -nm) + nm, min(i + hw, n - 1) + nm
+        d = xe[lo:hi + 1] - x[i]
+        s = [np.sum(d ** k) for k in range(5)]
+        t = [np.sum(ye[lo:hi + 1] * d ** k) for k in range(3)]
+        det = s[0] * (s[2] * s[4] - s[3] ** 2) - s[1] * (s[1] * s[4] - s[2] * s[3]) + s[2] * (s[1] * s[3] - s[2] ** 2)
+        if abs(det) > 0.0:
+            out[i] = (t[0] * (s[2] * s[4] - s[3] ** 2) - s[1] * (t[1] * s[4] - s[3] * t[2])
+                      + s[2] * (t[1] * s[3] - s[2] * t[2])) / det
+    return out
+
+
+def _solver_reset_1d():
+    from OpenFUSIONToolkit.TokaMaker.bootstrap import _saw_reset_1d
+    return _saw_reset_1d
+
+
+def q_reset(state, solver, q_floor=DEFAULT_Q_FLOOR, rule=Q_RESET_RULE, dq=Q_RESET_DQ, ramp=Q_RESET_RAMP,
+            smooth=Q_RESET_SMOOTH, reset_fn=None):
+    r"""The Grad-Shafranov solver's zero-net-current q reset applied to a diffusion state (opt-in
+    ``q_floor_form="reset"``; EXPERIMENTAL comparison form, not the default).
+
+    The solver's 1-D routine (``saw_reset_1d``, exposed as ``OpenFUSIONToolkit.TokaMaker.bootstrap._saw_reset_1d``;
+    ``reset_fn`` replaces it) takes q on the faces (this module's face q, axis value extrapolated), smoothed first
+    by :func:`quad_smooth` with half-width ``smooth`` (the solver smooths its q the same way before its reset), and
+    where q < ``q_floor`` (its ``q_s``) returns ``q_new = q_floor + dq * shape(rho / rho_m)``, matched in value and
+    slope at the mixing radius ``rho_m`` (the ``q_floor + dq`` crossing), weighted by a trigger ramp ``ramp``; rule 1
+    resets from the axis to ``rho_m``, rule 2 raises each dip about its own minimum.  Its current change is
+    ``dI = I (q/q_new - 1)`` with ``q`` the q it was given (``q I`` is fixed on fixed surfaces): zero outside the
+    reset, hence zero net current.  Here ``dI`` is applied to the state directly: on every interior face
+    ``psi' -> psi' q/q_new`` (the enclosed current ``I = k psi' F`` scales the same way), and psi is rebuilt from the
+    outermost cell inward, so the outermost cell, ``psi_boundary`` and Ip are kept.  The routine's own ``dj`` output
+    is not used (it is called with ``A = rho^2``, ``c1 = 1``).  With smoothing the final q inside the reset is
+    ``q_raw q_new / q_smooth`` (as in the solver, whose reset scales the unsmoothed current).
+
+    Refused (:class:`QFloorRefused`): q below the level at the domain edge, or a reset that reaches the last
+    interior face (the second-order boundary gradient uses the two outer cells).  When the routine reports a
+    failure (``ierr``) the state is returned unchanged and the record says so (the solver keeps its last reset).
+
+    Returns ``(state, record)`` (the input state itself when nothing changes).  ``record``: ``acted``, the rule and
+    numbers, q min / axis before and after, ``rho_s`` (outer ``q_s`` crossing), ``rho_m`` (mixing radius),
+    ``rho_out`` (outer end of the last reset; also ``rho_floor``), ``n_dips``, weight ``w``, ``ierr``, the crossings
+    of the level by the input q, the enclosed-current change ``dI_faces`` [A] and its largest value as a fraction of
+    Ip, the flux moved on the axis cell [Wb/rad]; radii on the domain's rho.
+    """
+    qf = _check_q_floor(q_floor)
+    if int(rule) not in (1, 2):
+        raise ValueError("rule must be 1 or 2")
+    rf = np.asarray(state.rho_faces, dtype=float)
+    rc = state.rho_cells
+    n = rc.size
+    prof = solver.profiles(state)
+    q = np.asarray(prof["q"], dtype=float)
+    i_f = np.asarray(prof["I_enclosed"], dtype=float)
+    ip = float(prof["ip"])
+    jmin = int(np.argmin(np.where(np.isfinite(q), q, np.inf)))
+    rec = dict(core_relaxation="q_floor", q_floor_form="reset", q_floor=qf, rule=int(rule), dq=float(dq),
+               ramp=float(ramp), smooth=int(smooth), q_min_before=float(q[jmin]), rho_q_min_before=float(rf[jmin]),
+               q_axis_before=float(q[0]), q_edge=float(q[n]), rho_floor_crossings=floor_crossings(rf, q, qf),
+               acted=False, rho_floor=None, rho_s=None, rho_m=None, rho_out=None, n_dips=0, w=0.0, ierr=0,
+               q_min_after=float(q[jmin]), rho_q_min_after=float(rf[jmin]), q_axis_after=float(q[0]),
+               q_floor_met=bool(np.all(q >= qf)), d_enclosed_current_max_over_ip=0.0, d_psi_axis_cell=0.0,
+               dI_faces=None)
+    if not q[n] >= qf:
+        raise QFloorRefused(f"q = {q[n]:.4g} at the domain edge is below the level q_s = {qf:g}: the reset cannot "
+                            "act at fixed edge current")
+    if not np.any(q < qf):
+        return state, rec
+    qs = quad_smooth(rf, q, smooth)
+    fn = reset_fn if reset_fn is not None else _solver_reset_1d()
+    q_new, _dj, info = fn(rf, qs, i_f, rf ** 2, np.ones_like(rf), qf, dq=float(dq), ramp=float(ramp), rule=int(rule))
+    q_new = np.asarray(q_new, float)
+    rec.update(ierr=int(info.get("ierr", 0)), n_dips=int(info.get("n_dips", 0)), w=float(info.get("w", 0.0)),
+               rho_s=float(info["rho_s"]) or None, rho_m=float(info["rho_m"]) or None,
+               rho_out=float(info["rho_out"]) or None)
+    if rec["ierr"] != 0:
+        return state, rec
+    ratio = np.ones(n + 1)
+    ch = q_new != qs
+    ratio[ch] = qs[ch] / q_new[ch]
+    if not np.all(np.isfinite(ratio)) or np.any(ratio <= 0.0):
+        raise QFloorRefused("the q reset returned a non-finite or non-positive q")
+    if ratio[n] != 1.0 or ratio[n - 1] != 1.0:
+        raise QFloorRefused("the q reset reaches the last interior face or the domain edge: it would change the edge "
+                            "current")
+    inner = np.arange(1, n)
+    if np.all(ratio[inner] == 1.0):
+        return state, rec
+    dpsi = np.zeros(n + 1)
+    dpsi[1:n] = np.diff(state.psi) / np.diff(rc)
+    new = dpsi * ratio
+    psi = np.empty(n)
+    psi[-1] = state.psi[-1]
+    psi[:-1] = state.psi[-1] - np.cumsum((new[1:n] * np.diff(rc))[::-1])[::-1]
+    st = CurrentState(rf, psi, state.psi_boundary, state.time, dict(state.meta or {}))
+    qa = np.asarray(solver.profiles(st)["q"], float)
+    j1 = int(np.argmin(np.where(np.isfinite(qa), qa, np.inf)))
+    di = i_f * (ratio - 1.0)
+    di[0] = 0.0
+    rec.update(acted=True, rho_floor=rec["rho_out"], q_min_after=float(qa[j1]), rho_q_min_after=float(rf[j1]),
+               q_axis_after=float(qa[0]), q_floor_met=bool(np.all(qa >= qf)), dI_faces=di,
+               d_enclosed_current_max_over_ip=(float(np.max(np.abs(di))) / ip if ip else float("nan")),
+               d_psi_axis_cell=float(psi[0] - state.psi[0]))
+    st.meta["q_floor"] = dict(q_floor=qf, form="reset", acted=True, rho_floor=rec["rho_floor"], rule=int(rule))
+    return st, rec
+
+
+def reset_source_solver(solver, dI_faces, rho_faces, t=0.0):
+    r"""A shallow copy of ``solver`` whose non-inductive source carries the reset current as a SOURCE of the
+    flux-diffusion equation (``q_reset_series="source"``): the source ``S`` of eq. (6) of :mod:`.diffusion`
+    (``S = V' <J_NI.B> / (2 pi F^2)``) gets the extra term ``d/drho (dI / F)`` on every cell (``dI`` the reset's
+    enclosed-current change on the faces), so the steady response of that extra source at fixed Ip is exactly
+    ``Delta(I/F) = dI / F`` (zero net: the loop voltage does not change).  Converted to ``<J_NI.B>`` with the
+    geometry at ``t`` and added as a piecewise-constant cell profile (evaluated at any rho by the cell it falls in)."""
+    rf = np.asarray(rho_faces, float)
+    rc = 0.5 * (rf[1:] + rf[:-1])
+    geo = solver.geometry_at(t)
+    gf = geo.evaluate(rf, ["fpol"])
+    gc = geo.evaluate(rc, ["dvol_drho", "fpol"])
+    di = np.asarray(dI_faces, float)
+    s_cell = np.diff(di / gf["fpol"]) / np.diff(rf)
+    jx = s_cell * 2.0 * np.pi * gc["fpol"] ** 2 / gc["dvol_drho"]
+    base = solver.jni_fn
+
+    def fn(tt, rho):
+        rho = np.asarray(rho, float)
+        k = np.clip(np.searchsorted(rf, rho, side="right") - 1, 0, rc.size - 1)
+        return np.asarray(base(tt, rho), float) + jx[k]
+
+    s = copy.copy(solver)
+    s.jni_fn = fn
+    return s
 
 
 # ====================================================================== interpolant of chi(s)

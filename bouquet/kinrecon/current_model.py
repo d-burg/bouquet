@@ -17,14 +17,23 @@ Physics (all in Python, iterated with the geometry):
   :attr:`CurrentModelSettings.core_relaxation` (:data:`CORE_RELAXATIONS`):
 
   - ``"q_floor"`` (default): the time-averaged state.  The steady state of the MODEL sources
-    (bootstrap and driven current) is held at ``q >= q_floor`` (:func:`.current.sawtooth.floor_q`,
-    ``q_floor`` default 1, one documented setting): wherever its own q is below the floor the core
-    current is flattened to hold q there, Ip conserved; a state whose q at the domain edge is below
-    the floor is refused.  The current corrections are added AFTER the floor, as their steady
-    response (the steady state with them among the sources minus the one without), so the floor
-    never cancels them and the fit may pull q below the floor where the data demand it; where the
-    floor does not act the state is the steady state with the corrections among the sources, to the
-    bit.  No sawtooth parameter, crash time or amplitude is used;
+    (bootstrap and driven current) with the RESISTIVE q floor (``q_floor`` default 1, one documented
+    setting; :func:`.current.sawtooth.resistive_floor_steady`, the stationary-sawtooth treatment of
+    FUSE's current-diffusion actor): where that steady state's q is below the floor, the resistivity
+    inside a flattening radius is set to its value at that radius, the radius scanned outward over the
+    diffusion faces to the first whose steady state has q >= floor everywhere (at most to the outermost
+    face where the plain state's q is below the floor; FUSE's rule).  The current stays continuous
+    (no jump at that radius), Ip is the steady state's own, and q ends AT OR SLIGHTLY ABOVE the floor
+    -- or somewhat below it where even the outermost radius does not reach it (recorded as
+    ``q_floor_met``).  The flattening radius is a grid face, so the state is piecewise constant in its
+    inputs where the chosen face changes (FUSE's scan has the same property).  A state whose q at the
+    domain edge is below the floor is refused.  The current corrections are added AFTER the floor, as
+    their steady response with the plain resistivity (the steady state with them among the sources
+    minus the one without), so the floor never cancels them and the fit may pull q below the floor
+    where the data demand it; where the floor does not act the state is the steady state with the
+    corrections among the sources, to the bit.  No sawtooth parameter, crash time or amplitude is
+    used.  ``q_floor_form="sharp"`` (opt-in, comparison) is the earlier clamp ``q -> max(q, q_floor)``
+    (:func:`.current.sawtooth.floor_q`), which makes ``<J.B>`` jump at the floor radius;
   - ``"periodic_orbit"`` (opt-in): the periodic orbit of "diffuse for one period, reconnect with
     fraction f" (:func:`.current.sawtooth.solve_periodic_orbit`) replaces the steady state and its
     cycle average is used (the window average over an unknown phase, averaged over phases, equals
@@ -34,8 +43,9 @@ Physics (all in Python, iterated with the geometry):
     (:func:`.current.sawtooth.simulate_slice`) averaged over the measurement window;
   - ``"none"``: the plain steady state, q unconstrained.
 
-  Every assembly records the treatment, ``q_floor``, whether the floor acted and the floor radius
-  (``assembly["core"]``).
+  Every assembly records the treatment, ``q_floor``, its form, whether the floor acted, the
+  flattening (floor) radius and every crossing of the floor by the model q, inner and outer
+  (``assembly["core"]``, :func:`core_record`).
 * ``<J.B>_BS``: Redl 2021 (:mod:`.current.bootstrap`), multiplier ``s_bs = 1`` by default.
 * ``<J.B>_CD`` and ``p_fast`` are supplied as arrays (:class:`SourceProfiles`) with optional
   scale factors; this module never computes them.
@@ -74,7 +84,10 @@ solve (:class:`.forward.ForwardModel`), repeat, until
 The passes may be Anderson-accelerated (``pass_acceleration="anderson"``, default; depth 3) on the
 comparison-grid profile: the input of the next solve is a mixture of the recent inputs and
 assembled profiles (the mixing correction is interpolated onto the knots); the fixed point and the
-criterion are unchanged, and a mixed input that does not solve falls back to the plain one.
+criterion are unchanged, and a mixed input that does not solve falls back to the plain one.  Safeguard:
+when the max-norm of the pass residual (assembled minus input profile on the comparison grid) grew
+against the previous pass, the history is restarted and that pass takes the plain input (recorded as
+``anderson_restart`` in the pass record); the residual and the convergence measure are the same.
 
 A supplied current state (``state_fn``; the time-dependent path of :mod:`.series`) replaces the
 steady state / periodic orbit: the profiles are then those of that state on the current geometry.
@@ -333,7 +346,8 @@ class CurrentModelSettings:
     pass_acceleration: str = "anderson"      # "anderson" (depth anderson_depth) or "none"
     anderson_depth: int = 3
     core_relaxation: str = "q_floor"         # CORE_RELAXATIONS: the core treatment (module docstring)
-    q_floor: float = _saw.DEFAULT_Q_FLOOR    # floor of the "q_floor" treatment
+    q_floor: float = _saw.DEFAULT_Q_FLOOR    # floor of the "q_floor" treatment (FUSE ActorQED qmin_desired default)
+    q_floor_form: str = "resistive"          # Q_FLOOR_FORMS: "resistive" (default) or "sharp" (opt-in, comparison)
     sawtooth_nsteps: int = 40
     sawtooth_sheet_width: float = _saw.DEFAULT_SHEET_WIDTH
     crash_times: Optional[Sequence[float]] = None   # measured crash times [s] ("crash_times" treatment)
@@ -351,6 +365,8 @@ class CurrentModelSettings:
         qf = float(self.q_floor)
         if not (np.isfinite(qf) and qf > 0.0):
             raise ValueError("q_floor must be finite and > 0")
+        if self.q_floor_form not in _saw.Q_FLOOR_FORMS:
+            raise ValueError(f"q_floor_form must be one of {_saw.Q_FLOOR_FORMS}")
         if self.crash_times is not None and self.core_relaxation != "crash_times":
             raise ValueError(f"crash_times are given but core_relaxation is {self.core_relaxation!r}: measured crash "
                              "times are an opt-in treatment (core_relaxation='crash_times')")
@@ -715,13 +731,16 @@ def assemble(lag, kin, src, params, cfg, ip, z0=None, state=None):
             raise ValueError(f"log_strength is a parameter of the opt-in sawtooth treatments {SAWTOOTH_RELAXATIONS}; "
                              f"core_relaxation is {cfg.core_relaxation!r}")
         if cfg.core_relaxation == "q_floor":
-            # the time-averaged state: the MODEL's steady state (bootstrap + driven current) held at the q floor FIRST,
+            # the time-averaged state: the MODEL's steady state (bootstrap + driven current) with the q floor FIRST,
             # then the corrections' steady response -- the steady state with them among the sources minus the one
-            # without -- added, so the floor never cancels a correction; where the floor does not act this is the
-            # steady state with the corrections among the sources, to the bit
+            # without, plain resistivity -- added, so the floor never cancels a correction; where the floor does not
+            # act this is the steady state with the corrections among the sources, to the bit
             sol_m = build_solver(lag, jbs + jcd, ipv)
             st_m = sol_m.steady_state(rf)
-            st_f, floor_rec = _saw.floor_q(st_m, sol_m, cfg.q_floor)
+            if cfg.q_floor_form == "sharp":
+                st_f, floor_rec = _saw.floor_q(st_m, sol_m, cfg.q_floor)
+            else:
+                st_f, floor_rec, _ = _saw.resistive_floor_steady(sol_m, rf, cfg.q_floor)
             state = st_f
             if any(a != 0.0 for a in p["a_corr"]):
                 st_c = sol.steady_state(rf)
@@ -729,11 +748,12 @@ def assemble(lag, kin, src, params, cfg, ip, z0=None, state=None):
                                      st_c.psi_boundary + (st_f.psi_boundary - st_m.psi_boundary), st_c.time,
                                      dict(st_c.meta, **({"q_floor": st_f.meta["q_floor"]} if "q_floor" in st_f.meta
                                                         else {})))
-            saw.update(mode="q floor (time-averaged state; the corrections added after the floor)")
+            saw.update(mode=f"q floor, {cfg.q_floor_form} (time-averaged state; the corrections added after the floor)")
         else:
             state = sol.steady_state(rf)
             floor_rec = dict(core_relaxation="none")
             saw.update(mode="none (steady state, q unconstrained)")
+    saw_params_used = str(saw.get("mode", "")).startswith(("periodic orbit", "measured crash times"))
     prof = sol.profiles(state)
     rate_layer = prof["v_loop_boundary"] / (2.0 * np.pi)
     # knots of this pass (from this pass's equilibrium) and the fixed comparison grid
@@ -800,7 +820,11 @@ def assemble(lag, kin, src, params, cfg, ip, z0=None, state=None):
                profiles_rho=dict(rho=prof["rho_cells"] * rmap.rho_edge, jdotb=prof["jdotb"],
                                  **{f"jdotb_{kk}": v for kk, v in parts_c.items()}),
                li3_diffusion=float(prof["li3"]), outer_layer_current_A=float(prof["outer_layer_current"]),
-               sawtooth=saw, core=core, orbit_z=orbit_z, corrections=corr_shapes, params=p, state=state,
+               sawtooth=saw, core=core, orbit_z=orbit_z, corrections=corr_shapes, state=state,
+               # the sawtooth parameters are read only by the opt-in treatments without a supplied state; elsewhere
+               # they are recorded as not used rather than as their opt-in defaults
+               params=(p if saw_params_used else dict(p, log_strength=None, f=None)),
+               params_not_used=None if saw_params_used else ["log_strength", "f"],
                correction_form=(corr_form if state is not None and corr_form is not None else
                                 ("source of the steady state / periodic orbit" if corr_shapes else None)),
                p_sep=float(pk[-1]), pax=float(pk[0] - pk[-1]), wall_s=round(time.perf_counter() - t0, 4))
@@ -809,27 +833,54 @@ def assemble(lag, kin, src, params, cfg, ip, z0=None, state=None):
 
 def core_record(floor_rec, cfg, q_model, rho_tor, rho_edge):
     """The core-treatment record of an assembly (``assembly["core"]``; a record only): the treatment, ``q_floor``,
-    whether the floor acted, the floor radius in rho_tor,norm (``rho_floor``; ``rho_floor_domain`` on the
-    diffusion domain's rho) and q_min before the floor (from :func:`.current.sawtooth.floor_q`), and the minimum of the
-    scored model q (after the corrections) with its rho_tor,norm and its difference from the floor (negative where the
-    corrections pull q below it; round-off at the floor itself)."""
+    its form, whether the floor acted, the floor (flattening) radius in rho_tor,norm (``rho_floor``;
+    ``rho_floor_domain`` on the diffusion domain's rho), every crossing of the floor by the model q before the floor
+    (``rho_floor_crossings``, inner and outer), q_min before the floor (from
+    :func:`.current.sawtooth.resistive_floor_steady` or :func:`.current.sawtooth.floor_q`), and the minimum and the
+    axis value of the scored model q (after the corrections) with their differences from the floor (negative where the
+    corrections pull q below it)."""
     rec = dict(floor_rec or {})
     rec.setdefault("core_relaxation", cfg.core_relaxation)
     rec.setdefault("q_floor", float(cfg.q_floor) if rec["core_relaxation"] == "q_floor" else None)
+    if rec["core_relaxation"] == "q_floor":
+        rec.setdefault("q_floor_form", cfg.q_floor_form)
     if "rho_floor" in rec and "rho_floor_domain" not in rec:
-        # floor_q works on the diffusion domain's rho (0..1 at the domain edge): rho_tor,norm = rho * rho_edge
+        # the floor works on the diffusion domain's rho (0..1 at the domain edge): rho_tor,norm = rho * rho_edge
         rec["rho_floor_domain"] = rec["rho_floor"]
-        for k in ("rho_floor", "rho_q_min_before"):
+        for k in ("rho_floor", "rho_q_min_before", "rho_q_min_after"):
             if rec.get(k) is not None:
                 rec[k] = float(rec[k]) * float(rho_edge)
+        if rec.get("rho_floor_crossings"):
+            rec["rho_floor_crossings"] = [dict(c, rho=float(c["rho"]) * float(rho_edge), rho_domain=float(c["rho"]))
+                                          for c in rec["rho_floor_crossings"]]
     q = np.asarray(q_model, float)
     ok = np.isfinite(q)
     if np.any(ok):
         j = int(np.argmin(np.where(ok, q, np.inf)))
-        rec.update(q_min_model=float(q[j]), rho_q_min_model=float(np.asarray(rho_tor, float)[j]))
+        rec.update(q_min_model=float(q[j]), rho_q_min_model=float(np.asarray(rho_tor, float)[j]),
+                   q_axis_model=float(q[0]))
         if rec.get("q_floor") is not None:
             rec["q_min_model_minus_floor"] = float(q[j] - rec["q_floor"])
+            rec["q_axis_model_minus_floor"] = float(q[0] - rec["q_floor"])
     return rec
+
+
+def core_vs_floor_record(core, correction_effect):
+    """Whether the data pull the core below the q floor -- a RECORD for the reader, with no threshold and no verdict
+    (nothing reads it: it cannot change a result).  From quantities the result already has: the scored model q at the
+    axis and its minimum against the floor (``core``, :func:`core_record`; after the fitted corrections) and the
+    signed change the corrections made to the current inside rho_tor,norm :data:`CORRECTION_CORE_RHO` and to the axis
+    q (``correction_effect``, :func:`correction_core_effect`).  Negative q differences and a positive change of the
+    core current mean the fit pulled the core below the floor."""
+    core = core or {}
+    cce = correction_effect or {}
+    return dict(q_floor=core.get("q_floor"), floor_acted=core.get("acted"), q_floor_met=core.get("q_floor_met"),
+                q_axis_model_minus_floor=core.get("q_axis_model_minus_floor"),
+                q_min_model_minus_floor=core.get("q_min_model_minus_floor"),
+                rho_q_min_model=core.get("rho_q_min_model"),
+                core_rho=cce.get("core_rho"), d_current_inside_core_over_ip=cce.get("d_current_inside_core_over_ip"),
+                d_q_axis_model=cce.get("d_q_axis_model"), correction_effect_computed=cce.get("computed"),
+                note="record only: no threshold, nothing reads it")
 
 
 # ============================================================== the corrections' effect on the core (recording only)
@@ -1058,6 +1109,11 @@ def consistent_solve(fm, kin, src, params, cfg, ip=None, start=None, z0=None, la
             hx.append(x_prev)
             hf.append(asm_k["jphi_cmp"] - x_prev)
             del hx[:-(cfg.anderson_depth + 1)], hf[:-(cfg.anderson_depth + 1)]
+            if (cfg.pass_acceleration == "anderson" and len(hf) >= 2
+                    and np.max(np.abs(hf[-1])) > np.max(np.abs(hf[-2]))):
+                # safeguard: the residual grew -> restart the history; this pass takes the plain input
+                del hx[:-1], hf[:-1]
+                rec["anderson_restart"] = True
             if cfg.pass_acceleration == "anderson" and len(hf) >= 2:
                 dF = np.column_stack([hf[i + 1] - hf[i] for i in range(len(hf) - 1)])
                 dX = np.column_stack([hx[i + 1] - hx[i] for i in range(len(hx) - 1)])

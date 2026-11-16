@@ -167,12 +167,56 @@ real stepping (``advance`` then ``reconnect``) must meet it.
 
 Time-averaged core (the default core treatment of the package)
 --------------------------------------------------------------
-:func:`floor_q` holds q at a floor (``q_floor``, default :data:`DEFAULT_Q_FLOOR` = 1) wherever the state's own q is
-below it: on those faces ``psi'`` is set to ``Phi_b rho / (pi q_floor)``, so the current inside the region is
-flattened and its total returns at the region's outer face (Ip conserved).  It needs no sawtooth parameter, crash
-time or amplitude: it is the time average over sawtooth cycles that the reconnection model resolves, the limit of a
-reset after every step (OFT's ``saw_reset_1d``, rule 2).  :mod:`..current_model` applies it to the steady model
-state of a single slice and :mod:`..series` after every diffusion step; the periodic orbit, the measured-crash runs
+The default holds the core at a minimum q (``q_floor``, default :data:`DEFAULT_Q_FLOOR` = 1) through the
+RESISTIVITY, as the current-diffusion actor of FUSE does with the stationary-sawtooth model it attributes to Jardin
+(FUSE ``ActorQED``, parameter ``qmin_desired``, default 1.0, ``src/actors/current/qed_actor.jl``; the resistivity
+change is ``QED.eta_JBni_sawteeth`` in ``ext/IMAS_Ext.jl`` of QED.jl; both public, ProjectTorreyPines on GitHub; the
+rule below is re-implemented here, no code is taken from there):
+
+.. code-block:: text
+
+    eta(rho) -> eta(rho_inv)   for rho < rho_inv,   unchanged outside                       (F1)
+
+i.e. the resistivity inside the flattening radius ``rho_inv`` is set to its own value AT that radius.  Inside, the
+ohmic current then follows the (flat) resistivity instead of the peaked one, so the core current is flatter and q
+higher; the resistivity is continuous across ``rho_inv`` (its slope breaks), so ``<J.B>`` has no jump there, and Ip
+is untouched (the diffusion keeps its Ip condition).  The non-inductive sources are NOT changed: FUSE's function
+also returns a flattened non-inductive current, but its actor discards that return value and keeps the unflattened
+sources (``eta_jardin, _ = ...`` and ``JBni`` set from the unflattened sources), and this module follows the actor.
+``rho_inv`` is chosen as in FUSE:
+
+* time-dependent (:class:`ResistiveFloor` as the ``resistivity_modifier`` of a diffusion step, :mod:`..series`):
+  from the state at the START of the step, ``rho_inv`` is the outermost face where q is below the floor (no change
+  when q >= floor everywhere).  FUSE takes it from the previous time step's q; so does this, per diffusion step.  q is
+  NOT held at the floor: the flattened resistivity relaxes the core toward it over the resistive time, so q may stay
+  below the floor for a while and dithers about it once there;
+* steady state (:func:`resistive_floor_steady`, the single-slice state of :mod:`..current_model`): the plain steady
+  state first; where its q is below the floor anywhere, ``rho_inv`` is scanned outward over the grid's faces, from
+  the first interior face to the outermost face where that plain state's q is below the floor, and the first face
+  whose steady state has q >= floor on every face is taken.  The result has q >= floor but not exactly at it (it is
+  above by up to one face's step), and ``rho_inv`` is a grid face: the state is piecewise constant in its inputs
+  where the chosen face changes (FUSE's scan has the same property on its own grid).  If no face up to that
+  outermost one reaches the floor, FUSE keeps the outermost; so does this, and the record says so
+  (``q_floor_met = False``).
+
+This is not the reconnection model of this module and needs no sawtooth parameter, crash time or amplitude.  It is a
+time-averaged model of a sawtoothing core, not a clamp: q need not equal the floor anywhere.  A state whose q is
+below the floor at the domain edge is refused (:class:`QFloorRefused`; FUSE has no such refusal).  Where this
+differs from FUSE's actor (none of it adds a number):
+
+* the grid: the flattening radius runs over this diffusion grid's faces (where q lives; ``n_cells`` uniform cells),
+  FUSE's over its core-profile grid; the resistivity is set per cell (cells whose center lies inside the radius take
+  the value at the radius, from the conductivity profile itself), where FUSE sets it on grid nodes and interpolates
+  log(eta) between them (cubic finite elements);
+* the q tested in the steady-state scan is this module's face q including the axis value extrapolated as in
+  :meth:`.diffusion.CurrentDiffusion.profiles`; FUSE evaluates its own iota on its grid, axis included;
+* time-dependent: the flattening radius is decided on every diffusion step; FUSE decides it once per actor step
+  (a step of ``Nt`` sub-steps) when it solves for Ip, and on every sub-step in its loop-voltage-controller mode.
+
+:func:`floor_q` (opt-in, ``q_floor_form="sharp"``) is the earlier construction: q clamped to ``max(q, q_floor)`` on
+the faces, which makes ``<J.B>`` jump at the floor radius (q is continuous there, its slope breaks); it is kept for
+comparison and for the periodic orbit's starting guess.  :mod:`..current_model` applies the default to the steady
+model state of a single slice and :mod:`..series` to every diffusion step; the periodic orbit, the measured-crash runs
 and the crash tables below are opt-ins.
 
 Time-dependent mode
@@ -208,6 +252,7 @@ states stored at the same time so a crash is a jump; exact integration over
 any window.
 """
 
+import copy
 import math
 import time as _time
 import warnings
@@ -219,12 +264,18 @@ from scipy.interpolate import PchipInterpolator
 from scipy.optimize import brentq
 
 from .diffusion import CurrentDiffusion, CurrentState, PositiveFrameError
+from .diffusion import _boundary_gradient_weights
 
 __all__ = [
     "CYCLE_TOL",
     "DEFAULT_Q_FLOOR",
     "QFloorRefused",
+    "Q_FLOOR_FORMS",
     "floor_q",
+    "floor_crossings",
+    "face_q",
+    "ResistiveFloor",
+    "resistive_floor_steady",
     "DEFAULT_SHEET_WIDTH",
     "DEFAULT_HISTORY",
     "F_CAP",
@@ -258,17 +309,190 @@ N_LEVELS = 2048             # helical-flux levels of the rearranged profile (fix
 _HALF_PI = 0.5 * np.pi
 
 
-#: Default floor of the time-averaged q-floor core treatment (:func:`floor_q`; one documented setting).
+#: Default floor of the time-averaged q-floor core treatment (one documented setting).  The value is FUSE's
+#: ``ActorQED`` default ``qmin_desired = 1.0`` (``src/actors/current/qed_actor.jl``; module docstring).
 DEFAULT_Q_FLOOR = 1.0
+#: Forms of the q floor: ``"resistive"`` (default; the resistivity inside the flattening radius set to its value
+#: there, :class:`ResistiveFloor`, :func:`resistive_floor_steady`) and ``"sharp"`` (opt-in; q clamped,
+#: :func:`floor_q`).
+Q_FLOOR_FORMS = ("resistive", "sharp")
 
 
 class QFloorRefused(ValueError):
-    """:func:`floor_q` cannot hold q at the floor without changing the current at the domain edge (q below the floor
-    at the domain edge or on the last interior face, which the boundary gradient uses)."""
+    """The q floor cannot act without changing the current at the domain edge: q below the floor at the domain edge
+    (both forms), or on the last interior face, which the boundary gradient uses (:func:`floor_q` only)."""
+
+
+def _check_q_floor(q_floor):
+    qf = float(q_floor)
+    if not (np.isfinite(qf) and qf > 0.0):
+        raise ValueError("q_floor must be finite and > 0")
+    return qf
+
+
+def floor_crossings(rho_faces, q, q_floor):
+    """Every radius where ``q`` crosses ``q_floor`` between two faces (linear in q between them), innermost first,
+    each with its direction: ``"up"`` where q rises through the floor going outward (the outer edge of a region below
+    the floor), ``"down"`` where it falls through it (the inner edge of an off-axis region, reversed shear)."""
+    rf = np.asarray(rho_faces, float)
+    d = np.asarray(q, float) - float(q_floor)
+    out = []
+    for i in range(d.size - 1):
+        a, b = d[i], d[i + 1]
+        if not (np.isfinite(a) and np.isfinite(b)) or (a < 0.0) == (b < 0.0):
+            continue
+        r = float(rf[i] + (-a) * (rf[i + 1] - rf[i]) / (b - a)) if b != a else float(rf[i])
+        out.append(dict(rho=r, direction="up" if a < 0.0 else "down"))
+    return out
+
+
+def face_q(state, phi_b):
+    """q on the faces of ``state`` from its own psi, with the formulas of
+    :meth:`.diffusion.CurrentDiffusion.profiles` (``q = Phi_b rho / (pi psi')``; interior faces two-point, the domain
+    edge through ``psi_boundary`` and the two outer cells, the axis value extrapolated as ``q0 + c rho^2``), without
+    evaluating any coefficient, so it can be used inside a ``resistivity_modifier``.  ``phi_b``: the boundary toroidal
+    flux [Wb] at the state's time."""
+    rf = np.asarray(state.rho_faces, float)
+    rc = 0.5 * (rf[1:] + rf[:-1])
+    n = rc.size
+    dpsi = np.zeros(n + 1)
+    dpsi[1:n] = np.diff(state.psi) / np.diff(rc)
+    wb, w1, w2 = _boundary_gradient_weights(rc)
+    dpsi[n] = wb * state.psi_boundary + w1 * state.psi[-1] + w2 * state.psi[-2]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        q = float(phi_b) * rf / (np.pi * dpsi)
+    q[0] = q[1] - (q[2] - q[1]) * rf[1] ** 2 / (rf[2] ** 2 - rf[1] ** 2)
+    return q
+
+
+class ResistiveFloor:
+    r"""Resistivity modifier of the resistive q floor (module docstring, eq. F1): the resistivity on every cell
+    inside the flattening radius ``rho_inv`` is set to the solver's resistivity AT ``rho_inv``.
+
+    For :class:`~.diffusion.CurrentDiffusion` (``resistivity_modifier``; :meth:`with_solver` attaches it to a copy
+    of a solver).  ``rho_inv`` is either fixed (``rho_inv=...``; the steady state, :func:`resistive_floor_steady`)
+    or, with ``rho_inv=None``, taken from the state the diffusion passes in -- the state at the start of the step --
+    as the outermost face where its q (:func:`face_q`) is below ``q_floor`` (the time-dependent rule; no change
+    where q >= floor on every face).  A state with q below the floor at the domain edge is refused
+    (:class:`QFloorRefused`).  The outer layer is never touched (the diffusion's ``resistivity_modifier`` acts on
+    the domain cells only).
+
+    ``last`` holds the region of the latest state examined (:meth:`region`).
+    """
+
+    def __init__(self, solver, q_floor=DEFAULT_Q_FLOOR, rho_inv=None):
+        self.solver = solver
+        self.q_floor = _check_q_floor(q_floor)
+        self.rho_inv = None if rho_inv is None else float(rho_inv)
+        self._seen = None
+        self.last = None
+
+    def region(self, state):
+        """``(k, rho_inv)`` of ``state`` under the time-dependent rule: ``k`` the index of the outermost face where q
+        is below the floor (0 when none, or when only the extrapolated axis value is), ``rho_inv`` that face's rho
+        (None when ``k`` is 0)."""
+        if self._seen is not None and self._seen[0] is state:
+            return self._seen[1]
+        q = face_q(state, self.solver.geometry_at(state.time).phi_b)
+        if not q[-1] >= self.q_floor:
+            raise QFloorRefused(f"q = {q[-1]:.4g} at the domain edge is below the floor q_floor = {self.q_floor:g}: "
+                                "the core cannot be held at the floor")
+        below = np.flatnonzero(~(q >= self.q_floor))
+        k = int(below[-1]) if below.size else 0
+        out = (k, float(state.rho_faces[k]) if k > 0 else None)
+        self._seen = (state, out)
+        self.last = dict(k=out[0], rho_inv=out[1], q=q)
+        return out
+
+    def __call__(self, t, rho_cells, eta, state):
+        r_inv = self.rho_inv
+        if r_inv is None:
+            if state is None:
+                raise ValueError("the time-dependent q floor needs the state at the start of the step")
+            r_inv = self.region(state)[1]
+        if r_inv is None:
+            return eta
+        eta = np.array(eta, dtype=float)
+        eta[np.asarray(rho_cells, float) < r_inv] = 1.0 / float(np.asarray(self.solver.sigma_fn(t, np.array([r_inv])),
+                                                                          float).ravel()[0])
+        return eta
+
+    def with_solver(self):
+        """A shallow copy of the solver with this modifier as its ``resistivity_modifier`` (the solver itself is
+        not changed); refused when the solver already has a modifier."""
+        if self.solver.resistivity_modifier is not None:
+            raise ValueError("the solver already has a resistivity modifier")
+        s = copy.copy(self.solver)
+        s.resistivity_modifier = self
+        return s
+
+
+def resistive_floor_steady(solver, rho_faces, q_floor=DEFAULT_Q_FLOOR, t=0.0, psi_boundary=0.0):
+    r"""Steady state of ``solver`` with the resistive q floor (module docstring, eq. F1 and the steady-state rule).
+
+    The plain steady state first.  Where its q (:func:`face_q`, every face including the extrapolated axis value) is
+    below ``q_floor`` anywhere, the flattening radius is scanned outward over the faces ``k = 1 ... k_max``
+    (``k_max`` the outermost face where the plain state's q is below the floor), the steady state with the
+    resistivity flattened inside ``rho_faces[k]`` (:class:`ResistiveFloor`) is formed for each, and the first whose
+    q is >= ``q_floor`` on every face is taken; if none is, the one at ``k_max`` (as FUSE's actor does), recorded as
+    ``q_floor_met = False``.  Ip is the solver's Ip condition throughout.  Refused (:class:`QFloorRefused`): q below
+    the floor at the domain edge.
+
+    Returns ``(state, record, solver_used)``: the state (the plain steady state itself where nothing is flattened),
+    ``solver_used`` the solver whose conductivity made it (``solver`` itself, or a copy carrying the modifier).
+    ``record``: ``core_relaxation``, ``q_floor_form``, ``q_floor``, ``acted`` (the resistivity was changed),
+    ``q_min_before`` and its ``rho``, ``q_edge``, every crossing of the floor by the plain state's q
+    (``rho_floor_crossings``: inner and outer edges of each region below the floor), ``rho_floor`` (the flattening
+    radius ``rho_inv``; the domain's rho, 0..1) and its face index ``n_cells_flattened`` (the number of cells whose
+    resistivity was set; 0 when nothing acted), the resistivity ratio ``eta(rho_inv)/eta(axis cell)`` of the plain
+    profile, ``q_min_after`` and its rho, ``q_floor_met``, the number of steady states formed, the largest change of
+    the enclosed current against the plain state as a fraction of Ip, and the flux moved on the axis cell.
+    """
+    qf = _check_q_floor(q_floor)
+    rf = np.asarray(rho_faces, dtype=float)
+    st0 = solver.steady_state(rf, t=t, psi_boundary=psi_boundary)
+    phi_b = solver.geometry_at(t).phi_b
+    q0 = face_q(st0, phi_b)
+    jmin = int(np.argmin(np.where(np.isfinite(q0), q0, np.inf)))
+    rec = dict(core_relaxation="q_floor", q_floor_form="resistive", q_floor=qf, q_min_before=float(q0[jmin]),
+               rho_q_min_before=float(rf[jmin]), q_edge=float(q0[-1]),
+               rho_floor_crossings=floor_crossings(rf, q0, qf), acted=False, n_cells_flattened=0, rho_floor=None,
+               eta_ratio_inv_to_axis=None, q_min_after=float(q0[jmin]), rho_q_min_after=float(rf[jmin]),
+               q_floor_met=bool(np.all(q0 >= qf)), n_steady_states=1, d_enclosed_current_max_over_ip=0.0,
+               d_psi_axis_cell=0.0)
+    if not q0[-1] >= qf:
+        raise QFloorRefused(f"q = {q0[-1]:.4g} at the domain edge is below the floor q_floor = {qf:g}: the core "
+                            "cannot be held at the floor")
+    below = np.flatnonzero(~(q0 >= qf))
+    k_max = int(below[-1]) if below.size else 0
+    if k_max < 1:
+        return st0, rec, solver
+    st = sol = q = None
+    for k in range(1, k_max + 1):
+        sol = ResistiveFloor(solver, qf, rho_inv=rf[k]).with_solver()
+        st = sol.steady_state(rf, t=t, psi_boundary=psi_boundary)
+        rec["n_steady_states"] += 1
+        q = face_q(st, phi_b)
+        if np.all(q >= qf):
+            break
+    rc = 0.5 * (rf[1:] + rf[:-1])
+    sig = np.asarray(solver.sigma_fn(t, np.array([rc[0], rf[k]])), float)
+    i0 = solver.profiles(st0)["I_enclosed"]
+    i1 = sol.profiles(st)["I_enclosed"]
+    ip = float(st0.meta.get("ip", np.nan))
+    j1 = int(np.argmin(np.where(np.isfinite(q), q, np.inf)))
+    rec.update(acted=True, n_cells_flattened=int(k), rho_floor=float(rf[k]), eta_ratio_inv_to_axis=float(sig[0] / sig[1]),
+               q_min_after=float(q[j1]), rho_q_min_after=float(rf[j1]), q_floor_met=bool(np.all(q >= qf)),
+               d_enclosed_current_max_over_ip=float(np.max(np.abs(i1 - i0)) / ip) if ip else float("nan"),
+               d_psi_axis_cell=float(st.psi[0] - st0.psi[0]))
+    st.meta = dict(st.meta or {}, q_floor=dict(q_floor=qf, form="resistive", acted=True, rho_floor=float(rf[k]),
+                                               q_floor_met=rec["q_floor_met"]))
+    return st, rec, sol
 
 
 def floor_q(state, solver, q_floor=DEFAULT_Q_FLOOR):
-    r"""Time-averaged core state: q held at ``q_floor`` wherever the state's own q is below it.
+    r"""Sharp q floor (opt-in ``q_floor_form="sharp"``; the default is the resistive floor, module docstring): q
+    clamped to ``q_floor`` wherever the state's own q is below it.
 
     On every interior face where ``q = Phi_b rho / (pi psi')`` (positive frame,
     :meth:`.diffusion.CurrentDiffusion.profiles`) is below ``q_floor``, ``psi'`` is replaced by
@@ -277,20 +501,23 @@ def floor_q(state, solver, q_floor=DEFAULT_Q_FLOOR):
     faces: the current inside a floored region is flattened and its total returns at the outer face of the region, so
     ``Ip`` is conserved without a separate correction (``q I`` is a function of rho alone on fixed surfaces).
     ``q_new = max(q, q_floor)`` on every interior face, so q is continuous across the floor radius (the slope breaks
-    there).  It is the identity on a state with ``q >= q_floor`` on every interior face.
+    there) and ``<J.B>`` is NOT: it jumps at the floor radius (the flat-q core against the unflattened shear outside;
+    a drop of about a third of the local value on the synthetic test fixture).  It is the identity on a state with
+    ``q >= q_floor`` on every interior face.
 
     Refused (:class:`QFloorRefused`): q below the floor at the domain edge, or on the last interior face (the second-
     order boundary gradient uses the two outer cells, so flooring there would change the edge current).
 
     Returns ``(state, record)`` (the input state itself when nothing changes).  ``record``: ``acted`` (the state
-    changed), ``q_floor``, ``q_min_before`` and its ``rho``, ``q_edge``, the number of floored faces, ``rho_floor``
+    changed), ``q_floor``, ``q_min_before`` and its ``rho``, ``q_edge``, the number of floored faces
+    (``n_faces_floored``; 0 when nothing changed) and of faces below the floor before (``n_faces_below_floor``, which
+    counts faces at the floor to round-off in a state floored before), every crossing of the floor by the state's q
+    (``rho_floor_crossings``: inner and outer edges of each region, reversed shear included), ``rho_floor``
     (the outer crossing ``q = q_floor`` of the outermost floored region, interpolated linearly in q between the last
     floored face and the next face; the domain's rho, 0..1), the largest change of the enclosed current as a fraction
     of ``Ip`` and the flux moved on the axis cell [Wb/rad].
     """
-    qf = float(q_floor)
-    if not (np.isfinite(qf) and qf > 0.0):
-        raise ValueError("q_floor must be finite and > 0")
+    qf = _check_q_floor(q_floor)
     rf = np.asarray(state.rho_faces, dtype=float)
     rc = state.rho_cells
     n = rc.size
@@ -304,9 +531,11 @@ def floor_q(state, solver, q_floor=DEFAULT_Q_FLOOR):
     inner = np.arange(1, n)
     below = ~(q[inner] >= qf)
     jmin = int(np.argmin(np.where(np.isfinite(q), q, np.inf)))
-    rec = dict(core_relaxation="q_floor", q_floor=qf, q_min_before=float(q[jmin]), rho_q_min_before=float(rf[jmin]),
-               q_edge=float(q[n]), acted=bool(np.any(below)), n_faces_floored=int(np.count_nonzero(below)),
-               rho_floor=None, d_enclosed_current_max_over_ip=0.0, d_psi_axis_cell=0.0)
+    rec = dict(core_relaxation="q_floor", q_floor_form="sharp", q_floor=qf, q_min_before=float(q[jmin]),
+               rho_q_min_before=float(rf[jmin]), q_edge=float(q[n]), acted=bool(np.any(below)),
+               n_faces_floored=int(np.count_nonzero(below)), n_faces_below_floor=int(np.count_nonzero(below)),
+               rho_floor_crossings=floor_crossings(rf, q, qf), rho_floor=None, d_enclosed_current_max_over_ip=0.0,
+               d_psi_axis_cell=0.0)
     if not q[n] >= qf or not q[n - 1] >= qf:
         raise QFloorRefused(f"q = {q[n]:.4g} at the domain edge and {q[n - 1]:.4g} on the last interior face: below "
                             f"the floor q_floor = {qf:g} there, so the core cannot be floored at fixed edge current")
@@ -320,7 +549,7 @@ def floor_q(state, solver, q_floor=DEFAULT_Q_FLOOR):
     psi[:-1] = state.psi[-1] - np.cumsum((new[1:n] * np.diff(rc))[::-1])[::-1]
     if np.array_equal(psi, state.psi):
         # faces already at the floor to round-off (e.g. a state floored before): nothing changes
-        rec["acted"] = False
+        rec.update(acted=False, n_faces_floored=0)
         return state, rec
     k = int(fl[-1])
     q0_, q1_ = q[k], q[k + 1]
@@ -330,7 +559,7 @@ def floor_q(state, solver, q_floor=DEFAULT_Q_FLOOR):
     rec.update(rho_floor=rho1, d_psi_axis_cell=float(psi[0] - state.psi[0]),
                d_enclosed_current_max_over_ip=(float(np.nanmax(np.abs(di))) / ip if ip else float("nan")))
     meta = dict(state.meta or {})
-    meta["q_floor"] = dict(q_floor=qf, acted=True, rho_floor=rho1)
+    meta["q_floor"] = dict(q_floor=qf, form="sharp", acted=True, rho_floor=rho1)
     return CurrentState(rf, psi, state.psi_boundary, state.time, meta), rec
 
 

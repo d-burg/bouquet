@@ -404,3 +404,83 @@ def test_noise_is_the_same_measurement_with_lagged_columns(monkeypatch):
     assert out["lagged"]["chi2"] == out["consistent"]["chi2"] == 0.0
     assert out["lagged"]["norm"] == out["consistent"]["norm"]
     assert "consistent solve" in out["lagged"]["method"]
+
+
+def test_core_vs_floor_is_a_record_that_cannot_change_a_result(monkeypatch):
+    """``record["core_vs_floor"]`` (whether the data pull the core below the q floor) is made once, after the result,
+    and nothing reads it: a recorder that raises or returns anything leaves the fit's status, parameters,
+    covariance, chi^2 and solve count unchanged."""
+    kin, src = _kin()
+    cfg = CM.CurrentModelSettings(r0=1.0, core_relaxation="periodic_orbit")
+    outs, calls = {}, []
+    real = CM.core_vs_floor_record
+
+    def counting(core, cce):
+        calls.append(1)
+        return real(core, cce)
+
+    def raising(core, cce):
+        calls.append(1)
+        raise RuntimeError("injected")
+
+    def garbage(core, cce):
+        calls.append(1)
+        return dict(q_axis_model_minus_floor=-99.0, d_current_inside_core_over_ip=99.0, verdict="below")
+
+    for name, fn in (("real", counting), ("raising", raising), ("garbage", garbage)):
+        fm = FakeFM()
+        _install(monkeypatch, fm)
+        monkeypatch.setattr(CM, "core_vs_floor_record", fn)
+        n0 = len(calls)
+        outs[name] = FIT.reconstruct(fm, kin, src, cfg, FIT.FitSettings(free=SAW_FREE),
+                                     params0=dict(log_strength=0.5, f=0.37))
+        assert len(calls) == n0 + 1                       # made once, at the end
+    ref = outs["real"]
+    assert ref.record["core_vs_floor"]["note"].startswith("record only")
+    assert outs["raising"].record["core_vs_floor"]["computed"] is False
+    assert outs["garbage"].record["core_vs_floor"]["verdict"] == "below"
+    for name in ("raising", "garbage"):
+        o = outs[name]
+        assert o.status == ref.status and o.record["n_solves"] == ref.record["n_solves"]
+        np.testing.assert_array_equal(o.theta, ref.theta)
+        np.testing.assert_array_equal(o.covariance, ref.covariance)
+        np.testing.assert_equal(o.chi2, ref.chi2)
+        assert o.params == ref.params
+    # the record carries the floor and correction quantities as they are, with no threshold or verdict
+    core = dict(q_floor=1.0, acted=True, q_floor_met=True, q_axis_model_minus_floor=-0.03, q_min_model_minus_floor=-0.04,
+                rho_q_min_model=0.1)
+    cce = dict(computed=True, core_rho=0.3, d_current_inside_core_over_ip=0.01, d_q_axis_model=-0.05)
+    r = real(core, cce)
+    assert r["q_axis_model_minus_floor"] == -0.03 and r["d_current_inside_core_over_ip"] == 0.01
+    assert r["d_q_axis_model"] == -0.05 and not any(isinstance(v, bool) and k not in ("floor_acted", "q_floor_met",
+                                                                                         "correction_effect_computed")
+                                                    for k, v in r.items())
+
+
+def test_default_fit_records_the_sawtooth_parameters_as_not_used(monkeypatch):
+    """On a path that does not read them (the default core treatment), the sawtooth parameters are recorded as not
+    used rather than as their opt-in defaults; under the opt-in orbit they are kept."""
+    kin, src = _kin()
+    fm = FakeFM()
+    _install(monkeypatch, fm)
+    out = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=1.0, core_relaxation="periodic_orbit"),
+                          FIT.FitSettings(free=SAW_FREE), params0=dict(log_strength=0.5, f=0.37))
+    assert out.params["f"] == 0.37 and "params_not_used" not in out.record
+    # the default treatment (q floor; the sawtooth parameters cannot be freed there): recorded as None
+    with pytest.raises(ValueError, match="opt-in sawtooth"):
+        FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=1.0), FIT.FitSettings(free=SAW_FREE))
+    fm = FakeFM()
+    _install(monkeypatch, fm)
+
+    def consistent(fm_, kin_, src_, params, cfg, start, z0, label, initial_profiles=None, state_fn=None):
+        fm_.n_solves += 1
+        fm_.theta_state = TRUE + params["a_corr"][0]          # the mocked model reads the first correction instead
+        solve = SimpleNamespace(stats={"q_0": 1.0}, status="converged",
+                                record={"policy": {"verification": {"verdict": "PASS"}}})
+        return CM.ConsistentResult(True, "consistent", 3, {"orbit_z": None, "fractions": {}}, {"lag": True}, solve,
+                                   {"passes": [], "reason": None}, 0.01)
+
+    monkeypatch.setattr(FIT, "_consistent", consistent)
+    out = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=1.0), FIT.FitSettings())
+    assert out.params["f"] is None and out.params["log_strength"] is None
+    assert out.record["params_not_used"] == ["log_strength", "f"]

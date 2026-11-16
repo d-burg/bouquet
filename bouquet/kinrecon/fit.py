@@ -52,7 +52,11 @@ result records the measured Ip, the fitted Ip (the solved equilibrium's) and ``(
 fitted)/sigma`` (``record["ip_fit"]``).
 
 Every result records its core treatment (``record["core"]``, :func:`.current_model.core_record`: the
-``core_relaxation``, ``q_floor``, whether the floor acted and the floor radius in rho_tor,norm).
+``core_relaxation``, ``q_floor`` and its form, whether the floor acted, the floor radius and the floor crossings in
+rho_tor,norm) and, as a record for the reader with no threshold, whether the data pull the core below the floor
+(``record["core_vs_floor"]``, :func:`.current_model.core_vs_floor_record`: the fitted model q at the axis and its
+minimum against the floor, and the signed change the corrections made to the core current and the axis q); nothing
+reads it.
 
 Every result also records what its current corrections did to the core (``record["correction_core_effect"]``,
 :func:`.current_model.correction_core_effect`; a record only): each amplitude against its prior sigma, and the
@@ -558,6 +562,10 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
         rec["core"] = ((center["res"].assembly or {}).get("core") if center is not None and center["res"].assembly
                        else dict(core_relaxation=cfg.core_relaxation, q_floor=float(cfg.q_floor),
                                  note="no consistent center"))
+        try:      # whether the data pull the core below the floor: a record only, nothing reads it
+            rec["core_vs_floor"] = _cm.core_vs_floor_record(rec["core"], rec["correction_core_effect"])
+        except Exception as exc:  # noqa: BLE001 -- a record must never end a fit
+            rec["core_vs_floor"] = dict(computed=False, reason=f"{type(exc).__name__}: {exc}"[:300])
         cov = np.full((len(names), len(names)), np.nan)
         sig = np.full(len(names), np.nan)
         chi = {}
@@ -576,7 +584,13 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
                         if col.get("noise_limited"):
                             info_flags[col["name"]] = "no information: column at the noise floor after the step growths"
                     rec["covariance_column_flags"] = info_flags
-        return FitResult(status=status, params=_to_params(center["theta"] if center is not None else th, names, base),
+        par = _to_params(center["theta"] if center is not None else th, names, base)
+        if state_fn is not None or cfg.core_relaxation not in _cm.SAWTOOTH_RELAXATIONS:
+            # the sawtooth parameters are not read on this path (the default core treatment or a supplied state):
+            # recorded as not used rather than as their opt-in defaults
+            par.update(log_strength=None, f=None)
+            rec["params_not_used"] = ["log_strength", "f"]
+        return FitResult(status=status, params=par,
                          free=names, theta=(center["theta"] if center is not None else th).copy(), sigma=sig,
                          covariance=cov, chi2=chi, record=rec)
 

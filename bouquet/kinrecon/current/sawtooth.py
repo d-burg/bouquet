@@ -245,8 +245,8 @@ shallow dip next to the axis; the full blow-up of (i) where a strong off-axis so
   floor acted on 47 of 50 steps of an interval and 1-5 slices per series were lost to the pass limit; with branch
   (b) taken from the model's steady state instead, the floor acted on nearly every step but the pass loop failed on
   most slices (the region's edge, the state's own crossing, moves with the geometry of each pass); with this rule
-  every slice converged (2-3 passes at flat Ip, 7 on the ramp) and the steps of 1 and 0.5 ms agreed in the traced
-  q0 to about 1e-8 (flat) and 1e-7 (ramp).  Cost: one steady search (tens of steady states) per diffusion step,
+  every slice converged (2-3 passes at flat Ip, 5-8 on the ramp) and the steps of 1 and 0.5 ms agreed in the traced
+  q0 to about 1e-8 (flat) and 2e-5 (ramp).  Cost: one steady search (tens of steady states) per diffusion step,
   kept small by the solver reusing the geometry it evaluated at a time;
 * the resistivity enters the diffusion per cell (the cell integral of the conductivity, midpoint rule); a cell cut
   by the region's edge takes the OVERLAP-WEIGHTED conductivity ``w sigma(rho_inv) + (1 - w) sigma_cell``

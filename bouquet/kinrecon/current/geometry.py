@@ -188,6 +188,9 @@ def choose_psi_n_edge(grid_shape=None, route_disagreement=None, psi_n_xpoint=Non
     else:
         checks["psi_n_xpoint"] = "not checked (no X-point location given)"
     rule_reason = "default (domain-edge rule)"
+    unchecked = [k for k, v in checks.items() if isinstance(v, str)]
+    if unchecked:
+        rule_reason += "; not given: " + ", ".join(unchecked)
     if requested is not None:
         checks["rule_choice"] = rule
         reason = f"requested by the caller (rule would give {rule})"

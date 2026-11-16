@@ -8,12 +8,14 @@ inside rho ~0.56 with q ~2.7 at the domain edge, so the floor q = 1 acts there.
 
 Checked, sharp clamp (opt-in): Ip conserved, q >= floor after, the identity where q >= floor, refusal when q at the
 domain edge is below the floor, continuity of q at the floor radius, idempotence (and no face counted as floored when
-nothing changed).  Resistive floor (default): Ip conserved, the resistivity inside the flattening radius equal to its
-value there and unchanged outside, q raised, FUSE's steady-state rule (the first face from the axis whose steady
-state has q >= floor everywhere, else the outermost face below the floor, recorded), no current jump at the
-flattening radius in the grid limit (the sharp clamp's jump does not shrink), the identity where q >= floor,
-refusal at the domain edge, the inner and outer crossings of a reversed-shear profile; its time-dependent form takes
-the flattening radius from the state at the start of each step.  The default treatment of a single slice (the floor
+nothing changed).  Resistive floor (default form; the tests that pin the radius to a face select FUSE's grid rule,
+``rule="grid"``, kept for comparison -- the default continuous rule is tested in ``test_q_floor_continuous.py``): Ip
+conserved, the resistivity inside the flattening radius equal to its value there and unchanged outside, q raised,
+FUSE's steady-state rule (the first face from the axis whose steady state has q >= floor everywhere, else the
+outermost face below the floor, recorded), no current jump at the flattening radius in the grid limit (the sharp
+clamp's jump does not shrink), the identity where q >= floor, refusal at the domain edge, the inner and outer
+crossings of a reversed-shear profile; its time-dependent form takes the flattening radius from the state at the
+start of each step.  The default treatment of a single slice (the floor
 on the MODEL state, the corrections added after it, bit-identical to the plain steady state where the floor does not
 act); a series under the default applies the same floor on every step and records it per slice; the opt-in sawtooth
 treatments stay reachable and are refused where they are not selected.
@@ -115,9 +117,10 @@ def _face_q(sol, st):
 
 
 def test_resistive_floor_conserves_ip_flattens_the_resistivity_and_raises_q():
+    # FUSE's grid rule (rule="grid", kept for comparison; the default continuous rule: test_q_floor_continuous.py)
     sol, st0 = _steady(IP_LOW_Q)
     rf = st0.rho_faces
-    st, rec, s2 = SAW.resistive_floor_steady(sol, rf, 1.0)
+    st, rec, s2 = SAW.resistive_floor_steady(sol, rf, 1.0, rule="grid")
     p0, p1 = sol.profiles(st0), s2.profiles(st)
     assert rec["acted"] and rec["q_floor_form"] == "resistive" and rec["q_min_before"] < 1.0
     k = rec["n_cells_flattened"]
@@ -138,13 +141,14 @@ def test_resistive_floor_conserves_ip_flattens_the_resistivity_and_raises_q():
 
 @pytest.mark.parametrize("fac", [1.74, 1.86, 2.2])
 def test_resistive_floor_takes_the_flattening_radius_by_the_fuse_steady_state_rule(fac):
-    """The first face from the axis whose steady state has q >= floor on every face; when none up to the outermost
-    face where the plain state's q is below the floor does, that outermost face, recorded as not meeting the floor."""
+    """FUSE's grid rule (rule="grid", kept for comparison): the first face from the axis whose steady state has
+    q >= floor on every face; when none up to the outermost face where the plain state's q is below the floor does,
+    that outermost face, recorded as not meeting the floor."""
     sol, st0 = _steady(fac * GEO.IP)
     rf = st0.rho_faces
     q0 = _face_q(sol, st0)
     k_max = int(np.flatnonzero(q0 < 1.0)[-1])
-    st, rec, s2 = SAW.resistive_floor_steady(sol, rf, 1.0)
+    st, rec, s2 = SAW.resistive_floor_steady(sol, rf, 1.0, rule="grid")
     k = rec["n_cells_flattened"]
 
     def meets(j):
@@ -199,8 +203,9 @@ def test_resistive_floor_is_the_identity_where_q_is_above_the_floor_and_refuses_
 
 def test_reversed_shear_records_the_inner_and_the_outer_crossing():
     """An off-axis region below the floor (q0 > floor): both crossings are recorded, the inner one falling through
-    the floor ('down') and the outer one rising ('up'); the time-dependent rule flattens out to the outermost face
-    below the floor; the sharp clamp leaves the axis untouched."""
+    the floor ('down') and the outer one rising ('up'); FUSE's grid rule (rule="grid", kept for comparison) flattens
+    out to the outermost face below the floor; the sharp clamp leaves the axis untouched.  (The default continuous
+    rule does not act on this state: test_q_floor_continuous.py.)"""
     lag = GEO._lag()
     rho = lag["phys"]["rho"]
     jni = lag["jbs"] + 8.0 * np.max(np.abs(lag["jbs"])) * np.exp(-0.5 * ((rho - 0.5) / 0.08) ** 2)
@@ -211,18 +216,19 @@ def test_reversed_shear_records_the_inner_and_the_outer_crossing():
     assert q[0] > 1.0 and q.min() < 1.0 < q[-1]
     cr = SAW.floor_crossings(rf, q, 1.0)
     assert [c["direction"] for c in cr] == ["down", "up"] and cr[0]["rho"] < rf[np.argmin(q)] < cr[1]["rho"]
-    k, r_inv = SAW.ResistiveFloor(sol, 1.0).region(st0)
+    k, r_inv = SAW.ResistiveFloor(sol, 1.0, rule="grid").region(st0)
     assert r_inv == rf[k] and q[k] < 1.0 <= q[k + 1] and cr[1]["rho"] > r_inv
     st_s, rec_s = SAW.floor_q(st0, sol, 1.0)
     assert [c["direction"] for c in rec_s["rho_floor_crossings"]] == ["down", "up"]
     assert rec_s["rho_floor"] == pytest.approx(cr[1]["rho"], rel=1e-12)
-    st, rec, _ = SAW.resistive_floor_steady(sol, rf, 1.0)
+    st, rec, _ = SAW.resistive_floor_steady(sol, rf, 1.0, rule="grid")
     assert [c["direction"] for c in rec["rho_floor_crossings"]] == ["down", "up"] and rec["acted"]
 
 
 def test_time_dependent_floor_takes_the_radius_from_the_state_at_the_start_of_the_step():
+    # FUSE's grid rule (rule="grid", kept for comparison; the default continuous rule: test_q_floor_continuous.py)
     sol, st0 = _steady(IP_LOW_Q)
-    mod = SAW.ResistiveFloor(sol, 1.0)
+    mod = SAW.ResistiveFloor(sol, 1.0, rule="grid")
     s2 = mod.with_solver()
     assert sol.resistivity_modifier is None and s2.resistivity_modifier is mod
     k, r_inv = mod.region(st0)

@@ -165,6 +165,7 @@ L. F. Shampine, Appl. Numer. Math. 20, 21 (1996).
 """
 
 import json
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Optional
 
@@ -188,6 +189,7 @@ __all__ = [
 
 _TRBDF2_GAMMA = 2.0 - np.sqrt(2.0)
 _RANGE_RTOL = 1e-12     # a table "covers" a request that lies outside it by no more than this fraction of its span
+_TIME_CACHE_SIZE = 8     # evaluated time-dependent geometries kept per solver (a cache size: changes no number)
 
 
 class PositiveFrameError(ValueError):
@@ -682,6 +684,7 @@ class CurrentDiffusion:
         self.boundary = boundary
         self.resistivity_modifier = resistivity_modifier
         self._static_cache = {}
+        self._time_cache = OrderedDict()      # time-dependent geometry: (t, faces) -> evaluated geometry (no numbers)
         if isinstance(outer_layer, str):
             if outer_layer != "none":
                 raise ValueError("outer_layer must be an OuterLayer, 'none' or None")
@@ -741,8 +744,14 @@ class CurrentDiffusion:
         rc = 0.5 * (rf[1:] + rf[:-1])
         h = np.diff(rf)
         key = rf.tobytes()
+        tkey = None if self._geo_fn is None else (float(t), key)
         if self._geo_fn is None and key in self._static_cache:
             geo, gf, gc = self._static_cache[key]
+        elif tkey is not None and tkey in self._time_cache:
+            # the same time and faces evaluated again (a steady search at one time, a step's end and the next step's
+            # start): the geometry is a fixed function of t, so this is the same evaluation, reused
+            geo, gf, gc = self._time_cache[tkey]
+            self._time_cache.move_to_end(tkey)
         else:
             geo = self.geometry_at(t)
             self._check_edge(geo)
@@ -751,6 +760,10 @@ class CurrentDiffusion:
             gc = geo.evaluate(rc)
             if self._geo_fn is None:
                 self._static_cache[key] = (geo, gf, gc)
+            else:
+                self._time_cache[tkey] = (geo, gf, gc)
+                while len(self._time_cache) > _TIME_CACHE_SIZE:
+                    self._time_cache.popitem(last=False)
         sigma = np.asarray(self.sigma_fn(t, rc), dtype=float)
         if self.resistivity_modifier is not None:
             sigma = 1.0 / np.asarray(self.resistivity_modifier(t, rc, 1.0 / sigma, state), dtype=float)

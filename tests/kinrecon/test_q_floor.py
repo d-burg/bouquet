@@ -338,8 +338,8 @@ def test_opt_in_sawtooth_treatments_are_reachable_and_refused_elsewhere():
 
 def test_series_default_floors_every_step_with_the_single_slice_treatment(monkeypatch):
     """Both modes use the same treatment by default: the first slice is solved with core_relaxation 'q_floor' and the
-    series' q_floor, and every interval applies the resistive floor on every step, the flattening radius taken from
-    the state at the start of the step."""
+    series' q_floor, and every interval applies the resistive floor on every step, the region decided at the start of
+    the step (the single-slice region of the step's sources, test_q_floor_continuous.py)."""
     lag = SD._lag()
     ip = IP_LOW_Q
     fm = SD.FakeFM(dict(pred=lag))

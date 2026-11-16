@@ -9,7 +9,8 @@ Synthetic geometry as in ``test_q_floor.py`` (no OFT).  Checked:
   cells outside their own; the state is continuous when the edge crosses a face;
 * the radius and q0 converge with the grid; the radius and q0 move continuously and monotonically with the level;
 * the three branches: (a) q below the floor on axis -- the region from the axis; (b) below it off axis only -- no
-  change, recorded; (c) nowhere -- no change; the time-dependent rule follows the same branches;
+  change, recorded; (c) nowhere -- no change; the time-dependent rule takes on every step the single-slice region of
+  the step's sources (the same branches), not a region read from the evolving state;
 * the records (loop voltage, l_i, current moved outside the radius, achieved q) are what they say and cannot change a
   fit or a series.
 """
@@ -153,7 +154,8 @@ def test_branch_a_axis_below_the_floor_flattens_from_the_axis():
     sig = s2.profiles(st)["conductivity"]
     s_r = float(sol.sigma_fn(0.0, np.array([rec["rho_floor"]]))[0])
     np.testing.assert_allclose(sig[rf[1:] <= rec["rho_floor"]], s_r, rtol=ULP2, atol=0)
-    # the time-dependent rule: the region from the axis to the outermost upward crossing of the state's q
+    # the time-dependent rule takes the single-slice region of the sources; on this fixture the floor is not met, so
+    # that region ends at the plain state's outermost upward crossing (the steady rule's fallback)
     mod = SAW.ResistiveFloor(sol, 1.0)
     info = mod.region_info(st0)
     up = [c["rho"] for c in SAW.floor_crossings(rf, _fq(sol, st0), 1.0) if c["direction"] == "up"][-1]
@@ -183,6 +185,62 @@ def test_branch_b_off_axis_minimum_only_leaves_the_state_unchanged_and_records_i
     assert info["branch"] == "off_axis" and info["k"] == 0 and info["rho_inv"] is None
     ref = sol.step(st0, 1e-3).psi
     np.testing.assert_allclose(mod.with_solver().step(st0, 1e-3).psi, ref, rtol=0, atol=1e-12 * np.ptp(ref))
+
+
+def test_time_dependent_region_is_the_single_slice_region_of_the_sources():
+    """On a diffusion step the region is the single-slice region of the solver's sources at the step's time, whatever
+    the state: here a floored state whose own q0 is just above the floor and whose minimum is just below it, off axis
+    (its own q would say branch (b), no change, and switch the whole region off for that step), and the plain state
+    (its own q would put the edge at its outermost crossing) both get the single-slice region; a step with it is a
+    step with that region fixed.  Where the sources' steady state is in branch (b) or (c) nothing changes, whatever
+    the state (the reversed-shear and q-above-floor cases are in the branch tests)."""
+    sol = _solver(IP_MET)
+    rf = CurrentState.uniform_faces(100)
+    st_ss, rec, _ = SAW.resistive_floor_steady(sol, rf, 1.0)
+    assert rec["floor_branch"] == "axis" and rec["acted"]
+    r = rec["rho_floor"] - 0.5 * (rf[1] - rf[0])        # half a cell short of the radius that meets the floor
+    st = SAW.ResistiveFloor(sol, 1.0, rho_inv=r, rho_faces=rf).with_solver().steady_state(rf)
+    q = _fq(sol, st)
+    assert q[0] >= 1.0 > q.min() and int(np.argmin(q)) > 0
+    st0 = sol.steady_state(rf)
+    for s_ in (st, st0, st_ss):
+        mod = SAW.ResistiveFloor(sol, 1.0)
+        info = mod.region_info(s_)
+        assert info["branch"] == "axis" and info["rho_inner"] == 0.0 and info["rho_inv"] == rec["rho_floor"]
+        assert info["k"] == rec["n_cells_flattened"] and info["q_axis_model_steady"] == rec["q_axis_before"]
+        fixed = SAW.ResistiveFloor(sol, 1.0, rho_inv=rec["rho_floor"], rho_faces=rf).with_solver().step(s_, 1e-3)
+        np.testing.assert_array_equal(mod.with_solver().step(s_, 1e-3).psi, fixed.psi)
+    assert SAW.ResistiveFloor(sol, 1.0).region_info(st)["state_branch"] == "off_axis"
+    assert SAW.ResistiveFloor(sol, 1.0).region_info(st0)["state_branch"] == "axis"
+    # the floored steady state is a fixed point of the time-dependent rule: a step from it leaves it in place
+    st1 = SAW.ResistiveFloor(sol, 1.0).with_solver().step(st_ss, 1e-3)
+    np.testing.assert_allclose(st1.psi - st1.psi_boundary, st_ss.psi - st_ss.psi_boundary, rtol=0,
+                               atol=1e-9 * np.ptp(st_ss.psi))
+
+
+def test_time_dependent_geometry_is_evaluated_once_per_time_and_the_reuse_changes_no_number():
+    """The time-dependent rule forms tens of steady states at each step's time; the solver keeps the geometry it
+    evaluated at a time (a cache) instead of evaluating it again.  Every coefficient from a solver that reuses it is
+    bitwise the coefficient of a solver that has never seen that time."""
+    lag0, lag1 = SD._lag(q0=1.1), SD._lag(q0=1.4)
+    args = (lag0, lag1, lag0["jbs"] + 1.0, 2.0 * lag1["jbs"] + 1.0, 0.0, 0.05, IP_LOW_Q, 1.1 * IP_LOW_Q)
+    sol = SE.interval_solver(*args)[0]
+    rf = CurrentState.uniform_faces(100)
+    times = (0.0, 0.0125, 0.05, 0.0125, 0.0, 0.03, 0.0125)
+    for t in times:
+        c = sol.coefficients(t, rf)
+        ref = SE.interval_solver(*args)[0].coefficients(t, rf)
+        for name in ("k_f", "F_f", "m_c", "s_c", "w_c", "sigma_c", "jni_c"):
+            np.testing.assert_array_equal(getattr(c, name), getattr(ref, name))
+        assert (c.w_b, c.bc_value, c.layer_A, c.layer_B, c.F_lcfs) == (ref.w_b, ref.bc_value, ref.layer_A,
+                                                                       ref.layer_B, ref.F_lcfs)
+    assert len(sol._time_cache) == len(set(times))
+    # the geometry differs between the ends (so the check above is not trivial)
+    assert not np.array_equal(sol.coefficients(0.0, rf).k_f, sol.coefficients(0.05, rf).k_f)
+    # a steady search and a step with the floor give the same numbers on a fresh solver
+    _, rec, _ = SAW.resistive_floor_steady(sol, rf, 1.0, t=0.0125)
+    _, rec2, _ = SAW.resistive_floor_steady(SE.interval_solver(*args)[0], rf, 1.0, t=0.0125)
+    assert rec["rho_floor"] == rec2["rho_floor"] and rec["q_axis_after"] == rec2["q_axis_after"]
 
 
 def test_branch_c_q_above_the_floor_everywhere_changes_nothing():

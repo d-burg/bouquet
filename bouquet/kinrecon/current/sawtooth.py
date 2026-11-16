@@ -213,6 +213,21 @@ differs from FUSE's actor (none of it adds a number):
 * time-dependent: the flattening radius is decided on every diffusion step; FUSE decides it once per actor step
   (a step of ``Nt`` sub-steps) when it solves for Ip, and on every sub-step in its loop-voltage-controller mode.
 
+:func:`q_reset` (opt-in, EXPERIMENTAL, ``q_floor_form="reset"``) applies the Grad-Shafranov solver's own sawtooth q
+reset to the model state instead: where q < level, ``q -> level + dq * shape(rho / rho_m)`` (rule 1 from the axis to
+the mixing radius ``rho_m``, rule 2 about each dip's own minimum), with the zero-net current change
+``dI = I (q/q_new - 1)``.  Where it acts and what it does to the bookkeeping:
+
+* single slice (:mod:`..current_model`): on the steady state of the model sources, before the corrections, re-evaluated
+  on every assembly relative to that pass's model state (never accumulated).  The reset current is driven by no term
+  of the flux-diffusion equation: Ohm's law holds for the rest of the current, the loop voltage is that of the plain
+  steady state, and the reset current is an extra zero-net current (in steady state identical to the response of a
+  zero-net non-inductive source carrying it, :func:`reset_source_solver`);
+* series (:mod:`..series`, ``q_reset_series``): ``"projection"`` applies the reset to the state after every diffusion
+  step, so the equation never sees it and the next step's diffusion partly undoes it (step-size dependent);
+  ``"source"`` makes the reset current of a BASE state (the model sources advanced without the reset) a zero-net
+  non-inductive source of each step, so the equation carries it and its stationary state is the single-slice state.
+
 :func:`floor_q` (opt-in, ``q_floor_form="sharp"``) is the earlier construction: q clamped to ``max(q, q_floor)`` on
 the faces, which makes ``<J.B>`` jump at the floor radius (q is continuous there, its slope breaks); it is kept for
 comparison and for the periodic orbit's starting guess.  :mod:`..current_model` applies the default to the steady

@@ -120,6 +120,11 @@ move current in the q < 1 region when a correction moves the q = 1 surface.  The
 time-dependent path always uses the plain Gaussians.  Every fit and series slice records what its corrections did
 to the core (:func:`correction_core_effect`).
 
+The series' non-default form ``filter_correction="carried_outside_core"`` (:mod:`.series`) splits each plain
+Gaussian at a core radius ``r_c`` with a continuous taper ``w`` (:func:`carry_taper`): the core part ``(1 - w) g_k``
+is an in-window source, and the outer part becomes a zero-net change of the carried state that is zero inside
+``r_c`` (:func:`carried_outside_core_parts`, :func:`carried_update`).
+
 :func:`lagged_solve` (geometry-dependent inputs lagged from a center) is kept for callers that
 want it; the fit (:mod:`.fit`) now takes its Jacobian columns from consistent solves.
 """
@@ -570,6 +575,138 @@ def local_return_shape(rho, center, width, return_width, lam):
     return np.exp(-0.5 * ((rho - center) / width) ** 2) - lam * np.exp(-0.5 * ((rho - center) / return_width) ** 2)
 
 
+def carry_taper(rho, r_core, width):
+    """Weight of the carried part of a correction in the series form ``filter_correction="carried_outside_core"``:
+
+    .. code-block:: text
+
+        w(rho) = 0                                    rho <= r_c
+        w(rho) = sin^2(pi (rho - r_c) / (2 Delta))    r_c < rho < r_c + Delta
+        w(rho) = 1                                    rho >= r_c + Delta
+
+    on rho_tor,norm, ``r_c = r_core``, ``Delta = width`` (> 0).  ``w`` and its slope are continuous, so neither the
+    carried part ``w g`` nor the in-window part ``(1 - w) g`` of a correction jumps anywhere."""
+    if not float(width) > 0.0:
+        raise ValueError("the taper width must be > 0")
+    x = np.clip((np.asarray(rho, float) - float(r_core)) / float(width), 0.0, 1.0)
+    return np.sin(0.5 * np.pi * x) ** 2
+
+
+def _gauss_current_measure(geom, layer, rmap, center, width, r_core=None, taper_width=None):
+    """``int G(rho; center, width) [w(rho)] dV / (2 pi F^2)`` over the domain (trapezoid on the geometry's grid) and
+    the outer layer: the integral :func:`correction_shapes` normalizes a Gaussian with (``w`` the taper of
+    :func:`carry_taper` when ``r_core`` is given)."""
+    gc = geom.evaluate(geom.rho, ["dvol_drho", "fpol"])
+    rg = geom.rho * rmap.rho_edge
+    rl = rmap.rho_of_psin(layer.psi_n)
+    fg = np.exp(-0.5 * ((rg - center) / width) ** 2)
+    fl = np.exp(-0.5 * ((rl - center) / width) ** 2)
+    if r_core is not None:
+        fg, fl = fg * carry_taper(rg, r_core, taper_width), fl * carry_taper(rl, r_core, taper_width)
+    dom = np.trapezoid(gc["dvol_drho"] * fg / (2 * np.pi * gc["fpol"] ** 2), geom.rho)
+    return float(dom + layer.integral(layer.source_density(fl)))
+
+
+def carried_outside_core_parts(lag, cfg, ip, r_core, taper_width, rho_faces):
+    r"""The two parts of each current correction in the series form ``filter_correction="carried_outside_core"``
+    (:mod:`.series`), for the core radius ``r_c = r_core`` and the taper width ``Delta = taper_width`` (rho_tor,norm;
+    :func:`carry_taper`, ``w``):
+
+    .. code-block:: text
+
+        g_k      = N_k G(rho; c_k, s)                         the plain Gaussian (form "in_window"), carrying a_k Ip
+        core_k   = (1 - w) g_k                                an in-window source over the slice's interval
+        h_k      = N_k w [G(rho; c_k, s) - lam_k G(rho; c_k, r s)]     the CARRIED part
+        lam_k    = M[w G(c_k, s)] / M[w G(c_k, r s)]
+
+    with ``s = corr_width_rho``, ``r = corr_return_width_ratio`` (the existing settings of the local return) and
+    ``M[f] = sum_cells V' f / (2 pi F^2) h + (outer-layer source integral of f)``, the measure in which the diffusion
+    state counts current (its cell sources and the lumped layer).  So ``h_k`` carries zero net current in the state's
+    own measure (to round-off), its return sits in the correction's own flank OUTSIDE ``r_c``, and ``h_k = 0`` for
+    ``rho <= r_c``.  ``N_k`` is the plain Gaussian's normalization (:func:`correction_shapes`), so ``a_k`` keeps its
+    meaning (the fraction of Ip the plain Gaussian carries) and the prior on it is unchanged.  Where ``w G(c_k, r s)``
+    has no current (``r_c`` beyond the domain) ``h_k = 0``.
+
+    Returns a dict: ``core`` and ``outer`` (lists of arrays on the physics grid ``lag["phys"]["rho"]``), ``outer_cells``
+    (the carried parts' cell sources ``V' h_k / (2 pi F^2) h`` on ``rho_faces``, the diffusion's ``s_c``),
+    ``outer_layer_B`` (their outer-layer source integrals), ``lam``, the solver coefficients used for the state
+    (``k_f``, ``rc``) and the settings."""
+    geom, layer, rmap = lag["geom"], lag["layer"], lag["rho_map"]
+    rho_ge = np.asarray(lag["phys"]["rho"], float)
+    w_ge = carry_taper(rho_ge, r_core, taper_width)
+    plain = correction_shapes(lag, cfg, ip, form="in_window")
+    rf = np.asarray(rho_faces, float)
+    rc = 0.5 * (rf[1:] + rf[:-1])
+    h = np.diff(rf)
+    c = build_solver(lag, np.zeros_like(np.asarray(lag["phys"]["psi_n"], float)), 0.0).coefficients(0.0, rf)
+    vfac = c.geo_c["dvol_drho"] / (2.0 * np.pi * c.geo_c["fpol"] ** 2) * h
+    rc_std = rc * rmap.rho_edge
+    rl = rmap.rho_of_psin(layer.psi_n)
+    w_c, w_l = carry_taper(rc_std, r_core, taper_width), carry_taper(rl, r_core, taper_width)
+    s, r = float(cfg.corr_width_rho), float(cfg.corr_return_width_ratio)
+    if not r > 1.0:
+        raise ValueError("corr_return_width_ratio must be > 1")
+    core, outer, cells, lay_b, lams = [], [], [], [], []
+    for c0, g in zip(cfg.corr_centers_rho, plain):
+        c0 = float(c0)
+        norm = abs(float(ip)) / (layer.fpol_lcfs * _gauss_current_measure(geom, layer, rmap, c0, s))
+        core.append((1.0 - w_ge) * g)
+
+        def gauss(x, wid):
+            return np.exp(-0.5 * ((np.asarray(x, float) - c0) / wid) ** 2)
+
+        m1 = float(np.sum(vfac * w_c * gauss(rc_std, s)) + layer.integral(layer.source_density(w_l * gauss(rl, s))))
+        m2 = float(np.sum(vfac * w_c * gauss(rc_std, r * s))
+                   + layer.integral(layer.source_density(w_l * gauss(rl, r * s))))
+        if not (m1 > 0.0 and m2 > 0.0):
+            lams.append(None)
+            outer.append(np.zeros_like(rho_ge))
+            cells.append(np.zeros_like(rc))
+            lay_b.append(0.0)
+            continue
+        lam = m1 / m2
+        lams.append(lam)
+        outer.append(norm * w_ge * (gauss(rho_ge, s) - lam * gauss(rho_ge, r * s)))
+        cells.append(norm * vfac * w_c * (gauss(rc_std, s) - lam * gauss(rc_std, r * s)))
+        lay_b.append(float(norm * layer.integral(layer.source_density(w_l * (gauss(rl, s) - lam * gauss(rl, r * s))))))
+    return dict(core=core, outer=outer, outer_cells=cells, outer_layer_B=lay_b, lam=lams, k_f=np.asarray(c.k_f),
+                F_f=np.asarray(c.F_f), rc=rc, rho_faces=rf, rho_edge=float(rmap.rho_edge), r_core=float(r_core),
+                taper_width=float(taper_width), ip_A=abs(float(ip)), fpol_lcfs=float(layer.fpol_lcfs))
+
+
+def carried_update(parts, amplitudes):
+    """The change of the carried diffusion state made by an absorbed fit in the series form
+    ``filter_correction="carried_outside_core"``: the state whose current density is ``sum_k a_k h_k`` (the carried
+    parts of :func:`carried_outside_core_parts`) on the cells, with no ohmic part (zero net current, so the steady
+    loop voltage is zero).  Built as :func:`state_from_jdotb` builds a state (``I/F`` at the faces is the cumulative
+    cell source, ``psi' = (I/F) / k``), so the enclosed current at every face inside ``r_c`` is exactly zero.
+    Returns ``(dpsi, dpsi_boundary, record)``: the change to add to a state on the same faces (the boundary value is
+    kept: 0) and a record of the update's net current over the domain and the layer, its current at the domain edge,
+    and the largest enclosed current it makes at a face inside ``r_c`` (fractions of Ip; the first and the last are
+    zero by construction, to round-off)."""
+    from .current.diffusion import _psi_boundary_from_flux
+    a = [float(v) for v in amplitudes]
+    rc, k_f, rf = parts["rc"], parts["k_f"], parts["rho_faces"]
+    n = rc.size
+    s_c = np.zeros(n)
+    lay_b = 0.0
+    for ak, sk, bk in zip(a, parts["outer_cells"], parts["outer_layer_B"]):
+        if ak != 0.0:
+            s_c = s_c + ak * sk
+            lay_b += ak * bk
+    gam = np.cumsum(s_c)                                   # I/F at faces 1..n (the ohmic rate is zero)
+    dpsi = gam[:n - 1] * np.diff(rc) / k_f[1:n]
+    psi = np.concatenate(([0.0], np.cumsum(dpsi)))
+    psi = psi - _psi_boundary_from_flux(psi, rc, gam[-1] / k_f[-1])
+    ipv, fl, ff = parts["ip_A"], parts["fpol_lcfs"], parts["F_f"][1:]
+    inside = rf[1:] <= parts["r_core"] / parts["rho_edge"]          # faces inside r_c (domain rho)
+    rec = dict(net_current_over_ip=float(fl * (gam[-1] + lay_b) / ipv) if ipv else float("nan"),
+               domain_edge_current_over_ip=float(ff[-1] * gam[-1] / ipv) if ipv else float("nan"),
+               current_inside_r_core_over_ip=(float(np.max(np.abs(ff[inside] * gam[inside]))) / ipv
+                                              if (ipv and np.any(inside)) else 0.0))
+    return psi, 0.0, rec
+
+
 def _domain_arrays(lag, values_ge, log=False):
     """Values given on the physics grid -> (domain rho grid values, layer sample values)."""
     ge = lag["phys"]["psi_n"]
@@ -672,6 +809,12 @@ def assemble(lag, kin, src, params, cfg, ip, z0=None, state=None):
         if len(amps) != len(cfg.corr_centers_rho):
             raise ValueError("a_corr needs one amplitude per correction center")
         shapes = correction_shapes(lag, cfg, ipv, form="steady" if src_amp is None else "in_window")
+        coc = None if (state is None or src_amp is None) else (state.meta or {}).get("carried_outside_core")
+        if coc is not None:
+            # series form "carried_outside_core": the slice's corrections are the in-window core parts plus the
+            # carried outer parts (carried_outside_core_parts); both are already in the supplied state
+            prt = carried_outside_core_parts(lag, cfg, ipv, coc["r_core"], coc["taper_width"], state.rho_faces)
+            shapes = [cp + op for cp, op in zip(prt["core"], prt["outer"])]
         for a, sa, g, rc0 in zip(p["a_corr"], amps, shapes, cfg.corr_centers_rho):
             jcorr = jcorr + sa * g
             corr_shapes.append(dict(center_rho_tor=rc0, width_rho_tor=cfg.corr_width_rho, amplitude_fraction_of_ip=a,
@@ -693,6 +836,9 @@ def assemble(lag, kin, src, params, cfg, ip, z0=None, state=None):
             # in-window form: the corrections acted as a non-inductive source over the interval that ends at this
             # slice; the flux diffusion of that interval already put their response into the state
             corr_form = "in-window source over the interval ending at this slice (in the supplied state)"
+            if (state.meta or {}).get("carried_outside_core") is not None:
+                corr_form = ("carried outside the core: in-window source inside r_c, zero-net carried change of the "
+                             "state outside it (in the supplied state)")
         elif any(a != 0.0 for a in p["a_corr"]):
             # steady form (the earlier treatment, kept for comparison): the zero-net-current steady response
             dpsi, dpb = correction_response(lag, shapes, p["a_corr"], rf)

@@ -587,6 +587,7 @@ def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, ini
                                           FitSettings().max_step["a_corr" if n.startswith("a_corr_") else n])
                     for n in names])
     n0 = fm.n_solves
+    i0 = len(getattr(fm, "iteration_log", None) or [])
     log = []
     rec = dict(label=label, free=names, specs={n: _spec(n, settings) for n in names}, settings=settings.as_dict(),
                model_settings=cfg.as_dict(), fit_groups=groups, excluded_groups=excluded, iterations=log,
@@ -602,6 +603,12 @@ def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, ini
         rec["n_solves"] = fm.n_solves - n0
         rec["wall_s"] = round(time.perf_counter() - t_all, 2)
         rec["forward"] = fm.settings_record()
+        get_its = getattr(fm, "iteration_record", None)
+        if get_its is not None:
+            try:      # every solve's iteration count and the limit in effect: a record only, nothing reads it
+                rec["solver_iterations"] = get_its(start=i0)
+            except Exception as exc:  # noqa: BLE001 -- a record must never end a fit
+                rec["solver_iterations"] = dict(computed=False, reason=f"{type(exc).__name__}: {exc}"[:300])
         if extra:
             rec.update(extra)
         rec["ip_fit"] = ip_record(center["all_tab"] if center is not None else None, ms,

@@ -797,6 +797,7 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
     s = settings or SeriesSettings()
     t_all = time.perf_counter()
     n_solves0 = fm.n_solves
+    its0 = len(getattr(fm, "iteration_log", None) or [])
     times = np.array([float(x.time) for x in slices])
     if np.any(np.diff(times) <= 0):
         raise ValueError("slice times must increase strictly")
@@ -842,6 +843,7 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
                                       fit_status=fr.status, n_solves=fm.n_solves - n0))
             out.update(status="failed_initial", n_solves=fm.n_solves - n_solves0,
                        wall_s=round(time.perf_counter() - t_all, 2))
+            _note_iterations(out, fm, its0)
             return out
         res0 = fr.record["center"]["res"]
         fm.restore(fr.record["center"]["snap"])
@@ -863,6 +865,7 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
                                           n_solves=fm.n_solves - n0, reason=msg))
                 out.update(status="refused_initial_fit_not_converged", reason=msg, n_solves=fm.n_solves - n_solves0,
                            wall_s=round(time.perf_counter() - t_all, 2))
+                _note_iterations(out, fm, its0)
                 return out
             out["initial_fit_nonconverged_start"] = dict(status=fr.status, policy=s.initial_fit_nonconverged,
                                                          note=start_note)
@@ -918,6 +921,7 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
         out["relaxed_start_guard"] = _relaxed_start_guard(res0, sl0, mode)
     if not res0.converged:
         out.update(status="failed_initial", n_solves=fm.n_solves - n_solves0, wall_s=round(time.perf_counter() - t_all, 2))
+        _note_iterations(out, fm, its0)
         return out
     crash = _crash_times(s, times[0], times[-1], ls_used)
     out["crash_times_used"] = crash.tolist() if s.sawtooth != "periodic" else dict(
@@ -1105,7 +1109,21 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
         pc_prev = fm.probe_correction.copy()
     out["boundary_displacement"] = boundary_displacement_history(out["slices"])
     out.update(status=status, n_solves=fm.n_solves - n_solves0, wall_s=round(time.perf_counter() - t_all, 2))
+    _note_iterations(out, fm, its0)
     return out
+
+
+def _note_iterations(out, fm, start):
+    """``out["solver_iterations"]``: every solve's iteration count over the series and the iteration limit in effect
+    (:meth:`.forward.ForwardModel.iteration_record` from index ``start``); a record only, never raises, absent for a
+    forward model without the log."""
+    get_its = getattr(fm, "iteration_record", None)
+    if get_its is None:
+        return
+    try:
+        out["solver_iterations"] = get_its(start=start)
+    except Exception as exc:  # noqa: BLE001 -- a record must never end a series
+        out["solver_iterations"] = dict(computed=False, reason=f"{type(exc).__name__}: {exc}"[:300])
 
 
 def check_zeff_series(slices, source=None, schedule=None):

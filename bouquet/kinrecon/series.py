@@ -801,6 +801,11 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
                            callback=callback, speed=speed)
 
 
+def _speed_kw(speed):
+    """``speed`` as a keyword only when it is given (the calls without it are the calls as before)."""
+    return {} if speed is None else dict(speed=speed)
+
+
 def _run_series(fm, slices, cfg, settings=None, start_psi=None, initial_profiles=None, callback=None, speed=None):
     """:func:`run_series` inside its speed scope."""
     s = settings or SeriesSettings()
@@ -840,7 +845,7 @@ def _run_series(fm, slices, cfg, settings=None, start_psi=None, initial_profiles
         fm.set_psi(start_psi)
     if mode == "mse_fit":
         fr = _fit.reconstruct(fm, sl0.kinetics, sl0.sources, cfg0, s.initial_fit, params0=p_relaxed,
-                              initial_profiles=initial_profiles, label=f"{sl0.label}:mse_fit", speed=speed)
+                              initial_profiles=initial_profiles, label=f"{sl0.label}:mse_fit", **_speed_kw(speed))
         if fr.record.get("center") is None:
             c0 = fr.record.get("center0") or {}
             its = fr.record.get("iterations", [])
@@ -1052,7 +1057,7 @@ def _run_series(fm, slices, cfg, settings=None, start_psi=None, initial_profiles
                 _cm.call_state_fn(state_fn, res.lag, p_pred)
             filt = None
             if res.converged and s.filter_at(t1):
-                filt, res = _filter_slice(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1, speed=speed)
+                filt, res = _filter_slice(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1, **_speed_kw(speed))
             cce = _interval_correction_effect(sl, cfg, s, state_fn, res, filt)
         finally:
             _branch_log_close(btok)
@@ -1408,7 +1413,7 @@ def _filter_slice(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1, speed=None
     the solver holds the slice's answer and ``holder`` the state to carry."""
     pred = dict(res=res, holder=dict(holder), snap=fm.snapshot(), pc=fm.probe_correction.copy())
     fr = _fit.reconstruct(fm, sl.kinetics, sl.sources, cfg, s.filter_fit, params0=p_pred,
-                          start=pred["snap"], label=f"{sl.label}:filter", state_fn=state_fn, speed=speed)
+                          start=pred["snap"], label=f"{sl.label}:filter", state_fn=state_fn, **_speed_kw(speed))
     stale = holder.get("end")       # advanced by the LAST solve of the fit (a column, a trial or the center)
     c = fr.record.get("center")
     filt = dict(status=fr.status, absorbed=False, free=list(fr.free), theta=fr.theta.tolist(), sigma=fr.sigma.tolist(),

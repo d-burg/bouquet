@@ -739,6 +739,7 @@ class CurrentDiffusion:
         self.source_modifier = None
         self._static_cache = {}
         self._time_cache = OrderedDict()      # time-dependent geometry: (t, faces) -> evaluated geometry (no numbers)
+        self._base_cache = OrderedDict()      # opt-in memo: (t, faces) -> coefficients that do not depend on sigma
         if isinstance(outer_layer, str):
             if outer_layer != "none":
                 raise ValueError("outer_layer must be an OuterLayer, 'none' or None")
@@ -823,19 +824,37 @@ class CurrentDiffusion:
             sigma = 1.0 / np.asarray(self.resistivity_modifier(t, rc, 1.0 / sigma, state), dtype=float)
         if np.any(~np.isfinite(sigma)) or np.any(sigma <= 0):
             raise ValueError("conductivity must be positive and finite")
-        jni = np.asarray(self.jni_fn(t, rc), dtype=float)
         Fc, Vc = gc["fpol"], gc["dvol_drho"]
-        k_f = gf["dvol_drho"] * gf["avg_grad_rho2_r2"] / (2.0 * np.pi * MU0 * gf["fpol"])
+        base = None
+        if _SPEED_MEMO["on"]:
+            # opt-in memo (set_speed_memo): everything below that does not depend on the conductivity is a fixed
+            # function of (t, faces) and of the solver's inputs; reused when the same inputs and geometry are in use
+            bkey = (float(t), key)
+            fns = (self.jni_fn, self.boundary, self.outer_layer, self._geo_fn, self._geo_static, geo)
+            hit = self._base_cache.get(bkey)
+            if hit is not None and all(x is y for x, y in zip(hit[0], fns)):
+                base = hit[1]
+                self._base_cache.move_to_end(bkey)
+        if base is None:
+            jni = np.asarray(self.jni_fn(t, rc), dtype=float)
+            k_f = gf["dvol_drho"] * gf["avg_grad_rho2_r2"] / (2.0 * np.pi * MU0 * gf["fpol"])
+            s_c = Vc * jni / (2.0 * np.pi * Fc ** 2) * h
+            wfac = geo.dphib_dt / (2.0 * geo.phi_b)
+            if self.outer_layer is not None:
+                lay_a, lay_b = self.outer_layer.integrals(t)
+                f_lcfs = self.outer_layer.fpol_at(t)
+            else:
+                lay_a, lay_b, f_lcfs = 0.0, 0.0, float(gf["fpol"][-1])
+            bc = self.boundary(t)
+            base = (jni, k_f, s_c, wfac, lay_a, lay_b, f_lcfs, bc)
+            if _SPEED_MEMO["on"]:
+                self._base_cache[bkey] = (fns, base)
+                while len(self._base_cache) > _TIME_CACHE_SIZE_LARGE:
+                    self._base_cache.popitem(last=False)
+        jni, k_f, s_c, wfac, lay_a, lay_b, f_lcfs, bc = base
         m_c = Vc * gc["avg_inv_r2"] * sigma / (2.0 * np.pi * Fc) * h
-        s_c = Vc * jni / (2.0 * np.pi * Fc ** 2) * h
-        wfac = geo.dphib_dt / (2.0 * geo.phi_b)
-        if self.outer_layer is not None:
-            lay_a, lay_b = self.outer_layer.integrals(t)
-            f_lcfs = self.outer_layer.fpol_at(t)
-        else:
-            lay_a, lay_b, f_lcfs = 0.0, 0.0, float(gf["fpol"][-1])
         c = _Coeffs(t=t, k_f=k_f, F_f=gf["fpol"], m_c=m_c, s_c=s_c, w_c=wfac * rc, w_b=wfac, sigma_c=sigma,
-                    jni_c=jni, geo_c=gc, geo=geo, bc_value=self.boundary(t), layer_A=lay_a, layer_B=lay_b,
+                    jni_c=jni, geo_c=gc, geo=geo, bc_value=bc, layer_A=lay_a, layer_B=lay_b,
                     F_lcfs=f_lcfs)
         smod = getattr(self, "source_modifier", None)
         if smod is not None:

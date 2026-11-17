@@ -155,3 +155,39 @@ def test_profile_memo_returns_the_same_values_and_fresh_arrays(form):
             f(0.01, np.array([1.5]))                    # the range check still applies
     assert all(np.array_equal(a, b) for a, b in zip(off, on2))
     assert all(np.array_equal(a, b) for a, b in zip(off[1:], on1[1:]))
+
+
+def _interval_solver():
+    from bouquet.kinrecon.current import diffusion as DF
+    from bouquet.kinrecon.current.geometry import FluxSurfaceGeometry
+    g0 = FluxSurfaceGeometry.cylinder(0.6, 1.7, 2.0, n=41)
+    g1 = FluxSurfaceGeometry.cylinder(0.62, 1.7, 2.05, n=41)
+    rho = g0.rho
+    sig = np.vstack((3e7 * (1.0 - 0.95 * rho ** 2) ** 3 + 1e5, 3.3e7 * (1.0 - 0.95 * rho ** 2) ** 3 + 1e5))
+    jni = np.vstack((2e5 * rho * np.exp(-4 * (rho - 0.7) ** 2), 2.4e5 * rho * np.exp(-4 * (rho - 0.7) ** 2)))
+    return DF.CurrentDiffusion(DF.GeometrySchedule([0.0, 0.02], [g0, g1]), ((0.0, 0.02), rho, sig),
+                               DF.IpBoundary(((0.0, 0.02), (1.5e6, 1.53e6))), j_ni=((0.0, 0.02), rho, jni))
+
+
+def _run_interval():
+    from bouquet.kinrecon.current import diffusion as DF
+    from bouquet.kinrecon.current import sawtooth as SAW
+    sol = _interval_solver()
+    rf = DF.CurrentState.uniform_faces(24)
+    st0 = sol.steady_state(rf, t=0.0)
+    mod = SAW.ResistiveFloor(sol, 1.0)
+    sol_f = mod.with_solver()
+    regions = [mod.region_info(st0)]
+    end = sol_f.advance(st0, 0.02, dt=0.001, post_step=lambda s, t, solver: (regions.append(mod.region_info(s)), s)[1])
+    plain = sol.advance(st0, 0.02, dt=0.001)
+    c = sol.coefficients(0.013, rf)
+    return [st0.psi, end.psi, np.array([end.psi_boundary]), plain.psi, c.m_c, c.s_c, c.k_f,
+            np.array([r["rho_inv"] if r["rho_inv"] is not None else -1.0 for r in regions])]
+
+
+def test_memo_leaves_an_interval_advance_with_the_floor_unchanged():
+    off = _run_interval()
+    assert np.all(off[-1] > 0.0)                         # the floor acts on every step (the search runs)
+    with SP.speed_scope(SP.SpeedSettings(memo=True)):
+        on = _run_interval()
+    assert all(np.array_equal(a, b) for a, b in zip(off, on))

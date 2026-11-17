@@ -74,6 +74,7 @@ triangle search on the mesh (:func:`on_mesh`), so it does not depend on how a
 given OFT build reports a failed interpolation.
 """
 
+import hashlib
 from typing import NamedTuple
 
 import numpy as np
@@ -131,13 +132,14 @@ def on_mesh(eq, pts):
     pts = np.asarray(pts, dtype=float).reshape(-1, 2)
     xy = np.asarray(gs.r)[:, :2]
     tri = np.asarray(gs.lc)
-    # the mesh of a TokaMaker object never changes: results are cached per (mesh, point set)
-    key = (xy.shape, float(np.sum(xy)), float(np.sum(xy[:, 0] * np.arange(xy.shape[0]))), tri.shape,
-           pts.tobytes())
+    # the mesh of a TokaMaker object never changes: results are cached per (mesh, point set); the mesh is named by
+    # the bytes of its points and triangles, so two different meshes never share an entry
+    mkey = _mesh_key(xy, tri)
+    key = mkey + (pts.tobytes(),)
     hit = _ON_MESH_CACHE.get(key)
     if hit is not None:
         return hit.copy()
-    out = (_on_mesh_compute(xy, tri, pts, index_key=key[:4]) if MESH_INDEX["on"] else
+    out = (_on_mesh_compute(xy, tri, pts, index_key=mkey) if MESH_INDEX["on"] else
            _on_mesh_compute_scan(xy, tri, pts))
     if len(_ON_MESH_CACHE) > 256:
         _ON_MESH_CACHE.clear()
@@ -148,6 +150,13 @@ def on_mesh(eq, pts):
 _ON_MESH_CACHE = {}
 #: Opt-in (off by default; :class:`.speed.SpeedSettings` ``mesh_index``): the bucket-indexed form of the same test.
 MESH_INDEX = dict(on=False)
+
+
+def _mesh_key(xy, tri):
+    """Cache key of a mesh: dtypes, shapes and a digest of the bytes of the points and of the triangles."""
+    xy, tri = np.ascontiguousarray(xy), np.ascontiguousarray(tri)
+    return (xy.dtype.str, xy.shape, hashlib.blake2b(xy.tobytes(), digest_size=32).digest(),
+            tri.dtype.str, tri.shape, hashlib.blake2b(tri.tobytes(), digest_size=32).digest())
 
 
 def _on_mesh_compute_scan(xy, tri, pts):
@@ -220,7 +229,7 @@ def _on_mesh_compute(xy, tri, pts, index_key=None):
     coordinates with the tolerance 1e-10, elementwise in the same arithmetic -- applied to the triangles listed in the
     point's bucket of :func:`_mesh_index` instead of to all triangles.  The bucket lists every triangle that passes
     the box test, so the triangles tested, and the result, are the same."""
-    key = index_key if index_key is not None else (xy.shape, xy.tobytes(), tri.shape, tri.tobytes())
+    key = index_key if index_key is not None else _mesh_key(xy, tri)
     m = _mesh_index(xy, tri, key)
     a, v0, v1, den, lo, hi = m["a"], m["v0"], m["v1"], m["den"], m["lo"], m["hi"]
     x0, hb, nb, buckets = m["x0"], m["hb"], m["nb"], m["buckets"]

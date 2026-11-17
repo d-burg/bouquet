@@ -512,7 +512,8 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
     otherwise); ``start``: starting state (snapshot or psi on nodes); ``initial_profiles``:
     ``(x, jphi, p)`` for the first solve when ``start`` is only a guess; ``state_fn``: a supplied
     current state per pass (time-dependent path; the corrections then act on it); ``speed``: opt-in
-    :class:`.speed.SpeedSettings` (parallel Jacobian columns; changes no result).
+    :class:`.speed.SpeedSettings` (parallel Jacobian columns; changes no result; recorded as ``speed`` when given
+    without workers -- with workers, every Jacobian's ``parallel`` record holds it).
 
     A branch log (:func:`.current_model.open_branch_log`) is open while the fit runs: the q floor's branch at every
     assembly is recorded (``record["floor_branch_record"]``, :func:`.current_model.branch_flip_record`), a record
@@ -563,6 +564,7 @@ def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, ini
                  state_fn=None, speed=None):
     """:func:`reconstruct` with its branch log open."""
     t_all = time.perf_counter()
+    speed_given = speed
     speed = _speed.check_speed(speed, fm)
     branch_jacobians = []
     settings = settings or FitSettings()
@@ -604,6 +606,10 @@ def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, ini
                sources_convention=dict(src.convention),
                kinetics_provenance=dict(getattr(kin, "provenance", {}) or {}),
                kinetics_record=dict(getattr(kin, "record", {}) or {}), ip_target=ip_note)
+    if speed_given is not None and not speed_given.parallel:
+        # the speed settings when they were given without workers (the default record is unchanged; with workers every
+        # Jacobian's ``parallel`` record holds them)
+        rec["speed"] = dict(settings=speed_given.as_dict())
 
     def finish(status, center, J=None, extra=None, jinfo=None):
         rec["status"] = status

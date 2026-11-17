@@ -943,15 +943,6 @@ Q_AXIS_MODEL_READBACK_DEFINITION = (
     "the scored model q at the axis face of the consistent state (after the corrections; core_record's q_axis_model): "
     "the axis q of the current profile the solver was given; valid only where the q consistency check of that state "
     "passed (q_axis_model_readback_valid)")
-#: Old names of the extrapolated-q record keys, kept as aliases of the new keys only so that existing test
-#: assertions stay unchanged; their removal awaits the owner's approval.
-Q_AXIS_ACHIEVED_DEFINITION = Q_AXIS_EXTRAPOLATED_EQ_DEFINITION
-DEPRECATED_FLOOR_EFFECT_ALIASES = dict(q_axis_achieved="q_axis_extrapolated_eq",
-                                       q_axis_achieved_definition="q_axis_extrapolated_eq_definition",
-                                       q_axis_achieved_window="q_axis_extrapolated_eq_window",
-                                       q_axis_achieved_degree="q_axis_extrapolated_eq_degree",
-                                       q_axis_achieved_fit_rms_rel="q_axis_extrapolated_eq_fit_rms_rel",
-                                       q_min_achieved="q_min_traced_eq")
 
 
 def floor_effect_record(core, q_check=None, q_equilibrium=None, q_traced_innermost=None, q_solver_q0=None):
@@ -984,8 +975,7 @@ def floor_effect_record(core, q_check=None, q_equilibrium=None, q_traced_innermo
     the same extrapolation applied to the model q (``q_model_axis_extrapolated``) and the model q's own axis face value
     (``q_model_axis``).  ``q_axis_spread``: the largest minus the smallest of the extrapolated value, the innermost
     trace and the solver's ``q_0``; ``q_axis_extrapolation_offset_model``: the extrapolation of the model q minus the
-    model's own axis value -- where the axis value is known, how far the estimator is from it.  The old key names
-    (:data:`DEPRECATED_FLOOR_EFFECT_ALIASES`) carry the same values as their new keys."""
+    model's own axis value -- where the axis value is known, how far the estimator is from it."""
     core = core or {}
     ax = ((q_check or {}).get("axis") or {})
     qe = None if q_equilibrium is None else np.asarray(q_equilibrium, float)
@@ -1028,9 +1018,6 @@ def floor_effect_record(core, q_check=None, q_equilibrium=None, q_traced_innermo
                reference=(core.get("floor_effect_reference") or
                           "steady state of the same model sources without the floor (before the corrections)"),
                note="record only: nothing reads it")
-    for old, new_key in DEPRECATED_FLOOR_EFFECT_ALIASES.items():
-        out[old] = out[new_key]
-    out["deprecated_keys"] = sorted(DEPRECATED_FLOOR_EFFECT_ALIASES)
     return out
 
 

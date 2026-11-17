@@ -286,10 +286,10 @@ def test_the_floor_records_its_effect_against_the_same_model_without_it():
     core = dict(rec, q_axis_model=1.02, q_min_model=0.99)
     q_check = dict(axis=dict(q0_eq=1.03))
     fe = CM.floor_effect_record(core, q_check, np.array([1.03, 1.0, 0.98, 1.5, np.nan]))
-    assert fe["q_axis_achieved"] == 1.03 and fe["q_min_achieved"] == 0.98 and fe["floor_branch"] == "axis"
+    assert fe["q_axis_extrapolated_eq"] == 1.03 and fe["q_min_traced_eq"] == 0.98 and fe["floor_branch"] == "axis"
     assert fe["d_v_loop_rel"] == rec["d_v_loop_rel"] and fe["current_moved_outside_over_ip"] == rec[
         "current_moved_outside_over_ip"] and fe["note"].startswith("record only")
-    assert CM.floor_effect_record(None)["q_axis_achieved"] is None
+    assert CM.floor_effect_record(None)["q_axis_extrapolated_eq"] is None
 
 
 def test_floor_effect_is_a_record_that_cannot_change_a_fit(monkeypatch):
@@ -705,15 +705,16 @@ def test_floor_effect_record_names_the_extrapolated_axis_q_and_keeps_the_others_
     """The q check's extrapolation of the solved equilibrium is recorded under its own name (not as an achieved axis
     q), with its definition; the trace of the innermost surface, the solver's q_0 (q at psi_N = 0.02) and the model's
     values are named cross-checks with their spread and the estimator's offset on the model, where the model's own
-    axis value is known.  The old key names carry the same values (aliases).  Numbers from the synthetic fixture."""
+    axis value is known.  The old key names are gone.  Numbers from the synthetic fixture."""
     q_ax, q_ext_model = _synthetic_axis_values()
     q_ext_eq, q_trace, q_s0 = 1.1, 0.5, 1.25
     core = dict(q_floor=1.0, floor_branch="axis", acted=True, q_axis_model=q_ax, q_min_model=q_ax,
                 floor_effect_computed=False, floor_effect_reason="RuntimeError: injected")
     q_check = dict(axis=dict(q0_eq=q_ext_eq, q0_model=q_ext_model, fit_rms_rel_eq=0.01, window=[0.05, 0.15], degree=2))
     fe = CM.floor_effect_record(core, q_check, np.array([1.1, 1.05, 1.3]), q_trace, -q_s0)
-    assert fe["q_axis_achieved"] == q_ext_eq and fe["q_axis_achieved_definition"] == CM.Q_AXIS_ACHIEVED_DEFINITION
-    assert fe["q_axis_achieved_window"] == [0.05, 0.15] and fe["q_axis_achieved_degree"] == 2
+    assert fe["q_axis_extrapolated_eq"] == q_ext_eq and fe[
+        "q_axis_extrapolated_eq_definition"] == CM.Q_AXIS_EXTRAPOLATED_EQ_DEFINITION
+    assert fe["q_axis_extrapolated_eq_window"] == [0.05, 0.15] and fe["q_axis_extrapolated_eq_degree"] == 2
     cc = fe["q_axis_cross_checks"]
     assert cc == dict(q_traced_innermost=q_trace, q_solver_q0=q_s0, q_model_axis_extrapolated=q_ext_model,
                       q_model_axis=q_ax)
@@ -721,14 +722,14 @@ def test_floor_effect_record_names_the_extrapolated_axis_q_and_keeps_the_others_
     assert fe["q_axis_extrapolation_offset_model"] == pytest.approx(q_ext_model - q_ax, rel=1e-12)
     assert fe["effect_computed"] is False and fe["effect_reason"].startswith("RuntimeError")
     none = CM.floor_effect_record(core)
-    assert none["q_axis_achieved"] is None and none["q_axis_spread"] is None
-    # the new names (the record no longer calls the extrapolation achieved; the old names are aliases)
+    assert none["q_axis_extrapolated_eq"] is None and none["q_axis_spread"] is None
+    # the new names (the record no longer calls the extrapolation achieved; the old names are removed)
     assert fe["q_axis_extrapolated_eq"] == q_ext_eq and fe["q_min_traced_eq"] == 1.05
     assert fe["q_axis_extrapolated_eq_definition"] == CM.Q_AXIS_EXTRAPOLATED_EQ_DEFINITION
     assert "not the achieved axis q" in CM.Q_AXIS_EXTRAPOLATED_EQ_DEFINITION
-    for old, new in CM.DEPRECATED_FLOOR_EFFECT_ALIASES.items():
-        assert fe[old] == fe[new] and old in fe["deprecated_keys"]
-    assert "achieved" not in "".join(CM.DEPRECATED_FLOOR_EFFECT_ALIASES.values())
+    assert not any(k in fe for k in ("q_axis_achieved", "q_axis_achieved_definition", "q_axis_achieved_window",
+                                     "q_axis_achieved_degree", "q_axis_achieved_fit_rms_rel", "q_min_achieved",
+                                     "deprecated_keys"))
     assert "edge" in CM.floor_effect_record.__doc__ and "not resolved there" not in CM.floor_effect_record.__doc__
 
 

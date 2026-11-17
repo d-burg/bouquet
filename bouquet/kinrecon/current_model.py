@@ -92,7 +92,27 @@ when the input of the previous pass was a mixture and the max-norm of the pass r
 minus input profile on the comparison grid) grew against the pass before, the history is restarted and
 that pass takes the plain input (recorded as ``anderson_restart`` in the pass record); growth after a
 plain input does not restart (where the plain passes themselves diverge, the mixing is what converges);
-the residual and the convergence measure are the same.
+the residual and the convergence measure are the same.  Every pass record carries ``residual_cos``, the
+cosine between this pass's residual and the previous one on the comparison grid (a record only; near -1
+on every pass is the signature of an oscillating pass map).
+
+Robustness options of the loop (NON-DEFAULT; all off by default, and with them off the loop is the one
+described above).  They change how the next input is chosen, never the criterion or the budget:
+
+* ``pass_relaxation = beta`` (0 < beta < 1): every pass is under-relaxed from the first -- a plain step
+  takes ``x + beta (G(x) - x)`` and an Anderson step the mixing form with the same factor,
+  ``x + beta f - (dX + beta dF) gamma`` (the mixing-parameter form of Anderson acceleration, H. F. Walker and
+  P. Ni, SIAM J. Numer. Anal. 49, 1715 (2011)), where ``f = G(x) - x`` is the pass residual on the comparison grid;
+* ``pass_cycle_relaxation = beta``: the same under-relaxation, engaged only when the loop's own iterates
+  show a period-2 cycle -- the residual reverses direction (``residual_cos < 0``) on
+  ``pass_cycle_window`` consecutive passes.  At that pass the Anderson history is restarted, the pass
+  takes the damped plain step (for a pure two-cycle with ``beta = 0.5`` this is the midpoint of the two
+  states), and every later pass of that loop uses ``beta``.  The trigger reads only the loop's iterates
+  (model state), never the data.  Recorded per pass (``relaxation``) and in the loop record
+  (``cycle_relaxation``).
+
+An under-relaxed pass leaves the fixed point unchanged (``G(x) = x``) and the convergence measure is the
+same pass residual, now of the damped input that was solved.
 
 A supplied current state (``state_fn``; the time-dependent path of :mod:`.series`) replaces the
 steady state / periodic orbit: the profiles are then those of that state on the current geometry.
@@ -351,6 +371,10 @@ class CurrentModelSettings:
     bootstrap_ln_lambda_model: str = "sauter"   # bootstrap Coulomb logarithms: "sauter" (S99 18d-e) or "nrl" (earlier)
     pass_acceleration: str = "anderson"      # "anderson" (depth anderson_depth) or "none"
     anderson_depth: int = 3
+    # NON-DEFAULT robustness options of the pass loop (module docstring, "Robustness options"); None = off
+    pass_relaxation: Optional[float] = None         # under-relaxation factor of every pass (0 < beta < 1)
+    pass_cycle_relaxation: Optional[float] = None   # the same, engaged on a period-2 cycle of the loop's iterates
+    pass_cycle_window: int = 2                      # consecutive residual reversals that engage it
     core_relaxation: str = "q_floor"         # CORE_RELAXATIONS: the core treatment (module docstring)
     q_floor: float = _saw.DEFAULT_Q_FLOOR    # floor of the "q_floor" treatment (FUSE ActorQED qmin_desired default)
     q_floor_form: str = "resistive"          # Q_FLOOR_FORMS: "resistive" (default) or "sharp" (opt-in, comparison)
@@ -386,6 +410,13 @@ class CurrentModelSettings:
                 raise ValueError("the non-default options of the q floor need q_floor_form='resistive'")
             _saw._check_options("continuous", self.q_floor_total_current, self.q_floor_transition,
                                 "axis" if self.q_floor_branch_freeze != "off" else None)
+        for name in ("pass_relaxation", "pass_cycle_relaxation"):
+            v = getattr(self, name)
+            if v is not None and (isinstance(v, bool) or not (np.isfinite(float(v)) and 0.0 < float(v) < 1.0)):
+                raise ValueError(f"{name} must be None (off) or a number strictly between 0 and 1")
+        if isinstance(self.pass_cycle_window, bool) or int(self.pass_cycle_window) != self.pass_cycle_window \
+                or self.pass_cycle_window < 1:
+            raise ValueError("pass_cycle_window must be a whole number >= 1")
         if self.crash_times is not None and self.core_relaxation != "crash_times":
             raise ValueError(f"crash_times are given but core_relaxation is {self.core_relaxation!r}: measured crash "
                              "times are an opt-in treatment (core_relaxation='crash_times')")
@@ -1313,6 +1344,19 @@ def consistent_solve(fm, kin, src, params, cfg, ip=None, start=None, z0=None, la
     x_prev = None
     prev_mixed = False       # whether the input of the previous pass was an Anderson mixture
     qrec = None
+    # robustness options (module docstring; off by default): the under-relaxation factor in effect (None = none)
+    beta = None if cfg.pass_relaxation is None else float(cfg.pass_relaxation)
+    cyc = None if cfg.pass_cycle_relaxation is None else dict(
+        beta=float(cfg.pass_cycle_relaxation), window=int(cfg.pass_cycle_window), engaged_at_pass=None,
+        rule="engaged when the pass residual reverses direction (residual_cos < 0) on `window` consecutive passes")
+    n_reversed = 0
+    last_f = None            # the previous pass residual (for residual_cos)
+
+    def _opts():
+        """The loop record of the robustness options (nothing when they are off)."""
+        if cyc is None and cfg.pass_relaxation is None:
+            return {}
+        return dict(robustness=dict(pass_relaxation=cfg.pass_relaxation, cycle_relaxation=dict(cyc) if cyc else None))
     for k in range(int(cfg.max_passes)):
         try:
             lag_k = evaluate_geometry(fm.gs, kin, cfg)
@@ -1320,7 +1364,7 @@ def consistent_solve(fm, kin, src, params, cfg, ip=None, start=None, z0=None, la
             asm_k = assemble(lag_k, kin, src, params, cfg, ipv, z0=z0, state=st_k)
         except (ModelFailure, ValueError, RuntimeError) as exc:
             return ConsistentResult(False, "model_failure", k, asm, lag, res,
-                                    dict(passes=passes, reason=f"{type(exc).__name__}: {exc}", q_check=qrec),
+                                    dict(passes=passes, reason=f"{type(exc).__name__}: {exc}", q_check=qrec, **_opts()),
                                     round(time.perf_counter() - t0, 3))
         z0 = asm_k["orbit_z"]
         rec = dict(k=k, geometry_wall_s=lag_k["wall_s"], assembly_wall_s=asm_k["wall_s"],
@@ -1342,19 +1386,25 @@ def consistent_solve(fm, kin, src, params, cfg, ip=None, start=None, z0=None, la
                 q_ok = bool(qrec and qrec.get("passed"))
                 if cfg.q_check.required and not q_ok:
                     return ConsistentResult(False, "q_inconsistent", k, used, lag, res,
-                                            dict(passes=passes, criterion=crit, q_check=qrec,
+                                            dict(passes=passes, criterion=crit, q_check=qrec, **_opts(),
                                                  reason=f"profiles consistent but q check failed: "
                                                         f"{(qrec or {}).get('max_rel', (qrec or {}).get('reason'))}"),
                                             round(time.perf_counter() - t0, 3))
                 return ConsistentResult(True, "consistent", k, used, lag, res,
                                         dict(passes=passes, criterion=crit, q_check=qrec,
-                                             assembly_on_final_state=dict(dj=dj)),
+                                             assembly_on_final_state=dict(dj=dj), **_opts()),
                                         round(time.perf_counter() - t0, 3))
         prev_stats = None if res is None else res.stats
         x_in, mixed = asm_k["jphi_cmp"], False
+        relaxed = False          # robustness options: the input is an under-relaxed (damped) step
         if x_prev is not None:
+            f_k = asm_k["jphi_cmp"] - x_prev
+            if last_f is not None:
+                nrm = float(np.linalg.norm(f_k) * np.linalg.norm(last_f))
+                rec["residual_cos"] = float(f_k @ last_f) / nrm if nrm > 0 else None
+            last_f = f_k
             hx.append(x_prev)
-            hf.append(asm_k["jphi_cmp"] - x_prev)
+            hf.append(f_k)
             del hx[:-(cfg.anderson_depth + 1)], hf[:-(cfg.anderson_depth + 1)]
             if (cfg.pass_acceleration == "anderson" and prev_mixed and len(hf) >= 2
                     and np.max(np.abs(hf[-1])) > np.max(np.abs(hf[-2]))):
@@ -1362,20 +1412,40 @@ def consistent_solve(fm, kin, src, params, cfg, ip=None, start=None, z0=None, la
                 # history; this pass takes the plain input
                 del hx[:-1], hf[:-1]
                 rec["anderson_restart"] = True
-            if cfg.pass_acceleration == "anderson" and len(hf) >= 2:
+            cycle_now = False
+            if cyc is not None and cyc["engaged_at_pass"] is None:
+                rc = rec.get("residual_cos")
+                n_reversed = n_reversed + 1 if (rc is not None and rc < 0.0) else 0
+                if n_reversed >= cyc["window"]:
+                    # a period-2 cycle of the loop's own iterates: restart the history, take the damped plain step
+                    # now and keep the factor for the rest of this loop
+                    cyc["engaged_at_pass"] = k
+                    beta = cyc["beta"]
+                    del hx[:-1], hf[:-1]
+                    cycle_now = True
+                    rec["cycle_relaxation_engaged"] = True
+            if cfg.pass_acceleration == "anderson" and len(hf) >= 2 and not cycle_now:
                 dF = np.column_stack([hf[i + 1] - hf[i] for i in range(len(hf) - 1)])
                 dX = np.column_stack([hx[i + 1] - hx[i] for i in range(len(hx) - 1)])
                 gam = np.linalg.lstsq(dF, hf[-1], rcond=None)[0]
-                cand = hx[-1] + hf[-1] - (dX + dF) @ gam
+                if beta is None:
+                    cand = hx[-1] + hf[-1] - (dX + dF) @ gam
+                else:
+                    cand = hx[-1] + beta * hf[-1] - (dX + beta * dF) @ gam
                 if np.all(np.isfinite(cand)):
                     x_in, mixed = cand, True
-        snap_k = fm.snapshot() if mixed else None
-        jk = _knot_input(asm_k, x_in) if mixed else asm_k["jphi"]
+            if beta is not None and not mixed:
+                x_in, relaxed = x_prev + beta * hf[-1], True
+            if beta is not None:
+                rec["relaxation"] = beta
+        moved = mixed or relaxed     # the input is not the assembled profile
+        snap_k = fm.snapshot() if moved else None
+        jk = _knot_input(asm_k, x_in) if moved else asm_k["jphi"]
         res = fm.solve((asm_k["x"], jk), (asm_k["x"], asm_k["p"]), ipv, init="keep", label=f"{label}:pass{k}")
-        if mixed and not res.converged:
-            rec["anderson_fallback"] = res.status
+        if moved and not res.converged:
+            rec["anderson_fallback" if mixed else "relaxation_fallback"] = res.status
             fm.restore(snap_k)
-            x_in, mixed = asm_k["jphi_cmp"], False
+            x_in, mixed, relaxed, moved = asm_k["jphi_cmp"], False, False, False
             jk = asm_k["jphi"]
             hx.clear()
             hf.clear()
@@ -1383,25 +1453,29 @@ def consistent_solve(fm, kin, src, params, cfg, ip=None, start=None, z0=None, la
                            label=f"{label}:pass{k}:plain")
         rec.update(solve_status=res.status, its=res.record["attempts"][-1].get("its"), solve_wall_s=res.wall_s,
                    anderson_mixed=mixed)
+        if relaxed:
+            rec["relaxed_plain_step"] = True
         passes.append(rec)
         if not res.converged:
             st = ("limit_cycle_untapered_lock" if res.status == "failed_limit_cycle_untapered_lock"
-                  or rec.get("anderson_fallback") == "failed_limit_cycle_untapered_lock" else "solve_failed")
+                  or rec.get("anderson_fallback") == "failed_limit_cycle_untapered_lock"
+                  or rec.get("relaxation_fallback") == "failed_limit_cycle_untapered_lock" else "solve_failed")
             return ConsistentResult(False, st, k, asm_k, lag_k, res,
-                                    dict(passes=passes, reason=res.status, q_check=qrec),
+                                    dict(passes=passes, reason=res.status, q_check=qrec, **_opts()),
                                     round(time.perf_counter() - t0, 3))
         try:
             last_probe_change = fm.update_probe_correction()
         except RuntimeError as exc:
             return ConsistentResult(False, "probe_correction_failed", k, asm_k, lag_k, res,
-                                    dict(passes=passes, reason=str(exc)), round(time.perf_counter() - t0, 3))
+                                    dict(passes=passes, reason=str(exc), **_opts()), round(time.perf_counter() - t0, 3))
         prev_j = x_in
         x_prev = x_in
         prev_mixed = mixed
-        used = dict(asm_k, jphi=jk, jphi_assembled=asm_k["jphi"], jphi_cmp_used=x_in) if mixed else asm_k
+        used = dict(asm_k, jphi=jk, jphi_assembled=asm_k["jphi"], jphi_cmp_used=x_in) if moved else asm_k
         lag, asm = lag_k, asm_k
     return ConsistentResult(False, "max_passes", int(cfg.max_passes), used, lag, res,
-                            dict(passes=passes, reason=f"not consistent within {cfg.max_passes} passes", q_check=qrec),
+                            dict(passes=passes, reason=f"not consistent within {cfg.max_passes} passes", q_check=qrec,
+                                 **_opts()),
                             round(time.perf_counter() - t0, 3))
 
 

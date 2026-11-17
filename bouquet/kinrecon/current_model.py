@@ -354,6 +354,10 @@ class CurrentModelSettings:
     core_relaxation: str = "q_floor"         # CORE_RELAXATIONS: the core treatment (module docstring)
     q_floor: float = _saw.DEFAULT_Q_FLOOR    # floor of the "q_floor" treatment (FUSE ActorQED qmin_desired default)
     q_floor_form: str = "resistive"          # Q_FLOOR_FORMS: "resistive" (default) or "sharp" (opt-in, comparison)
+    # non-default options of the resistive floor (current.sawtooth module docstring, "Non-default options"):
+    q_floor_total_current: str = "off"       # TOTAL_CURRENT_FORMS: "off" (default) or "flat_at_level"
+    q_floor_transition: str = "step"         # FLOOR_TRANSITIONS: "step" (default) or "blend_margin"
+    q_floor_branch_freeze: str = "off"       # BRANCH_FREEZES: "off" (default) or "first_assembly" (diagnostic)
     sawtooth_nsteps: int = 40
     sawtooth_sheet_width: float = _saw.DEFAULT_SHEET_WIDTH
     crash_times: Optional[Sequence[float]] = None   # measured crash times [s] ("crash_times" treatment)
@@ -373,6 +377,14 @@ class CurrentModelSettings:
             raise ValueError("q_floor must be finite and > 0")
         if self.q_floor_form not in _saw.Q_FLOOR_FORMS:
             raise ValueError(f"q_floor_form must be one of {_saw.Q_FLOOR_FORMS}")
+        if self.q_floor_branch_freeze not in _saw.BRANCH_FREEZES:
+            raise ValueError(f"q_floor_branch_freeze must be one of {_saw.BRANCH_FREEZES}")
+        if self.q_floor_total_current != "off" or self.q_floor_transition != "step" or \
+                self.q_floor_branch_freeze != "off":
+            if self.q_floor_form != "resistive":
+                raise ValueError("the non-default options of the q floor need q_floor_form='resistive'")
+            _saw._check_options("continuous", self.q_floor_total_current, self.q_floor_transition,
+                                "axis" if self.q_floor_branch_freeze != "off" else None)
         if self.crash_times is not None and self.core_relaxation != "crash_times":
             raise ValueError(f"crash_times are given but core_relaxation is {self.core_relaxation!r}: measured crash "
                              "times are an opt-in treatment (core_relaxation='crash_times')")
@@ -745,8 +757,11 @@ def assemble(lag, kin, src, params, cfg, ip, z0=None, state=None):
             st_m = sol_m.steady_state(rf)
             if cfg.q_floor_form == "sharp":
                 st_f, floor_rec = _saw.floor_q(st_m, sol_m, cfg.q_floor)
-            else:
+            elif (cfg.q_floor_total_current == "off" and cfg.q_floor_transition == "step" and
+                  cfg.q_floor_branch_freeze == "off"):
                 st_f, floor_rec, _ = _saw.resistive_floor_steady(sol_m, rf, cfg.q_floor)
+            else:
+                st_f, floor_rec = _floor_with_options(sol_m, rf, cfg)
             state = st_f
             if any(a != 0.0 for a in p["a_corr"]):
                 st_c = sol.steady_state(rf)
@@ -841,6 +856,42 @@ def assemble(lag, kin, src, params, cfg, ip, z0=None, state=None):
     return out
 
 
+def _floor_with_options(sol_m, rf, cfg):
+    """The resistive floor with its non-default options (:class:`CurrentModelSettings` ``q_floor_total_current``,
+    ``q_floor_transition``, ``q_floor_branch_freeze``).  The frozen branch: inside a fit (an open freeze,
+    :func:`open_branch_freeze`), the first assembly's branch is taken for every later assembly of that fit; outside a
+    fit nothing is frozen (recorded)."""
+    kw = dict(total_current=cfg.q_floor_total_current, transition=cfg.q_floor_transition)
+    hold = _BRANCH_FREEZE.get() if cfg.q_floor_branch_freeze != "off" else None
+    if hold is not None and hold.get("branch") is not None:
+        kw["branch"] = hold["branch"]
+    st_f, rec, _ = _saw.resistive_floor_steady(sol_m, rf, cfg.q_floor, **kw)
+    if cfg.q_floor_branch_freeze != "off":
+        if hold is None:
+            rec["branch_freeze"] = "no open freeze (not inside a fit): the plain state's branch"
+        elif hold.get("branch") is None:
+            hold["branch"] = rec["floor_branch"]
+            rec["branch_freeze"] = "first assembly of the fit: its branch is frozen for the rest of the fit"
+        else:
+            rec["branch_freeze"] = "branch frozen at the fit's first assembly"
+    return st_f, rec
+
+
+#: The frozen branch of the q floor within one fit (diagnostic option ``q_floor_branch_freeze="first_assembly"``):
+#: a dict holding the first assembly's branch, opened by :func:`.fit.reconstruct` per fit, or None.
+_BRANCH_FREEZE = contextvars.ContextVar("kinrecon_floor_branch_freeze", default=None)
+
+
+def open_branch_freeze():
+    """Open a branch freeze for one fit; returns ``(holder, token)``; close it with :func:`close_branch_freeze`."""
+    hold = dict(branch=None)
+    return hold, _BRANCH_FREEZE.set(hold)
+
+
+def close_branch_freeze(token):
+    _BRANCH_FREEZE.reset(token)
+
+
 def core_record(floor_rec, cfg, q_model, rho_tor, rho_edge):
     """The core-treatment record of an assembly (``assembly["core"]``; a record only): the treatment, ``q_floor``,
     its form, whether the floor acted, the floor (flattening) radius in rho_tor,norm (``rho_floor``;
@@ -877,12 +928,30 @@ def core_record(floor_rec, cfg, q_model, rho_tor, rho_edge):
     return rec
 
 
-#: Definition of the achieved axis q recorded by :func:`floor_effect_record` (one estimator; the others are
-#: cross-checks).
-Q_AXIS_ACHIEVED_DEFINITION = (
+#: Definition of the extrapolated axis q of the solved equilibrium recorded by :func:`floor_effect_record`
+#: (``q_axis_extrapolated_eq``).  It is NOT an achieved (read-back) axis value: it cannot see structure inside the
+#: window's inner edge, and the same estimator applied to the model q is off its own axis value by
+#: ``q_axis_extrapolation_offset_model``.
+Q_AXIS_EXTRAPOLATED_EQ_DEFINITION = (
     "regular-singular extrapolation q0 + q2 rho^2 + q4 rho^4 of the solved equilibrium's traced q, least squares on "
     "rho_tor,norm in the q check's axis window (coordinates.axis_q; the q check's axis.q0_eq): the axis value the "
-    "resolved surfaces imply, not a trace of the innermost surface")
+    "surfaces in that window imply under that smooth form, not a trace of the innermost surface and not the "
+    "achieved axis q")
+#: Definition of the read-back of the core level (``q_axis_model_readback``): the model's own axis q of the
+#: consistent state.
+Q_AXIS_MODEL_READBACK_DEFINITION = (
+    "the scored model q at the axis face of the consistent state (after the corrections; core_record's q_axis_model): "
+    "the axis q of the current profile the solver was given; valid only where the q consistency check of that state "
+    "passed (q_axis_model_readback_valid)")
+#: Old names of the extrapolated-q record keys, kept as aliases of the new keys only so that existing test
+#: assertions stay unchanged; their removal awaits the owner's approval.
+Q_AXIS_ACHIEVED_DEFINITION = Q_AXIS_EXTRAPOLATED_EQ_DEFINITION
+DEPRECATED_FLOOR_EFFECT_ALIASES = dict(q_axis_achieved="q_axis_extrapolated_eq",
+                                       q_axis_achieved_definition="q_axis_extrapolated_eq_definition",
+                                       q_axis_achieved_window="q_axis_extrapolated_eq_window",
+                                       q_axis_achieved_degree="q_axis_extrapolated_eq_degree",
+                                       q_axis_achieved_fit_rms_rel="q_axis_extrapolated_eq_fit_rms_rel",
+                                       q_min_achieved="q_min_traced_eq")
 
 
 def floor_effect_record(core, q_check=None, q_equilibrium=None, q_traced_innermost=None, q_solver_q0=None):
@@ -896,19 +965,27 @@ def floor_effect_record(core, q_check=None, q_equilibrium=None, q_traced_innermo
     moved from inside its outer edge to outside it, with whether that record was computed (``effect_computed``; NaN
     values and ``effect_reason`` where it failed).  The reference: for a single slice the steady state of the same
     model sources (before the corrections) with the plain resistivity; for a series slice the same interval advanced
-    from the same carried state without the floor (the floor's effect over this interval, not its history).
+    from the same carried state without the floor (the floor's effect over this interval, not its history); a
+    reference that is absent or None reads as the single-slice text.
 
-    The ACHIEVED q: ``q_axis_achieved``, ONE estimator, defined in ``q_axis_achieved_definition``
-    (:data:`Q_AXIS_ACHIEVED_DEFINITION`: the q check's extrapolated axis value of the solved equilibrium,
-    ``q_check["axis"]["q0_eq"]``, with its fit's rms), and the minimum of the equilibrium's traced q
-    (``q_equilibrium``), next to the scored model q's axis value and minimum (after the corrections).  Named
-    cross-checks only (``q_axis_cross_checks``), none of them the achieved axis q: the trace of the innermost surface
-    (``q_traced_innermost``; the equilibrium's q at psi_N = 1e-6, which falls inside the solver's first mesh element
-    and is not resolved there), the solver's ``q_0`` (``q_solver_q0``; q at psi_N = 0.02 by the solver's definition,
-    not an axis value), the same extrapolation applied to the model q (``q_model_axis_extrapolated``) and the model q's
-    own axis face value (``q_model_axis``).  ``q_axis_spread``: the largest minus the smallest of the achieved value,
-    the innermost trace and the solver's ``q_0``; ``q_axis_extrapolation_offset_model``: the extrapolation of the model
-    q minus the model's own axis value -- where the axis value is known, how far the estimator is from it."""
+    The READ-BACK of the core level: ``q_axis_model_readback``, the model's own axis q of the consistent state
+    (:data:`Q_AXIS_MODEL_READBACK_DEFINITION`), with ``q_axis_model_readback_valid`` True only where the q consistency
+    check of that state passed (``q_check["passed"] is True``; False, with the reason, otherwise).
+
+    The EXTRAPOLATED axis q of the solved equilibrium: ``q_axis_extrapolated_eq``
+    (:data:`Q_AXIS_EXTRAPOLATED_EQ_DEFINITION`: the q check's extrapolation ``q_check["axis"]["q0_eq"]``, with its
+    window, degree and fit rms) -- the axis value the surfaces in the window imply under a smooth form, NOT an achieved
+    axis value -- and the minimum of the equilibrium's traced q (``q_min_traced_eq``, from ``q_equilibrium``), next to
+    the scored model q's axis value and minimum (after the corrections).  Named cross-checks (``q_axis_cross_checks``):
+    the trace of the innermost surface (``q_traced_innermost``; the equilibrium's q at psi_N = 1e-6 -- a correct trace
+    of the discrete field, which is invalid where the field's discrete minimum lies on or next to a mesh element edge,
+    where the innermost contours of a kinked minimum give q falling without limit; elsewhere it can be flat and
+    correct), the solver's ``q_0`` (``q_solver_q0``; q at psi_N = 0.02 by the solver's definition, not an axis value),
+    the same extrapolation applied to the model q (``q_model_axis_extrapolated``) and the model q's own axis face value
+    (``q_model_axis``).  ``q_axis_spread``: the largest minus the smallest of the extrapolated value, the innermost
+    trace and the solver's ``q_0``; ``q_axis_extrapolation_offset_model``: the extrapolation of the model q minus the
+    model's own axis value -- where the axis value is known, how far the estimator is from it.  The old key names
+    (:data:`DEPRECATED_FLOOR_EFFECT_ALIASES`) carry the same values as their new keys."""
     core = core or {}
     ax = ((q_check or {}).get("axis") or {})
     qe = None if q_equilibrium is None else np.asarray(q_equilibrium, float)
@@ -920,28 +997,41 @@ def floor_effect_record(core, q_check=None, q_equilibrium=None, q_traced_innermo
             return v if np.isfinite(v) else None
         except (TypeError, ValueError):
             return None
-    q_ach = _f(ax.get("q0_eq"))
+    q_ext = _f(ax.get("q0_eq"))
     q_tr, q_s0 = _f(q_traced_innermost), _f(q_solver_q0)
     q_mx, q_ma = _f(ax.get("q0_model")), _f(core.get("q_axis_model"))
-    trio = [v for v in (q_ach, q_tr, q_s0) if v is not None]
-    return dict(q_floor=core.get("q_floor"), q_floor_form=core.get("q_floor_form"),
-                floor_rule=core.get("floor_rule"), floor_branch=core.get("floor_branch"),
-                acted=core.get("acted"), q_floor_met=core.get("q_floor_met"),
-                rho_floor=core.get("rho_floor"), rho_floor_inner=core.get("rho_floor_inner"),
-                q_axis_achieved=ax.get("q0_eq"), q_axis_achieved_definition=Q_AXIS_ACHIEVED_DEFINITION,
-                q_axis_achieved_window=ax.get("window"), q_axis_achieved_degree=ax.get("degree"),
-                q_axis_achieved_fit_rms_rel=ax.get("fit_rms_rel_eq"), q_min_achieved=q_min_eq,
-                q_axis_cross_checks=dict(q_traced_innermost=q_tr, q_solver_q0=q_s0, q_model_axis_extrapolated=q_mx,
-                                         q_model_axis=q_ma),
-                q_axis_spread=(max(trio) - min(trio)) if len(trio) >= 2 else None,
-                q_axis_extrapolation_offset_model=(q_mx - q_ma) if q_mx is not None and q_ma is not None else None,
-                q_axis_model=core.get("q_axis_model"), q_min_model=core.get("q_min_model"),
-                d_v_loop_rel=core.get("d_v_loop_rel"), d_li3=core.get("d_li3"), d_li3_domain=core.get("d_li3_domain"),
-                current_moved_outside_over_ip=core.get("current_moved_outside_over_ip"),
-                effect_computed=core.get("floor_effect_computed"), effect_reason=core.get("floor_effect_reason"),
-                reference=core.get("floor_effect_reference",
-                                   "steady state of the same model sources without the floor (before the corrections)"),
-                note="record only: nothing reads it")
+    trio = [v for v in (q_ext, q_tr, q_s0) if v is not None]
+    passed = (q_check or {}).get("passed")
+    rb_valid = passed is True and q_ma is not None
+    rb_reason = (None if rb_valid else ("no q check" if q_check is None else
+                                        "no model axis q" if q_ma is None else
+                                        f"q check not passed ({(q_check or {}).get('max_rel', (q_check or {}).get('reason'))})"))
+    out = dict(q_floor=core.get("q_floor"), q_floor_form=core.get("q_floor_form"),
+               floor_rule=core.get("floor_rule"), floor_branch=core.get("floor_branch"),
+               acted=core.get("acted"), q_floor_met=core.get("q_floor_met"),
+               rho_floor=core.get("rho_floor"), rho_floor_inner=core.get("rho_floor_inner"),
+               q_axis_model_readback=q_ma, q_axis_model_readback_valid=bool(rb_valid),
+               q_axis_model_readback_invalid_reason=rb_reason,
+               q_axis_model_readback_definition=Q_AXIS_MODEL_READBACK_DEFINITION,
+               q_axis_extrapolated_eq=ax.get("q0_eq"),
+               q_axis_extrapolated_eq_definition=Q_AXIS_EXTRAPOLATED_EQ_DEFINITION,
+               q_axis_extrapolated_eq_window=ax.get("window"), q_axis_extrapolated_eq_degree=ax.get("degree"),
+               q_axis_extrapolated_eq_fit_rms_rel=ax.get("fit_rms_rel_eq"), q_min_traced_eq=q_min_eq,
+               q_axis_cross_checks=dict(q_traced_innermost=q_tr, q_solver_q0=q_s0, q_model_axis_extrapolated=q_mx,
+                                        q_model_axis=q_ma),
+               q_axis_spread=(max(trio) - min(trio)) if len(trio) >= 2 else None,
+               q_axis_extrapolation_offset_model=(q_mx - q_ma) if q_mx is not None and q_ma is not None else None,
+               q_axis_model=core.get("q_axis_model"), q_min_model=core.get("q_min_model"),
+               d_v_loop_rel=core.get("d_v_loop_rel"), d_li3=core.get("d_li3"), d_li3_domain=core.get("d_li3_domain"),
+               current_moved_outside_over_ip=core.get("current_moved_outside_over_ip"),
+               effect_computed=core.get("floor_effect_computed"), effect_reason=core.get("floor_effect_reason"),
+               reference=(core.get("floor_effect_reference") or
+                          "steady state of the same model sources without the floor (before the corrections)"),
+               note="record only: nothing reads it")
+    for old, new_key in DEPRECATED_FLOOR_EFFECT_ALIASES.items():
+        out[old] = out[new_key]
+    out["deprecated_keys"] = sorted(DEPRECATED_FLOOR_EFFECT_ALIASES)
+    return out
 
 
 def core_vs_floor_record(core, correction_effect):
@@ -1012,7 +1102,7 @@ def branch_flip_record(log, jacobians=None, final_core=None):
     column and trial, every lagged solve); ``jacobians``: per Jacobian the branches of its assemblies and of its center
     (``dict(label, branches, mixed)``); ``final_core``: the result's core record.  Returned: the number of assemblies,
     the count per branch, the number of branch changes in call order, whether any Jacobian had assemblies on different
-    branches (and which), the smallest distance of the plain axis q from the floor seen, the final branch; for a series
+    branches (and which: at most the first 20 listed, with the total count and whether the list is truncated), the smallest distance of the plain axis q from the floor seen, the final branch; for a series
     slice also the count of diffusion steps per branch over every pass."""
     ents = [e for e in (log or []) if isinstance(e, dict)]
     br = [e.get("branch") for e in ents]
@@ -1033,6 +1123,7 @@ def branch_flip_record(log, jacobians=None, final_core=None):
                n_branch_changes_in_call_order=sum(1 for a, b in zip(br[:-1], br[1:]) if a != b),
                branch_changed=bool(len(counts) > 1 or len(steps) > 1),
                n_jacobians=len(jac), n_jacobians_mixed_branches=len(mixed), jacobians_mixed_branches=mixed[:20],
+               jacobians_mixed_branches_total=len(mixed), jacobians_mixed_branches_truncated=len(mixed) > 20,
                min_abs_plain_q_axis_minus_floor=min(devs) if devs else None,
                final_branch=(final_core or {}).get("floor_branch"),
                note="record only: nothing reads it")

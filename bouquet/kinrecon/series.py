@@ -465,7 +465,8 @@ def advance_interval(sol, state, t1, settings, crash_times, dt):
     return end, sch.events, traj.states
 
 
-def advance_q_floor(sol, state, t1, settings, dt, q_floor, sol_all=None, form="resistive"):
+def advance_q_floor(sol, state, t1, settings, dt, q_floor, sol_all=None, form="resistive", total_current="off",
+                    transition="step"):
     """Advance ``state`` to ``t1`` with the q floor (the default core treatment, module docstring); ``sol`` carries the
     MODEL sources only.
 
@@ -501,7 +502,12 @@ def advance_q_floor(sol, state, t1, settings, dt, q_floor, sol_all=None, form="r
     edge (resistive: the region at the end time; sharp: the outermost upward crossing of the end state's q) to outside
     it (0 where there is no region), made in a guard (a failure is recorded with ``floor_effect_computed`` False and
     never ends the series); resistive also the floor's branch on every step (``branch_steps``, count per branch) and
-    the smallest distance of the plain steady state's axis q from the floor over the steps."""
+    the smallest distance of the plain steady state's axis q from the floor over the steps.
+
+    Non-default options of the resistive form (:mod:`.current.sawtooth`, "Non-default options"; off by default):
+    ``total_current="flat_at_level"`` -- every step also changes the sources inside the step's region so that the
+    single-slice state of the step's sources has q flat at the level there (the diffusion relaxes toward it);
+    ``transition="blend_margin"`` -- the step's region is that of the blended transition."""
     if form not in _saw.Q_FLOOR_FORMS:
         raise ValueError(f"form must be one of {_saw.Q_FLOOR_FORMS}")
     acc = dict(n_steps=0, n_acted=0, d_i_max=0.0, last=None, regions=[])
@@ -518,7 +524,8 @@ def advance_q_floor(sol, state, t1, settings, dt, q_floor, sol_all=None, form="r
 
         end = sol.advance(state, t1, dt=dt, scheme=settings.scheme, post_step=hook)
     else:
-        mod = _saw.ResistiveFloor(sol, q_floor)
+        mod = (_saw.ResistiveFloor(sol, q_floor) if total_current == "off" and transition == "step" else
+               _saw.ResistiveFloor(sol, q_floor, total_current=total_current, transition=transition))
         sol_f = mod.with_solver()
         acc["regions"].append(mod.region_info(state))
 
@@ -554,6 +561,8 @@ def advance_q_floor(sol, state, t1, settings, dt, q_floor, sol_all=None, form="r
     else:
         radii = [r["rho_inv"] for r in acc["regions"][:-1] if r["rho_inv"] is not None]
         r_end = acc["regions"][-1]
+        if total_current != "off" or transition != "step":
+            common.update(total_current=total_current, floor_transition=transition)
         core = dict(common, acted=bool(acc["n_acted"]), rho_floor=r_end["rho_inv"],
                     rho_floor_inner=r_end["rho_inner"], floor_branch=r_end["branch"], floor_rule=mod.rule,
                     state_branch=r_end.get("state_branch"),
@@ -592,6 +601,11 @@ INTERVAL_FLOOR_EFFECT_KEYS = ("q_axis_model_end", "q_axis_no_floor_end", "q_min_
                               "floor_effect_reference")
 
 
+#: The reference of the interval's floor-effect record (also where that record failed).
+INTERVAL_FLOOR_EFFECT_REFERENCE = ("the same interval advanced from the same carried state without the floor "
+                                   "(model sources, before the corrections)")
+
+
 def _interval_floor_effect(sol, sol_f, plain_end, end, q_end, q_floor, r_out="crossing", advance_plain=None):
     """RECORD of the floor's effect over one interval: the model end state (``end``, with the floor; ``sol_f`` the
     solver that made it) against the same interval advanced without the floor (``plain_end``, ``sol``; when it is
@@ -609,7 +623,7 @@ def _interval_floor_effect(sol, sol_f, plain_end, end, q_end, q_floor, r_out="cr
         return out
     except Exception as exc:  # noqa: BLE001 -- a record must never end a series
         out = dict.fromkeys(INTERVAL_FLOOR_EFFECT_KEYS, float("nan"))
-        out.update(floor_effect_reference=None, floor_effect_computed=False,
+        out.update(floor_effect_reference=INTERVAL_FLOOR_EFFECT_REFERENCE, floor_effect_computed=False,
                    floor_effect_reason=f"{type(exc).__name__}: {exc}"[:300])
         return out
 
@@ -633,8 +647,7 @@ def _interval_floor_effect_values(sol, sol_f, plain_end, end, q_end, q_floor, r_
                 li3_domain_plain=float(p0["li3_domain"]), li3_domain_floor=float(p1["li3_domain"]),
                 d_li3_domain=float(p1["li3_domain"] - p0["li3_domain"]),
                 current_moved_outside_over_ip=moved,
-                floor_effect_reference="the same interval advanced from the same carried state without the floor "
-                                       "(model sources, before the corrections)")
+                floor_effect_reference=INTERVAL_FLOOR_EFFECT_REFERENCE)
 
 
 def _branch_log_open():
@@ -968,8 +981,11 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
                 # advance with them among the sources minus the one without) is added after it (module docstring)
                 sol_a = (interval_solver(lag_prev, lag, jni_prev + c0, jni1 + c1, tp, t1, ip0, ip1, s.layer_fpol)[0]
                          if c0 is not None else None)
+                opt = {k: v for k, v in (("total_current", getattr(cfg, "q_floor_total_current", "off")),
+                                         ("transition", getattr(cfg, "q_floor_transition", "step")))
+                       if v not in ("off", "step")}
                 end, core = advance_q_floor(sol, carried, t1, s, s.dt_max, cfg.q_floor, sol_all=sol_a,
-                                            form=cfg.q_floor_form)
+                                            form=cfg.q_floor_form, **opt)
                 events, states = [], []
             else:
                 end, events, states = advance_interval(sol, carried, t1, s, crash, s.dt_max)

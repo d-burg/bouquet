@@ -508,20 +508,30 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
 
     A branch log (:func:`.current_model.open_branch_log`) is open while the fit runs: the q floor's branch at every
     assembly is recorded (``record["floor_branch_record"]``, :func:`.current_model.branch_flip_record`), a record
-    only.
+    only; where a log was already open (a filter fit inside a series slice), this fit's entries are appended to it as
+    well, marked ``nested_fit``.  With ``cfg.q_floor_branch_freeze="first_assembly"`` (a diagnostic option, off by
+    default) the q floor's branch of the fit's first assembly is used for every later assembly of the fit.
     """
-    token = None
+    token = blog = parent = None
     try:                          # the branch log: a record only, never raises
-        _, token = _cm.open_branch_log()
+        parent = _cm.current_branch_log()
+        blog, token = _cm.open_branch_log()
     except Exception:  # noqa: BLE001 -- a record must never end a fit
         pass
+    # the frozen-branch diagnostic (option, off by default): the first assembly's branch for the whole fit
+    ftok = _cm.open_branch_freeze()[1] if getattr(cfg, "q_floor_branch_freeze", "off") != "off" else None
     try:
         return _reconstruct(fm, kin, src, cfg, settings=settings, params0=params0, start=start,
                             initial_profiles=initial_profiles, label=label, state_fn=state_fn)
     finally:
+        if ftok is not None:
+            _cm.close_branch_freeze(ftok)
         if token is not None:
             try:
                 _cm.close_branch_log(token)
+                if parent is not None and blog is not None:
+                    # a fit inside another log (a series slice's filter fit): its assemblies belong to that log too
+                    parent.extend(dict(e, nested_fit=str(label)) for e in blog if isinstance(e, dict))
             except Exception:  # noqa: BLE001 -- a record must never end a fit
                 pass
 

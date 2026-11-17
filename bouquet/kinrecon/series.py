@@ -793,12 +793,16 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
     every slice.  Returns a dict with ``slices`` (one record each), ``settings``, ``solver`` (the solver build,
     the cut-cell setting in effect and the edge-taper setting, :meth:`.forward.ForwardModel.solver_record`) and
     the totals.  ``speed``: opt-in :class:`.speed.SpeedSettings` (parallel Jacobian columns of the fits, the memo of
-    pure evaluations, the indexed point location, reused statistics; changes no result).
+    pure evaluations, the indexed point location, reused statistics; changes no result; recorded as ``speed`` when
+    given without workers -- with workers, every Jacobian's ``parallel`` record holds it).
     """
     from . import speed as _speed
     with _speed.speed_scope(_speed.validate(speed, fm)):
-        return _run_series(fm, slices, cfg, settings=settings, start_psi=start_psi, initial_profiles=initial_profiles,
-                           callback=callback, speed=speed)
+        out = _run_series(fm, slices, cfg, settings=settings, start_psi=start_psi, initial_profiles=initial_profiles,
+                          callback=callback, speed=speed)
+    if speed is not None and not speed.parallel and isinstance(out, dict):
+        out["speed"] = dict(settings=speed.as_dict())      # the default record is unchanged
+    return out
 
 
 def _speed_kw(speed):

@@ -13,7 +13,10 @@ object per process): the default settings, ``solver_maxits=80`` and ``solver_max
     bit-identical equilibrium (psi on the nodes, coil currents, stats) to the default;
 (c) a limit below what the solve needs stops it there: the solve ends with OFT's iteration-limit error after
     exactly that many iterations, which the iteration record flags (``stopped_at_limit``); ``nl_tol`` and ``urf``
-    unchanged, ``G7`` PASS against OFT's defaults with ``maxits`` replaced.
+    unchanged, ``G7`` PASS against OFT's defaults with ``maxits`` replaced; and the limit stays in force: two
+    further solves right after it, from the same start, each stop after exactly that many iterations too.
+The settings values compared here are the TokaMaker wrapper's Python-side settings (the solver has no getter); that
+the value reaches the solver is shown by behavior, (c).
 """
 import hashlib
 import json
@@ -56,7 +59,8 @@ def child(out, kind):
                limit=fm.solver_record()["iteration_limit"],
                expected=fm.settings_record()["oft_settings_expected"])
     xj, jj, pg = init
-    r = fm.solve((xj, jj), (xj, pg), ip=ip, init=fm.snapshot(), label="control")
+    snap0 = fm.snapshot()
+    r = fm.solve((xj, jj), (xj, pg), ip=ip, init=snap0, label="control")
     att = r.record["attempts"]
     rec.update(status=r.status, converged=r.converged, its=[a.get("its") for a in att],
                errors=[a.get("error") for a in att], G7=[a.get("G7") for a in att],
@@ -67,6 +71,17 @@ def child(out, kind):
         rec.update(psi=_sha(fm.gs.get_psi(False)),
                    coils=_sha([v for _, v in sorted(dict(fm.gs.get_coil_currents()[0]).items())]),
                    stats=r.stats)
+    if kind == "low":
+        # two more solves of the same case from the same start, right after the first: each must stop at the limit
+        # too (the setting must stay in force in the solver, not only in the record)
+        rep = []
+        for k in (1, 2):
+            rk = fm.solve((xj, jj), (xj, pg), ip=ip, init=snap0, label=f"repeat{k}")
+            rep.append(dict(status=rk.status, converged=rk.converged,
+                            its=[a.get("its") for a in rk.record["attempts"]],
+                            errors=[a.get("error") for a in rk.record["attempts"]]))
+        rec.update(repeats=rep, iterations_after=fm.iteration_record(), n_solves_after=fm.n_solves,
+                   settings_after_repeats=fm._read_settings())
     with open(out, "w") as fh:
         json.dump(_base._jsonable(rec), fh, indent=1)
 
@@ -132,6 +147,24 @@ def test_low_limit_stops_the_solve_there(results):
     assert first["stopped_at_limit"] and first["its"] == 3 and first["kind"] == "solve"
     assert it["n_stopped_at_limit"] >= 1 and it["n_solves"] == lo["n_solves"]
     assert it["limit"]["setting"] == 3 and it["limit"]["oft_default"] == oft["maxits"]
+
+
+def test_low_limit_holds_for_consecutive_solves(results):
+    """The limit stays in force in the solver after a solve: the next two solves of the same case, from the same
+    start, also end with the limit error after exactly 3 iterations (a solver that fell back to OFT's own limit
+    after the first solve would converge them, or take more than 3), and every logged attempt stopped there."""
+    lo = results["low"]
+    assert len(lo["repeats"]) == 2
+    for rp in lo["repeats"]:
+        assert not rp["converged"], rp
+        assert rp["its"] and all(i is None for i in rp["its"])           # a failed solve returns no count
+        assert all(e is not None and "maxits" in e.lower() for e in rp["errors"]), rp["errors"]
+    it = lo["iterations_after"]
+    assert it["n_solves"] == lo["n_solves_after"] >= lo["n_solves"] + 2
+    solves = [(i, k) for i, k in zip(it["its"], it["kind"])]
+    assert all(k == "solve" and i == 3 for i, k in solves), solves      # no verification: none converged
+    assert it["n_stopped_at_limit"] == len(solves) >= 3
+    assert lo["settings_after_repeats"] == dict(lo["defaults"], maxits=3)
 
 
 if __name__ == "__main__":

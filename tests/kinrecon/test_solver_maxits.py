@@ -158,3 +158,46 @@ def test_series_record_carries_the_series_solves(monkeypatch, with_log):
     it = out["solver_iterations"]
     assert it["n_solves"] == out["n_solves"] > 0 and it["its"] == [11] * out["n_solves"]
     assert it["limit"]["setting"] is None and it["n_over_oft_default"] == 0
+
+
+@pytest.mark.parametrize("case", ["fit_without_center", "fit_not_converged_refused", "relaxed_start_failed"])
+def test_series_early_returns_carry_the_iteration_record(monkeypatch, case):
+    """Every early return of run_series (the first-slice fit without a center, a non-converged first-slice fit
+    refused by the default policy, a failed first-slice solve) carries solver_iterations for its own solves."""
+    import test_series_driver as SD
+    from bouquet.kinrecon import series as SE
+    lag = SD._lag()
+    st0 = SD._steady(lag, SD.IP0)
+    fm = SD.FakeFM(dict(pred=lag))
+    fm.iteration_log = [_entry(5, label="earlier")]
+    fm.iteration_limit = dict(setting=70, in_effect=70, oft_default=OFT_LIMIT, rule="stub")
+    fm.iteration_record = lambda start=0: FW.ForwardModel.iteration_record(fm, start=start)
+
+    def consistent(fm_, kin, src, params, cfg, ip=None, start=None, z0=None, label="", initial_profiles=None,
+                   state_fn=None):
+        fm_.n_solves += 2
+        fm_.iteration_log.extend([_entry(61, label="first"), _entry(1, kind="verify")])
+        return SD._result(lag, st0, ok=(case != "relaxed_start_failed"))
+
+    def reconstruct(fm_, kin, src, cfg, settings, params0=None, initial_profiles=None, label="", **kw):
+        fm_.n_solves += 3
+        fm_.iteration_log.extend([_entry(61, label="fit"), _entry(1, kind="verify"), _entry(9, label="fit")])
+        if case == "fit_without_center":
+            rec = dict(center=None, center0=dict(status="model_failure", reason="stub"), iterations=[])
+            return SimpleNamespace(status="failed_initial_consistency", record=rec, free=[])
+        center = dict(res=SD._result(lag, st0), snap=dict(key="pred"), probe_correction=np.zeros(0))
+        rec = dict(center=center, iterations=[], stopping_summary=dict(status="stalled_no_significant_descent"))
+        return SimpleNamespace(status="stalled_no_significant_descent", record=rec, free=[])
+
+    monkeypatch.setattr(SE._cm, "consistent_solve", consistent)
+    monkeypatch.setattr(SE._fit, "reconstruct", reconstruct)
+    initial = "relaxed" if case == "relaxed_start_failed" else "mse_fit"
+    out = SE.run_series(fm, SD._slices(np.arange(3) * 0.02, np.full(3, SD.IP0)),
+                        CM.CurrentModelSettings(r0=SD.GEO.R0), SE.SeriesSettings(initial=initial, sawtooth="off"))
+    expected = dict(fit_without_center="failed_initial", fit_not_converged_refused="refused_initial_fit_not_converged",
+                    relaxed_start_failed="failed_initial")[case]
+    assert out["status"] == expected
+    it = out["solver_iterations"]
+    assert it["n_solves"] == out["n_solves"] > 0          # the entry logged before the series is not its own
+    assert it["limit"]["setting"] == 70 and it["max_its"] == 61 and it["n_over_oft_default"] >= 1
+    assert all(e["label"] != "earlier" for e in it["over_oft_default"])

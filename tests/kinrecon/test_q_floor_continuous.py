@@ -19,7 +19,9 @@ Synthetic geometry as in ``test_q_floor.py`` (no OFT).  Checked:
   time-dependent step, the not-met fallback, q_min ON the floor where met in an assembled state and in a fit);
 * the record of the floor's branch at every assembly (count per branch, Jacobians with columns on different branches,
   the smallest distance of the plain axis q from the floor) shows a flip at the branch boundary and is record-only;
-* the achieved axis q is one defined estimator, the other axis values named cross-checks with their spread.
+* the extrapolated axis q of the equilibrium is recorded under its own name (not as an achieved axis q), the other
+  axis values named cross-checks with their spread; the model's axis q is read back, valid only where the q check
+  passed; a fit inside an open branch log (a filter fit) appends its assemblies to it.
 """
 import os
 import sys
@@ -32,6 +34,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 import test_coordinates_kinetics_series as GEO  # noqa: E402
+from bouquet.kinrecon import coordinates as CO  # noqa: E402
 import test_correction_local_return as LR  # noqa: E402
 import test_fit_unit as FU  # noqa: E402
 import test_series_driver as SD  # noqa: E402
@@ -686,20 +689,145 @@ def test_series_interval_records_the_branch_of_every_step():
     assert r["branch_changed"] is True and r["diffusion_steps_per_branch"] == steps
 
 
-def test_floor_effect_record_names_one_achieved_axis_q_and_keeps_the_others_as_cross_checks():
-    """One achieved axis q (the q check's extrapolation of the solved equilibrium, with its definition); the trace of
-    the innermost surface, the solver's q_0 (q at psi_N = 0.02) and the model's values are named cross-checks with
-    their spread and the estimator's offset on the model, where the model's own axis value is known."""
-    core = dict(q_floor=1.0, floor_branch="axis", acted=True, q_axis_model=0.823, q_min_model=0.823,
+def _synthetic_axis_values():
+    """Axis values for the record tests, all from the synthetic fixture (no discharge): the floored model state's own
+    axis face q, its extrapolation from the q check's window, and round values for the equilibrium-side inputs."""
+    sol = _solver(IP_MET)
+    rf = CurrentState.uniform_faces(100)
+    st, rec, s2 = SAW.resistive_floor_steady(sol, rf, 1.0)
+    q = _fq(s2, st)
+    q_ax = float(q[0])
+    q_ext_model = float(CO.axis_q(rf, q, (0.05, 0.15), 2)["q0"])
+    return q_ax, q_ext_model
+
+
+def test_floor_effect_record_names_the_extrapolated_axis_q_and_keeps_the_others_as_cross_checks():
+    """The q check's extrapolation of the solved equilibrium is recorded under its own name (not as an achieved axis
+    q), with its definition; the trace of the innermost surface, the solver's q_0 (q at psi_N = 0.02) and the model's
+    values are named cross-checks with their spread and the estimator's offset on the model, where the model's own
+    axis value is known.  The old key names carry the same values (aliases).  Numbers from the synthetic fixture."""
+    q_ax, q_ext_model = _synthetic_axis_values()
+    q_ext_eq, q_trace, q_s0 = 1.1, 0.5, 1.25
+    core = dict(q_floor=1.0, floor_branch="axis", acted=True, q_axis_model=q_ax, q_min_model=q_ax,
                 floor_effect_computed=False, floor_effect_reason="RuntimeError: injected")
-    q_check = dict(axis=dict(q0_eq=0.92, q0_model=0.936, fit_rms_rel_eq=0.01, window=[0.05, 0.15], degree=2))
-    fe = CM.floor_effect_record(core, q_check, np.array([0.93, 0.99, 1.2]), 0.477, -1.0015)
-    assert fe["q_axis_achieved"] == 0.92 and fe["q_axis_achieved_definition"] == CM.Q_AXIS_ACHIEVED_DEFINITION
+    q_check = dict(axis=dict(q0_eq=q_ext_eq, q0_model=q_ext_model, fit_rms_rel_eq=0.01, window=[0.05, 0.15], degree=2))
+    fe = CM.floor_effect_record(core, q_check, np.array([1.1, 1.05, 1.3]), q_trace, -q_s0)
+    assert fe["q_axis_achieved"] == q_ext_eq and fe["q_axis_achieved_definition"] == CM.Q_AXIS_ACHIEVED_DEFINITION
     assert fe["q_axis_achieved_window"] == [0.05, 0.15] and fe["q_axis_achieved_degree"] == 2
     cc = fe["q_axis_cross_checks"]
-    assert cc == dict(q_traced_innermost=0.477, q_solver_q0=1.0015, q_model_axis_extrapolated=0.936, q_model_axis=0.823)
-    assert fe["q_axis_spread"] == pytest.approx(1.0015 - 0.477, rel=1e-12)
-    assert fe["q_axis_extrapolation_offset_model"] == pytest.approx(0.936 - 0.823, rel=1e-12)
+    assert cc == dict(q_traced_innermost=q_trace, q_solver_q0=q_s0, q_model_axis_extrapolated=q_ext_model,
+                      q_model_axis=q_ax)
+    assert fe["q_axis_spread"] == pytest.approx(q_s0 - q_trace, rel=1e-12)
+    assert fe["q_axis_extrapolation_offset_model"] == pytest.approx(q_ext_model - q_ax, rel=1e-12)
     assert fe["effect_computed"] is False and fe["effect_reason"].startswith("RuntimeError")
     none = CM.floor_effect_record(core)
     assert none["q_axis_achieved"] is None and none["q_axis_spread"] is None
+    # the new names (the record no longer calls the extrapolation achieved; the old names are aliases)
+    assert fe["q_axis_extrapolated_eq"] == q_ext_eq and fe["q_min_traced_eq"] == 1.05
+    assert fe["q_axis_extrapolated_eq_definition"] == CM.Q_AXIS_EXTRAPOLATED_EQ_DEFINITION
+    assert "not the achieved axis q" in CM.Q_AXIS_EXTRAPOLATED_EQ_DEFINITION
+    for old, new in CM.DEPRECATED_FLOOR_EFFECT_ALIASES.items():
+        assert fe[old] == fe[new] and old in fe["deprecated_keys"]
+    assert "achieved" not in "".join(CM.DEPRECATED_FLOOR_EFFECT_ALIASES.values())
+    assert "edge" in CM.floor_effect_record.__doc__ and "not resolved there" not in CM.floor_effect_record.__doc__
+
+
+def test_floor_effect_record_reads_back_the_model_axis_q_only_where_the_q_check_passed():
+    """The read-back of the core level is the model's own axis q of the consistent state; it is marked valid only
+    where the q consistency check passed, and invalid (with the reason) without a check, with a failed one, or without
+    a model axis q.  Record only."""
+    q_ax, _ = _synthetic_axis_values()
+    core = dict(q_floor=1.0, q_axis_model=q_ax)
+    ok = CM.floor_effect_record(core, dict(passed=True, max_rel=0.004, axis={}))
+    assert ok["q_axis_model_readback"] == q_ax and ok["q_axis_model_readback_valid"] is True
+    assert ok["q_axis_model_readback_invalid_reason"] is None
+    assert ok["q_axis_model_readback_definition"] == CM.Q_AXIS_MODEL_READBACK_DEFINITION
+    bad = CM.floor_effect_record(core, dict(passed=False, max_rel=0.02, axis={}))
+    assert bad["q_axis_model_readback"] == q_ax and bad["q_axis_model_readback_valid"] is False
+    assert "not passed" in bad["q_axis_model_readback_invalid_reason"]
+    none = CM.floor_effect_record(core)
+    assert none["q_axis_model_readback_valid"] is False and none["q_axis_model_readback_invalid_reason"] == "no q check"
+    nomodel = CM.floor_effect_record(dict(q_floor=1.0), dict(passed=True, axis={}))
+    assert nomodel["q_axis_model_readback"] is None and nomodel["q_axis_model_readback_valid"] is False
+    # a truthy value that is not True does not count as passed
+    odd = CM.floor_effect_record(core, dict(passed=1, axis={}))
+    assert odd["q_axis_model_readback_valid"] is False
+
+
+def test_branch_flip_record_states_the_total_and_the_truncation_of_mixed_jacobians():
+    """The list of Jacobians with columns on different branches keeps the first 20; the record states the total and
+    whether the list was truncated."""
+    log = [dict(branch="axis", q_floor=1.0, q_axis_plain=0.99)]
+    many = [dict(label=f"it{i}", branches=["axis", "off_axis"], mixed=True) for i in range(25)]
+    r = CM.branch_flip_record(log, many + [dict(label="x", branches=["axis"], mixed=False)])
+    assert r["n_jacobians_mixed_branches"] == 25 and r["jacobians_mixed_branches_total"] == 25
+    assert len(r["jacobians_mixed_branches"]) == 20 and r["jacobians_mixed_branches_truncated"] is True
+    few = CM.branch_flip_record(log, many[:2])
+    assert few["jacobians_mixed_branches_total"] == 2 and few["jacobians_mixed_branches_truncated"] is False
+
+
+def test_failed_interval_record_keeps_its_reference_text():
+    """A failed interval floor-effect record carries the interval's reference text (not None), and the slice's
+    floor-effect record reads a reference that is None as the default text."""
+    def raising():
+        raise RuntimeError("injected")
+    out = SE._interval_floor_effect(None, None, None, None, None, 1.0, advance_plain=raising)
+    assert out["floor_effect_computed"] is False and out["floor_effect_reason"].startswith("RuntimeError")
+    assert out["floor_effect_reference"] == SE.INTERVAL_FLOOR_EFFECT_REFERENCE
+    fe = CM.floor_effect_record(dict(out, q_floor=1.0))
+    assert fe["reference"] == SE.INTERVAL_FLOOR_EFFECT_REFERENCE
+    fe0 = CM.floor_effect_record(dict(q_floor=1.0, floor_effect_reference=None))
+    assert fe0["reference"].startswith("steady state of the same model sources")
+
+
+def test_a_fit_inside_an_open_branch_log_appends_its_assemblies_to_it(monkeypatch):
+    """A fit run while a branch log is open (a series slice's filter fit) appends its assemblies to that log, marked
+    with the fit's label; its own record and its result are unchanged."""
+    ref = _default_fit(monkeypatch)
+    parent, tok = CM.open_branch_log()
+    try:
+        parent.append(dict(branch="none", q_floor=1.0, q_axis_plain=None))
+        o = _default_fit(monkeypatch)
+    finally:
+        CM.close_branch_log(tok)
+    _assert_same_fit(o, ref)
+    assert o.record["floor_branch_record"] == ref.record["floor_branch_record"]
+    # the helper's own assembly before the fit is logged directly; the fit's assemblies carry the fit's label
+    nested = [e for e in parent if "nested_fit" in e]
+    assert len(nested) == ref.record["floor_branch_record"]["n_assemblies"] > 0
+    assert all(e["nested_fit"] == "fit" for e in nested) and len(parent) == len(nested) + 2
+    assert "nested_fit" not in parent[0] and parent[0]["branch"] == "none"
+    assert CM.current_branch_log() is None
+
+
+def test_series_slice_branch_record_includes_the_filter_fits_assemblies(monkeypatch):
+    """In a series slice the slice's branch log is open while its filter fit runs: the filter fit's assemblies are in
+    the slice's record (``nested_fit`` entries), not only the assemblies of the slice's own solves."""
+    seen = {}
+
+    def fake_filter(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1):
+        log = CM.current_branch_log()
+        log.append(dict(branch="axis", q_floor=1.0, q_axis_plain=0.97, nested_fit="filter"))
+        seen["n"] = len(log)
+        return None, res
+
+    lag = SD._lag()
+    ip = IP_LOW_Q
+    st0 = SD._steady(lag, ip)
+
+    def consistent(fm_, kin, src, params, cfg, ip=None, start=None, z0=None, label="", initial_profiles=None,
+                   state_fn=None):
+        fm_.n_solves += 1
+        if state_fn is None:
+            return SD._result(lag, st0)
+        st = state_fn(lag)
+        res = SD._result(lag, st)
+        res.assembly["core"] = dict(st.meta["core"])
+        return res
+    monkeypatch.setattr(SE._cm, "consistent_solve", consistent)
+    monkeypatch.setattr(SE, "_filter_slice", fake_filter)
+    cfg = CM.CurrentModelSettings(r0=SD.GEO.R0, q_floor=1.0)
+    out = SE.run_series(SD.FakeFM(dict(pred=lag)), SD._slices(np.arange(2) * 0.02, np.full(2, ip)), cfg,
+                        SE.SeriesSettings(initial="relaxed", filter=True))
+    r = out["slices"][1]["floor_branch_record"]
+    assert seen["n"] >= 1 and r["n_assemblies"] == seen["n"]

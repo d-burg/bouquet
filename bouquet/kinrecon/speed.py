@@ -26,27 +26,56 @@ sizes against it.  A column whose worker raised, died, could not send its result
 lock is re-run here serially, and so is every later column: an exception or a failure then surfaces exactly as in the
 serial loop.  Workers are killed when the Jacobian ends, also on an exception (and, on Linux, when this process dies).
 
-Bitwise identity with the serial loop requires one solver thread per process (``ForwardSettings.nthreads = 1``,
-the default): more threads are refused, both because OpenMP is not safe across ``fork()`` and because threaded
-solves are not reproducible.  The total number of cores used is ``column_workers`` (one thread each).  Each worker
-writes the solver's temporary files into its own directory.  Only platforms with ``os.fork`` are supported (Linux is
-the tested one).
+Robustness of the workers (none of these changes a value; each only decides where a column is computed):
+
+* a worker column that sends no result within the time bound (:func:`column_time_bound`) is killed and re-run here
+  serially, with every later column, exactly as a worker that died;
+* when the workers cannot be made (``fork``, ``pipe`` or the temporary directory fails with an ``OSError``, as under
+  a process or memory limit), every column of that Jacobian is computed here serially;
+* each re-run is recorded in the Jacobian's ``parallel`` record (``serial_reruns``, ``timeouts``,
+  ``worker_start_failure``, ``time_bound_s``).
+
+Bitwise identity with the serial loop requires one solver thread per process: parallel columns are refused when the
+solver's OpenMP thread count (:func:`solver_threads`: the OFT environment the forward model actually uses and the
+OpenMP runtime's own setting, not only ``ForwardSettings.nthreads``) is not 1, both because OpenMP is not safe across
+``fork()`` -- a worker forked from a process whose OpenMP runtime runs a thread team can wait forever -- and because
+threaded solves are not reproducible.  The total number of cores used is ``column_workers`` (one thread each).  Each
+worker writes the solver's temporary files into its own directory, named after this process; directories left by a
+process that was killed (the directory of a dead process of this user on this host) are removed when the next workers
+are made.  Parallel columns are refused off Linux (:func:`validate`): ``fork`` without ``exec`` is supported there,
+while macOS system libraries are not safe across ``fork()`` (which is why Python itself does not fork there by default).
+
+Parallel columns are a latency tool, not a throughput tool: they shorten the wall time of one fit, but the columns are
+solved in more processes than the serial loop keeps busy, so a fit costs more core-seconds than the serial fit (about
+1.6-1.9 times the allocated core-seconds with four processes on the measured cases).  For many independent fits, the
+in-process options (``memo``, ``mesh_index``, ``reuse_stats``) in one process per fit cost the fewest core-seconds.
+
+Non-physical numbers of this module (none changes a value; they change only where and when work is done): the time
+bound's ``column_time_factor`` and ``column_time_floor_s`` (:class:`SpeedSettings`), and the 4000 and 600 character
+truncations of a worker's traceback in the record.
 """
 
 import contextlib
+import ctypes
+import hashlib
 import os
 import pickle
+import re
+import select
 import shutil
 import signal
+import socket
+import stat
 import struct
 import sys
 import tempfile
+import time
 import traceback
 from dataclasses import asdict, dataclass
 
 import numpy as np
 
-__all__ = ["SpeedSettings", "check_speed", "speed_scope"]
+__all__ = ["SpeedSettings", "check_speed", "column_time_bound", "solver_threads", "speed_scope", "validate"]
 
 
 @dataclass(frozen=True)
@@ -55,15 +84,29 @@ class SpeedSettings:
     off by default, and none changes a value.
 
     ``column_workers``: processes that evaluate the columns of a Jacobian at once, this one included (1: serial, the
-    default behavior).  Choose at most the number of cores available to the run.
+    default behavior).  Choose at most the number of cores available to the run.  Linux only.  A latency tool: it
+    shortens one fit's wall time and costs more core-seconds than the serial fit (module docstring).
     ``memo``: the memo of pure evaluations in the current model (:func:`.current.diffusion.set_speed_memo`).
     ``mesh_index``: the bucket-indexed exact point-in-triangle test (:func:`.diagnostics.on_mesh`).
     ``reuse_stats``: a forward solve reuses the equilibrium statistics of its latest attempt instead of evaluating
-    them again on the same state (:meth:`.forward.ForwardModel.solve`)."""
+    them again on the same state (:meth:`.forward.ForwardModel.solve`).
+    ``column_time_factor`` and ``column_time_floor_s``: the time bound of a worker column (used only with
+    ``column_workers > 1``; :func:`column_time_bound`).  A worker column that has sent no result after
+    ``max(column_time_floor_s, column_time_factor * n_col * t_solve)`` seconds is killed and re-run in this process
+    with the serial code, where ``t_solve`` is the longest consistent solve this process (and its workers) has made so
+    far and ``n_col`` the most consistent solves one column can make (every step growth with an opposite-step retry:
+    ``2 * (max_step_growths + 1)``, 8 by default).  Non-physical numbers that change no value, only the wall time:
+    a bound that fires too early re-runs columns serially (the result is the same bit for bit), one that fires too
+    late only lets a hung worker wait longer.  The defaults (factor 3, floor 60 s) allow a column 24 times the
+    longest solve; a column usually makes one solve, and the longest solve is often the first, cold one, so this is
+    24 to about 100 times a typical column on the measured cases -- room for a machine loaded several times over,
+    while a hang still ends after minutes, not never."""
     column_workers: int = 1
     memo: bool = False
     mesh_index: bool = False
     reuse_stats: bool = False
+    column_time_factor: float = 3.0
+    column_time_floor_s: float = 60.0
 
     def __post_init__(self):
         if isinstance(self.column_workers, bool) or not isinstance(self.column_workers, (int, np.integer)) \
@@ -72,6 +115,11 @@ class SpeedSettings:
         for name in ("memo", "mesh_index", "reuse_stats"):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError(f"{name} must be True or False")
+        for name in ("column_time_factor", "column_time_floor_s"):
+            v = getattr(self, name)
+            if isinstance(v, bool) or not isinstance(v, (int, float, np.integer, np.floating)) or not np.isfinite(v) \
+                    or v < 0 or (name == "column_time_factor" and v == 0):
+                raise ValueError(f"{name} must be a finite number ({'> 0' if name == 'column_time_factor' else '>= 0'})")
 
     @classmethod
     def all_on(cls, column_workers):
@@ -90,6 +138,49 @@ class SpeedSettings:
         return asdict(self)
 
 
+def _openmp_max_threads():
+    """``omp_get_max_threads()`` of an OpenMP runtime already loaded into this process (the threads the next parallel
+    region of the calling thread would use), or None when none is loaded (only an already loaded library is asked;
+    nothing is loaded here)."""
+    mode = getattr(os, "RTLD_NOLOAD", None)
+    if mode is None:
+        return None
+    for name in ("libgomp.so.1", "libomp.so", "libomp.so.5", "libiomp5.so"):
+        try:
+            lib = ctypes.CDLL(name, mode=mode | getattr(os, "RTLD_LAZY", 1))
+            fn = lib.omp_get_max_threads
+        except (OSError, AttributeError):
+            continue
+        fn.restype = ctypes.c_int
+        fn.argtypes = []
+        return int(fn())
+    return None
+
+
+def solver_threads(fm):
+    """The OpenMP thread count the forward model's solver runs with, and where it was read.
+
+    The forward model's OFT environment (``fm.env``; when one is given to :class:`.forward.ForwardModel`,
+    ``ForwardSettings.nthreads`` is not used) holds the count it set at its start, and the loaded OpenMP runtime
+    holds the count in effect now (``OFT_env.set_num_threads`` changes it later); the larger of the two is returned.
+    Without an environment (a stand-in model) ``ForwardSettings.nthreads`` is the count.  Returns ``(count or None
+    when it cannot be established, description)``."""
+    env = getattr(fm, "env", None)
+    if env is None:
+        nt = getattr(getattr(fm, "settings", None), "nthreads", 1)
+        return int(nt), f"ForwardSettings.nthreads = {nt} (the forward model has no solver environment)"
+    found = {}
+    nt_env = getattr(env, "nthreads", None)
+    if nt_env is not None and int(nt_env) > 0:            # <= 0: the runtime's default, read from the runtime
+        found["the solver environment's nthreads"] = int(nt_env)
+    rt = _openmp_max_threads()
+    if rt is not None:
+        found["the OpenMP runtime's omp_get_max_threads()"] = rt
+    if not found:
+        return None, (f"the solver environment's nthreads is {nt_env!r} and no OpenMP runtime could be asked")
+    return max(found.values()), "; ".join(f"{k} = {v}" for k, v in found.items())
+
+
 def check_speed(speed, fm):
     """``speed`` when it asks for anything (validated against the forward model), else None."""
     if speed is None:
@@ -101,11 +192,51 @@ def check_speed(speed, fm):
     if speed.parallel:
         if not hasattr(os, "fork"):
             raise RuntimeError("parallel Jacobian columns need os.fork (not available on this platform)")
-        nt = getattr(getattr(fm, "settings", None), "nthreads", 1)
+        nt, where = solver_threads(fm)
         if nt != 1:
-            raise ValueError(f"parallel Jacobian columns need ForwardSettings.nthreads = 1 (got {nt}): OpenMP is not "
-                             "safe across fork() and threaded solves are not reproducible")
+            raise ValueError(f"parallel Jacobian columns need one solver thread per process (ForwardSettings.nthreads"
+                             f" = 1 and an OFT environment made with nthreads=1); found {where}: OpenMP is not safe "
+                             "across fork() (a forked worker can wait forever) and threaded solves are not "
+                             "reproducible")
     return speed
+
+
+def validate(speed, fm):
+    """:func:`check_speed`, and parallel columns refused off Linux.  Called by :func:`.fit.reconstruct` and
+    :func:`.series.run_series` before anything is solved."""
+    if isinstance(speed, SpeedSettings) and speed.parallel and not sys.platform.startswith("linux"):
+        raise RuntimeError(f"parallel Jacobian columns (column_workers > 1) are refused on {sys.platform!r}: the "
+                           "workers are made by fork() without exec, which is supported and tested on Linux only "
+                           "(macOS system libraries are not safe across fork()). Use column_workers=1; the other "
+                           "speed options work on every platform")
+    return check_speed(speed, fm)
+
+
+# ============================================================== the time bound of a worker column
+#: The longest consistent solve (wall seconds) made so far in this process and reported by its workers.
+_SOLVE_WALL = dict(longest=0.0)
+
+
+def note_solve_wall(seconds):
+    """Record the wall time of a consistent solve (only the longest is kept)."""
+    try:
+        s = float(seconds)
+    except (TypeError, ValueError):
+        return
+    if np.isfinite(s) and s > _SOLVE_WALL["longest"]:
+        _SOLVE_WALL["longest"] = s
+
+
+def longest_solve():
+    """The longest consistent solve noted in this process so far [s]."""
+    return float(_SOLVE_WALL["longest"])
+
+
+def column_time_bound(speed, n_col):
+    """Wall seconds a worker column may run before it is killed and re-run here:
+    ``max(column_time_floor_s, column_time_factor * n_col * longest consistent solve so far)``
+    (:class:`SpeedSettings`; ``n_col``: the most consistent solves one column can make)."""
+    return max(float(speed.column_time_floor_s), float(speed.column_time_factor) * int(n_col) * longest_solve())
 
 
 @contextlib.contextmanager
@@ -153,7 +284,17 @@ def _send(fd, obj):
     _write_all(fd, struct.pack("<Q", len(data)) + data)
 
 
-def _recv(fd):
+#: What :meth:`ForkWorker.recv` returns when no message began within its time bound.
+TIMED_OUT = ("timed_out",)
+
+
+def _recv(fd, timeout=None):
+    """The next framed message; None at the end of the stream; :data:`TIMED_OUT` when no byte of it arrived within
+    ``timeout`` seconds (once a message has begun it is read to its end: the sender writes it whole)."""
+    if timeout is not None:
+        ready, _, _ = select.select([fd], [], [], max(0.0, float(timeout)))
+        if not ready:
+            return TIMED_OUT
     head = _read_exact(fd, 8)
     if head is None:
         return None
@@ -189,6 +330,69 @@ class _Channel:
         return _recv(self._r)
 
 
+def _flush_c_stdio():
+    """Flush every C stdio stream of this process (``fflush(NULL)``), so that text buffered before a fork is not
+    copied into the worker and written twice."""
+    try:
+        ctypes.CDLL(None).fflush(None)
+    except Exception:  # noqa: BLE001 -- best effort (no C library handle on this platform)
+        pass
+
+
+# ============================================================== the workers' temporary directories
+#: Name of a worker's temporary directory: ``oft_worker_<host tag>_<pid of the process that made it>_<random>``.
+_WORKER_DIR = re.compile(r"^oft_worker_([0-9a-f]{8})_([0-9]+)_[A-Za-z0-9_]+$")
+_CLEANED = set()
+
+
+def _host_tag():
+    """Eight hex digits naming this host (a temporary directory on a shared file system is seen by several hosts,
+    whose process ids are unrelated)."""
+    return hashlib.sha1(socket.gethostname().encode("utf-8", "replace")).hexdigest()[:8]
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return True
+    return True
+
+
+def remove_stale_worker_dirs(base):
+    """Remove, in ``base``, the worker directories (:data:`_WORKER_DIR`) made on this host by a process of this user
+    that no longer runs (left when that process was killed: SIGTERM, SIGKILL, a scheduler's time limit).  Nothing else
+    is touched: the exact name, a directory (not a link), this user as owner, this host's tag and a dead process id
+    are all required.  Returns the names removed; never raises."""
+    removed = []
+    try:
+        tag, uid, me = _host_tag(), os.getuid(), os.getpid()
+        names = os.listdir(base)
+    except Exception:  # noqa: BLE001 -- cleanup is best effort
+        return removed
+    for name in names:
+        m = _WORKER_DIR.match(name)
+        if m is None or m.group(1) != tag:
+            continue
+        pid = int(m.group(2))
+        if pid == me or pid <= 1 or _pid_alive(pid):
+            continue
+        path = os.path.join(base, name)
+        try:
+            st = os.lstat(path)
+            if not stat.S_ISDIR(st.st_mode) or st.st_uid != uid:
+                continue
+            shutil.rmtree(path)
+            removed.append(name)
+        except Exception:  # noqa: BLE001
+            continue
+    return removed
+
+
 class ForkWorker:
     """One worker process running ``work(channel)`` on a copy of this process (``os.fork``).  The worker never
     returns into the caller's code: it leaves with ``os._exit`` (no finalizers, no exit handlers).  An exception in
@@ -196,18 +400,41 @@ class ForkWorker:
 
     ``oft_env``: the process's OFT environment; the worker then writes the solver's temporary files (the profile
     tables every solve passes to the solver through files) into a directory of its own, made here and removed by
-    :meth:`close` -- with the parent's directory the processes would overwrite each other's files."""
+    :meth:`close` -- with the parent's directory the processes would overwrite each other's files.  The directory is
+    made beside the environment's own one and named after this process (:data:`_WORKER_DIR`); the first worker made
+    in a directory removes the stale ones there (:func:`remove_stale_worker_dirs`).
+
+    An ``OSError`` while the worker is made (temporary directory, pipes, ``fork``) is raised after everything made
+    so far is released (no directory, no open pipe left)."""
 
     def __init__(self, work, oft_env=None):
         self._tmpdir = None
-        if oft_env is not None:
-            base = getattr(oft_env, "tempdir", None)
-            self._tmpdir = tempfile.mkdtemp(prefix="oft_worker_", dir=os.path.dirname(base) if base else None)
-        r_res, w_res = os.pipe()
-        r_cmd, w_cmd = os.pipe()
-        sys.stdout.flush()
-        sys.stderr.flush()
-        pid = os.fork()
+        fds = []
+        try:
+            if oft_env is not None:
+                base = getattr(oft_env, "tempdir", None)
+                where = os.path.dirname(base) if base else tempfile.gettempdir()
+                if where not in _CLEANED:
+                    _CLEANED.add(where)
+                    remove_stale_worker_dirs(where)
+                self._tmpdir = tempfile.mkdtemp(prefix=f"oft_worker_{_host_tag()}_{os.getpid()}_", dir=where)
+            r_res, w_res = os.pipe()
+            fds += [r_res, w_res]
+            r_cmd, w_cmd = os.pipe()
+            fds += [r_cmd, w_cmd]
+            sys.stdout.flush()
+            sys.stderr.flush()
+            _flush_c_stdio()
+            pid = os.fork()
+        except BaseException:
+            for fd in fds:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            if self._tmpdir is not None:
+                shutil.rmtree(self._tmpdir, ignore_errors=True)
+            raise
         if pid == 0:                                       # ---- worker
             code = 0
             try:
@@ -252,10 +479,11 @@ class ForkWorker:
         except (BrokenPipeError, OSError):
             return False
 
-    def recv(self):
-        """Next result of the worker, or None when it ended without sending one."""
+    def recv(self, timeout=None):
+        """Next result of the worker, None when it ended without sending one, or :data:`TIMED_OUT` when none began
+        within ``timeout`` seconds (None: wait as long as it takes)."""
         try:
-            return _recv(self._r)
+            return _recv(self._r, timeout)
         except (OSError, EOFError, pickle.UnpicklingError):
             return None
 

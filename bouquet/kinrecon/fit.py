@@ -124,10 +124,11 @@ hold, and when no lagged step descends (before a stall is declared) -- and a con
 Jacobian computed for that purpose is then also used for that iteration's step.  The covariance is
 always from consistent columns, also after ``failed_trials``.
 
-Parallel columns (``reconstruct(..., speed=SpeedSettings(column_workers=N))``, an option; off by default).  The
-columns of every Jacobian are evaluated in ``N`` processes at once (:mod:`.speed`); the result is bit for bit the
-serial one (same columns, same decisions in the same order, same records apart from wall times and the Jacobian's
-``parallel`` entry).
+Parallel columns (``reconstruct(..., speed=SpeedSettings(column_workers=N))``, an option; off by default; Linux
+only).  The columns of every Jacobian are evaluated in ``N`` processes at once (:mod:`.speed`); the result is bit for
+bit the serial one (same columns, same decisions in the same order, same records apart from wall times and the
+Jacobian's ``parallel`` entry, which holds the speed settings, the time bound and every serial re-run).  A latency tool: one fit's wall time drops, its core-seconds rise.
+A worker column that ends without a result, exceeds its time bound, or cannot be started is computed here serially.
 
 Statuses: ``converged``, ``converged_within_noise``, ``stalled_no_significant_descent``, ``max_iter``,
 ``failed_trials``, ``jacobian_failed``, ``failed_initial_consistency``, ``no_free_parameters`` (and
@@ -528,7 +529,7 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
     # the frozen-branch diagnostic (option, off by default): the first assembly's branch for the whole fit
     ftok = _cm.open_branch_freeze()[1] if getattr(cfg, "q_floor_branch_freeze", "off") != "off" else None
     try:
-        with _speed.speed_scope(_speed.check_speed(speed, fm)):
+        with _speed.speed_scope(_speed.validate(speed, fm)):
             return _reconstruct(fm, kin, src, cfg, settings=settings, params0=params0, start=start,
                                 initial_profiles=initial_profiles, label=label, state_fn=state_fn, speed=speed)
     finally:
@@ -678,6 +679,8 @@ def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, ini
         p = _to_params(theta, names, base)
         res = _consistent(fm, kin, src, p, cfg, start_state, z0, lab, init_prof,
                           _scaled_state_fn(state_fn, p, getattr(fm, "ip_measured", None)))
+        if speed is not None and speed.parallel:
+            _speed.note_solve_wall(getattr(res, "wall_s", None))       # the time bound's scale (no value read)
         if not res.converged:
             return None, res
         r, idx, tab = residual_vector(fm, ms, groups, settings, coil_roles)
@@ -924,8 +927,15 @@ def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, ini
         starts = np.concatenate(([0], np.cumsum(sizes)))
         blocks = [list(range(int(starts[i]), int(starts[i + 1]))) for i in range(n_proc)]
         owner = {j: w for w, blk in enumerate(blocks[1:]) for j in blk}
+        # the most consistent solves one column can make: every step growth with an opposite-step retry
+        n_col = (settings.max_step_growths + 1) * (2 if settings.column_retry_opposite else 1)
         prec = dict(column_workers=int(speed.column_workers), workers=n_proc - 1, blocks=blocks, columns_here=[],
-                    columns_from_workers=[], serial_reruns=[])
+                    columns_from_workers=[], serial_reruns=[], speed=speed.as_dict(),
+                    time_bound=dict(rule="max(column_time_floor_s, column_time_factor * n_col * the longest consistent "
+                                         "solve made so far in this process and its workers)",
+                                    n_col=int(n_col), n_col_rule="(max_step_growths + 1), times 2 with "
+                                                                 "column_retry_opposite"),
+                    time_bound_s={}, timeouts=[], worker_start_failure=None)
         workers = []
 
         def work(ch, cols_w):
@@ -938,7 +948,8 @@ def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, ini
             for j in cols_w:
                 mark = _speed.effects_mark(fm, log, side)
                 info, _ = one_column(c, j, names[j], lab, lagged, solve_col, r_ref, Jw, [], noise_wait=wait)
-                ch.send(("column", j, info, Jw[:, j].copy(), _speed.effects_since(mark, fm, log, side)))
+                ch.send(("column", j, info, Jw[:, j].copy(), _speed.effects_since(mark, fm, log, side),
+                         _speed.longest_solve()))
                 if info["attempts"][-1].get("status"):
                     return                          # the serial loop stops at a failed column
 
@@ -950,9 +961,23 @@ def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, ini
             return (None, dict(reason=f"column {names[j]} failed: {info['attempts'][-1]['status']}", columns=cols,
                                column_kind="lagged" if lagged else "consistent"))
 
+        def rerun_from(j, reason):
+            prec["serial_reruns"].append(dict(column=j, reason=reason))
+            return prec, j, None
+
         try:
-            for blk in blocks[1:]:
-                workers.append(_speed.ForkWorker(lambda ch, blk=blk: work(ch, blk), oft_env=getattr(fm, "env", None)))
+            try:
+                for blk in blocks[1:]:
+                    workers.append(_speed.ForkWorker(lambda ch, blk=blk: work(ch, blk),
+                                                     oft_env=getattr(fm, "env", None)))
+            except OSError as exc:
+                # the workers cannot be made (fork, pipe or temporary directory refused: a process or memory limit):
+                # every column of this Jacobian is computed here serially
+                for w in workers:
+                    w.close()
+                workers.clear()
+                prec["worker_start_failure"] = f"{type(exc).__name__}: {exc}"[:600]
+                return prec, 0, None
             for j in blocks[0]:                     # this process's block: the serial loop body
                 info, early = one_column(c, j, names[j], lab, lagged, solve_col, r_ref, J, cols,
                                          noise_sent=broadcast if noise["norm"] is None else None)
@@ -963,16 +988,28 @@ def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, ini
                 if info["attempts"][-1].get("status"):
                     return prec, j + 1, failed(j, info)
             for j in range(len(blocks[0]), len(names)):
-                msg = workers[owner[j]].recv()
+                # the time bound counts from now: the worker began this column no later than now (its earlier
+                # column's result has been read, or this is its first column), so it is killed only after running
+                # the column for at least the bound
+                bound = _speed.column_time_bound(speed, n_col)
+                prec["time_bound_s"][str(j)] = round(bound, 3)
+                t_wait = time.perf_counter()
+                msg = workers[owner[j]].recv(timeout=bound)
+                if msg is _speed.TIMED_OUT:
+                    # no result within the bound (a hung worker): killed by its process id, and this column and every
+                    # later one are re-run here serially, as for a worker that died
+                    workers[owner[j]].close()
+                    prec["timeouts"].append(dict(column=j, bound_s=round(bound, 3),
+                                                 waited_s=round(time.perf_counter() - t_wait, 3)))
+                    return rerun_from(j, f"no result within the time bound ({bound:.1f} s)")
                 if not (isinstance(msg, tuple) and msg[0] == "column" and msg[1] == j) or msg[4]["case_changed"]:
                     # a worker that raised, died or changed the edge-taper case: this column and every later one
                     # are re-run here serially (an exception or failure then surfaces as in the serial loop)
-                    prec["serial_reruns"].append(dict(column=j, reason=("edge-taper case changed"
-                                                                        if isinstance(msg, tuple) and msg[0] == "column"
-                                                                        else (msg[1][-600:] if isinstance(msg, tuple)
-                                                                              else "worker ended without a result"))))
-                    return prec, j, None
-                _, _, info, col, eff = msg
+                    return rerun_from(j, ("edge-taper case changed" if isinstance(msg, tuple) and msg[0] == "column"
+                                          else (msg[1][-600:] if isinstance(msg, tuple)
+                                                else "worker ended without a result")))
+                _, _, info, col, eff, t_long = msg
+                _speed.note_solve_wall(t_long)
                 _speed.apply_effects(eff, fm, log, side)
                 J[:, j] = col
                 cols.append(info)

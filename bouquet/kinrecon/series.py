@@ -796,7 +796,7 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
     pure evaluations, the indexed point location, reused statistics; changes no result).
     """
     from . import speed as _speed
-    with _speed.speed_scope(_speed.check_speed(speed, fm)):
+    with _speed.speed_scope(_speed.validate(speed, fm)):
         return _run_series(fm, slices, cfg, settings=settings, start_psi=start_psi, initial_profiles=initial_profiles,
                            callback=callback, speed=speed)
 

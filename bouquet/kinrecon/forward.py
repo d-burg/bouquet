@@ -52,7 +52,12 @@ Grad-Shafranov equation with
 * OFT's default solver settings, never set: ``nl_tol``, ``urf``, ``maxits`` are read back and
   recorded and compared with the defaults at every solve (record key ``G7``).  ``lcfs_cut_cells``
   is an opt-in of the quadrature, not a tolerance: it is set as described above and recorded
-  beside them, never part of the ``G7`` comparison;
+  beside them, never part of the ``G7`` comparison.  The one exception is the iteration limit
+  ``maxits``, and only as an explicit, recorded, non-default setting
+  (:attr:`ForwardSettings.solver_maxits`, default None = OFT's own limit untouched): when given, it
+  is set once on the solver and ``G7`` compares with OFT's defaults with that one value replaced;
+  ``nl_tol`` and ``urf`` are never set.  Every solve's iteration count is logged
+  (:meth:`ForwardModel.iteration_record`);
 * continuation: a solve starts from the current state of the solver (``init="keep"``), from a
   saved state (:meth:`ForwardModel.snapshot`), or -- first solve of a case only -- from a supplied
   reference ``psi`` on the mesh nodes;
@@ -138,6 +143,22 @@ CUT_CELL_LIBRARY_SYMBOL = "__oft_gs_MOD_gs_cut_cell_rule"
 LCFS_CUT_CELL_OPTIONS = ("if_available", "on", "off")
 LCFS_CUT_CELLS_DEFAULT = "if_available"
 _NOTICES = set()
+
+
+def check_solver_maxits(value):
+    """:attr:`ForwardSettings.solver_maxits` checked: None (OFT's own iteration limit, never set) or a whole number
+    >= 1 (an int, or a float with an integral value; a bool or a string is refused).  Returns None or the int."""
+    if value is None:
+        return None
+    if isinstance(value, (bool, np.bool_, str, bytes)):
+        raise ValueError(f"solver_maxits must be None or a whole number >= 1, got {value!r}")
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"solver_maxits must be None or a whole number >= 1, got {value!r}") from None
+    if not np.isfinite(v) or v != int(v) or int(v) < 1:
+        raise ValueError(f"solver_maxits must be None or a whole number >= 1, got {value!r}")
+    return int(v)
 
 
 def _notice_once(key, text):
@@ -234,6 +255,10 @@ class ForwardSettings:
     stall_policy: str = "report"                # "taper": treat a flat stall as taper-eligible (non-default)
     fitted_reference_gauge: bool = False        # True: accept a gauge built from ANOTHER fit's fitted reference
     #                                             (non-default; the default takes it from a measured reference)
+    solver_maxits: Optional[int] = None         # None: OFT's own nonlinear iteration limit, never set (default);
+    #                                             a whole number >= 1: that limit, set once on the solver and used by
+    #                                             every solve of this forward model -- an explicit, recorded,
+    #                                             non-default setting; nl_tol, urf and every criterion are untouched
 
     def as_dict(self):
         d = asdict(self)
@@ -516,6 +541,7 @@ class ForwardModel:
             raise ValueError("settings.vsc (coil -> VSC gain) must be given: it is device data")
         if s.lcfs_cut_cells not in LCFS_CUT_CELL_OPTIONS:
             raise ValueError(f"lcfs_cut_cells must be one of {LCFS_CUT_CELL_OPTIONS}")
+        maxits = check_solver_maxits(s.solver_maxits)
         self.solver_build = solver_build()
         if s.lcfs_cut_cells == "on" and not self.solver_build["provides_lcfs_cut_cells"]:
             raise RuntimeError(f"lcfs_cut_cells='on' but this OpenFUSIONToolkit build "
@@ -528,8 +554,10 @@ class ForwardModel:
         self.cut_cells = configure_cut_cells(self.gs, s.lcfs_cut_cells, self.solver_build)
         self.F0 = float(F0)
         self.defaults = self._read_settings()
+        self.iteration_limit = self._configure_iteration_limit(maxits)
         self.oft_path = os.path.dirname(os.path.abspath(OpenFUSIONToolkit.__file__))
         self.n_solves = 0
+        self.iteration_log = []
         self.history = []
         self.taper_restarts = []
         self.reconfigure(measurements, reference_boundary, coil_roles, case_id=case_id, ip=ip,
@@ -573,6 +601,51 @@ class ForwardModel:
     def _read_settings(self):
         g = self.gs.settings
         return dict(nl_tol=float(g.nl_tol), urf=float(g.urf), maxits=int(g.maxits))
+
+    def _configure_iteration_limit(self, maxits):
+        """Apply :attr:`ForwardSettings.solver_maxits` (already checked) once, after OFT's defaults were read.
+        None: nothing is set and ``G7`` compares with OFT's defaults.  A number: ``maxits`` only is set on the
+        solver (``update_settings``), read back, and ``G7`` compares with OFT's defaults with that value replaced;
+        ``nl_tol`` and ``urf`` stay OFT's.  Returns the record (``setting``, ``in_effect``, ``oft_default``)."""
+        oft = int(self.defaults["maxits"])
+        if maxits is None:
+            self.expected_settings = dict(self.defaults)
+            return dict(setting=None, in_effect=oft, oft_default=oft,
+                        rule="OFT's own nonlinear iteration limit (never set)")
+        self.gs.settings.maxits = int(maxits)
+        self.gs.update_settings()
+        self.expected_settings = dict(self.defaults, maxits=int(maxits))
+        now = self._read_settings()
+        if now != self.expected_settings:
+            raise RuntimeError(f"solver settings after setting maxits = {maxits}: {now}; expected "
+                               f"{self.expected_settings}")
+        return dict(setting=int(maxits), in_effect=int(now["maxits"]), oft_default=oft,
+                    rule="explicit non-default setting ForwardSettings.solver_maxits: the solver's nonlinear "
+                         "iteration limit for every solve of this forward model; nl_tol and urf are OFT's")
+
+    def _log_iterations(self, label, its, kind, at_limit):
+        """One entry of :attr:`iteration_log` per solver call counted in :attr:`n_solves`."""
+        self.iteration_log.append(dict(label=str(label), its=None if its is None else int(its), kind=kind,
+                                       stopped_at_limit=bool(at_limit)))
+
+    def iteration_record(self, start=0):
+        """Iteration counts of the solves logged since index ``start`` of :attr:`iteration_log` (a fit or a series
+        passes its own start; one entry per solver call counted in :attr:`n_solves`, warm verification re-solves
+        included).  ``its``: the counts in call order (None where the solver output could not be read);
+        ``kind``: ``"solve"`` or ``"verify"`` per entry; ``n_over_oft_default``: solves that needed more iterations
+        than OFT's own limit (possible only with :attr:`ForwardSettings.solver_maxits` above it);
+        ``n_stopped_at_limit``: solves that ended on the iteration limit in effect; ``over_oft_default``: label,
+        count and kind of each solve above OFT's limit or stopped at the limit.  A record only."""
+        log = self.iteration_log[int(start):]
+        oft = int(self.iteration_limit["oft_default"])
+        its = [e["its"] for e in log]
+        known = [i for i in its if i is not None]
+        flagged = [dict(e) for e in log if (e["its"] is not None and e["its"] > oft) or e["stopped_at_limit"]]
+        return dict(limit=dict(self.iteration_limit), n_solves=len(log), its=its, kind=[e["kind"] for e in log],
+                    n_unknown=sum(1 for i in its if i is None), max_its=(max(known) if known else None),
+                    n_over_oft_default=sum(1 for i in known if i > oft),
+                    n_stopped_at_limit=sum(1 for e in log if e["stopped_at_limit"]),
+                    over_oft_default=flagged)
 
     def _setup_rows(self, reference_boundary, coil_roles):
         ms, s, gs = self.ms, self.settings, self.gs
@@ -692,7 +765,8 @@ class ForwardModel:
         """Case-level settings: OFT build and defaults, the cut-cell setting, every row and weight, coil roles,
         anchor, edge taper."""
         return dict(settings=self.settings.as_dict(), oft_python=self.oft_path, oft_defaults=self.defaults,
-                    oft_settings_now=self._read_settings(), F0=self.F0, rows=self.rows_record,
+                    oft_settings_now=self._read_settings(), oft_settings_expected=dict(self.expected_settings),
+                    F0=self.F0, rows=self.rows_record,
                     solver=self.solver_record(),
                     edge_taper_case=self.case.as_dict(), n_solves=self.n_solves,
                     history_capture=HISTORY_CAPTURE_NOTE, taper_restarts=list(self.taper_restarts))
@@ -702,7 +776,8 @@ class ForwardModel:
         back now) and the edge-taper setting (mode and parameters): recorded with every solve, fit and series."""
         return dict(build=_copy_build(self.solver_build),
                     lcfs_cut_cells=dict(self.cut_cells, now=read_cut_cells(self.gs)),
-                    edge_taper=self.settings.edge_taper.as_dict())
+                    edge_taper=self.settings.edge_taper.as_dict(),
+                    iteration_limit=dict(self.iteration_limit, now=int(self.gs.settings.maxits)))
 
     def lock_tapered(self, reason):
         """Lock this case's edge taper ON (the ``auto`` policy after a detected limit cycle, applied to
@@ -831,11 +906,13 @@ class ForwardModel:
                     err = f"{type(exc).__name__}: {exc}"
             self.n_solves += 1
             h = parse_history(cap.text)
-            expect = its if err is None else (now["maxits"] if "maxits" in (err or "").lower() or
-                                              "iteration" in (err or "").lower() else None)
+            at_limit = err is not None and ("maxits" in err.lower() or "iteration" in err.lower())
+            expect = its if err is None else (now["maxits"] if at_limit else None)
             consistent = bool(h["ok"] and (expect is None or h["n"] == expect))
+            self._log_iterations(label + ("" if taper is None else ":tapered"),
+                                 its if its is not None else (h["n"] if consistent else None), "solve", at_limit)
             info = dict(error=err, its=its, wall_s=round(time.perf_counter() - t0, 4), settings_at_solve=now,
-                        G7=("PASS" if now == self.defaults else "FAIL"),
+                        G7=("PASS" if now == self.expected_settings else "FAIL"),
                         lcfs_cut_cells_at_solve=cut_now,
                         lcfs_cut_cells_check=("PASS" if cut_now == self.cut_cells["in_effect"] else "FAIL"),
                         history=_edge.summarize_history(h["residuals"]), history_consistent=consistent,
@@ -875,6 +952,8 @@ class ForwardModel:
             v = verify_states(a, b) if err is None else dict(verdict="FAIL", reason=err)
             v["wall_s"] = round(time.perf_counter() - t0, 4)
             v["warm_its"] = parse_history(cap.text).get("n")
+            self._log_iterations(label + ":verify", v["warm_its"], "verify",
+                                 err is not None and ("maxits" in err.lower() or "iteration" in err.lower()))
             ver = v["verdict"] == "PASS"
             stats = b
             pol["verification"] = v

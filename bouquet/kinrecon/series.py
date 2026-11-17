@@ -185,6 +185,36 @@ absorbed filter fit's slice evaluated in the form it used; none on a prediction 
 ``filter_correction="steady_response"`` is the earlier treatment, kept as a comparison option: an absorbed
 fit adds the corrections' zero-net-current steady response to the carried state and nothing is held.
 
+``filter_correction="carried_outside_core"`` (NON-DEFAULT option): an absorbed fit changes the CARRIED state
+outside a core radius ``r_c`` only.  Each plain Gaussian ``g_k`` is split by a continuous taper ``w`` (0 inside
+``r_c``, rising as ``sin^2`` to 1 at ``r_c + carry_taper_width``; :func:`.current_model.carry_taper`): the core
+part ``(1 - w) g_k`` is a source over the slice's interval exactly as in the in-window form (not carried), and
+the outer part becomes ``h_k = N_k w [G(c_k, s) - lam_k G(c_k, r s)]``, a change of the state's current density
+that carries zero net current, is zero inside ``r_c`` and returns its current in the correction's own flank
+outside ``r_c`` (:func:`.current_model.carried_outside_core_parts`; ``r`` the existing
+``CurrentModelSettings.corr_return_width_ratio``).  The fit's parameters are the same amplitudes with the same
+prior; every trial state is the interval advanced with the core parts as a source plus ``sum_k a_k h_k``
+(:func:`.current_model.carried_update`), so the state a fit's center scored and the state carried on are the same
+object, as in the in-window form.  A prediction slice and a non-absorbed fit apply nothing; the first slice is
+unchanged.  The core radius ``r_c`` (``carry_core_radius``, stated by the caller; no default): a number (a fixed
+rho_tor,norm), or ``"floor_region"`` -- from the MODEL state, the outer edge of the q floor's region at the slice
+(the region of the step's model sources at the slice time, from the slice's prediction before its fit:
+``core["rho_floor"]``), times ``carry_core_radius_scale`` (1; other values are diagnostics).  Where the floor has
+no region at a slice (its model q at or above the floor on axis), the region of the latest slice that had one is
+held (the first slice's, from its own floor record); a series in which the floor never had a region (a discharge
+with no q = 1 surface in the model, or the floor off) has ``r_c = 0``: the carried change then reaches in to the
+taper next to the axis.  Every slice records the radius used and where it came from (``carry_core_radius``).
+
+Records of the current corrections (every form; records only, nothing reads them): each fit's corrections in units
+of their prior sigma (``correction_size``: per function and root-sum-square); every slice's ACCUMULATED absorbed
+correction per function (``accumulated_correction``: the sum of the absorbed filter amplitudes since the first slice
+in units of the prior sigma, the first slice's own corrections excluded, with a plain flag where a magnitude exceeds
+:data:`ACCUMULATED_CORRECTION_REPORT_LEVEL` -- a REPORTING level for the reader, not an acceptance criterion; it
+steers nothing).  Opt-in record (``steady_state_check=True``; it costs a pass loop per slice): the slice's unfitted
+model steady state (the single-slice core treatment, no corrections, the slice's own inputs) scored on the MSE
+chords by radius (:data:`MSE_RADIAL_CLASSES_M`) next to the slice's own result (``steady_state_check``); the solver
+is restored afterwards and the series continues from the slice's own result.
+
 The vessel/eddy-current contribution through the previous slice's flux is not modeled
 (``vessel_eddy=False``; ``True`` is refused).
 
@@ -243,7 +273,7 @@ CRASH_SLICE_STATES = ("instantaneous", "window_average")
 #: ``"in_window"`` (default) -- a non-inductive source over the interval that ends at the slice only (not carried
 #: into later intervals); ``"steady_response"`` -- the earlier treatment (the zero-net-current
 #: steady response added to the state), kept for comparison.
-FILTER_CORRECTION_FORMS = ("in_window", "steady_response")
+FILTER_CORRECTION_FORMS = ("in_window", "steady_response", "carried_outside_core")
 #: What each form does (recorded in every series result).
 FILTER_CORRECTION_RULES = {
     "in_window": ("current corrections are a non-inductive source over the interval that ends at the slice (the flux "
@@ -252,7 +282,22 @@ FILTER_CORRECTION_RULES = {
                   "first slice's corrections are in its starting state (steady form) and are not a source of the "
                   "first interval"),
     "steady_response": ("COMPARISON OPTION (the earlier treatment): an absorbed fit adds the corrections' zero-net-"
-                        "current steady response to the carried state; nothing is held as a source")}
+                        "current steady response to the carried state; nothing is held as a source"),
+    "carried_outside_core": ("NON-DEFAULT OPTION: each correction is split at the core radius r_c by a continuous "
+                             "taper; inside r_c it is a source over the slice's interval as in the in-window form (not "
+                             "carried); outside r_c an absorbed fit changes the carried state by a zero-net current "
+                             "change that is zero inside r_c (its return in the correction's own flank outside r_c); "
+                             "the fit's trial states use the same form, so the scored state is the carried state")}
+#: Definitions of the core radius of ``filter_correction="carried_outside_core"`` (``carry_core_radius``): a number (a
+#: fixed rho_tor,norm) or ``"floor_region"`` (module docstring).
+CARRY_CORE_RADIUS_RULES = ("floor_region",)
+#: REPORTING level of the accumulated absorbed correction [prior sigmas of each function] (``accumulated_correction``):
+#: a plain flag for the reader where the magnitude of a function's accumulated amplitude exceeds it.  Not an
+#: acceptance criterion; nothing reads it and it steers nothing.
+ACCUMULATED_CORRECTION_REPORT_LEVEL = 3.0
+#: Radial classes of the MSE chords in the opt-in ``steady_state_check`` record: edges of ``|R_chord - R_axis|`` [m]
+#: (core below the first, mid between, outer above the second); a reporting convention of that record only.
+MSE_RADIAL_CLASSES_M = (0.15, 0.35)
 
 
 @dataclass
@@ -284,6 +329,10 @@ class SeriesSettings:
     filter_times: Optional[Sequence[float]] = None       # with filter=True: fit only at these slice times [s]
     filter_time_tol: float = 1.0e-6                      # [s] match tolerance of filter_times
     filter_correction: str = "in_window"                 # FILTER_CORRECTION_FORMS ("steady_response": comparison)
+    carry_core_radius: Optional[Any] = None              # "carried_outside_core" only: rho_tor,norm or "floor_region"
+    carry_core_radius_scale: float = 1.0                 # "floor_region" only: multiplier (other than 1: diagnostic)
+    carry_taper_width: float = 0.1                       # "carried_outside_core": taper width in rho_tor,norm
+    steady_state_check: bool = False                     # opt-in record: unfitted steady state scored on MSE
     dt_max: float = 1.0e-3                               # diffusion step [s]
     scheme: str = "trbdf2"
     sawtooth: str = "q_floor"                            # SAWTOOTH_MODES; the others only as explicit options
@@ -340,6 +389,28 @@ class SeriesSettings:
             raise ValueError(f"crash_slice_state must be one of {CRASH_SLICE_STATES}")
         if self.filter_correction not in FILTER_CORRECTION_FORMS:
             raise ValueError(f"filter_correction must be one of {FILTER_CORRECTION_FORMS}")
+        if self.filter_correction == "carried_outside_core":
+            rc = self.carry_core_radius
+            if rc is None:
+                raise ValueError("filter_correction='carried_outside_core' needs carry_core_radius stated: a "
+                                 f"rho_tor,norm in [0, 1) or one of {CARRY_CORE_RADIUS_RULES}")
+            if isinstance(rc, str):
+                if rc not in CARRY_CORE_RADIUS_RULES:
+                    raise ValueError(f"carry_core_radius must be a number or one of {CARRY_CORE_RADIUS_RULES}")
+            elif not 0.0 <= float(rc) < 1.0:
+                raise ValueError("a fixed carry_core_radius must lie in [0, 1) (rho_tor,norm)")
+            if not (np.isfinite(float(self.carry_core_radius_scale)) and float(self.carry_core_radius_scale) > 0.0):
+                raise ValueError("carry_core_radius_scale must be finite and > 0")
+            if float(self.carry_core_radius_scale) != 1.0 and rc != "floor_region":
+                raise ValueError("carry_core_radius_scale applies to carry_core_radius='floor_region' only")
+            if not (np.isfinite(float(self.carry_taper_width)) and float(self.carry_taper_width) > 0.0):
+                raise ValueError("carry_taper_width must be finite and > 0")
+            if self.sawtooth not in ("q_floor", "off"):
+                raise ValueError("filter_correction='carried_outside_core' is built for sawtooth='q_floor' (default) "
+                                 "and 'off' only")
+        elif self.carry_core_radius is not None or float(self.carry_core_radius_scale) != 1.0:
+            raise ValueError("carry_core_radius and carry_core_radius_scale are read only by "
+                             "filter_correction='carried_outside_core'")
         if self.filter_times is not None:
             if not self.filter:
                 raise ValueError("filter_times select the slices of the filter: they need filter=True")
@@ -878,7 +949,8 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
                       iterations=len(fr.record["iterations"]), stopping=fr.record.get("final_stopping_tests"),
                       stopping_summary=fr.record.get("stopping_summary"),
                       noise=fr.record.get("noise"), column_flags=fr.record.get("covariance_column_flags"),
-                      ip_fit=fr.record.get("ip_fit"))
+                      ip_fit=fr.record.get("ip_fit"),
+                      correction_size=_correction_size(fr.params, cfg0, s.initial_fit))
         cce0 = fr.record.get("correction_core_effect")
         branch0 = fr.record.get("floor_branch_record")
         params0 = fr.params
@@ -908,6 +980,11 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
                                                         vacuum_F0=f0rec0, correction_core_effect=cce0,
                                                         floor_branch_record=branch0,
                                                         ip_fitted=bool(fitrec and "ip_rel" in fitrec["free"])))
+    n_corr = len(cfg.corr_centers_rho)
+    sig_filter = _fit.correction_prior_sigmas(cfg, s.filter_fit)
+    acc_corr = np.zeros(n_corr)            # accumulated absorbed filter amplitudes [prior sigmas] (a record only)
+    n_absorbed = 0
+    rec0["accumulated_correction"] = _accumulated_record(acc_corr, 0, s, sig_filter)
     w0 = _sawtooth_warning(s, res0, float(times[0]), float(times[0]), [])
     if w0 is not None:
         rec0["q_below_one"] = w0
@@ -937,8 +1014,17 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
     # current corrections in the evolution (module docstring, "Fit interaction"): a filter fit's amplitudes are a
     # source over the interval ending at its slice only (the first slice's corrections are in its state)
     in_window = s.filter_correction == "in_window"
-    n_corr = len(cfg.corr_centers_rho)
+    hybrid = s.filter_correction == "carried_outside_core"
     out["filter_correction"] = dict(form=s.filter_correction, rule=FILTER_CORRECTION_RULES[s.filter_correction])
+    rc_held = None
+    if hybrid:
+        # the core radius rule's held value starts from the first slice's own floor region (module docstring)
+        core0 = (res0.assembly or {}).get("core") or {}
+        rc_held = float(core0["rho_floor"]) if core0.get("rho_floor") is not None else None
+        out["filter_correction"].update(carry_core_radius=s.carry_core_radius,
+                                        carry_core_radius_scale=float(s.carry_core_radius_scale),
+                                        carry_taper_width=float(s.carry_taper_width),
+                                        first_slice_floor_region=rc_held)
     # Ip convention (module docstring, "Plasma current in a series"): the carried state's current is the first
     # slice's solved target, and the relative offset of the fitted from the measured Ip (0 without an Ip fit) is
     # carried forward: every later interval is driven from the carried current to the NEXT measured Ip times
@@ -972,12 +1058,14 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
         p_pred = dict(log_strength=None, f=s.sawtooth_f,
                       s_bs=params0.get("s_bs", 1.0) if isinstance(params0, dict) else 1.0, ip_rel=ip_off)
         shapes_prev = {}
+        rc_box = dict(r=None)      # carried_outside_core: this slice's core radius (set from its prediction)
 
         def state_fn(lag, params=None, sl=sl, t1=t1, tp=tp, ip0=ip0, ip1=ip1, carried=carried, lag_prev=lag_prev,
-                     jni_prev=jni_prev, holder=holder, shapes_prev=shapes_prev):
+                     jni_prev=jni_prev, holder=holder, shapes_prev=shapes_prev, rc_box=rc_box):
             jni1 = _jni(lag, sl.kinetics, sl.sources, p_pred)
             j0, j1, amps, inc = jni_prev, jni1, None, None
             c0 = c1 = None
+            parts1 = None
             if in_window:
                 # the corrections as a non-inductive source over this interval only: the parameters' amplitudes (a
                 # fit's free a_corr; zero for a prediction), on each end's geometry; nothing from earlier intervals
@@ -990,6 +1078,24 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
                     g1 = _cm.correction_shapes(lag, cfg, ip1, form="in_window")
                     c0 = sum(a * g for a, g in zip(amps, shapes_prev["g"]))
                     c1 = sum(a * g for a, g in zip(amps, g1))
+                    if s.sawtooth != "q_floor":
+                        j0, j1 = jni_prev + c0, jni1 + c1
+            elif hybrid:
+                # NON-DEFAULT form (module docstring): the core parts (1 - w) g_k a source over this interval only;
+                # the outer parts a zero-net change of the state added at the end (carried on)
+                amps = (tuple(float(v) for v in _cm.full_params(params)["a_corr"]) if params is not None
+                        else (0.0,) * n_corr)
+                if any(a != 0.0 for a in amps):
+                    rcv = rc_box["r"]
+                    if rcv is None:
+                        raise RuntimeError("carried_outside_core: the slice's core radius is not set")
+                    if "parts" not in shapes_prev:
+                        shapes_prev["parts"] = _cm.carried_outside_core_parts(lag_prev, cfg, ip0, rcv,
+                                                                              s.carry_taper_width, carried.rho_faces)
+                    parts1 = _cm.carried_outside_core_parts(lag, cfg, ip1, rcv, s.carry_taper_width,
+                                                            carried.rho_faces)
+                    c0 = sum(a * g for a, g in zip(amps, shapes_prev["parts"]["core"]))
+                    c1 = sum(a * g for a, g in zip(amps, parts1["core"]))
                     if s.sawtooth != "q_floor":
                         j0, j1 = jni_prev + c0, jni1 + c1
             sol, info = interval_solver(lag_prev, lag, j0, j1, tp, t1, ip0, ip1, s.layer_fpol)
@@ -1007,14 +1113,26 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
                 events, states = [], []
             else:
                 end, events, states = advance_interval(sol, carried, t1, s, crash, s.dt_max)
+            upd = None
+            if parts1 is not None:
+                # the carried outer parts: a zero-net change of the state, zero inside r_c (current_model.carried_update)
+                dps, dpb, upd = _cm.carried_update(parts1, amps)
+                end = CurrentState(end.rho_faces, end.psi + dps, end.psi_boundary + dpb, end.time, dict(end.meta))
+                upd.update(r_core=float(rc_box["r"]), taper_width=float(s.carry_taper_width),
+                           lam=[None if v is None else float(v) for v in parts1["lam"]])
             holder.clear()
             end.meta["ip_A"] = float(ip1)
             end.meta["current_scale"] = None          # this interval made no rescale
             end.meta["core"] = core if core is not None else dict(core_relaxation=f"series mode {s.sawtooth!r}")
-            if in_window:
+            if in_window or hybrid:
                 end.meta.update(correction_source=amps)
+            if parts1 is not None:
+                end.meta.update(carried_outside_core=dict(r_core=float(rc_box["r"]),
+                                                          taper_width=float(s.carry_taper_width)))
             holder.update(end=end, events=events, states=states, info=info, jni1=jni1, window_average=False,
                           amps=amps)
+            if upd is not None:
+                holder["carried_update"] = upd
             use = end
             if events and s.crash_slice_state == "window_average":
                 # COMPARISON OPTION (the earlier treatment): the sawtooth effect over the interval -- the interval
@@ -1031,8 +1149,9 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
                 holder["window_average"] = bool(any(e.record.active for e in events))
             return use
 
-        state_fn.corrections_in_window = in_window
+        state_fn.corrections_in_window = in_window or hybrid
         blog, btok = _branch_log_open()          # the floor's branch at every assembly of this slice (a record)
+        rc_rec = None
         try:
             res = _cm.consistent_solve(fm, sl.kinetics, sl.sources, p_pred, cfg, label=f"{sl.label}:evolve",
                                        state_fn=state_fn)
@@ -1041,6 +1160,9 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
                 # pass; re-advance on the accepted pass's equilibrium, so that the state carried on is the state
                 # scored
                 _cm.call_state_fn(state_fn, res.lag, p_pred)
+                if hybrid:
+                    # the slice's core radius, from its prediction (model state), before any fit (module docstring)
+                    rc_box["r"], rc_held, rc_rec = _core_radius(s, (res.assembly or {}).get("core"), rc_held)
             filt = None
             if res.converged and s.filter_at(t1):
                 filt, res = _filter_slice(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1)
@@ -1060,6 +1182,12 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
                      window_average=holder.get("window_average", False), filter=filt, vacuum_F0=f0rec,
                      correction_core_effect=cce, wall_total_s=round(time.perf_counter() - tk0, 2),
                      floor_branch_record=_branch_record(blog, res, (filt or {}).get("floor_branch_record")))
+        if hybrid:
+            extra["carry_core_radius"] = rc_rec
+        if res.converged and filt and filt.get("absorbed"):
+            acc_corr = acc_corr + _prior_units(filt.get("a_corr"), sig_filter)
+            n_absorbed += 1
+        extra["accumulated_correction"] = _accumulated_record(acc_corr, n_absorbed, s, sig_filter)
         if not res.converged and crash_rec:
             # the crashes of the failed slice's last attempt were never applied to a carried state
             extra["crashes_of_failed_attempt"] = crash_rec
@@ -1088,6 +1216,9 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
         if float(sl.time) in zeff_flags:
             extra["zeff_flag"] = "the series' Z_eff source fails its tests or is unverified at this slice"
         rec = _slice_record(fm, res, sl, sl.label, extra)
+        if s.steady_state_check and res.converged:
+            # opt-in record (module docstring); the solver is restored to the slice's own result afterwards
+            rec["steady_state_check"] = _steady_state_check(fm, sl, cfg, s, p_pred)
         w = _sawtooth_warning(s, res, float(tp), float(t1), holder.get("events", []))
         if w is not None:
             rec["q_below_one"] = w
@@ -1407,7 +1538,9 @@ def _filter_slice(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1):
                 prior={n: fr.record["specs"].get(n, {}).get("prior") for n in fr.free}, chi2=fr.chi2,
                 n_solves=fr.record["n_solves"], wall_s=fr.record["wall_s"],
                 stopping=fr.record.get("final_stopping_tests"), stopping_summary=fr.record.get("stopping_summary"),
-                floor_branch_record=fr.record.get("floor_branch_record"))
+                floor_branch_record=fr.record.get("floor_branch_record"),
+                a_corr=[float(v) for v in _cm.full_params(fr.params)["a_corr"]],
+                correction_size=_correction_size(fr.params, cfg, s.filter_fit))
     if c is None or fr.status not in ACCEPTED_FIT_STATUSES:
         # not absorbed (stalled, max_iter, failed Jacobian or trials, failures): the slice stays at its evolved,
         # unfitted equilibrium and state
@@ -1430,10 +1563,11 @@ def _filter_slice(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1):
     ac = fr.params["a_corr"]
     k_ip = ip_fit / float(ip1)
     asm_st = res.assembly["state"]
-    if s.filter_correction == "in_window":
-        # the corrections acted as a source over the interval: re-advancing with the center's parameters (the same
-        # function the fit evaluated, fit._scaled_state_fn) gives the state the center scored; that end state is
-        # carried, and the source stops at this slice (not carried into the next interval)
+    if s.filter_correction in ("in_window", "carried_outside_core"):
+        # the corrections acted as a source over the interval (carried_outside_core: inside r_c; outside it their
+        # zero-net change of the state is part of the same state function): re-advancing with the center's parameters
+        # (the same function the fit evaluated, fit._scaled_state_fn) gives the state the center scored; that end
+        # state is carried, and the source stops at this slice (not carried into the next interval)
         use_c = _fit._scaled_state_fn(state_fn, fr.params, ip_meas)(res.lag)
         if k_ip != 1.0:
             holder["end"] = _cm.scale_state(holder["end"], k_ip)
@@ -1442,14 +1576,21 @@ def _filter_slice(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1):
         e = holder["end"]
         holder["end"] = CurrentState(e.rho_faces, e.psi, e.psi_boundary, e.time,
                                      dict(e.meta, filter_corrections_absorbed=list(ac)))
+        hyb = s.filter_correction == "carried_outside_core"
         filt.update(absorbed=True,
-                    carried_from=("state re-advanced on the accepted center's equilibrium with the corrections as a "
-                                  "source over the interval (in-window); the source stops at the slice"),
+                    carried_from=(("state re-advanced on the accepted center's equilibrium with the corrections' core "
+                                   "parts as a source over the interval and their outer parts as a zero-net change of "
+                                   "the state outside r_c (carried_outside_core); the source stops at the slice")
+                                  if hyb else
+                                  ("state re-advanced on the accepted center's equilibrium with the corrections as a "
+                                   "source over the interval (in-window); the source stops at the slice")),
                     correction_source=list(holder.get("amps") or ()),
                     center_state_check=dict(zip(("max_dpsi_rel", "dpsi_boundary"), _psi_shape_diff(use_c, asm_st))),
                     last_solve_state_vs_center=(dict(zip(("max_dpsi_rel", "dpsi_boundary"),
                                                          _psi_shape_diff(stale, holder["end"])))
                                                 if stale is not None else None))
+        if hyb:
+            filt["carried_update"] = holder.get("carried_update")
         return filt, res
     use_c = state_fn(res.lag)
     if k_ip != 1.0:
@@ -1499,13 +1640,125 @@ def _interval_correction_effect(sl, cfg, s, state_fn, res, filt):
         fn0.corrections_in_window = bool(getattr(state_fn, "corrections_in_window", False))
         st0 = _fit._scaled_state_fn(fn0, p0, _slice_ip(sl))(res.lag)
         asm0 = _cm.assemble(res.lag, sl.kinetics, sl.sources, p0, cfg, asm["ip"], state=st0)
-        how = (("in-window form: the interval re-advanced from the same carried state with no correction source, on "
+        how = (("carried_outside_core form: the interval re-advanced from the same carried state with no correction "
+                "source and no carried change, on the accepted center's geometry and Ip target, and assembled there; "
+                "no new equilibrium solve")
+               if s.filter_correction == "carried_outside_core" else
+               ("in-window form: the interval re-advanced from the same carried state with no correction source, on "
                 "the accepted center's geometry and Ip target, and assembled there; no new equilibrium solve")
                if fn0.corrections_in_window else
                ("steady comparison option: the re-advanced state of the accepted center without the corrections' "
                 "steady response, assembled on its geometry; no new equilibrium solve"))
         return _cm.correction_core_effect(res.lag, asm, asm0, cfg, _fit.correction_prior_sigmas(cfg, s.filter_fit),
                                           how)
+    except Exception as exc:  # noqa: BLE001 -- a record must never end a series
+        return dict(computed=False, reason=f"{type(exc).__name__}: {exc}"[:300])
+
+
+def _core_radius(s, core, held):
+    """The core radius ``r_c`` of one slice in the form ``filter_correction="carried_outside_core"`` (module docstring)
+    and the held floor region for the next slice.  ``core``: the slice's core record from its prediction (model state,
+    before any fit); ``held``: the floor region of the latest slice that had one (None: none yet).  Returns
+    ``(r_c, held_new, record)``; the rule reads the model state only, never the data."""
+    if not isinstance(s.carry_core_radius, str):
+        r = float(s.carry_core_radius)
+        return r, held, dict(r_core=r, rule="fixed rho_tor,norm (carry_core_radius)")
+    rho_f = (core or {}).get("rho_floor")
+    scale = float(s.carry_core_radius_scale)
+    if rho_f is not None:
+        held = float(rho_f)
+        src = "the floor's region at this slice (its prediction)"
+    elif held is not None:
+        src = "no floor region at this slice: the region of the latest slice that had one, held"
+    else:
+        src = "the floor has had no region in this series: r_c = 0"
+    r = scale * held if held is not None else 0.0
+    return r, held, dict(r_core=r, rule="floor_region", scale=scale, rho_floor_slice=rho_f, rho_floor_used=held,
+                         source=src)
+
+
+def _prior_units(amps, sigmas):
+    """Amplitudes divided by their prior sigmas (NaN where a prior sigma is missing or not positive)."""
+    a = np.asarray([float(v) for v in (amps or [])], float)
+    sg = np.asarray([np.nan if v is None or not float(v) > 0 else float(v) for v in sigmas], float)
+    if a.size != sg.size:
+        return np.full(sg.size, np.nan)
+    return a / sg
+
+
+def _correction_size(params, cfg, fit_settings):
+    """RECORD: one fit's current corrections in units of their prior sigma -- per function and root-sum-square."""
+    try:
+        sig = _fit.correction_prior_sigmas(cfg, fit_settings)
+        r = _prior_units(_cm.full_params(params)["a_corr"], sig)
+        return dict(ratio_to_prior_sigma=[float(v) for v in r], rss_prior_sigma=float(np.sqrt(np.sum(r ** 2))),
+                    prior_sigma=[None if v is None else float(v) for v in sig],
+                    centers_rho=[float(c) for c in cfg.corr_centers_rho])
+    except Exception as exc:  # noqa: BLE001 -- a record must never end a series
+        return dict(computed=False, reason=f"{type(exc).__name__}: {exc}"[:300])
+
+
+def _accumulated_record(acc, n_absorbed, s, sigmas):
+    """RECORD: the accumulated absorbed filter correction per function [prior sigmas of the filter fit] since the first
+    slice (its own corrections excluded) and the reader's flag at :data:`ACCUMULATED_CORRECTION_REPORT_LEVEL`."""
+    lvl = ACCUMULATED_CORRECTION_REPORT_LEVEL
+    acc = np.asarray(acc, float)
+    flags = [f"accumulated correction of function {k} is {v:+.2f} prior sigmas (reporting level {lvl:g})"
+             for k, v in enumerate(acc) if abs(v) > lvl]
+    meaning = {"in_window": "sum of the absorbed source amplitudes (each acted over its own interval only)",
+               "steady_response": "sum of the absorbed steady responses added to the carried state",
+               "carried_outside_core": ("sum of the absorbed amplitudes (their outer parts were added to the carried "
+                                        "state, their core parts acted over their own interval only)")}
+    return dict(per_function_prior_sigma=[float(v) for v in acc], n_absorbed=int(n_absorbed),
+                prior_sigma=[None if v is None else float(v) for v in sigmas], report_level_prior_sigma=lvl,
+                flagged=bool(flags), flags=flags, form=s.filter_correction,
+                meaning=meaning.get(s.filter_correction),
+                note=("a record for the reader: the reporting level is not an acceptance criterion and steers nothing; "
+                      "the first slice's corrections start the series inside its state and are not counted"))
+
+
+def _mse_by_radius(fm, ms):
+    """chi^2/N of the MSE chords of the solver's present equilibrium by ``|R - R_axis|`` class
+    (:data:`MSE_RADIAL_CLASSES_M`)."""
+    tab = score(fm.gs, ms, groups=["mse"])
+    g = ms.groups["mse"]
+    use = np.asarray(tab.used("mse"), bool)
+    res = np.asarray(tab.residual("mse"), float)
+    ra = float(np.asarray(fm.gs.o_point, float)[0])
+    d = np.abs(np.asarray(g.geometry["r"], float)[use] - ra)
+    e1, e2 = MSE_RADIAL_CLASSES_M
+    out = dict(r_axis_m=ra, class_edges_m=list(MSE_RADIAL_CLASSES_M))
+    for name, m in (("core", d < e1), ("mid", (d >= e1) & (d <= e2)), ("outer", d > e2), ("all", np.ones_like(d, bool))):
+        out[name] = dict(n=int(np.count_nonzero(m)), chi2_per_n=float(np.mean(res[m] ** 2)) if np.any(m) else None)
+    return out
+
+
+def _steady_state_check(fm, sl, cfg, s, params):
+    """OPT-IN RECORD (``steady_state_check``): the slice's unfitted model steady state -- the single-slice core
+    treatment, no corrections, the slice's own inputs and Ip target -- scored on the MSE chords by radius, next to the
+    slice's own result on the same chords.  The solver is restored to the slice's result afterwards.  Never raises."""
+    try:
+        ms = sl.measurements
+        if ms is None or "mse" not in ms.groups:
+            return dict(computed=False, reason="no MSE group at this slice")
+        if s.sawtooth not in ("q_floor", "off"):
+            return dict(computed=False, reason=f"not built for sawtooth={s.sawtooth!r}")
+        own = _mse_by_radius(fm, ms)
+        snap, pc = fm.snapshot(), fm.probe_correction.copy()
+        n0, t0 = fm.n_solves, time.perf_counter()
+        cfg_ss = dataclasses.replace(cfg, core_relaxation=FIRST_SLICE_CORE[s.sawtooth])
+        p = dict(params, a_corr=(0.0,) * len(cfg.corr_centers_rho), log_strength=None)
+        try:
+            r = _cm.consistent_solve(fm, sl.kinetics, sl.sources, p, cfg_ss, label=f"{sl.label}:steady_check")
+            ss = _mse_by_radius(fm, ms) if r.converged else None
+            stats = (r.solve.stats if r.solve is not None else {}) or {}
+            st = dict(status=r.status, l_i=stats.get("l_i"), q_0=stats.get("q_0"), steady_state=ss)
+        finally:
+            fm.restore(snap)
+            fm.probe_correction = pc
+        return dict(computed=True, own=own, **st, n_solves=fm.n_solves - n0, wall_s=round(time.perf_counter() - t0, 2),
+                    note=("a record for the reader (opt-in): the slice's model steady state with no fit, scored on the "
+                          "same chords as the slice's own result; nothing reads it"))
     except Exception as exc:  # noqa: BLE001 -- a record must never end a series
         return dict(computed=False, reason=f"{type(exc).__name__}: {exc}"[:300])
 

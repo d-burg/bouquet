@@ -792,8 +792,17 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
     starting state of the solver (as :func:`.fit.reconstruct`).  ``callback(record)`` is called after
     every slice.  Returns a dict with ``slices`` (one record each), ``settings``, ``solver`` (the solver build,
     the cut-cell setting in effect and the edge-taper setting, :meth:`.forward.ForwardModel.solver_record`) and
-    the totals.  ``speed``: :class:`.speed.SpeedSettings` of the fits (opt-in; changes no result).
+    the totals.  ``speed``: opt-in :class:`.speed.SpeedSettings` (parallel Jacobian columns of the fits, the memo of
+    pure evaluations, the indexed point location, reused statistics; changes no result).
     """
+    from . import speed as _speed
+    with _speed.speed_scope(_speed.check_speed(speed, fm)):
+        return _run_series(fm, slices, cfg, settings=settings, start_psi=start_psi, initial_profiles=initial_profiles,
+                           callback=callback, speed=speed)
+
+
+def _run_series(fm, slices, cfg, settings=None, start_psi=None, initial_profiles=None, callback=None, speed=None):
+    """:func:`run_series` inside its speed scope."""
     s = settings or SeriesSettings()
     t_all = time.perf_counter()
     n_solves0 = fm.n_solves

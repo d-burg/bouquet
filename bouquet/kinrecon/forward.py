@@ -256,6 +256,8 @@ class SolveResult:
 # ============================================================== residual-history capture
 #: Debugging aid: set to a list to keep every captured solver output (None: not kept).
 CAPTURE_LOG = None
+#: Opt-in speed options read by the forward solve (off by default; :class:`.speed.SpeedSettings`).
+SPEED_OPTIONS = dict(reuse_stats=False)
 
 
 class FortranStdout:
@@ -807,6 +809,7 @@ class ForwardModel:
             self.restore(init)
             start = self.snapshot()
         attempts = []
+        last_stats = [None]      # the stats of the latest attempt's state (the state the policy leaves)
 
         def one(taper):
             self.restore(start)
@@ -841,7 +844,9 @@ class ForwardModel:
                         history=_edge.summarize_history(h["residuals"]), history_consistent=consistent,
                         taper=None if trec is None else dict(pax_ratio=trec["taper"].get("pax_ratio"),
                                                              variant=trec["taper_variant"]))
-            info.update(_stats(gs))
+            st_now = _stats(gs)
+            last_stats[0] = st_now
+            info.update(st_now)
             if err is not None or not consistent:
                 # solver output kept for diagnosis (warnings, the iteration lines)
                 info["output_tail"] = cap.text[-3000:]
@@ -859,7 +864,12 @@ class ForwardModel:
                                           stall_policy=s.stall_policy)
         pol = out.record
         flag = pol["status"] != _edge.STATUS_FAILED
-        stats = _stats(gs) if flag else {}
+        if flag and SPEED_OPTIONS["reuse_stats"] and last_stats[0] is not None:
+            # opt-in: the solver still holds the state of the latest attempt, whose stats were just evaluated; they are
+            # reused (the same evaluation of the same state) instead of evaluated a second time
+            stats = dict(last_stats[0])
+        else:
+            stats = _stats(gs) if flag else {}
         ver = None
         if flag and s.verify:
             a = dict(stats)

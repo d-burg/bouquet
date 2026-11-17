@@ -528,8 +528,9 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
     # the frozen-branch diagnostic (option, off by default): the first assembly's branch for the whole fit
     ftok = _cm.open_branch_freeze()[1] if getattr(cfg, "q_floor_branch_freeze", "off") != "off" else None
     try:
-        return _reconstruct(fm, kin, src, cfg, settings=settings, params0=params0, start=start,
-                            initial_profiles=initial_profiles, label=label, state_fn=state_fn, speed=speed)
+        with _speed.speed_scope(_speed.check_speed(speed, fm)):
+            return _reconstruct(fm, kin, src, cfg, settings=settings, params0=params0, start=start,
+                                initial_profiles=initial_profiles, label=label, state_fn=state_fn, speed=speed)
     finally:
         if ftok is not None:
             _cm.close_branch_freeze(ftok)
@@ -886,7 +887,7 @@ def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, ini
         cols = []
         par_rec = None
         done = 0
-        if speed is not None and len(names) > 1:
+        if speed is not None and speed.parallel and len(names) > 1:
             par_rec, done, early = _parallel_columns(c, lab, lagged, solve_col, r_ref, J, cols)
             if early is not None:
                 return early

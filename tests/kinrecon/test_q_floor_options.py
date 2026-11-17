@@ -5,7 +5,11 @@
   branch (b); the same in a time-dependent step;
 * ``transition="blend_margin"``: the number-free blend of the level across the plain axis-q margin; identical to the
   default outside the band, continuous at the boundary inside it;
-* ``q_floor_branch_freeze="first_assembly"`` (diagnostic): the first assembly's branch for the whole fit;
+* ``total_current="flat_at_level_own_region"``: the same flat-at-level total current inside the option's own region
+  (the default rule's criterion on the flat-at-level states): q at or above the level outside it, the smallest such
+  edge, and the same in a time-dependent step;
+* ``q_floor_branch_freeze="first_assembly"`` (diagnostic): the first assembly's branch for the whole fit, carried by
+  the freeze, not read from a record;
 * with all three off the default path does not enter any of the new code (the default results are unchanged).
 
 Synthetic geometry as in ``test_q_floor.py`` (no OFT).
@@ -287,3 +291,230 @@ def test_frozen_branch_outside_a_fit_is_the_plain_branch_and_forced_branches_are
     assert rec["floor_branch"] == "axis" and rec["floor_branch_plain"] == "off_axis" and rec["acted"]
     _, rec, _ = SAW.resistive_floor_steady(sol, RF, 0.5, branch="axis")
     assert rec["floor_branch"] == "axis" and not rec["acted"] and "nothing to flatten" in rec["branch_frozen_note"]
+
+
+# ====================================================================== pieces of the options tested directly
+def test_total_current_cut_cell_is_the_overlap_weighted_blend_continuous_in_the_edge():
+    """The cut cell takes the overlap-weighted source change, so the flat-at-level state is continuous in the edge:
+    across a face the state changes in proportion to the distance from it (not by a whole cell's change)."""
+    sol = QC._solver(QC.IP_MET)
+    f_k = float(RF[30])
+
+    def gap(eps):
+        a, b = (SAW.ResistiveFloor(sol, 1.0, rho_inv=f_k * (1.0 + s * eps), rho_faces=RF,
+                                   total_current="flat_at_level").with_solver() for s in (1.0, -1.0))
+        sa, sb = a.steady_state(RF), b.steady_state(RF)
+        return float(np.max(np.abs(QC._fq(a, sa) - QC._fq(b, sb))))
+    g1, g2 = gap(1e-6), gap(1e-8)
+    assert 0.0 < g2 <= 0.2 * g1
+    # the change on a cut cell lies strictly between none and the whole cell's change
+    c = SAW.ResistiveFloor(sol, 1.0, rho_inv=RF[30], rho_faces=RF).with_solver().coefficients(0.0, RF)
+    r_mid = 0.5 * (RF[30] + RF[31])
+    ds_mid = SAW.level_flattening_source_change(RF, c, True, r_mid, 1.0)
+    ds_full = SAW.level_flattening_source_change(RF, c, True, RF[31], 1.0)
+    assert 0.0 < ds_mid[30] / ds_full[30] < 1.0
+
+
+@pytest.mark.parametrize("tc", ["flat_at_level", "flat_at_level_own_region"])
+def test_the_source_hook_changes_the_non_inductive_current_with_the_sources(tc):
+    """Where the option changes the cell sources, <J_NI.B> on the cells is changed with them: the coefficients keep
+    the relation s_c = V' <J_NI.B> h / (2 pi F^2) of the plain solver, so the outputs stay consistent."""
+    sol = QC._solver(QC.IP_LOW_Q)
+    _, rec, s2 = SAW.resistive_floor_steady(sol, RF, 1.0, total_current=tc)
+    h = np.diff(RF)
+    for s_ in (sol, s2):
+        c = s_.coefficients(0.0, RF)
+        vc, fc = c.geo_c["dvol_drho"], c.geo_c["fpol"]
+        np.testing.assert_allclose(c.s_c, vc * c.jni_c / (2.0 * np.pi * fc ** 2) * h, rtol=1e-12, atol=0.0)
+    c0, c1 = sol.coefficients(0.0, RF), s2.coefficients(0.0, RF)
+    assert np.any(c1.jni_c != c0.jni_c)
+
+
+def test_blend_lambda_is_the_plain_axis_q_margin_fraction():
+    """``lambda = 1 - (q0 - L) / (L - q_min)`` from the plain state: a level set so that ``q0 - L`` is half (a
+    quarter) of ``L - q_min`` gives lambda 1/2 (3/4), and the blended level is ``q_min + lambda (L - q_min)``."""
+    sol = QC._reversed_shear()
+    q = SAW.face_q(sol.steady_state(RF), sol.geometry_at(0.0).phi_b)
+    q0, qmn = float(q[0]), float(np.min(q[np.isfinite(q)]))
+    for frac, lam in ((0.5, 0.5), (0.25, 0.75)):
+        level = (q0 + frac * qmn) / (1.0 + frac)          # (q0 - level) / (level - q_min) = frac
+        _, rec, _ = SAW.resistive_floor_steady(sol, RF, level, transition="blend_margin")
+        assert rec["blend_lambda"] == pytest.approx(lam, rel=1e-12)
+        assert rec["level_used"] == pytest.approx(qmn + lam * (level - qmn), rel=1e-12)
+
+
+def _series_with(monkeypatch, **cfg_kw):
+    """A three-slice series on the mocked solve of ``test_q_floor_continuous`` (the slice's state is the advanced
+    model state), with extra model settings."""
+    lag = SD._lag()
+    ip = QC.IP_LOW_Q
+    st0 = SD._steady(lag, ip)
+
+    def consistent(fm_, kin, src, params, cfg, ip=None, start=None, z0=None, label="", initial_profiles=None,
+                   state_fn=None):
+        fm_.n_solves += 1
+        if state_fn is None:
+            return SD._result(lag, st0)
+        st = state_fn(lag)
+        res = SD._result(lag, st)
+        res.assembly["core"] = dict(st.meta["core"])
+        return res
+    with monkeypatch.context() as mp:
+        mp.setattr(SE._cm, "consistent_solve", consistent)
+        cfg = CM.CurrentModelSettings(r0=SD.GEO.R0, q_floor=1.0, **cfg_kw)
+        return SE.run_series(SD.FakeFM(dict(pred=lag)), SD._slices(np.arange(3) * 0.02, np.full(3, ip)), cfg,
+                             SE.SeriesSettings(initial="relaxed"))
+
+
+@pytest.mark.parametrize("tc", ["flat_at_level", "flat_at_level_own_region"])
+def test_run_series_passes_the_total_current_option_to_every_interval(monkeypatch, tc):
+    """The series applies the model's total-current option in its intervals: the interval records carry it and the
+    carried states differ from those of the default series."""
+    ref = _series_with(monkeypatch)
+    out = _series_with(monkeypatch, q_floor_total_current=tc)
+    assert out["status"] == ref["status"] == "completed"
+    for a, b in zip(out["slices"][1:], ref["slices"][1:]):
+        assert a["core"]["total_current"] == tc and "total_current" not in b["core"]
+        assert a["core"]["acted_in_interval"]
+        assert np.max(np.abs(np.asarray(a["carried_state"]["psi"]) - np.asarray(b["carried_state"]["psi"]))) > 0.0
+
+
+# ====================================================================== records do not steer; record keys
+def test_the_frozen_branch_is_carried_by_the_freeze_not_read_from_the_record(monkeypatch):
+    """The branch the freeze holds is the one the floor used (filled through ``branch_holder``), whatever the record
+    says: a record with a garbage branch does not change it."""
+    lag, kin, src = LR._fixture_inputs()
+    cfg = CM.CurrentModelSettings(r0=GEO.R0, q_floor_branch_freeze="first_assembly")
+    real = SAW.resistive_floor_steady
+
+    def garbage_record(*a, **k):
+        st, rec, s_ = real(*a, **k)
+        return st, dict(rec, floor_branch="garbage"), s_
+    sol_m = CM.build_solver(lag, lag["jbs"], QC.IP_MET)
+    hold, tok = CM.open_branch_freeze()
+    try:
+        with monkeypatch.context() as mp:
+            mp.setattr(CM._saw, "resistive_floor_steady", garbage_record)
+            CM._floor_with_options(sol_m, RF, cfg)
+    finally:
+        CM.close_branch_freeze(tok)
+    assert hold["branch"] == "axis"
+    used = {}
+    real(QC._reversed_shear(), RF, 1.0, branch="axis", branch_holder=used)
+    assert used == dict(branch="axis")
+    real(QC._reversed_shear(), RF, 1.0, branch_holder=used)
+    assert used == dict(branch="off_axis")
+
+
+@pytest.mark.parametrize("tc", ["flat_at_level", "flat_at_level_own_region"])
+def test_total_current_options_record_met_outside_the_region_under_its_own_key(tc):
+    sol = QC._solver(QC.IP_LOW_Q)
+    st, rec, s2 = SAW.resistive_floor_steady(sol, RF, 0.9, total_current=tc)
+    q = QC._fq(s2, st)
+    assert rec["q_floor_met_outside_region"] is bool(np.all(q[RF > rec["rho_floor"]] >= 0.9))
+    assert rec["q_floor_met_outside_region_definition"] == SAW.Q_FLOOR_MET_OUTSIDE_REGION_DEFINITION
+    assert rec["total_current_region"] == SAW.TOTAL_CURRENT_REGION_DEFINITIONS[tc]
+    _, rd, _ = SAW.resistive_floor_steady(sol, RF, 0.9)
+    assert "q_floor_met_outside_region" not in rd and "total_current_region" not in rd
+
+
+def test_series_slice_records_count_the_filter_fits_jacobians(monkeypatch):
+    """A series slice's branch record takes the Jacobian counts of its filter fit (the slice's own solves compute
+    none); a slice without a fit records that it computed no Jacobian."""
+    lag = SD._lag()
+    ip = QC.IP_LOW_Q
+    st0 = SD._steady(lag, ip)
+    fit_rec = dict(n_jacobians=3, n_jacobians_mixed_branches=1, jacobians_mixed_branches=[dict(label="c1", mixed=True)],
+                   jacobians_mixed_branches_total=1, jacobians_mixed_branches_truncated=False)
+
+    def fake_filter(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1):
+        return dict(absorbed=False, free=[], floor_branch_record=fit_rec), res
+
+    def consistent(fm_, kin, src, params, cfg, ip=None, start=None, z0=None, label="", initial_profiles=None,
+                   state_fn=None):
+        fm_.n_solves += 1
+        if state_fn is None:
+            return SD._result(lag, st0)
+        st = state_fn(lag)
+        res = SD._result(lag, st)
+        res.assembly["core"] = dict(st.meta["core"])
+        return res
+    monkeypatch.setattr(SE._cm, "consistent_solve", consistent)
+    monkeypatch.setattr(SE, "_filter_slice", fake_filter)
+    cfg = CM.CurrentModelSettings(r0=SD.GEO.R0, q_floor=1.0)
+    out = SE.run_series(SD.FakeFM(dict(pred=lag)), SD._slices(np.arange(2) * 0.02, np.full(2, ip)), cfg,
+                        SE.SeriesSettings(initial="relaxed", filter=True))
+    r = out["slices"][1]["floor_branch_record"]
+    assert r["n_jacobians"] == 3 and r["n_jacobians_mixed_branches"] == 1 and r["jacobians_from"].startswith("the slice")
+    assert r["jacobians_mixed_branches"] == fit_rec["jacobians_mixed_branches"]
+    out0 = SE.run_series(SD.FakeFM(dict(pred=lag)), SD._slices(np.arange(2) * 0.02, np.full(2, ip)), cfg,
+                         SE.SeriesSettings(initial="relaxed", filter=False))
+    r0 = out0["slices"][1]["floor_branch_record"]
+    assert r0["n_jacobians"] == 0 and r0["jacobians_from"].startswith("no fit")
+
+
+# ====================================================================== total current with its own region
+_OWN_CASES = [(QC.IP_MET, 1.0), (QC.IP_LOW_Q, 1.0), (QC.IP_LOW_Q, 0.9)]
+
+
+def _own_criterion(sol, rf, level, r):
+    """min q - level on the faces outside ``r`` of the flat-at-level state with the edge at ``r`` (the option's
+    criterion), from the public pieces."""
+    s_ = SAW.ResistiveFloor(sol, level, rho_inv=r, rho_faces=rf, total_current="flat_at_level").with_solver()
+    q = QC._fq(s_, s_.steady_state(rf))
+    return float(np.min(q[rf > r])) - level
+
+
+@pytest.mark.parametrize("ip, level", _OWN_CASES)
+@pytest.mark.parametrize("n", [100, 200, 400])
+def test_own_region_option_meets_the_level_outside_its_region_and_its_region_is_the_smallest(ip, level, n):
+    """Its own region: q is the level inside (to round-off), at or above it on every face outside; Ip is the solver's
+    Ip condition; the region lies inside the plain outermost crossing, and the edge one face further in fails the
+    criterion (the scan's bracket)."""
+    sol = QC._solver(ip)
+    rf = CurrentState.uniform_faces(n)
+    st0 = sol.steady_state(rf)
+    st, rec, s2 = SAW.resistive_floor_steady(sol, rf, level, total_current="flat_at_level_own_region")
+    q = QC._fq(s2, st)
+    r = rec["rho_floor"]
+    assert rec["floor_branch"] == "axis" and rec["acted"]
+    assert np.max(np.abs(q[rf <= r] - level)) <= FLAT_ATOL and rec["q_flat_max_abs_dev"] <= FLAT_ATOL
+    assert np.all(q[rf > r] >= level) and rec["q_floor_met_outside_region"] is True
+    assert rec["q_min_outside_region"] >= level
+    assert s2.profiles(st)["ip"] == pytest.approx(sol.profiles(st0)["ip"], rel=IP_RTOL)
+    plain_out = SAW.floor_region(rf, QC._fq(sol, st0), level)["rho_outer"]
+    assert 0.0 < r <= plain_out
+    k = int(np.searchsorted(rf, r))          # the first face at or beyond the edge; the face before it fails
+    assert rf[k - 1] < r and (k - 1 == 0 or _own_criterion(sol, rf, level, float(rf[k - 1])) < 0.0)
+    assert rec["total_current"] == "flat_at_level_own_region" and np.isfinite(rec["total_current_ni_added_over_ip"])
+
+
+@pytest.mark.parametrize("ip, level", _OWN_CASES)
+@pytest.mark.parametrize("n", [100, 200, 400])
+def test_flat_at_level_state_with_its_edge_at_the_plain_outermost_crossing_meets_the_level_outside(ip, level, n):
+    """The argument that the own-region search always finds an edge: with the edge at the plain state's outermost
+    upward crossing the enclosed current of q = level equals the plain one there, so the state outside is the plain
+    state (exact in the continuum; with the cut cell blended, approximately), which is at or above the level."""
+    sol = QC._solver(ip)
+    rf = CurrentState.uniform_faces(n)
+    r = SAW.floor_region(rf, QC._fq(sol, sol.steady_state(rf)), level)["rho_outer"]
+    assert _own_criterion(sol, rf, level, r) >= 0.0
+
+
+def test_own_region_option_in_a_time_dependent_step_relaxes_to_its_single_slice_state():
+    """In a series the step's region is the option's own region at the step's time: a long interval at fixed
+    sources ends on the single-slice state of the option, and Ip after a step is the interval's Ip condition."""
+    lag = SD._lag()
+    ip = QC.IP_MET
+    isol, _ = SE.interval_solver(lag, lag, lag["jbs"], lag["jbs"], 0.0, 20.0, ip, ip)
+    st_in = CurrentState(*(lambda s_: (s_.rho_faces, s_.psi, s_.psi_boundary, 0.0))(SD._steady(lag, ip)))
+    tc = "flat_at_level_own_region"
+    e1, c1 = SE.advance_q_floor(isol, st_in, 1e-3, SE.SeriesSettings(), 1e-3, 1.0, total_current=tc)
+    assert SAW.ResistiveFloor(isol, 1.0, total_current=tc).with_solver().profiles(e1)["ip"] == pytest.approx(
+        ip, rel=IP_RTOL)
+    assert c1["total_current"] == tc and c1["acted"]
+    e, c = SE.advance_q_floor(isol, st_in, 20.0, SE.SeriesSettings(), 0.25, 1.0, total_current=tc)
+    st_ss, rec_ss, s_ss = SAW.resistive_floor_steady(isol, e.rho_faces, 1.0, t=20.0, total_current=tc)
+    assert c["rho_floor"] == rec_ss["rho_floor"]
+    q_e = SAW.face_q(e, isol.geometry_at(20.0).phi_b)
+    assert np.max(np.abs(q_e - QC._fq(s_ss, st_ss))) <= 1e-9 * np.max(QC._fq(s_ss, st_ss))

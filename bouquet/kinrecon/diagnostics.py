@@ -137,7 +137,8 @@ def on_mesh(eq, pts):
     hit = _ON_MESH_CACHE.get(key)
     if hit is not None:
         return hit.copy()
-    out = _on_mesh_compute(xy, tri, pts)
+    out = (_on_mesh_compute(xy, tri, pts, index_key=key[:4]) if MESH_INDEX["on"] else
+           _on_mesh_compute_scan(xy, tri, pts))
     if len(_ON_MESH_CACHE) > 256:
         _ON_MESH_CACHE.clear()
     _ON_MESH_CACHE[key] = out.copy()
@@ -145,9 +146,13 @@ def on_mesh(eq, pts):
 
 
 _ON_MESH_CACHE = {}
+#: Opt-in (off by default; :class:`.speed.SpeedSettings` ``mesh_index``): the bucket-indexed form of the same test.
+MESH_INDEX = dict(on=False)
 
 
-def _on_mesh_compute(xy, tri, pts):
+def _on_mesh_compute_scan(xy, tri, pts):
+    """The point-in-triangle test by a scan of every triangle per point (the reference form of
+    :func:`_on_mesh_compute`; kept for the tests that show the two agree)."""
     a, b, c = xy[tri[:, 0]], xy[tri[:, 1]], xy[tri[:, 2]]
     v0, v1 = b - a, c - a
     den = v0[:, 0] * v1[:, 1] - v1[:, 0] * v0[:, 1]
@@ -159,6 +164,76 @@ def _on_mesh_compute(xy, tri, pts):
         if not np.all(np.isfinite(p)):
             continue
         cand = np.nonzero(np.all((p >= lo - 1e-12) & (p <= hi + 1e-12), axis=1))[0]
+        if cand.size == 0:
+            continue
+        d = p - a[cand]
+        s = (d[:, 0] * v1[cand, 1] - v1[cand, 0] * d[:, 1]) / den[cand]
+        t = (v0[cand, 0] * d[:, 1] - d[:, 0] * v0[cand, 1]) / den[cand]
+        out[k] = bool(np.any((s >= -tol) & (t >= -tol) & (s + t <= 1.0 + tol)))
+    return out
+
+
+#: Per mesh: the triangles' corner arrays and a uniform bucket grid of their bounding boxes (:func:`_mesh_index`).
+_MESH_INDEX = {}
+
+
+def _mesh_index(xy, tri, key):
+    """Triangle data and a bucket grid for :func:`_on_mesh_compute`, made once per mesh.
+
+    Every triangle is listed in each bucket that its bounding box widened by 1e-12 (the test's own widening) can
+    reach, plus one bucket on every side, so the bucket of a point lists every triangle whose widened box contains the
+    point (a superset: the exact box test is applied to it afterwards).  The bucket count is a work-sharing choice; it
+    changes no result."""
+    hit = _MESH_INDEX.get(key)
+    if hit is not None:
+        return hit
+    a, b, c = xy[tri[:, 0]], xy[tri[:, 1]], xy[tri[:, 2]]
+    v0, v1 = b - a, c - a
+    den = v0[:, 0] * v1[:, 1] - v1[:, 0] * v0[:, 1]
+    lo = np.minimum(np.minimum(a, b), c)
+    hi = np.maximum(np.maximum(a, b), c)
+    lo_w, hi_w = lo - 1e-12, hi + 1e-12
+    x0 = lo_w.min(axis=0)
+    span = np.maximum(hi_w.max(axis=0) - x0, 1e-300)
+    nb = max(1, int(np.sqrt(tri.shape[0])))
+    hb = span / nb
+    i0 = np.clip(np.floor((lo_w - x0) / hb).astype(np.int64) - 1, 0, nb - 1)
+    i1 = np.clip(np.floor((hi_w - x0) / hb).astype(np.int64) + 1, 0, nb - 1)
+    buckets = [[] for _ in range(nb * nb)]
+    for k in range(tri.shape[0]):
+        for ix in range(i0[k, 0], i1[k, 0] + 1):
+            row = ix * nb
+            for iy in range(i0[k, 1], i1[k, 1] + 1):
+                buckets[row + iy].append(k)
+    idx = dict(a=a, v0=v0, v1=v1, den=den, lo=lo, hi=hi, x0=x0, hb=hb, nb=nb,
+               buckets=[np.asarray(bk, dtype=np.int64) for bk in buckets])
+    if len(_MESH_INDEX) > 8:
+        _MESH_INDEX.clear()
+    _MESH_INDEX[key] = idx
+    return idx
+
+
+def _on_mesh_compute(xy, tri, pts, index_key=None):
+    """True for each point inside a triangle of ``(xy, tri)``.
+
+    The same test as :func:`_on_mesh_compute_scan` -- the bounding-box test widened by 1e-12, then the barycentric
+    coordinates with the tolerance 1e-10, elementwise in the same arithmetic -- applied to the triangles listed in the
+    point's bucket of :func:`_mesh_index` instead of to all triangles.  The bucket lists every triangle that passes
+    the box test, so the triangles tested, and the result, are the same."""
+    key = index_key if index_key is not None else (xy.shape, xy.tobytes(), tri.shape, tri.tobytes())
+    m = _mesh_index(xy, tri, key)
+    a, v0, v1, den, lo, hi = m["a"], m["v0"], m["v1"], m["den"], m["lo"], m["hi"]
+    x0, hb, nb, buckets = m["x0"], m["hb"], m["nb"], m["buckets"]
+    out = np.zeros(pts.shape[0], dtype=bool)
+    tol = 1e-10
+    for k, p in enumerate(pts):
+        if not np.all(np.isfinite(p)):
+            continue
+        ib = np.clip(np.floor((p - x0) / hb).astype(np.int64), 0, nb - 1)
+        bk = buckets[int(ib[0]) * nb + int(ib[1])]
+        if bk.size == 0:
+            continue
+        cand = bk[np.all((p >= lo[bk] - 1e-12) & (p <= hi[bk] + 1e-12), axis=1)]
         if cand.size == 0:
             continue
         d = p - a[cand]

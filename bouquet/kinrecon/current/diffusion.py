@@ -194,6 +194,55 @@ __all__ = [
 _TRBDF2_GAMMA = 2.0 - np.sqrt(2.0)
 _RANGE_RTOL = 1e-12     # a table "covers" a request that lies outside it by no more than this fraction of its span
 _TIME_CACHE_SIZE = 8     # evaluated time-dependent geometries kept per solver (a cache size: changes no number)
+_TIME_CACHE_SIZE_LARGE = 256   # the same with the opt-in memo (set_speed_memo): an interval's steps are re-evaluated
+#                                by the floor search and the record advances; a cache size, it changes no number
+_PROFILE_MEMO_SIZE = 64        # evaluations kept per table profile function with the memo (a cache size)
+
+#: Opt-in memo of pure evaluations (off by default; :func:`set_speed_memo`).
+_SPEED_MEMO = dict(on=False)
+
+
+def set_speed_memo(on):
+    """Switch the memo of pure evaluations on or off (process-wide; off by default); returns the previous value.
+
+    With it on, a table profile function of :func:`as_profile_function` (conductivity, ``<J_NI.B>``) returns a copy
+    of its earlier result for the same time and the same requested points instead of evaluating again, and each
+    solver keeps up to :data:`_TIME_CACHE_SIZE_LARGE` evaluated time-dependent geometries instead of
+    :data:`_TIME_CACHE_SIZE`.  Both are evaluations of fixed functions of their arguments, so every value is the
+    same with the memo on or off (the speed tier's tests and comparisons show it bit for bit); only repeated work is
+    skipped -- the q-floor region search evaluates the same coefficients for every trial radius, and an interval is
+    advanced several times on one geometry schedule."""
+    prev = bool(_SPEED_MEMO["on"])
+    _SPEED_MEMO["on"] = bool(on)
+    return prev
+
+
+def _memo_key(t, rho):
+    r = np.asarray(rho)
+    return (float(t), r.dtype.str, r.shape, r.tobytes())
+
+
+def _memoized(fn):
+    """``fn(t, rho)`` with the opt-in memo (:func:`set_speed_memo`): a hit returns a copy of the stored result; a call
+    that raises stores nothing."""
+    store = OrderedDict()
+
+    def g(t, rho):
+        if not _SPEED_MEMO["on"]:
+            return fn(t, rho)
+        key = _memo_key(t, rho)
+        hit = store.get(key)
+        if hit is not None:
+            store.move_to_end(key)
+            return hit.copy()
+        out = fn(t, rho)
+        if isinstance(out, np.ndarray):
+            store[key] = out.copy()
+            while len(store) > _PROFILE_MEMO_SIZE:
+                store.popitem(last=False)
+        return out
+
+    return g
 
 
 class PositiveFrameError(ValueError):
@@ -274,7 +323,7 @@ def as_profile_function(spec, log=False, extrapolate=False, name="profile table"
                 _check_inside(rho, r0, r1, name)
             return inv(p(rho))
 
-        return f2
+        return _memoized(f2)
     if len(spec) == 3:
         times, rho_in, vals = (np.asarray(x, dtype=float) for x in spec)
         if vals.shape != (times.size, rho_in.size):
@@ -294,7 +343,7 @@ def as_profile_function(spec, log=False, extrapolate=False, name="profile table"
             w = (t - times[k]) / (times[k + 1] - times[k])
             return inv((1.0 - w) * ps[k](rho) + w * ps[k + 1](rho))
 
-        return f
+        return _memoized(f)
     raise ValueError("unrecognized profile specification")
 
 
@@ -767,7 +816,7 @@ class CurrentDiffusion:
                 self._static_cache[key] = (geo, gf, gc)
             else:
                 self._time_cache[tkey] = (geo, gf, gc)
-                while len(self._time_cache) > _TIME_CACHE_SIZE:
+                while len(self._time_cache) > (_TIME_CACHE_SIZE_LARGE if _SPEED_MEMO["on"] else _TIME_CACHE_SIZE):
                     self._time_cache.popitem(last=False)
         sigma = np.asarray(self.sigma_fn(t, rc), dtype=float)
         if self.resistivity_modifier is not None:

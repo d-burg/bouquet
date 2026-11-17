@@ -33,6 +33,7 @@ writes the solver's temporary files into its own directory.  Only platforms with
 the tested one).
 """
 
+import contextlib
 import os
 import pickle
 import shutil
@@ -45,25 +46,45 @@ from dataclasses import asdict, dataclass
 
 import numpy as np
 
-__all__ = ["SpeedSettings", "check_speed"]
+__all__ = ["SpeedSettings", "check_speed", "speed_scope"]
 
 
 @dataclass(frozen=True)
 class SpeedSettings:
-    """Speed options of :func:`.fit.reconstruct` and :func:`.series.run_series` (module docstring).
+    """Speed options of :func:`.fit.reconstruct` and :func:`.series.run_series` (module docstring).  Every option is
+    off by default, and none changes a value.
 
     ``column_workers``: processes that evaluate the columns of a Jacobian at once, this one included (1: serial, the
-    default behavior).  Choose at most the number of cores available to the run."""
+    default behavior).  Choose at most the number of cores available to the run.
+    ``memo``: the memo of pure evaluations in the current model (:func:`.current.diffusion.set_speed_memo`).
+    ``mesh_index``: the bucket-indexed exact point-in-triangle test (:func:`.diagnostics.on_mesh`).
+    ``reuse_stats``: a forward solve reuses the equilibrium statistics of its latest attempt instead of evaluating
+    them again on the same state (:meth:`.forward.ForwardModel.solve`)."""
     column_workers: int = 1
+    memo: bool = False
+    mesh_index: bool = False
+    reuse_stats: bool = False
 
     def __post_init__(self):
         if isinstance(self.column_workers, bool) or not isinstance(self.column_workers, (int, np.integer)) \
                 or int(self.column_workers) < 1:
             raise ValueError("column_workers must be an integer >= 1")
+        for name in ("memo", "mesh_index", "reuse_stats"):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"{name} must be True or False")
+
+    @classmethod
+    def all_on(cls, column_workers):
+        """Every option on, with ``column_workers`` processes for the columns."""
+        return cls(column_workers=column_workers, memo=True, mesh_index=True, reuse_stats=True)
+
+    @property
+    def parallel(self):
+        return int(self.column_workers) > 1
 
     @property
     def active(self):
-        return int(self.column_workers) > 1
+        return self.parallel or self.memo or self.mesh_index or self.reuse_stats
 
     def as_dict(self):
         return asdict(self)
@@ -77,13 +98,36 @@ def check_speed(speed, fm):
         raise TypeError("speed must be a SpeedSettings")
     if not speed.active:
         return None
-    if not hasattr(os, "fork"):
-        raise RuntimeError("parallel Jacobian columns need os.fork (not available on this platform)")
-    nt = getattr(getattr(fm, "settings", None), "nthreads", 1)
-    if nt != 1:
-        raise ValueError(f"parallel Jacobian columns need ForwardSettings.nthreads = 1 (got {nt}): OpenMP is not safe "
-                         "across fork() and threaded solves are not reproducible")
+    if speed.parallel:
+        if not hasattr(os, "fork"):
+            raise RuntimeError("parallel Jacobian columns need os.fork (not available on this platform)")
+        nt = getattr(getattr(fm, "settings", None), "nthreads", 1)
+        if nt != 1:
+            raise ValueError(f"parallel Jacobian columns need ForwardSettings.nthreads = 1 (got {nt}): OpenMP is not "
+                             "safe across fork() and threaded solves are not reproducible")
     return speed
+
+
+@contextlib.contextmanager
+def speed_scope(speed):
+    """Turn the process-wide options of ``speed`` (``memo``, ``mesh_index``, ``reuse_stats``) on for the duration of
+    the block and restore the previous values afterwards (:func:`.fit.reconstruct` and :func:`.series.run_series` do
+    this themselves; wrap the forward model's construction too, so that its row set-up uses ``mesh_index``)."""
+    if speed is None:
+        yield
+        return
+    from . import diagnostics as _diag
+    from . import forward as _fw
+    from .current import diffusion as _dif
+    prev = (_dif.set_speed_memo(speed.memo), _diag.MESH_INDEX["on"], _fw.SPEED_OPTIONS["reuse_stats"])
+    _diag.MESH_INDEX["on"] = bool(speed.mesh_index)
+    _fw.SPEED_OPTIONS["reuse_stats"] = bool(speed.reuse_stats)
+    try:
+        yield
+    finally:
+        _dif.set_speed_memo(prev[0])
+        _diag.MESH_INDEX["on"] = prev[1]
+        _fw.SPEED_OPTIONS["reuse_stats"] = prev[2]
 
 
 # ============================================================== framed pickles over pipes

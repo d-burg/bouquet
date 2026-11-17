@@ -7,6 +7,7 @@ import os
 import signal
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from bouquet.kinrecon import speed as SP
@@ -106,3 +107,51 @@ def test_effects_round_trip_on_a_stand_in_model():
     case.locked = True
     eff = SP.effects_since(mark, fm, log, side)
     assert eff["side"] is None and eff["case_changed"]
+
+
+def test_options_validation_and_threads():
+    fm = SimpleNamespace(settings=SimpleNamespace(nthreads=2))
+    sp = SP.SpeedSettings(memo=True)
+    assert sp.active and not sp.parallel
+    assert SP.check_speed(sp, fm) is sp                  # threads matter only for forked workers
+    with pytest.raises(ValueError):
+        SP.SpeedSettings(memo=1)
+    a = SP.SpeedSettings.all_on(4)
+    assert (a.column_workers, a.memo, a.mesh_index, a.reuse_stats) == (4, True, True, True)
+
+
+def test_scope_sets_and_restores_the_process_options():
+    from bouquet.kinrecon import diagnostics as D
+    from bouquet.kinrecon import forward as FW
+    from bouquet.kinrecon.current import diffusion as DF
+    before = (DF._SPEED_MEMO["on"], D.MESH_INDEX["on"], FW.SPEED_OPTIONS["reuse_stats"])
+    assert before == (False, False, False)
+    with SP.speed_scope(SP.SpeedSettings.all_on(1)):
+        assert (DF._SPEED_MEMO["on"], D.MESH_INDEX["on"], FW.SPEED_OPTIONS["reuse_stats"]) == (True, True, True)
+        with SP.speed_scope(SP.SpeedSettings(memo=True)):
+            assert (DF._SPEED_MEMO["on"], D.MESH_INDEX["on"]) == (True, False)
+        assert D.MESH_INDEX["on"]
+    with pytest.raises(RuntimeError):
+        with SP.speed_scope(SP.SpeedSettings(memo=True)):
+            raise RuntimeError("leaves the scope")
+    assert (DF._SPEED_MEMO["on"], D.MESH_INDEX["on"], FW.SPEED_OPTIONS["reuse_stats"]) == before
+
+
+@pytest.mark.parametrize("form", ["2", "3"])
+def test_profile_memo_returns_the_same_values_and_fresh_arrays(form):
+    from bouquet.kinrecon.current import diffusion as DF
+    rho = np.linspace(0.0, 1.0, 11)
+    vals = np.exp(-3 * rho) + 0.1
+    spec = (rho, vals) if form == "2" else ((0.0, 0.02), rho, np.vstack((vals, 2 * vals)))
+    f = DF.as_profile_function(spec, log=True)
+    pts = np.linspace(0.05, 0.95, 37)
+    times = [0.0, 0.007, 0.013, 0.02]
+    off = [f(t, pts) for t in times]
+    with SP.speed_scope(SP.SpeedSettings(memo=True)):
+        on1 = [f(t, pts) for t in times]
+        on1[0][:] = -1.0                                 # a caller's change must not reach the stored value
+        on2 = [f(t, pts) for t in times]
+        with pytest.raises(ValueError):
+            f(0.01, np.array([1.5]))                    # the range check still applies
+    assert all(np.array_equal(a, b) for a, b in zip(off, on2))
+    assert all(np.array_equal(a, b) for a, b in zip(off[1:], on1[1:]))

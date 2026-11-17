@@ -150,6 +150,25 @@ Edge taper: the taper is off unless the forward model's settings ask for it
 the boundary).  The whole-reconstruction tapered restart after a limit cycle in the first center is a
 NON-DEFAULT option (``taper_restart=False`` by default) that acts only with the taper in the named
 mode ``auto``; without it such a center is a failure.
+
+Robustness options (NON-DEFAULT; off by default, and with them off the fit is the one described above; the
+pass-loop options are :class:`.current_model.CurrentModelSettings`'s ``pass_relaxation`` and
+``pass_cycle_relaxation``):
+
+* ``noise_retries = n`` (0 by default, at most ``len(NOISE_RETRY_STEPS)``): the noise re-solve of step 2 is a
+  single consistent solve; when it fails (it did not converge or verify), the default fit stops as
+  ``jacobian_failed``.  With the option it is repeated up to ``n`` times, retry ``k`` from the state of a consistent
+  solve at the first column's parameter moved by ``NOISE_RETRY_STEPS[k-1]`` times that column's own signed step
+  (``-1``: the opposite step, as ``column_retry_opposite`` does for a column; then ``+2``, ``-2``); the solves and
+  the verification criterion are the same, and the first success is the noise measurement.  Every attempt is
+  recorded (``record["noise"]["retries"]``).
+* ``stall_diagnostics = True``: a RECORD ONLY.  When a stall is about to be declared, it records the stopping tests
+  on central-difference columns of that center (each forward column averaged with a backward column at the
+  opposite step), the noise of a consistent re-solve of that center from the first backward column's state, and
+  the stopping tests on the forward columns read with that noise.  The stall stays a stall; no value recorded
+  here is read by the fit.  Cost: one consistent solve per parameter plus one noise re-solve, at a stall only.
+
+``record["robustness"]`` (present only when an option is set) says which options were in effect and what they did.
 """
 
 import math
@@ -207,6 +226,12 @@ PARAMETERS = {
 #: How the plasma-current target of the forward solve is treated by a fit (:attr:`FitSettings.ip_target`).
 IP_TARGETS = ("fitted", "measured")
 
+#: Starting states of the noise re-solve's retries (:attr:`FitSettings.noise_retries`, an option): retry n starts
+#: from the state of a consistent solve at the first Jacobian column's parameter moved by this multiple of that
+#: column's own signed step (the first try used +1).
+NOISE_RETRY_STEPS = (-1.0, 2.0, -2.0)
+
+
 
 @dataclass
 class FitSettings:
@@ -240,10 +265,18 @@ class FitSettings:
     taper_restart: bool = False          # NON-DEFAULT: restart the whole reconstruction tapered (module docstring)
     ip_target: str = "fitted"            # "fitted": ip_rel joins the parameters (Ip row its datum); "measured":
     #                                      the Ip target is held at the measured value (the earlier behavior)
+    # NON-DEFAULT robustness options (module docstring, "Robustness options"):
+    noise_retries: int = 0               # > 0: a failed noise re-solve is repeated from other stated states
+    stall_diagnostics: bool = False      # True: at a stall, RECORD central-column tests and the noise at the center
 
     def __post_init__(self):
         if self.jacobian_steps not in JACOBIAN_STEP_KINDS:
             raise ValueError(f"jacobian_steps must be one of {JACOBIAN_STEP_KINDS}")
+        if isinstance(self.noise_retries, bool) or int(self.noise_retries) != self.noise_retries \
+                or not 0 <= self.noise_retries <= len(NOISE_RETRY_STEPS):
+            raise ValueError(f"noise_retries must be a whole number from 0 to {len(NOISE_RETRY_STEPS)}")
+        if not isinstance(self.stall_diagnostics, bool):
+            raise ValueError("stall_diagnostics must be True or False")
         if self.ip_target not in IP_TARGETS:
             raise ValueError(f"ip_target must be one of {IP_TARGETS}")
         if self.ip_target == "measured" and "ip_rel" in self.free:
@@ -636,6 +669,20 @@ def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, ini
                 rec["solver_iterations"] = dict(computed=False, reason=f"{type(exc).__name__}: {exc}"[:300])
         if extra:
             rec.update(extra)
+        p_rlx, p_cyc = getattr(cfg, "pass_relaxation", None), getattr(cfg, "pass_cycle_relaxation", None)
+        if settings.noise_retries or settings.stall_diagnostics or p_rlx is not None or p_cyc is not None:
+            # NON-DEFAULT robustness options in effect and what they did (a record only; absent when all are off)
+            sd = [e["stall_diagnostics"] for e in log if e.get("stall_diagnostics")]
+            rec["robustness"] = dict(
+                noise_retries=int(settings.noise_retries), stall_diagnostics=bool(settings.stall_diagnostics),
+                pass_relaxation=p_rlx, pass_cycle_relaxation=p_cyc,
+                pass_cycle_window=getattr(cfg, "pass_cycle_window", None),
+                noise_retried=bool((rec.get("noise") or {}).get("retries")),
+                stall_diagnostics_made=[dict(
+                    central_test=(d.get("stopping_tests_central") or {}).get("test"),
+                    noise_chi2_at_center=(d.get("noise_at_center") or {}).get("chi2"),
+                    test_with_noise_at_center=(d.get("stopping_tests_with_noise_at_center") or {}).get("test"))
+                    for d in sd])
         rec["ip_fit"] = ip_record(center["all_tab"] if center is not None else None, ms,
                                   center["params"] if center is not None else _to_params(th, names, base),
                                   "ip_rel" in names)
@@ -818,16 +865,46 @@ def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, ini
             return None, "channel_set_changed", None
         return r, "ok", (state_after, None)
 
-    def measure_noise(c, from_state):
+    def measure_noise(c, from_state, lab=None):
         """chi^2 and residual noise of a consistent re-solve: the center's parameters re-solved from a
         different (nearby) starting state."""
-        trial, tres = evaluate(c["theta"], from_state, c["z0"], f"{label}:noise", ref_index=ref_index)
+        trial, tres = evaluate(c["theta"], from_state, c["z0"], lab or f"{label}:noise", ref_index=ref_index)
         restore_center(c)
         if trial is None:
             return dict(status=tres.status)
         dr = trial["r_data"] - c["r_data"]
         return dict(status="ok", chi2=abs(trial["chi2"]["objective"] - c["chi2"]["objective"]), r=dr,
                     norm=float(np.linalg.norm(dr)))
+
+    def noise_retries(c, j, hs, m_first):
+        """NON-DEFAULT option (``noise_retries`` > 0): the failed noise re-solve is repeated, each time from the
+        state of a consistent solve at parameter ``j`` moved by ``NOISE_RETRY_STEPS[n] * hs`` (``hs`` = the first
+        column's signed step), with the same solves and the same verification; the first success is the noise
+        measurement.  Every attempt is recorded under ``record["noise"]["retries"]``."""
+        tries = []
+        m = m_first
+        for n, s in enumerate(NOISE_RETRY_STEPS[:int(settings.noise_retries)], 1):
+            tr = c["theta"].copy()
+            tr[j] += s * hs
+            row = dict(retry=n, step_multiple=s, parameter=names[j], step=float(s * hs))
+            if not lo[j] <= tr[j] <= hi[j]:
+                tries.append(dict(row, status="starting state outside the parameter bounds: skipped"))
+                continue
+            _, why_r, es_r = column_solve(c, tr, f"{label}:noise_state_retry{n}")
+            if es_r is None:
+                tries.append(dict(row, status=f"starting-state solve failed: {why_r}"))
+                continue
+            m = measure_noise(c, es_r[0], f"{label}:noise_retry{n}")
+            tries.append(dict(row, status=m["status"], chi2=m.get("chi2"), norm=m.get("norm")))
+            if m["status"] == "ok":
+                break
+        rec["noise"].update(status=m["status"], chi2=m.get("chi2"), norm=m.get("norm"))
+        rec["noise"]["retries"] = dict(
+            first_status=m_first["status"], attempts=tries, setting=int(settings.noise_retries),
+            rule="NON-DEFAULT option noise_retries: a failed noise re-solve repeated from the state of a consistent "
+                 "solve at the first column's parameter moved by NOISE_RETRY_STEPS x its signed step; same solves, "
+                 "same verification criterion; the first success is the measurement")
+        return m
 
     def jacobian(c, lab, lagged=False):
         log = i0 = None
@@ -884,6 +961,8 @@ def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, ini
                                            "state of a consistent solve at its first Jacobian column's step"
                                            + (" (made for the noise measurement: the columns are lagged)"
                                               if lagged else ""))
+                if m["status"] != "ok" and settings.noise_retries > 0:
+                    m = noise_retries(c, j, direction * h, m)
                 if m["status"] != "ok":
                     return info, (None, dict(reason=f"noise measurement failed: {m['status']}", columns=cols))
                 noise.update(chi2=m["chi2"], r=m["r"], norm=m["norm"])
@@ -1044,6 +1123,51 @@ def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, ini
                 w.close()
             prec["wall_s"] = round(time.perf_counter() - t_par, 3)
 
+    def stall_diagnostics(c, Jf, jf_info, lab):
+        """NON-DEFAULT diagnostic (``stall_diagnostics=True``), RECORD ONLY -- nothing here steers the fit, the stall
+        stays a stall.  At the center ``c`` where no trial descended, with its consistent forward-difference Jacobian
+        ``Jf``: (1) central-difference columns (each forward column averaged with a backward one, a consistent solve
+        at the opposite of that column's own final signed step) and the stopping tests on them; (2) the noise of a
+        consistent re-solve of this center from the first backward column's state, and the stopping tests on the
+        forward columns read with that noise instead of the first measurement."""
+        Jc = np.array(Jf, dtype=float, copy=True)
+        cols, first_state, ok = [], None, True
+        for j, n in enumerate(names):
+            col = (jf_info.get("columns") or [{}] * len(names))[j]
+            hs = col.get("final_h")
+            row = dict(name=n, forward_step=hs)
+            if hs is None or not lo[j] <= c["theta"][j] - hs <= hi[j]:
+                cols.append(dict(row, central=False, reason="no forward step or opposite step outside the bounds"))
+                continue
+            tj = c["theta"].copy()
+            tj[j] -= hs
+            rj, why, es = column_solve(c, tj, f"{lab}:col{j}:back")
+            if rj is None:
+                cols.append(dict(row, central=False, reason=f"backward solve failed: {why}"))
+                ok = False
+                break
+            if first_state is None:
+                first_state = es[0]
+            jb = (rj - c["r_data"]) / (-hs)
+            Jc[:, j] = 0.5 * (Jf[:, j] + jb)
+            nf = float(np.linalg.norm(Jf[:, j]))
+            cols.append(dict(row, central=True, rel_change=(float(np.linalg.norm(Jc[:, j] - Jf[:, j])) / nf
+                                                             if nf > 0 else None)))
+        out = dict(note="record only (stall_diagnostics): nothing here steers the fit", central_columns=cols,
+                   column_kind="central differences of consistent solves: the forward columns of this center averaged "
+                               "with backward columns at the opposite step")
+        if ok:
+            A_c, g_c = normal_eq(Jc)
+            out["stopping_tests_central"] = stopping_tests(A_c, g_c, settings, noise["chi2"] or 0.0, rel_hist)
+        if first_state is not None:
+            m = measure_noise(c, first_state, f"{lab}:noise_record")
+            out["noise_at_center"] = dict(status=m["status"], chi2=m.get("chi2"), norm=m.get("norm"),
+                                          chi2_first_measurement=noise["chi2"], norm_first_measurement=noise["norm"])
+            if m["status"] == "ok":
+                A_f, g_f = normal_eq(Jf)
+                out["stopping_tests_with_noise_at_center"] = stopping_tests(A_f, g_f, settings, m["chi2"], rel_hist)
+        return out
+
     lam = settings.lm_lambda0
     fails = 0
     J = None
@@ -1142,6 +1266,9 @@ def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, ini
                     restore_center(center)
                     if lam > settings.lm_lambda_max:
                         break
+            if not accepted and J_consistent and settings.stall_diagnostics and "stall_diagnostics" not in entry:
+                # NON-DEFAULT diagnostic, record only: the stall is about to be declared; nothing here changes that
+                entry["stall_diagnostics"] = stall_diagnostics(center, J, jinfo, f"{label}:it{it}:stall_diag")
             if accepted or J_consistent:
                 break
             # no lagged step descended: before a stall is declared, the consistent columns decide (stopping

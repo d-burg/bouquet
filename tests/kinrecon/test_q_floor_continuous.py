@@ -12,7 +12,14 @@ Synthetic geometry as in ``test_q_floor.py`` (no OFT).  Checked:
   change, recorded; (c) nowhere -- no change; the time-dependent rule takes on every step the single-slice region of
   the step's sources (the same branches), not a region read from the evolving state;
 * the records (loop voltage, l_i, current moved outside the radius, achieved q) are what they say and cannot change a
-  fit or a series.
+  fit or a series -- on the default q-floor path too, where the floor's effect record is made inside every assembly
+  and every diffusion step (a record that raises or returns anything leaves theta, covariance, chi^2, solve count
+  and carried states bitwise unchanged);
+* the default rule's own properties (axis current lowered, face q = profiles q, meta = record, Ip after a
+  time-dependent step, the not-met fallback, q_min ON the floor where met in an assembled state and in a fit);
+* the record of the floor's branch at every assembly (count per branch, Jacobians with columns on different branches,
+  the smallest distance of the plain axis q from the floor) shows a flip at the branch boundary and is record-only;
+* the achieved axis q is one defined estimator, the other axis values named cross-checks with their spread.
 """
 import os
 import sys
@@ -25,6 +32,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 import test_coordinates_kinetics_series as GEO  # noqa: E402
+import test_correction_local_return as LR  # noqa: E402
 import test_fit_unit as FU  # noqa: E402
 import test_series_driver as SD  # noqa: E402
 from bouquet.kinrecon import current_model as CM  # noqa: E402
@@ -160,6 +168,7 @@ def test_branch_a_axis_below_the_floor_flattens_from_the_axis():
     info = mod.region_info(st0)
     up = [c["rho"] for c in SAW.floor_crossings(rf, _fq(sol, st0), 1.0) if c["direction"] == "up"][-1]
     assert info["branch"] == "axis" and info["rho_inner"] == 0.0 and info["rho_inv"] == up
+    assert rec["q_floor_met"] is False and info["q_floor_met_steady"] is False    # why rho_inv == up holds here
     assert mod.region(st0) == (info["k"], up) and info["k"] == int(np.count_nonzero(rf[:-1] < up))
 
 
@@ -390,3 +399,307 @@ def test_the_domain_li_change_is_recorded_where_the_full_plasma_li_is_not_availa
     assert core["n_steps_floor_acted"] > 0 and np.isfinite(core["d_li3_domain"])
     assert core["d_li3_domain"] == pytest.approx(want_s, rel=1e-12, abs=1e-15)
     assert CM.floor_effect_record(core)["d_li3_domain"] == core["d_li3_domain"]
+
+
+# ====================================================================== the default rule's own properties
+@pytest.mark.parametrize("ip", [IP_MET, IP_LOW_Q])
+def test_default_rule_lowers_the_axis_current_and_its_face_q_and_meta_are_consistent(ip):
+    """On the default (continuous) rule, where it acts (met: IP_MET; not met: IP_LOW_Q): the core current on the axis
+    is lowered and q raised; the operator's face q is the profiles' q; the state's meta says what the record says."""
+    sol = _solver(ip)
+    rf = CurrentState.uniform_faces(100)
+    st0 = sol.steady_state(rf)
+    st, rec, s2 = SAW.resistive_floor_steady(sol, rf, 1.0)
+    p0, p1 = sol.profiles(st0), s2.profiles(st)
+    assert rec["floor_rule"] == "continuous" and rec["acted"] and rec["floor_branch"] == "axis"
+    assert p1["jdotb"][0] < p0["jdotb"][0] and rec["q_min_after"] > rec["q_min_before"]
+    np.testing.assert_allclose(_fq(s2, st), p1["q"], rtol=1e-12)
+    m = st.meta["q_floor"]
+    assert m["rho_floor"] == rec["rho_floor"] and m["rho_floor_inner"] == rec["rho_floor_inner"] == 0.0
+    assert m["form"] == "resistive" and m["rule"] == "continuous" and m["branch"] == "axis" and m["acted"] is True
+    assert m["q_floor"] == 1.0 and m["q_floor_met"] is rec["q_floor_met"] is (ip == IP_MET)
+    assert rec["floor_effect_computed"] is True
+
+
+@pytest.mark.parametrize("ip", [IP_MET, IP_LOW_Q])
+def test_default_time_dependent_step_conserves_ip(ip):
+    sol = _solver(ip)
+    rf = CurrentState.uniform_faces(100)
+    st0 = sol.steady_state(rf)
+    mod = SAW.ResistiveFloor(sol, 1.0)
+    s2 = mod.with_solver()
+    assert mod.rule == "continuous" and mod.region_info(st0)["k"] > 0
+    st1 = s2.step(st0, 1e-3)
+    assert s2.profiles(st1)["ip"] == pytest.approx(ip, rel=1e-12)
+
+
+def test_default_rule_not_met_keeps_the_outermost_crossing_with_q_min_below_the_floor():
+    sol = _solver(IP_LOW_Q)
+    rf = CurrentState.uniform_faces(100)
+    st0 = sol.steady_state(rf)
+    q0 = _fq(sol, st0)
+    st, rec, s2 = SAW.resistive_floor_steady(sol, rf, 1.0)
+    up = [c["rho"] for c in SAW.floor_crossings(rf, q0, 1.0) if c["direction"] == "up"][-1]
+    assert rec["q_floor_met"] is False and rec["q_min_after"] < 1.0 and np.min(_fq(s2, st)) < 1.0
+    assert rec["rho_floor"] == up and rec["floor_branch"] == "axis"
+
+
+def test_assembled_default_state_lands_q_min_on_the_floor_where_met():
+    """The single-slice default (assembly) on the fixture: where the floor is met the floored model state's q_min IS
+    the floor (to the bisection's round-off), and the scored model q (no corrections) carries the same minimum."""
+    lag, kin, src = LR._fixture_inputs()
+    for qf in (0.95, 1.0):                 # the plain model axis q here is ~0.905
+        a = CM.assemble(lag, kin, src, {}, CM.CurrentModelSettings(r0=GEO.R0, q_floor=qf), IP_MET)
+        c = a["core"]
+        assert c["acted"] and c["q_floor_met"] is True and c["floor_branch"] == "axis"
+        assert 0.0 <= c["q_min_after"] - qf <= Q_LAND
+        assert c["q_min_model"] == pytest.approx(c["q_min_after"], rel=1e-12)
+
+
+# ====================================================================== records cannot change a default-path fit
+CENTERS = np.array([0.15, 0.3, 0.45, 0.6])
+
+
+def _default_fit(monkeypatch, ip=IP_MET, q_floor=1.0, free=("a_corr",), target_shift=0.03):
+    """A fit on the DEFAULT core treatment (q floor, resistive, continuous) whose every evaluation is a real
+    assembly on the fixture (no forward solve): the residuals are the scored model q at four radii against a target
+    (the default model's q plus a shift); Jacobian columns, trials and the noise solve all assemble."""
+    lag, kin, src = LR._fixture_inputs()
+    kin = FU.SimpleNamespace(**vars(kin), source="toy")
+    src = FU.SimpleNamespace(**vars(src), source="toy", convention={})
+    cfg = CM.CurrentModelSettings(r0=GEO.R0, q_floor=q_floor)
+    a0 = CM.assemble(lag, kin, src, {}, cfg, ip)
+    target = np.interp(CENTERS, a0["q_model"]["rho"], a0["q_model"]["q"]) + target_shift
+    fm = FU.FakeFM()
+    FU._install(monkeypatch, fm)
+
+    def _eval(fm_, params):
+        asm = CM.assemble(lag, kin, src, params, cfg, ip)
+        fm_.r = (np.interp(CENTERS, asm["q_model"]["rho"], asm["q_model"]["q"]) - target) / 0.02
+        return asm
+
+    def consistent(fm_, kin_, src_, params, cfg_, start, z0, label, initial_profiles=None, state_fn=None):
+        fm_.n_solves += 1
+        asm = _eval(fm_, params)
+        solve = FU.SimpleNamespace(stats={"q_0": 1.0}, status="converged", converged=True,
+                                   record={"policy": {"verification": {"verdict": "PASS"}}})
+        return CM.ConsistentResult(True, "consistent", 1, asm, lag, solve, {"passes": [], "reason": None}, 0.01)
+
+    def lagged(fm_, lag_, kin_, src_, params, cfg_, ip=None, start=None, z0=None, label="", state=None):
+        fm_.n_solves += 1
+        asm = _eval(fm_, params)
+        return FU.SimpleNamespace(converged=True, status="converged"), asm, "converged"
+
+    def residual_vector(fm_, ms, groups, settings, roles):
+        return fm_.r.copy(), [("flux_loop", s_) for s_ in "abcd"], FU.SimpleNamespace(model={}, excluded={}, notes=[])
+
+    monkeypatch.setattr(FIT, "_consistent", consistent)
+    monkeypatch.setattr(FIT._cm, "lagged_solve", lagged)
+    monkeypatch.setattr(FIT, "residual_vector", residual_vector)
+    return FIT.reconstruct(fm, kin, src, cfg, FIT.FitSettings(free=free))
+
+
+def _assert_same_fit(o, ref):
+    assert o.status == ref.status and o.record["n_solves"] == ref.record["n_solves"]
+    np.testing.assert_array_equal(o.theta, ref.theta)
+    np.testing.assert_array_equal(o.covariance, ref.covariance)
+    np.testing.assert_equal(o.chi2, ref.chi2)
+    assert o.params == ref.params
+
+
+def test_floor_records_cannot_change_a_default_path_fit(monkeypatch):
+    """The default q-floor path: the floor's effect record made inside every assembly (``_floor_effect``) and the
+    end-of-fit record (``floor_effect_record``) raising, or returning anything, leave the fit's status, parameters,
+    covariance, chi^2 and solve count bitwise unchanged; a failed record says so."""
+    ref = _default_fit(monkeypatch)
+    assert ref.record["core"]["floor_branch"] == "axis" and ref.record["core"]["acted"]
+    assert ref.record["core"]["floor_effect_computed"] is True
+    # the fit's own center lands q_min on the floor (the floored model state, before the corrections)
+    assert ref.record["core"]["q_floor_met"] is True and 0.0 <= ref.record["core"]["q_min_after"] - 1.0 <= Q_LAND
+    assert len(ref.theta) == 3 and np.any(ref.theta != 0.0)
+
+    def raising(*a, **k):
+        raise RuntimeError("injected")
+
+    junk = dict.fromkeys(SAW.FLOOR_EFFECT_KEYS, -99.0)
+    for name, fe, fer in (("effect raising", raising, None),
+                          ("effect garbage", lambda *a, **k: dict(acted=False, rho_floor=None, q_floor_met=False), None),
+                          ("effect junk values", lambda *a, **k: dict(junk, acted=False, rho_floor=0.9), None),
+                          ("effect not a dict", lambda *a, **k: 7, None),
+                          ("end record raising", None, raising),
+                          ("end record garbage", None, lambda *a, **k: dict(q_axis_achieved=-99.0)),
+                          ("both raising", raising, raising)):
+        with monkeypatch.context() as mp:
+            if fe is not None:
+                mp.setattr(SAW, "_floor_effect", fe)
+            if fer is not None:
+                mp.setattr(CM, "floor_effect_record", fer)
+            o = _default_fit(mp)
+        _assert_same_fit(o, ref)
+        c = o.record["core"]
+        assert c["acted"] and c["rho_floor"] == ref.record["core"]["rho_floor"], name
+        if fe is raising or name in ("effect garbage", "effect not a dict"):
+            assert c["floor_effect_computed"] is False and np.isnan(c["d_v_loop_rel"]) and c["floor_effect_reason"]
+        if fe is not None and name == "effect junk values":
+            assert c["d_v_loop_rel"] == -99.0          # junk values stay in the record's own keys only
+        if fer is raising:
+            assert o.record["floor_effect"]["computed"] is False
+
+
+def test_series_floor_records_cannot_change_the_carried_states(monkeypatch):
+    """A default series (mocked solves, real interval advances with the floor on every step): the floor's effect
+    record inside every step's region search (``_floor_effect``) and the interval's record (the unfloored advance and
+    its profiles) raising or returning anything leave every carried state bitwise unchanged."""
+    lag = SD._lag()
+    ip = IP_LOW_Q
+    st0 = SD._steady(lag, ip)
+
+    def consistent(fm_, kin, src, params, cfg, ip=None, start=None, z0=None, label="", initial_profiles=None,
+                   state_fn=None):
+        fm_.n_solves += 1
+        if state_fn is None:
+            return SD._result(lag, st0)
+        st = state_fn(lag)
+        res = SD._result(lag, st)
+        res.assembly["core"] = dict(st.meta["core"])
+        return res
+
+    def raising(*a, **k):
+        raise RuntimeError("injected")
+
+    def run(mp):
+        mp.setattr(SE._cm, "consistent_solve", consistent)
+        cfg = CM.CurrentModelSettings(r0=SD.GEO.R0, q_floor=1.0)
+        return SE.run_series(SD.FakeFM(dict(pred=lag)), SD._slices(np.arange(3) * 0.02, np.full(3, ip)), cfg,
+                             SE.SeriesSettings(initial="relaxed"))
+
+    with monkeypatch.context() as mp:
+        ref = run(mp)
+    assert ref["status"] == "completed" and ref["slices"][1]["core"]["floor_effect_computed"] is True
+    for name, patches in (("step effect raising", [(SAW, "_floor_effect", raising)]),
+                          ("step effect garbage", [(SAW, "_floor_effect", lambda *a, **k: dict(acted=False))]),
+                          ("interval values raising", [(SE, "_interval_floor_effect_values", raising)]),
+                          ("interval values garbage",
+                           [(SE, "_interval_floor_effect_values", lambda *a, **k: dict(floor_branch="none"))]),
+                          ("step branch record raising", [(SE, "_step_branch_record", raising)]),
+                          ("all", [(SAW, "_floor_effect", raising), (SE, "_interval_floor_effect_values", raising),
+                                   (SE, "_step_branch_record", raising)])):
+        with monkeypatch.context() as mp:
+            for mod, attr, fn in patches:
+                mp.setattr(mod, attr, fn)
+            out = run(mp)
+        assert out["status"] == ref["status"], name
+        for a, b in zip(ref["slices"][1:], out["slices"][1:]):
+            np.testing.assert_array_equal(a["carried_state"]["psi"], b["carried_state"]["psi"])
+            assert a["carried_state"]["psi_boundary"] == b["carried_state"]["psi_boundary"]
+            assert a["status"] == b["status"] and a["core"]["rho_floor"] == b["core"]["rho_floor"], name
+        if "interval values" in name or name == "all":
+            assert out["slices"][1]["core"]["floor_effect_computed"] is False
+
+
+# ====================================================================== branch-flip record (record only)
+def test_branch_flip_record_counts_branches_jacobians_and_the_distance_from_the_floor():
+    log = [dict(branch="axis", q_floor=1.0, q_axis_plain=0.998), dict(branch="axis", q_floor=1.0, q_axis_plain=0.999),
+           dict(branch="off_axis", q_floor=1.0, q_axis_plain=1.0004), dict(branch="axis", q_floor=1.0, q_axis_plain=0.9)]
+    jac = [dict(label="it0", branches=["axis", "off_axis"], mixed=True), dict(label="it1", branches=["axis"],
+                                                                                mixed=False)]
+    r = CM.branch_flip_record(log, jac, dict(floor_branch="axis"))
+    assert r["n_assemblies"] == 4 and r["assemblies_per_branch"] == {"axis": 3, "off_axis": 1}
+    assert r["n_branch_changes_in_call_order"] == 2 and r["branch_changed"] is True
+    assert r["n_jacobians"] == 2 and r["n_jacobians_mixed_branches"] == 1 and r["jacobians_mixed_branches"][0][
+        "label"] == "it0"
+    assert r["min_abs_plain_q_axis_minus_floor"] == pytest.approx(4e-4, rel=1e-9) and r["final_branch"] == "axis"
+    assert r["note"].startswith("record only")
+    one = CM.branch_flip_record(log[:2], [], dict(floor_branch="axis"))
+    assert one["branch_changed"] is False and one["n_branch_changes_in_call_order"] == 0
+    # a series interval entry: the diffusion steps per branch
+    s = CM.branch_flip_record([dict(branch="axis", q_floor=1.0, q_axis_plain=None,
+                                    branch_steps={"axis": 12, "off_axis": 8}, q_axis_plain_min_abs_dev=2e-3)])
+    assert s["branch_changed"] is True and s["diffusion_steps_per_branch"] == {"axis": 12, "off_axis": 8}
+    assert s["min_abs_plain_q_axis_minus_floor"] == 2e-3
+
+
+def _boundary_level(ip=IP_MET, ds=0.05):
+    """A floor level between the plain model axis q at the default bootstrap scale and at the scale one Jacobian
+    step above it, so that the center and its s_bs column sit on different branches."""
+    lag, _, _ = LR._fixture_inputs()
+    rf = CurrentState.uniform_faces(100)
+    q = [float(_fq(s_, s_.steady_state(rf))[0]) for s_ in (CM.build_solver(lag, f * lag["jbs"], ip)
+                                                          for f in (1.0, 1.0 + ds))]
+    return 0.5 * (q[0] + q[1]), abs(q[1] - q[0])
+
+
+def test_branch_flip_is_recorded_on_a_fit_at_the_branch_boundary_and_the_record_is_record_only(monkeypatch):
+    """A default-path fit (as above, the bootstrap scale free) whose floor level lies between the plain axis q at
+    the center and at its s_bs column: the record shows the flip (a Jacobian with columns on different branches, the
+    smallest distance of the plain axis q from the level); the record raising leaves the fit bitwise unchanged."""
+    level, dq = _boundary_level()
+    assert dq > 0.0
+    ref = _default_fit(monkeypatch, q_floor=level, free=("s_bs", "a_corr"))
+    r = ref.record["floor_branch_record"]
+    assert r["note"].startswith("record only") and r["n_assemblies"] > 0
+    assert r["branch_changed"] is True and r["n_jacobians_mixed_branches"] >= 1
+    assert r["min_abs_plain_q_axis_minus_floor"] <= 0.5 * dq * (1.0 + 1e-9)
+    assert r["final_branch"] == ref.record["core"]["floor_branch"]
+
+    def raising(*a, **k):
+        raise RuntimeError("injected")
+
+    for patches in ([(CM, "_log_assembly", raising)], [(CM, "branch_flip_record", raising)],
+                    [(FIT, "_note_jacobian", raising)], [(CM, "branch_flip_record", lambda *a, **k: dict(x=1))],
+                    [(CM, "_log_assembly", raising), (CM, "branch_flip_record", raising),
+                     (FIT, "_note_jacobian", raising), (CM, "open_branch_log", raising)]):
+        with monkeypatch.context() as mp:
+            for mod, attr, fn in patches:
+                mp.setattr(mod, attr, fn)
+            o = _default_fit(mp, q_floor=level, free=("s_bs", "a_corr"))
+        _assert_same_fit(o, ref)
+    # away from the boundary nothing flips
+    far = _default_fit(monkeypatch)
+    assert far.record["floor_branch_record"]["branch_changed"] is False
+    assert far.record["floor_branch_record"]["n_jacobians_mixed_branches"] == 0
+
+
+def test_series_interval_records_the_branch_of_every_step():
+    """An interval whose plain model axis q crosses the floor (an Ip ramp): the steps' branches are counted per
+    branch, the record shows the change, and the smallest distance of the plain axis q from the floor is recorded."""
+    lag = SD._lag_ni()
+    rf = CurrentState.uniform_faces(100)
+
+    def q0_plain(ip_):
+        s_ = CM.build_solver(lag, lag["jbs"], ip_)
+        return float(_fq(s_, s_.steady_state(rf))[0])
+    lo, hi = GEO.IP, 3.0 * GEO.IP                 # q0 falls with Ip: bracket the Ip where the plain q0 is 1
+    for _ in range(50):
+        mid = 0.5 * (lo + hi)
+        lo, hi = (mid, hi) if q0_plain(mid) > 1.0 else (lo, mid)
+    ip1 = 0.5 * (lo + hi)
+    isol, _ = SE.interval_solver(lag, lag, lag["jbs"], lag["jbs"], 0.0, 0.02, 0.97 * ip1, 1.03 * ip1)
+    st_in = CurrentState(*(lambda s_: (s_.rho_faces, s_.psi, s_.psi_boundary, 0.0))(SD._steady(lag, 0.97 * ip1)))
+    end, core = SE.advance_q_floor(isol, st_in, 0.02, SE.SeriesSettings(), 1e-3, 1.0)
+    steps = core["branch_steps"]
+    assert sum(steps.values()) == core["n_steps"] and len(steps) >= 2 and "axis" in steps
+    assert core["q_axis_model_steady_min_abs_dev_floor"] < abs(q0_plain(0.97 * ip1) - 1.0)
+    r = CM.branch_flip_record([dict(branch=core["floor_branch"], q_floor=1.0, q_axis_plain=None,
+                                    branch_steps=steps,
+                                    q_axis_plain_min_abs_dev=core["q_axis_model_steady_min_abs_dev_floor"])])
+    assert r["branch_changed"] is True and r["diffusion_steps_per_branch"] == steps
+
+
+def test_floor_effect_record_names_one_achieved_axis_q_and_keeps_the_others_as_cross_checks():
+    """One achieved axis q (the q check's extrapolation of the solved equilibrium, with its definition); the trace of
+    the innermost surface, the solver's q_0 (q at psi_N = 0.02) and the model's values are named cross-checks with
+    their spread and the estimator's offset on the model, where the model's own axis value is known."""
+    core = dict(q_floor=1.0, floor_branch="axis", acted=True, q_axis_model=0.823, q_min_model=0.823,
+                floor_effect_computed=False, floor_effect_reason="RuntimeError: injected")
+    q_check = dict(axis=dict(q0_eq=0.92, q0_model=0.936, fit_rms_rel_eq=0.01, window=[0.05, 0.15], degree=2))
+    fe = CM.floor_effect_record(core, q_check, np.array([0.93, 0.99, 1.2]), 0.477, -1.0015)
+    assert fe["q_axis_achieved"] == 0.92 and fe["q_axis_achieved_definition"] == CM.Q_AXIS_ACHIEVED_DEFINITION
+    assert fe["q_axis_achieved_window"] == [0.05, 0.15] and fe["q_axis_achieved_degree"] == 2
+    cc = fe["q_axis_cross_checks"]
+    assert cc == dict(q_traced_innermost=0.477, q_solver_q0=1.0015, q_model_axis_extrapolated=0.936, q_model_axis=0.823)
+    assert fe["q_axis_spread"] == pytest.approx(1.0015 - 0.477, rel=1e-12)
+    assert fe["q_axis_extrapolation_offset_model"] == pytest.approx(0.936 - 0.823, rel=1e-12)
+    assert fe["effect_computed"] is False and fe["effect_reason"].startswith("RuntimeError")
+    none = CM.floor_effect_record(core)
+    assert none["q_axis_achieved"] is None and none["q_axis_spread"] is None

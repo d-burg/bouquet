@@ -49,15 +49,16 @@ Grad-Shafranov equation with
   (:attr:`ForwardSettings.edge_taper`, default ``off``), with one :class:`.edge.EdgeTaperCase` per
   forward model, so the taper is uniform within a case.  The taper changes the INPUT pressure
   gradient in the outermost layer; it is a workaround for builds without the cut-cell setting;
-* OFT's default solver settings, never set: ``nl_tol``, ``urf``, ``maxits`` are read back and
-  recorded and compared with the defaults at every solve (record key ``G7``).  ``lcfs_cut_cells``
-  is an opt-in of the quadrature, not a tolerance: it is set as described above and recorded
-  beside them, never part of the ``G7`` comparison.  The one exception is the iteration limit
-  ``maxits``, and only as an explicit, recorded, non-default setting
+* OFT's default solver settings, never set: ``nl_tol``, ``urf``, ``maxits`` are read from the
+  TokaMaker wrapper's Python-side settings (the values ``update_settings`` sends; the solver itself
+  offers no getter) and recorded and compared with the defaults at every solve (record key ``G7``).
+  ``lcfs_cut_cells`` is an opt-in of the quadrature, not a tolerance: it is set as described above
+  and recorded beside them, never part of the ``G7`` comparison.  The one exception is the iteration
+  limit ``maxits``, and only as an explicit, recorded, non-default setting
   (:attr:`ForwardSettings.solver_maxits`, default None = OFT's own limit untouched): when given, it
-  is set once on the solver and ``G7`` compares with OFT's defaults with that one value replaced;
-  ``nl_tol`` and ``urf`` are never set.  Every solve's iteration count is logged
-  (:meth:`ForwardModel.iteration_record`);
+  is set once in the wrapper's settings and sent to the solver, and ``G7`` compares with OFT's
+  defaults with that one value replaced; ``nl_tol`` and ``urf`` are never set.  Every solve's
+  iteration count is logged (:meth:`ForwardModel.iteration_record`);
 * continuation: a solve starts from the current state of the solver (``init="keep"``), from a
   saved state (:meth:`ForwardModel.snapshot`), or -- first solve of a case only -- from a supplied
   reference ``psi`` on the mesh nodes;
@@ -142,6 +143,12 @@ CUT_CELL_LIBRARY_SYMBOL = "__oft_gs_MOD_gs_cut_cell_rule"
 #: the point test also on a build that provides the setting.
 LCFS_CUT_CELL_OPTIONS = ("if_available", "on", "off")
 LCFS_CUT_CELLS_DEFAULT = "if_available"
+#: What the recorded solver-setting values are (``oft_defaults``, ``oft_settings_now``, ``settings_at_solve``,
+#: ``iteration_limit``): the TokaMaker wrapper's Python-side settings, the values ``update_settings`` sends to the
+#: solver; the solver offers no getter, so they are not read from the solver itself.
+SETTINGS_SOURCE_NOTE = ("the TokaMaker wrapper's Python-side settings (the values update_settings sends to the "
+                        "solver; the solver has no getter): in_effect / now = the wrapper's value, oft_default = "
+                        "this instance's value at construction")
 _NOTICES = set()
 
 
@@ -256,7 +263,7 @@ class ForwardSettings:
     fitted_reference_gauge: bool = False        # True: accept a gauge built from ANOTHER fit's fitted reference
     #                                             (non-default; the default takes it from a measured reference)
     solver_maxits: Optional[int] = None         # None: OFT's own nonlinear iteration limit, never set (default);
-    #                                             a whole number >= 1: that limit, set once on the solver and used by
+    #                                             a whole number >= 1: that limit, sent once to the solver and used by
     #                                             every solve of this forward model -- an explicit, recorded,
     #                                             non-default setting; nl_tol, urf and every criterion are untouched
 
@@ -604,13 +611,16 @@ class ForwardModel:
 
     def _configure_iteration_limit(self, maxits):
         """Apply :attr:`ForwardSettings.solver_maxits` (already checked) once, after OFT's defaults were read.
-        None: nothing is set and ``G7`` compares with OFT's defaults.  A number: ``maxits`` only is set on the
-        solver (``update_settings``), read back, and ``G7`` compares with OFT's defaults with that value replaced;
-        ``nl_tol`` and ``urf`` stay OFT's.  Returns the record (``setting``, ``in_effect``, ``oft_default``)."""
+        None: nothing is set and ``G7`` compares with OFT's defaults.  A number: ``maxits`` only is set in the
+        TokaMaker wrapper's Python-side settings and sent to the solver (``update_settings``); the wrapper's value
+        is re-read (the solver itself has no getter, so this checks the value that was sent, not the solver), and
+        ``G7`` compares with OFT's defaults with that value replaced; ``nl_tol`` and ``urf`` stay OFT's.  Returns
+        the record: ``setting``; ``in_effect`` and ``oft_default`` = the wrapper's value after the setting and this
+        instance's value at construction (:data:`SETTINGS_SOURCE_NOTE`)."""
         oft = int(self.defaults["maxits"])
         if maxits is None:
             self.expected_settings = dict(self.defaults)
-            return dict(setting=None, in_effect=oft, oft_default=oft,
+            return dict(setting=None, in_effect=oft, oft_default=oft, values_source=SETTINGS_SOURCE_NOTE,
                         rule="OFT's own nonlinear iteration limit (never set)")
         self.gs.settings.maxits = int(maxits)
         self.gs.update_settings()
@@ -620,8 +630,9 @@ class ForwardModel:
             raise RuntimeError(f"solver settings after setting maxits = {maxits}: {now}; expected "
                                f"{self.expected_settings}")
         return dict(setting=int(maxits), in_effect=int(now["maxits"]), oft_default=oft,
-                    rule="explicit non-default setting ForwardSettings.solver_maxits: the solver's nonlinear "
-                         "iteration limit for every solve of this forward model; nl_tol and urf are OFT's")
+                    values_source=SETTINGS_SOURCE_NOTE,
+                    rule="explicit non-default setting ForwardSettings.solver_maxits: the nonlinear iteration limit "
+                         "sent to the solver for every solve of this forward model; nl_tol and urf are OFT's")
 
     def _log_iterations(self, label, its, kind, at_limit):
         """One entry of :attr:`iteration_log` per solver call counted in :attr:`n_solves`."""
@@ -633,8 +644,9 @@ class ForwardModel:
         passes its own start; one entry per solver call counted in :attr:`n_solves`, warm verification re-solves
         included).  ``its``: the counts in call order (None where the solver output could not be read);
         ``kind``: ``"solve"`` or ``"verify"`` per entry; ``n_over_oft_default``: solves that needed more iterations
-        than OFT's own limit (possible only with :attr:`ForwardSettings.solver_maxits` above it);
-        ``n_stopped_at_limit``: solves that ended on the iteration limit in effect; ``over_oft_default``: label,
+        than OFT's own limit (this instance's default at construction; possible only with
+        :attr:`ForwardSettings.solver_maxits` above it); ``n_stopped_at_limit``: solves that ended with the solver's
+        iteration-limit error (its output parsed; not a read of the solver's setting); ``over_oft_default``: label,
         count and kind of each solve above OFT's limit or stopped at the limit.  A record only."""
         log = self.iteration_log[int(start):]
         oft = int(self.iteration_limit["oft_default"])

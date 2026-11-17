@@ -20,7 +20,9 @@ Providers:
 :func:`.arrays.from_arrays`            any transport code's arrays with declared units/frames
 :func:`.imas.from_imas`                IMAS ``core_sources`` / ``core_profiles`` (OMAS, FUSE, OMFIT)
 :class:`.beam.SimpleBeamModel`         built-in NBI model (pencil beam or given deposition,
-                                       classical slowing down, shielded fast-ion current)
+                                       classical slowing down, shielded fast-ion current; options:
+                                       finite beams from beamlets (:mod:`.beam_optics`), fast-ion
+                                       trapping in the driven current (:mod:`.trapping`))
 :class:`.ec.SimpleECModel`             built-in ECCD estimate from a stated efficiency
 =====================================  ==========================================================
 
@@ -38,12 +40,15 @@ from .arrays import from_arrays
 from .imas import from_imas, to_imas
 from .slowing_down import IonSpecies, classical_moments
 from .beam import NeutralBeam, SimpleBeamModel, current_fractions_from_power, power_fractions_from_current
+from .beam_optics import Aperture, BeamOptics, DivergenceComponent, optics_from_ids
+from .trapping import FluxSurfaceField
 from .ec import ECLauncher, SimpleECModel
 from .priors import PRIOR_KINDS, proposed_priors
 
 __all__ = [
     "AmbiguousConventionError", "NonInductiveSources", "Provenance", "ScalePrior", "ShapePrior", "SOURCES_VERSION",
     "from_arrays", "from_imas", "to_imas", "IonSpecies", "classical_moments", "NeutralBeam", "SimpleBeamModel",
+    "Aperture", "BeamOptics", "DivergenceComponent", "optics_from_ids", "FluxSurfaceField",
     "power_fractions_from_current", "current_fractions_from_power", "ECLauncher", "SimpleECModel",
     "proposed_priors", "PRIOR_KINDS",
     "enclosed_current", "jdotb_from_jpar", "jpar_from_jdotb", "p_fast_from_energy_density",

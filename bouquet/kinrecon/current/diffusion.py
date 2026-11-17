@@ -134,6 +134,10 @@ Sawtooth hooks (the reconnection model itself is :mod:`.sawtooth`)
 * ``resistivity_modifier(t, rho, eta, state) -> eta`` modifies the resistivity
   used within the step; it is evaluated with the state at the start of the
   step for every stage, so each step stays linear.
+* ``source_modifier(t, rho_faces, coeffs, ip_mode, state) -> ds`` (an attribute, None
+  by default; set on a copy of a solver by an opt-in core treatment of :mod:`.sawtooth`)
+  adds ``ds`` to the cell sources ``S`` of (6) (and the matching ``<J_NI.B>``); like
+  the resistivity it is evaluated with the state at the start of the step.
 
 Design choices (documented defaults)
 ------------------------------------
@@ -683,6 +687,7 @@ class CurrentDiffusion:
             raise TypeError("boundary must be IpBoundary or VloopBoundary")
         self.boundary = boundary
         self.resistivity_modifier = resistivity_modifier
+        self.source_modifier = None
         self._static_cache = {}
         self._time_cache = OrderedDict()      # time-dependent geometry: (t, faces) -> evaluated geometry (no numbers)
         if isinstance(outer_layer, str):
@@ -780,9 +785,17 @@ class CurrentDiffusion:
             f_lcfs = self.outer_layer.fpol_at(t)
         else:
             lay_a, lay_b, f_lcfs = 0.0, 0.0, float(gf["fpol"][-1])
-        return _Coeffs(t=t, k_f=k_f, F_f=gf["fpol"], m_c=m_c, s_c=s_c, w_c=wfac * rc, w_b=wfac, sigma_c=sigma,
-                       jni_c=jni, geo_c=gc, geo=geo, bc_value=self.boundary(t), layer_A=lay_a, layer_B=lay_b,
-                       F_lcfs=f_lcfs)
+        c = _Coeffs(t=t, k_f=k_f, F_f=gf["fpol"], m_c=m_c, s_c=s_c, w_c=wfac * rc, w_b=wfac, sigma_c=sigma,
+                    jni_c=jni, geo_c=gc, geo=geo, bc_value=self.boundary(t), layer_A=lay_a, layer_B=lay_b,
+                    F_lcfs=f_lcfs)
+        smod = getattr(self, "source_modifier", None)
+        if smod is not None:
+            # opt-in hook (None by default): a change of the cell sources, from the coefficients above (the modified
+            # resistivity included); <J_NI.B> on the cells is changed to match, so the outputs stay consistent
+            ds = np.asarray(smod(t, rf, c, self.ip_mode, state), dtype=float)
+            c.s_c = s_c + ds
+            c.jni_c = jni + ds * 2.0 * np.pi * Fc ** 2 / (Vc * h)
+        return c
 
     def _cutoff_flux(self, c, psi, rc):
         """Under the Ip condition: (I/F at the domain edge, layer dpsi/dt|_Phi) for cell values ``psi``.

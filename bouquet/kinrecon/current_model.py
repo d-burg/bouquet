@@ -1090,7 +1090,12 @@ def branch_flip_record(log, jacobians=None, final_core=None):
     (``dict(label, branches, mixed)``); ``final_core``: the result's core record.  Returned: the number of assemblies,
     the count per branch, the number of branch changes in call order, whether any Jacobian had assemblies on different
     branches (and which: at most the first 20 listed, with the total count and whether the list is truncated), the smallest distance of the plain axis q from the floor seen, the final branch; for a series
-    slice also the count of diffusion steps per branch over every pass."""
+    slice also the count of diffusion steps per branch over every pass (``diffusion_steps_per_branch``).  A fit run
+    inside an open log (a series slice's filter fit) appends its assemblies to that log (:func:`.fit.reconstruct`,
+    ``nested_fit``), so in a series slice ``n_assemblies``, ``assemblies_per_branch`` and
+    ``diffusion_steps_per_branch`` count the filter fit's assemblies and interval advances as well as the slice's own
+    consistent solve.  ``jacobians`` is not given for a slice log (its Jacobians are the filter fit's own;
+    :func:`.series.run_series` adds their counts from the filter fit's record)."""
     ents = [e for e in (log or []) if isinstance(e, dict)]
     br = [e.get("branch") for e in ents]
     counts, steps, devs = {}, {}, []

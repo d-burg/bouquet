@@ -667,12 +667,25 @@ def _branch_log_close(token):
         pass
 
 
-def _branch_record(log, res):
-    """:func:`.current_model.branch_flip_record` of one slice's assemblies (a record only; never raises)."""
+def _branch_record(log, res, nested=None):
+    """:func:`.current_model.branch_flip_record` of one slice's assemblies (a record only; never raises).  ``nested``:
+    the ``floor_branch_record`` of a fit run inside the slice (its filter fit), whose Jacobians are the slice's: their
+    count, the mixed count and the mixed list are taken from it (``jacobians_from``); without one the slice computed
+    no Jacobian (0)."""
     try:
         if log is None:
             return dict(computed=False, reason="no branch log")
-        return _cm.branch_flip_record(log, None, ((res.assembly or {}).get("core") if res is not None else None))
+        out = _cm.branch_flip_record(log, None, ((res.assembly or {}).get("core") if res is not None else None))
+        if isinstance(nested, dict) and nested.get("n_jacobians") is not None:
+            out.update(n_jacobians=int(nested["n_jacobians"]),
+                       n_jacobians_mixed_branches=int(nested.get("n_jacobians_mixed_branches") or 0),
+                       jacobians_mixed_branches=list(nested.get("jacobians_mixed_branches") or []),
+                       jacobians_mixed_branches_total=int(nested.get("jacobians_mixed_branches_total") or 0),
+                       jacobians_mixed_branches_truncated=bool(nested.get("jacobians_mixed_branches_truncated")),
+                       jacobians_from="the slice's filter fit (its floor_branch_record)")
+        else:
+            out["jacobians_from"] = "no fit in this slice: no Jacobian computed"
+        return out
     except Exception as exc:  # noqa: BLE001 -- a record must never end a series
         return dict(computed=False, reason=f"{type(exc).__name__}: {exc}"[:300])
 
@@ -1041,7 +1054,7 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
                      crashes=crash_rec if res.converged else [],
                      window_average=holder.get("window_average", False), filter=filt, vacuum_F0=f0rec,
                      correction_core_effect=cce, wall_total_s=round(time.perf_counter() - tk0, 2),
-                     floor_branch_record=_branch_record(blog, res))
+                     floor_branch_record=_branch_record(blog, res, (filt or {}).get("floor_branch_record")))
         if not res.converged and crash_rec:
             # the crashes of the failed slice's last attempt were never applied to a carried state
             extra["crashes_of_failed_attempt"] = crash_rec
@@ -1374,7 +1387,8 @@ def _filter_slice(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1):
                 ip_fit=fr.record.get("ip_fit"), flux_offset=(fr.chi2 or {}).get("flux_offset"),
                 prior={n: fr.record["specs"].get(n, {}).get("prior") for n in fr.free}, chi2=fr.chi2,
                 n_solves=fr.record["n_solves"], wall_s=fr.record["wall_s"],
-                stopping=fr.record.get("final_stopping_tests"), stopping_summary=fr.record.get("stopping_summary"))
+                stopping=fr.record.get("final_stopping_tests"), stopping_summary=fr.record.get("stopping_summary"),
+                floor_branch_record=fr.record.get("floor_branch_record"))
     if c is None or fr.status not in ACCEPTED_FIT_STATUSES:
         # not absorbed (stalled, max_iter, failed Jacobian or trials, failures): the slice stays at its evolved,
         # unfitted equilibrium and state

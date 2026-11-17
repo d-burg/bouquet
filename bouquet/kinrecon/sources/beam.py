@@ -106,8 +106,31 @@ is NOT included, so shine-through is overestimated and the deposition is slightl
 deep.  A caller can pass its own ``cross_sections`` object with the same
 ``inverse_mfp`` method (e.g. a Suzuki/ADAS beam-stopping coefficient).
 
+Two OPTIONS, both off by default (the defaults reproduce the model above bit for bit):
+
+* ``deposition="beamlets"`` (default ``"pencil"``): each beam with a finite-beam description
+  (:class:`.beam_optics.BeamOptics`: source size, focus, divergence, apertures; IMAS schema) is
+  deposited as ``n_beamlets`` straight beamlets per divergence component, sampled
+  deterministically from its source rectangle, focal lengths and divergence and clipped at its
+  apertures (equations O1-O3 of :mod:`.beam_optics`).  Each beamlet is attenuated with B3
+  along its own line, its pitch from its own angular momentum about the symmetry axis
+  (``xi0 = L_z / R``, L_z conserved along the line, the generalization of B4), and all births
+  are binned together as above (the ``smoothing_width`` still applies to every beamlet; it then
+  stands for the orbit width only).  A beam without a description stays a pencil beam, and
+  every missing item of a description follows a stated rule; both are recorded per beam in
+  ``meta["beams"][name]``.  The number of beamlets is the caller's and must be chosen by a
+  convergence test (on-axis value, peaking and stored energy against the number).
+* ``trapping="zero_orbit_width"`` (default ``"none"``), for the driven current only: births on
+  trapped orbits carry no current and passing births carry their transit-averaged pitch
+  (equations T1-T4 of :mod:`.trapping`); needs ``field`` (:class:`.trapping.FluxSurfaceField`)
+  in :meth:`SimpleBeamModel.compute`.  The pressure, density and heating do not depend on it.
+  The driven current stays opt-in and flagged NOT validated (pitch scattering across the
+  trapped-passing boundary, finite orbit width and first-orbit loss are not included); a
+  record flags counter-injected power, for which the net current is ill-conditioned without
+  first-orbit loss.
+
 LIMITATIONS (recorded in provenance): pencil beams (no divergence or source size except via
-the smoothing width), straight-line orbits of the neutrals, no finite-orbit width of the
+the smoothing width; see the ``deposition`` option), straight-line orbits of the neutrals, no finite-orbit width of the
 fast ions (births are mapped to the flux surface of the ionization point), no prompt or
 orbit loss, no fast-ion CX loss, no anomalous fast-ion transport (Alfven eigenmodes,
 sawteeth, tearing modes), no beam-beam collisions, steady state per slice (no time history),
@@ -124,13 +147,19 @@ from typing import Callable, Dict, Optional, Sequence
 
 import numpy as np
 
+from .beam_optics import BeamOptics, HALTON_BASES, beamlet_sample
 from .conventions import E_CHARGE, M_AMU, array_sha256
 from .nbcd import shielding_factor
 from .provider import SOURCES_VERSION, NonInductiveSources, Provenance
 from .slowing_down import IonSpecies, classical_moments
+from .trapping import FluxSurfaceField, classify_births
 
 __all__ = ["NeutralBeam", "volume_weights", "volume_integral", "power_fractions_from_current", "current_fractions_from_power", "FreyaCrossSections",
-           "pencil_beam_deposition", "BeamDeposition", "SimpleBeamModel", "BEAM_LIMITATIONS", "FUSE_DIFFERENCES"]
+           "pencil_beam_deposition", "beamlet_deposition", "BeamDeposition", "SimpleBeamModel", "BEAM_LIMITATIONS",
+           "FUSE_DIFFERENCES", "DEPOSITION_MODES", "TRAPPING_MODES"]
+
+DEPOSITION_MODES = ("pencil", "beamlets")
+TRAPPING_MODES = ("none", "zero_orbit_width")
 
 BEAM_LIMITATIONS = [
     "pencil beams: no divergence or source size beyond the declared rho smoothing width",
@@ -159,6 +188,14 @@ FUSE_DIFFERENCES = [
     "applied; births stay on the flux surface of the ionization point",
     "NBCD is opt-in (compute_nbcd=True) and flagged NOT validated (no fast-ion trapping); FUSE returns it",
 ]
+#: Replaces the first entry of BEAM_LIMITATIONS with ``deposition="beamlets"``.
+BEAMLET_LIMITATION = ("finite beams from beamlets (source size, focus, divergence, apertures as described; missing "
+                      "items by the stated rules, recorded per beam); beams without a description stay pencil beams")
+#: Replaces the "no fast-ion trapping" entry of BEAM_LIMITATIONS with ``trapping="zero_orbit_width"``.
+TRAPPING_LIMITATION = ("zero-orbit-width fast-ion trapping in the driven current: trapped births carry no current, "
+                       "passing births their transit-averaged pitch; no pitch scattering across the trapped-passing "
+                       "boundary, no finite orbit width, no first-orbit loss; the driven current stays opt-in and "
+                       "flagged NOT validated")
 
 
 def power_fractions_from_current(c):
@@ -305,6 +342,9 @@ class BeamDeposition:
     p2_xi0: np.ndarray        # (3, n_rho) birth-weighted <P_2(xi0)>
     shine_through: np.ndarray  # (3,) transmitted fraction of each component
     path: Dict[str, np.ndarray] = field(default_factory=dict)
+    xi_cd: Optional[np.ndarray] = None        # (3, n_rho) birth-weighted current pitch (T4), trapping option only
+    trapped_births: Optional[np.ndarray] = None  # (3,) fraction of births on trapped orbits, trapping option only
+    info: Dict = field(default_factory=dict)  # beamlet record (deposition="beamlets" only)
 
 
 def volume_weights(rho, dvol_drho):
@@ -354,14 +394,17 @@ def _bin(rho_grid, dvol_drho, rho_pts, weights, width, mirror_axis):
 
 
 def pencil_beam_deposition(beam, rho_of_rz, rho, dvol_drho, ne, te_ev, hydrogenic, impurities,
-                           cross_sections=None, n_steps=4000, smoothing_width=0.0, mirror_axis=True, clamp_log=None):
+                           cross_sections=None, n_steps=4000, smoothing_width=0.0, mirror_axis=True, clamp_log=None,
+                           classifier=None):
     r"""Attenuate a pencil beam (eq. B3) and return births per component on ``rho``.
 
     ``rho_of_rz(R, Z)`` gives rho_tor_norm (NaN outside the plasma) from the caller's
     equilibrium; ``ne``, ``te_ev`` are arrays on ``rho``; ``hydrogenic`` / ``impurities`` are
     lists of ``(n_array_on_rho, Z)``.  The beam travels from ``(source_r, 0, source_z)`` toward
     the co-Ip toroidal direction for ``direction = +1`` (internal positive frame).  ``clamp_log``
-    (a dict) accumulates the cross-section fits' clamp counts.
+    (a dict) accumulates the cross-section fits' clamp counts.  ``classifier(rho, R, Z, xi0)``
+    (trapping option only; default None, which changes nothing) returns ``(trapped, xi_cd)`` per
+    birth segment; the result then also carries ``xi_cd`` and ``trapped_births``.
     """
     if beam.tangency_radius is None:
         raise ValueError("pencil_beam_deposition needs pencil geometry")
@@ -412,8 +455,150 @@ def pencil_beam_deposition(beam, rho_of_rz, rho, dvol_drho, ne, te_ev, hydrogeni
     with np.errstate(invalid="ignore", divide="ignore"):
         xi0 = np.where(births > 0, xw / births, 0.0)
         p2 = np.where(births > 0, p2w / births, 0.0)
-    return BeamDeposition(births=births, xi0=xi0, p2_xi0=p2, shine_through=shine,
-                          path={"R": R, "Z": Z, "rho": rr, "s": s})
+    out = BeamDeposition(births=births, xi0=xi0, p2_xi0=p2, shine_through=shine,
+                         path={"R": R, "Z": Z, "rho": rr, "s": s})
+    if classifier is not None:
+        Rm, Zm = 0.5 * (R[1:] + R[:-1]), 0.5 * (Z[1:] + Z[:-1])
+        out.xi_cd, out.trapped_births = _current_pitch(rho, np.asarray(dvol_drho, float), rmid[pts], Rm[pts], Zm[pts],
+                                                       xmid[pts], W[:, pts], births, smoothing_width, mirror_axis,
+                                                       classifier)
+    return out
+
+
+def _current_pitch(rho, dvol_drho, rp, Rp, Zp, xp, Wp, births, width, mirror_axis, classifier):
+    """Birth-weighted current pitch xi_cd (T4 of :mod:`.trapping`) on ``rho`` and the trapped fraction of births."""
+    trapped, xcd = classifier(rp, Rp, Zp, xp)
+    cw, _ = _bin(rho, dvol_drho, rp, Wp * xcd[None, :], width, mirror_axis)
+    tot = Wp.sum(1)
+    tf = np.where(tot > 0, (Wp * trapped[None, :]).sum(1) / np.where(tot > 0, tot, 1.0), 0.0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        xi_cd = np.where(births > 0, cw / births, 0.0)
+    return np.clip(xi_cd, -1.0, 1.0), tf
+
+
+def _beam_frame(beam):
+    """Source center S and the unit vectors d (axis), e_h, e_v of the beam frame (module docstring of beam_optics)."""
+    Rs, Zs, Rt, th = beam.source_r, beam.source_z, beam.tangency_radius, beam.vertical_angle
+    sin_a = Rt / Rs
+    cos_a = np.sqrt(1.0 - sin_a ** 2)
+    d = np.array([-cos_a * np.cos(th), sin_a * np.cos(th), np.sin(th)])
+    e_v = np.array([cos_a * np.sin(th), -sin_a * np.sin(th), np.cos(th)])
+    e_h = np.array([sin_a, cos_a, 0.0])
+    return np.array([Rs, 0.0, Zs]), d, e_h, e_v, cos_a
+
+
+def beamlet_deposition(beam, optics, rho_of_rz, rho, dvol_drho, ne, te_ev, hydrogenic, impurities, *, n_beamlets,
+                       cross_sections=None, n_steps=4000, smoothing_width=0.0, mirror_axis=True, clamp_log=None,
+                       classifier=None, batch=64, chunk=20000):
+    r"""Attenuate a finite beam as beamlets (eqs. O1-O3 of :mod:`.beam_optics`, B3 per beamlet); births on ``rho``.
+
+    Arguments as :func:`pencil_beam_deposition`; ``optics`` a :class:`.beam_optics.BeamOptics`, ``n_beamlets``
+    the number per divergence component.  The beam's particle rates are shared by the transmitted beamlets in
+    proportion to their weights (the power is the launched power, after the apertures).  ``info`` records the
+    sampling, the transmission through the apertures and each beamlet's closest approach in rho.
+    """
+    if beam.tangency_radius is None:
+        raise ValueError("beamlet_deposition needs pencil geometry (the beam axis)")
+    xs = FreyaCrossSections() if cross_sections is None else cross_sections
+    rho = np.asarray(rho, float)
+    dv_arr = np.asarray(dvol_drho, float)
+    smp = beamlet_sample(optics, n_beamlets)
+    S, d, eh, ev, cos_a = _beam_frame(beam)
+    dj = d[None, :] + np.tan(smp["a_h"])[:, None] * eh[None, :] + np.tan(smp["a_v"])[:, None] * ev[None, :]
+    dj = dj / np.linalg.norm(dj, axis=1)[:, None]
+    P0 = S[None, :] + smp["y_h"][:, None] * eh[None, :] + smp["y_v"][:, None] * ev[None, :]
+    keep = np.ones(dj.shape[0], bool)
+    for ap in optics.apertures:
+        t = ap.distance / (dj @ d)
+        keep &= ap.passes(smp["y_h"] + t * (dj @ eh), smp["y_v"] + t * (dj @ ev))
+    w_all = smp["weight"]
+    info = {"n_beamlets_per_component": int(n_beamlets), "n_sampled": int(w_all.size), "n_transmitted": int(keep.sum()),
+            "transmission": float(w_all[keep].sum() / w_all.sum()),
+            "sampling": f"Halton bases {HALTON_BASES}, points 1..{int(n_beamlets)} per divergence component",
+            "optics": optics.record()}
+    n = rho.size
+    zeros3 = np.zeros((3, n))
+    if not keep.any():
+        info["note"] = "fully clipped by the apertures: nothing deposited"
+        return BeamDeposition(births=zeros3.copy(), xi0=zeros3.copy(), p2_xi0=zeros3.copy(), shine_through=np.zeros(3),
+                              xi_cd=None if classifier is None else zeros3.copy(),
+                              trapped_births=None if classifier is None else np.zeros(3), info=info)
+    wt = w_all[keep] / w_all[keep].sum()
+    P0, dj = P0[keep], dj[keep]
+    L = 2.0 * beam.source_r * cos_a + 2.0 * abs(beam.source_z) + 1.0
+    s = np.linspace(0.0, L, n_steps)
+    ds = np.diff(s)
+    rates = beam.particle_rates
+    births, xw, p2w = zeros3.copy(), zeros3.copy(), zeros3.copy()
+    cw = zeros3.copy() if classifier is not None else None
+    trapped_w, born_w = np.zeros(3), np.zeros(3)
+    shine = np.zeros(3)
+    rho_min = np.full(wt.size, np.nan)
+    for b0 in range(0, wt.size, batch):
+        sl = slice(b0, b0 + batch)
+        p0, dd, ww = P0[sl], dj[sl], wt[sl]
+        X = p0[:, 0, None] + dd[:, 0, None] * s[None, :]
+        Y = p0[:, 1, None] + dd[:, 1, None] * s[None, :]
+        Z = p0[:, 2, None] + dd[:, 2, None] * s[None, :]
+        R = np.hypot(X, Y)
+        rr = np.asarray(rho_of_rz(R.ravel(), Z.ravel()), float).reshape(R.shape)
+        inside = np.isfinite(rr) & (rr <= rho[-1])
+        if np.any(inside, axis=1).any():
+            rho_min[sl] = np.where(inside.any(1), np.min(np.where(inside, rr, np.inf), axis=1), np.nan)
+        rq = np.where(inside, rr, 0.0)
+        ne_s = np.where(inside, np.interp(rq, rho, ne), 0.0)
+        te_s = np.where(inside, np.interp(rq, rho, te_ev), 1.0)
+        hyd_s = [(np.where(inside, np.interp(rq, rho, nn), 0.0), z) for nn, z in hydrogenic]
+        imp_s = [(np.where(inside, np.interp(rq, rho, nn), 0.0), z) for nn, z in impurities]
+        Lz = p0[:, 0] * dd[:, 1] - p0[:, 1] * dd[:, 0]           # angular momentum per unit speed (conserved)
+        xi_pt = beam.direction * Lz[:, None] / R
+        both = inside[:, 1:] & inside[:, :-1]
+        seg_in = inside[:, 1:] | inside[:, :-1]
+        rmid = np.where(both, 0.5 * (rq[:, 1:] + rq[:, :-1]), np.where(inside[:, :-1], rq[:, :-1], rq[:, 1:]))
+        xmid = 0.5 * (xi_pt[:, 1:] + xi_pt[:, :-1])
+        W = np.zeros((3,) + seg_in.shape)
+        for k, Ek in enumerate(beam.energies):
+            vb = np.sqrt(2.0 * Ek * E_CHARGE / (beam.A * M_AMU))
+            args = (Ek / beam.A, vb, ne_s[inside], te_s[inside], [(nn[inside], z) for nn, z in hyd_s],
+                    [(nn[inside], z) for nn, z in imp_s])
+            try:
+                lam_all = xs.inverse_mfp(*args, log=clamp_log)
+            except TypeError:                  # a caller's cross-section object without the log argument
+                lam_all = xs.inverse_mfp(*args)
+            lam = np.zeros(R.shape)
+            lam[inside] = lam_all
+            tau = np.concatenate([np.zeros((R.shape[0], 1)),
+                                  np.cumsum(0.5 * (lam[:, 1:] + lam[:, :-1]) * ds[None, :], axis=1)], axis=1)
+            I = rates[k] * ww[:, None] * np.exp(-tau)
+            W[k] = np.where(seg_in, I[:, :-1] - I[:, 1:], 0.0)
+            shine[k] += float(np.sum(ww * np.exp(-tau[:, -1])))
+        pts = seg_in & (W.sum(0) > 0)
+        rp, xp, Wp = rmid[pts], xmid[pts], W[:, pts]
+        if classifier is not None:
+            trapped, xcd = classifier(rp, 0.5 * (R[:, 1:] + R[:, :-1])[pts], 0.5 * (Z[:, 1:] + Z[:, :-1])[pts], xp)
+            trapped_w += (Wp * trapped[None, :]).sum(1)
+            born_w += Wp.sum(1)
+        for c0 in range(0, rp.size, chunk):
+            c = slice(c0, c0 + chunk)
+            bb, _ = _bin(rho, dv_arr, rp[c], Wp[:, c], smoothing_width, mirror_axis)
+            births += bb
+            bb, _ = _bin(rho, dv_arr, rp[c], Wp[:, c] * xp[c], smoothing_width, mirror_axis)
+            xw += bb
+            bb, _ = _bin(rho, dv_arr, rp[c], Wp[:, c] * 0.5 * (3 * xp[c] ** 2 - 1), smoothing_width, mirror_axis)
+            p2w += bb
+            if classifier is not None:
+                bb, _ = _bin(rho, dv_arr, rp[c], Wp[:, c] * xcd[c], smoothing_width, mirror_axis)
+                cw += bb
+    with np.errstate(invalid="ignore", divide="ignore"):
+        xi0 = np.where(births > 0, xw / births, 0.0)
+        p2 = np.where(births > 0, p2w / births, 0.0)
+        xi_cd = None if cw is None else np.clip(np.where(births > 0, cw / births, 0.0), -1.0, 1.0)
+    info["rho_closest_approach"] = {"min": float(np.nanmin(rho_min)) if np.any(np.isfinite(rho_min)) else None,
+                                    "weighted_mean": (float(np.nansum(wt * rho_min) / np.sum(wt[np.isfinite(rho_min)]))
+                                                      if np.any(np.isfinite(rho_min)) else None)}
+    tf = None if classifier is None else np.where(born_w > 0, trapped_w / np.where(born_w > 0, born_w, 1.0), 0.0)
+    return BeamDeposition(births=births, xi0=xi0, p2_xi0=p2, shine_through=shine, xi_cd=xi_cd, trapped_births=tf,
+                          info=info)
 
 
 def _beam_record(b):
@@ -434,15 +619,29 @@ class SimpleBeamModel:
     validated, module docstring), ``zeff_check_rtol`` (None: the Z_eff given and the one
     implied by the ion list are compared and the difference recorded; a number: refuse when
     the relative difference exceeds it).
+
+    Options (module docstring; both off by default, and then nothing below changes):
+    ``deposition`` (``"pencil"`` | ``"beamlets"``), with ``optics`` (``{beam name:
+    :class:`.beam_optics.BeamOptics`}``; a beam without an entry stays a pencil beam, recorded) and
+    ``n_beamlets`` (required with ``"beamlets"``: per divergence component, chosen by the caller's
+    convergence test); ``trapping`` (``"none"`` | ``"zero_orbit_width"``; the latter needs ``field``
+    in :meth:`compute` when ``compute_nbcd=True``).  The settings and records of an option appear
+    only when it is on, so default-path records are unchanged.
     """
 
     #: Reason attached to every built-in driven current (module docstring).
     NBCD_NOT_VALIDATED = ("built-in NBCD: cylindrical fast-ion current with birth-point pitch, no fast-ion "
                           "trapping; 1.5-2.4x a transport code per MW in tests; no calibration applied")
+    #: Reason attached with ``trapping="zero_orbit_width"`` (module docstring of :mod:`.trapping`).
+    NBCD_NOT_VALIDATED_TRAPPING = (
+        "built-in NBCD with zero-orbit-width fast-ion trapping: trapped births carry no current, passing births "
+        "their transit-averaged pitch; NOT included: pitch scattering across the trapped-passing boundary during "
+        "slowing down, finite orbit width, first-orbit loss (counter injection makes the net current "
+        "ill-conditioned); not compared with a bounce-averaged model; no calibration applied")
 
     def __init__(self, beams, *, smoothing_width, mirror_axis=True, shielding="redl_l31", ln_lambda_e="nrl_ei",
                  ln_lambda_i="nrl_beam_ion", cross_sections=None, n_steps=4000, compute_nbcd=False,
-                 zeff_check_rtol=None):
+                 zeff_check_rtol=None, deposition="pencil", optics=None, n_beamlets=None, trapping="none"):
         if not beams:
             raise ValueError("no beams given")
         names = [b.name for b in beams]
@@ -459,19 +658,60 @@ class SimpleBeamModel:
         self.compute_nbcd = bool(compute_nbcd)
         self.zeff_check_rtol = None if zeff_check_rtol is None else float(zeff_check_rtol)
         self._clamp_log = {}
+        if deposition not in DEPOSITION_MODES:
+            raise ValueError(f"deposition must be one of {DEPOSITION_MODES}")
+        if trapping not in TRAPPING_MODES:
+            raise ValueError(f"trapping must be one of {TRAPPING_MODES}")
+        self.deposition = deposition
+        self.trapping = trapping
+        if deposition == "pencil":
+            if optics is not None or n_beamlets is not None:
+                raise ValueError("optics and n_beamlets apply only with deposition='beamlets'")
+            self.optics, self.n_beamlets = {}, None
+        else:
+            if n_beamlets is None or int(n_beamlets) < 1:
+                raise ValueError("deposition='beamlets' needs n_beamlets >= 1 (chosen by a convergence test)")
+            self.n_beamlets = int(n_beamlets)
+            self.optics = dict(optics or {})
+            for k, v in self.optics.items():
+                if k not in names:
+                    raise ValueError(f"optics given for {k!r}, which is not a beam")
+                if not isinstance(v, BeamOptics):
+                    raise ValueError(f"optics[{k!r}] must be a BeamOptics")
 
     def settings(self):
-        return {"smoothing_width": self.smoothing_width, "mirror_axis": self.mirror_axis, "shielding": self.shielding,
-                "ln_lambda_e": self.ln_lambda_e, "ln_lambda_i": self.ln_lambda_i,
-                "cross_sections": getattr(self.cross_sections, "name", type(self.cross_sections).__name__),
-                "n_steps": self.n_steps,
-                "compute_nbcd": self.compute_nbcd if not self.compute_nbcd else "True (output flagged NOT validated)",
-                "zeff_check_rtol": self.zeff_check_rtol, "banana_shift": "not applied (declared difference from FUSE)",
-                "fast_ion_density_lower_limit": "v = 0 (no thermalization cutoff; slowing_down module docstring)"}
+        out = {"smoothing_width": self.smoothing_width, "mirror_axis": self.mirror_axis, "shielding": self.shielding,
+               "ln_lambda_e": self.ln_lambda_e, "ln_lambda_i": self.ln_lambda_i,
+               "cross_sections": getattr(self.cross_sections, "name", type(self.cross_sections).__name__),
+               "n_steps": self.n_steps,
+               "compute_nbcd": self.compute_nbcd if not self.compute_nbcd else "True (output flagged NOT validated)",
+               "zeff_check_rtol": self.zeff_check_rtol, "banana_shift": "not applied (declared difference from FUSE)",
+               "fast_ion_density_lower_limit": "v = 0 (no thermalization cutoff; slowing_down module docstring)"}
+        if self.deposition != "pencil":            # option keys only when on (default records unchanged)
+            out.update(deposition=self.deposition, n_beamlets=self.n_beamlets,
+                       beamlet_sampling=f"Halton bases {HALTON_BASES}, points 1..n per divergence component",
+                       beamlet_power_rule="beam power = launched power (after apertures), shared by transmitted "
+                                          "beamlets",
+                       beamlet_smoothing="smoothing_width applied to every beamlet")
+        if self.trapping != "none":
+            out.update(trapping=self.trapping + " (driven current only; trapping module T1-T4)")
+        return out
 
-    def deposit(self, beam, rho, dvol_drho, ne, te_ev, ions, rho_of_rz):
-        """Births, <xi0>, <P_2(xi0)> and shine-through of one beam on ``rho``."""
+    def _classifier(self, field):
+        if self.trapping == "none" or not self.compute_nbcd:
+            return None
+        if field is None:
+            raise ValueError("trapping='zero_orbit_width' needs field (a FluxSurfaceField) when compute_nbcd=True")
+        if not isinstance(field, FluxSurfaceField):
+            raise ValueError("field must be a FluxSurfaceField")
+        return lambda r, R, Z, x: classify_births(field, r, R, Z, x)
+
+    def deposit(self, beam, rho, dvol_drho, ne, te_ev, ions, rho_of_rz, field=None):
+        """Births, <xi0>, <P_2(xi0)> and shine-through of one beam on ``rho`` (with the options: beamlets, xi_cd)."""
+        classifier = self._classifier(field)
         if beam.deposition is not None:
+            if classifier is not None:
+                raise ValueError(f"{beam.name}: trapping needs birth positions; a given deposition has none")
             dep = beam.deposition
             g = np.asarray(dep["rho"], float)
             shapes = dep["shape"]
@@ -500,19 +740,31 @@ class SimpleBeamModel:
             raise ValueError(f"{beam.name}: pencil geometry needs rho_of_rz from the caller's equilibrium")
         hyd = [(ion.n, ion.Z) for ion in ions if ion.Z <= 1.0 + 1e-9]
         imp = [(ion.n, ion.Z) for ion in ions if ion.Z > 1.0 + 1e-9]
+        if self.deposition == "beamlets" and beam.name in self.optics:
+            return beamlet_deposition(beam, self.optics[beam.name], rho_of_rz, rho, dvol_drho, ne, te_ev, hyd, imp,
+                                      n_beamlets=self.n_beamlets, cross_sections=self.cross_sections,
+                                      n_steps=self.n_steps, smoothing_width=self.smoothing_width,
+                                      mirror_axis=self.mirror_axis, clamp_log=self._clamp_log, classifier=classifier)
+        if classifier is not None:
+            return pencil_beam_deposition(beam, rho_of_rz, rho, dvol_drho, ne, te_ev, hyd, imp, self.cross_sections,
+                                          self.n_steps, self.smoothing_width, self.mirror_axis,
+                                          clamp_log=self._clamp_log, classifier=classifier)
         return pencil_beam_deposition(beam, rho_of_rz, rho, dvol_drho, ne, te_ev, hyd, imp, self.cross_sections,
                                       self.n_steps, self.smoothing_width, self.mirror_axis,
                                       clamp_log=self._clamp_log)
 
     def compute(self, rho, *, time, ne, te_ev, ions, zeff, ft, B0, R0, dvol_drho, rho_of_rz=None, uncertainty=None,
-                time_window=0.0, inputs=None, eps=None):
+                time_window=0.0, inputs=None, eps=None, field=None):
         r"""Driven current, fast-ion pressure/density and heating of all beams at one slice.
 
         ``rho`` -- rho_tor_norm grid; ``ne`` [m^-3], ``te_ev`` [eV], ``zeff``, ``ft`` (trapped
         fraction, for the shielding; ``eps`` instead for ``shielding="start_cordey_fit"``) and
         ``dvol_drho`` [m^3] are arrays on it; ``ions`` a list of
-        :class:`.slowing_down.IonSpecies`; ``B0`` [T] and ``R0`` [m] the reference field and radius.
+        :class:`.slowing_down.IonSpecies`; ``B0`` [T] and ``R0`` [m] the reference field and radius;
+        ``field`` -- a :class:`.trapping.FluxSurfaceField` from the same equilibrium (trapping
+        option only).
         """
+        trap = self._classifier(field) is not None
         rho = np.asarray(rho, float)
         ne, te = np.asarray(ne, float), np.asarray(te_ev, float)
         zeff = np.broadcast_to(np.asarray(zeff, float), rho.shape)
@@ -526,14 +778,18 @@ class SimpleBeamModel:
         jdotb, p_fast, n_fast, p_par, p_perp, heating = {}, {}, {}, {}, {}, {}
         diag = {}
         for b in self.beams:
-            dep = self.deposit(b, rho, dvol_drho, ne, te, ions, rho_of_rz)
+            dep = self.deposit(b, rho, dvol_drho, ne, te, ions, rho_of_rz, field=field)
             jf = np.zeros_like(rho)
             tot = {k: np.zeros_like(rho) for k in ("n_fast", "p_fast", "p_par", "p_perp", "q_e", "q_i")}
             for k, Ek in enumerate(b.energies):
                 m = classical_moments(dep.births[k], Ek, ne, te, ions, b.A, b.Z, xi0=dep.xi0[k],
                                       ln_lambda_e=self.ln_lambda_e, ln_lambda_i=self.ln_lambda_i,
                                       p2_xi0=dep.p2_xi0[k])
-                jf += m["j_fast"]
+                if trap:          # T4: the current pitch replaces the birth pitch in S11 (current only)
+                    jf += classical_moments(dep.births[k], Ek, ne, te, ions, b.A, b.Z, xi0=dep.xi_cd[k],
+                                            ln_lambda_e=self.ln_lambda_e, ln_lambda_i=self.ln_lambda_i)["j_fast"]
+                else:
+                    jf += m["j_fast"]
                 for key in tot:
                     tot[key] += m[key]
             if self.compute_nbcd:
@@ -546,6 +802,29 @@ class SimpleBeamModel:
             births_int = [float(volume_integral(rho, dvol_drho, dep.births[k])) for k in range(3)]
             diag[b.name] = {"shine_through": dep.shine_through.tolist(), "births_per_s": births_int,
                             "power_fractions": b.p_frac.tolist(), "current_fractions": b.c_frac.tolist()}
+            if self.deposition == "beamlets":          # option records only when on
+                if b.name in self.optics:
+                    diag[b.name].update(deposition="beamlets", beamlets=dep.info)
+                elif b.deposition is not None:
+                    diag[b.name].update(deposition="given deposition (beamlets not applicable)")
+                else:
+                    diag[b.name].update(deposition="pencil: no finite-beam description given (missing input)")
+            if trap:
+                diag[b.name].update(trapped_birth_fraction=np.asarray(dep.trapped_births, float).tolist())
+        extra_meta = {}
+        extra_limitations = []
+        if trap:
+            p_ctr = float(sum(b.power for b in self.beams if b.direction == -1))
+            p_all = float(sum(b.power for b in self.beams))
+            extra_meta["counter_injection"] = {
+                "counter_power_W": p_ctr, "total_power_W": p_all, "flag": p_ctr > 0,
+                "note": "counter-injected power present: the net driven current is a difference of co and counter "
+                        "currents and is ill-conditioned without first-orbit loss (not modeled)" if p_ctr > 0
+                        else "no counter-injected power"}
+            extra_meta["trapping_field"] = field.record()
+            if p_ctr > 0:
+                extra_limitations.append(f"counter-injected power present ({p_ctr:.4g} of {p_all:.4g} W): net driven "
+                                         "current ill-conditioned without first-orbit loss (not modeled)")
         prov = Provenance(
             provider="simple_beam", source_code="kinrecon.sources.beam", source_version=SOURCES_VERSION,
             inputs=dict(inputs or {}, time=time, beams=[_beam_record(b) for b in self.beams],
@@ -561,9 +840,16 @@ class SimpleBeamModel:
             notes="Re-derived zeroth-order model; differences from FUSE ActorSimpleNB: " + "; ".join(FUSE_DIFFERENCES)
                   + ".  Credits: FUSE / IMAS.jl (Apache-2.0, General Atomics) for the model structure and the FREYA "
                     "cross-section fits.")
+        if self.deposition == "beamlets":
+            prov.limitations[0] = BEAMLET_LIMITATION
+        if trap:
+            prov.limitations = [TRAPPING_LIMITATION if x.startswith("no fast-ion trapping") else x
+                                for x in prov.limitations] + extra_limitations
+        reason = self.NBCD_NOT_VALIDATED_TRAPPING if trap else self.NBCD_NOT_VALIDATED
         if self.compute_nbcd:
-            prov.limitations.insert(0, "NOT VALIDATED: the returned beam-driven current (" + self.NBCD_NOT_VALIDATED + ")")
+            prov.limitations.insert(0, "NOT VALIDATED: the returned beam-driven current (" + reason + ")")
         return NonInductiveSources(rho=rho, time=time, time_window=time_window, B0=B0, R0=R0, jdotb=jdotb,
                                    p_fast=p_fast, n_fast=n_fast, p_par=p_par, p_perp=p_perp, heating=heating,
-                                   uncertainty=list(uncertainty or []), provenance=prov, meta={"beams": diag},
-                                   not_validated={f"jdotb:{k}": self.NBCD_NOT_VALIDATED for k in jdotb})
+                                   uncertainty=list(uncertainty or []), provenance=prov,
+                                   meta=dict({"beams": diag}, **extra_meta),
+                                   not_validated={f"jdotb:{k}": reason for k in jdotb})

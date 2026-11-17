@@ -268,7 +268,8 @@ step of ``Nt`` sub-steps) when it solves for Ip, and on every sub-step in its lo
 
 Record only (nothing reads it): the floor's branch, both edges, q0 and q_min before and after, and its effect against
 the same model without the floor -- the loop voltage, l_i (``li3``) and the fraction of Ip moved from inside
-``rho_inv`` to outside it.
+``rho_inv`` to outside it.  The effect is computed in a guard: a failure of it is recorded (``floor_effect_computed``
+False, ``floor_effect_reason``) and never ends or alters a fit or a series.
 
 :func:`floor_q` (opt-in, ``q_floor_form="sharp"``) is the earlier construction: q clamped to ``max(q, q_floor)`` on
 the faces, which makes ``<J.B>`` jump at the floor radius (q is continuous there, its slope breaks); it is kept for
@@ -631,6 +632,27 @@ def _floor_effect(solver, st0, sol_f, st_f, r_out):
                                                 if ip else float("nan")))
 
 
+#: The keys of :func:`_floor_effect` (the record of what the floor did): only these are taken from it into a floor
+#: record, so a record can never overwrite a key the floor's region is read from (``acted``, ``rho_floor``, ...).
+FLOOR_EFFECT_KEYS = ("v_loop_plain", "v_loop_floor", "d_v_loop_rel", "li3_plain", "li3_floor", "d_li3",
+                     "li3_domain_plain", "li3_domain_floor", "d_li3_domain", "current_moved_outside_over_ip",
+                     "d_enclosed_current_max_over_ip")
+
+
+def _floor_effect_record(solver, st0, sol_f, st_f, r_out):
+    """:func:`_floor_effect` as a RECORD that cannot end or alter a result: its own keys only
+    (:data:`FLOOR_EFFECT_KEYS`) with ``floor_effect_computed=True``; if it raises or returns anything else, those keys
+    are NaN with ``floor_effect_computed=False`` and the reason (``floor_effect_reason``)."""
+    try:
+        eff = _floor_effect(solver, st0, sol_f, st_f, r_out)
+        out = {k: eff[k] for k in FLOOR_EFFECT_KEYS}
+        out["floor_effect_computed"] = True
+    except Exception as exc:  # noqa: BLE001 -- a record must never end a fit or a series
+        out = dict.fromkeys(FLOOR_EFFECT_KEYS, float("nan"))
+        out.update(floor_effect_computed=False, floor_effect_reason=f"{type(exc).__name__}: {exc}"[:300])
+    return out
+
+
 def resistive_floor_steady(solver, rho_faces, q_floor=DEFAULT_Q_FLOOR, t=0.0, psi_boundary=0.0, rule="continuous"):
     r"""Steady state of ``solver`` with the resistive q floor (module docstring, eq. F1 and the steady-state rule).
 
@@ -661,7 +683,10 @@ def resistive_floor_steady(solver, rho_faces, q_floor=DEFAULT_Q_FLOOR, t=0.0, ps
     ``q_floor_met``, the number of steady states formed, the flux moved on the axis cell, and -- a RECORD of the
     floor's effect against the plain steady state of the same sources -- the loop voltage and ``li3`` of both and their
     changes (``d_v_loop_rel``, ``d_li3``), the fraction of Ip moved from inside ``rho_inv`` to outside it
-    (``current_moved_outside_over_ip``) and the largest change of the enclosed current (fraction of Ip).
+    (``current_moved_outside_over_ip``) and the largest change of the enclosed current (fraction of Ip).  That record
+    is made in a guard (:func:`_floor_effect_record`): where the floor acted it carries ``floor_effect_computed``, and
+    a failure of the record leaves its values NaN with the reason (``floor_effect_reason``) and never ends this call
+    or changes the state, the region or any other key.
     """
     if rule not in RESISTIVE_FLOOR_RULES:
         raise ValueError(f"rule must be one of {RESISTIVE_FLOOR_RULES}")
@@ -743,7 +768,13 @@ def resistive_floor_steady(solver, rho_faces, q_floor=DEFAULT_Q_FLOOR, t=0.0, ps
                rho_floor_inner=float(r_in), eta_ratio_inv_to_axis=float(sig[0] / sig[1]), q_min_after=float(q[j1]),
                rho_q_min_after=float(rf[j1]), q_axis_after=float(q[0]), q_floor_met=bool(np.all(q >= qf)),
                d_psi_axis_cell=float(st.psi[0] - st0.psi[0]))
-    rec.update(_floor_effect(solver, st0, sol, st, r_use))
+    try:
+        eff = _floor_effect_record(solver, st0, sol, st, r_use)
+        rec.update({k: eff[k] for k in FLOOR_EFFECT_KEYS + ("floor_effect_computed", "floor_effect_reason")
+                    if k in eff})
+    except Exception as exc:  # noqa: BLE001 -- a record must never end a fit or a series (the guard is also inside)
+        rec.update(dict.fromkeys(FLOOR_EFFECT_KEYS, float("nan")), floor_effect_computed=False,
+                   floor_effect_reason=f"{type(exc).__name__}: {exc}"[:300])
     st.meta = dict(st.meta or {}, q_floor=dict(q_floor=qf, form="resistive", rule=rule, branch=branch, acted=True,
                                                rho_floor=float(r_use), rho_floor_inner=float(r_in),
                                                q_floor_met=rec["q_floor_met"]))

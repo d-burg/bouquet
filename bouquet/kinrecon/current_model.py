@@ -124,6 +124,7 @@ to the core (:func:`correction_core_effect`).
 want it; the fit (:mod:`.fit`) now takes its Jacobian columns from consistent solves.
 """
 
+import contextvars
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Optional, Sequence
@@ -833,6 +834,10 @@ def assemble(lag, kin, src, params, cfg, ip, z0=None, state=None):
                correction_form=(corr_form if state is not None and corr_form is not None else
                                 ("source of the steady state / periodic orbit" if corr_shapes else None)),
                p_sep=float(pk[-1]), pax=float(pk[0] - pk[-1]), wall_s=round(time.perf_counter() - t0, 4))
+    try:                         # the floor's branch, to the open branch log: a record only
+        _log_assembly(core)
+    except Exception:  # noqa: BLE001 -- a record must never end a fit or a series
+        pass
     return out
 
 
@@ -872,7 +877,15 @@ def core_record(floor_rec, cfg, q_model, rho_tor, rho_edge):
     return rec
 
 
-def floor_effect_record(core, q_check=None, q_equilibrium=None):
+#: Definition of the achieved axis q recorded by :func:`floor_effect_record` (one estimator; the others are
+#: cross-checks).
+Q_AXIS_ACHIEVED_DEFINITION = (
+    "regular-singular extrapolation q0 + q2 rho^2 + q4 rho^4 of the solved equilibrium's traced q, least squares on "
+    "rho_tor,norm in the q check's axis window (coordinates.axis_q; the q check's axis.q0_eq): the axis value the "
+    "resolved surfaces imply, not a trace of the innermost surface")
+
+
+def floor_effect_record(core, q_check=None, q_equilibrium=None, q_traced_innermost=None, q_solver_q0=None):
     """What the q floor did in one result -- a RECORD for the reader (nothing reads it; it cannot change a result).
 
     From the core record (:func:`core_record`; for a series slice the interval's record of
@@ -880,23 +893,52 @@ def floor_effect_record(core, q_check=None, q_equilibrium=None):
     and met the floor, the outer and inner edges of the flattening region (rho_tor,norm), the change of the loop
     voltage (relative) and of l_i (``li3``, the full plasma, NaN in a series; ``li3_domain``, the diffusion domain)
     against the same model without the floor and the fraction of Ip the floor
-    moved from inside its outer edge to outside it.  The reference: for a single slice the steady state of the same
+    moved from inside its outer edge to outside it, with whether that record was computed (``effect_computed``; NaN
+    values and ``effect_reason`` where it failed).  The reference: for a single slice the steady state of the same
     model sources (before the corrections) with the plain resistivity; for a series slice the same interval advanced
-    from the same carried state without the floor (the floor's effect over this interval, not its history).  Also the
-    ACHIEVED q: the solved equilibrium's axis q (``q_check``'s ``axis.q0_eq``) and the minimum of its traced q
-    (``q_equilibrium``), next to the scored model q's axis value and minimum (after the corrections)."""
+    from the same carried state without the floor (the floor's effect over this interval, not its history).
+
+    The ACHIEVED q: ``q_axis_achieved``, ONE estimator, defined in ``q_axis_achieved_definition``
+    (:data:`Q_AXIS_ACHIEVED_DEFINITION`: the q check's extrapolated axis value of the solved equilibrium,
+    ``q_check["axis"]["q0_eq"]``, with its fit's rms), and the minimum of the equilibrium's traced q
+    (``q_equilibrium``), next to the scored model q's axis value and minimum (after the corrections).  Named
+    cross-checks only (``q_axis_cross_checks``), none of them the achieved axis q: the trace of the innermost surface
+    (``q_traced_innermost``; the equilibrium's q at psi_N = 1e-6, which falls inside the solver's first mesh element
+    and is not resolved there), the solver's ``q_0`` (``q_solver_q0``; q at psi_N = 0.02 by the solver's definition,
+    not an axis value), the same extrapolation applied to the model q (``q_model_axis_extrapolated``) and the model q's
+    own axis face value (``q_model_axis``).  ``q_axis_spread``: the largest minus the smallest of the achieved value,
+    the innermost trace and the solver's ``q_0``; ``q_axis_extrapolation_offset_model``: the extrapolation of the model
+    q minus the model's own axis value -- where the axis value is known, how far the estimator is from it."""
     core = core or {}
     ax = ((q_check or {}).get("axis") or {})
     qe = None if q_equilibrium is None else np.asarray(q_equilibrium, float)
     q_min_eq = float(np.min(qe[np.isfinite(qe)])) if qe is not None and np.any(np.isfinite(qe)) else None
+
+    def _f(v):
+        try:
+            v = abs(float(v))
+            return v if np.isfinite(v) else None
+        except (TypeError, ValueError):
+            return None
+    q_ach = _f(ax.get("q0_eq"))
+    q_tr, q_s0 = _f(q_traced_innermost), _f(q_solver_q0)
+    q_mx, q_ma = _f(ax.get("q0_model")), _f(core.get("q_axis_model"))
+    trio = [v for v in (q_ach, q_tr, q_s0) if v is not None]
     return dict(q_floor=core.get("q_floor"), q_floor_form=core.get("q_floor_form"),
                 floor_rule=core.get("floor_rule"), floor_branch=core.get("floor_branch"),
                 acted=core.get("acted"), q_floor_met=core.get("q_floor_met"),
                 rho_floor=core.get("rho_floor"), rho_floor_inner=core.get("rho_floor_inner"),
-                q_axis_achieved=ax.get("q0_eq"), q_min_achieved=q_min_eq,
+                q_axis_achieved=ax.get("q0_eq"), q_axis_achieved_definition=Q_AXIS_ACHIEVED_DEFINITION,
+                q_axis_achieved_window=ax.get("window"), q_axis_achieved_degree=ax.get("degree"),
+                q_axis_achieved_fit_rms_rel=ax.get("fit_rms_rel_eq"), q_min_achieved=q_min_eq,
+                q_axis_cross_checks=dict(q_traced_innermost=q_tr, q_solver_q0=q_s0, q_model_axis_extrapolated=q_mx,
+                                         q_model_axis=q_ma),
+                q_axis_spread=(max(trio) - min(trio)) if len(trio) >= 2 else None,
+                q_axis_extrapolation_offset_model=(q_mx - q_ma) if q_mx is not None and q_ma is not None else None,
                 q_axis_model=core.get("q_axis_model"), q_min_model=core.get("q_min_model"),
                 d_v_loop_rel=core.get("d_v_loop_rel"), d_li3=core.get("d_li3"), d_li3_domain=core.get("d_li3_domain"),
                 current_moved_outside_over_ip=core.get("current_moved_outside_over_ip"),
+                effect_computed=core.get("floor_effect_computed"), effect_reason=core.get("floor_effect_reason"),
                 reference=core.get("floor_effect_reference",
                                    "steady state of the same model sources without the floor (before the corrections)"),
                 note="record only: nothing reads it")
@@ -918,6 +960,85 @@ def core_vs_floor_record(core, correction_effect):
                 core_rho=cce.get("core_rho"), d_current_inside_core_over_ip=cce.get("d_current_inside_core_over_ip"),
                 d_q_axis_model=cce.get("d_q_axis_model"), correction_effect_computed=cce.get("computed"),
                 note="record only: no threshold, nothing reads it")
+
+
+# ============================================================== the floor's branch per assembly (recording only)
+#: The open log of the q floor's branch at every assembly (a list), or None.  :func:`.fit.reconstruct` opens one per
+#: fit and :func:`.series.run_series` one per slice (:func:`open_branch_log`); :func:`assemble` appends one entry per
+#: assembly to the log that is open.  A RECORD only (:func:`branch_flip_record`): nothing reads it.
+_ASSEMBLY_LOG = contextvars.ContextVar("kinrecon_floor_branch_log", default=None)
+
+
+def open_branch_log():
+    """Open a branch log (:data:`_ASSEMBLY_LOG`); returns ``(log, token)``; close it with :func:`close_branch_log`."""
+    log = []
+    return log, _ASSEMBLY_LOG.set(log)
+
+
+def close_branch_log(token):
+    """Close the branch log opened with ``token`` (the log open before it is open again)."""
+    _ASSEMBLY_LOG.reset(token)
+
+
+def current_branch_log():
+    """The open branch log, or None."""
+    return _ASSEMBLY_LOG.get()
+
+
+def _log_assembly(core):
+    """Append the floor branch of one assembly to the open branch log; never raises (a record must never end a fit
+    or a series).  Entry: the branch (:data:`.current.sawtooth.FLOOR_BRANCHES`, None for another core treatment), the
+    floor and the plain model state's axis q (single slice); for a series interval also the branch of every diffusion
+    step and the smallest distance of the plain axis q from the floor over the steps."""
+    try:
+        log = _ASSEMBLY_LOG.get()
+        if log is None:
+            return
+        c = core or {}
+        e = dict(branch=c.get("floor_branch"), q_floor=c.get("q_floor"), q_axis_plain=c.get("q_axis_before"))
+        if c.get("branch_steps") is not None:
+            e.update(branch_steps=dict(c["branch_steps"]),
+                     q_axis_plain_min_abs_dev=c.get("q_axis_model_steady_min_abs_dev_floor"))
+        log.append(e)
+    except Exception:  # noqa: BLE001 -- a record must never end a fit or a series
+        pass
+
+
+def branch_flip_record(log, jacobians=None, final_core=None):
+    """Whether the q floor's branch (:func:`.current.sawtooth.floor_region`, decided on the plain model state on every
+    assembly) changed inside one result -- a RECORD for the reader (nothing reads it; it cannot change a result).
+
+    ``log``: the entries of :func:`_log_assembly` in call order (every pass of every consistent solve, every Jacobian
+    column and trial, every lagged solve); ``jacobians``: per Jacobian the branches of its assemblies and of its center
+    (``dict(label, branches, mixed)``); ``final_core``: the result's core record.  Returned: the number of assemblies,
+    the count per branch, the number of branch changes in call order, whether any Jacobian had assemblies on different
+    branches (and which), the smallest distance of the plain axis q from the floor seen, the final branch; for a series
+    slice also the count of diffusion steps per branch over every pass."""
+    ents = [e for e in (log or []) if isinstance(e, dict)]
+    br = [e.get("branch") for e in ents]
+    counts, steps, devs = {}, {}, []
+    for b in br:
+        counts[str(b)] = counts.get(str(b), 0) + 1
+    for e in ents:
+        for k, v in (e.get("branch_steps") or {}).items():
+            steps[str(k)] = steps.get(str(k), 0) + int(v)
+        qf, qa = e.get("q_floor"), e.get("q_axis_plain")
+        if qf is not None and qa is not None and np.isfinite(qa):
+            devs.append(abs(float(qa) - float(qf)))
+        if e.get("q_axis_plain_min_abs_dev") is not None:
+            devs.append(float(e["q_axis_plain_min_abs_dev"]))
+    jac = [j for j in (jacobians or []) if isinstance(j, dict)]
+    mixed = [j for j in jac if j.get("mixed")]
+    out = dict(n_assemblies=len(ents), assemblies_per_branch=counts,
+               n_branch_changes_in_call_order=sum(1 for a, b in zip(br[:-1], br[1:]) if a != b),
+               branch_changed=bool(len(counts) > 1 or len(steps) > 1),
+               n_jacobians=len(jac), n_jacobians_mixed_branches=len(mixed), jacobians_mixed_branches=mixed[:20],
+               min_abs_plain_q_axis_minus_floor=min(devs) if devs else None,
+               final_branch=(final_core or {}).get("floor_branch"),
+               note="record only: nothing reads it")
+    if steps:
+        out["diffusion_steps_per_branch"] = steps
+    return out
 
 
 # ============================================================== the corrections' effect on the core (recording only)

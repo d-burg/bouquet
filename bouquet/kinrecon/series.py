@@ -499,7 +499,9 @@ def advance_q_floor(sol, state, t1, settings, dt, q_floor, sol_all=None, form="r
     reference surfaces) and of the domain's ``li3_domain`` (always available), and the fraction of Ip moved from
     inside the end state's outer
     edge (resistive: the region at the end time; sharp: the outermost upward crossing of the end state's q) to outside
-    it (0 where there is no region)."""
+    it (0 where there is no region), made in a guard (a failure is recorded with ``floor_effect_computed`` False and
+    never ends the series); resistive also the floor's branch on every step (``branch_steps``, count per branch) and
+    the smallest distance of the plain steady state's axis q from the floor over the steps."""
     if form not in _saw.Q_FLOOR_FORMS:
         raise ValueError(f"form must be one of {_saw.Q_FLOOR_FORMS}")
     acc = dict(n_steps=0, n_acted=0, d_i_max=0.0, last=None, regions=[])
@@ -531,9 +533,15 @@ def advance_q_floor(sol, state, t1, settings, dt, q_floor, sol_all=None, form="r
         acc["n_acted"] = sum(1 for r in used if r["k"] > 0)
     q_end = _saw.face_q(end, sol.geometry_at(end.time).phi_b)
     model_end_crossings = _saw.floor_crossings(end.rho_faces, q_end, q_floor)     # the model end state's q
-    e_mod = sol.advance(state, t1, dt=dt, scheme=settings.scheme)                 # the same interval, no floor
-    effect = _interval_floor_effect(sol, sol_f, e_mod, end, q_end, q_floor,
-                                    r_out=acc["regions"][-1]["rho_inv"] if form != "sharp" else "crossing")
+    # the same interval advanced without the floor: the corrections' response needs it when they are given; otherwise
+    # it is made for the record only, inside the record's guard (a record must never end a series)
+    e_mod = sol.advance(state, t1, dt=dt, scheme=settings.scheme) if sol_all is not None else None
+    try:
+        effect = _interval_floor_effect(sol, sol_f, e_mod, end, q_end, q_floor,
+                                        r_out=acc["regions"][-1]["rho_inv"] if form != "sharp" else "crossing",
+                                        advance_plain=lambda: sol.advance(state, t1, dt=dt, scheme=settings.scheme))
+    except Exception as exc:  # noqa: BLE001 -- a record must never end a series (the guard is also inside)
+        effect = dict(floor_effect_computed=False, floor_effect_reason=f"{type(exc).__name__}: {exc}"[:300])
     if sol_all is not None:
         e_all = sol_all.advance(state, t1, dt=dt, scheme=settings.scheme)
         end = CurrentState(end.rho_faces, end.psi + (e_all.psi - e_mod.psi),
@@ -553,37 +561,107 @@ def advance_q_floor(sol, state, t1, settings, dt, q_floor, sol_all=None, form="r
                     rho_floor_last_step=acc["regions"][-2]["rho_inv"] if len(acc["regions"]) > 1 else None,
                     rho_floor_max_interval=max(radii) if radii else None,
                     q_min_model_end=float(np.nanmin(q_end)))
+        try:                  # the branch of every step: a record only (never ends a series)
+            core.update(_step_branch_record(acc["regions"], q_floor))
+        except Exception as exc:  # noqa: BLE001 -- a record must never end a series
+            core.update(branch_steps=None, branch_steps_reason=f"{type(exc).__name__}: {exc}"[:300])
     core.update(effect)
     return end, core
 
 
-def _interval_floor_effect(sol, sol_f, plain_end, end, q_end, q_floor, r_out="crossing"):
-    """RECORD of the floor's effect over one interval: the model end state (``end``, with the floor; ``sol_f`` the
-    solver that made it) against the same interval advanced without the floor (``plain_end``, ``sol``); the current
-    moved is counted across ``r_out`` (the region's edge, None for no region; ``"crossing"``: the outermost upward
-    crossing of the end state's q).  Never raises (a record must not end a series)."""
+def _step_branch_record(regions, q_floor):
+    """RECORD of the floor's branch on the diffusion steps of one interval (the regions the steps used, and the one at
+    the end time): the count per branch (``branch_steps``) and the smallest distance of the plain steady state's axis
+    q from the floor (``q_axis_model_steady_min_abs_dev_floor``).  Never raises; nothing reads it."""
     try:
-        p0, p1 = sol.profiles(plain_end), sol_f.profiles(end)
-        q0 = np.asarray(p0["q"], float)
-        if isinstance(r_out, str):
-            r_out = _saw.floor_region(end.rho_faces, q_end, q_floor)["rho_outer"]
-        ip = float(p0["ip"])
-        moved = 0.0
-        if r_out is not None and ip:
-            rf = np.asarray(end.rho_faces, float)
-            moved = float((np.interp(r_out, rf, p0["I_enclosed"]) - np.interp(r_out, rf, p1["I_enclosed"])) / ip)
-        v0, v1 = float(p0["v_loop_boundary"]), float(p1["v_loop_boundary"])
-        return dict(q_axis_model_end=float(q_end[0]), q_axis_no_floor_end=float(q0[0]),
-                    q_min_no_floor_end=float(np.nanmin(q0)),
-                    v_loop_plain=v0, v_loop_floor=v1, d_v_loop_rel=(v1 / v0 - 1.0) if v0 else float("nan"),
-                    li3_plain=float(p0["li3"]), li3_floor=float(p1["li3"]), d_li3=float(p1["li3"] - p0["li3"]),
-                    li3_domain_plain=float(p0["li3_domain"]), li3_domain_floor=float(p1["li3_domain"]),
-                    d_li3_domain=float(p1["li3_domain"] - p0["li3_domain"]),
-                    current_moved_outside_over_ip=moved,
-                    floor_effect_reference="the same interval advanced from the same carried state without the floor "
-                                           "(model sources, before the corrections)")
+        steps = {}
+        for r in regions[:-1]:
+            steps[str(r.get("branch"))] = steps.get(str(r.get("branch")), 0) + 1
+        devs = [abs(float(r["q_axis_model_steady"]) - float(q_floor)) for r in regions
+                if r.get("q_axis_model_steady") is not None and np.isfinite(r["q_axis_model_steady"])]
+        return dict(branch_steps=steps, q_axis_model_steady_min_abs_dev_floor=min(devs) if devs else None)
     except Exception as exc:  # noqa: BLE001 -- a record must never end a series
-        return dict(floor_effect_error=f"{type(exc).__name__}: {exc}"[:300])
+        return dict(branch_steps=None, branch_steps_reason=f"{type(exc).__name__}: {exc}"[:300])
+
+
+#: The keys of the interval's floor-effect record (:func:`_interval_floor_effect`): only these are taken into the
+#: interval's core record, so a record can never overwrite a key of the floor's region or branch.
+INTERVAL_FLOOR_EFFECT_KEYS = ("q_axis_model_end", "q_axis_no_floor_end", "q_min_no_floor_end", "v_loop_plain",
+                              "v_loop_floor", "d_v_loop_rel", "li3_plain", "li3_floor", "d_li3", "li3_domain_plain",
+                              "li3_domain_floor", "d_li3_domain", "current_moved_outside_over_ip",
+                              "floor_effect_reference")
+
+
+def _interval_floor_effect(sol, sol_f, plain_end, end, q_end, q_floor, r_out="crossing", advance_plain=None):
+    """RECORD of the floor's effect over one interval: the model end state (``end``, with the floor; ``sol_f`` the
+    solver that made it) against the same interval advanced without the floor (``plain_end``, ``sol``; when it is
+    None it is made here by ``advance_plain()``, inside this record's guard); the current moved is counted across
+    ``r_out`` (the region's edge, None for no region; ``"crossing"``: the outermost upward crossing of the end state's
+    q).  Never raises (a record must not end a series): its own keys only (:data:`INTERVAL_FLOOR_EFFECT_KEYS`) with
+    ``floor_effect_computed=True``, or, if anything in it fails, NaN values with ``floor_effect_computed=False`` and
+    the reason (``floor_effect_reason``)."""
+    try:
+        if plain_end is None:
+            plain_end = advance_plain()
+        out = _interval_floor_effect_values(sol, sol_f, plain_end, end, q_end, q_floor, r_out)
+        out = {k: out[k] for k in INTERVAL_FLOOR_EFFECT_KEYS}
+        out["floor_effect_computed"] = True
+        return out
+    except Exception as exc:  # noqa: BLE001 -- a record must never end a series
+        out = dict.fromkeys(INTERVAL_FLOOR_EFFECT_KEYS, float("nan"))
+        out.update(floor_effect_reference=None, floor_effect_computed=False,
+                   floor_effect_reason=f"{type(exc).__name__}: {exc}"[:300])
+        return out
+
+
+def _interval_floor_effect_values(sol, sol_f, plain_end, end, q_end, q_floor, r_out):
+    """The values of :func:`_interval_floor_effect` (unguarded)."""
+    p0, p1 = sol.profiles(plain_end), sol_f.profiles(end)
+    q0 = np.asarray(p0["q"], float)
+    if isinstance(r_out, str):
+        r_out = _saw.floor_region(end.rho_faces, q_end, q_floor)["rho_outer"]
+    ip = float(p0["ip"])
+    moved = 0.0
+    if r_out is not None and ip:
+        rf = np.asarray(end.rho_faces, float)
+        moved = float((np.interp(r_out, rf, p0["I_enclosed"]) - np.interp(r_out, rf, p1["I_enclosed"])) / ip)
+    v0, v1 = float(p0["v_loop_boundary"]), float(p1["v_loop_boundary"])
+    return dict(q_axis_model_end=float(q_end[0]), q_axis_no_floor_end=float(q0[0]),
+                q_min_no_floor_end=float(np.nanmin(q0)),
+                v_loop_plain=v0, v_loop_floor=v1, d_v_loop_rel=(v1 / v0 - 1.0) if v0 else float("nan"),
+                li3_plain=float(p0["li3"]), li3_floor=float(p1["li3"]), d_li3=float(p1["li3"] - p0["li3"]),
+                li3_domain_plain=float(p0["li3_domain"]), li3_domain_floor=float(p1["li3_domain"]),
+                d_li3_domain=float(p1["li3_domain"] - p0["li3_domain"]),
+                current_moved_outside_over_ip=moved,
+                floor_effect_reference="the same interval advanced from the same carried state without the floor "
+                                       "(model sources, before the corrections)")
+
+
+def _branch_log_open():
+    """Open a branch log for one slice (:func:`.current_model.open_branch_log`); ``(None, None)`` if that fails (a
+    record must never end a series)."""
+    try:
+        return _cm.open_branch_log()
+    except Exception:  # noqa: BLE001 -- a record must never end a series
+        return None, None
+
+
+def _branch_log_close(token):
+    try:
+        if token is not None:
+            _cm.close_branch_log(token)
+    except Exception:  # noqa: BLE001 -- a record must never end a series
+        pass
+
+
+def _branch_record(log, res):
+    """:func:`.current_model.branch_flip_record` of one slice's assemblies (a record only; never raises)."""
+    try:
+        if log is None:
+            return dict(computed=False, reason="no branch log")
+        return _cm.branch_flip_record(log, None, ((res.assembly or {}).get("core") if res is not None else None))
+    except Exception as exc:  # noqa: BLE001 -- a record must never end a series
+        return dict(computed=False, reason=f"{type(exc).__name__}: {exc}"[:300])
 
 
 def _window_state(history, t_a, t_b, rf):
@@ -670,7 +748,8 @@ def _slice_record(fm, res, sl, label, extra=None):
         out["core_vs_floor"] = dict(computed=False, reason=f"{type(exc).__name__}: {exc}"[:300])
     try:      # a record only: nothing reads it
         out["floor_effect"] = _cm.floor_effect_record(out.get("core"), out.get("q_check"),
-                                                      None if lag is None else lag["phys"].get("q"))
+                                                      None if lag is None else lag["phys"].get("q"),
+                                                      out.get("q_axis_traced"), (st or {}).get("q_0"))
     except Exception as exc:  # noqa: BLE001 -- a record must never end a series
         out["floor_effect"] = dict(computed=False, reason=f"{type(exc).__name__}: {exc}"[:300])
     return out
@@ -772,14 +851,20 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
                       noise=fr.record.get("noise"), column_flags=fr.record.get("covariance_column_flags"),
                       ip_fit=fr.record.get("ip_fit"))
         cce0 = fr.record.get("correction_core_effect")
+        branch0 = fr.record.get("floor_branch_record")
         params0 = fr.params
     else:
         state_fn0 = None
         if mode == "from_profile":
             def state_fn0(lag):
                 return _given_state(lag, s, cfg, _slice_ip(sl0))
-        res0 = _cm.consistent_solve(fm, sl0.kinetics, sl0.sources, p_relaxed, cfg0, label=f"{sl0.label}:{mode}",
-                                    initial_profiles=initial_profiles, state_fn=state_fn0)
+        blog0, btok0 = _branch_log_open()
+        try:
+            res0 = _cm.consistent_solve(fm, sl0.kinetics, sl0.sources, p_relaxed, cfg0, label=f"{sl0.label}:{mode}",
+                                        initial_profiles=initial_profiles, state_fn=state_fn0)
+        finally:
+            _branch_log_close(btok0)
+        branch0 = _branch_record(blog0, res0)
         params0 = p_relaxed
         cce0 = dict(computed=False, reason=f"no fit at the first slice (initial mode '{mode}'): no corrections")
     ip_c0 = (float(res0.assembly["ip"]) if res0.converged and res0.assembly and res0.assembly.get("ip")
@@ -792,6 +877,7 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
                                                            if float(sl0.time) in zeff_flags else {}),
                                                         wall_total_s=round(time.perf_counter() - t0, 2),
                                                         vacuum_F0=f0rec0, correction_core_effect=cce0,
+                                                        floor_branch_record=branch0,
                                                         ip_fitted=bool(fitrec and "ip_rel" in fitrec["free"])))
     w0 = _sawtooth_warning(s, res0, float(times[0]), float(times[0]), [])
     if w0 is not None:
@@ -912,16 +998,21 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
             return use
 
         state_fn.corrections_in_window = in_window
-        res = _cm.consistent_solve(fm, sl.kinetics, sl.sources, p_pred, cfg, label=f"{sl.label}:evolve",
-                                   state_fn=state_fn)
-        if res.converged:
-            # the loop's last state-function call was made on the equilibrium of the solve AFTER the accepted pass;
-            # re-advance on the accepted pass's equilibrium, so that the state carried on is the state scored
-            _cm.call_state_fn(state_fn, res.lag, p_pred)
-        filt = None
-        if res.converged and s.filter_at(t1):
-            filt, res = _filter_slice(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1)
-        cce = _interval_correction_effect(sl, cfg, s, state_fn, res, filt)
+        blog, btok = _branch_log_open()          # the floor's branch at every assembly of this slice (a record)
+        try:
+            res = _cm.consistent_solve(fm, sl.kinetics, sl.sources, p_pred, cfg, label=f"{sl.label}:evolve",
+                                       state_fn=state_fn)
+            if res.converged:
+                # the loop's last state-function call was made on the equilibrium of the solve AFTER the accepted
+                # pass; re-advance on the accepted pass's equilibrium, so that the state carried on is the state
+                # scored
+                _cm.call_state_fn(state_fn, res.lag, p_pred)
+            filt = None
+            if res.converged and s.filter_at(t1):
+                filt, res = _filter_slice(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1)
+            cce = _interval_correction_effect(sl, cfg, s, state_fn, res, filt)
+        finally:
+            _branch_log_close(btok)
         crash_rec = [dict(time=e.time, active=bool(e.record.active), rho_mix=getattr(e.record, "rho_mix", None),
                           dpsi_max=getattr(e.record, "dpsi_max", None)) for e in holder.get("events", [])]
         extra = dict(n_solves=fm.n_solves - nk, interval=dict(holder.get("info", {}), start_s=float(tp), end_s=float(t1),
@@ -933,7 +1024,8 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
                      ip_fitted=bool(filt and filt.get("absorbed") and "ip_rel" in (filt.get("free") or [])),
                      crashes=crash_rec if res.converged else [],
                      window_average=holder.get("window_average", False), filter=filt, vacuum_F0=f0rec,
-                     correction_core_effect=cce, wall_total_s=round(time.perf_counter() - tk0, 2))
+                     correction_core_effect=cce, wall_total_s=round(time.perf_counter() - tk0, 2),
+                     floor_branch_record=_branch_record(blog, res))
         if not res.converged and crash_rec:
             # the crashes of the failed slice's last attempt were never applied to a carried state
             extra["crashes_of_failed_attempt"] = crash_rec

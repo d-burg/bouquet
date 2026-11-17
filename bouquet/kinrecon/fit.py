@@ -505,8 +505,46 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
     otherwise); ``start``: starting state (snapshot or psi on nodes); ``initial_profiles``:
     ``(x, jphi, p)`` for the first solve when ``start`` is only a guess; ``state_fn``: a supplied
     current state per pass (time-dependent path; the corrections then act on it).
+
+    A branch log (:func:`.current_model.open_branch_log`) is open while the fit runs: the q floor's branch at every
+    assembly is recorded (``record["floor_branch_record"]``, :func:`.current_model.branch_flip_record`), a record
+    only.
     """
+    token = None
+    try:                          # the branch log: a record only, never raises
+        _, token = _cm.open_branch_log()
+    except Exception:  # noqa: BLE001 -- a record must never end a fit
+        pass
+    try:
+        return _reconstruct(fm, kin, src, cfg, settings=settings, params0=params0, start=start,
+                            initial_profiles=initial_profiles, label=label, state_fn=state_fn)
+    finally:
+        if token is not None:
+            try:
+                _cm.close_branch_log(token)
+            except Exception:  # noqa: BLE001 -- a record must never end a fit
+                pass
+
+
+def _note_jacobian(jacobians, log, i0, c, lab):
+    """Record (never raises) the floor branches of one Jacobian's assemblies (``log[i0:]``) and of its center ``c``."""
+    try:
+        if log is None or i0 is None:
+            return
+        center_branch = (((c.get("res").assembly or {}).get("core") or {}).get("floor_branch")
+                         if c.get("res") is not None else None)
+        br = sorted({str(e.get("branch")) for e in log[i0:]} | {str(center_branch)})
+        jacobians.append(dict(label=lab, center_branch=center_branch, branches=br, n_assemblies=len(log) - i0,
+                              mixed=len(br) > 1))
+    except Exception:  # noqa: BLE001 -- a record must never end a fit
+        pass
+
+
+def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, initial_profiles=None, label="fit",
+                 state_fn=None):
+    """:func:`reconstruct` with its branch log open."""
     t_all = time.perf_counter()
+    branch_jacobians = []
     settings = settings or FitSettings()
     saw_free = [n for n in settings.free if n in ("log_strength", "f")]
     if saw_free and state_fn is None and cfg.core_relaxation not in _cm.SAWTOOTH_RELAXATIONS:
@@ -569,18 +607,26 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
         except Exception as exc:  # noqa: BLE001 -- a record must never end a fit
             rec["core_vs_floor"] = dict(computed=False, reason=f"{type(exc).__name__}: {exc}"[:300])
         # what the q floor did (achieved q0 / q_min, region, loop voltage, l_i, current moved): a record only
-        q_chk = q_eq = None
+        q_chk = q_eq = q_tr = q_s0 = None
         try:
             res_c = center["res"] if center is not None else None
             q_chk = (getattr(res_c, "record", None) or {}).get("q_check")
             lag_c = getattr(res_c, "lag", None)
             q_eq = None if lag_c is None else lag_c["phys"].get("q")
+            q_tr = None if lag_c is None else lag_c["phys"].get("q_axis")
+            q_s0 = (getattr(getattr(res_c, "solve", None), "stats", None) or {}).get("q_0")
         except Exception:  # noqa: BLE001 -- the achieved q is then not recorded
             pass
         try:
-            rec["floor_effect"] = _cm.floor_effect_record(rec["core"], q_chk, q_eq)
+            rec["floor_effect"] = _cm.floor_effect_record(rec["core"], q_chk, q_eq, q_tr, q_s0)
         except Exception as exc:  # noqa: BLE001 -- a record must never end a fit
             rec["floor_effect"] = dict(computed=False, reason=f"{type(exc).__name__}: {exc}"[:300])
+        # whether the floor's branch changed between the assemblies of this fit: a record only, nothing reads it
+        try:
+            rec["floor_branch_record"] = _cm.branch_flip_record(_cm.current_branch_log(), branch_jacobians,
+                                                                rec["core"])
+        except Exception as exc:  # noqa: BLE001 -- a record must never end a fit
+            rec["floor_branch_record"] = dict(computed=False, reason=f"{type(exc).__name__}: {exc}"[:300])
         cov = np.full((len(names), len(names)), np.nan)
         sig = np.full(len(names), np.nan)
         chi = {}
@@ -740,6 +786,20 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
                     norm=float(np.linalg.norm(dr)))
 
     def jacobian(c, lab, lagged=False):
+        log = i0 = None
+        try:                      # the floor branches of this Jacobian's assemblies: a record only, never raises
+            log = _cm.current_branch_log()
+            i0 = len(log) if log is not None else None
+        except Exception:  # noqa: BLE001 -- a record must never end a fit
+            pass
+        out = _jacobian(c, lab, lagged)
+        try:
+            _note_jacobian(branch_jacobians, log, i0, c, lab)
+        except Exception:  # noqa: BLE001 -- a record must never end a fit
+            pass
+        return out
+
+    def _jacobian(c, lab, lagged=False):
         solve_col = lagged_column_solve if lagged else column_solve
         r_ref = c["r_data"]
         if lagged:

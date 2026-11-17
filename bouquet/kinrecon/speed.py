@@ -13,11 +13,15 @@ serial loop body of its columns (the same function the serial loop calls: step, 
 against the measured noise) and sends back each column's values and the side effects the serial loop would have left
 in this process; they are applied here in column order:
 
-* the forward model's solve count, its residual-history list and the edge-taper case's history list;
+* the forward model's solve count, its residual-history list, its per-solve iteration log
+  (:meth:`.forward.ForwardModel.iteration_record`) and the edge-taper case's history list;
 * the entries of the open floor-branch log (:func:`.current_model.current_branch_log`);
 * the state function's side state (``state_fn.side_state``, a dict the function rewrites on every call, as the
   series driver's holder): the content left by the serially last column that changed it;
 * the debugging capture list :data:`.forward.CAPTURE_LOG` when it is set.
+
+The solver's iteration limit (:attr:`.forward.ForwardSettings.solver_maxits`) is part of the solver state a worker
+inherits at the fork, so a worker's solves run under the same limit as the serial loop's.
 
 The serial order of decisions is kept: the columns are taken in index order, the Jacobian stops at the first column
 that fails (the results of later columns are discarded, with their solve counts and records, as the serial loop would
@@ -551,7 +555,9 @@ def effects_mark(fm, log, side):
     """What a column's side effects are measured against (taken in the worker before the column)."""
     from . import forward as _fw
     case = fm.case
+    its = getattr(fm, "iteration_log", None)
     return dict(n_solves=fm.n_solves, history=len(fm.history), case_history=len(case.history),
+                iteration_log=None if its is None else len(its),
                 case_lock=(case.locked, case.spec, case.decided_by), taper_restarts=len(fm.taper_restarts),
                 log=None if log is None else len(log),
                 capture=None if _fw.CAPTURE_LOG is None else len(_fw.CAPTURE_LOG),
@@ -567,8 +573,11 @@ def effects_since(mark, fm, log, side):
     if side is not None:
         before = mark["side"]
         side_changed = set(before) != set(side) or any(side[k] is not before[k] for k in side)
+    its = getattr(fm, "iteration_log", None)
     return dict(n_solves=fm.n_solves - mark["n_solves"], history=list(fm.history[mark["history"]:]),
                 case_history=list(case.history[mark["case_history"]:]),
+                iteration_log=(None if its is None or mark.get("iteration_log") is None
+                               else [dict(e) for e in its[mark["iteration_log"]:]]),
                 case_changed=bool(lock[0] != mark["case_lock"][0] or lock[1] is not mark["case_lock"][1]
                                   or lock[2] != mark["case_lock"][2]
                                   or len(fm.taper_restarts) != mark["taper_restarts"]),
@@ -584,6 +593,9 @@ def apply_effects(eff, fm, log, side):
     fm.n_solves += int(eff["n_solves"])
     fm.history.extend(eff["history"])
     fm.case.history.extend(eff["case_history"])
+    its = getattr(fm, "iteration_log", None)
+    if its is not None and eff.get("iteration_log"):
+        its.extend(eff["iteration_log"])       # the worker's solves' iteration counts, in column order
     if log is not None and eff["log"]:
         log.extend(eff["log"])
     if _fw.CAPTURE_LOG is not None and eff["capture"]:

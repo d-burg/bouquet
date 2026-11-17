@@ -355,7 +355,8 @@ class CurrentModelSettings:
     q_floor: float = _saw.DEFAULT_Q_FLOOR    # floor of the "q_floor" treatment (FUSE ActorQED qmin_desired default)
     q_floor_form: str = "resistive"          # Q_FLOOR_FORMS: "resistive" (default) or "sharp" (opt-in, comparison)
     # non-default options of the resistive floor (current.sawtooth module docstring, "Non-default options"):
-    q_floor_total_current: str = "off"       # TOTAL_CURRENT_FORMS: "off" (default) or "flat_at_level"
+    q_floor_total_current: str = "off"       # TOTAL_CURRENT_FORMS: "off" (default), "flat_at_level",
+    #                                          or "flat_at_level_own_region" (its region from its own states)
     q_floor_transition: str = "step"         # FLOOR_TRANSITIONS: "step" (default) or "blend_margin"
     q_floor_branch_freeze: str = "off"       # BRANCH_FREEZES: "off" (default) or "first_assembly" (diagnostic)
     sawtooth_nsteps: int = 40
@@ -860,17 +861,21 @@ def _floor_with_options(sol_m, rf, cfg):
     """The resistive floor with its non-default options (:class:`CurrentModelSettings` ``q_floor_total_current``,
     ``q_floor_transition``, ``q_floor_branch_freeze``).  The frozen branch: inside a fit (an open freeze,
     :func:`open_branch_freeze`), the first assembly's branch is taken for every later assembly of that fit; outside a
-    fit nothing is frozen (recorded)."""
+    fit nothing is frozen (recorded).  The frozen branch is the state of the open freeze (the holder), filled by the
+    floor itself (``branch_holder``), never read from a record.  Limits (module docstring of :mod:`.current.sawtooth`,
+    "Non-default options"): a frozen "no action" branch (``"off_axis"``, ``"none"``) switches the floor off for the
+    rest of the fit, even where the plain axis q falls below the floor; only the branch is frozen, not the radius."""
     kw = dict(total_current=cfg.q_floor_total_current, transition=cfg.q_floor_transition)
     hold = _BRANCH_FREEZE.get() if cfg.q_floor_branch_freeze != "off" else None
+    used = {}
     if hold is not None and hold.get("branch") is not None:
         kw["branch"] = hold["branch"]
-    st_f, rec, _ = _saw.resistive_floor_steady(sol_m, rf, cfg.q_floor, **kw)
+    st_f, rec, _ = _saw.resistive_floor_steady(sol_m, rf, cfg.q_floor, branch_holder=used, **kw)
     if cfg.q_floor_branch_freeze != "off":
         if hold is None:
             rec["branch_freeze"] = "no open freeze (not inside a fit): the plain state's branch"
         elif hold.get("branch") is None:
-            hold["branch"] = rec["floor_branch"]
+            hold["branch"] = used.get("branch")
             rec["branch_freeze"] = "first assembly of the fit: its branch is frozen for the rest of the fit"
         else:
             rec["branch_freeze"] = "branch frozen at the fit's first assembly"

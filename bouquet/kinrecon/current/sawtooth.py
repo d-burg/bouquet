@@ -271,7 +271,19 @@ Non-default options (each off by default; with all of them off the floor is exac
   width ``min(rho/4, 0.05)`` (so the driven current is conserved), mixed in with ``flat_factor`` 0.5; q is then near
   the level but not at it.  Here q is AT the level inside the region, the non-inductive current is whatever that
   needs (not conserved; recorded as ``total_current_ni_added_over_ip``), and no width or factor is used.  Branch
-  (b) and (c): nothing (no region).  ``q_floor_met`` is then judged on the faces outside the region.
+  (b) and (c): nothing (no region).  ``q_floor_met`` is then judged on the faces outside the region, and the same
+  value is recorded under its own key ``q_floor_met_outside_region`` (:data:`Q_FLOOR_MET_OUTSIDE_REGION_DEFINITION`).
+  Limitation: the region is the resistivity-only search's, and setting q to the level inside raises the enclosed
+  current at its edge, so q on the first faces outside can fall below the level (by up to about 1e-3 on the beds
+  measured; it does not converge cleanly with the grid, as it depends on the cut cell's fraction).
+* ``total_current="flat_at_level_own_region"``: the same total current, inside the option's OWN region -- the
+  default rule's criterion applied to the flat-at-level states: the smallest outer edge whose flat-at-level state
+  has q >= ``q_floor`` on every face outside the region, searched exactly as the default rule searches (the faces
+  from the axis out to the plain state's outermost upward crossing scanned outward, then the edge bisected to
+  round-off; the criterion need not be monotonic in the edge, so the first face that meets it brackets the edge).
+  Where the region is the plain outermost crossing, the state outside equals the plain state (to the cut cell's
+  blend), which is at or above the level there; where not even that edge meets the criterion, it is kept and the
+  record says so (``q_floor_met_outside_region`` False), as the default rule does.  No new number.
 * ``transition="blend_margin"``: branch (b) with the level blended, ``L_eff = q_min + lambda (q_floor - q_min)``,
   ``lambda = clip(1 - (q0 - q_floor) / (q_floor - q_min), 0, 1)`` (``q0``, ``q_min``: the plain state's), and
   the region searched from the axis as in (a) for ``L_eff``; nothing where ``lambda = 0``.  It equals (a) at
@@ -279,6 +291,11 @@ Non-default options (each off by default; with all of them off the floor is exac
   is the state's own margin (no new number); q_min is left below the floor inside the band.
 * ``branch`` (:func:`resistive_floor_steady` only): the branch to use instead of the plain state's own (the
   frozen-branch diagnostic of a fit, :mod:`..current_model`); the region is still searched on the plain state.
+  Limits of that diagnostic: freezing ``"off_axis"`` or ``"none"`` (no action) switches the floor OFF for the rest of
+  the fit, even on assemblies whose plain axis q is below the floor; freezing ``"axis"`` on a plain state with no face
+  below the floor flattens nothing.  The branch is frozen, not the radius.  A fit that does not respond to the floor
+  (fitted values unchanged with the floor off) cannot show whether a branch flip is harmless; no real fit measured
+  so far both flips and converges, so the diagnostic has not been shown to answer the question it was built for.
 
 This is not the reconnection model of this module and needs no sawtooth parameter, crash time or amplitude.  It is a
 time-averaged model of a sawtoothing core, not a clamp.  A state whose q is below the floor at the domain edge is
@@ -416,17 +433,33 @@ RADIUS_ROUND_OFF = 1e-14
 _RADIUS_BISECTIONS = 80     # loop bound only: the bracket is at most one cell wide, 2^-80 of it is far below round-off
 #: Non-default options of the resistive floor (each off by default; module docstring, "Non-default options"):
 #: the total current inside the region (``"off"``, default: the resistivity alone; ``"flat_at_level"``: the total
-#: current set so that q is flat at the level inside the region), the transition between branches (a) and (b)
+#: current set so that q is flat at the level inside the default rule's region; ``"flat_at_level_own_region"``: the
+#: same inside the region the default rule's criterion gives on the flat-at-level states), the transition between branches (a) and (b)
 #: (``"step"``, default: the branch rule as stated; ``"blend_margin"``: the number-free blend of the level across the
 #: plain axis-q margin), and freezing the branch within one fit (``"off"``, default; ``"first_assembly"``: a
 #: diagnostic, see :mod:`..current_model`).
-TOTAL_CURRENT_FORMS = ("off", "flat_at_level")
+TOTAL_CURRENT_FORMS = ("off", "flat_at_level", "flat_at_level_own_region")
 FLOOR_TRANSITIONS = ("step", "blend_margin")
 BRANCH_FREEZES = ("off", "first_assembly")
 #: Forms of the q floor: ``"resistive"`` (default; the resistivity inside the flattening radius set to its value
 #: there, :class:`ResistiveFloor`, :func:`resistive_floor_steady`) and ``"sharp"`` (opt-in; q clamped,
 #: :func:`floor_q`).
 Q_FLOOR_FORMS = ("resistive", "sharp")
+
+
+#: Definition of ``q_floor_met_outside_region`` (the total-current options): q at or above the level on every face
+#: outside the region (inside it q is the level by construction, to round-off).  ``q_floor_met`` carries the same value
+#: under these options; without them ``q_floor_met`` is judged on every face.
+Q_FLOOR_MET_OUTSIDE_REGION_DEFINITION = (
+    "q >= q_floor on every face outside the flattening region (rho > rho_floor, the domain's rho); inside it q equals "
+    "q_floor by construction, to round-off, and is not judged")
+#: The region each total-current option uses (record text).
+TOTAL_CURRENT_REGION_DEFINITIONS = dict(
+    flat_at_level="the default rule's region: the smallest outer edge whose resistivity-only floored state has q >= "
+                  "q_floor on every face",
+    flat_at_level_own_region="the option's own region: the smallest outer edge whose flat-at-level state has q >= "
+                             "q_floor on every face outside the region (faces scanned from the axis to the plain "
+                             "state's outermost upward crossing, then bisected); that crossing if none meets it")
 
 
 class QFloorRefused(ValueError):
@@ -635,8 +668,12 @@ class ResistiveFloor:
             # the state's own q: the refusal at the domain edge and its branch, for the record only
             reg = floor_region(rf, q, self.q_floor)
             # the region: the single-slice region of the step's sources at this time (module docstring)
-            if self.transition == "step":
+            if self.transition == "step" and self.total_current != "flat_at_level_own_region":
                 _, rs, _ = resistive_floor_steady(self.solver, rf, self.q_floor, t=state.time)
+            elif self.total_current == "flat_at_level_own_region":
+                # the option's own region: searched on the flat-at-level states of the step's sources
+                _, rs, _ = resistive_floor_steady(self.solver, rf, self.q_floor, t=state.time,
+                                                  total_current=self.total_current)
             else:
                 _, rs, _ = resistive_floor_steady(self.solver, rf, self.q_floor, t=state.time,
                                                   transition=self.transition)
@@ -691,14 +728,14 @@ class ResistiveFloor:
             raise ValueError("the solver already has a resistivity modifier")
         s = copy.copy(self.solver)
         s.resistivity_modifier = self
-        if self.total_current == "flat_at_level":
+        if self.total_current != "off":
             if getattr(self.solver, "source_modifier", None) is not None:
                 raise ValueError("the solver already has a source modifier")
             s.source_modifier = self.source_change
         return s
 
     def source_change(self, t, rho_faces, c, ip_mode, state):
-        """The source modifier of ``total_current="flat_at_level"`` (:func:`level_flattening_source_change`) on the
+        """The source modifier of the total-current options (:func:`level_flattening_source_change`) on the
         region of :meth:`__call__` (fixed, or the region at the time of ``state``); zero where the floor does not
         act.  The level is the floor's level (the option is not combined with a blended transition)."""
         if self.rho_inv is not None:
@@ -762,7 +799,7 @@ def _floor_effect_record(solver, st0, sol_f, st_f, r_out):
 
 
 def resistive_floor_steady(solver, rho_faces, q_floor=DEFAULT_Q_FLOOR, t=0.0, psi_boundary=0.0, rule="continuous",
-                           total_current="off", transition="step", branch=None):
+                           total_current="off", transition="step", branch=None, branch_holder=None):
     r"""Steady state of ``solver`` with the resistive q floor (module docstring, eq. F1 and the steady-state rule).
 
     The plain steady state first.  The branch is the one of :func:`floor_region` (``rule="continuous"``, default):
@@ -802,12 +839,22 @@ def resistive_floor_steady(solver, rho_faces, q_floor=DEFAULT_Q_FLOOR, t=0.0, ps
     the total current inside it is set so that q is flat at ``q_floor`` (:func:`level_flattening_source_change`);
     ``transition="blend_margin"`` -- in branch (b) the level is blended from the plain q_min up to ``q_floor`` as
     the plain axis q falls through the margin ``q_floor - q_min`` above the floor; ``branch`` -- one of
-    :data:`FLOOR_BRANCHES` to use instead of the plain state's own branch (the frozen-branch diagnostic).
+    :data:`FLOOR_BRANCHES` to use instead of the plain state's own branch (the frozen-branch diagnostic);
+    ``branch_holder`` -- a dict that receives the branch the rule used (``branch_holder["branch"]``: the given
+    ``branch``, else the plain state's), the state the frozen-branch diagnostic carries from one assembly to the next
+    (the record keeps a copy; nothing reads the record).  ``total_current="flat_at_level_own_region"`` -- the
+    total current as for ``"flat_at_level"``, inside the region the default rule's criterion gives on the
+    flat-at-level states: the smallest outer edge whose flat-at-level state has q >= ``q_floor`` on every face
+    outside the region (inside, q is the level to round-off), searched exactly as above (faces scanned outward from
+    the axis to the plain state's outermost upward crossing, then bisected); if not even that crossing meets it, the
+    crossing is kept and ``q_floor_met_outside_region`` is False.
     """
     if rule not in RESISTIVE_FLOOR_RULES:
         raise ValueError(f"rule must be one of {RESISTIVE_FLOOR_RULES}")
     if total_current != "off" or transition != "step" or branch is not None:
         _check_options(rule, total_current, transition, branch)
+    frozen = branch is not None           # the frozen-branch diagnostic: read from the argument, never the record
+    tc_own = total_current == "flat_at_level_own_region"
     qf = _check_q_floor(q_floor)
     rf = np.asarray(rho_faces, dtype=float)
     st0 = solver.steady_state(rf, t=t, psi_boundary=psi_boundary)
@@ -841,7 +888,9 @@ def resistive_floor_steady(solver, rho_faces, q_floor=DEFAULT_Q_FLOOR, t=0.0, ps
     else:
         reg = floor_region(rf, q0, qf)
         target = qf
-        if branch is not None:
+        if branch_holder is not None:
+            branch_holder["branch"] = branch if frozen else reg["branch"]
+        if frozen:
             # frozen-branch diagnostic (option): the branch given, not the plain state's own; recorded
             rec.update(floor_branch_plain=reg["branch"], branch_frozen=True, floor_branch=branch)
             if branch != "axis" or reg["branch"] == "none":
@@ -864,13 +913,20 @@ def resistive_floor_steady(solver, rho_faces, q_floor=DEFAULT_Q_FLOOR, t=0.0, ps
         elif transition == "blend_margin":
             rec.update(floor_transition=transition, blend_lambda=1.0, level_used=qf)
         r_in, r_max = 0.0, reg["rho_outer"]
-        branch = "axis" if reg["branch"] == "axis" or rec.get("branch_frozen") else "off_axis"
+        branch = "axis" if reg["branch"] == "axis" or frozen else "off_axis"
 
         def ev(r):
-            s_ = ResistiveFloor(solver, qf, rho_inv=r, rho_inner=r_in, rho_faces=rf).with_solver()
+            if tc_own:
+                # option: the criterion on the flat-at-level state of this edge, judged on the faces outside it
+                s_ = ResistiveFloor(solver, qf, rho_inv=r, rho_inner=r_in, rho_faces=rf,
+                                    total_current=total_current).with_solver()
+            else:
+                s_ = ResistiveFloor(solver, qf, rho_inv=r, rho_inner=r_in, rho_faces=rf).with_solver()
             st_ = s_.steady_state(rf, t=t, psi_boundary=psi_boundary)
             rec["n_steady_states"] += 1
             q_ = face_q(st_, phi_b)
+            if tc_own:
+                return _min_face_q(q_[rf > r]) - target, (st_, s_, q_)
             return _min_face_q(q_) - target, (st_, s_, q_)
 
         lo, hi, best = r_in, None, None
@@ -904,6 +960,16 @@ def resistive_floor_steady(solver, rho_faces, q_floor=DEFAULT_Q_FLOOR, t=0.0, ps
                                   total_current=total_current).with_solver()
             st = s_tc.steady_state(rf, t=t, psi_boundary=psi_boundary)
             rec["n_steady_states"] += 1
+        elif tc_own:
+            # option: the search above was made on the flat-at-level states, so ``best`` is the option's state; the
+            # resistivity-only state of the same region is formed for the record
+            s_tc = sol
+            sol = ResistiveFloor(solver, qf, rho_inv=r_use, rho_inner=r_in, rho_faces=rf).with_solver()
+            q_r = face_q(sol.steady_state(rf, t=t, psi_boundary=psi_boundary), phi_b)
+            rec["n_steady_states"] += 1
+            rec.update(total_current=total_current, q_min_resistive_only=_min_face_q(q_r),
+                       q_axis_resistive_only=float(q_r[0]))
+        if total_current != "off":
             try:          # a record only: the non-inductive current the option adds (fraction of Ip)
                 c_tc, c_r = s_tc.coefficients(t, rf), sol.coefficients(t, rf)
                 rec["total_current_ni_added_over_ip"] = float(np.sum(c_tc.s_c - c_r.s_c) * c_tc.F_lcfs
@@ -920,11 +986,14 @@ def resistive_floor_steady(solver, rho_faces, q_floor=DEFAULT_Q_FLOOR, t=0.0, ps
                rho_floor_inner=float(r_in), eta_ratio_inv_to_axis=float(sig[0] / sig[1]), q_min_after=float(q[j1]),
                rho_q_min_after=float(rf[j1]), q_axis_after=float(q[0]), q_floor_met=bool(np.all(q >= qf)),
                d_psi_axis_cell=float(st.psi[0] - st0.psi[0]))
-    if total_current == "flat_at_level":
+    if total_current != "off":
         # q is the level inside the region by construction (to round-off): met is judged on the faces outside it, and
-        # the deviation from the level inside is recorded
+        # the deviation from the level inside is recorded; ``q_floor_met`` carries the same value (kept as before)
         out_r, in_r = rf > r_use, rf <= r_use
-        rec.update(q_floor_met=bool(np.all(q[out_r] >= qf)),
+        met_out = bool(np.all(q[out_r] >= qf))
+        rec.update(q_floor_met=met_out, q_floor_met_outside_region=met_out,
+                   q_floor_met_outside_region_definition=Q_FLOOR_MET_OUTSIDE_REGION_DEFINITION,
+                   total_current_region=TOTAL_CURRENT_REGION_DEFINITIONS[total_current],
                    q_flat_max_abs_dev=float(np.max(np.abs(q[in_r] - qf))) if np.any(in_r) else None,
                    q_min_outside_region=_min_face_q(q[out_r]) if np.any(out_r) else None)
     try:
@@ -937,9 +1006,8 @@ def resistive_floor_steady(solver, rho_faces, q_floor=DEFAULT_Q_FLOOR, t=0.0, ps
     st.meta = dict(st.meta or {}, q_floor=dict(q_floor=qf, form="resistive", rule=rule, branch=branch, acted=True,
                                                rho_floor=float(r_use), rho_floor_inner=float(r_in),
                                                q_floor_met=rec["q_floor_met"]))
-    if total_current != "off" or transition != "step" or rec.get("branch_frozen"):
-        st.meta["q_floor"].update(total_current=total_current, transition=transition,
-                                  branch_frozen=bool(rec.get("branch_frozen")))
+    if total_current != "off" or transition != "step" or frozen:
+        st.meta["q_floor"].update(total_current=total_current, transition=transition, branch_frozen=frozen)
     return st, rec, sol
 
 

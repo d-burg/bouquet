@@ -1027,7 +1027,7 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
             return use
 
         state_fn.corrections_in_window = in_window
-        state_fn.side_state = holder            # rewritten on every call (read by the parallel Jacobian, fit.speed)
+        state_fn.side_state = holder            # rewritten on every call (read by the parallel Jacobian columns, .speed)
         blog, btok = _branch_log_open()          # the floor's branch at every assembly of this slice (a record)
         try:
             res = _cm.consistent_solve(fm, sl.kinetics, sl.sources, p_pred, cfg, label=f"{sl.label}:evolve",

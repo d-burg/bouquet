@@ -13,8 +13,8 @@ Checked, with every saved value compared bit for bit (wall times and the paralle
 (c) a column whose solve RAISES (injected) raises the same exception from both fits;
 (d) a worker process that DIES in a column (injected in workers only) leaves the parallel fit identical to the serial
     one: the column is re-run serially and the re-run is recorded;
-(e) a short series with filter fits (three slices of the time-dependent path's synthetic truth, noisy data, the
-    in-window corrections): serial and parallel series records are identical, including the record of the state
+(e) a short series with filter fits (three slices of the time-dependent path's synthetic truth, noiseless data, the
+    true initial state, the in-window corrections; the filter fits are absorbed): serial and parallel series records are identical, including the record of the state
     left by each fit's last solve, which the parallel path takes from the worker that made it.
 """
 import json
@@ -126,10 +126,9 @@ def _series(workers):
                         label=f"truth{k}", meta=dict(ip=ip * (1 + TS.RAMP * k), generation_coil_reg=1e-2))
            for k, t in enumerate(times)]
     meas, refs = [], []
-    rng = np.random.default_rng(TS._SEED)
 
     def cb(r):
-        meas.append(_base._measurements(fm.gs, geo, roles, ip * (1 + TS.RAMP * len(meas)), rng))
+        meas.append(_base._measurements(fm.gs, geo, roles, ip * (1 + TS.RAMP * len(meas)), None))
         refs.append(np.asarray(fm.gs.trace_surf(0.999), float))
 
     truth = SE.run_series(fm, gen, cfg, SE.SeriesSettings(initial="from_profile", initial_profile=j_true,
@@ -168,12 +167,12 @@ def _run(tmp_path_factory, kind, workers, mode="none"):
 
 
 def differences(a, b, path=""):
-    """Every leaf that differs between two results (bitwise for numbers), ignoring wall times and the parallel
-    run's own record."""
+    """Every leaf that differs between two results (bitwise for numbers), ignoring wall times, the parallel run's own
+    record and the run's labels (worker count, injection mode)."""
     out = []
     if isinstance(a, dict) and isinstance(b, dict):
         for k in sorted(set(a) | set(b)):
-            if k in _IGNORE or k.endswith("wall_s") or k == "workers":
+            if k in _IGNORE or "wall" in k or k in ("workers", "mode"):
                 continue
             if k not in a or k not in b:
                 out.append(f"{path}/{k}: present in one result only")
@@ -246,10 +245,11 @@ def test_dead_worker_is_rerun_serially(fits):
 
 def test_parallel_series_is_bitwise_serial(tmp_path_factory):
     s, p = _run(tmp_path_factory, "series", 1), _run(tmp_path_factory, "series", WORKERS)
+    assert differences(s, p) == []
     assert s["series"]["status"] == "completed", s["series"]["status"]
     fits_s = [x["filter"] for x in s["series"]["slices"] if x.get("filter")]
     assert fits_s and all(f.get("absorbed") for f in fits_s)
-    assert differences(s, p) == []
+    assert all(f.get("last_solve_state_vs_center") is not None for f in fits_s)
 
 
 if __name__ == "__main__":

@@ -28,10 +28,12 @@ serial loop.  Workers are killed when the Jacobian ends, also on an exception (a
 
 Robustness of the workers (none of these changes a value; each only decides where a column is computed):
 
-* a worker column that sends no result within the time bound (:func:`column_time_bound`) is killed and re-run here
-  serially, with every later column, exactly as a worker that died;
-* when the workers cannot be made (``fork``, ``pipe`` or the temporary directory fails with an ``OSError``, as under
-  a process or memory limit), every column of that Jacobian is computed here serially;
+* a worker column whose result has not arrived whole within the time bound (:func:`column_time_bound`; the bound
+  covers the whole message, also one that stopped half way) is killed and re-run here serially, with every later
+  column, exactly as a worker that died;
+* when the workers cannot be made (``fork``, ``pipe`` or the temporary directory fails, as under a process or memory
+  limit, or any other error while they are made; an interrupt is not caught), every column of that Jacobian is
+  computed here serially;
 * each re-run is recorded in the Jacobian's ``parallel`` record (``serial_reruns``, ``timeouts``,
   ``worker_start_failure``, ``time_bound_s``).
 
@@ -39,10 +41,12 @@ Bitwise identity with the serial loop requires one solver thread per process: pa
 solver's OpenMP thread count (:func:`solver_threads`: the OFT environment the forward model actually uses and the
 OpenMP runtime's own setting, not only ``ForwardSettings.nthreads``) is not 1, both because OpenMP is not safe across
 ``fork()`` -- a worker forked from a process whose OpenMP runtime runs a thread team can wait forever -- and because
-threaded solves are not reproducible.  The total number of cores used is ``column_workers`` (one thread each).  Each
-worker writes the solver's temporary files into its own directory, named after this process; directories left by a
-process that was killed (the directory of a dead process of this user on this host) are removed when the next workers
-are made.  Parallel columns are refused off Linux (:func:`validate`): ``fork`` without ``exec`` is supported there,
+threaded solves are not reproducible.  The count is checked once, when a fit or a series starts (:func:`validate`); a
+count raised later (for example in a series callback) is not caught there, and the time bound then ends a resulting
+hang.  The total number of cores used is ``column_workers`` (one thread each).  Each worker writes the solver's
+temporary files into its own directory, named after this host, its boot and this process; directories left by a
+process that was killed (the directory of a dead process of this user on this host and boot) are removed when the next
+workers are made.  Parallel columns are refused off Linux (:func:`validate`): ``fork`` without ``exec`` is supported there,
 while macOS system libraries are not safe across ``fork()`` (which is why Python itself does not fork there by default).
 
 Parallel columns are a latency tool, not a throughput tool: they shorten the wall time of one fit, but the columns are
@@ -203,7 +207,8 @@ def check_speed(speed, fm):
 
 def validate(speed, fm):
     """:func:`check_speed`, and parallel columns refused off Linux.  Called by :func:`.fit.reconstruct` and
-    :func:`.series.run_series` before anything is solved."""
+    :func:`.series.run_series` when they start, before anything is solved (the thread count is read at that moment
+    only)."""
     if isinstance(speed, SpeedSettings) and speed.parallel and not sys.platform.startswith("linux"):
         raise RuntimeError(f"parallel Jacobian columns (column_workers > 1) are refused on {sys.platform!r}: the "
                            "workers are made by fork() without exec, which is supported and tested on Linux only "
@@ -269,9 +274,29 @@ def _write_all(fd, data):
         view = view[n:]
 
 
-def _read_exact(fd, n):
+def _wait_readable(fd, deadline):
+    """True when ``fd`` can be read (data or end of stream) before ``deadline`` (a ``time.monotonic()`` value; None:
+    wait as long as it takes), False when the deadline passes first.  ``poll``, not ``select``: it accepts descriptors
+    of any number (``select`` refuses 1024 and above)."""
+    if deadline is None:
+        return True
+    p = select.poll()
+    p.register(fd, select.POLLIN | select.POLLPRI | select.POLLHUP | select.POLLERR)
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0.0:
+            return bool(p.poll(0))
+        if p.poll(int(min(left, 3600.0) * 1000.0) + 1):
+            return True
+
+
+def _read_exact(fd, n, deadline=None):
+    """``n`` bytes from ``fd``; None at the end of the stream; :data:`TIMED_OUT` when ``deadline`` passes first (also
+    in the middle of a message)."""
     buf = bytearray()
     while len(buf) < n:
+        if not _wait_readable(fd, deadline):
+            return TIMED_OUT
         chunk = os.read(fd, n - len(buf))
         if not chunk:
             return None
@@ -284,22 +309,22 @@ def _send(fd, obj):
     _write_all(fd, struct.pack("<Q", len(data)) + data)
 
 
-#: What :meth:`ForkWorker.recv` returns when no message began within its time bound.
+#: What :meth:`ForkWorker.recv` returns when a message has not arrived whole within its time bound.
 TIMED_OUT = ("timed_out",)
 
 
 def _recv(fd, timeout=None):
-    """The next framed message; None at the end of the stream; :data:`TIMED_OUT` when no byte of it arrived within
-    ``timeout`` seconds (once a message has begun it is read to its end: the sender writes it whole)."""
-    if timeout is not None:
-        ready, _, _ = select.select([fd], [], [], max(0.0, float(timeout)))
-        if not ready:
-            return TIMED_OUT
-    head = _read_exact(fd, 8)
-    if head is None:
-        return None
-    data = _read_exact(fd, struct.unpack("<Q", head)[0])
-    return None if data is None else pickle.loads(data)
+    """The next framed message; None at the end of the stream; :data:`TIMED_OUT` when the whole message has not
+    arrived within ``timeout`` seconds (None: wait as long as it takes).  The bound covers the whole read, so a sender
+    that stops in the middle of a message cannot block the reader."""
+    deadline = None if timeout is None else time.monotonic() + max(0.0, float(timeout))
+    head = _read_exact(fd, 8, deadline)
+    if head is None or head is TIMED_OUT:
+        return head
+    data = _read_exact(fd, struct.unpack("<Q", head)[0], deadline)
+    if data is None or data is TIMED_OUT:
+        return data
+    return pickle.loads(data)
 
 
 #: Parent-side pipe ends of the workers alive in this process (a new worker closes them: its own pipes only).
@@ -345,20 +370,31 @@ _WORKER_DIR = re.compile(r"^oft_worker_([0-9a-f]{8})_([0-9]+)_[A-Za-z0-9_]+$")
 _CLEANED = set()
 
 
+def _boot_id():
+    """This boot of this machine (Linux ``/proc/sys/kernel/random/boot_id``), or "" where it cannot be read."""
+    try:
+        with open("/proc/sys/kernel/random/boot_id", "r") as fh:
+            return fh.read(64).strip()
+    except Exception:  # noqa: BLE001 -- not Linux, or not readable: the host name alone
+        return ""
+
+
 def _host_tag():
-    """Eight hex digits naming this host (a temporary directory on a shared file system is seen by several hosts,
-    whose process ids are unrelated)."""
-    return hashlib.sha1(socket.gethostname().encode("utf-8", "replace")).hexdigest()[:8]
+    """Eight hex digits naming this host and this boot of it: a temporary directory on a shared file system is seen
+    by several hosts, whose process ids are unrelated, and after a reboot old process ids mean nothing.  Hosts that
+    share a name (containers, ``localhost``) differ in their boot id.  Where the boot id cannot be read, the host
+    name alone."""
+    return hashlib.sha1((socket.gethostname() + "\0" + _boot_id()).encode("utf-8", "replace")).hexdigest()[:8]
 
 
 def _pid_alive(pid):
+    """False only when no process ``pid`` exists on this host; any other answer (alive, another user's, a number no
+    process can have, an error) counts as alive, so nothing is removed on a doubt."""
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
-    except PermissionError:
-        return True
-    except OSError:
+    except Exception:  # noqa: BLE001 -- PermissionError (another user's), OverflowError (no such pid can exist), ...
         return True
     return True
 
@@ -375,14 +411,14 @@ def remove_stale_worker_dirs(base):
     except Exception:  # noqa: BLE001 -- cleanup is best effort
         return removed
     for name in names:
-        m = _WORKER_DIR.match(name)
-        if m is None or m.group(1) != tag:
-            continue
-        pid = int(m.group(2))
-        if pid == me or pid <= 1 or _pid_alive(pid):
-            continue
-        path = os.path.join(base, name)
         try:
+            m = _WORKER_DIR.fullmatch(name) if isinstance(name, str) else None
+            if m is None or m.group(1) != tag:
+                continue
+            pid = int(m.group(2))
+            if pid == me or pid <= 1 or _pid_alive(pid):
+                continue
+            path = os.path.join(base, name)
             st = os.lstat(path)
             if not stat.S_ISDIR(st.st_mode) or st.st_uid != uid:
                 continue

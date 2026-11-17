@@ -75,6 +75,7 @@ given OFT build reports a failed interpolation.
 """
 
 import hashlib
+import weakref
 from typing import NamedTuple
 
 import numpy as np
@@ -130,11 +131,13 @@ def on_mesh(eq, pts):
     """
     gs = _tokamaker(eq)
     pts = np.asarray(pts, dtype=float).reshape(-1, 2)
-    xy = np.asarray(gs.r)[:, :2]
+    r_all = np.asarray(gs.r)
+    xy = r_all[:, :2]
     tri = np.asarray(gs.lc)
     # the mesh of a TokaMaker object never changes: results are cached per (mesh, point set); the mesh is named by
-    # the bytes of its points and triangles, so two different meshes never share an entry
-    mkey = _mesh_key(xy, tri)
+    # the bytes of its points and triangles, so two different meshes never share an entry (the name is computed once
+    # per pair of mesh arrays, :func:`_mesh_key_of`)
+    mkey = _mesh_key_of(r_all, tri)
     key = mkey + (pts.tobytes(),)
     hit = _ON_MESH_CACHE.get(key)
     if hit is not None:
@@ -153,10 +156,42 @@ MESH_INDEX = dict(on=False)
 
 
 def _mesh_key(xy, tri):
-    """Cache key of a mesh: dtypes, shapes and a digest of the bytes of the points and of the triangles."""
+    """Cache key of a mesh: dtypes, shapes and a digest of the bytes of the points and of the triangles.  On a mesh of
+    about 10^5 nodes this costs several milliseconds, so :func:`on_mesh` computes it once per pair of mesh arrays
+    (:func:`_mesh_key_of`)."""
     xy, tri = np.ascontiguousarray(xy), np.ascontiguousarray(tri)
     return (xy.dtype.str, xy.shape, hashlib.blake2b(xy.tobytes(), digest_size=32).digest(),
             tri.dtype.str, tri.shape, hashlib.blake2b(tri.tobytes(), digest_size=32).digest())
+
+
+#: Mesh keys already computed: (id of the points array, id of the triangles array) -> (weak references to the two
+#: arrays, private copies of them, key) (:func:`_mesh_key_of`; a cache, it changes no number).
+_MESH_KEYS = {}
+
+
+def _mesh_key_of(r, lc):
+    """:func:`_mesh_key` of the points ``r[:, :2]`` and the triangles ``lc``, computed once per pair of array objects.
+
+    A stored key is returned only while both arrays are the very objects it was computed for (weak references: an
+    array that was replaced or freed never matches, also when a new array reuses its id) and are equal, element for
+    element, to private copies taken when the key was made (an array changed in place never matches).  Otherwise the
+    key is computed again.  The check reads both arrays once: on a mesh of about 10^5 nodes about half the cost of the
+    coordinate sums of the earlier key and a tenth of the digest."""
+    slot = (id(r), id(lc))
+    hit = _MESH_KEYS.get(slot)
+    if hit is not None:
+        (ref_r, ref_lc), (copy_r, copy_lc), key = hit
+        if ref_r() is r and ref_lc() is lc and np.array_equal(r, copy_r) and np.array_equal(lc, copy_lc):
+            return key
+    key = _mesh_key(r[:, :2], lc)
+    try:
+        refs = (weakref.ref(r), weakref.ref(lc))
+    except TypeError:                     # an object without weak references: the key is not kept
+        return key
+    if len(_MESH_KEYS) >= 8:
+        _MESH_KEYS.clear()
+    _MESH_KEYS[slot] = (refs, (np.array(r, copy=True), np.array(lc, copy=True)), key)
+    return key
 
 
 def _on_mesh_compute_scan(xy, tri, pts):

@@ -13,9 +13,12 @@ Checked, with every saved value compared bit for bit (wall times and the paralle
 (c) a column whose solve RAISES (injected) raises the same exception from both fits;
 (d) a worker process that DIES in a column (injected in workers only) leaves the parallel fit identical to the serial
     one: the column is re-run serially and the re-run is recorded;
+(a') the same fit with every speed option on (``SpeedSettings.all_on``: also the memo, the indexed point location and
+    the reused statistics) is identical to the serial fit;
 (e) a short series with filter fits (three slices of the time-dependent path's synthetic truth, noiseless data, the
-    true initial state, the in-window corrections; the filter fits are absorbed): serial and parallel series records are identical, including the record of the state
-    left by each fit's last solve, which the parallel path takes from the worker that made it.
+    true initial state, the in-window corrections; the filter fits are absorbed; every speed option on): serial and
+    parallel series records are identical, including the record of the state left by each fit's last solve, which the
+    parallel path takes from the worker that made it.
 """
 import json
 import os
@@ -86,9 +89,10 @@ def _fixture_fit(workers, mode):
     roles = {n: ("held" if n.startswith("E") else ("free" if n in ("F8A", "F8B") else "fitted")) for n in gs.coil_sets}
     ms = _base._measurements(gs, geo, roles, ip, np.random.default_rng(_base._SEED))
     fm.reconfigure(ms, np.asarray(gs.trace_surf(0.999), float), roles, case_id="fit")
-    if mode != "none":
+    if mode not in ("none", "all"):
         _inject(mode, "fx:it0:col2")
-    speed = SpeedSettings(column_workers=workers) if workers > 1 else None
+    speed = (SpeedSettings.all_on(workers) if mode == "all" else
+             SpeedSettings(column_workers=workers) if workers > 1 else None)
     out = dict(workers=workers, mode=mode)
     try:
         fr = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=cfg.r0), FIT.FitSettings(), start=snap,
@@ -139,7 +143,7 @@ def _series(workers):
     sl = [SE.SliceData(time=t, measurements=meas[k], reference_boundary=refs[k], kinetics=kin, sources=src,
                        label=f"f{k}") for k, t in enumerate(times)]
     st = SE.SeriesSettings(initial="from_profile", initial_profile=j_true, sawtooth="off", filter=True)
-    r = SE.run_series(fm, sl, cfg, st, speed=SpeedSettings(column_workers=workers) if workers > 1 else None)
+    r = SE.run_series(fm, sl, cfg, st, speed=SpeedSettings.all_on(workers) if workers > 1 else None)
     return dict(workers=workers, series=r, psi=np.asarray(fm.gs.get_psi(False)), n_solves=fm.n_solves,
                 history=fm.history)
 
@@ -208,8 +212,8 @@ def _parallel_records(rec):
 @pytest.fixture(scope="module")
 def fits(tmp_path_factory):
     return {(w, m): _run(tmp_path_factory, "fit", w, m)
-            for w, m in [(1, "none"), (WORKERS, "none"), (1, "fail"), (WORKERS, "fail"), (1, "raise"),
-                         (WORKERS, "raise"), (WORKERS, "crash")]}
+            for w, m in [(1, "none"), (WORKERS, "none"), (WORKERS, "all"), (1, "fail"), (WORKERS, "fail"),
+                         (1, "raise"), (WORKERS, "raise"), (WORKERS, "crash")]}
 
 
 def test_parallel_fit_is_bitwise_serial(fits):
@@ -222,6 +226,10 @@ def test_parallel_fit_is_bitwise_serial(fits):
     assert all(sorted(r["columns_here"] + r["columns_from_workers"]) == [0, 1, 2, 3] for r in par)
     assert all(r["serial_reruns"] == [] for r in par)
     assert not _parallel_records(s["record"])
+
+
+def test_every_option_on_is_bitwise_serial(fits):
+    assert differences(fits[(1, "none")], fits[(WORKERS, "all")]) == []
 
 
 def test_failed_column_surfaces_as_serial(fits):

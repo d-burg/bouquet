@@ -970,9 +970,9 @@ def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, ini
                 for blk in blocks[1:]:
                     workers.append(_speed.ForkWorker(lambda ch, blk=blk: work(ch, blk),
                                                      oft_env=getattr(fm, "env", None)))
-            except OSError as exc:
-                # the workers cannot be made (fork, pipe or temporary directory refused: a process or memory limit):
-                # every column of this Jacobian is computed here serially
+            except Exception as exc:  # noqa: BLE001 -- an interrupt (KeyboardInterrupt, SystemExit) is not caught
+                # the workers cannot be made (fork, pipe or temporary directory refused: a process or memory limit;
+                # or any other error while they are made): every column of this Jacobian is computed here serially
                 for w in workers:
                     w.close()
                 workers.clear()

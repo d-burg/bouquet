@@ -782,7 +782,7 @@ def _slice_record(fm, res, sl, label, extra=None):
 
 
 def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, initial_profiles=None,
-               callback=None):
+               callback=None, speed=None):
     """Evolve the current through ``slices`` (module docstring).
 
     ``fm``: :class:`.forward.ForwardModel` configured for ``slices[0]`` (its rows are rebuilt for
@@ -792,7 +792,7 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
     starting state of the solver (as :func:`.fit.reconstruct`).  ``callback(record)`` is called after
     every slice.  Returns a dict with ``slices`` (one record each), ``settings``, ``solver`` (the solver build,
     the cut-cell setting in effect and the edge-taper setting, :meth:`.forward.ForwardModel.solver_record`) and
-    the totals.
+    the totals.  ``speed``: :class:`.speed.SpeedSettings` of the fits (opt-in; changes no result).
     """
     s = settings or SeriesSettings()
     t_all = time.perf_counter()
@@ -830,7 +830,7 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
         fm.set_psi(start_psi)
     if mode == "mse_fit":
         fr = _fit.reconstruct(fm, sl0.kinetics, sl0.sources, cfg0, s.initial_fit, params0=p_relaxed,
-                              initial_profiles=initial_profiles, label=f"{sl0.label}:mse_fit")
+                              initial_profiles=initial_profiles, label=f"{sl0.label}:mse_fit", speed=speed)
         if fr.record.get("center") is None:
             c0 = fr.record.get("center0") or {}
             its = fr.record.get("iterations", [])
@@ -1027,6 +1027,7 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
             return use
 
         state_fn.corrections_in_window = in_window
+        state_fn.side_state = holder            # rewritten on every call (read by the parallel Jacobian, fit.speed)
         blog, btok = _branch_log_open()          # the floor's branch at every assembly of this slice (a record)
         try:
             res = _cm.consistent_solve(fm, sl.kinetics, sl.sources, p_pred, cfg, label=f"{sl.label}:evolve",
@@ -1038,7 +1039,7 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
                 _cm.call_state_fn(state_fn, res.lag, p_pred)
             filt = None
             if res.converged and s.filter_at(t1):
-                filt, res = _filter_slice(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1)
+                filt, res = _filter_slice(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1, speed=speed)
             cce = _interval_correction_effect(sl, cfg, s, state_fn, res, filt)
         finally:
             _branch_log_close(btok)
@@ -1375,12 +1376,12 @@ def _psi_shape_diff(a, b):
     return float(np.max(np.abs(d - d[0])) / span), float(a.psi_boundary - b.psi_boundary)
 
 
-def _filter_slice(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1):
+def _filter_slice(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1, speed=None):
     """Filter fit of one evolved slice (module docstring).  Returns ``(record, result)``; on return
     the solver holds the slice's answer and ``holder`` the state to carry."""
     pred = dict(res=res, holder=dict(holder), snap=fm.snapshot(), pc=fm.probe_correction.copy())
     fr = _fit.reconstruct(fm, sl.kinetics, sl.sources, cfg, s.filter_fit, params0=p_pred,
-                          start=pred["snap"], label=f"{sl.label}:filter", state_fn=state_fn)
+                          start=pred["snap"], label=f"{sl.label}:filter", state_fn=state_fn, speed=speed)
     stale = holder.get("end")       # advanced by the LAST solve of the fit (a column, a trial or the center)
     c = fr.record.get("center")
     filt = dict(status=fr.status, absorbed=False, free=list(fr.free), theta=fr.theta.tolist(), sigma=fr.sigma.tolist(),

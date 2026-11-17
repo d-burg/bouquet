@@ -124,6 +124,11 @@ hold, and when no lagged step descends (before a stall is declared) -- and a con
 Jacobian computed for that purpose is then also used for that iteration's step.  The covariance is
 always from consistent columns, also after ``failed_trials``.
 
+Parallel columns (``reconstruct(..., speed=SpeedSettings(column_workers=N))``, an option; off by default).  The
+columns of every Jacobian are evaluated in ``N`` processes at once (:mod:`.speed`); the result is bit for bit the
+serial one (same columns, same decisions in the same order, same records apart from wall times and the Jacobian's
+``parallel`` entry).
+
 Statuses: ``converged``, ``converged_within_noise``, ``stalled_no_significant_descent``, ``max_iter``,
 ``failed_trials``, ``jacobian_failed``, ``failed_initial_consistency``, ``no_free_parameters`` (and
 ``<status>_no_final_jacobian`` when the covariance Jacobian failed).  ``converged_within_noise`` is a
@@ -152,6 +157,7 @@ from typing import Any, Dict, Optional, Sequence
 import numpy as np
 
 from . import current_model as _cm
+from . import speed as _speed
 from .current import sawtooth as _saw
 from .score import chi2_summary, flux_offset_record, score
 from .sources.priors import DRIVEN_CURRENT_SCALE_SIGMA, FAST_ION_PRESSURE_SCALE_SIGMA
@@ -494,7 +500,7 @@ def convergence_label(stop, final_gn=None):
 
 
 def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, initial_profiles=None, label="fit",
-                state_fn=None):
+                state_fn=None, speed=None):
     """MAP reconstruction (module docstring).
 
     ``fm``: :class:`.forward.ForwardModel` in reconstruction mode (with the measurement set);
@@ -504,7 +510,8 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
     (default: the prior means of the free parameters and :data:`current_model.DEFAULT_PARAMS`
     otherwise); ``start``: starting state (snapshot or psi on nodes); ``initial_profiles``:
     ``(x, jphi, p)`` for the first solve when ``start`` is only a guess; ``state_fn``: a supplied
-    current state per pass (time-dependent path; the corrections then act on it).
+    current state per pass (time-dependent path; the corrections then act on it); ``speed``: opt-in
+    :class:`.speed.SpeedSettings` (parallel Jacobian columns; changes no result).
 
     A branch log (:func:`.current_model.open_branch_log`) is open while the fit runs: the q floor's branch at every
     assembly is recorded (``record["floor_branch_record"]``, :func:`.current_model.branch_flip_record`), a record
@@ -522,7 +529,7 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
     ftok = _cm.open_branch_freeze()[1] if getattr(cfg, "q_floor_branch_freeze", "off") != "off" else None
     try:
         return _reconstruct(fm, kin, src, cfg, settings=settings, params0=params0, start=start,
-                            initial_profiles=initial_profiles, label=label, state_fn=state_fn)
+                            initial_profiles=initial_profiles, label=label, state_fn=state_fn, speed=speed)
     finally:
         if ftok is not None:
             _cm.close_branch_freeze(ftok)
@@ -551,9 +558,10 @@ def _note_jacobian(jacobians, log, i0, c, lab):
 
 
 def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, initial_profiles=None, label="fit",
-                 state_fn=None):
+                 state_fn=None, speed=None):
     """:func:`reconstruct` with its branch log open."""
     t_all = time.perf_counter()
+    speed = _speed.check_speed(speed, fm)
     branch_jacobians = []
     settings = settings or FitSettings()
     saw_free = [n for n in settings.free if n in ("log_strength", "f")]
@@ -809,6 +817,63 @@ def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, ini
             pass
         return out
 
+    def one_column(c, j, n, lab, lagged, solve_col, r_ref, J, cols, noise_wait=None, noise_sent=None):
+        """The serial loop body of column ``j`` (step, opposite-step retry, step growth against the noise).  Writes
+        ``J[:, j]``; returns ``(info, early)`` where ``early`` is the Jacobian's return value when the noise
+        measurement failed.  ``noise_wait`` (a worker process, :mod:`.speed`) receives the noise measured in this
+        process's first column instead of measuring it; ``noise_sent`` passes a newly measured noise on."""
+        h = _spec(n, settings)["step0"]
+        info = dict(name=n, attempts=[])
+        for gi in range(settings.max_step_growths + 1):
+            tj = c["theta"].copy()
+            direction = 1.0 if tj[j] + h <= hi[j] else -1.0
+            tj[j] += direction * h
+            rj, why, extra_state = solve_col(c, tj, f"{lab}:col{j}")
+            if rj is None and settings.column_retry_opposite and tj[j] - 2 * direction * h >= lo[j] \
+                    and tj[j] - 2 * direction * h <= hi[j]:
+                # the column solve failed: one retry with the opposite step (a backward difference); the
+                # failure is recorded
+                info["attempts"].append(dict(h=direction * h, status=why, retried_opposite=True))
+                direction = -direction
+                tj = c["theta"].copy()
+                tj[j] += direction * h
+                rj, why, extra_state = solve_col(c, tj, f"{lab}:col{j}:opp")
+            if rj is None:
+                info["attempts"].append(dict(h=direction * h, status=why))
+                break
+            if noise["norm"] is None and noise_wait is not None:
+                noise.update(noise_wait())
+            if noise["norm"] is None:
+                # the same measurement in both column modes: the starting state is that of a CONSISTENT solve
+                # at the first column's step (in lagged mode that solve is made for this purpose; a lagged
+                # column's state would make the noise -- and every threshold built on it -- depend on the mode)
+                from_state, why_n = (extra_state[0] if not lagged else None), None
+                if lagged:
+                    _, why_n, es_c = column_solve(c, tj, f"{lab}:noise_state")
+                    from_state = None if es_c is None else es_c[0]
+                m = (measure_noise(c, from_state) if from_state is not None
+                     else dict(status=f"noise starting state failed: {why_n}"))
+                rec["noise"] = dict(status=m["status"], chi2=m.get("chi2"), norm=m.get("norm"),
+                                    method="consistent re-solve of the first center's parameters from the "
+                                           "state of a consistent solve at its first Jacobian column's step"
+                                           + (" (made for the noise measurement: the columns are lagged)"
+                                              if lagged else ""))
+                if m["status"] != "ok":
+                    return info, (None, dict(reason=f"noise measurement failed: {m['status']}", columns=cols))
+                noise.update(chi2=m["chi2"], r=m["r"], norm=m["norm"])
+                if noise_sent is not None:
+                    noise_sent(dict(noise))
+            dr = rj - r_ref
+            ok = np.linalg.norm(dr) >= settings.step_noise_factor * noise["norm"]
+            info["attempts"].append(dict(h=direction * h, norm_dr=float(np.linalg.norm(dr)), ok=bool(ok)))
+            J[:, j] = dr / (direction * h)
+            if ok:
+                break
+            h *= settings.step_growth
+        info["final_h"] = info["attempts"][-1].get("h")
+        info["noise_limited"] = not info["attempts"][-1].get("ok", False)
+        return info, None
+
     def _jacobian(c, lab, lagged=False):
         solve_col = lagged_column_solve if lagged else column_solve
         r_ref = c["r_data"]
@@ -819,61 +884,105 @@ def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, ini
                 return None, dict(reason=f"lagged reference solve failed: {why}", columns=[], column_kind="lagged")
         J = np.zeros((c["r_data"].size, len(names)))
         cols = []
+        par_rec = None
+        done = 0
+        if speed is not None and len(names) > 1:
+            par_rec, done, early = _parallel_columns(c, lab, lagged, solve_col, r_ref, J, cols)
+            if early is not None:
+                return early
         for j, n in enumerate(names):
-            h = _spec(n, settings)["step0"]
-            info = dict(name=n, attempts=[])
-            for gi in range(settings.max_step_growths + 1):
-                tj = c["theta"].copy()
-                direction = 1.0 if tj[j] + h <= hi[j] else -1.0
-                tj[j] += direction * h
-                rj, why, extra_state = solve_col(c, tj, f"{lab}:col{j}")
-                if rj is None and settings.column_retry_opposite and tj[j] - 2 * direction * h >= lo[j] \
-                        and tj[j] - 2 * direction * h <= hi[j]:
-                    # the column solve failed: one retry with the opposite step (a backward difference); the
-                    # failure is recorded
-                    info["attempts"].append(dict(h=direction * h, status=why, retried_opposite=True))
-                    direction = -direction
-                    tj = c["theta"].copy()
-                    tj[j] += direction * h
-                    rj, why, extra_state = solve_col(c, tj, f"{lab}:col{j}:opp")
-                if rj is None:
-                    info["attempts"].append(dict(h=direction * h, status=why))
-                    break
-                if noise["norm"] is None:
-                    # the same measurement in both column modes: the starting state is that of a CONSISTENT solve
-                    # at the first column's step (in lagged mode that solve is made for this purpose; a lagged
-                    # column's state would make the noise -- and every threshold built on it -- depend on the mode)
-                    from_state, why_n = (extra_state[0] if not lagged else None), None
-                    if lagged:
-                        _, why_n, es_c = column_solve(c, tj, f"{lab}:noise_state")
-                        from_state = None if es_c is None else es_c[0]
-                    m = (measure_noise(c, from_state) if from_state is not None
-                         else dict(status=f"noise starting state failed: {why_n}"))
-                    rec["noise"] = dict(status=m["status"], chi2=m.get("chi2"), norm=m.get("norm"),
-                                        method="consistent re-solve of the first center's parameters from the "
-                                               "state of a consistent solve at its first Jacobian column's step"
-                                               + (" (made for the noise measurement: the columns are lagged)"
-                                                  if lagged else ""))
-                    if m["status"] != "ok":
-                        return None, dict(reason=f"noise measurement failed: {m['status']}", columns=cols)
-                    noise.update(chi2=m["chi2"], r=m["r"], norm=m["norm"])
-                dr = rj - r_ref
-                ok = np.linalg.norm(dr) >= settings.step_noise_factor * noise["norm"]
-                info["attempts"].append(dict(h=direction * h, norm_dr=float(np.linalg.norm(dr)), ok=bool(ok)))
-                J[:, j] = dr / (direction * h)
-                if ok:
-                    break
-                h *= settings.step_growth
-            info["final_h"] = info["attempts"][-1].get("h")
-            info["noise_limited"] = not info["attempts"][-1].get("ok", False)
+            if j < done:
+                continue
+            info, early = one_column(c, j, n, lab, lagged, solve_col, r_ref, J, cols)
+            if early is not None:
+                return early
             cols.append(info)
+            if par_rec is not None:
+                par_rec["columns_here"].append(j)
             if info["attempts"][-1].get("status"):
                 return None, dict(reason=f"column {n} failed: {info['attempts'][-1]['status']}", columns=cols,
                                   column_kind="lagged" if lagged else "consistent")
-        return J, dict(noise_norm=noise["norm"], noise_chi2=noise["chi2"],
-                       noise_source="consistent re-solve (measured once)", columns=cols,
-                       column_kind=("lagged single solves (geometry-dependent inputs of the center)" if lagged
-                                    else "consistent solves (no lagged inputs)"))
+        out = dict(noise_norm=noise["norm"], noise_chi2=noise["chi2"],
+                   noise_source="consistent re-solve (measured once)", columns=cols,
+                   column_kind=("lagged single solves (geometry-dependent inputs of the center)" if lagged
+                                else "consistent solves (no lagged inputs)"))
+        if par_rec is not None:
+            out["parallel"] = par_rec
+        return J, out
+
+    def _parallel_columns(c, lab, lagged, solve_col, r_ref, J, cols):
+        """The columns in contiguous blocks, the first (smallest) block here and the others in forked workers
+        (:mod:`.speed`).  Fills ``J`` and ``cols`` in column order and returns ``(record, number of leading columns
+        done, early return or None)``; the caller runs the remaining columns serially (all from the first column
+        whose worker result cannot be used)."""
+        t_par = time.perf_counter()
+        log = _cm.current_branch_log()
+        side = getattr(state_fn, "side_state", None)
+        n_proc = min(int(speed.column_workers), len(names))
+        sizes = [len(b) for b in np.array_split(np.arange(len(names)), n_proc)][::-1]   # the smallest block here
+        starts = np.concatenate(([0], np.cumsum(sizes)))
+        blocks = [list(range(int(starts[i]), int(starts[i + 1]))) for i in range(n_proc)]
+        owner = {j: w for w, blk in enumerate(blocks[1:]) for j in blk}
+        prec = dict(column_workers=int(speed.column_workers), workers=n_proc - 1, blocks=blocks, columns_here=[],
+                    columns_from_workers=[], serial_reruns=[])
+        workers = []
+
+        def work(ch, cols_w):
+            def wait():
+                msg = ch.recv()
+                if msg is None:                     # the parent no longer needs this column
+                    os._exit(0)
+                return msg
+            Jw = np.zeros_like(J)
+            for j in cols_w:
+                mark = _speed.effects_mark(fm, log, side)
+                info, _ = one_column(c, j, names[j], lab, lagged, solve_col, r_ref, Jw, [], noise_wait=wait)
+                ch.send(("column", j, info, Jw[:, j].copy(), _speed.effects_since(mark, fm, log, side)))
+                if info["attempts"][-1].get("status"):
+                    return                          # the serial loop stops at a failed column
+
+        def broadcast(nz):
+            for w in workers:
+                w.send(dict(chi2=nz["chi2"], r=nz["r"], norm=nz["norm"]))
+
+        def failed(j, info):
+            return (None, dict(reason=f"column {names[j]} failed: {info['attempts'][-1]['status']}", columns=cols,
+                               column_kind="lagged" if lagged else "consistent"))
+
+        try:
+            for blk in blocks[1:]:
+                workers.append(_speed.ForkWorker(lambda ch, blk=blk: work(ch, blk), oft_env=getattr(fm, "env", None)))
+            for j in blocks[0]:                     # this process's block: the serial loop body
+                info, early = one_column(c, j, names[j], lab, lagged, solve_col, r_ref, J, cols,
+                                         noise_sent=broadcast if noise["norm"] is None else None)
+                if early is not None:
+                    return prec, j + 1, early
+                cols.append(info)
+                prec["columns_here"].append(j)
+                if info["attempts"][-1].get("status"):
+                    return prec, j + 1, failed(j, info)
+            for j in range(len(blocks[0]), len(names)):
+                msg = workers[owner[j]].recv()
+                if not (isinstance(msg, tuple) and msg[0] == "column" and msg[1] == j) or msg[4]["case_changed"]:
+                    # a worker that raised, died or changed the edge-taper case: this column and every later one
+                    # are re-run here serially (an exception or failure then surfaces as in the serial loop)
+                    prec["serial_reruns"].append(dict(column=j, reason=("edge-taper case changed"
+                                                                        if isinstance(msg, tuple) and msg[0] == "column"
+                                                                        else (msg[1][-600:] if isinstance(msg, tuple)
+                                                                              else "worker ended without a result"))))
+                    return prec, j, None
+                _, _, info, col, eff = msg
+                _speed.apply_effects(eff, fm, log, side)
+                J[:, j] = col
+                cols.append(info)
+                prec["columns_from_workers"].append(j)
+                if info["attempts"][-1].get("status"):
+                    return prec, j + 1, failed(j, info)
+            return prec, len(names), None
+        finally:
+            for w in workers:
+                w.close()
+            prec["wall_s"] = round(time.perf_counter() - t_par, 3)
 
     lam = settings.lm_lambda0
     fails = 0

@@ -981,12 +981,13 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
             if in_window:
                 # the corrections as a non-inductive source over this interval only: the parameters' amplitudes (a
                 # fit's free a_corr; zero for a prediction), on each end's geometry; nothing from earlier intervals
+                # (the plain Gaussians, form "in_window", whatever corr_return says: module docstring)
                 amps = (tuple(float(v) for v in _cm.full_params(params)["a_corr"]) if params is not None
                         else (0.0,) * n_corr)
                 if any(a != 0.0 for a in amps):
                     if "g" not in shapes_prev:
-                        shapes_prev["g"] = _cm.correction_shapes(lag_prev, cfg, ip0)
-                    g1 = _cm.correction_shapes(lag, cfg, ip1)
+                        shapes_prev["g"] = _cm.correction_shapes(lag_prev, cfg, ip0, form="in_window")
+                    g1 = _cm.correction_shapes(lag, cfg, ip1, form="in_window")
                     c0 = sum(a * g for a, g in zip(amps, shapes_prev["g"]))
                     c1 = sum(a * g for a, g in zip(amps, g1))
                     if s.sawtooth != "q_floor":

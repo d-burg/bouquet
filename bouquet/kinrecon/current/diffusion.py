@@ -189,6 +189,7 @@ __all__ = [
     "CurrentDiffusion",
     "as_profile_function",
     "as_time_function",
+    "known_pure",
 ]
 
 _TRBDF2_GAMMA = 2.0 - np.sqrt(2.0)
@@ -211,10 +212,37 @@ def set_speed_memo(on):
     :data:`_TIME_CACHE_SIZE`.  Both are evaluations of fixed functions of their arguments, so every value is the
     same with the memo on or off (the speed tier's tests and comparisons show it bit for bit); only repeated work is
     skipped -- the q-floor region search evaluates the same coefficients for every trial radius, and an interval is
-    advanced several times on one geometry schedule."""
+    advanced several times on one geometry schedule.  A solver's coefficients that do not depend on the conductivity
+    are stored per (time, faces) only when its ``<J_NI.B>``, boundary and outer layer are known pure
+    (:func:`known_pure`: constants and tables this module copied); a caller's callable among them may hold state,
+    so for such a solver nothing is stored and every evaluation calls the inputs again (the memo of a table profile
+    function applies to tables only for the same reason: a callable is used as is)."""
     prev = bool(_SPEED_MEMO["on"])
     _SPEED_MEMO["on"] = bool(on)
     return prev
+
+
+def _pure(fn):
+    """Mark ``fn`` as a function this module made from values it holds itself (a constant or a copied table), so a
+    fixed function of its arguments; returns ``fn``."""
+    fn._kinrecon_pure = True
+    return fn
+
+
+def known_pure(obj):
+    """True when ``obj`` is an input this module can know to be a fixed function of time (and radius): ``None``, a
+    function made by :func:`as_profile_function` / :func:`as_time_function` from a constant or a table (copied when
+    it was made), an :class:`IpBoundary` / :class:`VloopBoundary` of such a function, or an :class:`OuterLayer`
+    whose every input is such a function.  A caller's callable is not known to be pure (it may hold state), so it is
+    False for it and for the objects built on it.  The coefficient memo of :class:`CurrentDiffusion` applies only
+    when its ``<J_NI.B>``, boundary and outer layer are all known pure (:meth:`CurrentDiffusion.coefficients`)."""
+    if obj is None:
+        return True
+    if isinstance(obj, (IpBoundary, VloopBoundary)):
+        return known_pure(getattr(obj, "_f", object()))
+    if isinstance(obj, OuterLayer):
+        return all(known_pure(getattr(obj, n, object())) for n in ("_F", "_A", "_B", "_sigma", "_jni"))
+    return bool(getattr(obj, "_kinrecon_pure", False))
 
 
 def _memo_key(t, rho):
@@ -242,7 +270,7 @@ def _memoized(fn):
                 store.popitem(last=False)
         return out
 
-    return g
+    return _pure(g)
 
 
 class PositiveFrameError(ValueError):
@@ -269,10 +297,10 @@ def as_time_function(spec, extrapolate=False, name="time table"):
     copied when the function is made (a later in-place change of the caller's arrays changes no value).
     """
     if callable(spec):
-        return spec
+        return spec                                       # a caller's callable: not known pure (known_pure)
     if np.isscalar(spec):
         v = float(spec)
-        return lambda t: v
+        return _pure(lambda t: v)
     times, values = spec
     # copies: the function holds its own table, so a later in-place change of the caller's arrays reaches no result
     times = np.array(times, dtype=float)
@@ -280,14 +308,14 @@ def as_time_function(spec, extrapolate=False, name="time table"):
     if np.any(np.diff(times) <= 0):
         raise ValueError("times must increase strictly")
     if extrapolate:
-        return lambda t: float(np.interp(t, times, values))
+        return _pure(lambda t: float(np.interp(t, times, values)))
     t0, t1 = float(times[0]), float(times[-1])
 
     def f(t):
         _check_inside(t, t0, t1, name)
         return float(np.interp(t, times, values))
 
-    return f
+    return _pure(f)
 
 
 def as_profile_function(spec, log=False, extrapolate=False, name="profile table"):
@@ -311,12 +339,12 @@ def as_profile_function(spec, log=False, extrapolate=False, name="profile table"
     memo of :func:`set_speed_memo` on or off).
     """
     if spec is None:
-        return lambda t, rho: np.zeros_like(np.asarray(rho, dtype=float))
+        return _pure(lambda t, rho: np.zeros_like(np.asarray(rho, dtype=float)))
     if callable(spec):
-        return spec
+        return spec                                       # a caller's callable: not known pure (known_pure)
     if np.isscalar(spec):
         v = float(spec)
-        return lambda t, rho: np.full_like(np.asarray(rho, dtype=float), v)
+        return _pure(lambda t, rho: np.full_like(np.asarray(rho, dtype=float), v))
     fwd = np.log if log else (lambda x: x)
     inv = np.exp if log else (lambda x: x)
     if len(spec) == 2:
@@ -447,8 +475,9 @@ class OuterLayer:
         obj._sigma = as_profile_function(conductivity, log=True, extrapolate=extrapolate,
                                          name="outer-layer conductivity table")
         obj._jni = as_profile_function(j_ni, extrapolate=extrapolate, name="outer-layer <J_NI.B> table")
-        obj._A = lambda t: geometry.integral(geometry.conductance_density(obj._sigma(t, geometry.psi_n)))
-        obj._B = lambda t: geometry.integral(geometry.source_density(obj._jni(t, geometry.psi_n)))
+        # made here from the layer's own profile functions (known_pure checks _sigma and _jni themselves)
+        obj._A = _pure(lambda t: geometry.integral(geometry.conductance_density(obj._sigma(t, geometry.psi_n))))
+        obj._B = _pure(lambda t: geometry.integral(geometry.source_density(obj._jni(t, geometry.psi_n))))
         return obj
 
     def fpol_at(self, t):
@@ -698,7 +727,11 @@ class CurrentDiffusion:
         :class:`IpBoundary` or :class:`VloopBoundary`.
     j_ni
         ``<J_NI . B>`` (t, rho) [A T / m^2], signed relative to Ip
-        (bootstrap + driven currents).  Default zero.
+        (bootstrap + driven currents).  Default zero.  A callable here (or
+        in the boundary or the outer layer) is called again at every
+        evaluation, also with the memo of :func:`set_speed_memo` on: only
+        constants and tables (copied when given) are known to be fixed
+        functions of time (:func:`known_pure`).
     resistivity_modifier
         Optional ``(t, rho_cells, eta, state) -> eta`` (sawtooth hook; see
         module docstring).
@@ -832,9 +865,13 @@ class CurrentDiffusion:
             raise ValueError("conductivity must be positive and finite")
         Fc, Vc = gc["fpol"], gc["dvol_drho"]
         base = None
-        if _SPEED_MEMO["on"]:
-            # opt-in memo (set_speed_memo): everything below that does not depend on the conductivity is a fixed
-            # function of (t, faces) and of the solver's inputs; reused when the same inputs and geometry are in use
+        # the memo (set_speed_memo) of everything below that does not depend on the conductivity: a fixed function of
+        # (t, faces) and of the solver's inputs only when those inputs are known pure (known_pure: constants and
+        # tables this module copied); with a caller's callable <J_NI.B>, boundary or layer input nothing is stored
+        memo = _SPEED_MEMO["on"] and known_pure(self.jni_fn) and known_pure(self.boundary) \
+            and known_pure(self.outer_layer)
+        if memo:
+            # reused when the same inputs and geometry are in use
             bkey = (float(t), key)
             fns = (self.jni_fn, self.boundary, self.outer_layer, self._geo_fn, self._geo_static, geo)
             hit = self._base_cache.get(bkey)
@@ -853,7 +890,7 @@ class CurrentDiffusion:
                 lay_a, lay_b, f_lcfs = 0.0, 0.0, float(gf["fpol"][-1])
             bc = self.boundary(t)
             base = (jni, k_f, s_c, wfac, lay_a, lay_b, f_lcfs, bc)
-            if _SPEED_MEMO["on"]:
+            if memo:
                 self._base_cache[bkey] = (fns, base)
                 while len(self._base_cache) > _TIME_CACHE_SIZE_LARGE:
                     self._base_cache.popitem(last=False)

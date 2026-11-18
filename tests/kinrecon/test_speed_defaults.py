@@ -40,3 +40,86 @@ def test_time_table_changed_in_place_afterwards_changes_no_value():
         times[1], values[:] = 0.019, 7.0
         assert [f(t) for t in (0.004, 0.013)] == before
         times[:], values[:] = saved
+
+
+# ---------------------------------------------------------------------------------------------------- 2. pure inputs
+def _cyl():
+    from bouquet.kinrecon.current.geometry import FluxSurfaceGeometry
+    return FluxSurfaceGeometry.cylinder(0.6, 1.7, 2.0, n=41)
+
+
+def test_known_pure_inputs():
+    from bouquet.kinrecon.current import diffusion as DF
+    rho = np.linspace(0.0, 1.0, 11)
+    assert DF.known_pure(None)
+    assert DF.known_pure(DF.as_profile_function(None)) and DF.known_pure(DF.as_profile_function(2.0))
+    assert DF.known_pure(DF.as_profile_function((rho, rho + 1.0)))
+    assert DF.known_pure(DF.as_profile_function(((0.0, 1.0), rho, np.vstack((rho, rho)))))
+    assert not DF.known_pure(DF.as_profile_function(lambda t, r: r))
+    assert DF.known_pure(DF.IpBoundary(1.0e6)) and DF.known_pure(DF.IpBoundary(((0.0, 1.0), (1.0e6, 2.0e6))))
+    assert DF.known_pure(DF.VloopBoundary(0.5)) and DF.known_pure(DF.VloopBoundary(((0.0, 1.0), (0.5, 0.6)), True))
+    assert not DF.known_pure(DF.IpBoundary(lambda t: 1.0e6)) and not DF.known_pure(DF.VloopBoundary(lambda t: 0.5))
+    assert DF.known_pure(DF.OuterLayer(0.95, 2.0, ((0.0, 1.0), (1.0, 2.0)), 0.0))
+    assert DF.known_pure(DF.OuterLayer(0.95, ((0.0, 1.0), (2.0, 2.1)), 1.0, 0.5, extrapolate=True))
+    assert not DF.known_pure(DF.OuterLayer(0.95, 2.0, lambda t: 1.0, 0.0))
+    assert not DF.known_pure(DF.OuterLayer(0.95, 2.0, 1.0, lambda t: 0.0))
+    assert not DF.known_pure(DF.OuterLayer(0.95, lambda t: 2.0, 1.0, 0.0))
+    assert not DF.known_pure(lambda t: 1.0) and not DF.known_pure(object())
+
+
+def _solver(which, state):
+    """A static-geometry solver whose ``which`` input ('jni', 'boundary', 'layer' or 'none': all tables) is a
+    caller's callable that reads the mutable ``state``."""
+    from bouquet.kinrecon.current import diffusion as DF
+    g = _cyl()
+    rho = g.rho
+    sig = ((0.0, 0.02), rho, np.vstack((3e7 * (1.0 - 0.95 * rho ** 2) ** 3 + 1e5,
+                                        3.3e7 * (1.0 - 0.95 * rho ** 2) ** 3 + 1e5)))
+    jni = ((0.0, 0.02), rho, np.vstack((2e5 * rho, 3e5 * rho)))
+    bnd = DF.IpBoundary(((0.0, 0.02), (1.5e6, 1.6e6)))
+    layer = DF.OuterLayer(0.95, 2.0, ((0.0, 0.02), (1.0e3, 1.1e3)), ((0.0, 0.02), (10.0, 20.0)))
+    if which == "jni":
+        jni = lambda t, r: state["k"] * 2e5 * np.asarray(r)                       # noqa: E731
+    elif which == "boundary":
+        bnd = DF.IpBoundary(lambda t: state["k"] * 1.5e6)
+    elif which == "layer":
+        layer = DF.OuterLayer(0.95, 2.0, lambda t: state["k"] * 1.0e3, 10.0)
+    return DF.CurrentDiffusion(g, sig, bnd, j_ni=jni, outer_layer=layer)
+
+
+def _values(sol, rf, t):
+    c = sol.coefficients(t, rf)
+    return [c.jni_c.copy(), c.s_c.copy(), c.k_f.copy(), np.array([c.bc_value, c.layer_A, c.layer_B])]
+
+
+@pytest.mark.parametrize("which", ["jni", "boundary", "layer"])
+def test_coefficient_memo_stores_nothing_for_a_callers_callable(which):
+    from bouquet.kinrecon.current import diffusion as DF
+    rf = DF.CurrentState.uniform_faces(24)
+    state = dict(k=1.0)
+    sol = _solver(which, state)
+    with SP.speed_scope(SP.SpeedSettings(memo=True, mesh_index=False, reuse_stats=False)):
+        first = _values(sol, rf, 0.007)
+        state["k"] = 1.7                                        # the callable's state changes between evaluations
+        second = _values(sol, rf, 0.007)
+    assert len(sol._base_cache) == 0
+    ref_state = dict(k=1.7)
+    with SP.speed_scope(SP.SpeedSettings(memo=False, mesh_index=False, reuse_stats=False)):
+        ref = _values(_solver(which, ref_state), rf, 0.007)
+    assert not all(np.array_equal(a, b) for a, b in zip(first, second))    # the input did change
+    assert all(np.array_equal(a, b) for a, b in zip(second, ref))
+
+
+def test_coefficient_memo_stores_table_inputs_and_changes_no_value():
+    from bouquet.kinrecon.current import diffusion as DF
+    rf = DF.CurrentState.uniform_faces(24)
+    times = [0.0, 0.007, 0.02, 0.007]
+    with SP.speed_scope(SP.SpeedSettings(memo=False, mesh_index=False, reuse_stats=False)):
+        off_sol = _solver("none", {})
+        off = [v for t in times for v in _values(off_sol, rf, t)]
+    assert len(off_sol._base_cache) == 0
+    on_sol = _solver("none", {})
+    with SP.speed_scope(SP.SpeedSettings(memo=True, mesh_index=False, reuse_stats=False)):
+        on = [v for t in times for v in _values(on_sol, rf, t)]
+    assert len(on_sol._base_cache) == 3                         # three distinct times stored, the fourth a hit
+    assert all(np.array_equal(a, b) for a, b in zip(off, on))

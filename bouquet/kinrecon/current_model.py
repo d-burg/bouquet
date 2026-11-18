@@ -96,23 +96,27 @@ the residual and the convergence measure are the same.  Every pass record carrie
 cosine between this pass's residual and the previous one on the comparison grid (a record only; near -1
 on every pass is the signature of an oscillating pass map).
 
-Robustness options of the loop (NON-DEFAULT; all off by default, and with them off the loop is the one
-described above).  They change how the next input is chosen, never the criterion or the budget:
+The q-consistency check of pass k compares the equilibrium solved at pass k-1 with the model q of the assembly
+made at pass k-1 (``asm``); when that pass solved a mixed (Anderson) or under-relaxed input rather than the
+assembled profile, the solved state belongs to that input, not exactly to that assembly (the difference is the
+mixing or damping correction, of the size of the pass residual).
+
+Robustness option of the loop (NON-DEFAULT, EXPERIMENTAL; off by default, and with it off the loop is the one
+described above).  It changes how the next input is chosen, never the criterion or the budget:
 
 * ``pass_relaxation = beta`` (0 < beta < 1): every pass is under-relaxed from the first -- a plain step
   takes ``x + beta (G(x) - x)`` and an Anderson step the mixing form with the same factor,
   ``x + beta f - (dX + beta dF) gamma`` (the mixing-parameter form of Anderson acceleration, H. F. Walker and
-  P. Ni, SIAM J. Numer. Anal. 49, 1715 (2011)), where ``f = G(x) - x`` is the pass residual on the comparison grid;
-* ``pass_cycle_relaxation = beta``: the same under-relaxation, engaged only when the loop's own iterates
-  show a period-2 cycle -- the residual reverses direction (``residual_cos < 0``) on
-  ``pass_cycle_window`` consecutive passes.  At that pass the Anderson history is restarted, the pass
-  takes the damped plain step (for a pure two-cycle with ``beta = 0.5`` this is the midpoint of the two
-  states), and every later pass of that loop uses ``beta``.  The trigger reads only the loop's iterates
-  (model state), never the data.  Recorded per pass (``relaxation``) and in the loop record
-  (``cycle_relaxation``).
+  P. Ni, SIAM J. Numer. Anal. 49, 1715 (2011)), where ``f = G(x) - x`` is the pass residual on the comparison grid.
+  **This option does NOT pass the package's factor-of-two test** (:data:`PASS_RELAXATION_NOTE`): with 0.5 and 0.75
+  it closed loops that the default does not, but with 0.25 it lost fits that converge by default (heavy damping
+  slows the non-oscillating modes until other loops exhaust the same pass budget), and it moves every converged
+  fit within its resolution.  The loop record says so (``robustness.pass_relaxation_note``).
 
-An under-relaxed pass leaves the fixed point unchanged (``G(x) = x``) and the convergence measure is the
-same pass residual, now of the damped input that was solved.
+An under-relaxed pass leaves the fixed point unchanged (``G(x) = x``) and the convergence measure ``dj`` is the
+same pass residual, now of the damped input that was solved, so closure is not loosened.  The loop's state tests
+(axis, l_i, q0, Ip between successive solves), however, then compare successive DAMPED solves, whose changes are
+about ``beta`` times those of undamped passes.
 
 A supplied current state (``state_fn``; the time-dependent path of :mod:`.series`) replaces the
 steady state / periodic orbit: the profiles are then those of that state on the current geometry.
@@ -186,6 +190,10 @@ CORRECTION_AXIS_REPORT_LEVEL = 0.05
 #: ``"q_floor"`` (default; time-averaged, q held at ``q_floor``), the opt-ins ``"periodic_orbit"`` and
 #: ``"crash_times"`` (they need the sawtooth parameters ``log_strength`` and ``f``), and ``"none"``.
 CORE_RELAXATIONS = ("q_floor", "periodic_orbit", "crash_times", "none")
+
+#: What the record says about the EXPERIMENTAL ``pass_relaxation`` option (module docstring).
+PASS_RELAXATION_NOTE = ("EXPERIMENTAL: does NOT pass the package's factor-of-two test -- at 0.25 it lost fits that "
+                        "converge by default (slow modes exhaust the pass budget); 0.5 and 0.75 did not")
 #: Core treatments that use the sawtooth parameters ``log_strength`` and ``f``.
 SAWTOOTH_RELAXATIONS = ("periodic_orbit", "crash_times")
 
@@ -372,9 +380,8 @@ class CurrentModelSettings:
     pass_acceleration: str = "anderson"      # "anderson" (depth anderson_depth) or "none"
     anderson_depth: int = 3
     # NON-DEFAULT robustness options of the pass loop (module docstring, "Robustness options"); None = off
-    pass_relaxation: Optional[float] = None         # under-relaxation factor of every pass (0 < beta < 1)
-    pass_cycle_relaxation: Optional[float] = None   # the same, engaged on a period-2 cycle of the loop's iterates
-    pass_cycle_window: int = 2                      # consecutive residual reversals that engage it
+    pass_relaxation: Optional[float] = None         # EXPERIMENTAL under-relaxation of every pass (0 < beta < 1);
+    #                                                 does NOT pass the factor-of-two test (PASS_RELAXATION_NOTE)
     core_relaxation: str = "q_floor"         # CORE_RELAXATIONS: the core treatment (module docstring)
     q_floor: float = _saw.DEFAULT_Q_FLOOR    # floor of the "q_floor" treatment (FUSE ActorQED qmin_desired default)
     q_floor_form: str = "resistive"          # Q_FLOOR_FORMS: "resistive" (default) or "sharp" (opt-in, comparison)
@@ -410,13 +417,9 @@ class CurrentModelSettings:
                 raise ValueError("the non-default options of the q floor need q_floor_form='resistive'")
             _saw._check_options("continuous", self.q_floor_total_current, self.q_floor_transition,
                                 "axis" if self.q_floor_branch_freeze != "off" else None)
-        for name in ("pass_relaxation", "pass_cycle_relaxation"):
-            v = getattr(self, name)
-            if v is not None and (isinstance(v, bool) or not (np.isfinite(float(v)) and 0.0 < float(v) < 1.0)):
-                raise ValueError(f"{name} must be None (off) or a number strictly between 0 and 1")
-        if isinstance(self.pass_cycle_window, bool) or int(self.pass_cycle_window) != self.pass_cycle_window \
-                or self.pass_cycle_window < 1:
-            raise ValueError("pass_cycle_window must be a whole number >= 1")
+        v = self.pass_relaxation
+        if v is not None and (isinstance(v, bool) or not (np.isfinite(float(v)) and 0.0 < float(v) < 1.0)):
+            raise ValueError("pass_relaxation must be None (off) or a number strictly between 0 and 1")
         if self.crash_times is not None and self.core_relaxation != "crash_times":
             raise ValueError(f"crash_times are given but core_relaxation is {self.core_relaxation!r}: measured crash "
                              "times are an opt-in treatment (core_relaxation='crash_times')")
@@ -1344,19 +1347,15 @@ def consistent_solve(fm, kin, src, params, cfg, ip=None, start=None, z0=None, la
     x_prev = None
     prev_mixed = False       # whether the input of the previous pass was an Anderson mixture
     qrec = None
-    # robustness options (module docstring; off by default): the under-relaxation factor in effect (None = none)
-    beta = None if cfg.pass_relaxation is None else float(cfg.pass_relaxation)
-    cyc = None if cfg.pass_cycle_relaxation is None else dict(
-        beta=float(cfg.pass_cycle_relaxation), window=int(cfg.pass_cycle_window), engaged_at_pass=None,
-        rule="engaged when the pass residual reverses direction (residual_cos < 0) on `window` consecutive passes")
-    n_reversed = 0
+    # robustness option (module docstring; off by default): the under-relaxation factor in effect (None = none)
+    beta = None if getattr(cfg, "pass_relaxation", None) is None else float(cfg.pass_relaxation)
     last_f = None            # the previous pass residual (for residual_cos)
 
     def _opts():
-        """The loop record of the robustness options (nothing when they are off)."""
-        if cyc is None and cfg.pass_relaxation is None:
+        """The loop record of the robustness option (nothing when it is off)."""
+        if beta is None:
             return {}
-        return dict(robustness=dict(pass_relaxation=cfg.pass_relaxation, cycle_relaxation=dict(cyc) if cyc else None))
+        return dict(robustness=dict(pass_relaxation=beta, pass_relaxation_note=PASS_RELAXATION_NOTE))
     for k in range(int(cfg.max_passes)):
         try:
             lag_k = evaluate_geometry(fm.gs, kin, cfg)
@@ -1412,19 +1411,7 @@ def consistent_solve(fm, kin, src, params, cfg, ip=None, start=None, z0=None, la
                 # history; this pass takes the plain input
                 del hx[:-1], hf[:-1]
                 rec["anderson_restart"] = True
-            cycle_now = False
-            if cyc is not None and cyc["engaged_at_pass"] is None:
-                rc = rec.get("residual_cos")
-                n_reversed = n_reversed + 1 if (rc is not None and rc < 0.0) else 0
-                if n_reversed >= cyc["window"]:
-                    # a period-2 cycle of the loop's own iterates: restart the history, take the damped plain step
-                    # now and keep the factor for the rest of this loop
-                    cyc["engaged_at_pass"] = k
-                    beta = cyc["beta"]
-                    del hx[:-1], hf[:-1]
-                    cycle_now = True
-                    rec["cycle_relaxation_engaged"] = True
-            if cfg.pass_acceleration == "anderson" and len(hf) >= 2 and not cycle_now:
+            if cfg.pass_acceleration == "anderson" and len(hf) >= 2:
                 dF = np.column_stack([hf[i + 1] - hf[i] for i in range(len(hf) - 1)])
                 dX = np.column_stack([hx[i + 1] - hx[i] for i in range(len(hx) - 1)])
                 gam = np.linalg.lstsq(dF, hf[-1], rcond=None)[0]

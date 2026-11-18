@@ -63,7 +63,13 @@ Grad-Shafranov equation with
   saved state (:meth:`ForwardModel.snapshot`), or -- first solve of a case only -- from a supplied
   reference ``psi`` on the mesh nodes;
 * verified convergence: the solver flag AND a warm re-solve that reproduces the axis within
-  0.5 mm and q0, l_i, Ip within 1e-3 (relative).  A solve that is not verified is a failure;
+  0.5 mm and q0, l_i, Ip within 1e-3 (relative).  A solve that is not verified is a failure.  The l_i
+  compared is the solver's ``'iter'`` normalization, ``2 Bp_vol / ((mu0 Ip)^2 R_axis)``
+  (:data:`VERIFY_LI`, stats key ``l_i_iter``), not the solver's default l_i: the default divides by the
+  length of the traced psi_N = 0.99 surface of a diverted equilibrium, and that traced length can jump by
+  a few tenths of a percent between states that do not move, which made unchanged states fail the
+  verification on l_i alone.  The default l_i is still computed and recorded (``l_i``), and the
+  consistency loop's own state test still uses it;
 * the nonlinear-residual history of every solve is captured from the solver's own output
   (file descriptor 1) and classified with :func:`.edge.classify_residual_history`.
 
@@ -115,6 +121,10 @@ COIL_ROLES = ("held", "fitted", "free")
 #: Verified-convergence criterion (decided, fixed): warm re-solve reproduces these.
 VERIFY_AXIS_M = 5.0e-4
 VERIFY_REL = 1.0e-3
+#: The quantities the verification compares to ``VERIFY_REL`` (stats keys).  ``l_i_iter`` is the solver's ``'iter'``
+#: normalization of l_i, ``2 Bp_vol / ((mu0 Ip)^2 R_axis)``, which uses no traced surface length (module docstring).
+VERIFY_LI = "l_i_iter"
+VERIFY_KEYS = ("q_0", VERIFY_LI, "Ip")
 #: Default isoflux (boundary-anchor) weight factor: the isoflux rows carry weight
 #: ``factor * 2 pi median(1/sigma_loop)``.  INTERIM value 3 (the earlier default was 10, convergence-selected as
 #: the center of the 3-30 window in which the anchored solves converged on the magnetics cases).  What it
@@ -270,7 +280,9 @@ class ForwardSettings:
     def as_dict(self):
         d = asdict(self)
         d["edge_taper"] = self.edge_taper.as_dict()
-        d["verify_criterion"] = dict(axis_m=VERIFY_AXIS_M, q0_li_ip_rel=VERIFY_REL, rule="warm re-solve reproduces axis, q0, l_i and Ip")
+        d["verify_criterion"] = dict(axis_m=VERIFY_AXIS_M, q0_li_ip_rel=VERIFY_REL, li=VERIFY_LI,
+                                     rule="warm re-solve reproduces axis, q0, l_i ('iter' normalization, "
+                                          "2 Bp_vol/((mu0 Ip)^2 R_axis)) and Ip")
         return d
 
 
@@ -373,14 +385,23 @@ def _stats(gs):
         out["R_axis"], out["Z_axis"] = (float(v) for v in gs.o_point)
     except Exception:  # noqa: BLE001
         pass
+    try:
+        # l_i on the solver's 'iter' normalization (the formula of TokaMaker get_stats(li_normalization='iter')):
+        # 2 Bp_vol / ((mu0 Ip)^2 R_axis) -- no traced surface length; the quantity the verification compares
+        ip_g, _c, _v, _pv, _df, _tf, bp_vol = gs.get_globals()
+        out[VERIFY_LI] = float(2.0 * bp_vol / ((MU0 * ip_g) ** 2 * float(gs.o_point[0])))
+    except Exception as exc:  # noqa: BLE001
+        out[VERIFY_LI + "_error"] = f"{type(exc).__name__}: {exc}"[:200]
     return out
 
 
 def verify_states(a, b):
-    """Verified-convergence check of two stats dicts (solve and its warm re-solve)."""
+    """Verified-convergence check of two stats dicts (solve and its warm re-solve): the axis within
+    :data:`VERIFY_AXIS_M` and :data:`VERIFY_KEYS` (q0, the ``'iter'`` l_i, Ip) within :data:`VERIFY_REL` (relative).
+    A missing quantity is a FAIL."""
     try:
         d_ax = float(np.hypot(a["R_axis"] - b["R_axis"], a["Z_axis"] - b["Z_axis"]))
-        rel = {k: abs(a[k] - b[k]) / max(abs(a[k]), 1e-300) for k in ("q_0", "l_i", "Ip")}
+        rel = {k: abs(a[k] - b[k]) / max(abs(a[k]), 1e-300) for k in VERIFY_KEYS}
     except (KeyError, TypeError) as exc:
         return dict(verdict="FAIL", reason=f"missing quantity: {exc}")
     ok = d_ax <= VERIFY_AXIS_M and all(v <= VERIFY_REL for v in rel.values())

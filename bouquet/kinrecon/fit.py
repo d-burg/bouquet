@@ -152,16 +152,16 @@ NON-DEFAULT option (``taper_restart=False`` by default) that acts only with the 
 mode ``auto``; without it such a center is a failure.
 
 Robustness options (NON-DEFAULT; off by default, and with them off the fit is the one described above; the
-pass-loop options are :class:`.current_model.CurrentModelSettings`'s ``pass_relaxation`` and
-``pass_cycle_relaxation``):
+pass-loop option is :class:`.current_model.CurrentModelSettings`'s EXPERIMENTAL ``pass_relaxation``):
 
-* ``noise_retries = n`` (0 by default, at most ``len(NOISE_RETRY_STEPS)``): the noise re-solve of step 2 is a
-  single consistent solve; when it fails (it did not converge or verify), the default fit stops as
-  ``jacobian_failed``.  With the option it is repeated up to ``n`` times, retry ``k`` from the state of a consistent
-  solve at the first column's parameter moved by ``NOISE_RETRY_STEPS[k-1]`` times that column's own signed step
-  (``-1``: the opposite step, as ``column_retry_opposite`` does for a column; then ``+2``, ``-2``); the solves and
-  the verification criterion are the same, and the first success is the noise measurement.  Every attempt is
-  recorded (``record["noise"]["retries"]``).
+* ``noise_retries = 1`` (0 by default; 0 or 1): the noise re-solve of step 2 is a single consistent solve; when it
+  fails (it did not converge or verify), the default fit stops as ``jacobian_failed``.  With the option it is
+  repeated once, from the state of a consistent solve at the first column's parameter moved by
+  ``NOISE_RETRY_STEPS[0]`` (-1) times that column's own signed step (the opposite step, as ``column_retry_opposite``
+  does for a column); the solves and the verification criterion are the same.  A successful retry is a NEW noise
+  draw from another starting state, not a repeat of the failed one (one draw of the noise can differ several-fold
+  between starting states); ``record["noise"]["method"]`` then says so, and every attempt is recorded
+  (``record["noise"]["retries"]``).  It acts only when the first measurement failed.
 * ``stall_diagnostics = True``: a RECORD ONLY.  When a stall is about to be declared, it records the stopping tests
   on central-difference columns of that center (each forward column averaged with a backward column at the
   opposite step), the noise of a consistent re-solve of that center from the first backward column's state, and
@@ -226,10 +226,10 @@ PARAMETERS = {
 #: How the plasma-current target of the forward solve is treated by a fit (:attr:`FitSettings.ip_target`).
 IP_TARGETS = ("fitted", "measured")
 
-#: Starting states of the noise re-solve's retries (:attr:`FitSettings.noise_retries`, an option): retry n starts
-#: from the state of a consistent solve at the first Jacobian column's parameter moved by this multiple of that
-#: column's own signed step (the first try used +1).
-NOISE_RETRY_STEPS = (-1.0, 2.0, -2.0)
+#: Starting state of the noise re-solve's retry (:attr:`FitSettings.noise_retries`, an option): the retry starts from
+#: the state of a consistent solve at the first Jacobian column's parameter moved by this multiple of that column's
+#: own signed step (the first try used +1; -1 is the opposite step, as ``column_retry_opposite`` takes for a column).
+NOISE_RETRY_STEPS = (-1.0,)
 
 
 
@@ -266,7 +266,7 @@ class FitSettings:
     ip_target: str = "fitted"            # "fitted": ip_rel joins the parameters (Ip row its datum); "measured":
     #                                      the Ip target is held at the measured value (the earlier behavior)
     # NON-DEFAULT robustness options (module docstring, "Robustness options"):
-    noise_retries: int = 0               # > 0: a failed noise re-solve is repeated from other stated states
+    noise_retries: int = 0               # 1: a failed noise re-solve is repeated once from a stated other state
     stall_diagnostics: bool = False      # True: at a stall, RECORD central-column tests and the noise at the center
 
     def __post_init__(self):
@@ -669,14 +669,13 @@ def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, ini
                 rec["solver_iterations"] = dict(computed=False, reason=f"{type(exc).__name__}: {exc}"[:300])
         if extra:
             rec.update(extra)
-        p_rlx, p_cyc = getattr(cfg, "pass_relaxation", None), getattr(cfg, "pass_cycle_relaxation", None)
-        if settings.noise_retries or settings.stall_diagnostics or p_rlx is not None or p_cyc is not None:
+        p_rlx = getattr(cfg, "pass_relaxation", None)
+        if settings.noise_retries or settings.stall_diagnostics or p_rlx is not None:
             # NON-DEFAULT robustness options in effect and what they did (a record only; absent when all are off)
             sd = [e["stall_diagnostics"] for e in log if e.get("stall_diagnostics")]
             rec["robustness"] = dict(
                 noise_retries=int(settings.noise_retries), stall_diagnostics=bool(settings.stall_diagnostics),
-                pass_relaxation=p_rlx, pass_cycle_relaxation=p_cyc,
-                pass_cycle_window=getattr(cfg, "pass_cycle_window", None),
+                pass_relaxation=p_rlx, pass_relaxation_note=(_cm.PASS_RELAXATION_NOTE if p_rlx is not None else None),
                 noise_retried=bool((rec.get("noise") or {}).get("retries")),
                 stall_diagnostics_made=[dict(
                     central_test=(d.get("stopping_tests_central") or {}).get("test"),
@@ -877,10 +876,10 @@ def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, ini
                     norm=float(np.linalg.norm(dr)))
 
     def noise_retries(c, j, hs, m_first):
-        """NON-DEFAULT option (``noise_retries`` > 0): the failed noise re-solve is repeated, each time from the
-        state of a consistent solve at parameter ``j`` moved by ``NOISE_RETRY_STEPS[n] * hs`` (``hs`` = the first
-        column's signed step), with the same solves and the same verification; the first success is the noise
-        measurement.  Every attempt is recorded under ``record["noise"]["retries"]``."""
+        """NON-DEFAULT option (``noise_retries=1``): the failed noise re-solve is repeated once, from the state of a
+        consistent solve at parameter ``j`` moved by ``NOISE_RETRY_STEPS[0] * hs`` (``hs`` = the first column's
+        signed step), with the same solves and the same verification; a success is the noise measurement -- a new
+        draw, recorded as such.  Every attempt is recorded under ``record["noise"]["retries"]``."""
         tries = []
         m = m_first
         for n, s in enumerate(NOISE_RETRY_STEPS[:int(settings.noise_retries)], 1):
@@ -898,12 +897,21 @@ def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, ini
             tries.append(dict(row, status=m["status"], chi2=m.get("chi2"), norm=m.get("norm")))
             if m["status"] == "ok":
                 break
+        first_method = rec["noise"].get("method")
         rec["noise"].update(status=m["status"], chi2=m.get("chi2"), norm=m.get("norm"))
+        ok_try = next((t for t in tries if t.get("status") == "ok"), None)
+        if ok_try is not None:
+            rec["noise"]["method"] = (
+                f"RETRY (noise_retries): consistent re-solve of the first center's parameters from the state of a "
+                f"consistent solve at {ok_try['parameter']} moved by {ok_try['step_multiple']:g} x the first column's "
+                f"signed step ({ok_try['step']:.6g}); a NEW noise draw from another starting state, not a repeat of "
+                f"the failed one")
         rec["noise"]["retries"] = dict(
-            first_status=m_first["status"], attempts=tries, setting=int(settings.noise_retries),
-            rule="NON-DEFAULT option noise_retries: a failed noise re-solve repeated from the state of a consistent "
-                 "solve at the first column's parameter moved by NOISE_RETRY_STEPS x its signed step; same solves, "
-                 "same verification criterion; the first success is the measurement")
+            first_status=m_first["status"], first_method=first_method, attempts=tries,
+            setting=int(settings.noise_retries), measured_by_retry=ok_try is not None,
+            rule="NON-DEFAULT option noise_retries: a failed noise re-solve repeated once from the state of a "
+                 "consistent solve at the first column's parameter moved by NOISE_RETRY_STEPS x its signed step; same "
+                 "solves, same verification criterion; the retry's measurement is a new draw")
         return m
 
     def jacobian(c, lab, lagged=False):

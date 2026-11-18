@@ -1,4 +1,12 @@
-r"""Opt-in speed settings of the reconstruction.  Off by default; none of them changes a result.
+r"""Speed settings of the reconstruction (:class:`SpeedSettings`); none of them changes a result.
+
+Defaults.  With no ``speed`` argument, :func:`.fit.reconstruct` and :func:`.series.run_series` run with
+``SpeedSettings()``: the three in-process options -- the memo of pure evaluations (``memo``), the indexed point
+location (``mesh_index``) and reused statistics (``reuse_stats``) -- on, and one process (parallel columns off; they
+stay opt-in).  Each in-process option gives the same result bit for bit as without it.  ``speed=SpeedSettings(...)``
+replaces the default whole; ``speed=SpeedSettings.all_off()`` turns every option off (the behavior before these
+options became the default, for bitwise comparisons with older runs and for debugging).  Every fit and series
+record holds the options in effect (``speed_in_effect``, :func:`in_effect`).
 
 Parallel Jacobian columns (:attr:`SpeedSettings.column_workers` > 1).  The columns of one Jacobian
 (:func:`.fit.reconstruct`, module docstring step 2) are independent consistent solves warm from the same center: each
@@ -83,21 +91,26 @@ from dataclasses import asdict, dataclass
 
 import numpy as np
 
-__all__ = ["SpeedSettings", "check_speed", "column_time_bound", "solver_threads", "speed_scope", "validate"]
+__all__ = ["SpeedSettings", "check_speed", "column_time_bound", "effective", "in_effect", "solver_threads",
+           "speed_scope", "validate"]
 
 
 @dataclass(frozen=True)
 class SpeedSettings:
-    """Speed options of :func:`.fit.reconstruct` and :func:`.series.run_series` (module docstring).  Every option is
-    off by default, and none changes a value.
+    """Speed options of :func:`.fit.reconstruct` and :func:`.series.run_series` (module docstring).  None changes a
+    value.  ``SpeedSettings()`` is the default of both entry points (used when ``speed`` is not given): the three
+    in-process options on, one process.  A given ``SpeedSettings`` replaces the default whole (each field as given).
+    :meth:`all_off` turns every option off (the behavior before the in-process options became the default: for
+    bitwise comparisons with older runs and for debugging).
 
     ``column_workers``: processes that evaluate the columns of a Jacobian at once, this one included (1: serial, the
-    default behavior).  Choose at most the number of cores available to the run.  Linux only.  A latency tool: it
+    default).  Choose at most the number of cores available to the run.  Linux only.  A latency tool: it
     shortens one fit's wall time and costs more core-seconds than the serial fit (module docstring).
-    ``memo``: the memo of pure evaluations in the current model (:func:`.current.diffusion.set_speed_memo`).
-    ``mesh_index``: the bucket-indexed exact point-in-triangle test (:func:`.diagnostics.on_mesh`).
-    ``reuse_stats``: a forward solve reuses the equilibrium statistics of its latest attempt instead of evaluating
-    them again on the same state (:meth:`.forward.ForwardModel.solve`).
+    ``memo`` (default on): the memo of pure evaluations in the current model
+    (:func:`.current.diffusion.set_speed_memo`).
+    ``mesh_index`` (default on): the bucket-indexed exact point-in-triangle test (:func:`.diagnostics.on_mesh`).
+    ``reuse_stats`` (default on): a forward solve reuses the equilibrium statistics of its latest attempt instead of
+    evaluating them again on the same state (:meth:`.forward.ForwardModel.solve`).
     ``column_time_factor`` and ``column_time_floor_s``: the time bound of a worker column (used only with
     ``column_workers > 1``; :func:`column_time_bound`).  A worker column that has sent no result after
     ``max(column_time_floor_s, column_time_factor * n_col * t_solve)`` seconds is killed and re-run in this process
@@ -110,9 +123,9 @@ class SpeedSettings:
     24 to about 100 times a typical column on the measured cases -- room for a machine loaded several times over,
     while a hang still ends after minutes, not never."""
     column_workers: int = 1
-    memo: bool = False
-    mesh_index: bool = False
-    reuse_stats: bool = False
+    memo: bool = True
+    mesh_index: bool = True
+    reuse_stats: bool = True
     column_time_factor: float = 3.0
     column_time_floor_s: float = 60.0
 
@@ -133,6 +146,12 @@ class SpeedSettings:
     def all_on(cls, column_workers):
         """Every option on, with ``column_workers`` processes for the columns."""
         return cls(column_workers=column_workers, memo=True, mesh_index=True, reuse_stats=True)
+
+    @classmethod
+    def all_off(cls):
+        """Every option off: one process, no memo, the plain point location, statistics evaluated on every attempt
+        (as before the in-process options became the default; for bitwise comparisons and debugging)."""
+        return cls(column_workers=1, memo=False, mesh_index=False, reuse_stats=False)
 
     @property
     def parallel(self):
@@ -209,6 +228,16 @@ def check_speed(speed, fm):
     return speed
 
 
+def effective(speed):
+    """The settings an entry point runs with: ``speed`` when given, else the default ``SpeedSettings()`` (the three
+    in-process options on, one process)."""
+    if speed is None:
+        return SpeedSettings()
+    if not isinstance(speed, SpeedSettings):
+        raise TypeError("speed must be a SpeedSettings")
+    return speed
+
+
 def validate(speed, fm):
     """:func:`check_speed`, and parallel columns refused off Linux.  Called by :func:`.fit.reconstruct` and
     :func:`.series.run_series` when they start, before anything is solved (the thread count is read at that moment
@@ -265,9 +294,11 @@ def column_time_bound(speed, n_col):
 
 @contextlib.contextmanager
 def speed_scope(speed):
-    """Turn the process-wide options of ``speed`` (``memo``, ``mesh_index``, ``reuse_stats``) on for the duration of
-    the block and restore the previous values afterwards (:func:`.fit.reconstruct` and :func:`.series.run_series` do
-    this themselves; wrap the forward model's construction too, so that its row set-up uses ``mesh_index``)."""
+    """Set the process-wide options of ``speed`` (``memo``, ``mesh_index``, ``reuse_stats``, each on or off as given)
+    for the duration of the block and restore the previous values afterwards; ``None`` leaves them as they are.
+    :func:`.fit.reconstruct` and :func:`.series.run_series` do this themselves with their settings (the default
+    ``SpeedSettings()`` when none is given).  Outside them the switches are off unless a scope sets them: wrap the
+    forward model's construction too, so that its row set-up uses ``mesh_index``."""
     if speed is None:
         yield
         return

@@ -792,14 +792,17 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
     starting state of the solver (as :func:`.fit.reconstruct`).  ``callback(record)`` is called after
     every slice.  Returns a dict with ``slices`` (one record each), ``settings``, ``solver`` (the solver build,
     the cut-cell setting in effect and the edge-taper setting, :meth:`.forward.ForwardModel.solver_record`) and
-    the totals.  ``speed``: opt-in :class:`.speed.SpeedSettings` (parallel Jacobian columns of the fits, the memo of
-    pure evaluations, the indexed point location, reused statistics; changes no result; recorded as ``speed`` when
+    the totals.  ``speed``: :class:`.speed.SpeedSettings` (parallel Jacobian columns of the fits, opt-in; the memo
+    of pure evaluations, the indexed point location and reused statistics, on by default -- not given:
+    ``SpeedSettings()``; ``SpeedSettings.all_off()`` turns every option off; changes no result; recorded as ``speed`` when
     given without workers -- with workers, every Jacobian's ``parallel`` record holds it).  The options in effect
     are recorded as ``speed_in_effect`` in every series record, also when ``speed`` is not given
     (:func:`.speed.in_effect`).
     """
     from . import speed as _speed
-    with _speed.speed_scope(_speed.validate(speed, fm)):
+    eff = _speed.effective(speed)                     # the default SpeedSettings() when none is given
+    _speed.validate(eff, fm)
+    with _speed.speed_scope(eff):                     # each in-process option set as in eff, also when off
         effect = _speed.in_effect(speed)
         out = _run_series(fm, slices, cfg, settings=settings, start_psi=start_psi, initial_profiles=initial_profiles,
                           callback=callback, speed=speed)

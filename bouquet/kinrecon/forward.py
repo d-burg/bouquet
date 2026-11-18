@@ -288,7 +288,8 @@ class SolveResult:
 # ============================================================== residual-history capture
 #: Debugging aid: set to a list to keep every captured solver output (None: not kept).
 CAPTURE_LOG = None
-#: Opt-in speed options read by the forward solve (off by default; :class:`.speed.SpeedSettings`).
+#: Speed options read by the forward solve (:class:`.speed.SpeedSettings`; this process switch is off outside a speed
+#: scope, and the fit and series entry points set it on by default).
 SPEED_OPTIONS = dict(reuse_stats=False)
 
 

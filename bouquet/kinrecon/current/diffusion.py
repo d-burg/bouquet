@@ -195,16 +195,18 @@ __all__ = [
 _TRBDF2_GAMMA = 2.0 - np.sqrt(2.0)
 _RANGE_RTOL = 1e-12     # a table "covers" a request that lies outside it by no more than this fraction of its span
 _TIME_CACHE_SIZE = 8     # evaluated time-dependent geometries kept per solver (a cache size: changes no number)
-_TIME_CACHE_SIZE_LARGE = 256   # the same with the opt-in memo (set_speed_memo): an interval's steps are re-evaluated
+_TIME_CACHE_SIZE_LARGE = 256   # the same with the memo (set_speed_memo): an interval's steps are re-evaluated
 #                                by the floor search and the record advances; a cache size, it changes no number
 _PROFILE_MEMO_SIZE = 64        # evaluations kept per table profile function with the memo (a cache size)
 
-#: Opt-in memo of pure evaluations (off by default; :func:`set_speed_memo`).
+#: Memo of pure evaluations (:func:`set_speed_memo`; off outside a speed scope, and the fit and series entry points
+#: set it on by default, :mod:`..speed`).
 _SPEED_MEMO = dict(on=False)
 
 
 def set_speed_memo(on):
-    """Switch the memo of pure evaluations on or off (process-wide; off by default); returns the previous value.
+    """Switch the memo of pure evaluations on or off (process-wide; off outside a speed scope -- the fit and series
+    entry points set it on by default, :class:`..speed.SpeedSettings`); returns the previous value.
 
     With it on, a table profile function of :func:`as_profile_function` (conductivity, ``<J_NI.B>``) returns a copy
     of its earlier result for the same time and the same requested points instead of evaluating again, and each
@@ -251,7 +253,7 @@ def _memo_key(t, rho):
 
 
 def _memoized(fn):
-    """``fn(t, rho)`` with the opt-in memo (:func:`set_speed_memo`): a hit returns a copy of the stored result; a call
+    """``fn(t, rho)`` with the memo (:func:`set_speed_memo`): a hit returns a copy of the stored result; a call
     that raises stores nothing."""
     store = OrderedDict()
 
@@ -778,7 +780,7 @@ class CurrentDiffusion:
         self.source_modifier = None
         self._static_cache = {}
         self._time_cache = OrderedDict()      # time-dependent geometry: (t, faces) -> evaluated geometry (no numbers)
-        self._base_cache = OrderedDict()      # opt-in memo: (t, faces) -> coefficients that do not depend on sigma
+        self._base_cache = OrderedDict()      # the memo: (t, faces) -> coefficients that do not depend on sigma
         if isinstance(outer_layer, str):
             if outer_layer != "none":
                 raise ValueError("outer_layer must be an OuterLayer, 'none' or None")

@@ -138,9 +138,66 @@ def test_series_record_holds_the_options_in_effect(monkeypatch):
     monkeypatch.setattr(SE, "_run_series", lambda *a, **k: dict(status="completed"))
     monkeypatch.setattr(SP, "_openmp_max_threads", lambda: None)
     fm = SimpleNamespace(settings=SimpleNamespace(nthreads=1))
-    assert SE.run_series(fm, [], None)["speed_in_effect"] == _effect(False, False, False)
+    assert SE.run_series(fm, [], None)["speed_in_effect"] == _effect(True, True, True)     # the default
+    assert SE.run_series(fm, [], None, speed=SP.SpeedSettings.all_off())["speed_in_effect"] == \
+        _effect(False, False, False)
     memo = SP.SpeedSettings(memo=True, mesh_index=True, reuse_stats=False)
     assert SE.run_series(fm, [], None, speed=memo)["speed_in_effect"] == _effect(True, True, False)
     if sys.platform.startswith("linux"):
         par = SP.SpeedSettings(column_workers=2, memo=True, mesh_index=False, reuse_stats=True, column_time_factor=2.0)
         assert SE.run_series(fm, [], None, speed=par)["speed_in_effect"] == _effect(True, False, True, 2, 2.0)
+
+
+# ---------------------------------------------------------------------------------------------------- 4. the default
+def _switches():
+    from bouquet.kinrecon import diagnostics as D
+    from bouquet.kinrecon import forward as FW
+    from bouquet.kinrecon.current import diffusion as DF
+    return (DF._SPEED_MEMO["on"], D.MESH_INDEX["on"], FW.SPEED_OPTIONS["reuse_stats"])
+
+
+def test_default_settings_are_the_in_process_options_without_workers():
+    d = SP.SpeedSettings()
+    assert (d.column_workers, d.memo, d.mesh_index, d.reuse_stats) == (1, True, True, True)
+    assert d.active and not d.parallel
+    o = SP.SpeedSettings.all_off()
+    assert (o.column_workers, o.memo, o.mesh_index, o.reuse_stats) == (1, False, False, False)
+    assert not o.active
+    assert SP.effective(None) == d and SP.effective(o) is o
+    with pytest.raises(TypeError):
+        SP.effective("all")
+    assert _switches() == (False, False, False)                # outside a scope the process switches are off
+
+
+@pytest.mark.parametrize("entry", ["fit", "series"])
+def test_entry_points_run_with_the_default_and_a_given_setting_replaces_it(entry, monkeypatch):
+    from types import SimpleNamespace
+    from bouquet.kinrecon import fit as FIT
+    from bouquet.kinrecon import series as SE
+    seen = []
+
+    def body(*a, **k):
+        seen.append((_switches(), k.get("speed")))
+        return dict(status="completed")
+
+    monkeypatch.setattr(FIT, "_reconstruct", body)
+    monkeypatch.setattr(SE, "_run_series", body)
+    monkeypatch.setattr(SP, "_openmp_max_threads", lambda: None)
+    fm = SimpleNamespace(settings=SimpleNamespace(nthreads=1))
+
+    def call(**kw):
+        if entry == "fit":
+            FIT.reconstruct(fm, None, None, None, **kw)
+        else:
+            SE.run_series(fm, [], None, **kw)
+        return seen[-1]
+
+    assert call() == ((True, True, True), None)                 # not given: the in-process options on
+    off = SP.SpeedSettings.all_off()
+    assert call(speed=off) == ((False, False, False), off)
+    one = SP.SpeedSettings(memo=False, mesh_index=True, reuse_stats=False)
+    assert call(speed=one) == ((False, True, False), one)
+    with SP.speed_scope(SP.SpeedSettings()):                   # an outer scope with every option on
+        assert call(speed=off)[0] == (False, False, False)     # all_off turns them off inside the call
+        assert _switches() == (True, True, True)               # and the outer scope's values come back
+    assert _switches() == (False, False, False)

@@ -129,6 +129,8 @@ only).  The columns of every Jacobian are evaluated in ``N`` processes at once (
 bit the serial one (same columns, same decisions in the same order, same records apart from wall times and the
 Jacobian's ``parallel`` entry, which holds the speed settings, the time bound and every serial re-run).  A latency tool: one fit's wall time drops, its core-seconds rise.
 A worker column that ends without a result, exceeds its time bound, or cannot be started is computed here serially.
+The in-process speed options (the memo of pure evaluations, the indexed point location, reused statistics) are on
+by default and change no value; ``speed=SpeedSettings.all_off()`` turns them off (:mod:`.speed`).
 
 Statuses: ``converged``, ``converged_within_noise``, ``stalled_no_significant_descent``, ``max_iter``,
 ``failed_trials``, ``jacobian_failed``, ``failed_initial_consistency``, ``no_free_parameters`` (and
@@ -511,9 +513,11 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
     (default: the prior means of the free parameters and :data:`current_model.DEFAULT_PARAMS`
     otherwise); ``start``: starting state (snapshot or psi on nodes); ``initial_profiles``:
     ``(x, jphi, p)`` for the first solve when ``start`` is only a guess; ``state_fn``: a supplied
-    current state per pass (time-dependent path; the corrections then act on it); ``speed``: opt-in
-    :class:`.speed.SpeedSettings` (parallel Jacobian columns; changes no result; recorded as ``speed`` when given
-    without workers -- with workers, every Jacobian's ``parallel`` record holds it).  The options in effect are
+    current state per pass (time-dependent path; the corrections then act on it); ``speed``:
+    :class:`.speed.SpeedSettings` (changes no result; not given: ``SpeedSettings()``, the in-process options on and
+    one process; parallel Jacobian columns are opt-in; ``SpeedSettings.all_off()`` turns every option off; set for
+    the duration of the fit; recorded as ``speed`` when given without workers -- with workers, every Jacobian's
+    ``parallel`` record holds it).  The options in effect are
     recorded as ``record["speed_in_effect"]`` in every fit record, also when ``speed`` is not given and when a fit
     ends before its first Jacobian (:func:`.speed.in_effect`).
 
@@ -532,7 +536,9 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
     # the frozen-branch diagnostic (option, off by default): the first assembly's branch for the whole fit
     ftok = _cm.open_branch_freeze()[1] if getattr(cfg, "q_floor_branch_freeze", "off") != "off" else None
     try:
-        with _speed.speed_scope(_speed.validate(speed, fm)):
+        eff = _speed.effective(speed)                 # the default SpeedSettings() when none is given
+        _speed.validate(eff, fm)
+        with _speed.speed_scope(eff):                 # each in-process option set as in eff, also when off
             return _reconstruct(fm, kin, src, cfg, settings=settings, params0=params0, start=start,
                                 initial_profiles=initial_profiles, label=label, state_fn=state_fn, speed=speed)
     finally:

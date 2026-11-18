@@ -17,10 +17,10 @@ _FORK = pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
 
 def test_default_is_serial_and_check_returns_none():
     assert SP.SpeedSettings().column_workers == 1
-    assert not SP.SpeedSettings().active
+    assert SP.SpeedSettings().active and not SP.SpeedSettings.all_off().active
     fm = SimpleNamespace(settings=SimpleNamespace(nthreads=1))
     assert SP.check_speed(None, fm) is None
-    assert SP.check_speed(SP.SpeedSettings(), fm) is None
+    assert SP.check_speed(SP.SpeedSettings.all_off(), fm) is None
     assert SP.check_speed(SP.SpeedSettings(column_workers=4), fm).column_workers == 4
 
 
@@ -128,7 +128,7 @@ def test_scope_sets_and_restores_the_process_options():
     assert before == (False, False, False)
     with SP.speed_scope(SP.SpeedSettings.all_on(1)):
         assert (DF._SPEED_MEMO["on"], D.MESH_INDEX["on"], FW.SPEED_OPTIONS["reuse_stats"]) == (True, True, True)
-        with SP.speed_scope(SP.SpeedSettings(memo=True)):
+        with SP.speed_scope(SP.SpeedSettings(memo=True, mesh_index=False)):
             assert (DF._SPEED_MEMO["on"], D.MESH_INDEX["on"]) == (True, False)
         assert D.MESH_INDEX["on"]
     with pytest.raises(RuntimeError):

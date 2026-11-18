@@ -151,7 +151,8 @@ def on_mesh(eq, pts):
 
 
 _ON_MESH_CACHE = {}
-#: Opt-in (off by default; :class:`.speed.SpeedSettings` ``mesh_index``): the bucket-indexed form of the same test.
+#: The bucket-indexed form of the same test (:class:`.speed.SpeedSettings` ``mesh_index``; this process switch is off
+#: outside a speed scope, and the fit and series entry points set it on by default).
 MESH_INDEX = dict(on=False)
 
 

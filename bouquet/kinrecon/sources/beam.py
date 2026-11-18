@@ -31,12 +31,18 @@ NBCD output                                 returned                            
 ==========================================  =======================================  ===================================
 
 **Beam-driven current is not validated and is off by default.**  The fast-ion current here is
-the cylindrical Gaffey result (S11) with the birth-point pitch: fast ions born in the trapped
-region of pitch space are counted as passing, and passing ions carry their birth pitch rather
-than the transit average.  Against a transport code this overestimated the driven current by
-1.5-2.4x per MW for tangential injection, consistent with an independent Monte-Carlo estimate
-of the trapping effect (x1.5-2.0); a bounce-averaged fast-ion model (Cordey, Nucl. Fusion 16,
-499 (1976), recalled) is the remedy and is not implemented.  :class:`SimpleBeamModel` therefore
+the cylindrical Gaffey result (S11).  With the birth-point pitch alone, fast ions born in the
+trapped region of pitch space are counted as passing and passing ions carry their birth pitch
+rather than the transit average; against a transport code this overestimated the driven current
+by 1.5-2.4x per MW for tangential injection.  Since the second development pass the DEFAULT of
+the current (``trapping="zero_orbit_width"``, below) removes the current of births on trapped
+orbits and gives passing births their transit-averaged pitch, which brought the co-injection
+development sample to 0.95 of the transport code (median); it needs the caller's
+:class:`.trapping.FluxSurfaceField`, and without one (or for a beam given as a deposition, which
+has no birth positions) the birth pitch is used and the record says so (a missing-input rule).
+Pitch scattering across the trapped-passing boundary, finite orbit width and first-orbit loss are
+still missing; a bounce-averaged fast-ion model (Cordey, Nucl. Fusion 16, 499 (1976), recalled)
+is not implemented.  :class:`SimpleBeamModel` therefore
 returns NO driven current unless ``compute_nbcd=True``, and then marks every beam's ``jdotb``
 as not validated in the output (``not_validated``), in its provenance and in its limitations;
 reading it raises until the caller acknowledges it
@@ -120,10 +126,14 @@ Two OPTIONS, both off by default (the defaults reproduce the model above bit for
   every missing item of a description follows a stated rule; both are recorded per beam in
   ``meta["beams"][name]``.  The number of beamlets is the caller's and must be chosen by a
   convergence test (on-axis value, peaking and stored energy against the number).
-* ``trapping="zero_orbit_width"`` (default ``"none"``), for the driven current only: births on
-  trapped orbits carry no current and passing births carry their transit-averaged pitch
-  (equations T1-T4 of :mod:`.trapping`); needs ``field`` (:class:`.trapping.FluxSurfaceField`)
-  in :meth:`SimpleBeamModel.compute`.  The pressure, density and heating do not depend on it.
+* ``trapping="zero_orbit_width"`` (THE DEFAULT; ``"none"`` restores the birth pitch), for the
+  driven current only: births on trapped orbits carry no current and passing births carry their
+  transit-averaged pitch (equations T1-T4 of :mod:`.trapping`); it uses ``field``
+  (:class:`.trapping.FluxSurfaceField`) in :meth:`SimpleBeamModel.compute`.  Without a field, or
+  for a beam given as a deposition, it is not applied and the record says so ("requested, not
+  applied: ...").  It acts only when ``compute_nbcd=True``; with ``compute_nbcd=False`` (the
+  default) nothing of it appears in the output or the records.  The pressure, density and heating
+  do not depend on it.
   The driven current stays opt-in and flagged NOT validated (pitch scattering across the
   trapped-passing boundary, finite orbit width and first-orbit loss are not included); a
   record flags counter-injected power, for which the net current is ill-conditioned without
@@ -136,7 +146,9 @@ orbit loss, no fast-ion CX loss, no anomalous fast-ion transport (Alfven eigenmo
 sawteeth, tearing modes), no beam-beam collisions, steady state per slice (no time history),
 a 1-D current model (the fast-ion parallel current is equated with <J.B>/B0, using the
 birth-point pitch: an order-one error near the trapped-passing boundary, not O(eps^2)),
-collisionless trapped-electron correction, NO FAST-ION TRAPPING (see above), no inward orbit
+collisionless trapped-electron correction, fast-ion trapping only in the zero-orbit-width limit
+and only where a field is given (see above; the provenance entry "no fast-ion trapping" is
+replaced when the trapping acts and kept otherwise), no inward orbit
 shift of the births (see above).  Cross-section fit clamps (T_e outside [1, 1e5] eV; proton
 impact zeroed below 0.1 keV/u) are counted per call and recorded in provenance
 (``inputs["cross_section_clamps"]``).
@@ -620,13 +632,16 @@ class SimpleBeamModel:
     implied by the ion list are compared and the difference recorded; a number: refuse when
     the relative difference exceeds it).
 
-    Options (module docstring; both off by default, and then nothing below changes):
-    ``deposition`` (``"pencil"`` | ``"beamlets"``), with ``optics`` (``{beam name:
-    :class:`.beam_optics.BeamOptics`}``; a beam without an entry stays a pencil beam, recorded) and
-    ``n_beamlets`` (required with ``"beamlets"``: per divergence component, chosen by the caller's
-    convergence test); ``trapping`` (``"none"`` | ``"zero_orbit_width"``; the latter needs ``field``
-    in :meth:`compute` when ``compute_nbcd=True``).  The settings and records of an option appear
-    only when it is on, so default-path records are unchanged.
+    Options (module docstring): ``deposition`` (``"pencil"``, the default | ``"beamlets"``), with
+    ``optics`` (``{beam name: :class:`.beam_optics.BeamOptics`}``; a beam without an entry stays a
+    pencil beam, recorded) and ``n_beamlets`` (required with ``"beamlets"``: per divergence
+    component, chosen by the caller's convergence test); ``trapping`` (``"zero_orbit_width"``, the
+    default | ``"none"``), which acts on the driven current only, i.e. only with
+    ``compute_nbcd=True``: it uses ``field`` in :meth:`compute`; without a field, or for a beam given
+    as a deposition, the birth pitch is used and the record says "requested, not applied" with the
+    reason.  The settings and records of an option appear only when it acts (trapping: when
+    ``compute_nbcd=True``), so records with ``compute_nbcd=False`` are those of the model before the
+    options.
     """
 
     #: Reason attached to every built-in driven current (module docstring).
@@ -638,10 +653,13 @@ class SimpleBeamModel:
         "their transit-averaged pitch; NOT included: pitch scattering across the trapped-passing boundary during "
         "slowing down, finite orbit width, first-orbit loss (counter injection makes the net current "
         "ill-conditioned); not compared with a bounce-averaged model; no calibration applied")
+    #: Appended to NBCD_NOT_VALIDATED when the (default) trapping was requested but could not act on a beam.
+    TRAPPING_NOT_APPLIED = "; trapping requested (the default) but NOT applied to this beam: {why}"
 
     def __init__(self, beams, *, smoothing_width, mirror_axis=True, shielding="redl_l31", ln_lambda_e="nrl_ei",
                  ln_lambda_i="nrl_beam_ion", cross_sections=None, n_steps=4000, compute_nbcd=False,
-                 zeff_check_rtol=None, deposition="pencil", optics=None, n_beamlets=None, trapping="none"):
+                 zeff_check_rtol=None, deposition="pencil", optics=None, n_beamlets=None,
+                 trapping="zero_orbit_width"):
         if not beams:
             raise ValueError("no beams given")
         names = [b.name for b in beams]
@@ -693,25 +711,23 @@ class SimpleBeamModel:
                        beamlet_power_rule="beam power = launched power (after apertures), shared by transmitted "
                                           "beamlets",
                        beamlet_smoothing="smoothing_width applied to every beamlet")
-        if self.trapping != "none":
-            out.update(trapping=self.trapping + " (driven current only; trapping module T1-T4)")
+        if self.trapping != "none" and self.compute_nbcd:     # acts on the driven current only
+            out.update(trapping=self.trapping + " (driven current only; trapping module T1-T4; birth pitch where "
+                                                "no field or no birth positions, recorded)")
         return out
 
     def _classifier(self, field):
-        if self.trapping == "none" or not self.compute_nbcd:
+        if self.trapping == "none" or not self.compute_nbcd or field is None:
             return None
-        if field is None:
-            raise ValueError("trapping='zero_orbit_width' needs field (a FluxSurfaceField) when compute_nbcd=True")
         if not isinstance(field, FluxSurfaceField):
             raise ValueError("field must be a FluxSurfaceField")
         return lambda r, R, Z, x: classify_births(field, r, R, Z, x)
 
     def deposit(self, beam, rho, dvol_drho, ne, te_ev, ions, rho_of_rz, field=None):
-        """Births, <xi0>, <P_2(xi0)> and shine-through of one beam on ``rho`` (with the options: beamlets, xi_cd)."""
+        """Births, <xi0>, <P_2(xi0)> and shine-through of one beam on ``rho`` (with the options: beamlets, xi_cd).
+        A beam given as a deposition has no birth positions, so trapping does not act on it (``xi_cd`` is None)."""
         classifier = self._classifier(field)
         if beam.deposition is not None:
-            if classifier is not None:
-                raise ValueError(f"{beam.name}: trapping needs birth positions; a given deposition has none")
             dep = beam.deposition
             g = np.asarray(dep["rho"], float)
             shapes = dep["shape"]
@@ -761,10 +777,12 @@ class SimpleBeamModel:
         fraction, for the shielding; ``eps`` instead for ``shielding="start_cordey_fit"``) and
         ``dvol_drho`` [m^3] are arrays on it; ``ions`` a list of
         :class:`.slowing_down.IonSpecies`; ``B0`` [T] and ``R0`` [m] the reference field and radius;
-        ``field`` -- a :class:`.trapping.FluxSurfaceField` from the same equilibrium (trapping
-        option only).
+        ``field`` -- a :class:`.trapping.FluxSurfaceField` from the same equilibrium (used by the
+        trapping of the driven current, the default; without it the birth pitch is used, recorded).
         """
+        trap_req = self.trapping != "none" and self.compute_nbcd
         trap = self._classifier(field) is not None
+        applied, not_applied = [], {}
         rho = np.asarray(rho, float)
         ne, te = np.asarray(ne, float), np.asarray(te_ev, float)
         zeff = np.broadcast_to(np.asarray(zeff, float), rho.shape)
@@ -779,13 +797,20 @@ class SimpleBeamModel:
         diag = {}
         for b in self.beams:
             dep = self.deposit(b, rho, dvol_drho, ne, te, ions, rho_of_rz, field=field)
+            use_cd = trap and dep.xi_cd is not None
+            if use_cd:
+                applied.append(b.name)
+            elif trap_req:
+                not_applied[b.name] = ("no field (FluxSurfaceField) given: birth pitch used (missing input)"
+                                       if not trap else "beam given as a deposition has no birth positions: birth "
+                                                        "pitch used (missing input)")
             jf = np.zeros_like(rho)
             tot = {k: np.zeros_like(rho) for k in ("n_fast", "p_fast", "p_par", "p_perp", "q_e", "q_i")}
             for k, Ek in enumerate(b.energies):
                 m = classical_moments(dep.births[k], Ek, ne, te, ions, b.A, b.Z, xi0=dep.xi0[k],
                                       ln_lambda_e=self.ln_lambda_e, ln_lambda_i=self.ln_lambda_i,
                                       p2_xi0=dep.p2_xi0[k])
-                if trap:          # T4: the current pitch replaces the birth pitch in S11 (current only)
+                if use_cd:        # T4: the current pitch replaces the birth pitch in S11 (current only)
                     jf += classical_moments(dep.births[k], Ek, ne, te, ions, b.A, b.Z, xi0=dep.xi_cd[k],
                                             ln_lambda_e=self.ln_lambda_e, ln_lambda_i=self.ln_lambda_i)["j_fast"]
                 else:
@@ -809,11 +834,17 @@ class SimpleBeamModel:
                     diag[b.name].update(deposition="given deposition (beamlets not applicable)")
                 else:
                     diag[b.name].update(deposition="pencil: no finite-beam description given (missing input)")
-            if trap:
+            if use_cd:
                 diag[b.name].update(trapped_birth_fraction=np.asarray(dep.trapped_births, float).tolist())
+            elif trap_req:
+                diag[b.name].update(trapping="requested, not applied: " + not_applied[b.name])
         extra_meta = {}
         extra_limitations = []
-        if trap:
+        if trap_req:
+            extra_meta["trapping"] = {"requested": self.trapping, "applied_to": applied, "not_applied": not_applied}
+            if not_applied:
+                extra_limitations.append("trapping requested (the default) but not applied to "
+                                         + ", ".join(sorted(not_applied)) + ": birth pitch used (missing input)")
             p_ctr = float(sum(b.power for b in self.beams if b.direction == -1))
             p_all = float(sum(b.power for b in self.beams))
             extra_meta["counter_injection"] = {
@@ -821,7 +852,8 @@ class SimpleBeamModel:
                 "note": "counter-injected power present: the net driven current is a difference of co and counter "
                         "currents and is ill-conditioned without first-orbit loss (not modeled)" if p_ctr > 0
                         else "no counter-injected power"}
-            extra_meta["trapping_field"] = field.record()
+            if field is not None:
+                extra_meta["trapping_field"] = field.record()
             if p_ctr > 0:
                 extra_limitations.append(f"counter-injected power present ({p_ctr:.4g} of {p_all:.4g} W): net driven "
                                          "current ill-conditioned without first-orbit loss (not modeled)")
@@ -842,14 +874,26 @@ class SimpleBeamModel:
                     "cross-section fits.")
         if self.deposition == "beamlets":
             prov.limitations[0] = BEAMLET_LIMITATION
-        if trap:
+        if applied:
             prov.limitations = [TRAPPING_LIMITATION if x.startswith("no fast-ion trapping") else x
-                                for x in prov.limitations] + extra_limitations
-        reason = self.NBCD_NOT_VALIDATED_TRAPPING if trap else self.NBCD_NOT_VALIDATED
+                                for x in prov.limitations]
+        if trap_req:
+            prov.limitations = prov.limitations + extra_limitations
+
+        def reason_of(name):
+            if name in applied:
+                return self.NBCD_NOT_VALIDATED_TRAPPING
+            if name in not_applied:
+                return self.NBCD_NOT_VALIDATED + self.TRAPPING_NOT_APPLIED.format(why=not_applied[name])
+            return self.NBCD_NOT_VALIDATED
+        reason = (self.NBCD_NOT_VALIDATED_TRAPPING if applied and not not_applied else
+                  self.NBCD_NOT_VALIDATED_TRAPPING + " (not applied to: " + ", ".join(sorted(not_applied)) + ")"
+                  if applied else self.NBCD_NOT_VALIDATED + (self.TRAPPING_NOT_APPLIED.format(
+                      why="no field or no birth positions") if not_applied else ""))
         if self.compute_nbcd:
             prov.limitations.insert(0, "NOT VALIDATED: the returned beam-driven current (" + reason + ")")
         return NonInductiveSources(rho=rho, time=time, time_window=time_window, B0=B0, R0=R0, jdotb=jdotb,
                                    p_fast=p_fast, n_fast=n_fast, p_par=p_par, p_perp=p_perp, heating=heating,
                                    uncertainty=list(uncertainty or []), provenance=prov,
                                    meta=dict({"beams": diag}, **extra_meta),
-                                   not_validated={f"jdotb:{k}": reason for k in jdotb})
+                                   not_validated={f"jdotb:{k}": reason_of(k) for k in jdotb})

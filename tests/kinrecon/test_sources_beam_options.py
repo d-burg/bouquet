@@ -94,30 +94,50 @@ def _two_beams():
 
 
 def test_defaults_match_the_values_before_the_options():
-    _, got = _default_numbers(SimpleBeamModel(_two_beams(), smoothing_width=0.06, compute_nbcd=True))
-    for k, v in PINNED_DEFAULT.items():
-        assert got[k] == pytest.approx(v, rel=1e-12, abs=0.0), k
+    # trapping="none" reproduces the model before the options; so does the default trapping when no field is given
+    # (it cannot act, the birth pitch is used and recorded)
+    for kw in (dict(trapping="none"), {}):
+        _, got = _default_numbers(SimpleBeamModel(_two_beams(), smoothing_width=0.06, compute_nbcd=True, **kw))
+        for k, v in PINNED_DEFAULT.items():
+            assert got[k] == pytest.approx(v, rel=1e-12, abs=0.0), k
+
+
+def _same_arrays(s0, s):
+    for a, b in ((s0.p_fast, s.p_fast), (s0.n_fast, s.n_fast), (s0.p_par, s.p_par)):
+        for k in a:
+            assert np.array_equal(a[k], b[k])
 
 
 def test_explicit_defaults_are_bitwise_identical_and_add_no_record_keys():
-    s0, _ = _default_numbers(SimpleBeamModel(_two_beams(), smoothing_width=0.06, compute_nbcd=True))
-    s1, _ = _default_numbers(SimpleBeamModel(_two_beams(), smoothing_width=0.06, compute_nbcd=True,
-                                             deposition="pencil", trapping="none"))
-    # a field given with trapping off changes nothing
-    s2 = _compute(SimpleBeamModel(_two_beams(), smoothing_width=0.06, compute_nbcd=True), field=_field())
-    s2.acknowledge_not_validated("*", reason="unit test")
-    for s in (s1, s2):
-        for a, b in ((s0.p_fast, s.p_fast), (s0.n_fast, s.n_fast), (s0.p_par, s.p_par)):
-            for k in a:
-                assert np.array_equal(a[k], b[k])
-        for k in s0.jdotb.raw():
-            assert np.array_equal(s0.jdotb.raw()[k], s.jdotb.raw()[k])
-        assert s.provenance.settings == s0.provenance.settings
-        assert s.provenance.limitations == s0.provenance.limitations
-        assert set(s.meta) == set(s0.meta) and s.meta["beams"] == s0.meta["beams"]
-        assert s.not_validated == s0.not_validated
+    # without the driven current (compute_nbcd=False, the default) the defaults are the model before the options:
+    # bitwise identical outputs and records, no option keys, whether or not a field is given
+    kw = dict(smoothing_width=0.06)
+    d0 = _compute(SimpleBeamModel(_two_beams(), **kw))
+    for s in (_compute(SimpleBeamModel(_two_beams(), deposition="pencil", trapping="none", **kw)),
+              _compute(SimpleBeamModel(_two_beams(), **kw), field=_field())):
+        _same_arrays(d0, s)
+        assert s.provenance.settings == d0.provenance.settings
+        assert s.provenance.limitations == d0.provenance.limitations
+        assert s.meta == d0.meta and s.not_validated == d0.not_validated == {}
     for key in ("deposition", "n_beamlets", "trapping"):
-        assert key not in s0.provenance.settings
+        assert key not in d0.provenance.settings
+    # with the driven current: the default trapping without a field = trapping="none" in every array, and says so
+    s1, _ = _default_numbers(SimpleBeamModel(_two_beams(), compute_nbcd=True, trapping="none", **kw))
+    s0, _ = _default_numbers(SimpleBeamModel(_two_beams(), compute_nbcd=True, **kw))
+    _same_arrays(s1, s0)
+    for k in s1.jdotb.raw():
+        assert np.array_equal(s1.jdotb.raw()[k], s0.jdotb.raw()[k])
+    assert "trapping" not in s1.provenance.settings and "trapping" in s0.provenance.settings
+    assert sorted(s0.meta["trapping"]["not_applied"]) == ["b1", "b2"] and s0.meta["trapping"]["applied_to"] == []
+    assert all("NOT applied" in v and "no field" in v for v in s0.not_validated.values())
+    assert any(x.startswith("trapping requested (the default) but not applied") for x in s0.provenance.limitations)
+    assert s0.meta["counter_injection"]["flag"]
+    # with a field the default trapping acts on the current only
+    s2 = _compute(SimpleBeamModel(_two_beams(), compute_nbcd=True, **kw), field=_field())
+    j2 = s2.acknowledge_not_validated("*", reason="unit test")
+    _same_arrays(s1, s2)
+    assert not np.array_equal(j2["b1"], s1.jdotb.raw()["b1"])
+    assert s2.not_validated["jdotb:b1"] == SimpleBeamModel.NBCD_NOT_VALIDATED_TRAPPING
     with pytest.raises(ValueError):
         SimpleBeamModel(_two_beams(), smoothing_width=0.06, n_beamlets=8)            # option args without the option
     with pytest.raises(ValueError):
@@ -304,10 +324,12 @@ def test_transit_averaged_pitch_against_quadrature():
 
 def test_model_trapping_changes_only_the_current_and_flags_counter_injection():
     beams = _two_beams()
-    off = _compute(SimpleBeamModel(beams, smoothing_width=0.06, compute_nbcd=True))
+    off = _compute(SimpleBeamModel(beams, smoothing_width=0.06, compute_nbcd=True, trapping="none"))
     on_model = SimpleBeamModel(beams, smoothing_width=0.06, compute_nbcd=True, trapping="zero_orbit_width")
-    with pytest.raises(ValueError, match="field"):
-        _compute(on_model)
+    nofield = _compute(on_model)               # a missing field is a missing input: birth pitch, recorded
+    assert nofield.meta["trapping"]["applied_to"] == [] and len(nofield.meta["trapping"]["not_applied"]) == 2
+    with pytest.raises(ValueError, match="FluxSurfaceField"):
+        _compute(on_model, field=object())     # a wrong object is an error
     on = _compute(on_model, field=_field())
     assert np.array_equal(off.p_fast["beam_A2_Z1"], on.p_fast["beam_A2_Z1"])       # pressure unaffected
     assert np.array_equal(off.n_fast["beam_A2_Z1"], on.n_fast["beam_A2_Z1"])

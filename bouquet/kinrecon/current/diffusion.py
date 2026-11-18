@@ -265,7 +265,8 @@ def as_time_function(spec, extrapolate=False, name="time table"):
     """Scalar time function from a constant, a callable ``f(t)`` or ``(times, values)`` (linear).
 
     A table is evaluated only inside ``[times[0], times[-1]]``: outside it a ``ValueError`` is raised, unless
-    ``extrapolate=True`` is passed, which holds the end values (the previous, silent behavior).
+    ``extrapolate=True`` is passed, which holds the end values (the previous, silent behavior).  The table arrays are
+    copied when the function is made (a later in-place change of the caller's arrays changes no value).
     """
     if callable(spec):
         return spec
@@ -273,8 +274,9 @@ def as_time_function(spec, extrapolate=False, name="time table"):
         v = float(spec)
         return lambda t: v
     times, values = spec
-    times = np.asarray(times, dtype=float)
-    values = np.asarray(values, dtype=float)
+    # copies: the function holds its own table, so a later in-place change of the caller's arrays reaches no result
+    times = np.array(times, dtype=float)
+    values = np.array(values, dtype=float)
     if np.any(np.diff(times) <= 0):
         raise ValueError("times must increase strictly")
     if extrapolate:
@@ -303,6 +305,10 @@ def as_profile_function(spec, log=False, extrapolate=False, name="profile table"
     form, time): a request outside it raises ``ValueError``.  ``extrapolate=True``
     restores the previous behavior explicitly (PCHIP extrapolation in rho --
     in log space for ``log=True`` -- and end values held in time).
+
+    The table arrays are copied when the function is made: a later in-place
+    change of the caller's arrays changes no value of the function (with the
+    memo of :func:`set_speed_memo` on or off).
     """
     if spec is None:
         return lambda t, rho: np.zeros_like(np.asarray(rho, dtype=float))
@@ -314,7 +320,7 @@ def as_profile_function(spec, log=False, extrapolate=False, name="profile table"
     fwd = np.log if log else (lambda x: x)
     inv = np.exp if log else (lambda x: x)
     if len(spec) == 2:
-        rho_in, vals = (np.asarray(x, dtype=float) for x in spec)
+        rho_in, vals = (np.array(x, dtype=float) for x in spec)
         p = PchipInterpolator(rho_in, fwd(vals), extrapolate=True)
         r0, r1 = float(rho_in[0]), float(rho_in[-1])
 
@@ -325,7 +331,7 @@ def as_profile_function(spec, log=False, extrapolate=False, name="profile table"
 
         return _memoized(f2)
     if len(spec) == 3:
-        times, rho_in, vals = (np.asarray(x, dtype=float) for x in spec)
+        times, rho_in, vals = (np.array(x, dtype=float) for x in spec)     # copies (docstring)
         if vals.shape != (times.size, rho_in.size):
             raise ValueError("values must have shape (n_times, n_rho)")
         ps = [PchipInterpolator(rho_in, fwd(v), extrapolate=True) for v in vals]

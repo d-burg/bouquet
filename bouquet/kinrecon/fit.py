@@ -67,6 +67,13 @@ between the final center and the same center with the amplitudes set to zero (th
 center's geometry).  Where the corrections' current returns in the steady form is a model setting
 (:attr:`.current_model.CurrentModelSettings.corr_return`).
 
+A single-slice fit (no supplied state) also records the steady-state input check (``record["steady_state_check"]``,
+:func:`steady_state_check`; ON by default, ``reconstruct(..., steady_state_check=False)`` switches it off): after the
+fit, the slice's unfitted model steady state (the fit's starting parameters with the corrections zero, the fit's own
+core treatment) is solved and scored on the MSE chords by radius next to the fit's own result, and the solver is
+restored to the state the fit left.  A RECORD that steers nothing: the fit and its own counts (``n_solves``, solver
+iterations) are complete before it runs; its solves are counted on the forward model and stated in its record.
+
 Every prior, bound, step rule and stopping criterion is an explicit setting recorded in the
 result (they are decisions for the user; the defaults are this package's proposals).
 
@@ -230,6 +237,12 @@ IP_TARGETS = ("fitted", "measured")
 #: the state of a consistent solve at the first Jacobian column's parameter moved by this multiple of that column's
 #: own signed step (the first try used +1; -1 is the opposite step, as ``column_retry_opposite`` takes for a column).
 NOISE_RETRY_STEPS = (-1.0,)
+
+#: Radial classes of the MSE chords in the ``steady_state_check`` record: edges of ``|R_chord - R_axis|`` [m] (core
+#: below the first, mid between, outer above the second); a reporting convention of that record only.
+MSE_RADIAL_CLASSES_M = (0.15, 0.35)
+STEADY_STATE_CHECK_NOTE = ("a record for the reader: the slice's model steady state with no fit, scored on the same "
+                           "chords as the slice's own result; nothing reads it")
 
 
 
@@ -536,7 +549,7 @@ def convergence_label(stop, final_gn=None):
 
 
 def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, initial_profiles=None, label="fit",
-                state_fn=None, speed=None):
+                state_fn=None, speed=None, steady_state_check=True):
     """MAP reconstruction (module docstring).
 
     ``fm``: :class:`.forward.ForwardModel` in reconstruction mode (with the measurement set);
@@ -559,8 +572,13 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
     only; where a log was already open (a filter fit inside a series slice), this fit's entries are appended to it as
     well, marked ``nested_fit``.  With ``cfg.q_floor_branch_freeze="first_assembly"`` (a diagnostic option, off by
     default) the q floor's branch of the fit's first assembly is used for every later assembly of the fit.
+
+    ``steady_state_check`` (default True; single-slice fits only, i.e. without ``state_fn``): the record
+    ``record["steady_state_check"]`` (module docstring, :func:`steady_state_check`), made after the fit and its branch
+    log are complete; it steers nothing.
     """
     token = blog = parent = None
+    start_box = {}
     try:                          # the branch log: a record only, never raises
         parent = _cm.current_branch_log()
         blog, token = _cm.open_branch_log()
@@ -572,8 +590,9 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
         eff = _speed.effective(speed)                 # the default SpeedSettings() when none is given
         _speed.validate(eff, fm)
         with _speed.speed_scope(eff):                 # each in-process option set as in eff, also when off
-            return _reconstruct(fm, kin, src, cfg, settings=settings, params0=params0, start=start,
-                                initial_profiles=initial_profiles, label=label, state_fn=state_fn, speed=speed)
+            out = _reconstruct(fm, kin, src, cfg, settings=settings, params0=params0, start=start,
+                               initial_profiles=initial_profiles, label=label, state_fn=state_fn, speed=speed,
+                               start_box=start_box)
     finally:
         if ftok is not None:
             _cm.close_branch_freeze(ftok)
@@ -585,6 +604,23 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
                     parent.extend(dict(e, nested_fit=str(label)) for e in blog if isinstance(e, dict))
             except Exception:  # noqa: BLE001 -- a record must never end a fit
                 pass
+    if state_fn is None and isinstance(getattr(out, "record", None), dict):
+        # the steady-state input check: a record made after the fit is complete (module docstring)
+        with _speed.speed_scope(eff):
+            out.record["steady_state_check"] = _fit_steady_state_check(fm, kin, src, cfg, out, start_box,
+                                                                       steady_state_check, label)
+    return out
+
+
+def _fit_steady_state_check(fm, kin, src, cfg, fr, start_box, on, label):
+    """``record["steady_state_check"]`` of a single-slice fit (:func:`steady_state_check`); never raises."""
+    if not on:
+        return dict(computed=False, reason="switched off (steady_state_check=False)")
+    if fr.record.get("center") is None:
+        return dict(computed=False, reason=f"no consistent final center (fit status {fr.status!r})")
+    if cfg.core_relaxation in _cm.SAWTOOTH_RELAXATIONS or "params" not in start_box:
+        return dict(computed=False, reason=f"not built for core_relaxation={cfg.core_relaxation!r}")
+    return steady_state_check(fm, kin, src, cfg, start_box["params"], fm.ms, f"{label}:steady_check")
 
 
 def _note_jacobian(jacobians, log, i0, c, lab):
@@ -602,8 +638,8 @@ def _note_jacobian(jacobians, log, i0, c, lab):
 
 
 def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, initial_profiles=None, label="fit",
-                 state_fn=None, speed=None):
-    """:func:`reconstruct` with its branch log open."""
+                 state_fn=None, speed=None, start_box=None):
+    """:func:`reconstruct` with its branch log open (``start_box`` receives the starting parameters)."""
     t_all = time.perf_counter()
     speed_given = speed
     speed = _speed.check_speed(speed, fm)
@@ -636,6 +672,8 @@ def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, ini
     lo = np.array([_spec(n, settings)["bounds"][0] for n in names])
     hi = np.array([_spec(n, settings)["bounds"][1] for n in names])
     th = np.clip(th, lo, hi)
+    if start_box is not None:
+        start_box["params"] = _to_params(th, names, base)
     cap = np.array([settings.max_step.get("a_corr" if n.startswith("a_corr_") else n,
                                           FitSettings().max_step["a_corr" if n.startswith("a_corr_") else n])
                     for n in names])
@@ -1477,3 +1515,48 @@ def _final_extra(center, fm, ms):
                 chi2_detail=center["chi2"], boundary=fm.boundary_distance(),
                 excluded_channels={k: v for k, v in center["all_tab"].excluded.items()},
                 score_notes=list(center["all_tab"].notes))
+
+
+def mse_by_radius(fm, ms):
+    """chi^2/N of the MSE chords of the solver's present equilibrium by ``|R - R_axis|`` class
+    (:data:`MSE_RADIAL_CLASSES_M`)."""
+    tab = score(fm.gs, ms, groups=["mse"])
+    g = ms.groups["mse"]
+    use = np.asarray(tab.used("mse"), bool)
+    res = np.asarray(tab.residual("mse"), float)
+    ra = float(np.asarray(fm.gs.o_point, float)[0])
+    d = np.abs(np.asarray(g.geometry["r"], float)[use] - ra)
+    e1, e2 = MSE_RADIAL_CLASSES_M
+    out = dict(r_axis_m=ra, class_edges_m=list(MSE_RADIAL_CLASSES_M))
+    for name, m in (("core", d < e1), ("mid", (d >= e1) & (d <= e2)), ("outer", d > e2), ("all", np.ones_like(d, bool))):
+        out[name] = dict(n=int(np.count_nonzero(m)), chi2_per_n=float(np.mean(res[m] ** 2)) if np.any(m) else None)
+    return out
+
+
+def steady_state_check(fm, kin, src, cfg, params, ms, label):
+    """RECORD that steers nothing (``steady_state_check``; on by default in single-slice fits and series): the
+    slice's unfitted model steady state -- the consistent solve of ``params`` with the corrections zero, the core
+    treatment of ``cfg``, the slice's own inputs and Ip target -- scored on the MSE chords by radius
+    (:func:`mse_by_radius`), next to the score of the solver's present state (the slice's own result).  The solver's
+    state and probe correction are restored afterwards to the state found on entry.  Its solves are counted on the
+    forward model as every solve is and stated here (``n_solves``); callers take their own counts before it.  Never
+    raises."""
+    try:
+        if ms is None or "mse" not in ms.groups:
+            return dict(computed=False, reason="no MSE group at this slice")
+        own = mse_by_radius(fm, ms)
+        snap, pc = fm.snapshot(), fm.probe_correction.copy()
+        n0, t0 = fm.n_solves, time.perf_counter()
+        p = dict(params, a_corr=(0.0,) * len(cfg.corr_centers_rho), log_strength=None)
+        try:
+            r = _cm.consistent_solve(fm, kin, src, p, cfg, label=label)
+            ss = mse_by_radius(fm, ms) if r.converged else None
+            stats = (r.solve.stats if r.solve is not None else {}) or {}
+            st = dict(status=r.status, l_i=stats.get("l_i"), q_0=stats.get("q_0"), steady_state=ss)
+        finally:
+            fm.restore(snap)
+            fm.probe_correction = pc
+        return dict(computed=True, own=own, **st, n_solves=fm.n_solves - n0, wall_s=round(time.perf_counter() - t0, 2),
+                    note=STEADY_STATE_CHECK_NOTE)
+    except Exception as exc:  # noqa: BLE001 -- a record must never end a fit or a series
+        return dict(computed=False, reason=f"{type(exc).__name__}: {exc}"[:300])

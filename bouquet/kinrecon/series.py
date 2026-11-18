@@ -210,10 +210,13 @@ of their prior sigma (``correction_size``: per function and root-sum-square); ev
 correction per function (``accumulated_correction``: the sum of the absorbed filter amplitudes since the first slice
 in units of the prior sigma, the first slice's own corrections excluded, with a plain flag where a magnitude exceeds
 :data:`ACCUMULATED_CORRECTION_REPORT_LEVEL` -- a REPORTING level for the reader, not an acceptance criterion; it
-steers nothing).  Opt-in record (``steady_state_check=True``; it costs a pass loop per slice): the slice's unfitted
-model steady state (the single-slice core treatment, no corrections, the slice's own inputs) scored on the MSE
-chords by radius (:data:`MSE_RADIAL_CLASSES_M`) next to the slice's own result (``steady_state_check``); the solver
-is restored afterwards and the series continues from the slice's own result.
+steers nothing).  Steady-state input check (``steady_state_check``, ON by default, a RECORD that steers nothing; it
+costs a pass loop per slice): the slice's unfitted model steady state (the single-slice core treatment, no
+corrections, the slice's own inputs) scored on the MSE chords by radius (:data:`MSE_RADIAL_CLASSES_M`,
+:func:`.fit.steady_state_check`) next to the slice's own result; the solver is restored afterwards and the series
+continues from the slice's own result.  The first slice's record is its fit's (an ``"mse_fit"`` start; without a
+fit its own result is that steady state).  Slice solve counts exclude the check's solves, which its record states;
+the series total includes them.
 
 The vessel/eddy-current contribution through the previous slice's flux is not modeled
 (``vessel_eddy=False``; ``True`` is refused).
@@ -295,9 +298,8 @@ CARRY_CORE_RADIUS_RULES = ("floor_region",)
 #: a plain flag for the reader where the magnitude of a function's accumulated amplitude exceeds it.  Not an
 #: acceptance criterion; nothing reads it and it steers nothing.
 ACCUMULATED_CORRECTION_REPORT_LEVEL = 3.0
-#: Radial classes of the MSE chords in the opt-in ``steady_state_check`` record: edges of ``|R_chord - R_axis|`` [m]
-#: (core below the first, mid between, outer above the second); a reporting convention of that record only.
-MSE_RADIAL_CLASSES_M = (0.15, 0.35)
+#: Radial classes of the MSE chords in the ``steady_state_check`` record (:data:`.fit.MSE_RADIAL_CLASSES_M`).
+MSE_RADIAL_CLASSES_M = _fit.MSE_RADIAL_CLASSES_M
 
 
 @dataclass
@@ -332,7 +334,7 @@ class SeriesSettings:
     carry_core_radius: Optional[Any] = None              # "carried_outside_core" only: rho_tor,norm or "floor_region"
     carry_core_radius_scale: float = 1.0                 # "floor_region" only: multiplier (other than 1: diagnostic)
     carry_taper_width: float = 0.1                       # "carried_outside_core": taper width in rho_tor,norm
-    steady_state_check: bool = False                     # opt-in record: unfitted steady state scored on MSE
+    steady_state_check: bool = True                      # record (steers nothing): unfitted steady state on MSE
     dt_max: float = 1.0e-3                               # diffusion step [s]
     scheme: str = "trbdf2"
     sawtooth: str = "q_floor"                            # SAWTOOTH_MODES; the others only as explicit options
@@ -928,7 +930,9 @@ def _run_series(fm, slices, cfg, settings=None, start_psi=None, initial_profiles
         fm.set_psi(start_psi)
     if mode == "mse_fit":
         fr = _fit.reconstruct(fm, sl0.kinetics, sl0.sources, cfg0, s.initial_fit, params0=p_relaxed,
-                              initial_profiles=initial_profiles, label=f"{sl0.label}:mse_fit", **_speed_kw(speed))
+                              initial_profiles=initial_profiles, label=f"{sl0.label}:mse_fit",
+                              steady_state_check=s.steady_state_check, **_speed_kw(speed))
+        ssc0 = fr.record.get("steady_state_check")
         if fr.record.get("center") is None:
             c0 = fr.record.get("center0") or {}
             its = fr.record.get("iterations", [])
@@ -994,9 +998,14 @@ def _run_series(fm, slices, cfg, settings=None, start_psi=None, initial_profiles
         branch0 = _branch_record(blog0, res0)
         params0 = p_relaxed
         cce0 = dict(computed=False, reason=f"no fit at the first slice (initial mode '{mode}'): no corrections")
+        ssc0 = dict(computed=False, reason=f"no fit at the first slice (initial mode '{mode}'): its own result is the "
+                                           "unfitted model steady state")
+    # the first slice's steady-state check is its fit's; its solves are stated there, not in the slice's count
+    n_chk0 = int((ssc0 or {}).get("n_solves") or 0)
     ip_c0 = (float(res0.assembly["ip"]) if res0.converged and res0.assembly and res0.assembly.get("ip")
              else _slice_ip(sl0))
-    rec0 = _slice_record(fm, res0, sl0, sl0.label, dict(initial_mode=mode, fit=fitrec, n_solves=fm.n_solves - n0,
+    rec0 = _slice_record(fm, res0, sl0, sl0.label, dict(initial_mode=mode, fit=fitrec,
+                                                        n_solves=fm.n_solves - n0 - n_chk0,
                                                         ip_carried_A=ip_c0,
                                                         ip_offset_carried=ip_c0 / _slice_ip(sl0) - 1.0,
                                                         **({"zeff_flag": "the series' Z_eff source fails its tests or "
@@ -1011,7 +1020,9 @@ def _run_series(fm, slices, cfg, settings=None, start_psi=None, initial_profiles
     acc_corr = np.zeros(n_corr)            # accumulated absorbed filter amplitudes [prior sigmas] (a record only)
     n_absorbed = 0
     rec0["accumulated_correction"] = _accumulated_record(acc_corr, 0, s, sig_filter)
-    w0 = _sawtooth_warning(s, res0, float(times[0]), float(times[0]), [])
+    if s.steady_state_check:
+        rec0["steady_state_check"] = ssc0
+    w0 =_sawtooth_warning(s, res0, float(times[0]), float(times[0]), [])
     if w0 is not None:
         rec0["q_below_one"] = w0
         if w0["warn"]:
@@ -1244,7 +1255,7 @@ def _run_series(fm, slices, cfg, settings=None, start_psi=None, initial_profiles
             extra["zeff_flag"] = "the series' Z_eff source fails its tests or is unverified at this slice"
         rec = _slice_record(fm, res, sl, sl.label, extra)
         if s.steady_state_check and res.converged:
-            # opt-in record (module docstring); the solver is restored to the slice's own result afterwards
+            # a record (module docstring); the solver is restored to the slice's own result afterwards
             rec["steady_state_check"] = _steady_state_check(fm, sl, cfg, s, p_pred)
         w = _sawtooth_warning(s, res, float(tp), float(t1), holder.get("events", []))
         if w is not None:
@@ -1744,48 +1755,20 @@ def _accumulated_record(acc, n_absorbed, s, sigmas):
                       "the first slice's corrections start the series inside its state and are not counted"))
 
 
-def _mse_by_radius(fm, ms):
-    """chi^2/N of the MSE chords of the solver's present equilibrium by ``|R - R_axis|`` class
-    (:data:`MSE_RADIAL_CLASSES_M`)."""
-    tab = score(fm.gs, ms, groups=["mse"])
-    g = ms.groups["mse"]
-    use = np.asarray(tab.used("mse"), bool)
-    res = np.asarray(tab.residual("mse"), float)
-    ra = float(np.asarray(fm.gs.o_point, float)[0])
-    d = np.abs(np.asarray(g.geometry["r"], float)[use] - ra)
-    e1, e2 = MSE_RADIAL_CLASSES_M
-    out = dict(r_axis_m=ra, class_edges_m=list(MSE_RADIAL_CLASSES_M))
-    for name, m in (("core", d < e1), ("mid", (d >= e1) & (d <= e2)), ("outer", d > e2), ("all", np.ones_like(d, bool))):
-        out[name] = dict(n=int(np.count_nonzero(m)), chi2_per_n=float(np.mean(res[m] ** 2)) if np.any(m) else None)
-    return out
+_mse_by_radius = _fit.mse_by_radius
 
 
 def _steady_state_check(fm, sl, cfg, s, params):
-    """OPT-IN RECORD (``steady_state_check``): the slice's unfitted model steady state -- the single-slice core
-    treatment, no corrections, the slice's own inputs and Ip target -- scored on the MSE chords by radius, next to the
-    slice's own result on the same chords.  The solver is restored to the slice's result afterwards.  Never raises."""
+    """RECORD (``steady_state_check``, on by default; steers nothing): :func:`.fit.steady_state_check` of the slice
+    with the series' first-slice core treatment, the slice's own inputs and Ip target.  Never raises."""
     try:
         ms = sl.measurements
         if ms is None or "mse" not in ms.groups:
             return dict(computed=False, reason="no MSE group at this slice")
         if s.sawtooth not in ("q_floor", "off"):
             return dict(computed=False, reason=f"not built for sawtooth={s.sawtooth!r}")
-        own = _mse_by_radius(fm, ms)
-        snap, pc = fm.snapshot(), fm.probe_correction.copy()
-        n0, t0 = fm.n_solves, time.perf_counter()
         cfg_ss = dataclasses.replace(cfg, core_relaxation=FIRST_SLICE_CORE[s.sawtooth])
-        p = dict(params, a_corr=(0.0,) * len(cfg.corr_centers_rho), log_strength=None)
-        try:
-            r = _cm.consistent_solve(fm, sl.kinetics, sl.sources, p, cfg_ss, label=f"{sl.label}:steady_check")
-            ss = _mse_by_radius(fm, ms) if r.converged else None
-            stats = (r.solve.stats if r.solve is not None else {}) or {}
-            st = dict(status=r.status, l_i=stats.get("l_i"), q_0=stats.get("q_0"), steady_state=ss)
-        finally:
-            fm.restore(snap)
-            fm.probe_correction = pc
-        return dict(computed=True, own=own, **st, n_solves=fm.n_solves - n0, wall_s=round(time.perf_counter() - t0, 2),
-                    note=("a record for the reader (opt-in): the slice's model steady state with no fit, scored on the "
-                          "same chords as the slice's own result; nothing reads it"))
+        return _fit.steady_state_check(fm, sl.kinetics, sl.sources, cfg_ss, params, ms, f"{sl.label}:steady_check")
     except Exception as exc:  # noqa: BLE001 -- a record must never end a series
         return dict(computed=False, reason=f"{type(exc).__name__}: {exc}"[:300])
 

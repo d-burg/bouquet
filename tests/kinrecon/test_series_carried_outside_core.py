@@ -243,7 +243,7 @@ def test_core_radius_rule_and_settings():
     with pytest.raises(ValueError, match="read only by"):
         SE.SeriesSettings(filter=True, carry_core_radius=0.3)
     d = SE.SeriesSettings().as_dict()
-    assert d["filter_correction"] == "in_window" and d["carry_core_radius"] is None and d["steady_state_check"] is False
+    assert d["filter_correction"] == "in_window" and d["carry_core_radius"] is None and d["steady_state_check"] is True
 
 
 @pytest.mark.parametrize("form", ["in_window", "steady_response", "carried_outside_core"])

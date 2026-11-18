@@ -2,9 +2,9 @@
 
 Fixture as ``test_default_core_live.py`` (the truth of ``test_fit_solver.py`` and its noisy synthetic measurements).
 From the same starting state, the default consistent solve (q floor, default budget and acceleration) and the same
-solve with ``pass_relaxation=0.5`` and with ``pass_cycle_relaxation=0.5`` all reach ``"consistent"`` by the
-unchanged criterion, and they reach the same state to within the loop's own state tests (axis within
-``state_axis_m``, l_i, q0 and Ip within ``state_rel``); the options are recorded only where set.  One fit with
+solve with the EXPERIMENTAL ``pass_relaxation=0.5`` both reach ``"consistent"`` by the unchanged criterion, and
+they reach the same state to within the loop's own state tests (axis within ``state_axis_m``, l_i, q0 and Ip within
+``state_rel``); the option is recorded only where set, with its factor-of-two note.  One fit with
 ``pass_relaxation=0.5`` and the fit options ``noise_retries=1`` and ``stall_diagnostics=True`` stops by a stopping
 test and records the options.  No setting, tolerance or budget of the package is changed by this test.
 
@@ -30,7 +30,7 @@ pytestmark = [
                        reason="needs OpenFUSIONToolkit and the public synthetic fixtures"),
 ]
 
-ARMS = (("default", {}), ("relaxation", dict(pass_relaxation=0.5)), ("cycle", dict(pass_cycle_relaxation=0.5)))
+ARMS = (("default", {}), ("relaxation", dict(pass_relaxation=0.5)))
 
 
 def child(out):
@@ -99,7 +99,7 @@ def test_loop_options_reach_the_default_state(result):
     d = result["default"]
     assert d["status"] == "consistent", d
     assert d["robustness"] is None and not any(d["relaxation"])
-    for name in ("relaxation", "cycle"):
+    for name in ("relaxation",):
         r = result[name]
         assert r["status"] == "consistent", (name, r)
         assert r["robustness"] is not None
@@ -109,16 +109,7 @@ def test_loop_options_reach_the_default_state(result):
             assert abs(r["stats"][k] - d["stats"][k]) / abs(d["stats"][k]) < crit["state_rel"], (name, k)
     assert result["relaxation"]["robustness"]["pass_relaxation"] == 0.5
     assert all(v == 0.5 for v in result["relaxation"]["relaxation"][1:-1])
-    cyc = result["cycle"]["robustness"]["cycle_relaxation"]
-    assert cyc["beta"] == 0.5 and cyc["window"] == 2
-    # engaged only where the loop's own residual reversed on two consecutive passes
-    rc = result["cycle"]["residual_cos"]
-    if cyc["engaged_at_pass"] is not None:
-        k = cyc["engaged_at_pass"]
-        assert rc[k] < 0.0 and rc[k - 1] < 0.0
-    else:
-        assert not any(rc[i] is not None and rc[i] < 0.0 and rc[i - 1] is not None and rc[i - 1] < 0.0
-                       for i in range(1, len(rc)))
+    assert "factor-of-two" in result["relaxation"]["robustness"]["pass_relaxation_note"]
 
 
 def test_fit_with_options_stops_by_a_stopping_test(result):

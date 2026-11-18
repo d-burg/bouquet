@@ -3,19 +3,23 @@
 Pass loop (``current_model.consistent_solve``; the mock of ``test_pass_loop_safeguard.py``: the solve stores its
 input, the next assembly returns ``G`` of it, so the loop is a fixed-point iteration with a known map):
 
-* defaults: every option is off, the loop record carries no ``robustness`` entry and no pass is relaxed, and
+* defaults: the option is off, the loop record carries no ``robustness`` entry and no pass is relaxed, and
   ``residual_cos`` (a record only) is the cosine of consecutive pass residuals;
-* a synthetic TWO-CYCLE (``G`` reflects the input through the fixed point): the plain loop never closes (the residual
-  keeps its size), ``pass_cycle_relaxation`` engages after ``pass_cycle_window`` reversals and closes it at the fixed
-  point by the unchanged criterion;
 * a synthetic PLATEAU (an oscillating mode with eigenvalue -0.93: the plain loop closes far too slowly for the
-  budget): under-relaxation closes it within the unchanged budget; the fixed point is the same;
+  budget): the EXPERIMENTAL under-relaxation closes it within the unchanged budget; the fixed point is the same, and
+  the record carries the note that the option does not pass the factor-of-two test;
+* the Anderson step under relaxation is the mixing-parameter form ``x + beta f - (dX + beta dF) gamma`` (checked
+  against an independent evaluation on a map with unequal modes), and the plain relaxed step ``x + beta f``;
+* the returned assembly of a relaxed pass names the input actually solved;
 * an under-relaxed input that does not solve falls back to the plain input (as a mixed one does).
 
 Fit (``fit.reconstruct`` on the linear mock of ``test_fit_unit.py``):
 
-* ``noise_retries``: a failed noise re-solve ends the fit by default (``jacobian_failed``); with one retry the noise
-  is measured from the stated other starting state and the fit converges; the attempt is recorded;
+* ``noise_retries`` (0 or 1): a failed noise re-solve ends the fit by default (``jacobian_failed``); with the retry
+  the noise is measured from the stated other starting state (the state of a consistent solve at the first column's
+  parameter moved by MINUS that column's step) and the fit converges; the retry's method is recorded as a new draw;
+  no retry is made when the first measurement succeeded; a retry whose starting state lies outside the parameter
+  bounds is skipped without a solve;
 * ``stall_diagnostics=True`` (record only): on a quadratic model whose forward-difference columns are biased and
   whose trials are all rejected (a stall), the fit is the default's stall in every value; the record says that the
   stopping tests on central-difference columns would hold there (test a) and carries the noise re-measured at the
@@ -79,36 +83,37 @@ def _install_loop(monkeypatch, fm, G):
     monkeypatch.setattr(CM, "q_check", lambda lag, asm, stats, cfg: dict(passed=True, max_rel=0.0))
 
 
-def two_cycle(x):
-    """Reflection through the fixed point plus a small non-smooth part: the plain passes alternate between two
-    states forever; the reflection's eigenvalue is exactly -1."""
-    d = x - XSTAR
-    return XSTAR - d + 0.05 * np.abs(d) * np.sign(RHO - 0.5)
-
-
 def plateau(x):
     """An oscillating mode with eigenvalue -0.93: plain passes close, but far too slowly for the budget."""
     return XSTAR - 0.93 * (x - XSTAR)
 
 
+LAMS = np.linspace(-0.9, 0.6, N)
+
+
+def unequal(x):
+    """A linear map with unequal eigenvalues (-0.9 .. 0.6, one per point): a one-difference Anderson step is not
+    exact on it, so the plain and the mixing-parameter forms of the step differ."""
+    return XSTAR + LAMS * (x - XSTAR)
+
+
 def test_defaults_are_off_and_validated():
     cfg = CM.CurrentModelSettings(r0=1.0)
-    assert cfg.pass_relaxation is None and cfg.pass_cycle_relaxation is None and cfg.pass_cycle_window == 2
+    assert cfg.pass_relaxation is None
+    assert not hasattr(cfg, "pass_cycle_relaxation") and not hasattr(cfg, "pass_cycle_window")
     fs = FIT.FitSettings()
     assert fs.noise_retries == 0 and fs.stall_diagnostics is False
+    assert FIT.NOISE_RETRY_STEPS == (-1.0,)
     for bad in (0.0, 1.0, -0.5, 1.5, float("nan"), True):
         with pytest.raises(ValueError):
             CM.CurrentModelSettings(r0=1.0, pass_relaxation=bad)
-        with pytest.raises(ValueError):
-            CM.CurrentModelSettings(r0=1.0, pass_cycle_relaxation=bad)
-    for bad in (0, -1, 1.5, True):
-        with pytest.raises(ValueError):
-            CM.CurrentModelSettings(r0=1.0, pass_cycle_window=bad)
-    for bad in (-1, 1.5, True, len(FIT.NOISE_RETRY_STEPS) + 1):
+    for bad in (-1, 1.5, True, 2):
         with pytest.raises(ValueError):
             FIT.FitSettings(noise_retries=bad)
+    assert FIT.FitSettings(noise_retries=1).noise_retries == 1
     with pytest.raises(ValueError):
         FIT.FitSettings(stall_diagnostics="central")
+    assert "factor-of-two" in CM.PASS_RELAXATION_NOTE and "NOT" in CM.PASS_RELAXATION_NOTE
 
 
 @pytest.mark.parametrize("accel", ["anderson", "none"])
@@ -118,8 +123,7 @@ def test_default_loop_records_the_residual_cosine_and_no_option(monkeypatch, acc
     res = CM.consistent_solve(fm, None, None, {}, CM.CurrentModelSettings(r0=1.0, pass_acceleration=accel), ip=1.0)
     assert "robustness" not in res.record
     recs = res.record["passes"]
-    assert not any(r.get("relaxation") or r.get("relaxed_plain_step") or r.get("cycle_relaxation_engaged")
-                   for r in recs)
+    assert not any(r.get("relaxation") or r.get("relaxed_plain_step") for r in recs)
     xs = fm.inputs
     resid =[plateau(xs[k - 1]) - xs[k - 1] for k in range(1, len(xs))]   # residual seen at pass k
     for k in range(2, len(xs)):
@@ -128,41 +132,39 @@ def test_default_loop_records_the_residual_cosine_and_no_option(monkeypatch, acc
                                                         rel=1e-9, abs=1e-12)
 
 
-def test_two_cycle_closes_with_the_cycle_relaxation(monkeypatch):
-    out = {}
-    for opt in (None, 0.5):
-        fm = LoopFM()
-        _install_loop(monkeypatch, fm, two_cycle)
-        cfg = CM.CurrentModelSettings(r0=1.0, pass_acceleration="none", pass_cycle_relaxation=opt)
-        out[opt] = (CM.consistent_solve(fm, None, None, {}, cfg, ip=1.0), fm, cfg)
-    res0, fm0, cfg0 = out[None]
-    assert res0.status == "max_passes"
-    # the plain loop alternates between two states: every residual reverses the previous one
-    assert all(r["residual_cos"] < -0.9 for r in res0.record["passes"][2:])
-    res, fm, cfg = out[0.5]
-    assert res.converged and res.status == "consistent"
-    assert res.record["passes"][-1]["dj"] < cfg.pass_tol                  # the unchanged criterion
-    np.testing.assert_allclose(fm.state, XSTAR, rtol=0, atol=1e-4)
-    cyc = res.record["robustness"]["cycle_relaxation"]
-    k = cyc["engaged_at_pass"]
-    # the first residual_cos exists at pass 2; two consecutive reversals engage it at pass 3
-    assert k == 3 and cyc["beta"] == 0.5 and cyc["window"] == 2
-    recs = res.record["passes"]
-    assert recs[k]["cycle_relaxation_engaged"] and recs[k]["relaxed_plain_step"]
-    # the engaging pass takes the midpoint of the last input and its image
-    xs = fm.inputs
-    np.testing.assert_allclose(xs[k], xs[k - 1] + 0.5 * (two_cycle(xs[k - 1]) - xs[k - 1]), rtol=0, atol=1e-14)
-    assert all(r.get("relaxation") == 0.5 for r in recs[k:-1])
-    assert not any(r.get("relaxation") for r in recs[:k])
-
-
-def test_cycle_window_counts_consecutive_reversals(monkeypatch):
+def test_relaxed_steps_have_the_stated_form(monkeypatch):
+    """Pass 1 is the plain relaxed step x + beta f; pass 2 (two history entries, no restart possible yet) is the
+    mixing-parameter Anderson step x + beta f - (dX + beta dF) gamma, gamma = lstsq(dF, f)."""
+    beta = 0.5
     fm = LoopFM()
-    _install_loop(monkeypatch, fm, two_cycle)
-    cfg = CM.CurrentModelSettings(r0=1.0, pass_acceleration="none", pass_cycle_relaxation=0.5, pass_cycle_window=4)
+    _install_loop(monkeypatch, fm, unequal)
+    cfg = CM.CurrentModelSettings(r0=1.0, pass_relaxation=beta, max_passes=4)
+    res = CM.consistent_solve(fm, None, None, {}, cfg, ip=1.0)
+    x0, x1, x2 = fm.inputs[0], fm.inputs[1], fm.inputs[2]
+    f0, f1 = unequal(x0) - x0, unequal(x1) - x1
+    np.testing.assert_allclose(x1, x0 + beta * f0, rtol=0, atol=1e-13)
+    dF, dX = (f1 - f0)[:, None], (x1 - x0)[:, None]
+    gam = np.linalg.lstsq(dF, f1, rcond=None)[0]
+    want = x1 + beta * f1 - (dX + beta * dF) @ gam
+    np.testing.assert_allclose(x2, want, rtol=0, atol=1e-12)
+    # the undamped form differs on this map by far more than the tolerance (so the check above has teeth)
+    plain = x1 + f1 - (dX + dF) @ gam
+    assert np.max(np.abs(plain - want)) > 1e-6
+    recs = res.record["passes"]
+    assert recs[1].get("relaxed_plain_step") and recs[2].get("anderson_mixed") and recs[2].get("relaxation") == beta
+    assert res.record["robustness"] == dict(pass_relaxation=beta, pass_relaxation_note=CM.PASS_RELAXATION_NOTE)
+
+
+def test_returned_assembly_names_the_relaxed_input(monkeypatch):
+    """A loop that closes after relaxed passes returns the assembly with the input actually solved."""
+    fm = LoopFM()
+    _install_loop(monkeypatch, fm, plateau)
+    cfg = CM.CurrentModelSettings(r0=1.0, pass_acceleration="none", pass_relaxation=0.5)
     res = CM.consistent_solve(fm, None, None, {}, cfg, ip=1.0)
     assert res.converged
-    assert res.record["robustness"]["cycle_relaxation"]["engaged_at_pass"] == 5
+    used = res.assembly
+    assert "jphi_cmp_used" in used and np.array_equal(used["jphi"], fm.inputs[-1])
+    assert not np.array_equal(used["jphi"], used["jphi_assembled"])
 
 
 @pytest.mark.parametrize("accel", ["anderson", "none"])
@@ -231,9 +233,12 @@ def _install_fit(monkeypatch, fm, resid, fail=None, reject_trials=False):
     """``resid(theta)``: the data residuals; ``fail(label)``: whether that consistent solve fails;
     ``reject_trials``: every LM trial returns a chi^2 far above the center's (a stall)."""
     labels = []
+    calls = []
 
     def consistent(fm_, kin, src, params, cfg, start, z0, label, initial_profiles=None, state_fn=None):
         labels.append(label)
+        calls.append(dict(label=label, theta=params["log_strength"],
+                          start=(None if start is None else (start.get("theta") or (None,))[0])))
         fm_.n_solves += 3
         ok = not (fail is not None and fail(label))
         if ok:
@@ -254,7 +259,15 @@ def _install_fit(monkeypatch, fm, resid, fail=None, reject_trials=False):
     monkeypatch.setattr(FIT, "score", lambda *a, **k: SimpleNamespace(model={}, excluded={}, notes=[]))
     monkeypatch.setattr(FIT, "chi2_summary", lambda tab: {"total": (0.0, 0, 0.0)})
     monkeypatch.setattr(FIT, "constraints_table", lambda *a, **k: {})
+    _CALLS[:] = [calls]           # every consistent solve of the last installed mock: label, parameter, start state
     return labels
+
+
+_CALLS = []
+
+
+def _calls():
+    return _CALLS[0]
 
 
 def _fit(fm, fs, theta0):
@@ -286,19 +299,46 @@ def test_noise_retry_from_the_stated_state(monkeypatch):
     assert any(lab.endswith(":noise_state_retry1") for lab in labels)
     assert any(lab.endswith(":noise_retry1") for lab in labels)
     assert out.record["robustness"]["noise_retried"] is True
+    # the starting state is that of a consistent solve at the center's parameter MINUS the first column's step,
+    # and the retry re-solves the center's parameters FROM that state (not from the center)
+    calls = _calls()
+    c0 = next(c for c in calls if c["label"].endswith(":center0"))
+    st = next(c for c in calls if c["label"].endswith(":noise_state_retry1"))
+    re = next(c for c in calls if c["label"].endswith(":noise_retry1"))
+    assert st["theta"] == pytest.approx(c0["theta"] - h, abs=1e-15)
+    assert re["theta"] == pytest.approx(c0["theta"], abs=1e-15)
+    assert re["start"] == pytest.approx(st["theta"], abs=1e-15) and re["start"] != pytest.approx(c0["theta"])
+    # the record says the noise came from the retry, as a new draw
+    assert rt["measured_by_retry"] is True and rt["first_method"].startswith("consistent re-solve")
+    assert out.record["noise"]["method"].startswith("RETRY") and "NEW noise draw" in out.record["noise"]["method"]
 
 
-def test_noise_retry_count_is_bounded(monkeypatch):
+def test_no_retry_when_the_first_measurement_succeeds(monkeypatch):
     lin = lambda th: A * (th - TRUE) + B  # noqa: E731
-    every = lambda lab: ":noise" in lab and "noise_state" not in lab  # noqa: E731 -- every noise re-solve fails
+    out = {}
+    for n in (0, 1):
+        fm = FitFM()
+        labels = _install_fit(monkeypatch, fm, lin)
+        out[n] = (_fit(fm, FIT.FitSettings(free=("log_strength", "a_corr"), noise_retries=n), 0.5), labels)
+    (o0, l0), (o1, l1) = out[0], out[1]
+    assert not any("retry" in lab for lab in l1) and l1 == l0
+    assert "retries" not in o1.record["noise"] and o1.record["noise"] == o0.record["noise"]
+    assert np.array_equal(o0.theta, o1.theta) and o1.record["robustness"]["noise_retried"] is False
+
+
+def test_retry_outside_the_bounds_is_skipped(monkeypatch):
+    lin = lambda th: A * (th - TRUE) + B  # noqa: E731
+    first = lambda lab: lab.endswith(":noise")  # noqa: E731
+    lo = FIT.PARAMETERS["log_strength"]["bounds"][0]
+    h = FIT.PARAMETERS["log_strength"]["step0"]
     fm = FitFM()
-    labels = _install_fit(monkeypatch, fm, lin, fail=every)
-    out = _fit(fm, FIT.FitSettings(free=("log_strength", "a_corr"), noise_retries=2), 0.5)
+    labels = _install_fit(monkeypatch, fm, lin, fail=first)
+    out = _fit(fm, FIT.FitSettings(free=("log_strength", "a_corr"), noise_retries=1), lo + 0.5 * h)
     assert out.status == "jacobian_failed"
     att = out.record["noise"]["retries"]["attempts"]
-    assert [a["retry"] for a in att] == [1, 2] and [a["step_multiple"] for a in att] == [-1.0, 2.0]
-    assert all(a["status"] == "solve_failed" for a in att)
-    assert [lab.rsplit(":", 1)[-1] for lab in labels if "noise_retry" in lab] == ["noise_retry1", "noise_retry2"]
+    assert len(att) == 1 and att[0]["status"].startswith("starting state outside the parameter bounds")
+    assert not any("noise_state_retry" in lab or "noise_retry" in lab for lab in labels)
+    assert out.record["noise"]["retries"]["measured_by_retry"] is False
 
 
 Q = np.array([4.0, 3.0, -2.0, 5.0])

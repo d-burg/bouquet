@@ -794,14 +794,19 @@ def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, 
     the cut-cell setting in effect and the edge-taper setting, :meth:`.forward.ForwardModel.solver_record`) and
     the totals.  ``speed``: opt-in :class:`.speed.SpeedSettings` (parallel Jacobian columns of the fits, the memo of
     pure evaluations, the indexed point location, reused statistics; changes no result; recorded as ``speed`` when
-    given without workers -- with workers, every Jacobian's ``parallel`` record holds it).
+    given without workers -- with workers, every Jacobian's ``parallel`` record holds it).  The options in effect
+    are recorded as ``speed_in_effect`` in every series record, also when ``speed`` is not given
+    (:func:`.speed.in_effect`).
     """
     from . import speed as _speed
     with _speed.speed_scope(_speed.validate(speed, fm)):
+        effect = _speed.in_effect(speed)
         out = _run_series(fm, slices, cfg, settings=settings, start_psi=start_psi, initial_profiles=initial_profiles,
                           callback=callback, speed=speed)
+    if isinstance(out, dict):
+        out["speed_in_effect"] = effect                    # the options in effect, in every series record
     if speed is not None and not speed.parallel and isinstance(out, dict):
-        out["speed"] = dict(settings=speed.as_dict())      # the default record is unchanged
+        out["speed"] = dict(settings=speed.as_dict())      # the settings as given
     return out
 
 

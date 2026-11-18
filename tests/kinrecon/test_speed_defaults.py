@@ -123,3 +123,24 @@ def test_coefficient_memo_stores_table_inputs_and_changes_no_value():
         on = [v for t in times for v in _values(on_sol, rf, t)]
     assert len(on_sol._base_cache) == 3                         # three distinct times stored, the fourth a hit
     assert all(np.array_equal(a, b) for a, b in zip(off, on))
+
+
+# ---------------------------------------------------------------------------------------------------- 3. the record
+def _effect(memo, mesh_index, reuse_stats, workers=1, factor=3.0, floor=60.0):
+    return dict(memo=memo, mesh_index=mesh_index, reuse_stats=reuse_stats,
+                workers=dict(column_workers=workers, column_time_factor=factor, column_time_floor_s=floor))
+
+
+def test_series_record_holds_the_options_in_effect(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+    from bouquet.kinrecon import series as SE
+    monkeypatch.setattr(SE, "_run_series", lambda *a, **k: dict(status="completed"))
+    monkeypatch.setattr(SP, "_openmp_max_threads", lambda: None)
+    fm = SimpleNamespace(settings=SimpleNamespace(nthreads=1))
+    assert SE.run_series(fm, [], None)["speed_in_effect"] == _effect(False, False, False)
+    memo = SP.SpeedSettings(memo=True, mesh_index=True, reuse_stats=False)
+    assert SE.run_series(fm, [], None, speed=memo)["speed_in_effect"] == _effect(True, True, False)
+    if sys.platform.startswith("linux"):
+        par = SP.SpeedSettings(column_workers=2, memo=True, mesh_index=False, reuse_stats=True, column_time_factor=2.0)
+        assert SE.run_series(fm, [], None, speed=par)["speed_in_effect"] == _effect(True, False, True, 2, 2.0)

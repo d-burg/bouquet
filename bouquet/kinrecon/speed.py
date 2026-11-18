@@ -221,6 +221,21 @@ def validate(speed, fm):
     return check_speed(speed, fm)
 
 
+def in_effect(speed):
+    """The speed options in effect, as written into every fit and series record (``speed_in_effect``): ``memo``,
+    ``mesh_index`` and ``reuse_stats`` read from the process-wide switches at the moment of the call (inside the
+    entry point's :func:`speed_scope`, so what the run actually uses), and under ``workers`` the worker settings of
+    ``speed`` (``column_workers`` and the time bound; ``column_workers = 1``: one process).  A record only."""
+    from . import diagnostics as _diag
+    from . import forward as _fw
+    from .current import diffusion as _dif
+    sp = speed if isinstance(speed, SpeedSettings) else SpeedSettings()
+    return dict(memo=bool(_dif._SPEED_MEMO["on"]), mesh_index=bool(_diag.MESH_INDEX["on"]),
+                reuse_stats=bool(_fw.SPEED_OPTIONS["reuse_stats"]),
+                workers=dict(column_workers=int(sp.column_workers), column_time_factor=float(sp.column_time_factor),
+                             column_time_floor_s=float(sp.column_time_floor_s)))
+
+
 # ============================================================== the time bound of a worker column
 #: The longest consistent solve (wall seconds) made so far in this process and reported by its workers.
 _SOLVE_WALL = dict(longest=0.0)

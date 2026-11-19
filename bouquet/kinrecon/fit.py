@@ -67,9 +67,12 @@ between the final center and the same center with the amplitudes set to zero (th
 center's geometry).  Where the corrections' current returns in the steady form is a model setting
 (:attr:`.current_model.CurrentModelSettings.corr_return`).
 
-Every result with a final center also records, as a record that steers nothing, the solver's vertical-stability coil
+Every result with a final center also records, as records that steer nothing, the solver's vertical-stability coil
 current and each of its coils' own current and total (``record["coil_currents"]``,
-:meth:`.forward.ForwardModel.coil_current_record`).
+:meth:`.forward.ForwardModel.coil_current_record`), and how far the fitted surfaces sit from those of the equilibrium
+that produced the kinetic profiles in outboard-midplane major radius (``record["radial_coordinate"]``,
+:meth:`.forward.ForwardModel.midplane_radius_record`; "not supplied" unless the kinetic inputs carry that
+equilibrium's table).
 
 A single-slice fit (no supplied state) also records the steady-state input check (``record["steady_state_check"]``,
 :func:`steady_state_check`; ON by default, ``reconstruct(..., steady_state_check=False)`` switches it off): after the
@@ -869,7 +872,7 @@ def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, ini
 
     if not names:
         restore_center(center)
-        extra = _final_extra(center, fm, ms)
+        extra = _final_extra(center, fm, ms, kin)
         out = finish("no_free_parameters", center, None, extra)
         out.record["center"] = center
         return out
@@ -1380,7 +1383,7 @@ def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, ini
     else:
         Jf, jf_info = jacobian(center, f"{label}:final")
     restore_center(center)
-    extra = _final_extra(center, fm, ms)
+    extra = _final_extra(center, fm, ms, kin)
     extra["final_jacobian"] = jf_info
     extra["final_stopping_tests"] = stop
     out = finish(status if Jf is not None else status + "_no_final_jacobian", center, Jf, extra, jinfo=jf_info)
@@ -1508,7 +1511,7 @@ def ip_record(tab, ms, params, fitted):
                 pull_measured_minus_fitted_sigma=(None if model is None or not sig > 0 else (meas - model) / sig))
 
 
-def _final_extra(center, fm, ms):
+def _final_extra(center, fm, ms, kin=None):
     asm = center["res"].assembly
     return dict(final_center=dict(passes=center["res"].passes, passes_record=center["res"].record.get("passes"),
                                   stats=center["res"].solve.stats, solve_status=center["res"].solve.status,
@@ -1518,6 +1521,7 @@ def _final_extra(center, fm, ms):
                 constraints=constraints_table(center["all_tab"], ms, list(center["all_tab"].model)),
                 chi2_detail=center["chi2"], boundary=fm.boundary_distance(),
                 coil_currents=_coil_currents(fm, center["res"].solve),
+                radial_coordinate=_radial_coordinate(fm, kin),
                 excluded_channels={k: v for k, v in center["all_tab"].excluded.items()},
                 score_notes=list(center["all_tab"].notes))
 
@@ -1529,6 +1533,15 @@ def _coil_currents(fm, solve):
     if get is None:
         return dict(computed=False, reason="the forward model has no coil-current record")
     return get(solve)
+
+
+def _radial_coordinate(fm, kin):
+    """The radial-coordinate record of the present state (:meth:`.forward.ForwardModel.midplane_radius_record`)
+    against the producing equilibrium's midplane table carried by the kinetic inputs, when supplied; a record only."""
+    get = getattr(fm, "midplane_radius_record", None)
+    if get is None:
+        return dict(computed=False, reason="the forward model has no radial-coordinate record")
+    return get(getattr(kin, "midplane_radius", None))
 
 
 def mse_by_radius(fm, ms):

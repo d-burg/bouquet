@@ -113,6 +113,10 @@ class KineticInputs:
     provenance: Dict[str, str] = field(default_factory=dict)
     record: Dict[str, Any] = field(default_factory=dict)
     source: str = ""
+    #: The producing equilibrium's outboard-midplane major radius against its psi_N (``psi_n``, ``r_m`` [m],
+    #: ``source``), when the caller supplied it (:func:`assemble_kinetic_inputs`); read only by the fit's
+    #: radial-coordinate record, never by the model.
+    midplane_radius: Optional[Dict[str, Any]] = None
 
     def _f(self, name):
         cache = self.__dict__.setdefault("_interp", {})
@@ -145,7 +149,7 @@ class KineticInputs:
 def assemble_kinetic_inputs(x, ne, te, ti, *, zeff_candidates, zeff_source, z_imp, coordinate="rho_tor_norm",
                             n_fast=None, n_fast_source=None, psi_n_to_rho=None,
                             mapping_source=None, provenance=None, ni_reference=None, source="",
-                            disagreement_range=(0.0, 0.9), zeff_rule=None):
+                            disagreement_range=(0.0, 0.9), zeff_rule=None, midplane_radius=None):
     """Build :class:`KineticInputs` (module docstring).
 
     Parameters
@@ -180,6 +184,11 @@ def assemble_kinetic_inputs(x, ne, te, ti, *, zeff_candidates, zeff_source, z_im
         inputs are then placed by rho (``mapping_source`` names that equilibrium).
     ni_reference : array on x, optional
         A main-ion density from the producer (e.g. a transport code's), compared, never used.
+    midplane_radius : (psi_n, r_m) or (psi_n, r_m, source), optional
+        The producing equilibrium's outboard-midplane major radius [m] against its psi_N (both strictly
+        increasing, finite).  Kept on the result for the fit's radial-coordinate record (how far the fitted
+        surfaces sit from the producer's in real space); it does not enter the model.  The record says
+        "not supplied" without it.
     """
     if coordinate not in COORDINATES:
         raise ValueError(f"coordinate must be one of {COORDINATES}")
@@ -329,8 +338,21 @@ def assemble_kinetic_inputs(x, ne, te, ti, *, zeff_candidates, zeff_source, z_im
     if xs[0] > 1e-9 or xs[-1] < 1.0 - 1e-9:
         raise ValueError(f"kinetic inputs must cover [0, 1] in {coord} after mapping (got [{xs[0]:.4g}, {xs[-1]:.4g}]); "
                          "no extrapolation is done")
+    mid = None
+    if midplane_radius is not None:
+        mp, mr = (np.asarray(v, dtype=float) for v in midplane_radius[:2])
+        if mp.ndim != 1 or mp.shape != mr.shape or mp.size < 2 or not (np.all(np.isfinite(mp))
+                                                                       and np.all(np.isfinite(mr))):
+            raise ValueError("midplane_radius must be two finite 1-D arrays of the same length (psi_n, r_m)")
+        if np.any(np.diff(mp) <= 0) or np.any(np.diff(mr) <= 0) or mr[0] <= 0:
+            raise ValueError("midplane_radius: psi_n and r_m must increase strictly (outboard midplane, r_m > 0)")
+        mid = dict(psi_n=mp, r_m=mr, source=str(midplane_radius[2]) if len(midplane_radius) > 2 else
+                   (mapping_source or "the producing equilibrium"))
+    rec["midplane_radius"] = ("not supplied" if mid is None else
+                              f"supplied: {mid['source']}, {mp.size} points, psi_N {mp[0]:.4g} to {mp[-1]:.4g}")
     return KineticInputs(coordinate=coord, x=xs, ne=out["ne"], te=out["te"], ti=out["ti"], zeff=zeff, ni=ni,
-                         nimp=nimp, n_fast=nf, z_imp=z, provenance=prov, record=rec, source=source)
+                         nimp=nimp, n_fast=nf, z_imp=z, provenance=prov, record=rec, source=source,
+                         midplane_radius=mid)
 
 
 def _checked_source(x, coordinate, ne, n_fast, n_fast_none, z, specs, cand, psi_n_to_rho, opts, rec):

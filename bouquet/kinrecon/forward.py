@@ -1331,3 +1331,44 @@ class ForwardModel:
         out["strike_points_reference"] = ("reference_points" if ref_sp else
                                           "none given: solved strike points listed without a displacement")
         return out
+
+    def midplane_radius_record(self, table):
+        """RECORD that steers nothing: how far the solved flux surfaces sit from those of the equilibrium that
+        produced the kinetic profiles, in real space.  ``table``: that equilibrium's outboard-midplane major radius
+        against its psi_N (``{"psi_n", "r_m", "source"}``, :attr:`.kinetics.KineticInputs.midplane_radius`) or
+        None ("not supplied").  Ours: the outboard crossing of each psi_N on the horizontal line through the solved
+        magnetic axis (0.25 mm scan from 1 mm off the axis, the axis itself at psi_N = 0, interpolated in
+        sqrt(psi_N); the edge by the LCFS crossing).
+        ``dR = R_ours - R_table`` at every table point with 0 <= psi_N <= 1 (positive: our surface lies further
+        out); recorded: the largest ``|dR|`` with its psi_N and both radii, and ``dR`` at the edge (the table
+        interpolated linearly in psi_N to 1; None when the table stops short of 1).  Never raises."""
+        if table is None:
+            return dict(supplied=False, note="not supplied")
+        try:
+            tp, tr = (np.asarray(table[k], float) for k in ("psi_n", "r_m"))
+            gs = self.gs
+            ra, za = (float(v) for v in gs.o_point)
+            psi_fn, fe = self._psi_direct()
+            r_edge = self._lcfs_crossing(max(float(tr[-1]), ra + 0.01), za, ra, psi_fn)
+            if not np.isfinite(r_edge):
+                return dict(supplied=True, computed=False, reason="no outboard LCFS crossing on the axis line")
+            r = np.arange(ra + 1e-3, r_edge, 2.5e-4)
+            pn = np.asarray(gs.abspsi_to_normalized(psi_fn(np.column_stack((r, np.full_like(r, za))))), float)
+            del fe
+            r, s = np.concatenate(([ra], r, [r_edge])), np.sqrt(np.concatenate(([0.0], pn, [1.0])))
+            if not (np.all(np.isfinite(s)) and np.all(np.diff(s) > 0)):
+                return dict(supplied=True, computed=False, reason="solved psi_N not strictly increasing on the line")
+            m = (tp >= 0.0) & (tp <= 1.0)
+            ours = np.interp(np.sqrt(tp[m]), s, r)
+            d = ours - tr[m]
+            i = int(np.argmax(np.abs(d)))
+            edge_t = float(np.interp(1.0, tp, tr)) if tp[-1] >= 1.0 else None
+            return dict(supplied=True, computed=True, source=table.get("source"), midplane_z_m=za,
+                        n_points=int(m.sum()), max_abs_mm=float(1e3 * abs(d[i])), max_signed_mm=float(1e3 * d[i]),
+                        max_psi_n=float(tp[m][i]), max_r_ours_m=float(ours[i]), max_r_table_m=float(tr[m][i]),
+                        edge_mm=(None if edge_t is None else float(1e3 * (r_edge - edge_t))),
+                        edge_r_ours_m=float(r_edge), edge_r_table_m=edge_t, psi_n=tp[m].tolist(),
+                        d_mm=(1e3 * d).tolist(),
+                        sign="positive: our surface lies further out than the table's")
+        except Exception as exc:  # noqa: BLE001 -- a record must never end a fit
+            return dict(supplied=True, computed=False, reason=f"{type(exc).__name__}: {exc}"[:300])

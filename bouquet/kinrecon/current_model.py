@@ -167,6 +167,7 @@ from .current.conductivity import neoclassical_conductivity
 from .current.diffusion import CurrentDiffusion, CurrentState, IpBoundary, OuterLayer
 from .current.diffusion import _boundary_gradient_weights as _diff_bgw
 from .current.geometry import from_tokamaker
+from ._numpy_compat import trapezoid as _trapezoid
 from .coordinates import KnotSettings, QCheckSettings, q_consistency, rho_map_from_geometry, solver_knots
 from .pressure import pressure_gradient
 
@@ -585,7 +586,7 @@ def correction_shapes(lag, cfg, ip, form="steady"):
     out = []
     for rc0 in cfg.corr_centers_rho:
         w = float(cfg.corr_width_rho)
-        dom = np.trapezoid(gc["dvol_drho"] * np.exp(-0.5 * ((rho_std_g - rc0) / w) ** 2)
+        dom = _trapezoid(gc["dvol_drho"] * np.exp(-0.5 * ((rho_std_g - rc0) / w) ** 2)
                            / (2 * np.pi * gc["fpol"] ** 2), geom.rho)
         lay = layer.integral(layer.source_density(np.exp(-0.5 * ((rho_l - rc0) / w) ** 2)))
         norm = abs(float(ip)) / (layer.fpol_lcfs * (dom + lay))
@@ -593,7 +594,7 @@ def correction_shapes(lag, cfg, ip, form="steady"):
             out.append(np.exp(-0.5 * ((rho_ge - rc0) / w) ** 2) * norm)
             continue
         wr = float(cfg.corr_return_width_ratio) * w
-        dom_r = np.trapezoid(gc["dvol_drho"] * np.exp(-0.5 * ((rho_std_g - rc0) / wr) ** 2)
+        dom_r = _trapezoid(gc["dvol_drho"] * np.exp(-0.5 * ((rho_std_g - rc0) / wr) ** 2)
                              / (2 * np.pi * gc["fpol"] ** 2), geom.rho)
         lay_r = layer.integral(layer.source_density(np.exp(-0.5 * ((rho_l - rc0) / wr) ** 2)))
         out.append(local_return_shape(rho_ge, rc0, w, wr, (dom + lay) / (dom_r + lay_r)) * norm)
@@ -637,7 +638,7 @@ def _gauss_current_measure(geom, layer, rmap, center, width, r_core=None, taper_
     fl = np.exp(-0.5 * ((rl - center) / width) ** 2)
     if r_core is not None:
         fg, fl = fg * carry_taper(rg, r_core, taper_width), fl * carry_taper(rl, r_core, taper_width)
-    dom = np.trapezoid(gc["dvol_drho"] * fg / (2 * np.pi * gc["fpol"] ** 2), geom.rho)
+    dom = _trapezoid(gc["dvol_drho"] * fg / (2 * np.pi * gc["fpol"] ** 2), geom.rho)
     return float(dom + layer.integral(layer.source_density(fl)))
 
 

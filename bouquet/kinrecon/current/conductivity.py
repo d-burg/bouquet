@@ -80,6 +80,8 @@ logarithms leave their range of validity) -- this affects ``sigma_neo`` only in 
 
 import numpy as np
 
+from .._numpy_compat import trapezoid as _trapezoid
+
 __all__ = [
     "coulomb_log_e",
     "coulomb_log_ii",
@@ -282,5 +284,5 @@ def trapped_fraction(b_mod, weight, nlambda=2001):
     h = b / bmax
     lam = np.linspace(0.0, 1.0, nlambda)
     den = np.array([np.sum(w * np.sqrt(np.clip(1.0 - lv * h, 0.0, None))) for lv in lam])
-    integ = np.trapezoid(lam / den, lam)
+    integ = _trapezoid(lam / den, lam)
     return 1.0 - 0.75 * np.sum(w * h ** 2) * integ

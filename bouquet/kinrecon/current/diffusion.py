@@ -177,6 +177,7 @@ import numpy as np
 from scipy.interpolate import PchipInterpolator
 from scipy.linalg import solve_banded
 
+from .._numpy_compat import trapezoid as _trapezoid
 from .geometry import MU0, FluxSurfaceGeometry, OuterLayerGeometry
 
 __all__ = [
@@ -1243,7 +1244,7 @@ class CurrentDiffusion:
             q_f = geo.phi_b * rf / (np.pi * dpsi_f)
         q_f[0] = q_f[1] - (q_f[2] - q_f[1]) * rf[1] ** 2 / (rf[2] ** 2 - rf[1] ** 2)
         # poloidal field energy: int B_p^2 dV = int psi'^2 g2 V' drho = 2 pi mu0 int I psi' drho
-        bp2_int = 2.0 * np.pi * MU0 * np.trapezoid(I_f * dpsi_f, rf)
+        bp2_int = 2.0 * np.pi * MU0 * _trapezoid(I_f * dpsi_f, rf)
         li3_dom = 2.0 * bp2_int / (MU0 ** 2 * ip_c ** 2 * geo.R0) if ip_c != 0 else np.nan
         c_edge = self._edge_value(geo)
 
@@ -1273,8 +1274,8 @@ class CurrentDiffusion:
                 I_l = lay.layer_profile(state.time, gam_f[n], rate_layer)
                 ratio = I_l / g.ampere_current
                 tail = 1.0 - g.psi_n[-1]
-                dpsi_l = g.dpsi_ref * (np.trapezoid(ratio, g.psi_n) + ratio[-1] * tail)
-                bp2_l = 2.0 * np.pi * MU0 * g.dpsi_ref * (np.trapezoid(I_l * ratio, g.psi_n) + I_l[-1] * ratio[-1] * tail)
+                dpsi_l = g.dpsi_ref * (_trapezoid(ratio, g.psi_n) + ratio[-1] * tail)
+                bp2_l = 2.0 * np.pi * MU0 * g.dpsi_ref * (_trapezoid(I_l * ratio, g.psi_n) + I_l[-1] * ratio[-1] * tail)
                 w_full = (bp2_int + bp2_l) / (2.0 * MU0)
                 li3 = 2.0 * (bp2_int + bp2_l) / (MU0 ** 2 * ip ** 2 * geo.R0)
                 q95 = q_at(0.95, psi_f[-1] + dpsi_l)

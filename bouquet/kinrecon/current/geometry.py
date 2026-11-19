@@ -97,6 +97,8 @@ from typing import Dict, Optional
 import numpy as np
 from scipy.interpolate import PchipInterpolator
 
+from .._numpy_compat import trapezoid as _trapezoid
+
 __all__ = ["FluxSurfaceGeometry", "OuterLayerGeometry", "EdgeChoice", "choose_psi_n_edge", "check_psi_samples",
            "from_tokamaker", "PSI_N_EDGE_DEFAULT", "PSI_N_EDGE_MAX"]
 
@@ -859,7 +861,7 @@ def from_tokamaker(gs, R0, B0=None, npsi=200, psi_pad_axis=1.0e-3, psi_n_edge="a
     if legacy:
         # fraction of Phi_b that comes from the extrapolated edge strip
         dphi = F * g1 * vps / (2.0 * np.pi) * abs(fsa["psi_boundary"] - fsa["psi_axis"])
-        phi_in = np.trapezoid(dphi, psi_n)
+        phi_in = _trapezoid(dphi, psi_n)
         geom.meta["phi_b_extrapolated_fraction"] = float(1.0 - phi_in / geom.phi_b)
         geom.meta["edge_choice"] = "previous behavior (psi_n_edge=None): extrapolated to psi_N = 1, no outer layer"
         return geom

@@ -37,6 +37,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .._numpy_compat import trapezoid as _trapezoid
 from .conventions import E_CHARGE, EPS0, array_sha256, jdotb_from_jphi_over_r
 from .provider import SOURCES_VERSION, NonInductiveSources, Provenance
 
@@ -102,7 +103,7 @@ class SimpleECModel:
             I = self.current(L, ne0, te0, z0, R0)
             shape = np.exp(-0.5 * ((rho - L.rho0) / L.width) ** 2) + np.exp(-0.5 * ((rho + L.rho0) / L.width) ** 2)
             # <J_phi/R> = I * shape / (int shape dV / 2pi)   (C7)
-            norm = np.trapezoid(shape * dv, rho) / (2.0 * np.pi)
+            norm = _trapezoid(shape * dv, rho) / (2.0 * np.pi)
             jphi_r = I * shape / norm
             if geometry is not None:
                 jdotb[L.name] = jdotb_from_jphi_over_r(jphi_r, rho, geometry)

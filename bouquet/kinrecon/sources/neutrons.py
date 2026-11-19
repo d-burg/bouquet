@@ -41,6 +41,7 @@ fell outside, and the provider records it in its provenance.
 
 import numpy as np
 
+from .._numpy_compat import trapezoid as _trapezoid
 from .conventions import E_CHARGE, M_AMU
 
 __all__ = ["dd_n_cross_section", "dd_n_reactivity", "thermonuclear_rate", "beam_target_rate", "validity_flags"]
@@ -109,7 +110,7 @@ def _warm_kernel(v, u, m_r):
     vr = np.maximum(vb + uu * t, 0.0)                                        # >= 0 by construction
     sig = dd_n_cross_section(0.5 * m_r * vr ** 2 / E_CHARGE / 1e3)
     kern = np.exp(-((vr - vb) / uu) ** 2) - np.exp(-((vr + vb) / uu) ** 2)
-    integ = np.trapezoid(sig * vr ** 2 * kern, s, axis=-1) * (6.0 - t_lo[..., 0]) * u[:, None]   # dv_r = u dt
+    integ = _trapezoid(sig * vr ** 2 * kern, s, axis=-1) * (6.0 - t_lo[..., 0]) * u[:, None]   # dv_r = u dt
     return integ / (np.sqrt(np.pi) * v[None, :] * u[:, None])
 
 

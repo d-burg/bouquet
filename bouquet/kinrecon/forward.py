@@ -350,20 +350,24 @@ def parse_history(text):
     LAST such block of the captured output is parsed -- profile updates may print more than one):
     iteration, ffp_scale, p_scale, SQRT(nl_res), O-point R, O-point Z, vcontrol/mu0; column 4 is
     the norm compared with ``nl_tol``.  Accepted only if the counter runs 1, 2, 3, ... without gaps.
+    ``vsc_A``: column 7 of the last line, the vertical-stability coil current [A per unit gain] of the state the
+    solve leaves (printed after that iteration's coil solve, 5 significant digits; None when not accepted).
     """
     blocks = text.split("Starting non-linear GS solver")
     if len(blocks) < 2:
         return dict(ok=False, reason="no solver block found", residuals=[], n=0)
-    its, res, oz = [], [], []
+    its, res, oz, vsc = [], [], [], []
     for ln in blocks[-1].splitlines():
         m = _ITER.match(ln)
         if m:
             its.append(int(m.group(1)))
             res.append(float(m.group(4)))
             oz.append((float(m.group(5)), float(m.group(6))))
+            vsc.append(float(m.group(7)))
     ok = its == list(range(1, len(its) + 1)) and len(its) > 0
     return dict(ok=ok, reason=None if ok else "iteration counter not 1..n (lines lost or merged)",
-                residuals=res, n=len(res), o_point_tail=oz[-6:], n_blocks=len(blocks) - 1)
+                residuals=res, n=len(res), o_point_tail=oz[-6:], n_blocks=len(blocks) - 1,
+                vsc_A=(vsc[-1] if ok else None))
 
 
 # ============================================================== forward model
@@ -815,6 +819,34 @@ class ForwardModel:
                     edge_taper=self.settings.edge_taper.as_dict(),
                     iteration_limit=dict(self.iteration_limit, now=int(self.gs.settings.maxits)))
 
+    def coil_current_record(self, solve=None):
+        """RECORD that steers nothing: the coil currents of the solver's present state and the vertical-stability
+        coil (VSC) current.  TokaMaker's ``get_coil_currents`` returns each coil's TOTAL current, its own current plus
+        its VSC gain times the VSC current; the VSC current has no getter and is the value the solver printed for the
+        state that ``solve`` (the :class:`SolveResult` that produced the present state) left (``record["vsc_A"]``,
+        :func:`parse_history`; 5 significant digits).  Per coil with a nonzero gain: the gain, the total, the VSC
+        share (gain x VSC current), the coil's own current (total - share) and share / total.  Without ``solve``
+        the VSC current and the split are not stated.  Never raises."""
+        try:
+            cur, _reg = self.gs.get_coil_currents()
+            tot = {str(k): float(v) for k, v in dict(cur).items()}
+            vsc = None if solve is None else solve.record.get("vsc_A")
+            per = {}
+            for n, g in self.settings.vsc.items():
+                if float(g) == 0.0 or str(n) not in tot:
+                    continue
+                t = tot[str(n)]
+                share = None if vsc is None else float(g) * float(vsc)
+                per[str(n)] = dict(gain=float(g), total_A=t, vsc_share_A=share,
+                                   own_A=(None if share is None else t - share),
+                                   share_of_total=(None if share is None or t == 0.0 else share / t))
+            return dict(computed=True, vsc_A=vsc, vsc_coils=per, totals_A=tot,
+                        vsc_source=("solver output: last iteration line of the solve that left this state (5 "
+                                    "significant digits)" if vsc is not None else "not stated (no solve record)"),
+                        rule="total = own + gain x VSC current (get_coil_currents returns the totals)")
+        except Exception as exc:  # noqa: BLE001 -- a record must never end a fit
+            return dict(computed=False, reason=f"{type(exc).__name__}: {exc}"[:300])
+
     def lock_tapered(self, reason):
         """Lock this case's edge taper ON (the ``auto`` policy after a detected limit cycle, applied to
         the WHOLE reconstruction so that the case stays uniform): every later solve is tapered."""
@@ -953,6 +985,7 @@ class ForwardModel:
                         lcfs_cut_cells_at_solve=cut_now,
                         lcfs_cut_cells_check=("PASS" if cut_now == self.cut_cells["in_effect"] else "FAIL"),
                         history=_edge.summarize_history(h["residuals"]), history_consistent=consistent,
+                        vsc_A=h["vsc_A"],
                         taper=None if trec is None else dict(pax_ratio=trec["taper"].get("pax_ratio"),
                                                              variant=trec["taper_variant"]))
             st_now = _stats(gs)
@@ -995,7 +1028,9 @@ class ForwardModel:
             b = _stats(gs)
             v = verify_states(a, b) if err is None else dict(verdict="FAIL", reason=err)
             v["wall_s"] = round(time.perf_counter() - t0, 4)
-            v["warm_its"] = parse_history(cap.text).get("n")
+            hv = parse_history(cap.text)
+            v["warm_its"] = hv.get("n")
+            v["vsc_A"] = hv.get("vsc_A")
             self._log_iterations(label + ":verify", v["warm_its"], "verify",
                                  err is not None and ("maxits" in err.lower() or "iteration" in err.lower()))
             ver = v["verdict"] == "PASS"
@@ -1019,6 +1054,9 @@ class ForwardModel:
                 rec["ffp_scale_solver"] = float(gs.ffp_scale)
         except Exception:  # noqa: BLE001
             pass
+        # the VSC current of the state this solve leaves (the warm re-solve when it ran, else the latest attempt)
+        rec["vsc_A"] = ((pol.get("verification") or {}).get("vsc_A") if ver is not None
+                        else (attempts[-1].get("vsc_A") if attempts else None))
         return SolveResult(status=status, converged=converged, verified=ver, stats=stats, record=rec,
                            wall_s=round(time.perf_counter() - t_all, 4))
 

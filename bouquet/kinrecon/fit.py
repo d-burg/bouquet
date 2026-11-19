@@ -67,6 +67,10 @@ between the final center and the same center with the amplitudes set to zero (th
 center's geometry).  Where the corrections' current returns in the steady form is a model setting
 (:attr:`.current_model.CurrentModelSettings.corr_return`).
 
+Every result with a final center also records, as a record that steers nothing, the solver's vertical-stability coil
+current and each of its coils' own current and total (``record["coil_currents"]``,
+:meth:`.forward.ForwardModel.coil_current_record`).
+
 A single-slice fit (no supplied state) also records the steady-state input check (``record["steady_state_check"]``,
 :func:`steady_state_check`; ON by default, ``reconstruct(..., steady_state_check=False)`` switches it off): after the
 fit, the slice's unfitted model steady state (the fit's starting parameters with the corrections zero, the fit's own
@@ -1513,8 +1517,18 @@ def _final_extra(center, fm, ms):
                 assembly=dict({k: v for k, v in asm.items() if k not in ("orbit_z", "state")}),
                 constraints=constraints_table(center["all_tab"], ms, list(center["all_tab"].model)),
                 chi2_detail=center["chi2"], boundary=fm.boundary_distance(),
+                coil_currents=_coil_currents(fm, center["res"].solve),
                 excluded_channels={k: v for k, v in center["all_tab"].excluded.items()},
                 score_notes=list(center["all_tab"].notes))
+
+
+def _coil_currents(fm, solve):
+    """The forward model's coil-current record of the present state (:meth:`.forward.ForwardModel.
+    coil_current_record`: the VSC current and each VSC coil's own current and total); a record only."""
+    get = getattr(fm, "coil_current_record", None)
+    if get is None:
+        return dict(computed=False, reason="the forward model has no coil-current record")
+    return get(solve)
 
 
 def mse_by_radius(fm, ms):

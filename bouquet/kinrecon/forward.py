@@ -356,6 +356,13 @@ class FortranStdout:
         return False
 
 
+#: The error of a solve whose solver returned without an error but whose captured output holds no solver block: the
+#: solve is a failure (status ``failed``), since its residual history and its VSC current are unknown.
+NO_SOLVER_HISTORY = ("no solver output captured ('Starting non-linear GS solver' not found): the residual history "
+                     "and the vertical-stability coil current (vsc_A) of this solve are unknown, so the solve is not "
+                     "accepted; the Fortran output is buffered when GFORTRAN_UNBUFFERED_PRECONNECTED=y was not set "
+                     "before the Fortran runtime was loaded (before numpy or the solver library was imported)")
+
 _NUM = r"[-+]?\d\.\d{4}E[-+]\d{2}"
 _ITER = re.compile(rf"^\s*(\d+)\s+({_NUM})\s+({_NUM})\s+({_NUM})\s+({_NUM})\s+({_NUM})\s+({_NUM})\s*$")
 
@@ -372,7 +379,8 @@ def parse_history(text):
     """
     blocks = text.split("Starting non-linear GS solver")
     if len(blocks) < 2:
-        return dict(ok=False, reason="no solver block found", residuals=[], n=0)
+        return dict(ok=False, reason="no solver block found", residuals=[], n=0, o_point_tail=[], n_blocks=0,
+                    vsc_A=None)
     its, res, oz, vsc = [], [], [], []
     for ln in blocks[-1].splitlines():
         m = _ITER.match(ln)
@@ -950,7 +958,8 @@ class ForwardModel:
         on the mesh nodes.  ``lock_case=False`` runs the edge-taper policy WITHOUT the case lock
         (only for a starting-state solve with other profiles, which must not decide the case's
         taper).  Returns a :class:`SolveResult`; a failed solve leaves the solver in its
-        failed state (the caller restores a snapshot).
+        failed state (the caller restores a snapshot).  An attempt whose captured output holds no
+        solver block (buffered Fortran output) is not converged, with the error :data:`NO_SOLVER_HISTORY`.
         """
         t_all = time.perf_counter()
         s, gs = self.settings, self.gs
@@ -1003,6 +1012,10 @@ class ForwardModel:
             at_limit = err is not None and ("maxits" in err.lower() or "iteration" in err.lower())
             expect = its if err is None else (now["maxits"] if at_limit else None)
             consistent = bool(h["ok"] and (expect is None or h["n"] == expect))
+            if err is None and not h["n_blocks"]:
+                # the solver returned but its printed output carries no solver block (buffered unit 6): no residual
+                # history and no VSC current, so a recorded failure of this solve, never a guessed value
+                err = NO_SOLVER_HISTORY
             self._log_iterations(label + ("" if taper is None else ":tapered"),
                                  its if its is not None else (h["n"] if consistent else None), "solve", at_limit)
             info = dict(error=err, its=its, wall_s=round(time.perf_counter() - t0, 4), settings_at_solve=now,

@@ -5,11 +5,17 @@
   not two strictly increasing finite arrays, and without any effect on the profiles (compared bit for bit);
 * the vertical-stability coil current read from the solver's iteration lines (``forward.parse_history``: column 7
   of the last line of the last solver block), checked on constructed solver output;
+* a forward solve (on a stub solver) whose solver output is not captured (buffered Fortran output): a recorded
+  failure of that solve with the reason stated, and the same solve with its output captured accepted;
 * the fit's two record helpers when the forward model or the kinetic inputs do not provide what they read.
 """
+import os
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
+from bouquet.kinrecon import edge as EDGE
 from bouquet.kinrecon import fit as FIT
 from bouquet.kinrecon import forward as FW
 from bouquet.kinrecon import kinetics as KI
@@ -71,6 +77,83 @@ def test_vsc_current_is_column_7_of_the_last_line_of_the_last_block():
     bad = "\n".join(["Starting non-linear GS solver", _line(1, 1.0), _line(3, 2.0)])
     assert FW.parse_history(bad)["vsc_A"] is None
     assert FW.parse_history("no solver output")["n"] == 0
+
+
+class _StubGS:
+    """A stand-in for the solver object: ``solve`` writes ``text`` to file descriptor 1 (where the Fortran solver
+    writes; nothing when its output is buffered) and returns without an error."""
+
+    def __init__(self, text):
+        self.text = text
+        self.settings = SimpleNamespace(nl_tol=1e-6, urf=0.2, maxits=40)
+        self.ffp_scale = 1.0
+
+    def set_targets(self, **kw):
+        pass
+
+    def set_profiles(self, **kw):
+        pass
+
+    def solve(self, return_its=False):
+        if self.text:
+            os.write(1, self.text.encode())
+        return (0, 3) if return_its else 0
+
+    def get_stats(self):
+        return {"Ip": 1.0e6, "l_i": 0.9, "q_0": 1.1}
+
+    def copy_eq(self):
+        return None
+
+    def replace_eq(self, snap):
+        pass
+
+
+def _stub_forward_model(text):
+    fm = object.__new__(FW.ForwardModel)
+    fm.settings = FW.ForwardSettings(verify=False)
+    fm.gs = _StubGS(text)
+    fm._apply_rows = lambda: None
+    fm.defaults = dict(nl_tol=1e-6, urf=0.2, maxits=40)
+    fm.expected_settings = dict(fm.defaults)
+    fm.cut_cells = dict(in_effect=None, provided=False)
+    fm.n_solves, fm.iteration_log, fm.history = 0, [], []
+    fm.case_id = "stub"
+    fm.case = EDGE.EdgeTaperCase(case_id="stub")
+    fm.ip_measured, fm.F0 = 1.0e6, 1.0
+    fm.solver_build = dict(liboftpy_sha256="stub")
+    return fm
+
+
+def _solve(fm):
+    x = np.linspace(0.0, 1.0, 11)
+    return fm.solve((x, 1.0e6 * (1.0 - x ** 2)), (x, 1.0e4 * (1.0 - 0.9 * x ** 2)))
+
+
+def test_solve_without_solver_output_is_a_recorded_failure_not_a_key_error():
+    """Buffered Fortran output: the solver returns without an error but nothing of its output is captured.  The solve
+    is a failure with the reason stated (status ``failed``, the attempt's ``error``); no VSC current is guessed."""
+    res = _solve(_stub_forward_model(""))
+    assert res.status == "failed" and res.converged is False and res.verified is None
+    att = res.record["attempts"]
+    assert len(att) == 1 and att[0]["error"] == FW.NO_SOLVER_HISTORY and att[0]["vsc_A"] is None
+    assert att[0]["history_consistent"] is False and res.record["vsc_A"] is None
+    pol = res.record["policy"]
+    assert pol["status"] == EDGE.STATUS_FAILED and pol["attempts"][0]["info"]["error"] == FW.NO_SOLVER_HISTORY
+    assert pol["attempts"][0]["detector"]["verdict"] == "insufficient_history" and pol["taper_applied"] is False
+    assert "vsc_A" in FW.NO_SOLVER_HISTORY and "GFORTRAN_UNBUFFERED_PRECONNECTED" in FW.NO_SOLVER_HISTORY
+    h = FW.parse_history("")
+    assert h["n_blocks"] == 0 and h["vsc_A"] is None and h["o_point_tail"] == []
+
+
+def test_solve_with_its_solver_output_is_accepted_with_the_vsc_current():
+    """The same stub with the output captured (the control of the test above): accepted, the VSC current read."""
+    text = "\n".join(["Starting non-linear GS solver", _line(1, -10.0), _line(2, -11.0), _line(3, -12.34), ""])
+    res = _solve(_stub_forward_model(text))
+    assert res.status == EDGE.STATUS_CONVERGED and res.converged is True
+    att = res.record["attempts"]
+    assert att[0]["error"] is None and att[0]["history_consistent"] is True
+    assert res.record["vsc_A"] == -12.34
 
 
 def test_fit_record_helpers_without_the_methods_or_the_table():

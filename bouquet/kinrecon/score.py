@@ -363,7 +363,8 @@ def score(equilibrium, measurements, kinetics=None, groups=None, orientation=Non
             notes.append(f"solver constraints: {rrec['projected']} row(s) with points moved onto the mesh boundary")
     for name in todo:
         group = measurements.groups[name]
-        syn = _model_group(equilibrium, name, group, kinetics, notes, frame, solved)
+        syn = (_model_group(equilibrium, name, group, kinetics, notes, frame) if solved is None else
+               _model_group(equilibrium, name, group, kinetics, notes, frame, solved=solved))
         value = np.asarray(syn.value, dtype=float)
         if name in FRAME_SIGN_OF_GROUP:
             value = value * frame[FRAME_SIGN_OF_GROUP[name]]

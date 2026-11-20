@@ -23,6 +23,9 @@ TE = 3e3 * (1 - 0.9 * np.minimum(PSI, 1.0) ** 2) + 50.0
 TI = 0.9 * TE
 RHO_MAP = (PSI[PSI <= 1.0], np.sqrt(PSI[PSI <= 1.0]))
 RAW_RHO = np.linspace(0.05, 0.85, 17)
+#: Ion-temperature points inside the boundary: the required coverage check passes (it is tested in
+#: test_kinetics_ti_coverage.py).
+TI_COV = dict(points=dict(value=[2.0e3, 1.0e3], psi_N=[0.1, 0.6]), core_psi_n_max=None)
 
 
 def _nimp(fc0=0.01, slope=0.5):
@@ -65,7 +68,7 @@ def _build(cands, rule=None, n_fast="none", source=CHECKED, **kw):
     return assemble_kinetic_inputs(PSI, NE, TE, TI, zeff_candidates=cands, zeff_source=source, z_imp=6.0,
                                    coordinate="psi_n", psi_n_to_rho=RHO_MAP, n_fast=n_fast,
                                    zeff_rule=dict(dict(slice_time=1.0), **(rule or {})) if source == CHECKED else None,
-                                   **kw)
+                                   **dict(dict(ti_coverage=TI_COV), **kw))
 
 
 def _quiet(**kw):
@@ -182,27 +185,31 @@ def test_a_rho_table_needs_the_psi_n_of_its_points():
                          fit_points=Z.MeasurementPoints(value=np.interp(np.linspace(0.05, 0.95, 10), rho, nimp),
                                                         sigma=None, rho=np.linspace(0.05, 0.95, 10)))}
     with pytest.raises(ValueError, match="psi_n"):
-        assemble_kinetic_inputs(rho, ne, te, ti, zeff_candidates=cands, zeff_source=CHECKED, z_imp=6.0, n_fast="none")
+        assemble_kinetic_inputs(rho, ne, te, ti, zeff_candidates=cands, zeff_source=CHECKED, z_imp=6.0, n_fast="none",
+                                ti_coverage=TI_COV)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", Z.ZeffSourceWarning)
         k = assemble_kinetic_inputs(rho, ne, te, ti, zeff_candidates=cands, zeff_source=CHECKED, z_imp=6.0,
-                                    zeff_rule=dict(psi_n=psi), n_fast="none")
+                                    zeff_rule=dict(psi_n=psi), n_fast="none", ti_coverage=TI_COV)
     assert k.record["zeff_source"] == "cer"
     assert k.record["zeff_rule"]["candidates"][Z.IMPURITY]["tests"]["I-1"]["verdict"] == Z.PASS
 
 
 def test_the_named_route_is_unchanged_and_refuses_rule_options():
     old = assemble_kinetic_inputs(PSI, NE, TE, TI, zeff_candidates={"vb": ("zeff", _zline())}, zeff_source="vb",
-                                  z_imp=6.0, coordinate="psi_n", psi_n_to_rho=RHO_MAP, n_fast="none")
+                                  z_imp=6.0, coordinate="psi_n", psi_n_to_rho=RHO_MAP, n_fast="none",
+                                  ti_coverage=TI_COV)
     new = assemble_kinetic_inputs(PSI, NE, TE, TI, zeff_candidates={"vb": dict(kind="zeff", value=_zline())},
-                                  zeff_source="vb", z_imp=6.0, coordinate="psi_n", psi_n_to_rho=RHO_MAP, n_fast="none")
+                                  zeff_source="vb", z_imp=6.0, coordinate="psi_n", psi_n_to_rho=RHO_MAP, n_fast="none",
+                                  ti_coverage=TI_COV)
     np.testing.assert_array_equal(old.zeff, new.zeff)
     np.testing.assert_array_equal(old.ni, new.ni)
     assert "zeff_rule" not in old.record
     assert "not tested" in old.provenance["zeff"]
     with pytest.raises(ValueError, match="only with zeff_source"):
         assemble_kinetic_inputs(PSI, NE, TE, TI, zeff_candidates={"vb": ("zeff", _zline())}, zeff_source="vb",
-                                z_imp=6.0, coordinate="psi_n", zeff_rule=dict(override="vb"), n_fast="none")
+                                z_imp=6.0, coordinate="psi_n", zeff_rule=dict(override="vb"), n_fast="none",
+                                ti_coverage=TI_COV)
 
 
 def test_no_default_and_bad_inputs_are_refused():

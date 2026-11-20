@@ -20,7 +20,8 @@ def _inputs():
     ne = 4e19 * (1.0 - 0.8 * x ** 2)
     te = 2e3 * (1.0 - 0.9 * x ** 2)
     return x, ne, te, 0.8 * te, dict(zeff_candidates={"vb": ("zeff", np.full_like(x, 1.8))}, zeff_source="vb",
-                                     z_imp=6.0, n_fast="none")
+                                     z_imp=6.0, n_fast="none",
+                                     ti_coverage=dict(points=dict(value=[1.5e3], psi_N=[0.2]), core_psi_n_max=None))
 
 
 def test_midplane_table_is_kept_and_stated_and_changes_no_profile():

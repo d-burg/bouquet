@@ -42,6 +42,16 @@ also accepts that explicitly (``"accept_failed": True``, recorded and warned).  
 (every candidate, test value, verdict, threshold and the decision) is stored in
 ``KineticInputs.record["zeff_rule"]`` and summarized in the provenance.
 
+Ion-temperature coverage (``ti_coverage``, required): the caller passes the ion-temperature measurement points of
+the slice (the analysis the ``T_i`` profile was fitted to) and states the core criterion (``core_psi_n_max``: a psi_N,
+or ``None`` for none; there is no default, the value depends on the device's diagnostic coverage).  A slice with no
+valid point inside the plasma boundary (or, criterion applied, none at psi_N <= ``core_psi_n_max``) has an ion
+temperature that is not measured there: it is refused (:class:`TiCoverageRefused`, with the check's record) unless the
+caller names an assumption for it (``"assumption": "equal_to_electron"``: ``T_i = T_e`` over the whole table, with a
+relative uncertainty the caller states).  An applied assumption is recorded (``record["ti_coverage"]``: assumed, the
+rule, the radial range, the stated uncertainty), named in the provenance and warned about; it is never applied
+silently, and a named assumption on a covered slice is recorded and not applied.
+
 Coordinate (the working coordinate is rho_tor,norm):
 
 * profiles that carry rho_tor,norm are placed by it (``coordinate="rho_tor_norm"``);
@@ -66,7 +76,9 @@ from . import zeff_sources as _zr
 EC = 1.602176634e-19
 
 __all__ = ["KineticInputs", "assemble_kinetic_inputs", "zeff_from_impurity_density", "COORDINATES",
-           "CHECKED", "ZEFF_RULE_OPTIONS", "FAST_IONS_NONE"]
+           "CHECKED", "ZEFF_RULE_OPTIONS", "FAST_IONS_NONE", "ti_coverage_check", "TiCoverageRefused",
+           "TiCoverageWarning", "TI_COVERAGE_KEYS", "TI_ASSUMPTIONS", "TI_EQUAL_TO_ELECTRON", "TI_COVERED",
+           "TI_NOT_COVERED"]
 
 #: Coordinates a kinetic table can carry.
 COORDINATES = ("rho_tor_norm", "psi_n")
@@ -83,6 +95,134 @@ FAST_IONS_NONE = "none"
 ZEFF_RULE_OPTIONS = ("psi_n", "slice_time", "slice_window", "override", "accept_failed", "fast_ions")
 #: Keys a candidate may carry when given as a dict (``value`` and ``kind`` required).
 _CANDIDATE_KEYS = ("kind", "value", "sigma", "fit_points", "raw_points", "provenance", "core_median_series")
+#: Keys of the ``ti_coverage`` argument of :func:`assemble_kinetic_inputs`: ``points`` and ``core_psi_n_max`` are
+#: required (``core_psi_n_max`` may be ``None``, stated), ``slice_window`` (required for points that carry times),
+#: ``assumption`` and ``assumption_sigma_rel`` optional.
+TI_COVERAGE_KEYS = ("points", "core_psi_n_max", "slice_window", "assumption", "assumption_sigma_rel")
+#: The assumption a caller may name for an ion temperature that is not measured inside the boundary: ``T_i = T_e``.
+TI_EQUAL_TO_ELECTRON = "equal_to_electron"
+TI_ASSUMPTIONS = (TI_EQUAL_TO_ELECTRON,)
+#: Verdicts of :func:`ti_coverage_check`.
+TI_COVERED, TI_NOT_COVERED = "covered", "not_covered"
+
+
+class TiCoverageRefused(ValueError):
+    """The ion temperature is not measured inside the plasma boundary on this slice and no assumption was named
+    (:func:`assemble_kinetic_inputs`).  ``record`` holds the coverage check's record."""
+
+    def __init__(self, message, record=None):
+        super().__init__(message)
+        self.record = record
+
+
+class TiCoverageWarning(UserWarning):
+    """An assumed ion temperature is in use (the slice's ion temperature is not measured inside the boundary)."""
+
+
+def ti_coverage_check(points, *, core_psi_n_max, slice_window=None):
+    """Whether the ion temperature is measured inside the plasma boundary on one slice; returns the check's record.
+
+    Parameters
+    ----------
+    points : :class:`.zeff_sources.MeasurementPoints` or its dict
+        The ion-temperature measurement points of the analysis the ``T_i`` profile was fitted to: ``value`` [eV],
+        ``psi_N`` (of the producing equilibrium; required), optional ``sigma`` and ``time`` [s].  Padding
+        (non-finite or fill-magnitude entries) is dropped.  A valid point has a finite value > 0, a finite psi_N and,
+        when an uncertainty is given for it, a finite uncertainty > 0; it is inside the boundary at psi_N <= 1.
+    core_psi_n_max : float or None
+        Required, no default: the innermost valid point inside the boundary must lie at psi_N <= this value
+        (0 < value <= 1); ``None`` states that no core criterion is applied (recorded).
+    slice_window : (t0, t1) [s], optional
+        Required when the points carry times: only the points inside it (inclusive) count.
+
+    Covered: at least one valid point inside the boundary and, the criterion applied, the innermost of them at
+    psi_N <= ``core_psi_n_max``.
+    """
+    pts = _zr.MeasurementPoints.coerce(points, label="ion-temperature points")
+    if pts is None or pts.psi_N is None:
+        raise ValueError("ti_coverage points need 'value' and 'psi_N' (psi_N of the producing equilibrium)")
+    if core_psi_n_max is not None:
+        core_psi_n_max = float(core_psi_n_max)
+        if not 0.0 < core_psi_n_max <= 1.0:
+            raise ValueError("core_psi_n_max must lie in (0, 1], or be None (no core criterion, stated)")
+    big = _zr.FILL_ABS_MIN
+    v = np.asarray(pts.value, dtype=float).ravel()
+    p = np.asarray(pts.psi_N, dtype=float).ravel()
+    if p.shape != v.shape:
+        raise ValueError("ti_coverage points: 'value' and 'psi_N' must have the same length")
+    with np.errstate(invalid="ignore"):
+        ok = np.isfinite(v) & (np.abs(v) < big) & np.isfinite(p) & (np.abs(p) < big)
+        n = int(ok.sum())
+        valid = ok & (v > 0)
+        if pts.sigma is not None:
+            s = np.asarray(pts.sigma, dtype=float).ravel()
+            if s.shape != v.shape:
+                raise ValueError("ti_coverage points: 'sigma' must have the length of 'value'")
+            valid &= np.isfinite(s) & (s > 0) & (np.abs(s) < big)
+    window = "points carry no times (taken as selected for this slice)"
+    if pts.time is not None:
+        if slice_window is None:
+            raise ValueError("ti_coverage points carry times: pass ti_coverage['slice_window'] = (t0, t1) [s]")
+        a, b = float(slice_window[0]), float(slice_window[1])
+        t = np.asarray(pts.time, dtype=float).ravel()
+        valid &= (t >= a) & (t <= b)
+        window = f"the slice's window [{a:.4f}, {b:.4f}] s"
+    inside = valid & (p <= 1.0)
+    ni = int(inside.sum())
+    inner = float(p[inside].min()) if ni else None
+    outer = float(p[inside].max()) if ni else None
+    why = []
+    if ni == 0:
+        why.append(f"no valid point inside the boundary ({n} point(s) given, {int(valid.sum())} valid)")
+    elif core_psi_n_max is not None and inner > core_psi_n_max:
+        why.append(f"innermost valid point at psi_N {inner:.3f} (> core_psi_n_max {core_psi_n_max:g})")
+    return dict(verdict=TI_NOT_COVERED if why else TI_COVERED, points=str(pts.label), n_points=n,
+                n_valid=int(valid.sum()), n_valid_inside=ni, psi_n_inner=inner, psi_n_outer=outer,
+                core_psi_n_max=core_psi_n_max,
+                core_criterion=("applied" if core_psi_n_max is not None else
+                                "not applied (core_psi_n_max=None, stated by the caller)"),
+                window=window, reason="; ".join(why) if why else "covered")
+
+
+def _ti_coverage(x, coordinate, out, opts):
+    """The coverage check on the slice and the refusal or the named assumption (module docstring).  Replaces
+    ``out["ti"]`` when an assumption is applied; returns the record."""
+    if not isinstance(opts, dict):
+        raise ValueError("ti_coverage must be a dict (TI_COVERAGE_KEYS)")
+    unknown = set(opts) - set(TI_COVERAGE_KEYS)
+    if unknown or "points" not in opts or "core_psi_n_max" not in opts:
+        raise ValueError(f"ti_coverage needs 'points' and 'core_psi_n_max' (a psi_N, or None stated) and may carry "
+                         f"only {TI_COVERAGE_KEYS} (got {sorted(opts)})")
+    rule, sig = opts.get("assumption"), opts.get("assumption_sigma_rel")
+    if rule is not None and rule not in TI_ASSUMPTIONS:
+        raise ValueError(f"ti_coverage assumption must be one of {TI_ASSUMPTIONS} (or omitted: refuse)")
+    if rule is not None and not (sig is not None and np.isfinite(float(sig)) and float(sig) > 0):
+        raise ValueError("ti_coverage: an assumption needs 'assumption_sigma_rel', the relative 1-sigma uncertainty "
+                         "of the assumed T_i (> 0), stated by the caller")
+    if rule is None and sig is not None:
+        raise ValueError("ti_coverage: 'assumption_sigma_rel' is given without an assumption")
+    rec = ti_coverage_check(opts["points"], core_psi_n_max=opts["core_psi_n_max"],
+                            slice_window=opts.get("slice_window"))
+    rec["assumption_named"] = rule
+    if rec["verdict"] == TI_COVERED:
+        rec["ti"] = "measured"
+        if rule is not None:
+            rec["note"] = f"assumption {rule!r} named but not applied: the ion temperature is measured"
+        return rec
+    if rule is None:
+        raise TiCoverageRefused(
+            "ion temperature not measured inside the plasma boundary: " + rec["reason"] + "; refused (pass "
+            f"ti_coverage={{..., 'assumption': {TI_EQUAL_TO_ELECTRON!r}, 'assumption_sigma_rel': <stated>}} to fit "
+            "it with T_i = T_e, recorded)", rec)
+    out["ti"] = out["te"].copy()
+    rec["ti"] = "assumed"
+    rec["assumption"] = dict(rule=rule, statement="T_i = T_e", sigma_rel=float(sig),
+                             sigma_note="stated by the caller and recorded; the kinetic inputs carry no uncertainties",
+                             coordinate=coordinate, range=[float(x[0]), float(x[-1])], extent="the whole table")
+    warnings.warn(f"ion temperature ASSUMED (T_i = T_e, rule {rule!r}, stated relative 1-sigma {float(sig):g}) over "
+                  f"{coordinate} [{x[0]:g}, {x[-1]:g}]: not measured inside the boundary ({rec['reason']})",
+                  TiCoverageWarning, stacklevel=3)
+    return rec
 
 
 def zeff_from_impurity_density(ne, nimp, z_imp):
@@ -149,7 +289,7 @@ class KineticInputs:
 def assemble_kinetic_inputs(x, ne, te, ti, *, zeff_candidates, zeff_source, z_imp, coordinate="rho_tor_norm",
                             n_fast=None, n_fast_source=None, psi_n_to_rho=None,
                             mapping_source=None, provenance=None, ni_reference=None, source="",
-                            disagreement_range=(0.0, 0.9), zeff_rule=None, midplane_radius=None):
+                            disagreement_range=(0.0, 0.9), zeff_rule=None, midplane_radius=None, ti_coverage=None):
     """Build :class:`KineticInputs` (module docstring).
 
     Parameters
@@ -189,6 +329,13 @@ def assemble_kinetic_inputs(x, ne, te, ti, *, zeff_candidates, zeff_source, z_im
         increasing, finite).  Kept on the result for the fit's radial-coordinate record (how far the fitted
         surfaces sit from the producer's in real space); it does not enter the model.  The record says
         "not supplied" without it.
+    ti_coverage : dict
+        Required (``None`` is refused): the ion-temperature coverage check of the slice (module docstring;
+        :data:`TI_COVERAGE_KEYS`, :func:`ti_coverage_check`).  ``points``: the ion-temperature measurement points;
+        ``core_psi_n_max``: a psi_N or ``None`` (stated); ``slice_window``: for points with times; ``assumption``
+        (:data:`TI_ASSUMPTIONS`) with ``assumption_sigma_rel``: used only when the slice is not covered.  A slice that
+        is not covered, with no assumption named, raises :class:`TiCoverageRefused`.  Recorded in
+        ``record["ti_coverage"]``.
     """
     if coordinate not in COORDINATES:
         raise ValueError(f"coordinate must be one of {COORDINATES}")
@@ -230,7 +377,12 @@ def assemble_kinetic_inputs(x, ne, te, ti, *, zeff_candidates, zeff_source, z_im
         raise ValueError("n_fast must be finite, >= 0 and on x")
     if n_fast_source is None:
         n_fast_source = "declared by the caller: no fast ions" if declared_none else "supplied (source not named)"
-    rec = dict(z_imp=z, n_fast_source=n_fast_source, zeff_source=zeff_source, candidates={})
+    if ti_coverage is None:
+        raise ValueError("ti_coverage is required: the ion-temperature measurement points of the slice and the core "
+                         "criterion, dict(points=..., core_psi_n_max=<psi_N or None>) (an ion temperature is never "
+                         "taken as measured without the check)")
+    ti_rec = _ti_coverage(x, coordinate, out, ti_coverage)
+    rec = dict(z_imp=z, n_fast_source=n_fast_source, zeff_source=zeff_source, candidates={}, ti_coverage=ti_rec)
     cand = {}
     specs = {}
     for name, spec in zeff_candidates.items():
@@ -299,6 +451,11 @@ def assemble_kinetic_inputs(x, ne, te, ti, *, zeff_candidates, zeff_source, z_im
     prov.setdefault("ne", "caller")
     prov.setdefault("te", "caller")
     prov.setdefault("ti", "caller")
+    if ti_rec["ti"] == "assumed":
+        a = ti_rec["assumption"]
+        prov["ti"] = (f"ASSUMED: T_i = T_e (rule {a['rule']!r}, stated relative 1-sigma {a['sigma_rel']:g}) over "
+                      f"{a['coordinate']} [{a['range'][0]:g}, {a['range'][1]:g}]; not measured: {ti_rec['reason']}; "
+                      f"the supplied T_i ({prov['ti']}) is not used")
     prov["zeff"] = f"candidate {zeff_source!r}"
     if checked:
         d = rec["zeff_rule"]["decision"]

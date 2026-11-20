@@ -28,10 +28,11 @@ from bouquet.kinrecon import forward as FW  # noqa: E402
 class _Settings:
     """Like TokaMaker's settings: attributes fixed at construction, a new one refused."""
 
-    def __init__(self, with_cut_cells):
+    def __init__(self, with_cut_cells, setting="lcfs_rule"):
         self.nl_tol, self.urf, self.maxits = 1.0e-6, 0.2, 40
         if with_cut_cells:
-            self.lcfs_cut_cells = False
+            # the solver's own default: lcfs_rule = 1 (cut cells); the earlier boolean lcfs_cut_cells = False
+            setattr(self, setting, 1 if setting == "lcfs_rule" else False)
         self._initialized = True
 
     def __setattr__(self, name, value):
@@ -41,8 +42,8 @@ class _Settings:
 
 
 class _GS:
-    def __init__(self, with_cut_cells):
-        self.settings = _Settings(with_cut_cells)
+    def __init__(self, with_cut_cells, setting="lcfs_rule"):
+        self.settings = _Settings(with_cut_cells, setting)
         self.sent = []
 
     def update_settings(self):
@@ -59,43 +60,64 @@ def fresh_notices(monkeypatch):
 
 
 # ------------------------------------------------------------------ cut cells: detection, default, off-switch, record
-def test_cut_cells_on_by_default_when_the_build_provides_them(fresh_notices):
+#: (setting, on value, off value): the integer setting and the boolean one of earlier builds
+SETTINGS = [("lcfs_rule", 1, 0), ("lcfs_cut_cells", True, False)]
+
+
+def _same(a, b):
+    """Equal value AND type (1 is not True)."""
+    return type(a) is type(b) and a == b
+
+
+def test_the_settings_and_their_values():
+    assert FW.CUT_CELL_SETTINGS == {n: (on, off) for n, on, off in SETTINGS}
+    assert FW.cut_cell_setting(["nl_tol", "lcfs_rule"]) == "lcfs_rule"
+    assert FW.cut_cell_setting(["lcfs_cut_cells", "urf"]) == "lcfs_cut_cells"
+    assert FW.cut_cell_setting(["nl_tol", "urf"]) is None
+
+
+@pytest.mark.parametrize("setting,on,off", SETTINGS)
+def test_cut_cells_on_by_default_when_the_build_provides_them(fresh_notices, setting, on, off):
     assert FW.ForwardSettings().lcfs_cut_cells == "if_available" == FW.LCFS_CUT_CELLS_DEFAULT
-    gs = _GS(True)
+    gs = _GS(True, setting)
     with warnings.catch_warnings():
         warnings.simplefilter("error")                   # no message when the cut cells are in effect
         rec = FW.configure_cut_cells(gs, "if_available", _build(True))
-    assert gs.settings.lcfs_cut_cells is True and len(gs.sent) == 1 and gs.sent[0]["lcfs_cut_cells"] is True
+    assert _same(getattr(gs.settings, setting), on) and len(gs.sent) == 1 and _same(gs.sent[0][setting], on)
     assert rec["provided"] is True and rec["requested"] is True and rec["in_effect"] is True
+    assert rec["setting"] == setting and _same(rec["value"], on)
     assert rec["option"] == "if_available" and rec["liboftpy_sha256"] == "0" * 64 and rec["reason"].startswith("on")
     assert FW.read_cut_cells(gs) is True
     # "on" on such a build is the same
-    gs2 = _GS(True)
+    gs2 = _GS(True, setting)
     assert FW.configure_cut_cells(gs2, "on", _build(True))["in_effect"] is True and len(gs2.sent) == 1
 
 
 def test_build_without_the_setting_runs_as_before_and_says_so_once(fresh_notices):
     gs = _GS(False)
-    with pytest.warns(RuntimeWarning, match="no 'lcfs_cut_cells' setting"):
+    with pytest.warns(RuntimeWarning, match="no 'lcfs_rule' or 'lcfs_cut_cells' setting"):
         rec = FW.configure_cut_cells(gs, "if_available", _build(False))
     # nothing was assigned (an assignment would have raised) and nothing was sent
-    assert "lcfs_cut_cells" not in vars(gs.settings) and gs.sent == []
+    assert not set(FW.CUT_CELL_SETTINGS) & set(vars(gs.settings)) and gs.sent == []
     assert rec["provided"] is False and rec["requested"] is None and rec["in_effect"] is None
+    assert rec["setting"] is None and rec["value"] is None
     assert "point test" in rec["reason"] and FW.read_cut_cells(gs) is None
     with warnings.catch_warnings():
         warnings.simplefilter("error")                   # one message per process, not one per model
         FW.configure_cut_cells(_GS(False), "if_available", _build(False))
-    with pytest.raises(RuntimeError, match="has no 'lcfs_cut_cells' setting"):
+    with pytest.raises(RuntimeError, match="has no 'lcfs_rule' or 'lcfs_cut_cells' setting"):
         FW.configure_cut_cells(_GS(False), "on", _build(False))
 
 
-def test_off_switch_is_sent_and_recorded(fresh_notices):
-    gs = _GS(True)
-    gs.settings.lcfs_cut_cells = True                     # whatever the instance had, "off" sends False
+@pytest.mark.parametrize("setting,on,off", SETTINGS)
+def test_off_switch_is_sent_and_recorded(fresh_notices, setting, on, off):
+    gs = _GS(True, setting)
+    setattr(gs.settings, setting, on)                    # whatever the instance had, "off" sends the off value
     with pytest.warns(RuntimeWarning, match="lcfs_cut_cells='off'"):
         rec = FW.configure_cut_cells(gs, "off", _build(True))
-    assert gs.settings.lcfs_cut_cells is False and gs.sent[-1]["lcfs_cut_cells"] is False
+    assert _same(getattr(gs.settings, setting), off) and _same(gs.sent[-1][setting], off)
     assert rec["provided"] is True and rec["requested"] is False and rec["in_effect"] is False
+    assert rec["setting"] == setting and _same(rec["value"], off)
     assert rec["option"] == "off" and "turned off" in rec["reason"]
     # off on a build without the setting: nothing to send
     rec2 = FW.configure_cut_cells(_GS(False), "off", _build(False))
@@ -131,7 +153,9 @@ def test_solver_build_record_of_the_installed_build(monkeypatch):
     from OpenFUSIONToolkit.TokaMaker import _core
     monkeypatch.setattr(FW, "_BUILD_CACHE", {})
     b = FW.solver_build()
-    assert b["provides_lcfs_cut_cells"] == ("lcfs_cut_cells" in vars(_core.tokamaker_settings()))
+    names = set(FW.CUT_CELL_SETTINGS) & set(vars(_core.tokamaker_settings()))
+    assert b["provides_lcfs_cut_cells"] == bool(names) and len(names) <= 1
+    assert b["cut_cell_setting"] == (names.pop() if names else None)
     assert os.path.isfile(b["liboftpy_path"])
     with open(b["liboftpy_path"], "rb") as f:
         assert b["liboftpy_sha256"] == hashlib.sha256(f.read()).hexdigest()
@@ -146,7 +170,7 @@ def test_solver_build_refuses_a_python_package_and_library_of_different_builds(m
     if not _oft():
         pytest.skip("needs OpenFUSIONToolkit")
     from OpenFUSIONToolkit.TokaMaker import _core
-    has = "lcfs_cut_cells" in vars(_core.tokamaker_settings())
+    has = bool(set(FW.CUT_CELL_SETTINGS) & set(vars(_core.tokamaker_settings())))
     monkeypatch.setattr(FW, "_BUILD_CACHE", {})
     # pretend the library does (unpatched Python package) or does not (patched package) carry the rule
     monkeypatch.setattr(FW, "CUT_CELL_LIBRARY_SYMBOL", "oftpy_init" if not has else "no_such_symbol_in_liboftpy")

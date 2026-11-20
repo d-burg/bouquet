@@ -40,7 +40,8 @@ Grad-Shafranov equation with
     solve "magnetics + reference boundary", not a free-boundary shape reconstruction; every result
     records how far the achieved boundary moved from the reference (:meth:`ForwardModel.boundary_distance`);
 * the plasma source at the last closed flux surface integrated by TokaMaker's cut-cell quadrature
-  (setting ``lcfs_cut_cells``) when the solver build provides it (:attr:`ForwardSettings.lcfs_cut_cells`,
+  (setting ``lcfs_rule = 1``; the boolean ``lcfs_cut_cells`` in earlier builds, :data:`CUT_CELL_SETTINGS`)
+  when the solver build provides it (:attr:`ForwardSettings.lcfs_cut_cells`,
   default ``"if_available"``; :func:`solver_build`): each mesh cell cut by the boundary contributes
   only its part inside, so the discrete equations stay continuous when ``P'`` or the current is
   finite at the boundary.  A build without the setting solves as before (point test of each
@@ -52,7 +53,7 @@ Grad-Shafranov equation with
 * OFT's default solver settings, never set: ``nl_tol``, ``urf``, ``maxits`` are read from the
   TokaMaker wrapper's Python-side settings (the values ``update_settings`` sends; the solver itself
   offers no getter) and recorded and compared with the defaults at every solve (record key ``G7``).
-  ``lcfs_cut_cells`` is an opt-in of the quadrature, not a tolerance: it is set as described above
+  The cut-cell setting is a choice of the quadrature, not a tolerance: it is set as described above
   and recorded beside them, never part of the ``G7`` comparison.  The one exception is the iteration
   limit ``maxits``, and only as an explicit, recorded, non-default setting
   (:attr:`ForwardSettings.solver_maxits`, default None = OFT's own limit untouched): when given, it
@@ -142,8 +143,12 @@ STRIKE_SEARCH_POINTS_PER_M = 500
 #: psi_N of the recorded ``q_90`` (q on the psi_N = 0.9 surface, beside TokaMaker's ``q_95``).
 Q_90_PSIN = 0.9
 
-#: TokaMaker setting of the cut-cell quadrature of the plasma integrals at the last closed flux surface.
-CUT_CELL_SETTING = "lcfs_cut_cells"
+#: TokaMaker settings of the cut-cell quadrature of the plasma integrals at the last closed flux surface, each with
+#: its (on, off) values, in the order they are looked for: the integer ``lcfs_rule`` (1 cut cells, 0 point test; the
+#: solver's default is 1) and, in earlier builds, the boolean ``lcfs_cut_cells``.  A build has at most one of them.
+CUT_CELL_SETTINGS = {"lcfs_rule": (1, 0), "lcfs_cut_cells": (True, False)}
+#: The setting names as written in messages.
+CUT_CELL_SETTING = " or ".join(f"'{n}'" for n in CUT_CELL_SETTINGS)
 #: Exported library symbol of the cut-cell rule (gfortran name of the module procedure).  Its presence in the
 #: loaded library is checked against the Python package's settings: the Python settings structure and the library
 #: must come from ONE build, or the settings passed to the solver are misaligned.
@@ -196,15 +201,24 @@ def _sha256(path):
 _BUILD_CACHE = {}
 
 
+def cut_cell_setting(names):
+    """Name of the cut-cell setting (:data:`CUT_CELL_SETTINGS`) among ``names`` (the attribute or field names of a
+    settings object), or None when there is none."""
+    names = set(names)
+    return next((n for n in CUT_CELL_SETTINGS if n in names), None)
+
+
 def solver_build():
     """Identity of the loaded OpenFUSIONToolkit build and whether it provides the cut-cell setting.
 
     Read without a TokaMaker instance (cached per process; the library cannot change once loaded):
 
-    * ``provides_lcfs_cut_cells``: the Python package's TokaMaker settings have ``lcfs_cut_cells`` AND its settings
-      structure has the field AND the loaded library exports the cut-cell rule
-      (:data:`CUT_CELL_LIBRARY_SYMBOL`).  The three must agree; any disagreement (a Python package of one build
-      with the library of another) raises ``RuntimeError``, because the settings structure would be misaligned;
+    * ``provides_lcfs_cut_cells``: the Python package's TokaMaker settings have a cut-cell setting
+      (:data:`CUT_CELL_SETTINGS`) AND its settings structure has the same field AND the loaded library exports the
+      cut-cell rule (:data:`CUT_CELL_LIBRARY_SYMBOL`).  The three must agree; any disagreement (a Python package of
+      one build with the library of another) raises ``RuntimeError``, because the settings structure would be
+      misaligned;
+    * ``cut_cell_setting``: the name of that setting (``lcfs_rule`` or ``lcfs_cut_cells``), None without one;
     * ``liboftpy_path``, ``liboftpy_sha256``: the library file that was loaded and its hash.  The hash is the
       reliable build identifier: the package version and the revision in the solver's banner are the same for a
       patched and an unpatched build of one revision;
@@ -219,16 +233,19 @@ def solver_build():
     from OpenFUSIONToolkit.TokaMaker import _interface as tm_interface
     lib = oft_interface.oftpy_lib
     lib_path = getattr(lib, "_name", None)
-    in_python = CUT_CELL_SETTING in vars(tm_core.tokamaker_settings())
-    in_struct = any(f[0] == CUT_CELL_SETTING for f in tm_interface.tokamaker_settings_cstruct._fields_)
+    name = cut_cell_setting(vars(tm_core.tokamaker_settings()))
+    struct_name = cut_cell_setting(f[0] for f in tm_interface.tokamaker_settings_cstruct._fields_)
+    in_python = name is not None
+    in_struct = struct_name is not None and struct_name == name
     in_library = hasattr(lib, CUT_CELL_LIBRARY_SYMBOL)
-    if not in_python == in_struct == in_library:
-        raise RuntimeError(f"inconsistent OpenFUSIONToolkit build: '{CUT_CELL_SETTING}' in the Python settings "
-                           f"{in_python}, in the settings structure {in_struct}, cut-cell rule in the loaded library "
+    if not (in_python == in_struct == in_library and struct_name == name):
+        raise RuntimeError(f"inconsistent OpenFUSIONToolkit build: cut-cell setting {name!r} in the Python settings, "
+                           f"{struct_name!r} in the settings structure, cut-cell rule in the loaded library "
                            f"{lib_path} {in_library}; the Python package and the library must come from one build")
     py_files = {n: os.path.abspath(m.__file__) for n, m in (("TokaMaker/_core.py", tm_core),
                                                              ("TokaMaker/_interface.py", tm_interface))}
-    build = dict(provides_lcfs_cut_cells=bool(in_python), library_symbol=CUT_CELL_LIBRARY_SYMBOL,
+    build = dict(provides_lcfs_cut_cells=bool(in_python), cut_cell_setting=name,
+                 library_symbol=CUT_CELL_LIBRARY_SYMBOL,
                  oft_python=os.path.dirname(os.path.abspath(OpenFUSIONToolkit.__file__)),
                  oft_version=getattr(OpenFUSIONToolkit, "__version__", None),
                  liboftpy_path=lib_path,
@@ -467,43 +484,50 @@ def psi_on_nodes(nodes_rz, r_grid, z_grid, psi_grid, map_sign):
 
 
 def read_cut_cells(gs):
-    """``lcfs_cut_cells`` of a TokaMaker instance's settings: the Python-side value that ``update_settings`` sends to
-    the solver; None when its build has no such setting.  The solver offers no way to read the value back from its
-    own (Fortran) settings, so this is what can be recorded; whether the value reached the solver is shown by
-    behavior (the live tests: a case that converges only with cut cells stalls under ``"off"``)."""
+    """Whether a TokaMaker instance's cut-cell setting (:data:`CUT_CELL_SETTINGS`) is on: True when the Python-side
+    value that ``update_settings`` sends to the solver is the setting's on value, False otherwise; None when its build
+    has no such setting.  The solver offers no way to read the value back from its own (Fortran) settings, so this is
+    what can be recorded; whether the value reached the solver is shown by behavior (the live tests: a case that
+    converges only with cut cells stalls under ``"off"``)."""
     v = vars(gs.settings)
-    return bool(v[CUT_CELL_SETTING]) if CUT_CELL_SETTING in v else None
+    name = cut_cell_setting(v)
+    if name is None:
+        return None
+    return bool(v[name] == CUT_CELL_SETTINGS[name][0]) if name == "lcfs_rule" else bool(v[name])
 
 
 def configure_cut_cells(gs, option, build):
     """Apply :attr:`ForwardSettings.lcfs_cut_cells` to a set-up TokaMaker instance; returns the record.
 
-    ``build`` is :func:`solver_build`.  The setting is present when ``lcfs_cut_cells`` is an attribute of the
-    instance's settings (no exception is used to find out: on a build without it, assigning the attribute raises).
-    ``"if_available"``: on when present, otherwise nothing is set and the solve uses the build's point test;
-    ``"on"``: a build without the setting is refused; ``"off"``: set to False when present.  When present, the value
-    is sent to the solver with ``update_settings()``.  Running without the cut cells (either reason) gives one
-    message per process.  The record states the option, whether the build provides the setting, the value in
-    effect (None without the setting) and why.
+    ``build`` is :func:`solver_build`.  The setting is present when one of :data:`CUT_CELL_SETTINGS` (``lcfs_rule``,
+    or ``lcfs_cut_cells`` in earlier builds) is an attribute of the instance's settings (no exception is used to find
+    out: on a build without it, assigning the attribute raises).  ``"if_available"``: on when present, otherwise
+    nothing is set and the solve uses the build's point test; ``"on"``: a build without the setting is refused;
+    ``"off"``: set to the setting's off value (``lcfs_rule = 0``, ``lcfs_cut_cells = False``) when present.  When
+    present, the value (on: ``lcfs_rule = 1``, ``lcfs_cut_cells = True``) is sent to the solver with
+    ``update_settings()``.  Running without the cut cells (either reason) gives one message per process.  The record
+    states the option, whether the build provides the setting, its name and the value sent, the value in effect
+    (True/False; None without the setting) and why.
     """
     if option not in LCFS_CUT_CELL_OPTIONS:
         raise ValueError(f"lcfs_cut_cells must be one of {LCFS_CUT_CELL_OPTIONS}")
-    provided = CUT_CELL_SETTING in vars(gs.settings)
+    name = cut_cell_setting(vars(gs.settings))
+    provided = name is not None
     if provided != bool(build["provides_lcfs_cut_cells"]):
-        raise RuntimeError(f"the TokaMaker settings ('{CUT_CELL_SETTING}' present: {provided}) disagree with the "
-                           f"build record ({build['provides_lcfs_cut_cells']})")
+        raise RuntimeError(f"the TokaMaker settings (cut-cell setting {CUT_CELL_SETTING} present: {provided}) "
+                           f"disagree with the build record ({build['provides_lcfs_cut_cells']})")
     if option == "on" and not provided:
         raise RuntimeError(f"lcfs_cut_cells='on' but this OpenFUSIONToolkit build ({build.get('liboftpy_path')}) has "
-                           f"no '{CUT_CELL_SETTING}' setting")
+                           f"no {CUT_CELL_SETTING} setting")
     want = bool(provided and option != "off")
     if provided:
-        setattr(gs.settings, CUT_CELL_SETTING, want)
+        setattr(gs.settings, name, CUT_CELL_SETTINGS[name][0 if want else 1])
         gs.update_settings()
     if not provided:
         reason = ("the solver build does not provide the setting: the plasma source at the boundary uses the build's "
                   "point test of each quadrature point")
         _notice_once("not_provided", f"bouquet.kinrecon: this OpenFUSIONToolkit build ({build.get('liboftpy_path')}) "
-                     f"has no '{CUT_CELL_SETTING}' setting; the forward solves run without the cut-cell quadrature at "
+                     f"has no {CUT_CELL_SETTING} setting; the forward solves run without the cut-cell quadrature at "
                      "the last closed flux surface (as before). Solves with a pressure gradient or current that is "
                      "finite at the boundary may then cycle or stall; the edge taper (ForwardSettings.edge_taper) is "
                      "the opt-in workaround for such a build.")
@@ -514,6 +538,7 @@ def configure_cut_cells(gs, option, build):
     else:
         reason = "on: the solver build provides the setting"
     return dict(option=option, provided=bool(provided), requested=want if provided else None,
+                setting=name, value=(vars(gs.settings)[name] if provided else None),
                 in_effect=read_cut_cells(gs), reason=reason, liboftpy_sha256=build.get("liboftpy_sha256"),
                 in_effect_source=("the Python-side settings value sent by update_settings (the solver has no "
                                   "getter for its own settings)"))
@@ -580,7 +605,7 @@ class ForwardModel:
         self.solver_build = solver_build()
         if s.lcfs_cut_cells == "on" and not self.solver_build["provides_lcfs_cut_cells"]:
             raise RuntimeError(f"lcfs_cut_cells='on' but this OpenFUSIONToolkit build "
-                               f"({self.solver_build['liboftpy_path']}) has no '{CUT_CELL_SETTING}' setting")
+                               f"({self.solver_build['liboftpy_path']}) has no {CUT_CELL_SETTING} setting")
         self.env = oft_env if oft_env is not None else OFT_env(nthreads=s.nthreads)
         self.gs = TokaMaker(self.env)
         pts, lc, reg, coil_dict, cond_dict = mesh

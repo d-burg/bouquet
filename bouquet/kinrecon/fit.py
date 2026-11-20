@@ -116,7 +116,8 @@ D. W. Marquardt, J. SIAM 11, 431 (1963)):
    center with a new Jacobian.  When a test holds, the undamped Gauss-Newton step it computed is
    taken as a last trial (``final_gn_step``) and kept if chi^2 does not rise by more than the noise;
 4. LM step ``(J^T J + lambda diag(J^T J)) delta = -J^T r`` shrunk as a whole to the trust caps
-   ``max_step`` and clipped to the bounds; when the cap binds and the step does not change with
+   ``max_step`` and clipped to the bounds (each correction amplitude by default at most 0.04 of Ip per
+   step; a step rule only, no stopping test reads it); when the cap binds and the step does not change with
    lambda, lambda is raised without a solve; the trial is a FULL consistent solve warm from the
    center; a failed trial (any solve not converged or not verified, a model failure, a q-consistency
    failure, a changed channel set) is a rejected step (lambda x ``lm_up``);
@@ -276,8 +277,9 @@ class FitSettings:
     max_step_growths: int = 3
     max_failed_trials: int = 4
     fit_groups: Sequence[str] = ("flux_loop", "bpol_probe", "pf_current", "ip", "mse")
+    # trust caps of one LM step (step 4 of the algorithm); a_corr: fraction of Ip per correction amplitude per step
     max_step: Dict[str, float] = field(default_factory=lambda: dict(log_strength=0.5, f=0.1, s_pfast=0.1, s_cd=0.1,
-                                                                    s_bs=0.2, a_corr=0.01, ip_rel=0.02))
+                                                                    s_bs=0.2, a_corr=0.04, ip_rel=0.02))
     fitted_coil_role: str = "fitted"
     column_retry_opposite: bool = True   # a failed column solve is retried once with the opposite step
     final_gn_step: bool = True           # take the undamped GN step of the converged test (accepted within noise)

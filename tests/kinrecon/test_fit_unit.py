@@ -211,6 +211,20 @@ def test_parameter_expansion_and_unknown():
     assert p["log_strength"] == 1.0 and p["a_corr"] == (0.0, 0.01, 0.0)
 
 
+def test_default_step_cap_of_the_correction_amplitudes():
+    """The default trust cap of one LM step in each correction amplitude is 0.04 of Ip; the other caps are as before,
+    and a step larger than the cap is shrunk as a whole to it."""
+    st = FIT.FitSettings()
+    assert st.max_step["a_corr"] == 0.04
+    assert st.max_step == dict(log_strength=0.5, f=0.1, s_pfast=0.1, s_cd=0.1, s_bs=0.2, a_corr=0.04, ip_rel=0.02)
+    assert st.as_dict()["max_step"]["a_corr"] == 0.04
+    cap = np.array([0.04, 0.04])
+    delta, capped = FIT.lm_step(np.eye(2), np.array([-0.1, 0.02]), 0.0, cap)
+    assert capped and np.allclose(delta, [0.04, -0.008], rtol=0, atol=1e-15)
+    delta, capped = FIT.lm_step(np.eye(2), np.array([-0.03, 0.02]), 0.0, cap)
+    assert not capped and np.allclose(delta, [0.03, -0.02], rtol=0, atol=1e-15)
+
+
 def test_convergence_label_separates_stops_resting_on_the_noise():
     """``converged_within_noise``: test (b) held only through its noise-scaled floor, or the final
     Gauss-Newton step was kept with a chi^2 increase; the stopping tests themselves are unchanged."""

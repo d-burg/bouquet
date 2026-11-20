@@ -69,6 +69,24 @@ def test_call_units_impurity_and_frame():
     np.testing.assert_array_equal(jb2, jb)
 
 
+def test_geometry_of_the_evaluation_is_passed_through():
+    """``return_geometry``: f_t and eps of the solver's pass unchanged (frame signs apply to the current only); None
+    from a solver build that returns no geometry."""
+    x, te, ti, ne, ni, zeff = _profiles()
+    F = np.full_like(x, -3.4)
+
+    class _GeoGS(_FakeGS):
+        def eval_bootstrap(self, psi, *a, **kw):
+            out = super().eval_bootstrap(psi, *a, **kw)
+            return dict(out, f_t=np.linspace(0.1, 0.6, len(psi)), eps=np.linspace(0.01, 0.3, len(psi)))
+
+    jb, _, geo = solver_jdotb(_GeoGS((0.5, 0.1)), x, te, ti, ne, ni, zeff, F, return_geometry=True)
+    np.testing.assert_array_equal(geo["f_t"], np.linspace(0.1, 0.6, x.size))
+    np.testing.assert_array_equal(geo["eps"], np.linspace(0.01, 0.3, x.size))
+    np.testing.assert_array_equal(jb, solver_jdotb(_GeoGS((0.5, 0.1)), x, te, ti, ne, ni, zeff, F)[0])
+    assert solver_jdotb(_FakeGS(), x, te, ti, ne, ni, zeff, F, return_geometry=True)[2] is None
+
+
 def test_refusals():
     x, te, ti, ne, ni, zeff = _profiles()
     F = np.full_like(x, 3.4)

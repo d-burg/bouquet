@@ -516,14 +516,23 @@ def evaluate_geometry(gs, kin, cfg):
     ge = ge[np.concatenate(([True], np.diff(ge) > 1e-9))]
     rho_ge = rmap.rho_of_psin(ge)
     fsa = gs.get_fsa(psi=ge)
-    _, fc, _, _, eps = gs.sauter_fc(psi=ge, return_eps=True)
+    k = kin.profiles_at(psi_n=ge, rho=rho_ge)
+    # the bootstrap evaluation traces the Sauter surfaces on ge anyway and returns f_t and eps of that pass, bit for
+    # bit those of a separate gs.sauter_fc(psi=ge, return_eps=True); that call is made only for a solver build
+    # whose eval_bootstrap does not return them
+    jbs, bsettings, bgeo = solver_jdotb(gs, ge, k["te"], k["ti"], k["ne"], k["ni"], k["zeff"], fsa["F"],
+                                        nimp=k.get("nimp"), ion_collisionality=cfg.ion_collisionality,
+                                        ln_lambda_model=cfg.bootstrap_ln_lambda_model, return_geometry=True)
+    if bgeo is None:
+        _, fc, _, _, eps = gs.sauter_fc(psi=ge, return_eps=True)
+        bgeo = dict(f_t=1.0 - np.asarray(fc, float), eps=eps)
     F = np.abs(np.asarray(fsa["F"], float))
     g1 = np.asarray(fsa["<1/R^2>"], float)
     bp2 = np.asarray(fsa["<Bp^2>"], float)
     phys = dict(psi_n=ge, rho=rho_ge, q=np.abs(np.asarray(fsa["q"], float)), F=F,
                 inv_r=np.asarray(fsa["<1/R>"], float), r_avg=np.asarray(fsa["<R>"], float), inv_r2=g1,
                 b2=bp2 + F ** 2 * g1, r_geo=0.5 * (np.asarray(fsa["R_min"], float) + np.asarray(fsa["R_max"], float)),
-                eps=np.asarray(eps, float), ft=1.0 - np.asarray(fc, float))
+                eps=np.asarray(bgeo["eps"], float), ft=np.asarray(bgeo["f_t"], float))
     dpsi = abs(float(fsa["psi_boundary"]) - float(fsa["psi_axis"]))
     # axis value of the equilibrium's own q profile (limit psi_N -> 0 of the traced q).  TokaMaker's
     # get_stats()['q_0'] is q at psi_N = 0.02 by its definition, not an axis value; this trace is a raw
@@ -532,13 +541,9 @@ def evaluate_geometry(gs, kin, cfg):
         phys["q_axis"] = float(abs(np.asarray(gs.get_q(psi=np.array([Q_AXIS_PSIN]))[1], float)[0]))
     except Exception:  # noqa: BLE001
         phys["q_axis"] = float("nan")
-    k = kin.profiles_at(psi_n=ge, rho=rho_ge)
     sig, sparts = neoclassical_conductivity(k["ne"], k["te"], k["zeff"], phys["ft"], phys["q"], phys["r_geo"],
                                             phys["eps"], model=cfg.conductivity_model,
                                             ln_lambda_model=cfg.ln_lambda_model)
-    jbs, bsettings = solver_jdotb(gs, ge, k["te"], k["ti"], k["ne"], k["ni"], k["zeff"], fsa["F"],
-                                  nimp=k.get("nimp"), ion_collisionality=cfg.ion_collisionality,
-                                  ln_lambda_model=cfg.bootstrap_ln_lambda_model)
     return dict(geom=geom, layer=layer, psi_n_edge=c, to_rho=to_rho, to_psin=to_psin, rho_map=rmap, phys=phys,
                 dpsi=dpsi, sigma=np.asarray(sig, float), jbs=np.asarray(jbs, float), kin=k,
                 kinetics_coordinate=getattr(kin, "coordinate", "psi_n"),

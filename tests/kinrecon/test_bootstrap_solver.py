@@ -108,6 +108,13 @@ def child(out):
                          argmax_psi_n=float(ge[int(np.argmax(dif))]), peak=float(np.abs(ref).max()),
                          pointwise_max_rel=float(np.max(dif / np.maximum(np.abs(ref), 1e-300))),
                          solver_options=settings["solver_options"])
+    # the geometry of the evaluation's own pass (what evaluate_geometry takes instead of its own sauter_fc call)
+    _, _, geo = solver_jdotb(gs, ge, te, ti, ne, ni, zeff, F, nimp=nimp, return_geometry=True)
+    rec["geometry_from_eval"] = geo is not None
+    if geo is not None:
+        rec["geometry_bitwise"] = {
+            "f_t": geo["f_t"].tobytes() == (1.0 - np.asarray(fc, float)).tobytes(),
+            "eps": geo["eps"].tobytes() == np.asarray(eps, float).tobytes()}
     with open(out, "w") as fh:
         json.dump(rec, fh, indent=1)
 
@@ -128,6 +135,12 @@ def result(tmp_path_factory):
 @pytest.mark.parametrize("case", ["impurity_sauter", "no_impurity_sauter", "impurity_nrl"])
 def test_solver_bootstrap_equals_the_engine_transcription(result, case):
     assert result[case]["max_abs_over_peak"] < BOUND, result[case]
+
+
+def test_bootstrap_geometry_equals_the_separate_sauter_pass(result):
+    """f_t and eps returned with the bootstrap equal a separate ``sauter_fc`` call on the same grid bit for bit."""
+    assert result["geometry_from_eval"], "the solver build's eval_bootstrap returns no geometry"
+    assert all(result["geometry_bitwise"].values()), result["geometry_bitwise"]
 
 
 if __name__ == "__main__":

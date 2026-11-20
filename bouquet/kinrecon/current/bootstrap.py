@@ -33,7 +33,9 @@ equilibrium and on the engine's physics grid, with the options that reproduce th
   data.  The earlier engine options ``"zeff"`` and ``"unity"`` have no solver counterpart and are refused;
 * geometry from the solver's flux-surface contour pass (``sauter_fc``): f_t, |q|, ``R = (R_max + R_min)/2``,
   ``eps = (R_max - R_min)/(R_max + R_min)`` and ``F``; gradients by the second-order three-point stencil on the
-  given samples (one-sided second order at the ends), as ``numpy.gradient(edge_order=2)``.
+  given samples (one-sided second order at the ends), as ``numpy.gradient(edge_order=2)``.  ``eval_bootstrap``
+  returns f_t and eps of that pass (``return_geometry``), so the engine makes no second ``sauter_fc`` call for the
+  conductivity on the same points.
 
 Frame: the engine's "positive frame" of :mod:`.diffusion` (``|F|``, psi increasing outward, a co-current bootstrap
 positive).  The solver's result is odd in ``F`` and in the sign of ``psi_axis - psi_boundary`` of its internal
@@ -71,7 +73,7 @@ def solver_options(ion_collisionality="spike", ln_lambda_model="sauter"):
 
 
 def solver_jdotb(gs, psi_n, te, ti, ne, ni, zeff, f_signed, nimp=None,
-                 ion_collisionality="spike", ln_lambda_model="sauter"):
+                 ion_collisionality="spike", ln_lambda_model="sauter", return_geometry=False):
     r"""<j_BS . B> [A T / m^2] on the psi_N samples, positive frame (module docstring).
 
     Parameters
@@ -86,8 +88,13 @@ def solver_jdotb(gs, psi_n, te, ti, ne, ni, zeff, f_signed, nimp=None,
         ``F`` of the equilibrium on the samples, with its sign (only the sign is used).
     nimp : array (n,), optional
         Impurity density [m^-3] at ``T_i``, counted in the ion pressure; None: ion pressure ``n_i T_i``.
+    return_geometry : bool
+        Also return the geometry of the evaluation's own flux-surface pass (the solver's ``sauter_fc`` on the same
+        points, which ``eval_bootstrap`` makes anyway): ``{"f_t": 1 - f_c, "eps": (R_max - R_min)/(R_max + R_min)}``,
+        bit for bit what a separate ``gs.sauter_fc(psi=psi_n, return_eps=True)`` returns, so that call is not needed.
 
-    Returns ``(jdotb, settings)``.
+    Returns ``(jdotb, settings)``, or ``(jdotb, settings, geometry)`` with ``return_geometry`` (``geometry`` None
+    for a solver build whose ``eval_bootstrap`` does not return it).
     """
     ops = solver_options(ion_collisionality, ln_lambda_model)
     x = np.asarray(psi_n, dtype=float)
@@ -117,4 +124,9 @@ def solver_jdotb(gs, psi_n, te, ti, ne, ni, zeff, f_signed, nimp=None,
                     ion_pressure=("(n_i + n_imp) T_i (main ions and impurity)" if nimp is not None
                                   else "n_i T_i (main ions only; no impurity density given)"),
                     frame="positive (|F|, psi increasing outward)")
+    if return_geometry:
+        geometry = None   # a solver build whose eval_bootstrap returns no geometry: the caller traces it itself
+        if "eps" in out:
+            geometry = {"f_t": np.asarray(out["f_t"], dtype=float), "eps": np.asarray(out["eps"], dtype=float)}
+        return jb, settings, geometry
     return jb, settings

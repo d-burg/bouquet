@@ -13,6 +13,13 @@ IMAS ``equilibrium.time_slice[:].constraints.*.chi_squared`` and of OFT's
 reconstruction error rows (``err = (val - model)*wt`` with ``wt = 1/sigma``,
 ``grad_shaf_fit.F90``), up to the sign of ``r``.
 
+Where the modeled signals come from: the magnetic groups ``flux_loop``, ``bpol_probe``, ``ip``,
+``diamagnetic_flux``, ``pf_current`` and ``mse`` are evaluated by the solver's own reconstruction constraints
+(OpenFUSIONToolkit ``TokaMaker.reconstruction``, :mod:`.solver_rows`) on the active equilibrium of a ``TokaMaker``
+object; the residuals, weights, masks, exclusions, frames, gauges and reports stay here.  The Thomson groups, and
+every group of a ``TokaMaker_equilibrium`` copy, are evaluated by :mod:`.diagnostics` (equal to the solver's rows
+to round-off where both exist; ``tests/kinrecon/test_score_solver.py``).
+
 Channels that are valid in the measurement set but cannot be modeled (off the
 mesh, a Thomson channel outside the LCFS, a non-finite model) are removed from
 the comparison through the table's per-group ``model_valid`` mask and listed
@@ -90,7 +97,13 @@ Conventions (documented defaults of the scorer):
 import numpy as np
 
 from . import diagnostics as _diag
+from . import solver_rows as _rows
 from .interfaces import MeasurementSet, ResidualTable
+
+#: Process switch: the magnetic groups of :data:`.solver_rows.SOLVER_GROUPS` are modeled by the solver's
+#: reconstruction constraints (on, the default); off: by the engine's own diagnostics (the reference path of the
+#: equivalence tests).  A ``TokaMaker_equilibrium`` copy is always scored by the engine's diagnostics.
+SOLVER_ROWS = dict(on=True)
 
 #: Groups :func:`score` can model, in evaluation order.
 SCORED_GROUPS = ("flux_loop", "bpol_probe", "ip", "diamagnetic_flux", "pf_current",
@@ -172,28 +185,23 @@ def resolve_orientation(eq, measurements, orientation=None):
                 discharge_signs=dict(ip=d_ip, bt=d_bt), checks=checks)
 
 
-def _model_group(eq, name, group, kinetics, notes, frame=None):
-    """``Synthetic`` for one group, applying its meta and the kinetics."""
+def _model_group(eq, name, group, kinetics, notes, frame=None, solved=None):
+    """``Synthetic`` for one group, applying its meta and the kinetics.  ``solved``: the groups already evaluated by
+    the solver's reconstruction constraints (:mod:`.solver_rows`); their notes are made here as for the others."""
     geo = group.geometry
     if name == "flux_loop":
-        ref = group.meta.get("flux_reference")
-        if ref is None:
-            return _diag.flux_loop(eq, geo)
-        if ref not in group.labels:
-            raise KeyError(f"score: flux_reference '{ref}' is not a flux-loop label")
-        i = group.labels.index(ref)
-        notes.append(f"flux_loop: modeled relative to reference loop '{ref}'")
-        return _diag.flux_loop(eq, geo, reference=(float(np.asarray(geo["r"])[i]),
-                                                   float(np.asarray(geo["z"])[i])))
+        ref = _flux_reference_point(group)
+        if ref is not None:
+            notes.append(f"flux_loop: modeled relative to reference loop '{group.meta['flux_reference']}'")
+        if solved is not None and name in solved:
+            return solved[name]
+        return _diag.flux_loop(eq, geo, reference=ref)
+    if solved is not None and name in solved and name != "mse":
+        if name == "bpol_probe":
+            _probe_notes(group, notes)
+        return solved[name]
     if name == "bpol_probe":
-        model = group.meta.get("probe_model", "finite_length")
-        n_avg = int(group.meta.get("probe_n_avg", _diag.PROBE_N_AVG_DEFAULT))
-        if model == "finite_length" and "length" in geo:
-            notes.append(f"bpol_probe: finite-length probes (EFIT midpoint rule, n_avg = {n_avg})")
-        elif model == "finite_length":
-            notes.append("bpol_probe: no probe lengths in the geometry: point probes")
-        else:
-            notes.append("bpol_probe: point probes (meta['probe_model'] = 'point')")
+        model, n_avg = _probe_notes(group, notes)
         return _diag.bpol_probe(eq, geo, model=model, n_avg=n_avg)
     if name == "ip":
         return _diag.ip(eq, geo)
@@ -202,34 +210,66 @@ def _model_group(eq, name, group, kinetics, notes, frame=None):
     if name == "pf_current":
         return _diag.pf_current(eq, geo)
     if name == "mse":
-        e_r = kinetics.get("e_r")
-        e_z = kinetics.get("e_z")
-        corrected = bool(group.meta.get("er_corrected", False))
-        if corrected and e_r is not None:
-            raise ValueError("score: the MSE group is already E_r-corrected "
-                             "(meta['er_corrected']=True) and an E_r was supplied; "
-                             "applying it would count E_r twice")
-        if e_r is None:
-            notes.append("mse: E_R = 0 in the model"
-                         + (" (data declared E_r-corrected)" if corrected else
-                            " and the data are NOT declared E_r-corrected: biased "
-                            "if E_r is not small"))
-        else:
-            notes.append("mse: E_R from kinetics['e_r'] applied through c3 and c7")
-        sp, st = group.meta.get("field_orientation", (1.0, 1.0))
-        if frame is not None and (frame["sign_ip"], frame["sign_bt"]) != (1.0, 1.0):
-            if "field_orientation" in group.meta and (float(sp), float(st)) != (frame["sign_ip"], frame["sign_bt"]):
-                raise ValueError(f"score: MSE field_orientation {tuple(group.meta['field_orientation'])} disagrees with "
-                                 f"the stated orientation map ({frame['sign_ip']:+g}, {frame['sign_bt']:+g})")
-            sp, st = frame["sign_ip"], frame["sign_bt"]
-        if (float(sp), float(st)) != (1.0, 1.0):
-            notes.append(f"mse: stated field orientation sign_pol={sp:+g}, sign_tor={st:+g}")
+        sp, st, e_r, e_z = _mse_orientation(group, kinetics, notes, frame)
+        if solved is not None and name in solved:
+            return solved[name]
         return _diag.mse(eq, geo, e_r=e_r, e_z=e_z, sign_pol=float(sp), sign_tor=float(st),
                          quantity=group.meta.get("quantity", "polarisation_angle"))
     if name in _THOMSON_PROFILE:
         prof = kinetics[_THOMSON_PROFILE[name]]
         return _diag.thomson(eq, geo, prof, outside=kinetics.get("thomson_outside", "exclude"))
     raise KeyError(name)
+
+
+def _probe_notes(group, notes):
+    model = group.meta.get("probe_model", "finite_length")
+    n_avg = int(group.meta.get("probe_n_avg", _diag.PROBE_N_AVG_DEFAULT))
+    if model == "finite_length" and "length" in group.geometry:
+        notes.append(f"bpol_probe: finite-length probes (EFIT midpoint rule, n_avg = {n_avg})")
+    elif model == "finite_length":
+        notes.append("bpol_probe: no probe lengths in the geometry: point probes")
+    else:
+        notes.append("bpol_probe: point probes (meta['probe_model'] = 'point')")
+    return model, n_avg
+
+
+def _flux_reference_point(group):
+    """``(r, z)`` of the flux-loop group's reference loop (``meta["flux_reference"]``), or None."""
+    ref = group.meta.get("flux_reference")
+    if ref is None:
+        return None
+    if ref not in group.labels:
+        raise KeyError(f"score: flux_reference '{ref}' is not a flux-loop label")
+    i = group.labels.index(ref)
+    geo = group.geometry
+    return (float(np.asarray(geo["r"])[i]), float(np.asarray(geo["z"])[i]))
+
+
+def _mse_orientation(group, kinetics, notes, frame):
+    """MSE E-field checks and notes, and the stated ``(sign_pol, sign_tor, e_r, e_z)``."""
+    e_r = kinetics.get("e_r")
+    e_z = kinetics.get("e_z")
+    corrected = bool(group.meta.get("er_corrected", False))
+    if corrected and e_r is not None:
+        raise ValueError("score: the MSE group is already E_r-corrected "
+                         "(meta['er_corrected']=True) and an E_r was supplied; "
+                         "applying it would count E_r twice")
+    if e_r is None:
+        notes.append("mse: E_R = 0 in the model"
+                     + (" (data declared E_r-corrected)" if corrected else
+                        " and the data are NOT declared E_r-corrected: biased "
+                        "if E_r is not small"))
+    else:
+        notes.append("mse: E_R from kinetics['e_r'] applied through c3 and c7")
+    sp, st = group.meta.get("field_orientation", (1.0, 1.0))
+    if frame is not None and (frame["sign_ip"], frame["sign_bt"]) != (1.0, 1.0):
+        if "field_orientation" in group.meta and (float(sp), float(st)) != (frame["sign_ip"], frame["sign_bt"]):
+            raise ValueError(f"score: MSE field_orientation {tuple(group.meta['field_orientation'])} disagrees with "
+                             f"the stated orientation map ({frame['sign_ip']:+g}, {frame['sign_bt']:+g})")
+        sp, st = frame["sign_ip"], frame["sign_bt"]
+    if (float(sp), float(st)) != (1.0, 1.0):
+        notes.append(f"mse: stated field orientation sign_pol={sp:+g}, sign_tor={st:+g}")
+    return sp, st, e_r, e_z
 
 
 def score(equilibrium, measurements, kinetics=None, groups=None, orientation=None):
@@ -307,9 +347,23 @@ def score(equilibrium, measurements, kinetics=None, groups=None, orientation=Non
         notes.append(f"orientation map from {frame['source']}: sign_ip {frame['sign_ip']:+g}, "
                      f"sign_bt {frame['sign_bt']:+g} applied to the modeled values")
     model, model_valid, excluded = {}, {}, {}
+    solved = None
+    on_solver = [n for n in todo if n in _rows.SOLVER_GROUPS]
+    if on_solver and SOLVER_ROWS["on"] and _rows.available(equilibrium):
+        mse_signs = (1.0, 1.0)
+        if "mse" in on_solver:
+            sp, st, _, _ = _mse_orientation(measurements.groups["mse"], kinetics, [], frame)
+            mse_signs = (float(sp), float(st))
+        ref = _flux_reference_point(measurements.groups["flux_loop"]) if "flux_loop" in on_solver else None
+        solved, rrec = _rows.evaluate(equilibrium, measurements, on_solver, kinetics,
+                                      dict(frame, mse_signs=mse_signs), flux_reference=ref)
+        notes.append(f"{', '.join(on_solver)}: modeled by the solver's reconstruction constraints "
+                     f"({rrec['rows']} rows, eval_error)")
+        if rrec["projected"]:
+            notes.append(f"solver constraints: {rrec['projected']} row(s) with points moved onto the mesh boundary")
     for name in todo:
         group = measurements.groups[name]
-        syn = _model_group(equilibrium, name, group, kinetics, notes, frame)
+        syn = _model_group(equilibrium, name, group, kinetics, notes, frame, solved)
         value = np.asarray(syn.value, dtype=float)
         if name in FRAME_SIGN_OF_GROUP:
             value = value * frame[FRAME_SIGN_OF_GROUP[name]]

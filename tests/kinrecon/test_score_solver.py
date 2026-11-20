@@ -265,6 +265,48 @@ def child(out):
     rec["state_after_oft_eval_identical"] = {k: bool(np.array_equal(before[k], v))
                                              for k, v in _state(gs).items()}
 
+    # the solver's reconstruction rows (score's default) against the engine's own diagnostics, row by row, on
+    # this equilibrium: modeled values in units of each channel's sigma, and the exclusion masks
+    import importlib
+    import time
+
+    score_mod = importlib.import_module("bouquet.kinrecon.score")   # the module (the package exports the function)
+    import dataclasses
+
+    from bouquet.kinrecon.interfaces import MeasurementSet
+    kin_noer = {"n_e": _ne, "t_e": _te}
+    og = dict(clean.groups)       # a stated MSE orientation and a reference flux loop (relative form)
+    og["mse"] = dataclasses.replace(og["mse"], meta=dict(og["mse"].meta, field_orientation=(-1.0, 1.0)))
+    og["flux_loop"] = dataclasses.replace(og["flux_loop"],
+                                          meta=dict(og["flux_loop"].meta, flux_reference="flux_loop_3"))
+    oriented = MeasurementSet("synthetic", 1.0, 0.01, og)
+    rows = {}
+    for label, ms, kk in (("noisy_er", noisy, kin), ("clean_no_er", clean, kin_noer),
+                          ("oriented_ref", oriented, kin_noer)):
+        t_s = time.perf_counter()
+        ts = score(gs, ms, kinetics=kk)
+        t_s = time.perf_counter() - t_s
+        score_mod.SOLVER_ROWS["on"] = False
+        try:
+            t_e = time.perf_counter()
+            te_ = score(gs, ms, kinetics=kk)
+            t_e = time.perf_counter() - t_e
+        finally:
+            score_mod.SOLVER_ROWS["on"] = True
+        r = {"wall_s_solver_rows": t_s, "wall_s_engine": t_e,
+             "solver_note": any("solver's reconstruction constraints" in n for n in ts.notes)}
+        for k in ts.model:
+            both = np.isfinite(ts.model[k]) & np.isfinite(te_.model[k])
+            d = np.abs(ts.model[k] - te_.model[k])[both]
+            r[k] = dict(max_abs_over_sigma=float(np.max(d / ms.groups[k].sigma[both])) if d.size else 0.0,
+                        max_rel=float(np.max(d / np.maximum(np.abs(te_.model[k][both]), 1e-300))) if d.size else 0.0,
+                        mask_equal=bool(np.array_equal(ts.model_valid[k], te_.model_valid[k])),
+                        chi2_solver=float(ts.chi2(k)), chi2_engine=float(te_.chi2(k)))
+        rows[label] = r
+    after_rows = _state(gs)
+    rec["solver_rows_side_effect_identical"] = {k: bool(np.array_equal(before[k], v)) for k, v in after_rows.items()}
+    rec["solver_rows_vs_engine"] = rows
+
     # (c) sensitivity: re-solve with Ip +3 %, score against the noisy set of the base
     gs.set_targets(Ip=1.03 * abs(g["ip"]), pax=g["pres"][0])
     gs.solve()
@@ -327,6 +369,21 @@ def test_perturbed_equilibrium_scores_worse(result):
 def test_score_has_no_side_effects(result):
     assert all(result["side_effect_identical"].values()), result["side_effect_identical"]
     assert result["repeat_identical"]
+
+
+#: Agreement of the solver's reconstruction rows with the engine's diagnostics, in units of each channel's sigma:
+#: round-off (the two evaluate the same field at the same points by different call paths).
+SOLVER_ROWS_BOUND_SIGMA = 1.0e-9
+
+
+@pytest.mark.parametrize("label", ["noisy_er", "clean_no_er", "oriented_ref"])
+def test_solver_rows_equal_engine_diagnostics(result, label):
+    r = result["solver_rows_vs_engine"][label]
+    assert r["solver_note"]
+    for k in ("flux_loop", "bpol_probe", "ip", "diamagnetic_flux", "pf_current", "mse"):
+        assert r[k]["mask_equal"], (k, r[k])
+        assert r[k]["max_abs_over_sigma"] < SOLVER_ROWS_BOUND_SIGMA, (k, r[k])
+    assert all(result["solver_rows_side_effect_identical"].values())
 
 
 def test_magnetics_match_oft_constraint_evaluation(result):

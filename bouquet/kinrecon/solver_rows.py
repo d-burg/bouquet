@@ -28,10 +28,25 @@ use the solver's EFIT-convention average (``length``, ``n_avg``), the engine's r
 The solver evaluates the ACTIVE equilibrium of a ``TokaMaker`` object.  A ``TokaMaker_equilibrium`` (a copy) is
 therefore scored by the engine's own diagnostics (:mod:`.diagnostics`), which stay as that path and as the reference
 of the equivalence tests.
+
+Lifetime of the solver's constraint set.  The solver holds ONE constraint set per ``TokaMaker`` object, which any
+reconstruction object replaces when it sets up its own.  Outside :func:`keep_constraints`, every evaluation sets the
+set up, evaluates it and destroys it again, so nothing is left behind and nothing else can have replaced it.  Inside
+:func:`keep_constraints` (the scope :func:`.fit.reconstruct` and :func:`.series.run_series` run in, where the engine
+is the only user of the solver's reconstruction constraints), the set of the specification last evaluated stays set
+up between evaluations and is replaced only when another specification is evaluated (or the solver object's
+pointer changed); it is destroyed when the outermost scope ends, also on an exception.  The values are the same bit
+for bit: the set holds only the constraint definitions and the mesh cells of their points (located once, from the
+same start, as a fresh set-up locates them); every evaluation reads the solver's CURRENT equilibrium (flux, coil
+currents, profiles).  The :class:`_Rows` of each specification are cached per solver object (the
+:data:`_CACHE_MAX` most recently used), so alternating specifications (the fit groups and all groups of a fit) do not
+build new reconstruction objects on every call.
 """
 
+import contextlib
 import hashlib
 import os
+import shutil
 import tempfile
 import weakref
 
@@ -42,7 +57,13 @@ from . import diagnostics as _diag
 #: Groups whose modeled signal comes from the solver's reconstruction constraints.
 SOLVER_GROUPS = ("flux_loop", "bpol_probe", "ip", "diamagnetic_flux", "pf_current", "mse")
 _MSE_QUANTITY = {"polarisation_angle": "angle", "tan_polarisation_angle": "tan"}
+#: Per solver object: ``{signature: _Rows}``, most recently used last (at most :data:`_CACHE_MAX` entries).
 _CACHE = weakref.WeakKeyDictionary()
+_CACHE_MAX = 8
+#: Depth of nested :func:`keep_constraints` scopes (0: every evaluation sets up and destroys the set).
+_KEEP = dict(depth=0)
+#: Per solver object: the :class:`_Rows` whose constraint set the solver holds (only inside :func:`keep_constraints`).
+_LIVE = weakref.WeakKeyDictionary()
 
 
 def available(eq):
@@ -175,6 +196,8 @@ class _Rows:
     def __init__(self, gs, specs):
         from OpenFUSIONToolkit.TokaMaker.reconstruction import reconstruction
         self.dir = tempfile.mkdtemp(prefix="kr_rows_")
+        self._finalize_dir = weakref.finalize(self, _remove_dir, self.dir, os.getpid())
+        self.live_ptr = None              # the solver pointer the set was set up on while it is kept (else None)
         self.recon = reconstruction(gs, in_filename=os.path.join(self.dir, "fit.in"),
                                     out_filename=os.path.join(self.dir, "fit.out"))
         rc, cons = self.recon, {}
@@ -215,18 +238,81 @@ class _Rows:
         self.n_rows = len(order)
         self.projected = []
 
-    def evaluate(self):
-        """Modeled signal of every row on the current equilibrium.  The constraints are set up again on every call:
-        the solver holds one constraint set, which any other reconstruction object (or a later solve's own use)
-        replaces, so a set kept from an earlier call is not assumed to be still in place."""
+    def evaluate(self, gs):
+        """Modeled signal of every row on the current equilibrium of *gs* (module docstring, "Lifetime").  Outside
+        :func:`keep_constraints` the set is set up and destroyed around the evaluation; inside, it is set up only
+        when the solver does not hold this object's set (first use, another specification evaluated since, or a
+        new solver pointer) and is kept afterwards."""
         if not self.n_rows:
             return np.zeros(0)
-        self.recon.setup_constraints()
-        try:
+        if _KEEP["depth"] <= 0:
+            self.recon.setup_constraints()
+            try:
+                self.projected = list(self.recon.projected)
+                return self.recon.eval_error()[:, 1].copy()
+            finally:
+                self.recon.destroy_constraints()       # leave no constraint set behind (score changes nothing)
+        ptr = _pointer(gs)
+        live = _LIVE.get(gs)
+        if live is not self or self.live_ptr != ptr:
+            _LIVE.pop(gs, None)
+            if live is not None:
+                live.release()
+            self.release()
+            try:
+                self.recon.setup_constraints()
+            except BaseException:
+                self.recon.destroy_constraints()       # a set-up that failed leaves no set behind
+                raise
+            self.live_ptr = ptr
+            _LIVE[gs] = self
             self.projected = list(self.recon.projected)
+        try:
             return self.recon.eval_error()[:, 1].copy()
-        finally:
-            self.recon.destroy_constraints()       # leave no constraint set behind (score changes nothing)
+        except BaseException:
+            _LIVE.pop(gs, None)
+            self.release()                             # an evaluation that failed leaves no set behind
+            raise
+
+    def release(self):
+        """Destroy this object's constraint set in the solver if it holds it (kept sets only)."""
+        if self.live_ptr is None:
+            return
+        self.live_ptr = None
+        self.recon.destroy_constraints()
+
+
+def _remove_dir(path, pid):
+    """Remove a constraint-file directory, in the process that made it only (not in a forked worker)."""
+    if os.getpid() == pid:
+        shutil.rmtree(path, True)
+
+
+def _pointer(gs):
+    p = getattr(gs, "_tMaker_ptr", None)
+    return getattr(p, "value", p)
+
+
+@contextlib.contextmanager
+def keep_constraints():
+    """Scope in which the solver's constraint set is kept between evaluations (module docstring, "Lifetime"); the
+    kept sets are destroyed when the outermost scope ends.  Changes no value.  Usable as a decorator."""
+    _KEEP["depth"] += 1
+    try:
+        yield
+    finally:
+        _KEEP["depth"] -= 1
+        if _KEEP["depth"] <= 0:
+            _KEEP["depth"] = 0
+            release_all()
+
+
+def release_all():
+    """Destroy every kept constraint set (module docstring, "Lifetime")."""
+    for gs in list(_LIVE.keys()):
+        rows = _LIVE.pop(gs, None)
+        if rows is not None:
+            rows.release()
 
 
 def _signature(specs):
@@ -234,13 +320,21 @@ def _signature(specs):
 
 
 def rows_for(gs, specs):
-    """The cached :class:`_Rows` of *gs* for *specs* (rebuilt when the specification changes)."""
+    """The cached :class:`_Rows` of *gs* for *specs* (built on the first use of the specification; the
+    :data:`_CACHE_MAX` most recently used specifications are kept per solver object)."""
     sig = _signature(specs)
-    hit = _CACHE.get(gs)
-    if hit is not None and hit[0] == sig:
-        return hit[1]
-    rows = _Rows(gs, specs)
-    _CACHE[gs] = (sig, rows)
+    per = _CACHE.get(gs)
+    if per is None:
+        per = _CACHE[gs] = {}
+    rows = per.pop(sig, None)
+    if rows is None:
+        rows = _Rows(gs, specs)
+    per[sig] = rows                                    # most recently used last
+    while len(per) > _CACHE_MAX:
+        old = per.pop(next(iter(per)))
+        if _LIVE.get(gs) is old:
+            del _LIVE[gs]
+        old.release()
     return rows
 
 
@@ -249,7 +343,7 @@ def evaluate(eq, measurements, names, kinetics, frame, flux_reference=None):
     ``TokaMaker`` object *eq*; also returns the record ``{"projected": n}``."""
     specs, reasons = build_specs(eq, measurements, names, kinetics, frame, flux_reference)
     rows = rows_for(eq, specs)
-    sig = rows.evaluate()
+    sig = rows.evaluate(eq)
     out = {}
     for name in names:
         r = reasons[name].copy()

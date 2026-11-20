@@ -173,6 +173,32 @@ def _state(gs):
                 o_point=np.array(gs.o_point), psi_bounds=np.array(gs.psi_bounds))
 
 
+def _count_setups():
+    """Count the solver constraint set-ups from now on (a wrapper around reconstruction.setup_constraints)."""
+    from OpenFUSIONToolkit.TokaMaker import reconstruction as recon_module
+    cnt = {"n": 0}
+    orig = recon_module.reconstruction.setup_constraints
+
+    def counted(self):
+        cnt["n"] += 1
+        return orig(self)
+    recon_module.reconstruction.setup_constraints = counted
+    return cnt
+
+
+def _solver_holds_no_set(gs):
+    """True when the solver object holds no reconstruction constraint set (its error evaluation refuses with -102)."""
+    import ctypes
+    from OpenFUSIONToolkit.TokaMaker import reconstruction as recon_module
+    buf = np.zeros((4, 4096))           # room for any set, should one (wrongly) be held
+    flag = ctypes.c_int()
+    st = recon_module.tokamaker_recon_settings()
+    recon_module.tokamaker_recon_err(gs._tMaker_ptr, ctypes.c_bool(False),
+                                     ctypes.byref(st.get_c_struct(gs._oft_env)),
+                                     buf.ctypes.data_as(ctypes.POINTER(ctypes.c_double)), ctypes.byref(flag))
+    return flag.value == -102
+
+
 def child(out):
     from bouquet.kinrecon import diagnostics as diag
     from bouquet.kinrecon.score import chi2_summary, score
@@ -307,11 +333,42 @@ def child(out):
     rec["solver_rows_side_effect_identical"] = {k: bool(np.array_equal(before[k], v)) for k, v in after_rows.items()}
     rec["solver_rows_vs_engine"] = rows
 
-    # (c) sensitivity: re-solve with Ip +3 %, score against the noisy set of the base
-    gs.set_targets(Ip=1.03 * abs(g["ip"]), pax=g["pres"][0])
-    gs.solve()
+    # the kept constraint set (solver_rows.keep_constraints, the scope of fit.reconstruct and series.run_series): the
+    # values of the per-call set-up bit for bit, also after a switch of specification and back; set-ups only on a
+    # switch; no set left in the solver after the scope
+    from bouquet.kinrecon import solver_rows as srows
+    sets = [("noisy_er", noisy, kin), ("clean_no_er", clean, kin_noer), ("oriented_ref", oriented, kin_noer)]
+    per_call = {label: score(gs, ms, kinetics=kk).model for label, ms, kk in sets}
+    n_setup = _count_setups()
+    with srows.keep_constraints():
+        n0 = n_setup["n"]
+        kept = [(label, score(gs, ms, kinetics=kk).model) for label, ms, kk in sets + sets[:1] + sets[:1]]
+        rec["kept_setups"] = n_setup["n"] - n0        # 3 specifications, then a switch back, then none
+        rec["kept_live_inside"] = len(srows._LIVE)
+    rec["kept_equal_per_call"] = all(np.array_equal(m[k], per_call[label][k], equal_nan=True)
+                                     for label, m in kept for k in m)
+    rec["kept_live_after"] = len(srows._LIVE)
+    rec["kept_solver_holds_no_set_after"] = _solver_holds_no_set(gs)
+    rec["kept_side_effect_identical"] = {k: bool(np.array_equal(before[k], v)) for k, v in _state(gs).items()}
+
+    # (c) sensitivity: re-solve with Ip +3 %, score against the noisy set of the base.  A kept set made on the base
+    # equilibrium is evaluated on the re-solved one (it must read the current equilibrium)
+    kc = srows.keep_constraints()
+    kc.__enter__()
+    try:
+        tk0 = score(gs, noisy, kinetics=kin)
+        n0 = n_setup["n"]
+        gs.set_targets(Ip=1.03 * abs(g["ip"]), pax=g["pres"][0])
+        gs.solve()
+        tpk = score(gs, noisy, kinetics=kin)
+        rec["kept_resolve_setups"] = n_setup["n"] - n0
+    finally:
+        kc.__exit__(None, None, None)
     tp = score(gs, noisy, kinetics=kin)
     rec["perturbed"] = {k: list(v) for k, v in chi2_summary(tp).items()}
+    rec["kept_resolve_equal_per_call"] = all(np.array_equal(tpk.model[k], tp.model[k], equal_nan=True)
+                                             for k in tp.model)
+    rec["kept_resolve_moved"] = bool(not np.array_equal(tpk.model["flux_loop"], tk0.model["flux_loop"]))
     with open(out, "w") as fh:
         json.dump(rec, fh, indent=1)
 
@@ -384,6 +441,22 @@ def test_solver_rows_equal_engine_diagnostics(result, label):
         assert r[k]["mask_equal"], (k, r[k])
         assert r[k]["max_abs_over_sigma"] < SOLVER_ROWS_BOUND_SIGMA, (k, r[k])
     assert all(result["solver_rows_side_effect_identical"].values())
+
+
+def test_kept_constraint_set_equals_per_call_set_up(result):
+    # bit for bit, set up only when the specification changes, nothing left behind
+    assert result["kept_equal_per_call"]
+    assert result["kept_setups"] == 4
+    assert result["kept_live_inside"] == 1
+    assert result["kept_live_after"] == 0
+    assert result["kept_solver_holds_no_set_after"]
+    assert all(result["kept_side_effect_identical"].values())
+
+
+def test_kept_constraint_set_reads_the_current_equilibrium(result):
+    assert result["kept_resolve_setups"] == 0
+    assert result["kept_resolve_moved"]
+    assert result["kept_resolve_equal_per_call"]
 
 
 def test_magnetics_match_oft_constraint_evaluation(result):

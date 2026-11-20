@@ -193,6 +193,7 @@ from typing import Any, Dict, Optional, Sequence
 import numpy as np
 
 from . import current_model as _cm
+from . import solver_rows as _rows
 from . import speed as _speed
 from .current import sawtooth as _saw
 from .score import chi2_summary, flux_offset_record, score
@@ -555,6 +556,7 @@ def convergence_label(stop, final_gn=None):
     return "converged_within_noise" if (via_noise_floor or kept_up) else "converged"
 
 
+@_rows.keep_constraints()        # the solver's constraint set kept between score calls (solver_rows; no value changes)
 def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, initial_profiles=None, label="fit",
                 state_fn=None, speed=None, steady_state_check=True):
     """MAP reconstruction (module docstring).

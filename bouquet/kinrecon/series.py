@@ -243,6 +243,7 @@ import numpy as np
 
 from . import current_model as _cm
 from . import fit as _fit
+from . import solver_rows as _rows
 from .current import sawtooth as _saw
 from .current.diffusion import CurrentDiffusion, CurrentState, GeometrySchedule, IpBoundary, OuterLayer
 from .score import chi2_report, flux_offset_record, score
@@ -854,6 +855,7 @@ def _slice_record(fm, res, sl, label, extra=None):
     return out
 
 
+@_rows.keep_constraints()        # the solver's constraint set kept between score calls (solver_rows; no value changes)
 def run_series(fm, slices: List[SliceData], cfg, settings=None, start_psi=None, initial_profiles=None,
                callback=None, speed=None):
     """Evolve the current through ``slices`` (module docstring).
@@ -1030,6 +1032,7 @@ def _run_series(fm, slices, cfg, settings=None, start_psi=None, initial_profiles
             out.setdefault("warnings", []).append(dict(slice=0, time=float(times[0]), sawtooth=w0["text"]))
     out["slices"].append(rec0)
     if callback:
+        _rows.release_all()                          # the callback may use the solver: no constraint set kept
         callback(rec0)
     if res0.converged and mode in ("relaxed", "mse_fit"):
         out["relaxed_start_guard"] = _relaxed_start_guard(res0, sl0, mode)
@@ -1265,6 +1268,7 @@ def _run_series(fm, slices, cfg, settings=None, start_psi=None, initial_profiles
                 out.setdefault("warnings", []).append(dict(slice=k, time=float(t1), sawtooth=w["text"]))
         out["slices"].append(rec)
         if callback:
+            _rows.release_all()                      # the callback may use the solver: no constraint set kept
             callback(rec)
         if not res.converged:
             status = f"failed_at_slice_{k}"

@@ -1029,7 +1029,9 @@ def floor_q(state, solver, q_floor=DEFAULT_Q_FLOOR):
     Refused (:class:`QFloorRefused`): q below the floor at the domain edge, or on the last interior face (the second-
     order boundary gradient uses the two outer cells, so flooring there would change the edge current).
 
-    Returns ``(state, record)`` (the input state itself when nothing changes).  ``record``: ``acted`` (the state
+    Returns ``(state, record)`` (the input state itself when nothing changes: the rebuilt psi equal to the input
+    within ``n`` ulp per cell, ``n`` the number of cells, since the rebuild is not bitwise reversible).  ``record``:
+    ``acted`` (the state
     changed), ``q_floor``, ``q_min_before`` and its ``rho``, ``q_edge``, the number of floored faces
     (``n_faces_floored``; 0 when nothing changed) and of faces below the floor before (``n_faces_below_floor``, which
     counts faces at the floor to round-off in a state floored before), every crossing of the floor by the state's q
@@ -1068,8 +1070,11 @@ def floor_q(state, solver, q_floor=DEFAULT_Q_FLOOR):
     psi = np.empty(n)
     psi[-1] = state.psi[-1]
     psi[:-1] = state.psi[-1] - np.cumsum((new[1:n] * np.diff(rc))[::-1])[::-1]
-    if np.array_equal(psi, state.psi):
-        # faces already at the floor to round-off (e.g. a state floored before): nothing changes
+    if np.all(np.abs(psi - state.psi) <= n * np.spacing(np.abs(state.psi))):
+        # faces already at the floor to round-off (e.g. a state floored before): nothing changes.  "Nothing changed"
+        # is equality of the rebuilt psi within n ulp per cell (n = number of cells), not bitwise: the rebuild
+        # (difference, divide, multiply, re-accumulate n terms) is not bitwise reversible, and a bitwise test would
+        # report a 1-ulp difference as a second flooring
         rec.update(acted=False, n_faces_floored=0)
         return state, rec
     k = int(fl[-1])

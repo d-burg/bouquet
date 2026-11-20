@@ -91,6 +91,47 @@ def test_floor_q_is_continuous_at_the_floor_radius_and_idempotent():
     assert isinstance(rec2["n_faces_below_floor"], int)          # recorded apart (round-off faces, if any)
 
 
+def _stub_floor_case(n=64, m=20):
+    """A stub solver whose q is fixed (0.8 on faces 0..m, 1.5 outside: faces 1..m always floored at q_floor = 1) and
+    a state whose psi rebuild is exact outside the floored region (psi dyadic, uniform faces k/n with n a power of
+    two), so the rebuilt psi of any state that agrees with it outside depends only on that outside part."""
+    rf = np.arange(n + 1) / n
+    q = np.where(np.arange(n + 1) <= m, 0.8, 1.5)
+    sol = SimpleNamespace(profiles=lambda state: dict(q=q, I_enclosed=np.linspace(0.0, 1.0, n + 1), ip=1.0),
+                          geometry_at=lambda t: SimpleNamespace(phi_b=1.0))
+    rc = 0.5 * (rf[1:] + rf[:-1])
+    st0 = CurrentState(rf, -(1.0 - rc ** 2), 0.0)
+    st_a, rec_a = SAW.floor_q(st0, sol, 1.0)
+    assert rec_a["acted"] and rec_a["n_faces_floored"] == m
+    # the rebuild is exact outside the floored region (the premise of the two tests below)
+    np.testing.assert_array_equal(st_a.psi[m:], st0.psi[m:])
+    return sol, st_a, n, m
+
+
+def test_floor_q_returns_its_input_when_the_rebuilt_psi_is_off_by_one_ulp():
+    """"Nothing changed" is equality of the rebuilt psi within n ulp per cell (n cells), not bitwise: the input state
+    itself is returned when the rebuild differs from it by 1 ulp in some cells."""
+    sol, st_a, n, m = _stub_floor_case()
+    psi = st_a.psi.copy()
+    psi[1:m:3] = np.nextafter(psi[1:m:3], np.inf)            # 1 ulp in some cells of the floored region
+    st_x = CurrentState(st_a.rho_faces, psi, st_a.psi_boundary, st_a.time)
+    assert not np.array_equal(st_x.psi, st_a.psi)            # its rebuilt psi (st_a's, below) is not bitwise equal
+    st2, rec2 = SAW.floor_q(st_x, sol, 1.0)
+    assert st2 is st_x and rec2["acted"] is False and rec2["n_faces_floored"] == 0 and rec2["rho_floor"] is None
+    assert rec2["n_faces_below_floor"] == m
+
+
+def test_floor_q_acts_when_the_rebuilt_psi_differs_by_clearly_more_than_n_ulp():
+    sol, st_a, n, m = _stub_floor_case()
+    psi = st_a.psi.copy()
+    psi[1:m:3] += 4 * n * np.spacing(np.abs(psi[1:m:3]))     # 4 n ulp in the same cells
+    st_x = CurrentState(st_a.rho_faces, psi, st_a.psi_boundary, st_a.time)
+    st2, rec2 = SAW.floor_q(st_x, sol, 1.0)
+    assert st2 is not st_x and rec2["acted"] is True and rec2["n_faces_floored"] == m
+    # the rebuild does not read the changed cells: it returns the floored psi of the first call, bit for bit
+    np.testing.assert_array_equal(st2.psi, st_a.psi)
+
+
 def test_floor_q_is_the_identity_where_q_is_above_the_floor():
     sol, st = _steady(GEO.IP)
     assert sol.profiles(st)["q"].min() > 1.0

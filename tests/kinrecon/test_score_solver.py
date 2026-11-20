@@ -241,9 +241,14 @@ def child(out):
         xc[k] = dict(max_abs=float(np.max(np.abs(v - ours))),
                      max_rel=float(np.max(np.abs(v - ours) / np.maximum(np.abs(ours), 1e-30))))
     rec["oft_crosscheck"] = xc
-    # OFT passes constraints through a text file written with '{:E}' (7
-    # significant digits).  Evaluate ours at those rounded locations/normals.
-    rnd = np.vectorize(lambda v: float(f"{v:E}"))
+    # OFT passes constraints through a text file: written with '{:E}' (7
+    # significant digits) by earlier builds, with the module's
+    # CON_FILE_REAL_FORMAT ('.16E', 17 digits) by later ones.  Evaluate ours at
+    # the locations/normals as the build writes them.
+    from OpenFUSIONToolkit.TokaMaker import reconstruction as recon_module
+    fmt = getattr(recon_module, "CON_FILE_REAL_FORMAT", "E")
+    rec["oft_constraint_file_format"] = fmt
+    rnd = np.vectorize(lambda v: float(f"{v:{fmt}}"))
     g_fl = {"r": rnd(geo["flux_loop"]["r"]), "z": rnd(geo["flux_loop"]["z"])}
     g_pr = {k: rnd(v) for k, v in geo["bpol_probe"].items()}
     rec["oft_crosscheck_rounded_geometry"] = {
@@ -329,9 +334,11 @@ def test_magnetics_match_oft_constraint_evaluation(result):
     # Ip and diamagnetic flux: same Fortran integrals, bit-identical.
     for name in ("ip", "diamagnetic_flux"):
         assert xc[name]["max_abs"] == 0.0, (name, xc[name])
-    # Flux loops and probes: OFT reads sensor locations from a '{:E}' text
-    # file (7 significant digits); at those rounded locations they agree to
-    # round-off, at the exact locations to the rounding's effect (~1e-6).
+    # Flux loops and probes: OFT reads sensor locations from a text file
+    # (7 significant digits in earlier builds, 17 in later ones, recorded in
+    # 'oft_constraint_file_format'); at the locations as written they agree to
+    # round-off, at the exact locations to the rounding's effect (~1e-6 with 7
+    # digits).
     for name, rel in result["oft_crosscheck_rounded_geometry"].items():
         assert rel < 1e-10, (name, rel)
     for name in ("flux_loop", "bpol_probe"):

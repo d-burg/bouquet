@@ -8,8 +8,9 @@ correction G halved, the proton-impact ionization fit x 2.7.  Independent refere
   ``scipy.integrate.quad`` from the distribution itself (P_par - P_perp = m int v^2 P_2(xi) f d^3v ->
   2 E0 P_2(xi0) S tau_s int x^4/(x^3+w^3) g^R_D dx; J = Z e S tau_s v0 xi0 int x^3/(x^3+w^3) g^(R_D/3) dx),
   using only tau_s, w = v_c/v0 and R_D from the package (those have their own tests);
-* G: the Redl L31 of ``bouquet.kinrecon.current.bootstrap`` (a separate transcription, itself tested against
-  OFT's implementation) at zero collisionality;
+* G: the Redl L31 at zero collisionality, transcribed here (:func:`redl_coefficients`, Redl et al. 2021
+  eqs. 10-11: the transcription the engine's bootstrap carried, tested against OFT's implementation, before the
+  engine moved to the solver's own bootstrap evaluation);
 * proton-impact ionization of H(1s): peak ~1.45e-16 cm^2 near 50-60 keV/u (Shah and Gilbody, J. Phys. B 14,
   2361 (1981); recalled value) -- the FREYA fit must lie within a factor 1.5 of it at 50 keV/u (the fit gives
   1.76e-16; x 2.7 would give 4.7e-16).
@@ -21,12 +22,22 @@ import numpy as np
 import pytest
 from scipy.integrate import quad
 
-from bouquet.kinrecon.current.bootstrap import redl_coefficients
 from bouquet.kinrecon.sources import IonSpecies, NeutralBeam, SimpleBeamModel, classical_moments
 from bouquet.kinrecon.sources import beam as bm
 from bouquet.kinrecon.sources.conventions import E_CHARGE, M_AMU
 from bouquet.kinrecon.sources.nbcd import trapped_electron_correction
 from bouquet.kinrecon.sources.provider import NonInductiveSources, NotValidatedError
+
+
+def redl_coefficients(ft, zeff, nu_e, nu_i):
+    """Redl 2021 ``L31`` (eqs. 10-11), the independent reference of G (module docstring); ``nu_i`` unused."""
+    fT, Zeff, nue = (np.asarray(x, dtype=float) for x in (ft, zeff, nu_e))
+    d1 = (0.67 * (1 - 0.7 * fT) * np.sqrt(nue)) / (0.56 + 0.44 * Zeff)
+    d2 = ((0.52 + 0.086 * np.sqrt(nue)) * (1 + 0.87 * fT) * nue) / (1 + 1.13 * np.sqrt(np.maximum(Zeff - 1, 0.0)))
+    X31 = fT / (1 + d1 + d2)
+    dZ = Zeff ** 1.2 - 0.71
+    L31 = (1 + 0.15 / dZ) * X31 - (0.22 / dZ) * X31 ** 2 + (0.01 / dZ) * X31 ** 3 + (0.06 / dZ) * X31 ** 4
+    return dict(L31=L31)
 
 R0, A = 1.7, 0.6
 RHO = np.linspace(0.0, 1.0, 51)

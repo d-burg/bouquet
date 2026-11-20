@@ -49,7 +49,8 @@ Physics (all in Python, iterated with the geometry):
   Every assembly records the treatment, ``q_floor``, its form, whether the floor acted, the
   flattening (floor) radius and every crossing of the floor by the model q, inner and outer
   (``assembly["core"]``, :func:`core_record`).
-* ``<J.B>_BS``: Redl 2021 (:mod:`.current.bootstrap`), multiplier ``s_bs = 1`` by default.
+* ``<J.B>_BS``: Redl 2021, the solver's own evaluation ``TokaMaker.eval_bootstrap`` on the physics grid
+  (:mod:`.current.bootstrap`), multiplier ``s_bs = 1`` by default.
 * ``<J.B>_CD`` and ``p_fast`` are supplied as arrays (:class:`SourceProfiles`) with optional
   scale factors; this module never computes them.
 * (3): the Grad-Shafranov identity for the plain surface average <J_phi> that TokaMaker's
@@ -162,7 +163,7 @@ import numpy as np
 from scipy.interpolate import PchipInterpolator
 
 from .current import sawtooth as _saw
-from .current.bootstrap import EC, redl_jdotb
+from .current.bootstrap import EC, solver_jdotb
 from .current.conductivity import neoclassical_conductivity
 from .current.diffusion import CurrentDiffusion, CurrentState, IpBoundary, OuterLayer
 from .current.diffusion import _boundary_gradient_weights as _diff_bgw
@@ -381,7 +382,7 @@ class CurrentModelSettings:
     fsa_pad_edge: float = 5.0e-5
     conductivity_model: str = "redl2021"
     ln_lambda_model: str = "sauter"          # for sigma_neo (conductivity module default)
-    ion_collisionality: str = "spike"        # for the bootstrap (current.bootstrap)
+    ion_collisionality: str = "spike"        # for the bootstrap (current.bootstrap; the solver's ion_charge_model 1)
     bootstrap_ln_lambda_model: str = "sauter"   # bootstrap Coulomb logarithms: "sauter" (S99 18d-e) or "nrl" (earlier)
     pass_acceleration: str = "anderson"      # "anderson" (depth anderson_depth) or "none"
     anderson_depth: int = 3
@@ -535,13 +536,13 @@ def evaluate_geometry(gs, kin, cfg):
     sig, sparts = neoclassical_conductivity(k["ne"], k["te"], k["zeff"], phys["ft"], phys["q"], phys["r_geo"],
                                             phys["eps"], model=cfg.conductivity_model,
                                             ln_lambda_model=cfg.ln_lambda_model)
-    jbs, bparts = redl_jdotb(ge, k["te"], k["ti"], k["ne"], k["ni"], k["zeff"], phys["q"], phys["r_geo"],
-                             phys["eps"], phys["ft"], F, dpsi, ion_collisionality=cfg.ion_collisionality,
-                             nimp=k.get("nimp"), ln_lambda_model=cfg.bootstrap_ln_lambda_model)
+    jbs, bsettings = solver_jdotb(gs, ge, k["te"], k["ti"], k["ne"], k["ni"], k["zeff"], fsa["F"],
+                                  nimp=k.get("nimp"), ion_collisionality=cfg.ion_collisionality,
+                                  ln_lambda_model=cfg.bootstrap_ln_lambda_model)
     return dict(geom=geom, layer=layer, psi_n_edge=c, to_rho=to_rho, to_psin=to_psin, rho_map=rmap, phys=phys,
                 dpsi=dpsi, sigma=np.asarray(sig, float), jbs=np.asarray(jbs, float), kin=k,
                 kinetics_coordinate=getattr(kin, "coordinate", "psi_n"),
-                bootstrap_settings=bparts["settings"], wall_s=round(time.perf_counter() - t0, 4),
+                bootstrap_settings=bsettings, wall_s=round(time.perf_counter() - t0, 4),
                 fsa_psi_axis=float(fsa["psi_axis"]), fsa_psi_boundary=float(fsa["psi_boundary"]))
 
 

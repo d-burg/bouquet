@@ -1,162 +1,92 @@
-"""``bouquet.kinrecon.current.bootstrap`` (Redl 2021, jboot1 form).
+"""``bouquet.kinrecon.current.bootstrap``: the adapter to the solver's ``eval_bootstrap`` (no solver needed).
 
-Synthetic profiles only.  The transcription is checked against OFT's own Python implementation
-(``OpenFUSIONToolkit.TokaMaker.bootstrap.redl_bootstrap``, which agrees with TokaMaker's in-solve
-Fortran Redl) when OFT is importable; the structural checks run
-without OFT.
+A stand-in solver object records what the adapter sends: the option integers that reproduce the engine's
+definitions, temperatures in keV, the impurity density in the ion pressure, and the frame signs.  The numerical
+equivalence with the engine's earlier Python transcription is the solver test ``test_bootstrap_solver.py``.
 """
-import os
-import sys
+import inspect
 
 import numpy as np
 import pytest
 
-from bouquet.kinrecon.current.bootstrap import EC, coulomb_logs, collisionalities, redl_jdotb
+from bouquet.kinrecon.current import bootstrap as _bs
+from bouquet.kinrecon.current.bootstrap import EC, solver_jdotb, solver_options
 
 
-def _profiles(n=60):
+class _FakeGS:
+    def __init__(self, bounds=(0.1, 0.5)):
+        self.psi_bounds = np.array(bounds, dtype=float)
+        self.calls = []
+
+    def eval_bootstrap(self, psi, te, ti, ne, ni, Zeff, nimp=None, ln_lambda_model=None, imp_pressure=None,
+                       bs_model=None, ion_charge_model=None):
+        self.calls.append(dict(psi=psi, te=te, ti=ti, ne=ne, ni=ni, Zeff=Zeff, nimp=nimp,
+                               ln_lambda_model=ln_lambda_model, imp_pressure=imp_pressure, bs_model=bs_model,
+                               ion_charge_model=ion_charge_model))
+        return {"psi_n": np.asarray(psi), "jdotB_bs_raw": np.linspace(1.0, 2.0, len(psi))}
+
+
+def _profiles(n=12):
     x = np.linspace(0.02, 0.98, n)
     te = 3.0e3 * (1 - x ** 1.5) ** 1.5 + 100.0
     ti = 2.5e3 * (1 - x ** 1.4) ** 1.4 + 120.0
     ne = 5.0e19 * (1 - 0.6 * x ** 2) + 0.5e19
     zeff = 1.8 + 0.2 * x
-    ni = ne * (6.0 - zeff) / 5.0             # one carbon impurity, quasineutrality
-    q = 1.0 + 3.0 * x ** 2
-    R = 1.7 + 0.02 * (1 - x)
-    eps = np.maximum(0.35 * np.sqrt(x), 1e-3)
-    ft = 1.46 * np.sqrt(eps) - 0.46 * eps
-    F = 3.4 - 0.05 * x
-    return x, te, ti, ne, ni, zeff, q, R, eps, ft, F
+    ni = ne * (6.0 - zeff) / 5.0
+    return x, te, ti, ne, ni, zeff
 
 
-def test_zero_gradients_give_zero_and_linear_in_F():
-    x, te, ti, ne, ni, zeff, q, R, eps, ft, F = _profiles()
-    flat = [np.full_like(x, v[len(x) // 2]) for v in (te, ti, ne, ni)]
-    jb, _ = redl_jdotb(x, *flat[:2], *flat[2:], zeff, q, R, eps, ft, F, 0.4)
-    j1, _ = redl_jdotb(x, te, ti, ne, ni, zeff, q, R, eps, ft, F, 0.4)
-    # numpy.gradient of a constant on a linspace grid is round-off, not exactly 0
-    assert np.max(np.abs(jb)) < 1e-12 * np.max(np.abs(j1))
-    j2, _ = redl_jdotb(x, te, ti, ne, ni, zeff, q, R, eps, ft, 2.0 * F, 0.4)
-    np.testing.assert_allclose(j2, 2.0 * j1, rtol=1e-14)
-    # profiles falling outward in the positive frame give a co-current bootstrap
-    assert np.all(j1[3:-3] > 0)
-    # 1/dpsi scaling of every gradient term
-    j3, _ = redl_jdotb(x, te, ti, ne, ni, zeff, q, R, eps, ft, F, 0.8)
-    np.testing.assert_allclose(j3, 0.5 * j1, rtol=1e-14)
-
-
-def test_collisionality_and_coulomb_log_forms():
-    x, te, ti, ne, ni, zeff, q, R, eps, ft, F = _profiles(5)
-    le, li = coulomb_logs(te, ti, ne, ni)
-    # default: Sauter 1999 eqs. (18d) and (18e) (Redl 2021 section III.D), no floor, Z = max(n_e/n_i, 1) in Lambda_ii,
-    # the electron form shared with the conductivity module
-    np.testing.assert_allclose(le, 31.3 - np.log(np.sqrt(ne) / te), rtol=1e-14)
-    z = np.clip(ne / ni, 1.0, None)
-    np.testing.assert_allclose(li, 30.0 - np.log(z ** 3 * np.sqrt(ni) / ti ** 1.5), rtol=1e-14)
-    from bouquet.kinrecon.current.conductivity import coulomb_log_e
-    np.testing.assert_array_equal(le, coulomb_log_e(ne, te))
-    # the earlier default, kept as the option "nrl": NRL electron form and the same ion form, both floored at 10
-    le_n, li_n = coulomb_logs(te, ti, ne, ni, model="nrl")
-    exp_e = 23.5 - np.log(np.sqrt(ne / 1e6) * te ** -1.25) - np.sqrt(1e-5 + (np.log(te) - 2) ** 2 / 16)
-    np.testing.assert_allclose(le_n, np.maximum(exp_e, 10.0), rtol=1e-14)
-    np.testing.assert_allclose(li_n, np.maximum(li, 10.0), rtol=1e-14)
+def test_options_reproduce_the_engine_definitions():
+    assert solver_options() == dict(bs_model=1, ln_lambda_model=2, ion_charge_model=1)
+    assert solver_options(ln_lambda_model="nrl")["ln_lambda_model"] == 1
+    for bad in ("zeff", "unity", "koh"):
+        with pytest.raises(ValueError):
+            solver_options(ion_collisionality=bad)
     with pytest.raises(ValueError):
-        coulomb_logs(te, ti, ne, ni, model="spitzer")
-    jb_s, ps = redl_jdotb(x, te, ti, ne, ni, zeff, q, R, eps, ft, F, 1.0)
-    jb_n, pn = redl_jdotb(x, te, ti, ne, ni, zeff, q, R, eps, ft, F, 1.0, ln_lambda_model="nrl")
-    assert ps["settings"]["ln_lambda_model"] == "sauter" and pn["settings"]["ln_lambda_model"] == "nrl"
-    np.testing.assert_array_equal(pn["ln_lambda_e"], le_n)
-    assert not np.array_equal(jb_s, jb_n)
-    nue, nui = collisionalities(q, R, eps, te, ti, ne, ni, zeff, le, li)
-    np.testing.assert_allclose(nue, 6.921e-18 * q * R * ne * zeff * le / (te ** 2 * eps ** 1.5), rtol=1e-14)
-    np.testing.assert_allclose(nui, 4.90e-18 * q * R * ni * (ne / ni * zeff) * li / (ti ** 2 * eps ** 1.5),
-                               rtol=1e-14)
-    with pytest.raises(ValueError):
-        collisionalities(q, R, eps, te, ti, ne, ni, zeff, le, li, ion_collisionality="koh")
+        solver_options(ln_lambda_model="spitzer")
 
 
-def _oft_bootstrap():
-    cand = os.environ.get("OFT_PYTHONPATH")
-    if cand and os.path.isdir(cand) and cand not in sys.path:
-        sys.path.insert(0, cand)
-    try:
-        from OpenFUSIONToolkit.TokaMaker.bootstrap import redl_bootstrap
-        return redl_bootstrap
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def test_matches_oft_python_redl_to_round_off():
-    redl_bootstrap = _oft_bootstrap()
-    if redl_bootstrap is None:
-        pytest.skip("OpenFUSIONToolkit not importable")
-    x, te, ti, ne, ni, zeff, q, R, eps, ft, F = _profiles()
-    dpsi = 0.45
-    ours, parts = redl_jdotb(x, te, ti, ne, ni, zeff, q, R, eps, ft, F, dpsi)
-    d = lambda y: np.gradient(y, x, edge_order=2) / dpsi  # noqa: E731
-    theirs, _ = redl_bootstrap(psi_N=x, Te=te, Ti=ti, ne=ne, ni=ni, pe=EC * ne * te, pi=EC * ni * ti, Zeff=zeff,
-                               R=R, q=q, eps=eps, fT=ft, I_psi=F, dT_e_dpsi=d(te), dT_i_dpsi=d(ti),
-                               dn_e_dpsi=d(ne), dn_i_dpsi=d(ni), ln_lambda_e=parts["ln_lambda_e"],
-                               ln_lambda_ii=parts["ln_lambda_ii"], nu_e_star_override=parts["nu_e_star"],
-                               nu_i_star_override=parts["nu_i_star"], use_legacy_L34=False, use_sign_q=False,
-                               formula_form="jboot1")
-    np.testing.assert_allclose(ours, theirs, rtol=1e-12, atol=1e-12 * np.max(np.abs(theirs)))
-
-
-def test_impurity_enters_the_ion_pressure_only():
-    """With an impurity density the ion pressure (and its gradient) is (n_i + n_imp) T_i, the same thermal
-    pressure as the equilibrium's; the collisionality still uses the main ions.  Without it the earlier
-    result is reproduced bit for bit."""
-    x, te, ti, ne, ni, zeff, q, R, eps, ft, F = _profiles()
+def test_call_units_impurity_and_frame():
+    x, te, ti, ne, ni, zeff = _profiles()
     nimp = ne * (zeff - 1.0) / 30.0
-    j0, p0 = redl_jdotb(x, te, ti, ne, ni, zeff, q, R, eps, ft, F, 0.45)
-    jn, _ = redl_jdotb(x, te, ti, ne, ni, zeff, q, R, eps, ft, F, 0.45, nimp=None)
-    np.testing.assert_array_equal(j0, jn)
-    jz, pz = redl_jdotb(x, te, ti, ne, ni, zeff, q, R, eps, ft, F, 0.45, nimp=nimp)
-    np.testing.assert_array_equal(pz["nu_i_star"], p0["nu_i_star"])
-    np.testing.assert_array_equal(pz["ln_lambda_ii"], p0["ln_lambda_ii"])
-    assert "impurity" in pz["settings"]["ion_pressure"] and "only" in p0["settings"]["ion_pressure"]
-    # the same as the main-ion formula with the ion pressure built from n_i + n_imp, written out
-    from bouquet.kinrecon.current.bootstrap import redl_coefficients
-    c = redl_coefficients(ft, zeff, pz["nu_e_star"], pz["nu_i_star"])
-    d = lambda y: np.gradient(y, x, edge_order=2) / 0.45  # noqa: E731
-    pe, pi = EC * ne * te, EC * (ni + nimp) * ti
-    dp = EC * (ne * d(te) + te * d(ne) + (ni + nimp) * d(ti) + ti * d(ni + nimp))
-    ref = -F * pe * (c["L31"] * dp / pe + c["L32"] * d(te) / te + c["L31"] * c["alpha"] * pi / pe * d(ti) / ti)
-    np.testing.assert_allclose(jz, ref, rtol=1e-12, atol=1e-12 * np.max(np.abs(ref)))
-    # more ion pressure at the same gradients: a larger bootstrap here (falling profiles)
-    assert np.median(jz[5:-5] / j0[5:-5]) > 1.0
+    F = np.full_like(x, 3.4)
+    gs = _FakeGS((0.1, 0.5))                         # psi_axis > psi_boundary
+    jb, s = solver_jdotb(gs, x, te, ti, ne, ni, zeff, F, nimp=nimp)
+    c = gs.calls[-1]
+    np.testing.assert_array_equal(c["te"], te / 1.0e3)
+    np.testing.assert_array_equal(c["ti"], ti / 1.0e3)
+    np.testing.assert_array_equal(c["nimp"], nimp)
+    assert c["imp_pressure"] is True and (c["bs_model"], c["ln_lambda_model"], c["ion_charge_model"]) == (1, 2, 1)
+    np.testing.assert_array_equal(jb, np.linspace(1.0, 2.0, x.size))
+    assert "impurity" in s["ion_pressure"] and s["evaluation"].startswith("solver")
+    # without an impurity density: no impurity in the ion pressure
+    jb0, s0 = solver_jdotb(gs, x, te, ti, ne, ni, zeff, F)
+    assert gs.calls[-1]["nimp"] is None and gs.calls[-1]["imp_pressure"] is False and "only" in s0["ion_pressure"]
+    # the result is odd in F and in the sign of psi_axis - psi_boundary: the positive frame either way
+    jb1, _ = solver_jdotb(gs, x, te, ti, ne, ni, zeff, -F, nimp=nimp)
+    np.testing.assert_array_equal(jb1, -jb)
+    jb2, _ = solver_jdotb(_FakeGS((0.5, 0.1)), x, te, ti, ne, ni, zeff, -F, nimp=nimp)
+    np.testing.assert_array_equal(jb2, jb)
+
+
+def test_refusals():
+    x, te, ti, ne, ni, zeff = _profiles()
+    F = np.full_like(x, 3.4)
     with pytest.raises(ValueError):
-        redl_jdotb(x, te, ti, ne, ni, zeff, q, R, eps, ft, F, 0.45, nimp=-nimp)
-
-
-def test_impurity_ion_pressure_matches_oft_with_its_pressure_inputs():
-    redl_bootstrap = _oft_bootstrap()
-    if redl_bootstrap is None:
-        pytest.skip("OpenFUSIONToolkit not importable")
-    x, te, ti, ne, ni, zeff, q, R, eps, ft, F = _profiles()
-    nimp = ne * (zeff - 1.0) / 30.0
-    dpsi = 0.45
-    ours, parts = redl_jdotb(x, te, ti, ne, ni, zeff, q, R, eps, ft, F, dpsi, nimp=nimp)
-    d = lambda y: np.gradient(y, x, edge_order=2) / dpsi  # noqa: E731
-    nit = ni + nimp
-    theirs, _ = redl_bootstrap(psi_N=x, Te=te, Ti=ti, ne=ne, ni=ni, pe=EC * ne * te, pi=EC * nit * ti, Zeff=zeff,
-                               R=R, q=q, eps=eps, fT=ft, I_psi=F, dT_e_dpsi=d(te), dT_i_dpsi=d(ti),
-                               dn_e_dpsi=d(ne), dn_i_dpsi=d(ni),
-                               dp_dpsi=EC * (ne * d(te) + te * d(ne) + nit * d(ti) + ti * d(nit)),
-                               ln_lambda_e=parts["ln_lambda_e"], ln_lambda_ii=parts["ln_lambda_ii"],
-                               nu_e_star_override=parts["nu_e_star"], nu_i_star_override=parts["nu_i_star"],
-                               use_legacy_L34=False, use_sign_q=False, formula_form="jboot1")
-    np.testing.assert_allclose(ours, theirs, rtol=1e-12, atol=1e-12 * np.max(np.abs(theirs)))
+        solver_jdotb(_FakeGS(), x, te, ti, ne, ni, zeff, F, nimp=-ne * 0.01)
+    with pytest.raises(ValueError):
+        solver_jdotb(_FakeGS(), x, te, ti, ne, ni, zeff, np.where(x < 0.5, F, -F))
+    with pytest.raises(ValueError):
+        solver_jdotb(_FakeGS((0.3, 0.3)), x, te, ti, ne, ni, zeff, F)
+    with pytest.raises(ValueError):
+        solver_jdotb(_FakeGS(), x, te, ti, ne, ni, zeff, F, ion_collisionality="zeff")
 
 
 def test_sauter_coulomb_logarithm_is_the_default_everywhere():
     """The bootstrap uses Sauter's Coulomb logarithms by default, in the module and in the current model's settings
     (the NRL pair is a comparison option only)."""
-    import inspect
-
-    from bouquet.kinrecon.current import bootstrap as _bs
     from bouquet.kinrecon.current_model import CurrentModelSettings
-    assert inspect.signature(_bs.redl_jdotb).parameters["ln_lambda_model"].default == "sauter"
-    assert inspect.signature(_bs.coulomb_logs).parameters["model"].default == "sauter"
+    assert inspect.signature(_bs.solver_jdotb).parameters["ln_lambda_model"].default == "sauter"
     assert CurrentModelSettings(r0=1.7).bootstrap_ln_lambda_model == "sauter"
+    assert CurrentModelSettings(r0=1.7).ion_collisionality == "spike"
+    assert EC == 1.602176634e-19

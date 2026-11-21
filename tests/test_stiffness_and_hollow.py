@@ -5,11 +5,13 @@ import pytest
 
 from bouquet.baseline import Baseline
 from bouquet.geometry.miller import miller_from_baseline
+from bouquet.kinetic_sampler import KineticBase, sample_kinetics
 from bouquet.sampling import (
     _draw_monotonic_perturbation,
     draw_bounded_perturbation,
     make_rng,
 )
+from bouquet.stiff_sampler import sample_stiff_inward_channel
 from bouquet.stiffness import compute_physics_length_scales, detect_pedestal_window
 
 
@@ -526,4 +528,143 @@ def test_clipped_kinetic_grid_j_ls_bounded_and_smooth_q1_transition():
     i_q1 = int(np.argmin(np.abs(mg_full.q - 1.0)))
     adj_skin_ref = float(np.max(slope_std[(psi_j >= 0.22) & (psi_j <= 0.35)]))
     assert float(np.max(slope_std[max(i_q1 - 3, 0): i_q1 + 4])) <= 1.05 * adj_skin_ref
+
+
+def test_stiff_inward_flat_sawtooth_core_unbiased():
+    """sample_stiff_inward_channel preserves zero axis bias on flat sawtooth cores."""
+    psi = np.linspace(0.0, 1.0, 101)
+    prof = np.where(
+        psi <= 0.28,
+        1.0,
+        0.05 + 0.95 * ((1.0 - (psi - 0.28) / 0.72) ** 1.5),
+    )
+    sig = 0.10 * prof
+    rng_si = make_rng(2026)
+    dk = np.full_like(psi, 1.5)
+    ell = np.full_like(psi, 0.25)
+    si_draws = np.array([
+        sample_stiff_inward_channel(
+            psi, prof * 5000.0, sig * 5000.0, dk, ell,
+            psi_ped_top=0.90, rng=rng_si,
+        ) / 5000.0
+        for _ in range(300)
+    ])
+    si_mean_err = abs(float(np.mean(si_draws[:, 0]) - prof[0]))
+    assert si_mean_err < 0.02, f"stiff_inward axis mean should match baseline, got err={si_mean_err}"
+    assert np.all(si_draws > 0.0)
+
+
+def test_sample_kinetics_pellet_inverted_density_and_radiative_hollow_te():
+    """sample_kinetics with gradient_policy='physics_bounds' supports pellet bumps
+    and radiatively hollow core Te while preserving the H-mode pedestal barrier."""
+    psi = np.linspace(0.0, 1.0, 129)
+    ne_base = _hmode_profile(psi, 0.85e20, 0.82e20, 0.15e20, psi_ped=0.92)
+    te_base = _hmode_profile(psi, 12.0e3, 3.5e3, 200.0, psi_ped=0.92)
+    te_base *= 1.0 - 0.22 * np.exp(-((psi / 0.18) ** 2))
+    ni_base = 0.9 * ne_base
+    ti_base = _hmode_profile(psi, 11.0e3, 3.5e3, 200.0, psi_ped=0.92)
+
+    kb = KineticBase(
+        psi_kin=psi,
+        ne=ne_base, te=te_base, ni=ni_base, ti=ti_base,
+        sigma_ne=0.12 * ne_base, sigma_te=0.12 * te_base,
+        sigma_ni=0.12 * ni_base, sigma_ti=0.12 * ti_base,
+        n_ls=0.25, t_ls=0.25,
+        gradient_policy="physics_bounds",
+        sampling_mode="gibbs_level",
+        psi_ped_top=0.92,
+        kappa_bounds={
+            "ne": (np.full_like(psi, -5.0), np.full_like(psi, 25.0)),
+            "te": (np.full_like(psi, -4.0), np.full_like(psi, 25.0)),
+            "ni": (np.full_like(psi, -5.0), np.full_like(psi, 25.0)),
+            "ti": (np.full_like(psi, -3.0), np.full_like(psi, 25.0)),
+        },
+    )
+    target = float(np.trapezoid(ne_base * te_base + ni_base * ti_base, psi))
+    rng = make_rng(42)
+
+    saw_inverted_ne = False
+    for _ in range(40):
+        kd = sample_kinetics(
+            kb, rng,
+            lambda d: float(np.trapezoid(d.ne * d.te + d.ni * d.ti, psi)),
+            target, p_thresh=0.15,
+        )
+        assert np.all(kd.ne > 0.0) and np.all(kd.te > 0.0)
+        i_ped = int(np.searchsorted(psi, 0.92))
+        assert np.all(np.diff(kd.te[i_ped:]) <= 2e-4 * np.max(kd.te))
+        i_85 = int(np.searchsorted(psi, 0.85))
+        if kd.ne[i_85] > kd.ne[0]:
+            saw_inverted_ne = True
+    assert saw_inverted_ne, "physics_bounds in sample_kinetics should permit pellet-like inverted ne draws"
+
+
+def test_sigma_zero_identity_across_all_modes():
+    """At sigma == 0, every sampling_mode x gradient_policy returns baseline bit-for-bit."""
+    psi = np.linspace(0.0, 1.0, 65)
+    ne = _hmode_profile(psi, 1.0e20, 0.6e20, 0.1e20)
+    te = _hmode_profile(psi, 5.0e3, 1.2e3, 100.0)
+    z = np.zeros_like(psi)
+    target = float(np.trapezoid(2.0 * ne * te, psi))
+
+    for smode in ("gibbs_level", "stiff_inward"):
+        for gpol in ("legacy", "positivity_only", "physics_bounds"):
+            if smode == "stiff_inward" and gpol == "legacy":
+                continue
+            kb = KineticBase(
+                psi_kin=psi, ne=ne, te=te, ni=ne, ti=te,
+                sigma_ne=z, sigma_te=z, sigma_ni=z, sigma_ti=z,
+                n_ls=0.3, t_ls=0.3,
+                sampling_mode=smode, gradient_policy=gpol,
+            )
+            kd = sample_kinetics(
+                kb, make_rng(7),
+                lambda d: float(np.trapezoid(d.ne * d.te + d.ni * d.ti, psi)),
+                target,
+            )
+            np.testing.assert_array_equal(kd.ne, ne)
+            np.testing.assert_array_equal(kd.te, te)
+            np.testing.assert_array_equal(kd.ni, ne)
+            np.testing.assert_array_equal(kd.ti, te)
+
+
+def test_stiff_inward_variance_partitioning_no_double_counting():
+    """sample_stiff_inward_channel must partition pedestal + core variance so flat
+    scalar sigmas never suffer pedestal * core variance double-counting."""
+    psi = np.linspace(0.0, 1.0, 101)
+    te_base = _hmode_profile(psi, 21.0e3, 4.5e3, 150.0, psi_ped=0.92)
+    sig_rel = 0.20
+    sig_te = sig_rel * te_base
+    dk = np.full_like(psi, 1.5)
+    ell = np.full_like(psi, 0.06)
+
+    rng_uncond = make_rng(202611)
+    draws_uncond = np.array([
+        sample_stiff_inward_channel(
+            psi, te_base, sig_te, dk, ell,
+            psi_ped_top=0.92, a_over_R0=0.31, ell_kappa=0.30,
+            enforce_ped_monotonic=False, rng=rng_uncond,
+        )
+        for _ in range(2500)
+    ])
+    rel_mean_uncond = np.mean(draws_uncond, axis=0) / te_base
+    assert np.max(np.abs(rel_mean_uncond[:90] - 1.0)) < 0.010, (
+        f"Unconditional core mean violated: max err={np.max(np.abs(rel_mean_uncond[:90] - 1.0)):.4f}"
+    )
+    assert float(np.std(np.log(draws_uncond[:, 0] / te_base[0]))) <= sig_rel + 0.008
+
+    rng = make_rng(202611)
+    draws = np.array([
+        sample_stiff_inward_channel(
+            psi, te_base, sig_te, dk, ell,
+            psi_ped_top=0.92, a_over_R0=0.31, ell_kappa=0.30,
+            enforce_ped_monotonic=True, rng=rng,
+        )
+        for _ in range(2500)
+    ])
+    assert abs(float(np.mean(draws[:, 0]) / te_base[0]) - 1.0) < 0.020
+    log_std_axis = float(np.std(np.log(draws[:, 0] / te_base[0])))
+    assert log_std_axis <= sig_rel + 0.008, (
+        f"Axis log-std {log_std_axis:.4f} exceeded target {sig_rel:.4f} (variance double-counted)"
+    )
 

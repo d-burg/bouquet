@@ -57,7 +57,8 @@ def test_the_registered_features():
     assert list(X.REGISTRY) == [
         "fuse_zeff_fast_ions", "swb_solve_method",
         "bootstrap_convergence_override", "ida_fuse_timing",
-        "bistability_guard"]
+        "bistability_guard", "physics_profile_sampling",
+        "power_balance_chi"]
     # the measured IDA route, the beam subtraction and the sampler clips left the registry
     # (owner decision 2026-10: the ida_hybrid default), their open items
     # kept as known limitations
@@ -194,6 +195,26 @@ def test_ni_source_is_validated(tmp_path):
         _recon(tmp_path, ni_source="mean")
     with pytest.raises(ValueError, match="ni_source"):
         ImasSource(ids_path="x.json", ni_source="VB+CER")
+
+
+def test_physics_sampling_and_power_balance_chi_switches(tmp_path):
+    assert X.experimental_features_enabled(
+        _imas(tmp_path, unc=UncertaintyConfig(length_scale_mode="tier1_analytical"))
+    ) == ["physics_profile_sampling"]
+    assert X.experimental_features_enabled(
+        _imas(tmp_path, unc=UncertaintyConfig(sampling_mode="stiff_inward"))
+    ) == ["physics_profile_sampling"]
+    assert X.experimental_features_enabled(
+        _imas(tmp_path, unc=UncertaintyConfig(gradient_policy="physics_bounds"))
+    ) == ["physics_profile_sampling"]
+    assert X.experimental_features_enabled(
+        _imas(tmp_path, unc=UncertaintyConfig(chi_consistency="power_balance"))
+    ) == ["power_balance_chi"]
+    assert X.experimental_features_enabled(
+        _imas(tmp_path, unc=UncertaintyConfig(
+            length_scale_mode="tier2_tglfnn", chi_consistency="surrogate"
+        ))
+    ) == ["physics_profile_sampling", "power_balance_chi"]
 
 
 # ---------------------------------------------------------------------------

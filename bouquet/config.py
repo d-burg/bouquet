@@ -437,13 +437,17 @@ def absolute_source(src: "BaselineSource") -> "BaselineSource":
 
 
 def with_absolute_paths(config: "BouquetConfig") -> "BouquetConfig":
-    """A copy of ``config`` with its input files (mesh, source, uncertainty IDA file) as absolute paths."""
+    """A copy of ``config`` with its input files (mesh, source, uncertainty IDA/TGLF-NN paths) as absolute paths."""
     import copy
     import os
     cfg = copy.deepcopy(config)
     cfg.solver.mesh_path = os.path.abspath(cfg.solver.mesh_path)
     if cfg.uncertainty.ida_path:
         cfg.uncertainty.ida_path = os.path.abspath(cfg.uncertainty.ida_path)
+    tm = getattr(cfg.uncertainty, "tglfnn_model", None)
+    if isinstance(tm, str) and tm and not os.path.isabs(tm):
+        if os.path.exists(tm) or "/" in tm or os.sep in tm or tm.startswith("."):
+            cfg.uncertainty.tglfnn_model = os.path.abspath(tm)
     cfg.source = absolute_source(cfg.source)
     return cfg
 
@@ -884,6 +888,154 @@ class UncertaintyConfig:
     aux_sigmas: dict = field(default_factory=dict)         # {name: sigma(psi_N)}
     aux_baselines: dict = field(default_factory=dict)      # {name: baseline(psi_N)}
     aux_length_scales: dict = field(default_factory=dict)  # {name: GPR length} (default 0.4)
+
+    # --- physics-informed stiffness, gradient policy & transport consistency ---
+    # length_scale_mode:
+    #   'manual'           -- user scalars / arrays n_ls, t_ls, j_ls (default)
+    #   'tier1_analytical' -- analytical ETG/TEM/ITG/EPED critical-gradient Gibbs ell(x)
+    #   'tier2_tglfnn'     -- standalone Python TGLF-NN Jacobian & critical-gradient Gibbs ell(x)
+    #   'tier2_qlknn'      -- electrostatic QLKNN 10D critical-gradient Gibbs ell(x)
+    length_scale_mode: str = "manual"
+    tglfnn_model: str = "sat2_em_d3d_azf-1_withnegD"
+    # sampling_mode:
+    #   'gibbs_level'      -- level-space GP (default; preferred when propagating
+    #                         independent pointwise diagnostic chord covariances
+    #                         without imposing a pedestal-to-core stiffness prior)
+    #   'stiff_inward'     -- stochastic pedestal draw + inward-integrated bounded
+    #                         d(ln f)/dr (avoids the Gibbs (l'/l)^2 outer-core slope
+    #                         artifact; recommended for stiff burning plasmas such
+    #                         as SPARC/ARC/ITER and transport-consistent H-modes)
+    sampling_mode: str = "gibbs_level"
+    # gradient_policy:
+    #   'legacy'           -- global _draw_monotonic_perturbation (bit-identical v1.4.1 default)
+    #   'positivity_only'  -- strict positivity f > 0, zero monotonicity rejection
+    #   'physics_bounds'   -- outward decrease in thermal pedestal, symmetric core bounds
+    #                         permitting pellet hollow ne and radiative hollow Te
+    gradient_policy: str = "legacy"
+    # chi_consistency:
+    #   'passive_gp'       -- uncoupled GP draw on chi_e / chi_i (legacy default)
+    #   'power_balance'    -- steady-state power-balance chi_s ~ M_Q * (n0*|dT0/dpsi|)
+    #                         / (n_d*|dT_d/dpsi|) (negatively correlated with |dT/dpsi|;
+    #                         recommended for experimental shot reconstructions with
+    #                         known auxiliary power and steady-state burning scenarios)
+    #   'surrogate'        -- instantaneous TGLF-NN turbulent flux ratio Q_NN,d / Q_NN,0
+    #                         scaling (positively correlated with |dT/dpsi| above critical
+    #                         gradient; represents unrelaxed turbulent transport drive)
+    #   NOTE (open investigation for SLAYER tearing UQ): 'power_balance' and
+    #   'surrogate' have opposite sign correlations with local |-dTe/dpsi| at
+    #   rational surfaces (q=3/2, 2/1). Pending full SLAYER error-field-penetration
+    #   sensitivity studies, 'power_balance' (with alpha_heating_feedback=True on
+    #   DT plasmas) is recommended for steady-state equilibrium UQ, while
+    #   bracketing against 'surrogate' tests sensitivity to unrelaxed stiff transport.
+    chi_consistency: str = "passive_gp"
+    alpha_heating_feedback: bool = False
+    current_evolution_time_s: Optional[float] = None
+    # Explicit user priors where local gyrokinetics alone does not set an
+    # amplitude or spatial scale:
+    #   flux_uncertainty_rel -- fractional uncertainty delta_Q / Q in surface
+    #       heat/particle flux when inverting critical-gradient / TGLF-NN flux
+    #       curves (0.0 uses only the TGLF-NN 20-member committee epistemic std).
+    #   stiff_gradient_ls    -- minor-radius (r/a) correlation length of core
+    #       inverse-scale-length residuals delta(R0/L_s) in 'stiff_inward'.
+    #   (Z_eff has no critical-gradient law in TGLF-NN and continues to use the
+    #   explicit scalar prior aux_length_scales.get('zeff', 0.4).)
+    flux_uncertainty_rel: float = 0.30
+    stiff_gradient_ls: float = 0.30
+    # gibbs_ls_form:
+    #   'chilenski_tanh' -- two-plateau smooth linear tanh transition between the
+    #       resolved core median ell_core and detected pedestal width ell_ped
+    #       (Chilenski, Greenwald, Marzouk et al., Nucl. Fusion 55, 023012, 2015),
+    #       giving ell'(psi_N) == 0 across the core and eliminating Gibbs (l'/l)^2
+    #       slope spikes.
+    #   'pointwise'      -- raw point-by-point radial ell(psi_N) array.
+    gibbs_ls_form: str = "chilenski_tanh"
+    # tritium_fraction:
+    #   None (default)   -- auto-detect from Baseline.tritium_fraction or IMAS
+    #                       core_profiles hydrogenic (Z=1) species, else 0.0
+    #                       (pure Deuterium, P_alpha == 0).
+    #   float in [0, 1]  -- explicit fuel tritium fraction n_T / (n_D + n_T)
+    #                       (e.g. 0.5 for 50-50 D-T burning plasmas).
+    tritium_fraction: Optional[float] = None
+
+    def __post_init__(self):
+        import math
+        import numbers
+
+        def _is_finite_real(v) -> bool:
+            return (
+                not isinstance(v, bool)
+                and isinstance(v, numbers.Real)
+                and math.isfinite(float(v))
+            )
+
+        if self.length_scale_mode not in (
+            "manual", "tier1_analytical", "tier2_tglfnn", "tier2_qlknn"
+        ):
+            raise ValueError(
+                f"uncertainty.length_scale_mode={self.length_scale_mode!r} not in "
+                "('manual', 'tier1_analytical', 'tier2_tglfnn', 'tier2_qlknn')"
+            )
+        if not isinstance(self.tglfnn_model, str) or not self.tglfnn_model.strip():
+            raise ValueError(
+                f"uncertainty.tglfnn_model={self.tglfnn_model!r} must be a non-empty str"
+            )
+        if self.sampling_mode not in ("gibbs_level", "stiff_inward"):
+            raise ValueError(
+                f"uncertainty.sampling_mode={self.sampling_mode!r} not in "
+                "('gibbs_level', 'stiff_inward')"
+            )
+        if self.gradient_policy not in ("legacy", "positivity_only", "physics_bounds"):
+            raise ValueError(
+                f"uncertainty.gradient_policy={self.gradient_policy!r} not in "
+                "('legacy', 'positivity_only', 'physics_bounds')"
+            )
+        if self.chi_consistency not in ("passive_gp", "power_balance", "surrogate"):
+            raise ValueError(
+                f"uncertainty.chi_consistency={self.chi_consistency!r} not in "
+                "('passive_gp', 'power_balance', 'surrogate')"
+            )
+        if not isinstance(self.alpha_heating_feedback, bool):
+            raise ValueError(
+                f"uncertainty.alpha_heating_feedback={self.alpha_heating_feedback!r} "
+                "must be a bool"
+            )
+        if self.current_evolution_time_s is not None:
+            if (
+                not _is_finite_real(self.current_evolution_time_s)
+                or float(self.current_evolution_time_s) <= 0.0
+            ):
+                raise ValueError(
+                    f"uncertainty.current_evolution_time_s={self.current_evolution_time_s!r} "
+                    "must be None or a finite number > 0"
+                )
+            self.current_evolution_time_s = float(self.current_evolution_time_s)
+        if not _is_finite_real(self.flux_uncertainty_rel) or float(self.flux_uncertainty_rel) < 0.0:
+            raise ValueError(
+                f"uncertainty.flux_uncertainty_rel={self.flux_uncertainty_rel!r} "
+                "must be a finite number >= 0.0"
+            )
+        self.flux_uncertainty_rel = float(self.flux_uncertainty_rel)
+        if not _is_finite_real(self.stiff_gradient_ls) or float(self.stiff_gradient_ls) <= 0.0:
+            raise ValueError(
+                f"uncertainty.stiff_gradient_ls={self.stiff_gradient_ls!r} "
+                "must be a finite number > 0.0"
+            )
+        self.stiff_gradient_ls = float(self.stiff_gradient_ls)
+        if self.tritium_fraction is not None:
+            if (
+                not _is_finite_real(self.tritium_fraction)
+                or not (0.0 <= float(self.tritium_fraction) <= 1.0)
+            ):
+                raise ValueError(
+                    f"uncertainty.tritium_fraction={self.tritium_fraction!r} "
+                    "must be None or a finite number in [0.0, 1.0]"
+                )
+            self.tritium_fraction = float(self.tritium_fraction)
+        if self.gibbs_ls_form not in ("chilenski_tanh", "pointwise"):
+            raise ValueError(
+                f"uncertainty.gibbs_ls_form={self.gibbs_ls_form!r} not in "
+                "('chilenski_tanh', 'pointwise')"
+            )
 
 
 #: GenerationConfig.swb_saw_rule -> OFT boot_ops saw_rule.
@@ -3007,6 +3159,7 @@ class BouquetConfig:
         """Rebuild a :class:`BouquetConfig` from :meth:`to_dict` output."""
         d = _decode(d)
         source = _decode_source(d["source"])
+        uncd = _checked_uncertainty_keys(dict(d.get("uncertainty", {})))
         gend = _checked_generation_keys(dict(d.get("generation", {})))
         if "jbs_self_consistent" not in gend:
             # A stored config written before the self-consistent bootstrap
@@ -3103,7 +3256,7 @@ class BouquetConfig:
                 source=source,
                 solver=_build(SolverConfig, d["solver"]),
                 output_header=d["output_header"],
-                uncertainty=_build(UncertaintyConfig, d.get("uncertainty", {})),
+                uncertainty=_build(UncertaintyConfig, uncd),
                 generation=_build(GenerationConfig, gend),
                 filtering=_build(FilterConfig, d.get("filtering", {})),
                 fixed_components=_build(FixedComponentsConfig,
@@ -3163,6 +3316,10 @@ def _decode(v):
 _RETIRED_GENERATION_KEYS = ("coil_drift_threshold_A", "lock_coils",
                             "lock_coils_weight", "window_coord", "seed_coord",
                             "engine_split_pressure")
+
+#: UncertaintyConfig fields that existed once and were removed (dropped with a
+#: warning on stored configs, never mistaken for a typo).
+_RETIRED_UNCERTAINTY_KEYS = ("sigma_ni_from_ne",)
 
 
 #: Every earlier DEFAULT of an engine-only field, with the dates it was the
@@ -3616,6 +3773,40 @@ def _checked_generation_keys(gend: dict) -> dict:
             UserWarning, stacklevel=3)
         gend = {k: v for k, v in gend.items() if k not in retired}
     return gend
+
+
+def _checked_uncertainty_keys(uncd: dict) -> dict:
+    """Refuse an unknown ``uncertainty`` key in a config dict (while dropping
+    retired keys in :data:`_RETIRED_UNCERTAINTY_KEYS` with a warning)."""
+    import difflib
+    import warnings
+    names = {f.name for f in _dc.fields(UncertaintyConfig)}
+    retired = [k for k in uncd if k in _RETIRED_UNCERTAINTY_KEYS]
+    unknown = sorted(
+        k for k in uncd if k not in names and k not in _RETIRED_UNCERTAINTY_KEYS
+    )
+    if unknown:
+        parts = []
+        for k in unknown:
+            near = difflib.get_close_matches(str(k), sorted(names), n=1, cutoff=0.0)
+            parts.append(
+                f"{k!r} (nearest valid key: {near[0]!r})" if near else repr(k)
+            )
+        raise ValueError(
+            "config uncertainty section has unknown key(s): "
+            + ", ".join(parts)
+            + ".  Refusing to drop them silently (a misspelt field would leave "
+            "its default in force); fix the spelling or remove the key."
+        )
+    if retired:
+        warnings.warn(
+            "config uncertainty section carries retired field(s) "
+            f"{retired}: they no longer exist and are ignored.",
+            UserWarning,
+            stacklevel=3,
+        )
+        uncd = {k: v for k, v in uncd.items() if k not in retired}
+    return uncd
 
 
 def _encode_source(src) -> dict:

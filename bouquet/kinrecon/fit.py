@@ -187,6 +187,7 @@ pass-loop option is :class:`.current_model.CurrentModelSettings`'s EXPERIMENTAL 
 """
 
 import math
+import os
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Optional, Sequence

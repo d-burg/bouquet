@@ -162,3 +162,61 @@ def test_the_check_applies_to_a_rho_table_too():
                                    zeff_candidates={"vb": ("zeff", np.full_like(rho, 1.8))}, zeff_source="vb",
                                    z_imp=6.0, n_fast="none", ti_coverage=dict(points=_pts(EDGE), core_psi_n_max=None))
     assert k.coordinate == "rho_tor_norm" and k.record["ti_coverage"]["verdict"] == KI.TI_COVERED
+
+
+RATIO = 0.7 + 0.2 * X                                          # a supplied T_i/T_e on the table
+DETAIL = dict(source="measured T_i/T_e of the two neighboring covered slices, linear in time",
+              bracketing_times_s=[0.50, 0.60], gap_s=0.10)
+
+
+def test_the_ratio_assumption_on_an_uncovered_slice_sets_ti_to_ratio_times_te_and_records_it():
+    sig = 0.1 + 0.1 * X
+    opts = dict(points=_pts(OUTSIDE), core_psi_n_max=None, assumption=KI.TI_RATIO_TO_ELECTRON,
+                assumption_sigma_rel=sig, assumption_ratio=RATIO, assumption_detail=DETAIL)
+    with pytest.warns(KI.TiCoverageWarning, match="r supplied by the caller"):
+        k = _build(opts, provenance=dict(ti="profile fit of the T_i points"))
+    r = k.record["ti_coverage"]
+    assert r["verdict"] == KI.TI_NOT_COVERED and r["ti"] == "assumed" and r["assumption_named"] == "ratio_to_electron"
+    a = r["assumption"]
+    assert a["rule"] == "ratio_to_electron" and a["detail"] == DETAIL
+    assert a["ratio"] == RATIO.tolist() and a["sigma_rel"] == sig.tolist()
+    assert np.array_equal(k.ti, RATIO * TE)
+    assert k.provenance["ti"].startswith("ASSUMED: T_i = r T_e, r supplied by the caller (rule 'ratio_to_electron'")
+    assert "not used" in k.provenance["ti"]
+    json.dumps(r)
+    with pytest.warns(KI.TiCoverageWarning):
+        k1 = _build(dict(opts, assumption_sigma_rel=0.2))
+    assert k1.record["ti_coverage"]["assumption"]["sigma_rel"] == 0.2 and np.array_equal(k1.ti, k.ti)
+
+
+def test_the_ratio_assumption_on_a_covered_slice_changes_nothing():
+    ref = _build(dict(points=_pts(CORE), core_psi_n_max=None))
+    with _no_ti_warning():
+        k = _build(dict(points=_pts(CORE), core_psi_n_max=None, assumption=KI.TI_RATIO_TO_ELECTRON,
+                        assumption_sigma_rel=0.2, assumption_ratio=RATIO, assumption_detail=DETAIL))
+    r = k.record["ti_coverage"]
+    assert r["ti"] == "measured" and "assumption" not in r and "not applied" in r["note"]
+    for f in ("ti", "te", "ne", "ni", "nimp", "zeff"):
+        assert np.array_equal(getattr(k, f), getattr(ref, f)), f
+
+
+def test_the_ratio_assumption_checks_its_inputs():
+    base = dict(points=_pts(OUTSIDE), core_psi_n_max=None, assumption=KI.TI_RATIO_TO_ELECTRON,
+                assumption_sigma_rel=0.2, assumption_ratio=RATIO, assumption_detail=DETAIL)
+    neg = RATIO.copy()
+    neg[3] = -1.0
+    bad = [(dict(base, assumption_ratio=None), "needs 'assumption_ratio'"),
+           (dict(base, assumption_detail=None), "needs 'assumption_ratio'"),
+           (dict(base, assumption_detail={}), "needs 'assumption_ratio'"),
+           (dict(base, assumption_ratio=RATIO[:-1]), "finite and > 0"),
+           (dict(base, assumption_ratio=neg), "finite and > 0"),
+           (dict(base, assumption_sigma_rel=np.full(3, 0.2)), "one number"),
+           (dict(base, assumption_sigma_rel=np.zeros_like(X)), "assumption_sigma_rel"),
+           (dict(base, assumption_detail=dict(a=object())), "plain numbers"),
+           (dict(base, assumption=KI.TI_EQUAL_TO_ELECTRON), "only"),
+           (dict(base, assumption=KI.TI_EQUAL_TO_ELECTRON, assumption_ratio=None, assumption_detail=None,
+                 assumption_sigma_rel=np.full_like(X, 0.2)), "one number")]
+    for opts, msg in bad:
+        with pytest.raises(ValueError, match=msg):
+            _build(opts)
+

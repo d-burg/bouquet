@@ -48,7 +48,10 @@ or ``None`` for none; there is no default, the value depends on the device's dia
 valid point inside the plasma boundary (or, criterion applied, none at psi_N <= ``core_psi_n_max``) has an ion
 temperature that is not measured there: it is refused (:class:`TiCoverageRefused`, with the check's record) unless the
 caller names an assumption for it (``"assumption": "equal_to_electron"``: ``T_i = T_e`` over the whole table, with a
-relative uncertainty the caller states).  An applied assumption is recorded (``record["ti_coverage"]``: assumed, the
+relative uncertainty the caller states; or ``"assumption": "ratio_to_electron"``: ``T_i = r T_e`` with the ratio
+``r`` the caller supplies on the table (``assumption_ratio``; e.g. the measured ``T_i/T_e`` of the neighboring covered
+slices interpolated in time), its relative uncertainty (a number or an array on the table) and a description of where
+the ratio comes from (``assumption_detail``, recorded as given)).  An applied assumption is recorded (``record["ti_coverage"]``: assumed, the
 rule, the radial range, the stated uncertainty), named in the provenance and warned about; it is never applied
 silently, and a named assumption on a covered slice is recorded and not applied.
 
@@ -64,6 +67,7 @@ The result evaluates on any equilibrium through :meth:`KineticInputs.profiles_at
 equilibrium's ``(psi_N, rho)`` pair; :mod:`.current_model` calls it on every pass.
 """
 
+import json
 import warnings
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
@@ -77,7 +81,7 @@ EC = 1.602176634e-19
 
 __all__ = ["KineticInputs", "assemble_kinetic_inputs", "zeff_from_impurity_density", "COORDINATES",
            "CHECKED", "ZEFF_RULE_OPTIONS", "FAST_IONS_NONE", "ti_coverage_check", "TiCoverageRefused",
-           "TiCoverageWarning", "TI_COVERAGE_KEYS", "TI_ASSUMPTIONS", "TI_EQUAL_TO_ELECTRON", "TI_COVERED",
+           "TiCoverageWarning", "TI_COVERAGE_KEYS", "TI_ASSUMPTIONS", "TI_EQUAL_TO_ELECTRON", "TI_RATIO_TO_ELECTRON", "TI_COVERED",
            "TI_NOT_COVERED"]
 
 #: Coordinates a kinetic table can carry.
@@ -97,11 +101,15 @@ ZEFF_RULE_OPTIONS = ("psi_n", "slice_time", "slice_window", "override", "accept_
 _CANDIDATE_KEYS = ("kind", "value", "sigma", "fit_points", "raw_points", "provenance", "core_median_series")
 #: Keys of the ``ti_coverage`` argument of :func:`assemble_kinetic_inputs`: ``points`` and ``core_psi_n_max`` are
 #: required (``core_psi_n_max`` may be ``None``, stated), ``slice_window`` (required for points that carry times),
-#: ``assumption`` and ``assumption_sigma_rel`` optional.
-TI_COVERAGE_KEYS = ("points", "core_psi_n_max", "slice_window", "assumption", "assumption_sigma_rel")
-#: The assumption a caller may name for an ion temperature that is not measured inside the boundary: ``T_i = T_e``.
+#: ``assumption`` and ``assumption_sigma_rel`` optional; ``assumption_ratio`` and ``assumption_detail`` are required
+#: with, and allowed only with, the assumption ``"ratio_to_electron"``.
+TI_COVERAGE_KEYS = ("points", "core_psi_n_max", "slice_window", "assumption", "assumption_sigma_rel",
+                    "assumption_ratio", "assumption_detail")
+#: The assumptions a caller may name for an ion temperature that is not measured inside the boundary: ``T_i = T_e``,
+#: and ``T_i = r T_e`` with a ratio ``r`` the caller supplies on the table and describes.
 TI_EQUAL_TO_ELECTRON = "equal_to_electron"
-TI_ASSUMPTIONS = (TI_EQUAL_TO_ELECTRON,)
+TI_RATIO_TO_ELECTRON = "ratio_to_electron"
+TI_ASSUMPTIONS = (TI_EQUAL_TO_ELECTRON, TI_RATIO_TO_ELECTRON)
 #: Verdicts of :func:`ti_coverage_check`.
 TI_COVERED, TI_NOT_COVERED = "covered", "not_covered"
 
@@ -196,11 +204,34 @@ def _ti_coverage(x, coordinate, out, opts):
     rule, sig = opts.get("assumption"), opts.get("assumption_sigma_rel")
     if rule is not None and rule not in TI_ASSUMPTIONS:
         raise ValueError(f"ti_coverage assumption must be one of {TI_ASSUMPTIONS} (or omitted: refuse)")
-    if rule is not None and not (sig is not None and np.isfinite(float(sig)) and float(sig) > 0):
+    ratio, detail = opts.get("assumption_ratio"), opts.get("assumption_detail")
+    by_ratio = rule == TI_RATIO_TO_ELECTRON
+    if sig is not None:
+        sig = np.asarray(sig, dtype=float)
+        if sig.ndim and not (by_ratio and sig.shape == x.shape):
+            raise ValueError("ti_coverage: 'assumption_sigma_rel' must be one number (with the assumption "
+                             f"{TI_RATIO_TO_ELECTRON!r} it may be an array on the table)")
+    if rule is not None and not (sig is not None and np.all(np.isfinite(sig)) and np.all(sig > 0)):
         raise ValueError("ti_coverage: an assumption needs 'assumption_sigma_rel', the relative 1-sigma uncertainty "
                          "of the assumed T_i (> 0), stated by the caller")
     if rule is None and sig is not None:
         raise ValueError("ti_coverage: 'assumption_sigma_rel' is given without an assumption")
+    if not by_ratio and (ratio is not None or detail is not None):
+        raise ValueError(f"ti_coverage: 'assumption_ratio' and 'assumption_detail' belong to the assumption "
+                         f"{TI_RATIO_TO_ELECTRON!r} only")
+    if by_ratio:
+        if ratio is None or not isinstance(detail, dict) or not detail:
+            raise ValueError(f"ti_coverage: the assumption {TI_RATIO_TO_ELECTRON!r} needs 'assumption_ratio' (T_i/T_e "
+                             "on the table) and 'assumption_detail' (a dict saying where the ratio comes from, "
+                             "recorded as given)")
+        ratio = np.asarray(ratio, dtype=float)
+        if ratio.shape != x.shape or not (np.all(np.isfinite(ratio)) and np.all(ratio > 0)):
+            raise ValueError("ti_coverage: 'assumption_ratio' must be finite and > 0 at every point of the table")
+        try:
+            detail = json.loads(json.dumps(detail))
+        except (TypeError, ValueError) as err:
+            raise ValueError("ti_coverage: 'assumption_detail' must hold plain numbers, strings, lists and "
+                             "dicts") from err
     rec = ti_coverage_check(opts["points"], core_psi_n_max=opts["core_psi_n_max"],
                             slice_window=opts.get("slice_window"))
     rec["assumption_named"] = rule
@@ -213,13 +244,24 @@ def _ti_coverage(x, coordinate, out, opts):
         raise TiCoverageRefused(
             "ion temperature not measured inside the plasma boundary: " + rec["reason"] + "; refused (pass "
             f"ti_coverage={{..., 'assumption': {TI_EQUAL_TO_ELECTRON!r}, 'assumption_sigma_rel': <stated>}} to fit "
-            "it with T_i = T_e, recorded)", rec)
-    out["ti"] = out["te"].copy()
+            f"it with T_i = T_e, or the assumption {TI_RATIO_TO_ELECTRON!r} with a supplied T_i/T_e, recorded)", rec)
     rec["ti"] = "assumed"
-    rec["assumption"] = dict(rule=rule, statement="T_i = T_e", sigma_rel=float(sig),
-                             sigma_note="stated by the caller and recorded; the kinetic inputs carry no uncertainties",
-                             coordinate=coordinate, range=[float(x[0]), float(x[-1])], extent="the whole table")
-    warnings.warn(f"ion temperature ASSUMED (T_i = T_e, rule {rule!r}, stated relative 1-sigma {float(sig):g}) over "
+    note = "stated by the caller and recorded; the kinetic inputs carry no uncertainties"
+    if by_ratio:
+        out["ti"] = ratio * out["te"]
+        statement = "T_i = r T_e, r supplied by the caller"
+        sig_rec = float(sig) if not sig.ndim else [float(v) for v in sig]
+        sig_txt = f"{float(sig):g}" if not sig.ndim else f"{float(np.median(sig)):g} (median over the table)"
+        rec["assumption"] = dict(rule=rule, statement=statement, sigma_rel=sig_rec, sigma_note=note,
+                                 ratio=[float(v) for v in ratio], detail=detail, coordinate=coordinate,
+                                 range=[float(x[0]), float(x[-1])], extent="the whole table")
+    else:
+        out["ti"] = out["te"].copy()
+        statement, sig_txt = "T_i = T_e", f"{float(sig):g}"
+        rec["assumption"] = dict(rule=rule, statement=statement, sigma_rel=float(sig), sigma_note=note,
+                                 coordinate=coordinate, range=[float(x[0]), float(x[-1])], extent="the whole table")
+    rec["assumption"]["sigma_text"] = sig_txt
+    warnings.warn(f"ion temperature ASSUMED ({statement}, rule {rule!r}, stated relative 1-sigma {sig_txt}) over "
                   f"{coordinate} [{x[0]:g}, {x[-1]:g}]: not measured inside the boundary ({rec['reason']})",
                   TiCoverageWarning, stacklevel=3)
     return rec
@@ -333,7 +375,8 @@ def assemble_kinetic_inputs(x, ne, te, ti, *, zeff_candidates, zeff_source, z_im
         Required (``None`` is refused): the ion-temperature coverage check of the slice (module docstring;
         :data:`TI_COVERAGE_KEYS`, :func:`ti_coverage_check`).  ``points``: the ion-temperature measurement points;
         ``core_psi_n_max``: a psi_N or ``None`` (stated); ``slice_window``: for points with times; ``assumption``
-        (:data:`TI_ASSUMPTIONS`) with ``assumption_sigma_rel``: used only when the slice is not covered.  A slice that
+        (:data:`TI_ASSUMPTIONS`) with ``assumption_sigma_rel`` (and, for ``"ratio_to_electron"``, ``assumption_ratio``
+        and ``assumption_detail``): used only when the slice is not covered.  A slice that
         is not covered, with no assumption named, raises :class:`TiCoverageRefused`.  Recorded in
         ``record["ti_coverage"]``.
     """
@@ -453,7 +496,7 @@ def assemble_kinetic_inputs(x, ne, te, ti, *, zeff_candidates, zeff_source, z_im
     prov.setdefault("ti", "caller")
     if ti_rec["ti"] == "assumed":
         a = ti_rec["assumption"]
-        prov["ti"] = (f"ASSUMED: T_i = T_e (rule {a['rule']!r}, stated relative 1-sigma {a['sigma_rel']:g}) over "
+        prov["ti"] = (f"ASSUMED: {a['statement']} (rule {a['rule']!r}, stated relative 1-sigma {a['sigma_text']}) over "
                       f"{a['coordinate']} [{a['range'][0]:g}, {a['range'][1]:g}]; not measured: {ti_rec['reason']}; "
                       f"the supplied T_i ({prov['ti']}) is not used")
     prov["zeff"] = f"candidate {zeff_source!r}"

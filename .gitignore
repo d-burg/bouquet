@@ -45,6 +45,13 @@ dd_sim.json
 *_dd_sim.json
 dd_exp.json
 *_dd_exp.json
+*OMAS_IDS*.json
+*.ids.json
+*.ids.*.json
+arc_v3a*.json
+sparc_*.json
+validation_local/
+benchmarks_local/
 
 # Fortran / compiled artifacts (in case any build steps live nearby)
 *.mod

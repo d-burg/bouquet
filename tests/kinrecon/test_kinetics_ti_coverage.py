@@ -220,3 +220,23 @@ def test_the_ratio_assumption_checks_its_inputs():
         with pytest.raises(ValueError, match=msg):
             _build(opts)
 
+
+def test_the_temperature_factor_scales_both_temperatures_and_the_pressure_and_names_itself():
+    from bouquet.kinrecon import current_model as CM
+    k = _build(dict(points=_pts(CORE), core_psi_n_max=None))
+    assert k.with_temperature_factor(1.0) is k and CM.kinetics_at(k, None) is k
+    assert CM.kinetics_at(k, dict(s_temp=1.0)) is k
+    s = CM.kinetics_at(k, dict(s_temp=1.08))
+    assert s is k.with_temperature_factor(1.08) and s is not k
+    assert np.array_equal(s.te, k.te * 1.08) and np.array_equal(s.ti, k.ti * 1.08)
+    for f in ("ne", "ni", "nimp", "zeff"):
+        assert np.array_equal(getattr(s, f), getattr(k, f)), f
+    np.testing.assert_allclose(s.thermal_pressure_at(psi_n=X), 1.08 * k.thermal_pressure_at(psi_n=X), rtol=1e-12)
+    assert s.record["temperature_factor"] == 1.08 and "temperature_factor" not in k.record
+    assert "MULTIPLIED by the fitted temperature factor 1.08" in s.provenance["te"]
+    assert np.array_equal(k.te, TE)
+    for bad in (0.0, -1.0, float("nan")):
+        with pytest.raises(ValueError, match="temperature factor"):
+            k.with_temperature_factor(bad)
+    assert CM.DEFAULT_PARAMS["s_temp"] == 1.0
+

@@ -442,8 +442,20 @@ class CurrentModelSettings:
 
 
 #: Model parameters and their defaults (the fit decides which are free).
-DEFAULT_PARAMS = dict(log_strength=None, f=0.37, s_bs=1.0, s_cd=1.0, s_pfast=1.0, a_corr=(0.0, 0.0, 0.0),
-                      ip_rel=0.0)
+DEFAULT_PARAMS = dict(log_strength=None, f=0.37, s_bs=1.0, s_cd=1.0, s_pfast=1.0, s_temp=1.0,
+                      a_corr=(0.0, 0.0, 0.0), ip_rel=0.0)
+
+
+def kinetics_at(kin, params):
+    """The kinetic inputs the model sees at ``params``: ``kin`` itself at the temperature factor ``s_temp`` = 1,
+    else ``kin.with_temperature_factor(s_temp)`` (both temperatures scaled; pressure, bootstrap current and
+    conductivity follow; the fast-ion sources, computed by the caller beforehand, do NOT)."""
+    s = float(full_params(params).get("s_temp", 1.0))
+    if s == 1.0:
+        return kin
+    if not hasattr(kin, "with_temperature_factor"):
+        raise ModelFailure("s_temp != 1 needs kinetic inputs with with_temperature_factor (kinetics.KineticInputs)")
+    return kin.with_temperature_factor(s)
 
 
 def full_params(params):
@@ -1459,6 +1471,7 @@ def consistent_solve(fm, kin, src, params, cfg, ip=None, start=None, z0=None, la
 
     ``fm`` is a :class:`.forward.ForwardModel`; ``start`` an optional snapshot (or psi array) to
     start from (default: the solver's current state); ``z0`` an orbit continuation vector.
+    The kinetic inputs are taken at the temperature factor of ``params`` (:func:`kinetics_at`).
     ``initial_profiles`` = ``(x, jphi, p)``: for the FIRST solve of a case, whose starting psi is
     only an initial guess (no solved equilibrium to evaluate the model on yet), one forward solve
     with these profiles (e.g. the reference equilibrium's <j_phi> and the kinetic pressure) is made
@@ -1469,6 +1482,7 @@ def consistent_solve(fm, kin, src, params, cfg, ip=None, start=None, z0=None, la
     ``max_passes``, or a q-consistency failure once the profiles have converged) are returned with
     ``converged=False`` and the reason; the solver is then left in its last state (the caller
     restores a snapshot)."""
+    kin = kinetics_at(kin, params)
     t0 = time.perf_counter()
     ipv = ip_target(fm.ip_measured if ip is None else ip, params)
     if start is not None:
@@ -1621,7 +1635,9 @@ def consistent_solve(fm, kin, src, params, cfg, ip=None, start=None, z0=None, la
 
 def lagged_solve(fm, lag, kin, src, params, cfg, ip=None, start=None, z0=None, label="column", state=None):
     """One forward solve with the geometry-dependent inputs lagged from ``lag``.  Returns
-    ``(SolveResult or None, assembly or None, reason)``."""
+    ``(SolveResult or None, assembly or None, reason)``.  The kinetic inputs are taken at the temperature factor of
+    ``params`` (:func:`kinetics_at`): the pressure follows it, the lagged conductivity and bootstrap do not."""
+    kin = kinetics_at(kin, params)
     ipv = ip_target(fm.ip_measured if ip is None else ip, params)
     if start is not None:
         fm.restore(start)

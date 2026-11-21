@@ -33,6 +33,9 @@ name               meaning                                     default prior / b
 ``f``              reconnection fraction at fixed strength     no Gaussian prior (uniform 0.1-1)
 ``s_pfast``        fast-ion pressure scale                     N(1, 0.20); bounds 0.2..3
 ``s_cd``           driven-current scale                        N(1, 0.25); bounds 0..3
+``s_temp``         temperature factor: T_e and T_i both        N(1, 0.10); bounds 0.5..2.  Not free by
+                   multiplied by it; thermal pressure,         default.  The fast-ion sources are the
+                   bootstrap and conductivity follow           caller's and do not follow it.
 ``s_bs``           bootstrap multiplier                        N(1, 0.5); bounds 0..3
 ``a_corr_k``       current-correction amplitude k (fraction    N(0, 0.02) (fraction of Ip); +-0.2
                    of Ip; Gaussians on rho_tor,norm,
@@ -220,6 +223,9 @@ LOG_STRENGTH_PRIOR_BOUNDS_BROAD = (0.5 * (LOG_STRENGTH_BOUNDS[0] + LOG_STRENGTH_
 
 #: Column kinds the optimizer's steps may use (:attr:`FitSettings.jacobian_steps`).
 JACOBIAN_STEP_KINDS = ("consistent", "lagged")
+#: Prior width of the temperature factor ``s_temp`` (relative; a stated value, of the size of the systematic
+#: uncertainty of the temperature profiles).
+TEMPERATURE_FACTOR_SIGMA = 0.10
 
 
 #: Parameter specifications: prior (mean, sigma; sigma None = no prior row), bounds, initial step.
@@ -230,6 +236,10 @@ PARAMETERS = {
               note="reconnection fraction at fixed strength (uniform prior 0.1-1: bounds only)"),
     "s_pfast": dict(prior=(1.0, FAST_ION_PRESSURE_SCALE_SIGMA), bounds=(0.2, 3.0), step0=0.05, unit="1",
                     note="fast-ion pressure scale (prior width: sources.priors)"),
+    "s_temp": dict(prior=(1.0, TEMPERATURE_FACTOR_SIGMA), bounds=(0.5, 2.0), step0=0.02, unit="1",
+                   note="temperature factor on T_e and T_i (thermal pressure, bootstrap and conductivity follow; "
+                        "the fast-ion sources do not); a measure of the mismatch between the kinetic profiles and "
+                        "the magnetic measurements, to be reported with every result"),
     "s_cd": dict(prior=(1.0, DRIVEN_CURRENT_SCALE_SIGMA), bounds=(0.0, 3.0), step0=0.05, unit="1",
                  note="driven-current scale (prior width: sources.priors)"),
     "s_bs": dict(prior=(1.0, 0.5), bounds=(0.0, 3.0), step0=0.05, unit="1", note="bootstrap multiplier"),
@@ -280,7 +290,8 @@ class FitSettings:
     fit_groups: Sequence[str] = ("flux_loop", "bpol_probe", "pf_current", "ip", "mse")
     # trust caps of one LM step (step 4 of the algorithm); a_corr: fraction of Ip per correction amplitude per step
     max_step: Dict[str, float] = field(default_factory=lambda: dict(log_strength=0.5, f=0.1, s_pfast=0.1, s_cd=0.1,
-                                                                    s_bs=0.2, a_corr=0.04, ip_rel=0.02))
+                                                                    s_bs=0.2, a_corr=0.04, ip_rel=0.02,
+                                                                    s_temp=0.05))
     fitted_coil_role: str = "fitted"
     column_retry_opposite: bool = True   # a failed column solve is retried once with the opposite step
     final_gn_step: bool = True           # take the undamped GN step of the converged test (accepted within noise)

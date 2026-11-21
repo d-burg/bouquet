@@ -216,7 +216,8 @@ def test_default_step_cap_of_the_correction_amplitudes():
     and a step larger than the cap is shrunk as a whole to it."""
     st = FIT.FitSettings()
     assert st.max_step["a_corr"] == 0.04
-    assert st.max_step == dict(log_strength=0.5, f=0.1, s_pfast=0.1, s_cd=0.1, s_bs=0.2, a_corr=0.04, ip_rel=0.02)
+    assert st.max_step == dict(log_strength=0.5, f=0.1, s_pfast=0.1, s_cd=0.1, s_bs=0.2, a_corr=0.04, ip_rel=0.02,
+                               s_temp=0.05)
     assert st.as_dict()["max_step"]["a_corr"] == 0.04
     cap = np.array([0.04, 0.04])
     delta, capped = FIT.lm_step(np.eye(2), np.array([-0.1, 0.02]), 0.0, cap)

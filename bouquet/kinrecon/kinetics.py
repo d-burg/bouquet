@@ -69,7 +69,7 @@ equilibrium's ``(psi_N, rho)`` pair; :mod:`.current_model` calls it on every pas
 
 import json
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, Optional
 
 import numpy as np
@@ -321,6 +321,27 @@ class KineticInputs:
         one matching ``coordinate`` is used).  Returns ``ne, te, ni, ti, zeff, nimp, n_fast``."""
         q = self._coord(psi_n, rho)
         return {k: self._f(k)(q) for k in ("ne", "te", "ni", "ti", "zeff", "nimp", "n_fast")}
+
+    def with_temperature_factor(self, s):
+        """These inputs with BOTH temperatures multiplied by ``s`` (``T_e -> s T_e``, ``T_i -> s T_i``; densities and
+        ``Z_eff`` untouched): the kinetic inputs a fit sees at the temperature factor ``s`` (``s_temp`` of
+        :mod:`.fit`).  Everything computed from them (thermal pressure, bootstrap current, conductivity) follows.
+        ``s = 1`` returns this object itself; the copy's record and provenance name the factor."""
+        s = float(s)
+        if s == 1.0:
+            return self
+        if not (np.isfinite(s) and s > 0):
+            raise ValueError("the temperature factor must be finite and > 0")
+        cache = self.__dict__.setdefault("_scaled", {})
+        if s not in cache:
+            if len(cache) > 64:
+                cache.clear()
+            prov = dict(self.provenance)
+            for k in ("te", "ti"):
+                prov[k] = f"{prov.get(k, 'caller')}; MULTIPLIED by the fitted temperature factor {s:.6g}"
+            cache[s] = replace(self, te=self.te * s, ti=self.ti * s, provenance=prov,
+                               record=dict(self.record, temperature_factor=s))
+        return cache[s]
 
     def thermal_pressure_at(self, psi_n=None, rho=None):
         """(K5): ``e (n_e T_e + (n_i + n_imp) T_i)`` [Pa], full frame."""

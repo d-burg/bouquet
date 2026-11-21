@@ -25,6 +25,8 @@ Generator that ``generate_bouquet`` hands to every draw site.  ``rng=None``
 non-reproducible mode.
 """
 
+import warnings
+
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.spatial.distance import cdist
@@ -158,8 +160,13 @@ class GPRProfilePerturber:
         """
         if not self._ls_is_array:
             return self.length_scale, self.length_scale
-        ell = self.length_scale
-        return ell[:n1, None] * np.ones((1, n2)), np.ones((n1, 1)) * ell[:n2]
+        ell = self.length_scale.ravel()
+        if n1 != ell.size or n2 != ell.size:
+            raise ValueError(
+                f"Non-stationary length_scale length ({ell.size}) must match "
+                f"query grid sizes ({n1}, {n2})."
+            )
+        return ell[:, None] * np.ones((1, n2)), np.ones((n1, 1)) * ell[None, :]
 
     def _rbf_kernel(self, X1: np.ndarray, X2: np.ndarray) -> np.ndarray:
         r"""Squared-exponential (Gibbs) kernel with unit variance.
@@ -183,16 +190,17 @@ class GPRProfilePerturber:
         if not self._ls_is_array:
             return np.exp(-0.5 * (d / ell_i) ** 2)
 
-        ell2_sum = ell_i**2 + ell_j**2
-        prefactor = np.sqrt(2.0 * ell_i * ell_j / ell2_sum)
+        ell2_sum = np.maximum(ell_i**2 + ell_j**2, 1.0e-24)
+        prefactor = np.sqrt(np.maximum(2.0 * ell_i * ell_j, 0.0) / ell2_sum)
         return prefactor * np.exp(-d**2 / ell2_sum)
 
     def _matern52_kernel(self, X1: np.ndarray, X2: np.ndarray) -> np.ndarray:
-        r"""Matérn-5/2 (Gibbs) kernel with unit variance.
+        r"""Matérn-5/2 (Paciorek-Schervish) kernel with unit variance.
 
-        Non-stationary extension: replaces the scalar :math:`\ell` with
-        the geometric mean :math:`\bar{\ell} = \sqrt{\ell_i \ell_j}` and
-        applies the same Gibbs prefactor as the RBF kernel.
+        Non-stationary positive-semi-definite extension (Paciorek & Schervish,
+        Environmetrics 17, 483-506, 2006, Theorem 1): scales distance by the
+        quadratic (RMS) mean :math:`\bar{\ell}_{\rm RMS} = \sqrt{(\ell_i^2 + \ell_j^2)/2}`
+        paired with the Gibbs prefactor :math:`\sqrt{2 \ell_i \ell_j / (\ell_i^2 + \ell_j^2)}`.
         """
         d = cdist(X1.reshape(-1, 1), X2.reshape(-1, 1), "euclidean")
         ell_i, ell_j = self._ell_matrices(len(X1), len(X2))
@@ -201,10 +209,10 @@ class GPRProfilePerturber:
             s = np.sqrt(5.0) * d / ell_i
             return (1.0 + s + s**2 / 3.0) * np.exp(-s)
 
-        ell2_sum = ell_i**2 + ell_j**2
-        prefactor = np.sqrt(2.0 * ell_i * ell_j / ell2_sum)
-        ell_geom = np.sqrt(ell_i * ell_j)
-        s = np.sqrt(5.0) * d / ell_geom
+        ell2_sum = np.maximum(ell_i**2 + ell_j**2, 1.0e-24)
+        prefactor = np.sqrt(np.maximum(2.0 * ell_i * ell_j, 0.0) / ell2_sum)
+        ell_rms = np.sqrt(0.5 * ell2_sum)
+        s = np.sqrt(5.0) * d / ell_rms
         return prefactor * (1.0 + s + s**2 / 3.0) * np.exp(-s)
 
     # ---- core sampling method ----------------------------------------
@@ -885,4 +893,225 @@ def _draw_monotonic_perturbation(
 
     raise RuntimeError(
         f"No monotonically-decreasing GPR draw found in {max_draws} attempts."
+    )
+
+
+def _precompute_grad_1d(x: np.ndarray):
+    """Build a fast closure matching ``np.gradient(y, x)`` for 1-D *x*."""
+    x_mono = np.asarray(x, dtype=float).copy()
+    for i in range(1, x_mono.size):
+        if x_mono[i] <= x_mono[i - 1] + 1.0e-12:
+            x_mono[i] = x_mono[i - 1] + 1.0e-12
+    n = x_mono.size
+    if n < 2:
+        return lambda y: np.zeros_like(y, dtype=float)
+    if n == 2:
+        inv_dx = 1.0 / (x_mono[1] - x_mono[0])
+        return lambda y: np.full(2, (y[1] - y[0]) * inv_dx, dtype=float)
+    hd = np.diff(x_mono)
+    hs0 = hd[:-1]
+    hs1 = hd[1:]
+    denom = hs0 * hs1 * (hs0 + hs1)
+    w_prev = -(hs1 ** 2) / denom
+    w_curr = ((hs1 ** 2) - (hs0 ** 2)) / denom
+    w_next = (hs0 ** 2) / denom
+    inv_h0 = 1.0 / hd[0]
+    inv_hn = 1.0 / hd[-1]
+
+    def _grad(y: np.ndarray) -> np.ndarray:
+        out = np.empty_like(y, dtype=float)
+        out[0] = (y[1] - y[0]) * inv_h0
+        out[1:-1] = w_prev * y[:-2] + w_curr * y[1:-1] + w_next * y[2:]
+        out[-1] = (y[-1] - y[-2]) * inv_hn
+        return out
+
+    return _grad
+
+
+def draw_bounded_perturbation(
+    psi_N,
+    normalised_profile,
+    sigma_profile,
+    length_scale,
+    *,
+    policy: str = "physics_bounds",
+    channel: str = "te",
+    psi_ped_top: float = 0.92,
+    has_pedestal: bool = True,
+    coord: str = "psi_n",
+    r_norm: Optional[np.ndarray] = None,
+    a_over_R0: float = 0.33,
+    kappa_bounds: Optional[tuple] = None,
+    max_draws: int = _MAX_MONOTONIC_DRAWS,
+    rng: Optional[np.random.Generator] = None,
+):
+    r"""Sample a GPR perturbation under a regional positivity & gradient policy.
+
+    Unlike :func:`_draw_monotonic_perturbation`, which rejects ``df/dpsi_N > 0``
+    globally (introducing a positive axis mean bias on sawtooth-flat cores and
+    forbidding pellet density inversions or radiatively hollow core ``Te``),
+    this routine enforces:
+
+    * ``policy == "legacy"``: delegates directly to
+      :func:`_draw_monotonic_perturbation` (bit-for-bit identical).
+    * ``policy == "positivity_only"``: enforces strict positivity ``f > 0`` on
+      all nodes with zero gradient rejection (smoothness governed solely by
+      ``length_scale``).
+    * ``policy == "physics_bounds"``:
+      1. Strict positivity everywhere;
+      2. When ``has_pedestal=True``, outward decrease ``df/dpsi_N <= 0`` *only*
+         across the H-mode barrier (``psi_N >= psi_ped_top`` for temperatures;
+         outer steep half of the pedestal for densities so pellet shoulders
+         inside ``psi_ped_top`` are permitted) when the baseline itself
+         strictly decreases there.  In L-mode (``has_pedestal=False``), no
+         artificial edge barrier monotonicity is imposed;
+      3. Two-sided core inverse-scale-length bounds
+         ``kappa_min <= -(R0/a) (df / dx_r) / max(|f_0|, f_floor) <= kappa_max``
+         evaluated with baseline-normalized slope so ``delta_f -> -delta_f``
+         exhibits exact antipodal symmetry (exact zero level and slope skew on
+         flat cores) while ``kappa_min < 0`` allows physical hollowness.
+    """
+    if policy == "legacy":
+        return _draw_monotonic_perturbation(
+            psi_N,
+            normalised_profile,
+            sigma_profile,
+            length_scale,
+            max_draws=max_draws,
+            rng=rng,
+        )
+    if policy not in ("positivity_only", "physics_bounds"):
+        raise ValueError(
+            f"Unknown gradient_policy={policy!r}; expected 'legacy', "
+            "'positivity_only', or 'physics_bounds'"
+        )
+
+    psi = np.asarray(psi_N, dtype=float)
+    mn = np.asarray(normalised_profile, dtype=float)
+    sig = np.asarray(sigma_profile, dtype=float)
+
+    if not np.any(sig > 0.0):
+        return mn.copy()
+
+    psi_c = np.clip(psi, 0.0, 1.0)
+    c_mode = str(coord or "psi_n").strip().lower()
+    if r_norm is not None:
+        x_r = np.clip(np.asarray(r_norm, dtype=float), 0.0, 1.0)
+    elif c_mode == "rho_tor":
+        x_r = psi_c
+    elif c_mode == "phi_n":
+        x_r = np.sqrt(psi_c)
+    else:
+        # Canonical q(psi_N) = 1 + 2.2 * psi_N^1.5 map from psi_N to rho_tor ~ r_min/a
+        x_r = np.sqrt((psi_c + 0.88 * (psi_c ** 2.5)) / 1.88)
+
+    grad_xr = _precompute_grad_1d(x_r)
+    R_over_a = 1.0 / max(float(a_over_R0), 1.0e-3)
+
+    scale = max(float(np.max(np.abs(mn))), 1.0e-12)
+    min_pos_floor = max(1.0e-4 * float(np.min(np.maximum(mn, 1.0e-12 * scale))), 1.0e-8 * scale)
+    f_floor = max(1.0e-3 * scale, min_pos_floor)
+    mn_denom = np.maximum(np.abs(mn), f_floor)
+
+    k_min_mask = None
+    k_max_mask = None
+    if policy == "physics_bounds":
+        if has_pedestal and psi.size >= 4:
+            if channel in ("ne", "ni"):
+                # Allow pellet fueling bump inside pedestal top; guard outer steep barrier
+                ped_start = 0.5 * (float(psi_ped_top) + 1.0)
+            else:
+                ped_start = float(psi_ped_top)
+            i_ped = int(np.searchsorted(psi, np.clip(ped_start, 0.70, 0.99)))
+            i_ped = min(max(i_ped, 2), psi.size - 2)
+            base_ped_dec = bool(np.all(np.diff(mn[i_ped:]) < -1.0e-4 * scale))
+            core_mask = (x_r >= 0.08) & (psi <= ped_start)
+        else:
+            ped_start = float(np.max(psi)) if psi.size else 1.0
+            i_ped = max(psi.size - 1, 0)
+            base_ped_dec = False
+            core_mask = x_r >= 0.08
+
+        if kappa_bounds is not None and np.any(core_mask):
+            k_min_arr = np.broadcast_to(np.asarray(kappa_bounds[0], dtype=float), psi.shape).copy()
+            k_max_arr = np.broadcast_to(np.asarray(kappa_bounds[1], dtype=float), psi.shape).copy()
+            if has_pedestal and channel in ("ne", "ni"):
+                # On the density pedestal shoulder (psi_ped_top, ped_start], ensure constant
+                # core-only user bounds do not exclude the baseline H-mode pedestal slope
+                # while still bounding shoulder excursions cleanly without a gap.
+                shoulder = core_mask & (psi > float(psi_ped_top))
+                if np.any(shoulder):
+                    kappa_0 = -R_over_a * grad_xr(mn) / mn_denom
+                    k_min_arr[shoulder] = np.minimum(k_min_arr[shoulder], kappa_0[shoulder] - 1.0)
+                    k_max_arr[shoulder] = np.maximum(k_max_arr[shoulder], kappa_0[shoulder] + 10.0)
+            k_min_mask = k_min_arr[core_mask]
+            k_max_mask = k_max_arr[core_mask]
+    else:
+        i_ped = max(psi.size - 1, 0)
+        base_ped_dec = False
+        core_mask = np.zeros_like(psi, dtype=bool)
+
+    # Pre-factorise unit-variance Gibbs/RBF kernel + Cholesky ONCE for all attempts
+    perturber = GPRProfilePerturber(kernel_func="rbf", length_scale=length_scale)
+    n_pts = len(psi)
+    K_scaled = perturber._kernel(psi, psi) * np.outer(sig, sig)
+    max_diag = float(K_scaled.diagonal().max()) if n_pts else 0.0
+    if max_diag <= 0.0:
+        return mn.copy()
+    L_chol = np.linalg.cholesky(K_scaled + (_CHOL_JITTER * n_pts * max_diag) * np.eye(n_pts))
+    if rng is None:
+        rng = np.random.default_rng()
+
+    for _ in range(max_draws):
+        z = rng.standard_normal((n_pts, 1))
+        sample = mn + (L_chol @ z)[:, 0]
+        if np.any(sample <= min_pos_floor):
+            continue
+        if policy == "physics_bounds":
+            if base_ped_dec:
+                s_peak = max(float(np.max(np.abs(sample))), 1.0e-12 * scale)
+                if np.any(np.diff(sample[i_ped:]) > 1.0e-4 * s_peak):
+                    continue
+            if k_min_mask is not None:
+                kappa_s = -R_over_a * grad_xr(sample) / mn_denom
+                ks_core = kappa_s[core_mask]
+                if np.any(ks_core < k_min_mask) or np.any(ks_core > k_max_mask):
+                    continue
+        return sample
+
+    # Variance-consistent, bounds-screened log-normal fallback when sigma >> profile near separatrix
+    warnings.warn(
+        f"draw_bounded_perturbation(channel={channel!r}, policy={policy!r}) "
+        f"exhausted {max_draws} additive GP attempts; falling back to "
+        "variance-matched log-normal GP rejection sampling.",
+        UserWarning,
+        stacklevel=2,
+    )
+    mn_safe = np.maximum(mn, min_pos_floor)
+    sig_rel = np.clip(sig / mn_safe, 0.0, 1.5)
+    scale_rel = np.where(sig > 0.0, sig_rel / np.maximum(sig, 1.0e-30), 0.0)
+    n_fb = max(int(max_draws), _MAX_MONOTONIC_DRAWS)
+
+    for _ in range(n_fb):
+        raw_delta = (L_chol @ rng.standard_normal((n_pts, 1)))[:, 0]
+        rel = np.clip(raw_delta * scale_rel, -8.0, 8.0)
+        cand = mn_safe * np.exp(rel - 0.5 * (sig_rel ** 2))
+        if np.any(cand <= 0.0):
+            continue
+        if policy == "physics_bounds":
+            if base_ped_dec:
+                c_peak = max(float(np.max(np.abs(cand))), 1.0e-12 * scale)
+                if np.any(np.diff(cand[i_ped:]) > 1.0e-4 * c_peak):
+                    continue
+            if k_min_mask is not None:
+                dln_dx = grad_xr(np.log(np.maximum(cand, 1.0e-30 * scale)))
+                kappa_c = -R_over_a * dln_dx
+                kc_core = kappa_c[core_mask]
+                if np.any(kc_core < k_min_mask) or np.any(kc_core > k_max_mask):
+                    continue
+        return cand
+
+    raise RuntimeError(
+        f"No bounded GPR perturbation found for channel={channel!r} in "
+        f"{max_draws} additive + {n_fb} log-normal attempts."
     )

@@ -921,6 +921,67 @@ def _initial_fit_series(monkeypatch, status, policy="refuse", log_strength=np.lo
     return out, seen
 
 
+def _auto_start(monkeypatch, groups, initial="auto", status="converged"):
+    """A series whose first slice declares ``groups`` (name -> meta) and whose first-slice fit is mocked:
+    the chosen mode, what the fit was handed, and the series record."""
+    lag = _lag()
+    fm = FakeFM(dict(pred=lag))
+    st0 = _steady(lag, IP0)
+    _install(monkeypatch, fm, st0, lambda f: f.lags["pred"])
+    monkeypatch.setattr(SE, "score", lambda gs, ms, groups=None: SimpleNamespace(model={}, excluded={}, notes=[]))
+    monkeypatch.setattr(SE._fit, "headline_summary", lambda tab, ms, roles: {})
+    monkeypatch.setattr(SE._fit, "ip_record", lambda *a, **k: None)
+    monkeypatch.setattr(SE, "flux_offset_record", lambda tab: None)
+    monkeypatch.setattr(SE, "chi2_report", lambda tab, n_params=0, inner_dof=0.0, exclude=None: {})
+    seen = {}
+
+    def reconstruct(fm_, kin, src, cfg, settings, params0=None, initial_profiles=None, label="", **kw):
+        seen.update(fit_groups=tuple(settings.fit_groups), label=label)
+        names = [f"a_corr_{k}" for k in range(3)]
+        center = dict(res=_result(lag, st0), snap=dict(key="pred"), probe_correction=np.zeros(0))
+        return SimpleNamespace(status=status, theta=np.zeros(3), sigma=np.full(3, 0.1), free=names,
+                               params=dict(log_strength=None, a_corr=(0.0, 0.0, 0.0)), chi2={},
+                               record=dict(center=center, specs={n: dict(prior=(0.0, 1.0)) for n in names},
+                                           n_solves=5, wall_s=0.0, iterations=[], final_stopping_tests=None,
+                                           stopping_summary=dict(status=status)))
+
+    monkeypatch.setattr(SE._fit, "reconstruct", reconstruct)
+    sl = _slices(np.arange(2) * 0.02, np.full(2, IP0))
+    if groups is not None:
+        sl[0].measurements = SimpleNamespace(groups={g: SimpleNamespace(meta=m, measured=np.array([IP0])) for g, m in groups.items()})
+    out = SE.run_series(fm, sl, CM.CurrentModelSettings(r0=GEO.R0), SE.SeriesSettings(initial=initial, sawtooth="off"))
+    return out, seen
+
+
+def test_auto_start_is_a_magnetics_fit_without_usable_mse(monkeypatch):
+    """``initial="auto"``: E_r-corrected MSE -> ``mse_fit``; magnetics without usable MSE -> ``magnetics_fit``
+    with MSE out of the first-slice fit groups; no magnetics -> ``relaxed`` (no fit)."""
+    mag = dict(flux_loop={}, bpol_probe={}, ip={})
+    out, seen = _auto_start(monkeypatch, dict(mag, mse=dict(er_corrected=True)))
+    assert out["initial_auto_choice"] == "mse_fit" and "mse" in seen["fit_groups"]
+    assert "initial_fit_groups" not in out
+    for groups in (mag, dict(mag, mse=dict(er_corrected=False)), dict(flux_loop={}, ip={})):
+        out, seen = _auto_start(monkeypatch, groups)
+        assert out["initial_auto_choice"] == "magnetics_fit"
+        assert "mse" not in seen["fit_groups"] and "flux_loop" in seen["fit_groups"]
+        assert out["initial_fit_groups"] == list(seen["fit_groups"]) and seen["label"].endswith(":magnetics_fit")
+        assert out["slices"][0]["initial_mode"] == "magnetics_fit"
+    for groups in (None, dict(ip={})):
+        out, seen = _auto_start(monkeypatch, groups)
+        assert out["initial_auto_choice"] == "relaxed" and not seen
+
+
+def test_magnetics_fit_start_withholds_mse_and_keeps_the_acceptance_standard(monkeypatch):
+    """Asked for explicitly with E_r-corrected MSE present, the first-slice fit still leaves MSE out; a fit
+    that is not converged refuses the series as any first-slice fit does."""
+    groups = dict(flux_loop={}, bpol_probe={}, ip={}, mse=dict(er_corrected=True))
+    out, seen = _auto_start(monkeypatch, groups, initial="magnetics_fit")
+    assert "initial_auto_choice" not in out and "mse" not in seen["fit_groups"]
+    assert out["status"] == "completed"
+    out, _ = _auto_start(monkeypatch, groups, initial="magnetics_fit", status="max_iter")
+    assert out["status"] == "refused_initial_fit_not_converged"
+
+
 @pytest.mark.parametrize("status", ["stalled_no_significant_descent", "max_iter", "jacobian_failed", "failed_trials"])
 def test_series_refuses_to_start_from_a_nonconverged_first_slice_fit(monkeypatch, status):
     out, _ = _initial_fit_series(monkeypatch, status)

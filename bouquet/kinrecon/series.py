@@ -65,11 +65,11 @@ with, on each interval ``[t_{k-1}, t_k]``,
   the explicit option ``sawtooth="periodic"`` (recorded):
   ``sawtooth="crash_times"`` uses measured crash times; ``sawtooth="periodic"`` places crashes every
   ``1/nu`` with ``nu`` from the two parameters ``(f, ln Lambda)``; ``ln Lambda`` is fitted at the
-  first slice when the initial state is ``"mse_fit"`` (a free parameter of the first-slice fit by
+  first slice when the initial state is a first-slice fit (``"mse_fit"``, ``"magnetics_fit"``; a free parameter of the first-slice fit by
   default, as in single-slice fits) and that value sets the train, otherwise it is
   ``sawtooth_log_strength`` (default: the fit module's prior mean).  Phase of the periodic train
   (stated, not measured): the first slice's state is the CYCLE AVERAGE of the periodic orbit (initial
-  ``"relaxed"`` and ``"mse_fit"``), and the first crash of the train is one period AFTER the first
+  ``"relaxed"`` and the first-slice fits), and the first crash of the train is one period AFTER the first
   slice time (``t_0 + 1/nu``, ``t_0 + 2/nu``, ...; ``sawtooth_first_crash_phase`` moves it to
   ``t_0 + phase/nu`` for sensitivity studies).  With measured crash times the first slice's state
   is the window average of the measured-crash slice run of the current model over the window
@@ -123,6 +123,10 @@ Initial state (first slice):
   the fitted state (whose ohmic
   part then carries the corrections, i.e. is NOT relaxed) starts the evolution, and the
   corrections are not applied again;
+* ``"magnetics_fit"``: the same first-slice fit with MSE out of its fit groups (magnetics, coil currents and
+  plasma current only), for a discharge with no usable MSE; the same acceptance standard and labels apply.
+  On nine discharges whose MSE was withheld and only scored, a series started this way stayed close to the
+  series fitted to MSE, where a series started from the relaxed state did not;
 * ``"relaxed"``: the model state of the first slice under its core treatment (the q-floor state by default);
 * ``"from_profile"``: a supplied current profile ``<J.B>(rho_tor,norm)`` (e.g. from a prior
   equilibrium; controlled tests), held as a profile through the first slice's pass loop, the state
@@ -137,8 +141,11 @@ Initial state (first slice):
   ``initial_profile_domain_fraction_tolerance``, and the excess ``f - 1`` is recorded.  (Holding a psi(rho) or q(rho) state
   FIXED while the geometry iterates was tried and did not converge on the public fixture: the passes
   drift by ~4e-4 in l_i per pass without and oscillate with Anderson mixing; not offered.)
-* ``"auto"``: ``"mse_fit"`` when the first slice has an MSE group declared E_r-corrected, else
-  ``"relaxed"`` (recorded).
+* ``"auto"``: ``"mse_fit"`` when the first slice has an MSE group declared E_r-corrected; else
+  ``"magnetics_fit"`` when it has a flux-loop or a poloidal-field-probe group; else ``"relaxed"`` (the
+  choice is recorded as ``initial_auto_choice``).  A magnetics-only first-slice fit that does not end
+  converged refuses the series like any first-slice fit; ``initial="relaxed"`` asks for the relaxed
+  state explicitly.
 
 A first-slice fit must end ``"converged"`` or ``"converged_within_noise"`` to start a series (the
 standard the filter applies to its fits; :data:`ACCEPTED_FIT_STATUSES`; a within-noise fit stopped at
@@ -214,7 +221,7 @@ steers nothing).  Steady-state input check (``steady_state_check``, ON by defaul
 costs a pass loop per slice): the slice's unfitted model steady state (the single-slice core treatment, no
 corrections, the slice's own inputs) scored on the MSE chords by radius (:data:`MSE_RADIAL_CLASSES_M`,
 :func:`.fit.steady_state_check`) next to the slice's own result; the solver is restored afterwards and the series
-continues from the slice's own result.  The first slice's record is its fit's (an ``"mse_fit"`` start; without a
+continues from the slice's own result.  The first slice's record is its fit's (a first-slice-fit start; without a
 fit its own result is that steady state).  Slice solve counts exclude the check's solves, which its record states;
 the series total includes them.
 
@@ -250,14 +257,18 @@ from .score import chi2_report, flux_offset_record, score
 
 __all__ = ["SliceData", "SeriesSettings", "run_series", "INITIAL_MODES", "SAWTOOTH_MODES"]
 
-INITIAL_MODES = ("auto", "mse_fit", "relaxed", "from_profile")
+INITIAL_MODES = ("auto", "mse_fit", "magnetics_fit", "relaxed", "from_profile")
+#: The initial modes that start a series from a first-slice fit (``"magnetics_fit"``: MSE out of the fit groups).
+FIT_START_MODES = ("mse_fit", "magnetics_fit")
+#: The measurement groups whose presence lets ``initial="auto"`` choose ``"magnetics_fit"`` without usable MSE.
+MAGNETIC_GROUPS = ("flux_loop", "bpol_probe")
 #: Core treatments of a series (module docstring): ``"q_floor"`` (default), and the opt-ins ``"crash_times"``,
 #: ``"periodic"`` and ``"off"``.
 SAWTOOTH_MODES = ("q_floor", "crash_times", "off", "periodic")
 #: The first slice's ``CurrentModelSettings.core_relaxation`` under each series mode (``"crash_times"``: replaced
 #: by ``"crash_times"`` when the covered history holds measured crashes, :func:`_measured_crash_start`).
 FIRST_SLICE_CORE = dict(q_floor="q_floor", crash_times="none", off="none", periodic="periodic_orbit")
-#: What a series does when its first-slice fit (``initial="mse_fit"``) did not end ``"converged"``.
+#: What a series does when its first-slice fit (:data:`FIT_START_MODES`) did not end ``"converged"``.
 INITIAL_FIT_POLICIES = ("refuse", "proceed_labeled")
 #: The plasma-current convention of a series (module docstring, "Plasma current in a series"; recorded).
 IP_CONVENTION = ("Ip(t) driving each interval: linear from the carried state's current to the next slice's measured "
@@ -910,8 +921,14 @@ def _run_series(fm, slices, cfg, settings=None, start_psi=None, initial_profiles
     sl0 = slices[0]
     mode = s.initial
     if mode == "auto":
-        mse = None if sl0.measurements is None else sl0.measurements.groups.get("mse")
-        mode = "mse_fit" if (mse is not None and bool(mse.meta.get("er_corrected", False))) else "relaxed"
+        groups0 = {} if sl0.measurements is None else sl0.measurements.groups
+        mse = groups0.get("mse")
+        if mse is not None and bool(mse.meta.get("er_corrected", False)):
+            mode = "mse_fit"
+        elif any(g in groups0 for g in MAGNETIC_GROUPS):
+            mode = "magnetics_fit"
+        else:
+            mode = "relaxed"
         out["initial_auto_choice"] = mode
     case = fm.case
     ls_used = s.log_strength() if s.sawtooth == "periodic" else None
@@ -930,9 +947,13 @@ def _run_series(fm, slices, cfg, settings=None, start_psi=None, initial_profiles
     f0rec0 = _apply_f0(fm, sl0)
     if start_psi is not None:
         fm.set_psi(start_psi)
-    if mode == "mse_fit":
-        fr = _fit.reconstruct(fm, sl0.kinetics, sl0.sources, cfg0, s.initial_fit, params0=p_relaxed,
-                              initial_profiles=initial_profiles, label=f"{sl0.label}:mse_fit",
+    if mode in FIT_START_MODES:
+        fit0 = s.initial_fit
+        if mode == "magnetics_fit":
+            fit0 = dataclasses.replace(fit0, fit_groups=tuple(g for g in fit0.fit_groups if g != "mse"))
+            out["initial_fit_groups"] = list(fit0.fit_groups)
+        fr = _fit.reconstruct(fm, sl0.kinetics, sl0.sources, cfg0, fit0, params0=p_relaxed,
+                              initial_profiles=initial_profiles, label=f"{sl0.label}:{mode}",
                               steady_state_check=s.steady_state_check, **_speed_kw(speed))
         ssc0 = fr.record.get("steady_state_check")
         if fr.record.get("center") is None:
@@ -982,7 +1003,7 @@ def _run_series(fm, slices, cfg, settings=None, start_psi=None, initial_profiles
                       stopping_summary=fr.record.get("stopping_summary"),
                       noise=fr.record.get("noise"), column_flags=fr.record.get("covariance_column_flags"),
                       ip_fit=fr.record.get("ip_fit"),
-                      correction_size=_correction_size(fr.params, cfg0, s.initial_fit))
+                      correction_size=_correction_size(fr.params, cfg0, fit0))
         cce0 = fr.record.get("correction_core_effect")
         branch0 = fr.record.get("floor_branch_record")
         params0 = fr.params
@@ -1034,7 +1055,7 @@ def _run_series(fm, slices, cfg, settings=None, start_psi=None, initial_profiles
     if callback:
         _rows.release_all()                          # the callback may use the solver: no constraint set kept
         callback(rec0)
-    if res0.converged and mode in ("relaxed", "mse_fit"):
+    if res0.converged and mode in ("relaxed",) + FIT_START_MODES:
         out["relaxed_start_guard"] = _relaxed_start_guard(res0, sl0, mode)
     if not res0.converged:
         out.update(status="failed_initial", n_solves=fm.n_solves - n_solves0, wall_s=round(time.perf_counter() - t_all, 2))

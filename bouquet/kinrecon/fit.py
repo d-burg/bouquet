@@ -192,7 +192,7 @@ pass-loop option is :class:`.current_model.CurrentModelSettings`'s EXPERIMENTAL 
 import math
 import os
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Dict, Optional, Sequence
 
 import numpy as np
@@ -303,6 +303,11 @@ class FitSettings:
     # NON-DEFAULT robustness options (module docstring, "Robustness options"):
     noise_retries: int = 0               # 1: a failed noise re-solve is repeated once from a stated other state
     stall_diagnostics: bool = False      # True: at a stall, RECORD central-column tests and the noise at the center
+    # NON-DEFAULT moving anchor target (:func:`reconstruct`, "anchor_follow"; single-slice fits only):
+    anchor_follow: bool = False          # True: after the fit, move the anchor target toward the solved boundary and
+    #                                      refit, while the fitted groups' chi^2 falls (the weight never changes)
+    anchor_follow_fraction: float = 0.5  # fraction of the way to the solved boundary per move
+    anchor_follow_max_steps: int = 8     # cost bound: at most this many moves
 
     def __post_init__(self):
         if self.jacobian_steps not in JACOBIAN_STEP_KINDS:
@@ -314,6 +319,13 @@ class FitSettings:
             raise ValueError("stall_diagnostics must be True or False")
         if self.ip_target not in IP_TARGETS:
             raise ValueError(f"ip_target must be one of {IP_TARGETS}")
+        if not isinstance(self.anchor_follow, bool):
+            raise ValueError("anchor_follow must be True or False")
+        if not 0.0 < float(self.anchor_follow_fraction) <= 1.0:
+            raise ValueError("anchor_follow_fraction must be in (0, 1]")
+        if isinstance(self.anchor_follow_max_steps, bool) or int(self.anchor_follow_max_steps) != \
+                self.anchor_follow_max_steps or self.anchor_follow_max_steps < 1:
+            raise ValueError("anchor_follow_max_steps must be a whole number >= 1")
         if self.ip_target == "measured" and "ip_rel" in self.free:
             raise ValueError("ip_rel is free but ip_target='measured' holds the Ip target: choose one")
 
@@ -599,9 +611,94 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
     ``steady_state_check`` (default True; single-slice fits only, i.e. without ``state_fn``): the record
     ``record["steady_state_check"]`` (module docstring, :func:`steady_state_check`), made after the fit and its branch
     log are complete; it steers nothing.
+
+    ``settings.anchor_follow`` (NON-DEFAULT; single-slice fits only): the moving anchor target.  The fit above first,
+    with the reference boundary as the anchor target.  Then, at most ``anchor_follow_max_steps`` times: every point of
+    the anchor target moves ``anchor_follow_fraction`` of the way to the solved boundary
+    (:meth:`.forward.ForwardModel.move_anchor_target`; the anchor weight never changes) and the fit is run again from
+    the converged state and parameters.  A move is KEPT only if the refit converges and the chi^2 of the fitted groups
+    (``chi2["data"]``) is lower than before; at the first move that is not kept the target and the state are put back
+    and the last kept fit is the result.  The reference boundary then acts as a starting guess and an implicit prior
+    whose strength is the number of moves; every step is in ``record["anchor_follow"]``.  With ``state_fn`` (a series
+    slice) the option is not applied and the record says so.
     """
+    st = settings or FitSettings()
+    kw = dict(label=label, state_fn=state_fn, speed=speed)
+    if not st.anchor_follow:
+        return _reconstruct_checked(fm, kin, src, cfg, settings=settings, params0=params0, start=start,
+                                    initial_profiles=initial_profiles, steady_state_check=steady_state_check, **kw)
+    base = replace(st, anchor_follow=False)
+    if state_fn is not None:
+        out = _reconstruct_checked(fm, kin, src, cfg, settings=base, params0=params0, start=start,
+                                   initial_profiles=initial_profiles, steady_state_check=steady_state_check, **kw)
+        if isinstance(getattr(out, "record", None), dict):
+            out.record["anchor_follow"] = dict(applied=False, reason="not built for a supplied current state (series)")
+        return out
+    return _follow_anchor(fm, kin, src, cfg, base, st, params0, start, initial_profiles, label, speed,
+                          steady_state_check)
+
+
+#: Fit statuses that count as converged for the moving anchor target.
+CONVERGED_STATUSES = ("converged", "converged_within_noise")
+
+
+def _follow_anchor(fm, kin, src, cfg, base, st, params0, start, initial_profiles, label, speed, check):
+    """The moving anchor target of :func:`reconstruct` (``FitSettings.anchor_follow``)."""
+    t0, n0 = time.perf_counter(), fm.n_solves
+    box = {}
+    fr = _reconstruct_checked(fm, kin, src, cfg, settings=base, params0=params0, start=start,
+                              initial_profiles=initial_profiles, label=label, speed=speed, steady_state_check=False,
+                              start_box_out=box)
+
+    def data_chi2(r):
+        try:
+            return float(r.chi2["data"])
+        except Exception:  # noqa: BLE001
+            return float("nan")
+
+    steps = [dict(step=0, status=fr.status, chi2_data=data_chi2(fr), kept=True)]
+    rec = dict(applied=True, fraction=float(st.anchor_follow_fraction), max_steps=int(st.anchor_follow_max_steps),
+               rule="a move is kept only if the refit converges and the fitted groups' chi^2 (chi2['data']) is lower "
+                    "than before; the anchor weight never changes; the reference boundary is the first target",
+               steps=steps)
+    stop = None
+    for k in range(1, int(st.anchor_follow_max_steps) + 1):
+        if fr.status not in CONVERGED_STATUSES:
+            stop = f"the fit before move {k} is not converged ({fr.status})"
+            break
+        keep_target, keep_state = fm.anchor_target(), fm.snapshot()
+        move = fm.move_anchor_target(st.anchor_follow_fraction)
+        nbox = {}
+        new = _reconstruct_checked(fm, kin, src, cfg, settings=base, params0=dict(fr.params), start=fm.snapshot(),
+                                   label=f"{label}:anchor{k}", speed=speed, steady_state_check=False,
+                                   start_box_out=nbox)
+        c_old, c_new = data_chi2(fr), data_chi2(new)
+        kept = bool(new.status in CONVERGED_STATUSES and c_new < c_old)
+        steps.append(dict(step=k, status=new.status, chi2_data=c_new, kept=kept, move=move))
+        if not kept:
+            fm.set_anchor_target(keep_target)
+            fm.restore(keep_state)
+            stop = (f"move {k} not kept: refit {new.status}" if new.status not in CONVERGED_STATUSES else
+                    f"move {k} not kept: chi^2 of the fitted groups did not fall ({c_old:.6g} -> {c_new:.6g})")
+            break
+        fr, box = new, nbox
+    else:
+        stop = f"the cap of {int(st.anchor_follow_max_steps)} moves"
+    rec.update(stop=stop, n_moves_kept=sum(1 for x in steps[1:] if x["kept"]), n_solves_total=fm.n_solves - n0,
+               wall_s_total=round(time.perf_counter() - t0, 2))
+    if isinstance(getattr(fr, "record", None), dict):
+        fr.record["anchor_follow"] = rec
+        with _speed.speed_scope(_speed.effective(speed)):
+            fr.record["steady_state_check"] = _fit_steady_state_check(fm, kin, src, cfg, fr, box, check, label)
+    return fr
+
+
+def _reconstruct_checked(fm, kin, src, cfg, settings=None, params0=None, start=None, initial_profiles=None,
+                         label="fit", state_fn=None, speed=None, steady_state_check=True, start_box_out=None):
+    """One fit of :func:`reconstruct` with its branch log and steady-state record (``start_box_out`` receives the
+    starting parameters)."""
     token = blog = parent = None
-    start_box = {}
+    start_box = {} if start_box_out is None else start_box_out
     try:                          # the branch log: a record only, never raises
         parent = _cm.current_branch_log()
         blog, token = _cm.open_branch_log()

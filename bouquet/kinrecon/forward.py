@@ -823,6 +823,7 @@ class ForwardModel:
         wiso = float(s.anchor_factor) * 2.0 * np.pi * med
         self._iso = dict(points=bi, weight=wiso)
         self.reference_boundary = b
+        self._anchor_polygon = b.copy()         # the anchor target now (moved only by move_anchor_target, opt-in)
         rec["anchor"] = dict(n_points=int(len(bi)), stride=int(s.isoflux_stride), weight=wiso,
                              anchor_factor=float(s.anchor_factor),
                              rule="weight = factor * 2 pi median(1/sigma_loop) over the loop rows")
@@ -1179,6 +1180,71 @@ class ForwardModel:
             return 0.0
         gmap = dict(flux_loop="flux_loop", bpol_probe="bpol_probe", fitted_coil="pf_current")
         return float(sum(v for k, v in d["by_kind"].items() if k in gmap and gmap[k] in set(groups)))
+
+    # ---------------------------------------------------------------- moving anchor target (opt-in)
+    def anchor_target(self):
+        """A copy of the anchor target now: the full polygon whose strided points carry the isoflux rows.  It is the
+        reference boundary until :meth:`move_anchor_target` is called (opt-in, ``FitSettings.anchor_follow``);
+        ``reference_boundary`` itself never moves, so every boundary record stays measured against the reference."""
+        return np.array(getattr(self, "_anchor_polygon", self.reference_boundary), float)
+
+    def set_anchor_target(self, polygon):
+        """Set the anchor target (same number of points as the reference polygon); the anchor weight is unchanged."""
+        b = np.asarray(polygon, float)
+        if b.shape != self.reference_boundary.shape:
+            raise ValueError(f"anchor target shape {b.shape}: expected {self.reference_boundary.shape}")
+        self._anchor_polygon = b.copy()
+        self._iso["points"] = b[::int(self.settings.isoflux_stride)].copy()
+
+    def boundary_crossings(self, points, span=(0.6, 1.4), n_scan=161, n_bisect=40):
+        """Where the solved boundary (psi_N = 1) crosses the ray from the solved magnetic axis through each point:
+        the first crossing outward, by a scan of the ray over ``span`` (in units of the point's distance from the
+        axis) and bisection.  NaN where no crossing is found on the span."""
+        gs = self.gs
+        pts = np.asarray(points, float)
+        ax = np.array([float(v) for v in gs.o_point])
+        d = pts - ax
+        sg = np.linspace(span[0], span[1], int(n_scan))
+        out = np.full_like(pts, np.nan)
+        for i in range(len(pts)):
+            pn = np.asarray(_diag.psi_n_at(gs, ax + sg[:, None] * d[i])[0], float)
+            k = np.where(pn >= 1.0)[0]
+            if not len(k) or k[0] == 0:
+                continue
+            lo, hi = sg[k[0] - 1], sg[k[0]]
+            for _ in range(int(n_bisect)):
+                mid = 0.5 * (lo + hi)
+                if float(np.asarray(_diag.psi_n_at(gs, (ax + mid * d[i])[None, :])[0])[0]) >= 1.0:
+                    hi = mid
+                else:
+                    lo = mid
+            out[i] = ax + 0.5 * (lo + hi) * d[i]
+        return out
+
+    def move_anchor_target(self, fraction):
+        """Move every point of the anchor target ``fraction`` of the way to where the solved boundary crosses the ray
+        from the solved magnetic axis through it (:meth:`boundary_crossings`); a point without a crossing stays.  The
+        anchor weight is unchanged.  Returns the record of the move (mm): its rms and maximum, the number of points
+        not moved, and the target's rms and mean (signed along the axis ray, positive outward) displacement from the
+        reference boundary after the move."""
+        fraction = float(fraction)
+        if not 0.0 < fraction <= 1.0:
+            raise ValueError(f"fraction = {fraction!r}: must be in (0, 1]")
+        b = self.anchor_target()
+        c = self.boundary_crossings(b)
+        found = np.isfinite(c[:, 0])
+        mv = np.where(found[:, None], fraction * (c - b), 0.0)
+        new = b + mv
+        self.set_anchor_target(new)
+        m = np.hypot(mv[:, 0], mv[:, 1])
+        ax = np.array([float(v) for v in self.gs.o_point])
+        ref = self.reference_boundary
+        off = np.hypot(*(new - ref).T) * np.sign(np.hypot(*(new - ax).T) - np.hypot(*(ref - ax).T))
+        return dict(fraction=fraction, move_rms_mm=1e3 * float(np.sqrt(np.mean(m ** 2))), move_max_mm=1e3 * float(m.max()),
+                    n_points=int(len(b)), n_not_moved=int((~found).sum()),
+                    target_from_reference_rms_mm=1e3 * float(np.sqrt(np.mean(off ** 2))),
+                    target_from_reference_mean_mm=1e3 * float(np.mean(off)),
+                    sign="positive: the target lies outside the reference boundary, along the ray from the magnetic axis")
 
     # ---------------------------------------------------------------- geometry metrics
     def boundary_distance(self):

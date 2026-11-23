@@ -520,3 +520,111 @@ def test_default_fit_records_the_sawtooth_parameters_as_not_used(monkeypatch):
     out = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=1.0), FIT.FitSettings())
     assert out.params["f"] is None and out.params["log_strength"] is None
     assert out.record["params_not_used"] == ["log_strength", "f"]
+
+
+class FakeFMAnchor(FakeFM):
+    """The mocked forward model with a movable anchor target: the misfit offset is scaled by ``scale[n_moves]``."""
+
+    def __init__(self, scale):
+        super().__init__()
+        self.scale = list(scale)
+        self.target = 0                      # the number of moves the target now stands at
+        self.moves = 0                       # every move_anchor_target call
+
+    def snapshot(self):
+        return dict(theta=self.theta_state)
+
+    def anchor_target(self):
+        return self.target
+
+    def set_anchor_target(self, target):
+        self.target = target
+
+    def move_anchor_target(self, fraction):
+        self.target += 1
+        self.moves += 1
+        return dict(fraction=fraction, move_rms_mm=1.0)
+
+
+def _install_anchor(monkeypatch, fm, fail_at_target=None):
+    calls = _install(monkeypatch, fm)
+    consistent = FIT._consistent
+
+    def consistent_t(fm_, kin, src, params, cfg, start, z0, label, initial_profiles=None, state_fn=None):
+        out = consistent(fm_, kin, src, params, cfg, start, z0, label, initial_profiles=initial_profiles,
+                         state_fn=state_fn)
+        if fail_at_target is not None and fm_.target == fail_at_target:
+            return CM.ConsistentResult(False, "solve_failed", 3, None, {"lag": True}, out.solve,
+                                       {"passes": [], "reason": "injected"}, 0.01)
+        return out
+
+    def residual_vector(fm_, ms, groups, settings, roles):
+        r = A[:, 0] * (fm_.theta_state - TRUE) + B * fm_.scale[fm_.target]
+        return r, [("flux_loop", s) for s in "abcd"], SimpleNamespace(model={}, excluded={}, notes=[])
+
+    monkeypatch.setattr(FIT, "_consistent", consistent_t)
+    monkeypatch.setattr(FIT, "residual_vector", residual_vector)
+    return calls
+
+
+def _anchor_fit(fm, **kw):
+    kin, src = _kin()
+    cfg = CM.CurrentModelSettings(r0=1.0, core_relaxation="periodic_orbit")
+    return FIT.reconstruct(fm, kin, src, cfg, FIT.FitSettings(free=SAW_FREE, **kw),
+                           params0=dict(log_strength=0.5, f=0.37))
+
+
+def test_anchor_follow_is_off_by_default_and_checked():
+    s = FIT.FitSettings()
+    assert s.anchor_follow is False and s.anchor_follow_fraction == 0.5 and s.anchor_follow_max_steps == 8
+    for bad in (dict(anchor_follow=1), dict(anchor_follow_fraction=0.0), dict(anchor_follow_fraction=1.5),
+                dict(anchor_follow_max_steps=0), dict(anchor_follow_max_steps=2.5)):
+        with pytest.raises(ValueError):
+            FIT.FitSettings(**bad)
+
+
+def test_default_fit_never_moves_the_anchor_target(monkeypatch):
+    fm = FakeFMAnchor([1.0, 0.5])
+    _install_anchor(monkeypatch, fm)
+    out = _anchor_fit(fm)
+    assert out.status == "converged" and fm.moves == 0 and fm.target == 0
+    assert "anchor_follow" not in out.record
+
+
+def test_anchor_follow_keeps_moves_while_the_fitted_chi2_falls(monkeypatch):
+    fm = FakeFMAnchor([1.0, 0.5, 0.25, 0.6, 0.1])        # falls twice, then rises: the third move is not kept
+    _install_anchor(monkeypatch, fm)
+    ref = FakeFMAnchor([0.25])
+    _install_anchor(monkeypatch, ref)
+    want = _anchor_fit(ref)
+    _install_anchor(monkeypatch, fm)
+    out = _anchor_fit(fm, anchor_follow=True)
+    rec = out.record["anchor_follow"]
+    assert rec["applied"] and rec["n_moves_kept"] == 2 and fm.moves == 3
+    assert fm.target == 2                                   # the target put back to the last kept move
+    assert [s["kept"] for s in rec["steps"]] == [True, True, True, False]
+    c = [s["chi2_data"] for s in rec["steps"]]
+    assert c[1] < c[0] and c[2] < c[1] and c[3] > c[2]
+    assert "did not fall" in rec["stop"]
+    # the result is the last kept fit: the fit of the twice-moved target, and the state is its state
+    assert out.status == "converged" and out.chi2["data"] == pytest.approx(c[2], rel=1e-12)
+    assert out.theta[0] == pytest.approx(want.theta[0], abs=1e-6)
+    assert fm.theta_state == pytest.approx(out.theta[0], abs=1e-6)
+    assert rec["n_solves_total"] == fm.n_solves
+
+
+def test_anchor_follow_puts_the_target_back_when_a_refit_fails(monkeypatch):
+    fm = FakeFMAnchor([1.0, 0.5, 0.25])
+    _install_anchor(monkeypatch, fm, fail_at_target=2)     # every solve on the twice-moved target fails
+    out = _anchor_fit(fm, anchor_follow=True)
+    rec = out.record["anchor_follow"]
+    assert rec["n_moves_kept"] == 1 and fm.target == 1 and out.status == "converged"
+    assert rec["steps"][-1]["kept"] is False and "refit" in rec["stop"]
+
+
+def test_anchor_follow_stops_at_the_cap_and_is_not_applied_in_a_series(monkeypatch):
+    fm = FakeFMAnchor([1.0, 0.8, 0.6, 0.4, 0.2])
+    _install_anchor(monkeypatch, fm)
+    out = _anchor_fit(fm, anchor_follow=True, anchor_follow_max_steps=2)
+    assert out.record["anchor_follow"]["n_moves_kept"] == 2 and "cap" in out.record["anchor_follow"]["stop"]
+    assert fm.target == 2

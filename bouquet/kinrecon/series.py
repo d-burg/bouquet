@@ -841,6 +841,8 @@ def _slice_record(fm, res, sl, label, extra=None):
                boundary=fm.boundary_distance() if res.converged else None)
     out["ip_fit"] = _fit.ip_record(tab, ms, (asm or {}).get("params") or {}, bool((extra or {}).get("ip_fitted")))
     out["flux_offset"] = None if tab is None else flux_offset_record(tab)
+    out["coil_residuals"] = _fit.coil_residual_record(tab, ms, {
+        n: v.get("role") for n, v in (getattr(fm, "rows_record", {}) or {}).get("coils", {}).get("per_coil", {}).items()})
     st_meta = dict(getattr((asm or {}).get("state"), "meta", None) or {})
     if "profile_scale" in st_meta:
         out["initial_profile_scale"] = dict(profile_scale=st_meta["profile_scale"],

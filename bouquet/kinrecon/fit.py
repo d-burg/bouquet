@@ -746,6 +746,7 @@ def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, ini
         rec["ip_fit"] = ip_record(center["all_tab"] if center is not None else None, ms,
                                   center["params"] if center is not None else _to_params(th, names, base),
                                   "ip_rel" in names)
+        rec["coil_residuals"] = coil_residual_record(center["all_tab"] if center is not None else None, ms, coil_roles)
         rec["correction_core_effect"] = _correction_effect_record(center, kin, src, cfg, settings, state_fn)
         # the core treatment of the final center: core_relaxation, q_floor, whether the floor acted, the floor radius
         rec["core"] = ((center["res"].assembly or {}).get("core") if center is not None and center["res"].assembly
@@ -1509,6 +1510,42 @@ def headline_summary(tab, ms, coil_roles):
     c_t, n_t = t["chi2"] - c_free, t["n"] - n_free
     out["total"] = dict(chi2=c_t, n=n_t, chi2_per_n=(c_t / n_t if n_t else float("nan")))
     return out
+
+
+#: REPORTING level of a fitted coil's current residual [sigma] (:func:`coil_residual_record`): a plain flag for the
+#: reader where the magnitude of a coil's normalized residual reaches it.  Not an acceptance criterion; nothing reads
+#: it and it steers nothing.
+COIL_RESIDUAL_REPORT_LEVEL = 3.0
+
+
+def coil_residual_record(tab, ms, coil_roles):
+    """How far the solve left the coils that carry a measurement constraint from their measured currents.
+
+    The coil currents are not parameters of the fit: the forward solve's least squares chooses them against the
+    magnetics, the measured currents and the boundary anchor rows together (:mod:`.forward`), so a coil that
+    ends well away from its measurement says those rows disagree.  Per coil with a role other than ``"free"``:
+    the normalized residual ``w (model - measured) / sigma``; over them the rms, the largest magnitude with its
+    coil, and the coils at or above :data:`COIL_RESIDUAL_REPORT_LEVEL`.  A record only: nothing reads it."""
+    if tab is None or ms is None or "pf_current" not in getattr(tab, "model", {}) or "pf_current" not in ms.groups:
+        return dict(available=False, note="no scored pf_current group")
+    grp = ms.groups["pf_current"]
+    used = tab.used("pf_current")
+    names = [str(n) for n in grp.geometry.get("coil_names", grp.labels)]
+    lab = [names[i] for i in np.nonzero(used)[0]]
+    r = np.asarray(tab.residual("pf_current"), float)
+    keep = np.array([coil_roles.get(n, "free") != "free" for n in lab], dtype=bool)
+    lab, r = [n for n, k in zip(lab, keep) if k], r[keep]
+    if not r.size:
+        return dict(available=False, note="no coil with a measurement constraint in the solve")
+    i = int(np.argmax(np.abs(r)))
+    lvl = COIL_RESIDUAL_REPORT_LEVEL
+    flags = [dict(coil=n, residual_sigma=float(v)) for n, v in zip(lab, r) if abs(v) >= lvl]
+    return dict(available=True, n=int(r.size), rms_sigma=float(np.sqrt(np.mean(r ** 2))),
+                max_abs_sigma=float(abs(r[i])), max_coil=lab[i], max_residual_sigma=float(r[i]),
+                residual_sigma={n: float(v) for n, v in zip(lab, r)},
+                report_level_sigma=lvl, flags=flags, flagged=bool(flags),
+                sign="model - measured",
+                note="a record for the reader: the reporting level is not an acceptance criterion and steers nothing")
 
 
 def ip_record(tab, ms, params, fitted):

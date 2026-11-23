@@ -381,6 +381,27 @@ def test_ip_record_and_target():
     assert FIT.ip_record(None, MeasurementSet("toy", 0, 0, {}), {}, False)["available"] is False
 
 
+def test_coil_residual_record_is_a_record_of_the_constrained_coils():
+    from bouquet.kinrecon.interfaces import ResidualTable
+    names = ["A", "B", "C", "D"]
+    g = ConstraintGroup("pf_current", names, [1.0e5, -2.0e5, 5.0e4, 1.0e3], [1.0e3, 2.0e3, 1.0e3, 1.0e2],
+                        [True, True, True, True], geometry={"coil_names": names})
+    ms = MeasurementSet("toy", 0, 0, {"pf_current": g})
+    tab = ResidualTable(ms, model={"pf_current": np.array([1.0e5 - 3.5e3, -2.0e5 + 2.0e3, 5.0e4, 9.0e3])})
+    roles = dict(A="fitted", B="fitted", C="held", D="free")
+    rec = FIT.coil_residual_record(tab, ms, roles)
+    assert rec["available"] and rec["n"] == 3 and "D" not in rec["residual_sigma"]       # the free coil is left out
+    assert rec["residual_sigma"]["A"] == pytest.approx(-3.5) and rec["residual_sigma"]["B"] == pytest.approx(1.0)
+    assert rec["max_coil"] == "A" and rec["max_abs_sigma"] == pytest.approx(3.5)
+    assert rec["rms_sigma"] == pytest.approx(np.sqrt((3.5 ** 2 + 1.0 + 0.0) / 3.0))
+    assert rec["flagged"] and [f["coil"] for f in rec["flags"]] == ["A"]
+    assert rec["report_level_sigma"] == FIT.COIL_RESIDUAL_REPORT_LEVEL == 3.0
+    quiet = FIT.coil_residual_record(ResidualTable(ms, model={"pf_current": np.asarray(g.measured, float)}), ms, roles)
+    assert not quiet["flagged"] and quiet["max_abs_sigma"] == 0.0
+    assert FIT.coil_residual_record(None, ms, roles)["available"] is False
+    assert FIT.coil_residual_record(tab, ms, dict.fromkeys(names, "free"))["available"] is False
+
+
 def test_noise_is_the_same_measurement_with_lagged_columns(monkeypatch):
     """The noise measurement re-solves the center from a CONSISTENT state in both column modes: here a
     re-solve from a lagged column's state would carry an offset (the mocked lagged state is not a

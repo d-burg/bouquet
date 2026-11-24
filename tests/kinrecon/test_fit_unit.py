@@ -628,3 +628,55 @@ def test_anchor_follow_stops_at_the_cap_and_is_not_applied_in_a_series(monkeypat
     out = _anchor_fit(fm, anchor_follow=True, anchor_follow_max_steps=2)
     assert out.record["anchor_follow"]["n_moves_kept"] == 2 and "cap" in out.record["anchor_follow"]["stop"]
     assert fm.target == 2
+
+
+def test_anchor_follow_also_follows_with_a_supplied_state(monkeypatch):
+    """A filter fit of a series slice (``state_fn`` given) follows by the same rule; no steady-state record is made."""
+    fm = FakeFMAnchor([1.0, 0.5, 0.7])
+    _install_anchor(monkeypatch, fm)
+    kin, src = _kin()
+    cfg = CM.CurrentModelSettings(r0=1.0, core_relaxation="periodic_orbit")
+    out = FIT.reconstruct(fm, kin, src, cfg, FIT.FitSettings(free=SAW_FREE, anchor_follow=True),
+                          params0=dict(log_strength=0.5, f=0.37), state_fn=lambda lag, params=None: None)
+    rec = out.record["anchor_follow"]
+    assert rec["applied"] and rec["n_moves_kept"] == 1 and fm.target == 1
+    assert "steady_state_check" not in out.record
+
+
+def test_anchor_offset_is_carried_onto_another_polygon_by_angle():
+    """``ForwardModel.anchor_offset`` / ``apply_anchor_offset`` (no solver): the displacement of a moved target is
+    carried onto another slice's reference polygon along the rays from the magnetic axis."""
+    from bouquet.kinrecon.forward import ForwardModel
+
+    def model(ref):
+        fm = ForwardModel.__new__(ForwardModel)
+        fm.reference_boundary = ref
+        fm._anchor_polygon = ref.copy()
+        fm._iso = dict(points=ref[::2].copy(), weight=3.0)
+        fm.settings = SimpleNamespace(isoflux_stride=2)
+        fm.gs = SimpleNamespace(o_point=(1.72, 0.02))
+        return fm
+
+    ax = np.array([1.72, 0.02])
+    th = np.linspace(0, 2 * np.pi, 80, endpoint=False)
+    ref = np.c_[1.7 + 0.6 * np.cos(th), 1.0 * np.sin(th)]
+    fm = model(ref)
+    assert fm.anchor_offset() is None                      # nothing moved: nothing to carry
+    d = ref - ax
+    rr = np.hypot(d[:, 0], d[:, 1])
+    dr = -0.02 + 0.01 * np.cos(np.arctan2(d[:, 1], d[:, 0]))
+    fm.set_anchor_target(ax + (rr + dr)[:, None] * d / rr[:, None])
+    off = fm.anchor_offset()
+    assert np.allclose(off["dr"], dr, atol=1e-14)
+    assert fm._iso["weight"] == 3.0 and len(fm._iso["points"]) == 40 and np.array_equal(fm.reference_boundary, ref)
+    th2 = np.linspace(0.1, 2 * np.pi + 0.1, 61, endpoint=False)
+    fm2 = model(np.c_[1.71 + 0.61 * np.cos(th2), 1.02 * np.sin(th2)])
+    rec = fm2.apply_anchor_offset(off)
+    d2 = fm2.reference_boundary - ax
+    t2 = fm2.anchor_target() - ax
+    want = -0.02 + 0.01 * np.cos(np.arctan2(d2[:, 1], d2[:, 0]))
+    assert np.max(np.abs(np.hypot(t2[:, 0], t2[:, 1]) - np.hypot(d2[:, 0], d2[:, 1]) - want)) < 5e-5
+    assert np.allclose(t2[:, 0] * d2[:, 1] - t2[:, 1] * d2[:, 0], 0.0, atol=1e-12)     # on the same rays
+    assert rec["carried"] and rec["mean_mm"] == pytest.approx(-20.0, abs=0.5)
+    with pytest.raises(ValueError):
+        fm2.set_anchor_target(ref)                          # another polygon's shape is refused

@@ -1246,6 +1246,33 @@ class ForwardModel:
                     target_from_reference_mean_mm=1e3 * float(np.mean(off)),
                     sign="positive: the target lies outside the reference boundary, along the ray from the magnetic axis")
 
+    def anchor_offset(self):
+        """The anchor target's displacement from the reference boundary as a function of the poloidal angle about the
+        solved magnetic axis: ``theta`` of every reference point and ``dr`` (m), the target point's distance from the
+        axis minus the reference point's.  ``None`` when the target is the reference boundary (nothing was moved).
+        Used to carry a moved target from one slice of a series to the next (:meth:`apply_anchor_offset`)."""
+        ref, tgt = self.reference_boundary, self.anchor_target()
+        if np.array_equal(ref, tgt):
+            return None
+        ax = np.array([float(v) for v in self.gs.o_point])
+        return dict(theta=np.arctan2(ref[:, 1] - ax[1], ref[:, 0] - ax[0]),
+                    dr=np.hypot(*(tgt - ax).T) - np.hypot(*(ref - ax).T))
+
+    def apply_anchor_offset(self, offset):
+        """Set the anchor target to the reference boundary displaced along the rays from the solved magnetic axis by
+        ``offset`` (:meth:`anchor_offset` of another slice; periodic linear interpolation in the poloidal angle).
+        Returns the record of the displacement (mm).  The anchor weight is unchanged."""
+        ref = self.reference_boundary
+        ax = np.array([float(v) for v in self.gs.o_point])
+        th = np.arctan2(ref[:, 1] - ax[1], ref[:, 0] - ax[0])
+        o = np.argsort(offset["theta"])
+        d = np.interp(th, np.asarray(offset["theta"], float)[o], np.asarray(offset["dr"], float)[o], period=2.0 * np.pi)
+        rr = np.hypot(*(ref - ax).T)
+        self.set_anchor_target(ax + (rr + d)[:, None] * (ref - ax) / np.maximum(rr, 1e-30)[:, None])
+        return dict(carried=True, rms_mm=1e3 * float(np.sqrt(np.mean(d ** 2))), mean_mm=1e3 * float(np.mean(d)),
+                    max_abs_mm=1e3 * float(np.max(np.abs(d))), n_points=int(len(ref)),
+                    sign="positive: the target lies outside the reference boundary, along the ray from the magnetic axis")
+
     # ---------------------------------------------------------------- geometry metrics
     def boundary_distance(self):
         """Displacement of the solved boundary from the reference (anchor) boundary.

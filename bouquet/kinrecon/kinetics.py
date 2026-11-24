@@ -387,7 +387,7 @@ def assemble_kinetic_inputs(x, ne, te, ti, *, zeff_candidates, zeff_source, z_im
         inputs are then placed by rho (``mapping_source`` names that equilibrium).
     ni_reference : array on x, optional
         A main-ion density from the producer (e.g. a transport code's), compared, never used.
-    midplane_radius : (psi_n, r_m) or (psi_n, r_m, source), optional
+    midplane_radius : (psi_n, r_m), (psi_n, r_m, source) or (psi_n, r_m, source, rho_tor_norm), optional
         The producing equilibrium's outboard-midplane major radius [m] against its psi_N (both strictly
         increasing, finite).  Kept on the result for the fit's radial-coordinate record (how far the fitted
         surfaces sit from the producer's in real space); it does not enter the model.  The record says
@@ -569,6 +569,19 @@ def assemble_kinetic_inputs(x, ne, te, ti, *, zeff_candidates, zeff_source, z_im
             raise ValueError("midplane_radius: psi_n and r_m must increase strictly (outboard midplane, r_m > 0)")
         mid = dict(psi_n=mp, r_m=mr, source=str(midplane_radius[2]) if len(midplane_radius) > 2 else
                    (mapping_source or "the producing equilibrium"))
+        # the table's own rho_tor,norm (a fourth element, or from psi_n_to_rho): read only by the fit's record of
+        # T_e at the reconstruction's separatrix in real space (fit.separatrix_te_record), never by the model
+        mrho = None
+        if len(midplane_radius) > 3 and midplane_radius[3] is not None:
+            mrho = np.asarray(midplane_radius[3], dtype=float)
+            if mrho.shape != mp.shape or not np.all(np.isfinite(mrho)) or np.any(np.diff(mrho) <= 0):
+                raise ValueError("midplane_radius: rho_tor_norm must be finite, strictly increasing and as long as psi_n")
+        elif psi_n_to_rho is not None:
+            tp_, tr_ = (np.asarray(v, dtype=float) for v in psi_n_to_rho)
+            if mp[0] >= tp_[0] - 1e-12 and mp[-1] <= tp_[-1] + 1e-12:
+                mrho = np.interp(mp, tp_, tr_)
+        if mrho is not None:
+            mid["rho_tor_norm"] = mrho
     rec["midplane_radius"] = ("not supplied" if mid is None else
                               f"supplied: {mid['source']}, {mp.size} points, psi_N {mp[0]:.4g} to {mp[-1]:.4g}")
     return KineticInputs(coordinate=coord, x=xs, ne=out["ne"], te=out["te"], ti=out["ti"], zeff=zeff, ni=ni,

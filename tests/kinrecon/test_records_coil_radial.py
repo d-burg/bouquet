@@ -166,3 +166,35 @@ def test_fit_record_helpers_without_the_methods_or_the_table():
         def midplane_radius_record(self, table):
             return dict(table=table)
     assert FIT._radial_coordinate(WithMethod(), Bare()) == dict(table=None)
+
+
+def test_separatrix_te_record_reads_the_profile_where_our_separatrix_sits():
+    """``fit.separatrix_te_record``: T_e of the kinetic inputs at our separatrix radius on the producing equilibrium's
+    midplane table; a record, no extrapolation, never raises."""
+    from scipy.interpolate import PchipInterpolator
+
+    class Kin:
+        coordinate = "rho_tor_norm"
+        x = np.linspace(0.0, 1.0, 101)
+
+        def _f(self, name):
+            y = dict(te=1000.0 * (1.0 - self.x) + 80.0, ne=5.0e19 * (1.0 - 0.9 * self.x))[name]
+            return PchipInterpolator(self.x, y)
+
+    kin = Kin()
+    psi = np.linspace(0.0, 1.0, 51)
+    kin.midplane_radius = dict(psi_n=psi, r_m=1.70 + 0.55 * np.sqrt(psi), rho_tor_norm=np.sqrt(psi), source="toy")
+    rad = dict(computed=True, edge_r_ours_m=2.25 - 0.011)            # our separatrix 11 mm inside the table's
+    rec = FIT.separatrix_te_record(rad, kin)
+    rho = (2.25 - 0.011 - 1.70) / 0.55
+    assert rec["computed"] and rec["inside_table"]
+    assert rec["separatrix_minus_table_edge_mm"] == pytest.approx(-11.0, abs=1e-6)
+    assert rec["coordinate_at_our_separatrix"] == pytest.approx(rho, abs=2e-4)
+    assert rec["te_eV"] == pytest.approx(1000.0 * (1.0 - rho) + 80.0, rel=2e-3)
+    assert rec["te_table_edge_eV"] == pytest.approx(80.0) and rec["te_over_table_edge"] > 1.2
+    out = FIT.separatrix_te_record(dict(computed=True, edge_r_ours_m=2.26), kin)   # outside the table: not extrapolated
+    assert out["computed"] and out["inside_table"] is False and out["te_eV"] is None
+    del kin.midplane_radius["rho_tor_norm"]                         # no table coordinate for rho inputs: stated
+    assert FIT.separatrix_te_record(rad, kin)["computed"] is False
+    assert FIT.separatrix_te_record(dict(computed=False), kin)["computed"] is False
+    assert FIT.separatrix_te_record(rad, object())["computed"] is False

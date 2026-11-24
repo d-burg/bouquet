@@ -365,6 +365,10 @@ class SeriesSettings:
     #                                            (start, end, candidate, source); checked within each interval
     keep_going_after_failure: bool = False   # True: a failed slice is recorded and skipped; the next interval
     #                                          starts from the last consistent state (recorded per slice)
+    # Moving anchor target in a series (only with FitSettings.anchor_follow on in the first-slice fit or the filter):
+    anchor_carry_retest: bool = True         # a carried target is used on a slice only if its filter fit has a lower
+    #                                          fitted chi^2 than the filter fit on the slice's own reference boundary
+    anchor_follow_total: Optional[int] = None   # at most this many kept moves along one carried chain (None: no bound)
 
     def __post_init__(self):
         if self.initial not in INITIAL_MODES:
@@ -797,6 +801,30 @@ def _slice_ip(sl):
     return abs(float(sl.measurements.groups["ip"].measured[0]))
 
 
+def _anchor_offset(fm):
+    """The moved anchor target's displacement from the slice's reference boundary
+    (:meth:`.forward.ForwardModel.anchor_offset`), or ``None`` when nothing was moved (always, unless
+    ``FitSettings.anchor_follow`` is on in the first-slice fit or the filter fit).  Never raises."""
+    try:
+        get = getattr(fm, "anchor_offset", None)
+        return None if get is None else get()
+    except Exception:  # noqa: BLE001 -- carrying nothing is the default behavior
+        return None
+
+
+def _carry_anchor(fm, offset):
+    """Moving anchor target in a series: the previous slice's displacement of the anchor target from its reference
+    boundary, as a function of the poloidal angle about the magnetic axis, is applied to this slice's reference
+    boundary before its solves (:meth:`.forward.ForwardModel.apply_anchor_offset`).  ``None`` when nothing was moved
+    (the default: the target is the slice's reference boundary).  Returns the record for the slice."""
+    if offset is None:
+        return None
+    try:
+        return fm.apply_anchor_offset(offset)
+    except Exception as exc:  # noqa: BLE001 -- the slice then runs on its reference boundary, and the record says so
+        return dict(carried=False, reason=f"{type(exc).__name__}: {exc}"[:300])
+
+
 def _slice_record(fm, res, sl, label, extra=None):
     """Distilled record of one solved slice (no measured values)."""
     ms = sl.measurements
@@ -949,6 +977,7 @@ def _run_series(fm, slices, cfg, settings=None, start_psi=None, initial_profiles
     f0rec0 = _apply_f0(fm, sl0)
     if start_psi is not None:
         fm.set_psi(start_psi)
+    anchor_moves0 = 0
     if mode in FIT_START_MODES:
         fit0 = s.initial_fit
         if mode == "magnetics_fit":
@@ -958,6 +987,7 @@ def _run_series(fm, slices, cfg, settings=None, start_psi=None, initial_profiles
                               initial_profiles=initial_profiles, label=f"{sl0.label}:{mode}",
                               steady_state_check=s.steady_state_check, **_speed_kw(speed))
         ssc0 = fr.record.get("steady_state_check")
+        anchor_moves0 = int((fr.record.get("anchor_follow") or {}).get("n_moves_kept") or 0)
         if fr.record.get("center") is None:
             c0 = fr.record.get("center0") or {}
             its = fr.record.get("iterations", [])
@@ -1096,6 +1126,8 @@ def _run_series(fm, slices, cfg, settings=None, start_psi=None, initial_profiles
     ip_off = float(ip_carried / _slice_ip(sl0) - 1.0)
     snap_prev = fm.snapshot()
     pc_prev = fm.probe_correction.copy()
+    off_prev = _anchor_offset(fm)       # a moved anchor target (FitSettings.anchor_follow) is carried slice to slice
+    anchor_box = dict(moves=anchor_moves0, carried=False)      # kept moves along the carried chain
     status = "completed"
     for k in range(1, len(slices)):
         sl = slices[k]
@@ -1104,6 +1136,7 @@ def _run_series(fm, slices, cfg, settings=None, start_psi=None, initial_profiles
         nk = fm.n_solves
         fm.restore(snap_prev)
         f0rec = _apply_f0(fm, sl)
+        anchor_rec = None
         if sl.measurements is None:     # generation mode (synthetic truth series)
             fm.reconfigure(None, sl.reference_boundary, case_id=case.case_id, ip=_slice_ip(sl),
                            generation_coil_reg=sl.meta["generation_coil_reg"])
@@ -1115,6 +1148,7 @@ def _run_series(fm, slices, cfg, settings=None, start_psi=None, initial_profiles
             fm.reconfigure(sl.measurements, sl.reference_boundary, coil_roles=roles, case_id=case.case_id,
                            **_reference_points_kw(sl))
             fm.probe_correction = pc_prev.copy()
+            anchor_rec = _carry_anchor(fm, off_prev)
         fm.case = case
         ip0, ip1 = ip_carried, _slice_ip(sl) * (1.0 + ip_off)
         holder = {}
@@ -1229,7 +1263,9 @@ def _run_series(fm, slices, cfg, settings=None, start_psi=None, initial_profiles
                     rc_box["r"], rc_held, rc_rec = _core_radius(s, (res.assembly or {}).get("core"), rc_held)
             filt = None
             if res.converged and s.filter_at(t1):
-                filt, res = _filter_slice(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1, **_speed_kw(speed))
+                anchor_box["carried"] = bool(anchor_rec and anchor_rec.get("carried"))
+                filt, res = _filter_carried(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1, anchor_box,
+                                            **_speed_kw(speed))
             cce = _interval_correction_effect(sl, cfg, s, state_fn, res, filt)
         finally:
             _branch_log_close(btok)
@@ -1280,6 +1316,8 @@ def _run_series(fm, slices, cfg, settings=None, start_psi=None, initial_profiles
         if float(sl.time) in zeff_flags:
             extra["zeff_flag"] = "the series' Z_eff source fails its tests or is unverified at this slice"
         rec = _slice_record(fm, res, sl, sl.label, extra)
+        if anchor_rec is not None:
+            rec["anchor_target"] = anchor_rec
         if s.steady_state_check and res.converged:
             # a record (module docstring); the solver is restored to the slice's own result afterwards
             rec["steady_state_check"] = _steady_state_check(fm, sl, cfg, s, p_pred)
@@ -1304,6 +1342,7 @@ def _run_series(fm, slices, cfg, settings=None, start_psi=None, initial_profiles
         jni_prev = nxt["jni1"]
         snap_prev = fm.snapshot()
         pc_prev = fm.probe_correction.copy()
+        off_prev = _anchor_offset(fm)
     out["boundary_displacement"] = boundary_displacement_history(out["slices"])
     out.update(status=status, n_solves=fm.n_solves - n_solves0, wall_s=round(time.perf_counter() - t_all, 2))
     _note_iterations(out, fm, its0)
@@ -1590,11 +1629,81 @@ def _psi_shape_diff(a, b):
     return float(np.max(np.abs(d - d[0])) / span), float(a.psi_boundary - b.psi_boundary)
 
 
-def _filter_slice(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1, speed=None):
+def _follow_settings(s, box):
+    """The filter-fit settings of this slice under the bound on kept moves along a carried chain
+    (``SeriesSettings.anchor_follow_total``): the moving target's cap is the smaller of the filter fit's own and what
+    the bound leaves; with nothing left the fit runs without further moves."""
+    ff = s.filter_fit
+    if not ff.anchor_follow or s.anchor_follow_total is None:
+        return ff
+    left = int(s.anchor_follow_total) - int(box.get("moves", 0))
+    if left <= 0:
+        return dataclasses.replace(ff, anchor_follow=False)
+    return dataclasses.replace(ff, anchor_follow_max_steps=min(int(ff.anchor_follow_max_steps), left))
+
+
+def _kept_moves(filt):
+    return int(((filt or {}).get("anchor_follow") or {}).get("n_moves_kept") or 0)
+
+
+def _filter_carried(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1, box, speed=None):
+    """The filter fit of a slice with the moving anchor target (:func:`_filter_slice` otherwise, unchanged).
+
+    Where the slice's anchor target was carried from the previous slice and ``SeriesSettings.anchor_carry_retest`` is
+    on, two filter fits are made from the same evolved state: one on the slice's own reference boundary (no moves) and
+    one on the carried target (with the further moves the settings allow).  The carried one is used only if it is
+    absorbed and its fitted chi^2 (``chi2["data"]``) is lower than the reference one's (or the reference one is not
+    absorbed); otherwise the reference fit is the slice's answer, the target is the reference boundary again, and
+    nothing is carried on.  The comparison is recorded (``filter["anchor_retest"]``)."""
+    kw = _speed_kw(speed)
+    if not (box.get("carried") and s.anchor_carry_retest and hasattr(fm, "set_anchor_target")):
+        filt, out = _filter_slice(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1, filter_fit=_follow_settings(s, box),
+                                  **kw)
+        box["moves"] = int(box.get("moves", 0)) + _kept_moves(filt) if _anchor_offset(fm) is not None else 0
+        return filt, out
+    pre = dict(snap=fm.snapshot(), pc=fm.probe_correction.copy(), holder=dict(holder), target=fm.anchor_target())
+
+    def chi(f):
+        return float((f.get("chi2") or {}).get("data")) if f.get("absorbed") else None
+
+    fm.set_anchor_target(fm.reference_boundary)
+    filt_r, res_r = _filter_slice(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1,
+                                  filter_fit=dataclasses.replace(s.filter_fit, anchor_follow=False), **kw)
+    ref = dict(snap=fm.snapshot(), pc=fm.probe_correction.copy(), holder=dict(holder))
+    fm.restore(pre["snap"])
+    fm.probe_correction = pre["pc"].copy()
+    holder.clear()
+    holder.update(pre["holder"])
+    fm.set_anchor_target(pre["target"])
+    filt_c, res_c = _filter_slice(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1,
+                                  filter_fit=_follow_settings(s, box), **kw)
+    c_r, c_c = chi(filt_r), chi(filt_c)
+    use_carried = c_c is not None and (c_r is None or c_c < c_r)
+    rec = dict(chi2_reference=c_r, chi2_carried=c_c, status_reference=filt_r.get("status"),
+               status_carried=filt_c.get("status"), kept="carried" if use_carried else "reference",
+               n_solves_reference=filt_r.get("n_solves"), n_solves_carried=filt_c.get("n_solves"),
+               rule="the carried target is used only if its filter fit is absorbed with a lower fitted chi^2 than "
+                    "the filter fit on the slice's own reference boundary")
+    if use_carried:
+        box["moves"] = int(box.get("moves", 0)) + _kept_moves(filt_c)
+        filt_c["anchor_retest"] = rec
+        return filt_c, res_c
+    fm.set_anchor_target(fm.reference_boundary)
+    fm.restore(ref["snap"])
+    fm.probe_correction = ref["pc"].copy()
+    holder.clear()
+    holder.update(ref["holder"])
+    box["moves"] = 0
+    filt_r["anchor_retest"] = rec
+    return filt_r, res_r
+
+
+def _filter_slice(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1, speed=None, filter_fit=None):
     """Filter fit of one evolved slice (module docstring).  Returns ``(record, result)``; on return
-    the solver holds the slice's answer and ``holder`` the state to carry."""
+    the solver holds the slice's answer and ``holder`` the state to carry.  ``filter_fit``: the fit settings in place
+    of ``s.filter_fit`` (the moving anchor target's per-slice settings, :func:`_filter_carried`)."""
     pred = dict(res=res, holder=dict(holder), snap=fm.snapshot(), pc=fm.probe_correction.copy())
-    fr = _fit.reconstruct(fm, sl.kinetics, sl.sources, cfg, s.filter_fit, params0=p_pred,
+    fr = _fit.reconstruct(fm, sl.kinetics, sl.sources, cfg, filter_fit or s.filter_fit, params0=p_pred,
                           start=pred["snap"], label=f"{sl.label}:filter", state_fn=state_fn, **_speed_kw(speed))
     stale = holder.get("end")       # advanced by the LAST solve of the fit (a column, a trial or the center)
     c = fr.record.get("center")
@@ -1604,6 +1713,7 @@ def _filter_slice(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1, speed=None
                 n_solves=fr.record["n_solves"], wall_s=fr.record["wall_s"],
                 stopping=fr.record.get("final_stopping_tests"), stopping_summary=fr.record.get("stopping_summary"),
                 floor_branch_record=fr.record.get("floor_branch_record"),
+                anchor_follow=fr.record.get("anchor_follow"),      # None unless FitSettings.anchor_follow is on
                 a_corr=[float(v) for v in _cm.full_params(fr.params)["a_corr"]],
                 correction_size=_correction_size(fr.params, cfg, s.filter_fit))
     if c is None or fr.status not in ACCEPTED_FIT_STATUSES:

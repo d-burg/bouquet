@@ -619,8 +619,9 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
     the converged state and parameters.  A move is KEPT only if the refit converges and the chi^2 of the fitted groups
     (``chi2["data"]``) is lower than before; at the first move that is not kept the target and the state are put back
     and the last kept fit is the result.  The reference boundary then acts as a starting guess and an implicit prior
-    whose strength is the number of moves; every step is in ``record["anchor_follow"]``.  With ``state_fn`` (a series
-    slice) the option is not applied and the record says so.
+    whose strength is the number of moves; every step is in ``record["anchor_follow"]``.  With ``state_fn`` (a filter
+    fit of a series slice) the same rule applies to the filter fit; the series driver carries the moved target to the
+    next slice (:mod:`.series`, "Moving anchor target").
     """
     st = settings or FitSettings()
     kw = dict(label=label, state_fn=state_fn, speed=speed)
@@ -628,27 +629,22 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
         return _reconstruct_checked(fm, kin, src, cfg, settings=settings, params0=params0, start=start,
                                     initial_profiles=initial_profiles, steady_state_check=steady_state_check, **kw)
     base = replace(st, anchor_follow=False)
-    if state_fn is not None:
-        out = _reconstruct_checked(fm, kin, src, cfg, settings=base, params0=params0, start=start,
-                                   initial_profiles=initial_profiles, steady_state_check=steady_state_check, **kw)
-        if isinstance(getattr(out, "record", None), dict):
-            out.record["anchor_follow"] = dict(applied=False, reason="not built for a supplied current state (series)")
-        return out
     return _follow_anchor(fm, kin, src, cfg, base, st, params0, start, initial_profiles, label, speed,
-                          steady_state_check)
+                          steady_state_check, state_fn)
 
 
 #: Fit statuses that count as converged for the moving anchor target.
 CONVERGED_STATUSES = ("converged", "converged_within_noise")
 
 
-def _follow_anchor(fm, kin, src, cfg, base, st, params0, start, initial_profiles, label, speed, check):
+def _follow_anchor(fm, kin, src, cfg, base, st, params0, start, initial_profiles, label, speed, check,
+                   state_fn=None):
     """The moving anchor target of :func:`reconstruct` (``FitSettings.anchor_follow``)."""
     t0, n0 = time.perf_counter(), fm.n_solves
     box = {}
     fr = _reconstruct_checked(fm, kin, src, cfg, settings=base, params0=params0, start=start,
                               initial_profiles=initial_profiles, label=label, speed=speed, steady_state_check=False,
-                              start_box_out=box)
+                              start_box_out=box, state_fn=state_fn)
 
     def data_chi2(r):
         try:
@@ -666,18 +662,27 @@ def _follow_anchor(fm, kin, src, cfg, base, st, params0, start, initial_profiles
         if fr.status not in CONVERGED_STATUSES:
             stop = f"the fit before move {k} is not converged ({fr.status})"
             break
+        c_prev = fr.record.get("center") if isinstance(getattr(fr, "record", None), dict) else None
+        if isinstance(c_prev, dict) and c_prev.get("snap") is not None:
+            # the kept fit's accepted center is the state to move from and to put back (the solver may hold the state
+            # of the fit's last solve, a column or a trial)
+            fm.restore(c_prev["snap"])
+            if c_prev.get("probe_correction") is not None:
+                fm.probe_correction = np.array(c_prev["probe_correction"], float)
         keep_target, keep_state = fm.anchor_target(), fm.snapshot()
+        keep_pc = np.array(getattr(fm, "probe_correction", np.zeros(0)), float)
         move = fm.move_anchor_target(st.anchor_follow_fraction)
         nbox = {}
-        new = _reconstruct_checked(fm, kin, src, cfg, settings=base, params0=dict(fr.params), start=fm.snapshot(),
+        new = _reconstruct_checked(fm, kin, src, cfg, settings=base, params0=dict(fr.params), start=keep_state,
                                    label=f"{label}:anchor{k}", speed=speed, steady_state_check=False,
-                                   start_box_out=nbox)
+                                   start_box_out=nbox, state_fn=state_fn)
         c_old, c_new = data_chi2(fr), data_chi2(new)
         kept = bool(new.status in CONVERGED_STATUSES and c_new < c_old)
         steps.append(dict(step=k, status=new.status, chi2_data=c_new, kept=kept, move=move))
         if not kept:
             fm.set_anchor_target(keep_target)
             fm.restore(keep_state)
+            fm.probe_correction = keep_pc
             stop = (f"move {k} not kept: refit {new.status}" if new.status not in CONVERGED_STATUSES else
                     f"move {k} not kept: chi^2 of the fitted groups did not fall ({c_old:.6g} -> {c_new:.6g})")
             break
@@ -688,8 +693,9 @@ def _follow_anchor(fm, kin, src, cfg, base, st, params0, start, initial_profiles
                wall_s_total=round(time.perf_counter() - t0, 2))
     if isinstance(getattr(fr, "record", None), dict):
         fr.record["anchor_follow"] = rec
-        with _speed.speed_scope(_speed.effective(speed)):
-            fr.record["steady_state_check"] = _fit_steady_state_check(fm, kin, src, cfg, fr, box, check, label)
+        if state_fn is None:
+            with _speed.speed_scope(_speed.effective(speed)):
+                fr.record["steady_state_check"] = _fit_steady_state_check(fm, kin, src, cfg, fr, box, check, label)
     return fr
 
 
@@ -1671,7 +1677,8 @@ def _final_extra(center, fm, ms, kin=None):
                 constraints=constraints_table(center["all_tab"], ms, list(center["all_tab"].model)),
                 chi2_detail=center["chi2"], boundary=fm.boundary_distance(),
                 coil_currents=_coil_currents(fm, center["res"].solve),
-                radial_coordinate=_radial_coordinate(fm, kin),
+                radial_coordinate=(_rc := _radial_coordinate(fm, kin)),
+                separatrix_te=separatrix_te_record(_rc, kin),
                 excluded_channels={k: v for k, v in center["all_tab"].excluded.items()},
                 score_notes=list(center["all_tab"].notes))
 
@@ -1692,6 +1699,54 @@ def _radial_coordinate(fm, kin):
     if get is None:
         return dict(computed=False, reason="the forward model has no radial-coordinate record")
     return get(getattr(kin, "midplane_radius", None))
+
+
+def separatrix_te_record(radial, kin):
+    """RECORD that steers nothing: the electron temperature of the kinetic profiles at the reconstruction's own
+    separatrix IN REAL SPACE, on the outboard midplane.
+
+    The kinetic profiles are applied on the reconstruction's flux coordinate as the producing equilibrium mapped them;
+    where the two equilibria differ at the edge, the measured edge sits elsewhere in real space than the
+    reconstruction places it.  From the radial-coordinate record (``radial``, :func:`_radial_coordinate`: the
+    outboard-midplane major radius of our separatrix) and the producing equilibrium's midplane table carried by the
+    kinetic inputs (major radius against its psi_N, with its rho_tor,norm when supplied): the table's coordinate at
+    our separatrix radius, and T_e and n_e of the kinetic inputs there, beside their values at the table's own edge.
+    Where our separatrix lies outside the table's last point the profile is not extrapolated and the record says so.
+    Never raises."""
+    try:
+        tab = getattr(kin, "midplane_radius", None)
+        if tab is None or not isinstance(radial, dict) or not radial.get("computed"):
+            return dict(computed=False, reason="no midplane table or no radial-coordinate record")
+        coord = getattr(kin, "coordinate", None)
+        xt = tab.get("rho_tor_norm") if coord == "rho_tor_norm" else tab.get("psi_n")
+        if xt is None:
+            return dict(computed=False, reason=f"the midplane table carries no {coord} (kinetic inputs are on {coord})")
+        tp, tr, xt = (np.asarray(v, float) for v in (tab["psi_n"], tab["r_m"], xt))
+        r_sep = float(radial["edge_r_ours_m"])
+        x_hi = float(np.asarray(kin.x, float)[-1])
+
+        def at(x):
+            x = float(min(max(x, float(kin.x[0])), x_hi))
+            return float(kin._f("te")(x)), float(kin._f("ne")(x))
+
+        te_e, ne_e = at(float(np.interp(min(1.0, tp[-1]), tp, xt)))
+        out = dict(computed=True, r_separatrix_ours_m=r_sep, r_table_edge_m=float(np.interp(min(1.0, tp[-1]), tp, tr)),
+                   coordinate=coord, te_table_edge_eV=te_e, ne_table_edge_m3=ne_e, source=tab.get("source"),
+                   note="record only: T_e of the kinetic inputs where OUR separatrix sits on the producing "
+                        "equilibrium's outboard midplane; nothing reads it")
+        out["separatrix_minus_table_edge_mm"] = 1e3 * (r_sep - out["r_table_edge_m"])
+        if r_sep > tr[-1]:
+            out.update(inside_table=False, te_eV=None, ne_m3=None,
+                       reason="our separatrix lies outside the table's last point: no extrapolation")
+            return out
+        x_at = float(np.interp(r_sep, tr, xt))
+        te, ne = at(x_at)
+        out.update(inside_table=True, psi_n_table_at_our_separatrix=float(np.interp(r_sep, tr, tp)),
+                   coordinate_at_our_separatrix=x_at, te_eV=te, ne_m3=ne,
+                   te_over_table_edge=(te / te_e if te_e > 0 else None))
+        return out
+    except Exception as exc:  # noqa: BLE001 -- a record must never end a fit
+        return dict(computed=False, reason=f"{type(exc).__name__}: {exc}"[:300])
 
 
 def mse_by_radius(fm, ms):

@@ -1122,3 +1122,77 @@ def test_first_crash_phase_moves_the_periodic_train():
     assert np.allclose(b, a - 0.75 * tau, rtol=0, atol=1e-15)
     with pytest.raises(ValueError):
         SE.SeriesSettings(sawtooth_first_crash_phase=0.0)
+
+
+# ---------------------------------------------------------------- moving anchor target: the carried target is re-tested
+class _AnchorFM:
+    """Only what ``series._filter_carried`` touches: a state, a probe correction and an anchor target."""
+
+    def __init__(self):
+        self.reference_boundary = np.zeros((8, 2))
+        self.target = self.reference_boundary + 0.01          # a carried (moved) target
+        self.state = "evolved"
+        self.probe_correction = np.zeros(1)
+
+    def snapshot(self):
+        return self.state
+
+    def restore(self, snap):
+        self.state = snap
+
+    def anchor_target(self):
+        return self.target.copy()
+
+    def set_anchor_target(self, b):
+        self.target = np.array(b, float)
+
+    def anchor_offset(self):
+        return None if np.array_equal(self.target, self.reference_boundary) else dict(theta=[0.0], dr=[0.01])
+
+
+def _retest(monkeypatch, chi_ref, chi_car, absorbed_car=True, **skw):
+    from bouquet.kinrecon import fit as FIT
+    from bouquet.kinrecon import series as SE
+    fm, calls = _AnchorFM(), []
+
+    def filter_slice(fm_, sl, cfg, s, p_pred, state_fn, holder, res, ip1, speed=None, filter_fit=None):
+        on_ref = np.array_equal(fm_.target, fm_.reference_boundary)
+        calls.append(dict(on_reference=on_ref, start=fm_.state, follow=filter_fit.anchor_follow,
+                          cap=filter_fit.anchor_follow_max_steps))
+        fm_.state = "fit_reference" if on_ref else "fit_carried"
+        holder["end"] = fm_.state
+        if on_ref:
+            return dict(status="converged", absorbed=True, chi2=dict(data=chi_ref), n_solves=1), "res_reference"
+        return dict(status="converged" if absorbed_car else "stalled", absorbed=absorbed_car, chi2=dict(data=chi_car),
+                    n_solves=1, anchor_follow=dict(n_moves_kept=1)), "res_carried"
+
+    monkeypatch.setattr(SE, "_filter_slice", filter_slice)
+    s = SE.SeriesSettings(filter=True, filter_fit=FIT.FitSettings(free=("a_corr",), anchor_follow=True,
+                                                                   anchor_follow_max_steps=2), **skw)
+    holder, box = dict(end="evolved"), dict(moves=3, carried=True)
+    filt, res = SE._filter_carried(fm, None, None, s, {}, None, holder, "res_pred", 1.0, box)
+    return fm, calls, filt, res, holder, box
+
+
+def test_carried_anchor_target_is_used_only_when_its_fit_is_better(monkeypatch):
+    fm, calls, filt, res, holder, box = _retest(monkeypatch, chi_ref=100.0, chi_car=80.0)
+    assert [c["on_reference"] for c in calls] == [True, False]
+    assert all(c["start"] == "evolved" for c in calls)         # both fits start from the same evolved state
+    assert calls[0]["follow"] is False and calls[1]["follow"] is True     # no moves on the reference fit
+    assert res == "res_carried" and fm.state == "fit_carried" and holder["end"] == "fit_carried"
+    assert filt["anchor_retest"]["kept"] == "carried" and box["moves"] == 4 and fm.anchor_offset() is not None
+
+
+def test_carried_anchor_target_is_dropped_when_the_reference_fit_is_better(monkeypatch):
+    for kw in (dict(chi_ref=80.0, chi_car=100.0), dict(chi_ref=100.0, chi_car=80.0, absorbed_car=False)):
+        fm, calls, filt, res, holder, box = _retest(monkeypatch, **kw)
+        assert res == "res_reference" and fm.state == "fit_reference" and holder["end"] == "fit_reference"
+        assert filt["anchor_retest"]["kept"] == "reference" and box["moves"] == 0
+        assert fm.anchor_offset() is None                      # the target is the reference again: nothing carried
+
+
+def test_bound_on_kept_moves_along_a_carried_chain(monkeypatch):
+    fm, calls, filt, res, holder, box = _retest(monkeypatch, chi_ref=100.0, chi_car=80.0, anchor_follow_total=4)
+    assert calls[1]["follow"] is True and calls[1]["cap"] == 1          # 3 kept so far, bound 4: one move left
+    fm, calls, filt, res, holder, box = _retest(monkeypatch, chi_ref=100.0, chi_car=80.0, anchor_follow_total=3)
+    assert calls[1]["follow"] is False                                   # nothing left: the carried target, no moves

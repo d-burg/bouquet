@@ -198,6 +198,7 @@ from typing import Any, Dict, Optional, Sequence
 import numpy as np
 
 from . import current_model as _cm
+from . import pressure as _pressure
 from . import solver_rows as _rows
 from . import speed as _speed
 from .current import sawtooth as _saw
@@ -1679,6 +1680,7 @@ def _final_extra(center, fm, ms, kin=None):
                 coil_currents=_coil_currents(fm, center["res"].solve),
                 radial_coordinate=(_rc := _radial_coordinate(fm, kin)),
                 separatrix_te=separatrix_te_record(_rc, kin),
+                pressure_frames=pressure_frames_record(center["res"].solve, fm),
                 excluded_channels={k: v for k, v in center["all_tab"].excluded.items()},
                 score_notes=list(center["all_tab"].notes))
 
@@ -1699,6 +1701,28 @@ def _radial_coordinate(fm, kin):
     if get is None:
         return dict(computed=False, reason="the forward model has no radial-coordinate record")
     return get(getattr(kin, "midplane_radius", None))
+
+
+def pressure_frames_record(solve, fm):
+    """RECORD that steers nothing: the stored energy, the betas and the axis pressure of a solved state in BOTH
+    pressure frames (:func:`.pressure.pressure_frames`).
+
+    The solver's own numbers (``stats``) count the pressure above its boundary value only; with the default
+    ``separatrix_pressure="offset"`` the kinetic pressure at psi_N = 1 (``p_sep``) is added back in the full frame
+    (W_MHD + 1.5 p_sep V).  A comparison with another code's stored energy, or with a diamagnetic measurement, must use
+    the full frame.  Under ``"legacy"`` no offset was applied and both frames are the solver's.  ``computed`` is False,
+    with the reason, when the solve carries no statistics or no boundary pressure."""
+    stats = getattr(solve, "stats", None) or {}
+    p_sep = (getattr(solve, "record", None) or {}).get("p_sep")
+    mode = getattr(getattr(fm, "settings", None), "separatrix_pressure", None)
+    if p_sep is None or "vol" not in stats or "W_MHD" not in stats:
+        return dict(computed=False, reason="the solve carries no boundary pressure, volume or stored energy")
+    applied = 0.0 if mode == "legacy" else float(p_sep)
+    try:
+        out = _pressure.pressure_frames(stats, applied)
+    except ValueError as exc:
+        return dict(computed=False, reason=str(exc)[:200])
+    return dict(out, computed=True, separatrix_pressure=mode, p_sep_kinetic=float(p_sep))
 
 
 def separatrix_te_record(radial, kin):

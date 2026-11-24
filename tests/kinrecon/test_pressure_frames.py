@@ -114,3 +114,24 @@ def test_nothing_scored_is_pressure_like():
     bad = [g for g in SCORED_GROUPS if any(w in g for w in ("pressure", "beta", "w_mhd", "energy"))]
     assert not bad
     assert set(SCORED_GROUPS) >= {"thomson_ne", "thomson_te"}
+
+
+def test_pressure_frames_record_of_a_solve():
+    """``fit.pressure_frames_record``: both frames from a solve's statistics and boundary pressure; the solver's
+    frame alone under the legacy mode; a reason when the solve carries nothing."""
+    from types import SimpleNamespace as NS
+
+    from bouquet.kinrecon import fit as FIT
+    st = dict(vol=20.0, W_MHD=6.0e5, beta_pol=1.0, beta_tor=0.02, beta_n=2.0, P_ax=5.0e4)
+    solve = NS(stats=st, record=dict(p_sep=1.0e3))
+    r = FIT.pressure_frames_record(solve, NS(settings=NS(separatrix_pressure="offset")))
+    assert r["computed"] and r["p_sep"] == 1.0e3 and r["p_sep_kinetic"] == 1.0e3
+    assert r["solver"]["W_MHD"] == 6.0e5
+    assert np.isclose(r["full"]["W_MHD"], 6.0e5 + 1.5 * 1.0e3 * 20.0)
+    assert np.isclose(r["full"]["beta_n"], 2.0 * (4.0e5 + 2.0e4) / 4.0e5)
+    assert np.isclose(r["full"]["P_ax"], 5.1e4)
+    leg = FIT.pressure_frames_record(solve, NS(settings=NS(separatrix_pressure="legacy")))
+    assert leg["computed"] and leg["p_sep"] == 0.0 and leg["full"] == leg["solver"] and leg["p_sep_kinetic"] == 1.0e3
+    assert FIT.pressure_frames_record(None, None)["computed"] is False
+    assert FIT.pressure_frames_record(NS(stats=dict(vol=1.0), record=dict(p_sep=1.0)), None)["computed"] is False
+

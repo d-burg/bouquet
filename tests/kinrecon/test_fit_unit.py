@@ -680,3 +680,118 @@ def test_anchor_offset_is_carried_onto_another_polygon_by_angle():
     assert rec["carried"] and rec["mean_mm"] == pytest.approx(-20.0, abs=0.5)
     with pytest.raises(ValueError):
         fm2.set_anchor_target(ref)                          # another polygon's shape is refused
+
+
+# ---------------------------------------------------------------- separatrix-temperature alignment (opt-in)
+def _toy_kin(te_edge=60.0):
+    from bouquet.kinrecon.kinetics import KineticInputs
+    x = np.linspace(0.0, 1.0, 201)
+    te = te_edge + 1500.0 * (1.0 - x)
+    ne = 1.0e19 + 4.0e19 * (1.0 - x)
+    psi = np.linspace(0.0, 1.0, 101)
+    return KineticInputs(coordinate="rho_tor_norm", x=x, ne=ne, te=te, ti=1.2 * te, zeff=np.full_like(x, 2.0),
+                         ni=0.8 * ne, nimp=ne / 30.0, n_fast=np.zeros_like(x), z_imp=6.0,
+                         midplane_radius=dict(psi_n=psi, r_m=1.70 + 0.55 * np.sqrt(psi), rho_tor_norm=np.sqrt(psi),
+                                              source="toy"))
+
+
+def test_te_position_and_rigid_shift_in_major_radius():
+    from bouquet.kinrecon import kinetics as KIN
+    kin = _toy_kin()
+    r_t, te_used, reached = KIN.te_position_in_table(kin, 80.0)
+    x_t = 1.0 - 20.0 / 1500.0                                  # T_e = 80 eV on the toy profile
+    assert reached and te_used == 80.0 and r_t == pytest.approx(1.70 + 0.55 * x_t, abs=2e-5)
+    hot = _toy_kin(te_edge=110.0)                              # never as cold as the target: the last point, stated
+    r_e, te_e, ok = KIN.te_position_in_table(hot, 80.0)
+    assert ok is False and te_e == pytest.approx(110.0) and r_e == pytest.approx(2.25, abs=1e-6)
+    # our surfaces 10 mm inside the producing equilibrium's at the edge (the same axis)
+    r_ours = 1.70 + 0.54 * np.asarray(kin.x)
+    delta = r_t - r_ours[-1]
+    new = KIN.shifted_in_major_radius(kin, r_ours, delta)
+    assert float(new.te[-1]) == pytest.approx(80.0, abs=0.05)             # the target at OUR separatrix
+    assert np.array_equal(new.ti, kin.ti) and np.array_equal(new.n_fast, kin.n_fast) and np.array_equal(new.x, kin.x)
+    assert np.allclose(new.ni / new.ne, 0.8) and np.allclose(new.zeff, 2.0)   # densities moved together
+    assert new.record["separatrix_alignment"]["delta_mm"] == pytest.approx(1e3 * delta)
+    assert float(new.te[0]) == pytest.approx(float(np.interp(delta / 0.55, kin.x, kin.te)), rel=1e-6)  # rigid in R
+    assert np.array_equal(kin.te, _toy_kin().te)                          # the original is not changed
+    with pytest.raises(ValueError):
+        KIN.shifted_in_major_radius(kin, r_ours[::-1], 0.0)
+
+
+class FakeFMAlign(FakeFM):
+    """The mocked forward model with a midplane profile whose edge radius follows the kinetic inputs in use (so the
+    alignment has something to settle on): r_edge = 2.24 + 0.2 * (move applied so far)."""
+
+    def __init__(self):
+        super().__init__()
+        self.kin_seen = []
+
+    def midplane_profile(self):
+        d = self.kin_seen[-1].record.get("separatrix_alignment", {}).get("delta_mm", 0.0) * 1e-3 if self.kin_seen else 0.0
+        s = np.linspace(0.0, 1.0, 51)
+        return dict(r_m=1.70 + (0.54 + 0.2 * d) * s, sqrt_psi_n=s, z_m=0.0)
+
+
+def _install_align(monkeypatch, fm, fail_refit=False):
+    calls = _install(monkeypatch, fm)
+    consistent = FIT._consistent
+
+    def consistent_k(fm_, kin, src, params, cfg, start, z0, label, initial_profiles=None, state_fn=None):
+        fm_.kin_seen.append(kin)
+        out = consistent(fm_, kin, src, params, cfg, start, z0, label, initial_profiles=initial_profiles,
+                         state_fn=state_fn)
+        lag = dict(rho_map=SimpleNamespace(rho_of_psin=lambda p: np.sqrt(np.asarray(p, float))))
+        if fail_refit and ":tesep" in label:
+            return CM.ConsistentResult(False, "solve_failed", 3, None, lag, out.solve, {"passes": [], "reason": "inj"}, 0.01)
+        return CM.ConsistentResult(out.converged, out.status, out.passes, out.assembly, lag, out.solve, out.record,
+                                   out.wall_s)
+
+    monkeypatch.setattr(FIT, "_consistent", consistent_k)
+    return calls
+
+
+def _align_fit(fm, kin, **kw):
+    cfg = CM.CurrentModelSettings(r0=1.0, core_relaxation="periodic_orbit")
+    return FIT.reconstruct(fm, kin, SimpleNamespace(source="toy", convention={}), cfg,
+                           FIT.FitSettings(free=SAW_FREE, **kw), params0=dict(log_strength=0.5, f=0.37))
+
+
+def test_te_sep_alignment_is_opt_in_settles_and_reports(monkeypatch):
+    s = FIT.FitSettings()
+    assert s.te_sep_align is False and s.te_sep_eV == 80.0
+    for bad in (dict(te_sep_align=1), dict(te_sep_eV=0.0), dict(te_sep_align_max_steps=0)):
+        with pytest.raises(ValueError):
+            FIT.FitSettings(**bad)
+    kin = _toy_kin()
+    fm = FakeFMAlign()
+    _install_align(monkeypatch, fm)
+    out = _align_fit(fm, kin)
+    assert "te_sep_align" not in out.record and all(k is kin for k in fm.kin_seen)       # off: the inputs as given
+    fm = FakeFMAlign()
+    _install_align(monkeypatch, fm)
+    out = _align_fit(fm, kin, te_sep_align=True)
+    rec = out.record["te_sep_align"]
+    assert rec["applied"] and rec["stop"].startswith("settled") and out.status == "converged"
+    d = [s["delta_mm"] for s in rec["steps"]]
+    assert d[0] == 0.0 and d[1] == pytest.approx(1e3 * (1.70 + 0.55 * (1 - 20 / 1500) - 2.24), abs=0.05)
+    assert abs(d[-1] - d[-2]) > 0.5 or len(d) == 2 or rec["final_check"] is not None
+    assert rec["steps"][1]["te_unshifted_at_our_separatrix_eV"] > 80.0 and rec["steps"][1]["te_target_reached"]
+    assert fm.kin_seen[-1] is not kin and np.array_equal(kin.te, _toy_kin().te)
+    # the profiles in use have the target at the separatrix of the equilibrium they were aligned on
+    assert rec["final_check"]["te_used_eV"] == 80.0
+
+
+def test_te_sep_alignment_keeps_the_previous_fit_when_a_refit_fails_and_states_when_not_applied(monkeypatch):
+    kin = _toy_kin()
+    fm = FakeFMAlign()
+    _install_align(monkeypatch, fm, fail_refit=True)
+    out = _align_fit(fm, kin, te_sep_align=True)
+    rec = out.record["te_sep_align"]
+    assert out.status == "converged" and rec["applied"] is False and "not kept" in rec["stop"]
+    bare = _toy_kin()
+    bare.midplane_radius = None
+    fm = FakeFMAlign()
+    _install_align(monkeypatch, fm)
+    out = _align_fit(fm, bare, te_sep_align=True)
+    assert out.status == "converged" and out.record["te_sep_align"] == dict(
+        applied=False, reason="the kinetic inputs carry no midplane table")

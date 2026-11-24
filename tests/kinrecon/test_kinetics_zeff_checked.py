@@ -227,3 +227,33 @@ def test_no_default_and_bad_inputs_are_refused():
         _quiet(cands={"cer": _imp_spec()}, rule=dict(override="vb"))
     with pytest.raises(ValueError, match="may carry only"):
         _quiet(cands={"cer": dict(_imp_spec(), extra=1)})
+
+
+def test_shift_electrons_to_separatrix_te():
+    """``kinetics.shift_electrons_to_separatrix_te``: the same small additive shift of n_e and T_e along their flux
+    coordinate puts the chosen T_e at the separatrix; profiles that run past the separatrix are used there."""
+    import numpy as np
+    import pytest
+    from bouquet.kinrecon import kinetics as KIN
+    x = np.linspace(0.0, 1.2, 241)
+    te = np.where(x > 1.0, 60.0 * np.exp(-(x - 1.0) / 0.03), 60.0 + 1500.0 * (1.0 - x))      # 60 eV at x = 1
+    te_in = te.copy()
+    ne = 1.0e19 + 4.0e19 * np.clip(1.0 - x, 0.0, None)
+    ne_s, te_s, rec = KIN.shift_electrons_to_separatrix_te(x, ne, te)                 # 80 eV lies INSIDE: outward move
+    x_t = 1.0 - 20.0 / 1500.0
+    assert rec["applied"] and rec["x_of_te_sep"] == pytest.approx(x_t, abs=1e-4) and rec["shift"] == pytest.approx(1.0 - x_t, abs=1e-4)
+    assert np.interp(1.0, x, te_s) == pytest.approx(80.0, abs=0.5) and rec["te_at_separatrix_before_eV"] == pytest.approx(60.0)
+    assert np.interp(1.0, x, ne_s) == pytest.approx(np.interp(x_t, x, ne), rel=1e-3)   # n_e moved by the same shift
+    hot = np.where(x > 1.0, 110.0 * np.exp(-(x - 1.0) / 0.03), 110.0 + 1500.0 * (1.0 - x))   # 110 eV at x = 1
+    hot[x > 1.1] = np.nan                                                                # the fit ends at 1.1
+    ne2 = ne.copy(); ne2[x > 1.1] = np.nan
+    ne_h, te_h, rec = KIN.shift_electrons_to_separatrix_te(x, ne2, hot)                 # 80 eV lies OUTSIDE: inward move
+    assert rec["applied"] and rec["shift"] < 0 and rec["x_of_te_sep"] == pytest.approx(1.0 + 0.03 * np.log(110.0 / 80.0), abs=2e-3)
+    ok = np.isfinite(te_h)
+    assert np.interp(1.0, x[ok], te_h[ok]) == pytest.approx(80.0, abs=0.5) and np.all(np.isnan(te_h[~ok]))
+    assert np.array_equal(te, te_in) and rec["x_last_finite"] == pytest.approx(1.1)      # the inputs are not changed
+    flat = np.full_like(x, 200.0)                                                        # never falls through: untouched
+    n3, t3, rec = KIN.shift_electrons_to_separatrix_te(x, ne, flat)
+    assert rec["applied"] is False and np.array_equal(t3, flat) and np.array_equal(n3, ne) and "does not fall" in rec["reason"]
+    with pytest.raises(ValueError):
+        KIN.shift_electrons_to_separatrix_te(x[::-1], ne, te)

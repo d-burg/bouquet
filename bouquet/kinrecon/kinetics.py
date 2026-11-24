@@ -349,6 +349,49 @@ class KineticInputs:
         return EC * (d["ne"] * d["te"] + (d["ni"] + d["nimp"]) * d["ti"])
 
 
+def shift_electrons_to_separatrix_te(x, ne, te, te_sep_eV=80.0, x_sep=1.0, search=(0.9, 1.1)):
+    """Electron profiles shifted along their flux coordinate so that T_e has ``te_sep_eV`` at the separatrix.
+
+    For the caller that prepares kinetic inputs from fitted profiles (an OPT-IN step; nothing in the package calls it
+    by itself).  ``x``: the profiles' own flux coordinate (psi_N or rho_tor,norm), strictly increasing, which may run
+    past the separatrix ``x_sep``; ``ne``, ``te`` on it (non-finite values, as beyond the last fitted point, are left
+    out of the search and of the interpolation).  The point ``x_T`` where ``te`` falls through ``te_sep_eV`` is
+    searched inside ``search`` (the OUTERMOST crossing); the shifted profiles are ``f(x + (x_T - x_sep))`` for both
+    n_e and T_e (the same additive shift: they are measured on the same chords), so that ``te(x_sep) = te_sep_eV``.
+    Values asked for beyond the finite range take the end values (nothing is extrapolated).  Where ``te`` does not
+    cross the value inside ``search`` nothing is shifted and the record says so.
+
+    Returns ``(ne_shifted, te_shifted, record)`` on ``x``; the record holds the shift (``shift = x_sep - x_T``:
+    negative when the profiles move inward), ``x_T``, T_e at the separatrix before and after."""
+    x = np.asarray(x, float)
+    ne, te = np.asarray(ne, float), np.asarray(te, float)
+    if x.ndim != 1 or x.shape != ne.shape or x.shape != te.shape or np.any(np.diff(x) <= 0):
+        raise ValueError("x, ne, te must be 1-D arrays of the same length with x strictly increasing")
+    if not float(te_sep_eV) > 0.0:
+        raise ValueError("te_sep_eV must be positive")
+    ok = np.isfinite(ne) & np.isfinite(te)
+    xf, nf_, tf = x[ok], ne[ok], te[ok]
+    te0 = float(np.interp(x_sep, xf, tf))
+    rec = dict(te_sep_eV=float(te_sep_eV), x_sep=float(x_sep), search=[float(search[0]), float(search[1])],
+               te_at_separatrix_before_eV=te0, x_last_finite=float(xf[-1]), applied=False, shift=0.0,
+               rule="n_e and T_e read at x + (x_T - x_sep), x_T the outermost point in the search range where T_e "
+                    "falls through the value; end values beyond the finite range",
+               sign="shift negative: the profiles move inward")
+    w = np.where((xf[:-1] >= search[0]) & (xf[1:] <= search[1]) & (tf[:-1] > te_sep_eV) & (tf[1:] <= te_sep_eV))[0]
+    if not len(w):
+        rec["reason"] = f"T_e does not fall through {float(te_sep_eV):g} eV between x = {search[0]:g} and {search[1]:g}"
+        return ne.copy(), te.copy(), rec
+    i = int(w[-1])
+    x_t = float(xf[i] + (tf[i] - te_sep_eV) / (tf[i] - tf[i + 1]) * (xf[i + 1] - xf[i]))
+    dx = x_t - float(x_sep)
+    ne_s, te_s = ne.copy(), te.copy()
+    ne_s[ok] = np.interp(xf + dx, xf, nf_)
+    te_s[ok] = np.interp(xf + dx, xf, tf)
+    rec.update(applied=True, shift=-dx, x_of_te_sep=x_t, te_at_separatrix_after_eV=float(np.interp(x_sep, xf, te_s[ok])),
+               end_values_used=bool(xf[-1] + dx > xf[-1] or xf[0] + dx < xf[0]))
+    return ne_s, te_s, rec
+
+
 def assemble_kinetic_inputs(x, ne, te, ti, *, zeff_candidates, zeff_source, z_imp, coordinate="rho_tor_norm",
                             n_fast=None, n_fast_source=None, psi_n_to_rho=None,
                             mapping_source=None, provenance=None, ni_reference=None, source="",

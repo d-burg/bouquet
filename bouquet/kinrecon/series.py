@@ -1657,8 +1657,10 @@ def _filter_carried(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1, box, spe
     nothing is carried on.  The comparison is recorded (``filter["anchor_retest"]``)."""
     kw = _speed_kw(speed)
     if not (box.get("carried") and s.anchor_carry_retest and hasattr(fm, "set_anchor_target")):
-        filt, out = _filter_slice(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1, filter_fit=_follow_settings(s, box),
-                                  **kw)
+        ff = _follow_settings(s, box)
+        if ff is not s.filter_fit:      # only when the bound changes the settings: otherwise the call is as it always was
+            kw = dict(kw, filter_fit=ff)
+        filt, out = _filter_slice(fm, sl, cfg, s, p_pred, state_fn, holder, res, ip1, **kw)
         box["moves"] = int(box.get("moves", 0)) + _kept_moves(filt) if _anchor_offset(fm) is not None else 0
         return filt, out
     pre = dict(snap=fm.snapshot(), pc=fm.probe_correction.copy(), holder=dict(holder), target=fm.anchor_target())

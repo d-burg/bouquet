@@ -198,7 +198,6 @@ from typing import Any, Dict, Optional, Sequence
 import numpy as np
 
 from . import current_model as _cm
-from . import kinetics as _kin
 from . import solver_rows as _rows
 from . import speed as _speed
 from .current import sawtooth as _saw
@@ -309,13 +308,6 @@ class FitSettings:
     #                                      refit, while the fitted groups' chi^2 falls (the weight never changes)
     anchor_follow_fraction: float = 0.5  # fraction of the way to the solved boundary per move
     anchor_follow_max_steps: int = 8     # cost bound: at most this many moves
-    # NON-DEFAULT separatrix-temperature alignment of the electron profiles (:func:`reconstruct`,
-    # "te_sep_align"; single-slice fits only):
-    te_sep_align: bool = False           # True: n_e and T_e (with n_i, n_imp, Z_eff) are moved rigidly in midplane
-    #                                      major radius so that T_e has te_sep_eV at the reconstruction's separatrix
-    te_sep_eV: float = 80.0              # the separatrix T_e [eV] (the OMFITprofiles value)
-    te_sep_align_tol_m: float = 5.0e-4   # the alignment is settled when the move changes by less than this [m]
-    te_sep_align_max_steps: int = 4      # cost bound: at most this many re-alignments (each a fit)
 
     def __post_init__(self):
         if self.jacobian_steps not in JACOBIAN_STEP_KINDS:
@@ -327,13 +319,6 @@ class FitSettings:
             raise ValueError("stall_diagnostics must be True or False")
         if self.ip_target not in IP_TARGETS:
             raise ValueError(f"ip_target must be one of {IP_TARGETS}")
-        if not isinstance(self.te_sep_align, bool):
-            raise ValueError("te_sep_align must be True or False")
-        if not (float(self.te_sep_eV) > 0.0 and float(self.te_sep_align_tol_m) > 0.0):
-            raise ValueError("te_sep_eV and te_sep_align_tol_m must be positive")
-        if isinstance(self.te_sep_align_max_steps, bool) or int(self.te_sep_align_max_steps) != \
-                self.te_sep_align_max_steps or self.te_sep_align_max_steps < 1:
-            raise ValueError("te_sep_align_max_steps must be a whole number >= 1")
         if not isinstance(self.anchor_follow, bool):
             raise ValueError("anchor_follow must be True or False")
         if not 0.0 < float(self.anchor_follow_fraction) <= 1.0:
@@ -637,14 +622,8 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
     whose strength is the number of moves; every step is in ``record["anchor_follow"]``.  With ``state_fn`` (a filter
     fit of a series slice) the same rule applies to the filter fit; the series driver carries the moved target to the
     next slice (:mod:`.series`, "Moving anchor target").
-
-    ``settings.te_sep_align`` (NON-DEFAULT; single-slice fits only): :func:`_te_sep_aligned`; the record is
-    ``record["te_sep_align"]``.
     """
     st = settings or FitSettings()
-    if st.te_sep_align:
-        return _te_sep_aligned(fm, kin, src, cfg, st, params0, start, initial_profiles, label, state_fn, speed,
-                               steady_state_check)
     kw = dict(label=label, state_fn=state_fn, speed=speed)
     if not st.anchor_follow:
         return _reconstruct_checked(fm, kin, src, cfg, settings=settings, params0=params0, start=start,
@@ -656,117 +635,6 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
 
 #: Fit statuses that count as converged for the moving anchor target.
 CONVERGED_STATUSES = ("converged", "converged_within_noise")
-
-
-def te_separatrix_shift(fm, kin, lag, te_target):
-    """The rigid move in outboard-midplane major radius that puts ``te_target`` [eV] of the ORIGINAL kinetic inputs
-    ``kin`` at the present equilibrium's separatrix, and the reconstruction's midplane radius of every point of
-    ``kin.x``: ``(delta_m, r_of_x, record)``.  ``delta_m`` = (the radius where the original T_e has the target on the
-    producing equilibrium's midplane, :func:`.kinetics.te_position_in_table`) - (our separatrix radius); the profile is
-    then read at ``r_ours + delta_m`` (:func:`.kinetics.shifted_in_major_radius`).  ``lag``: the geometry inputs of
-    the present equilibrium (its psi_N to rho_tor,norm map)."""
-    mp = fm.midplane_profile()
-    r, sq = np.asarray(mp["r_m"], float), np.asarray(mp["sqrt_psi_n"], float)
-    x = np.asarray(kin.x, float)
-    if kin.coordinate == "rho_tor_norm":
-        pg = np.linspace(0.0, 1.0, 401)
-        rg = np.asarray(lag["rho_map"].rho_of_psin(pg), float)
-        rg = rg / rg[-1]
-        psi_x = np.interp(np.clip(x, 0.0, 1.0), rg, pg)
-    else:
-        psi_x = np.clip(x, 0.0, 1.0)
-    r_of_x = np.interp(np.sqrt(psi_x), sq, r)
-    r_t, te_used, reached = _kin.te_position_in_table(kin, float(te_target))
-    delta = r_t - float(r[-1])
-    te0 = float(kin._f("te")(float(np.clip(np.interp(float(r[-1]), np.asarray(kin.midplane_radius["r_m"], float),
-                                                     np.asarray(kin.midplane_radius["rho_tor_norm" if kin.coordinate ==
-                                                                                    "rho_tor_norm" else "psi_n"], float)),
-                                           x[0], x[-1]))))
-    return delta, r_of_x, dict(delta_mm=1e3 * delta, r_separatrix_ours_m=float(r[-1]), r_te_target_table_m=r_t,
-                               te_target_eV=float(te_target), te_used_eV=te_used, te_target_reached=bool(reached),
-                               te_unshifted_at_our_separatrix_eV=te0,
-                               sign="delta positive: the profile is read further out (the profiles move inward)")
-
-
-def _te_sep_aligned(fm, kin, src, cfg, st, params0, start, initial_profiles, label, state_fn, speed, check):
-    """``FitSettings.te_sep_align`` (NON-DEFAULT; the standard alignment of Thomson profiles to the equilibrium
-    separatrix, as an additive shift): the fit first with the kinetic inputs as given; then, while the fit is
-    converged, the electron profiles (with the ion and impurity densities and Z_eff; not T_i, not the fast ions) are
-    moved rigidly in outboard-midplane major radius so that T_e has ``te_sep_eV`` at the separatrix of the fit's own
-    equilibrium, and the fit is run again from the converged state.  It is repeated, each time from the ORIGINAL
-    profiles and the latest equilibrium, until the move changes by less than ``te_sep_align_tol_m`` (settled) or
-    ``te_sep_align_max_steps`` is reached.  Where the profile never falls to ``te_sep_eV`` its last point is put at
-    the separatrix and the T_e used is recorded (nothing is extrapolated).  A refit that does not converge is not
-    kept: the state is put back and the previous fit is the result.  Not applied with a supplied current state (a
-    series), without a midplane table carrying the inputs' coordinate, or when the first fit is not converged; the
-    record ``record["te_sep_align"]`` says so."""
-    base = replace(st, te_sep_align=False)
-
-    def fit(kin_, p0, st0, ip, lab, chk, box=None):
-        if base.anchor_follow:
-            return _follow_anchor(fm, kin_, src, cfg, replace(base, anchor_follow=False), base, p0, st0, ip, lab,
-                                  speed, chk, state_fn)
-        return _reconstruct_checked(fm, kin_, src, cfg, settings=base, params0=p0, start=st0, initial_profiles=ip,
-                                    label=lab, state_fn=state_fn, speed=speed, steady_state_check=chk,
-                                    start_box_out=box)
-
-    tab = getattr(kin, "midplane_radius", None)
-    why = ("not built for a supplied current state (series)" if state_fn is not None else
-           "the kinetic inputs carry no midplane table" if tab is None else
-           f"the midplane table carries no {kin.coordinate}" if (kin.coordinate == "rho_tor_norm" and
-                                                                 "rho_tor_norm" not in tab) else None)
-    if why is not None:
-        out = fit(kin, params0, start, initial_profiles, label, check)
-        if isinstance(getattr(out, "record", None), dict):
-            out.record["te_sep_align"] = dict(applied=False, reason=why)
-        return out
-    t0, n0 = time.perf_counter(), fm.n_solves
-    box0 = {}
-    fr = fit(kin, params0, start, initial_profiles, label, False, box0)
-    steps = [dict(step=0, status=fr.status, delta_mm=0.0, chi2_data=(fr.chi2 or {}).get("data"))]
-    rec = dict(applied=False, te_sep_eV=float(st.te_sep_eV), tol_mm=1e3 * float(st.te_sep_align_tol_m),
-               max_steps=int(st.te_sep_align_max_steps), profiles_moved=list(_kin.ALIGNED_PROFILES), steps=steps,
-               rule="rigid move in outboard-midplane major radius, from the original profiles and the latest "
-                    "equilibrium each time; settled when the move changes by less than the tolerance")
-    kin_used, delta_prev, stop = kin, None, None
-    for k in range(1, int(st.te_sep_align_max_steps) + 1):
-        c = fr.record.get("center") if isinstance(getattr(fr, "record", None), dict) else None
-        if fr.status not in CONVERGED_STATUSES or not isinstance(c, dict) or c.get("res") is None:
-            stop = f"the fit before alignment {k} is not converged ({fr.status})"
-            break
-        fm.restore(c["snap"])
-        if c.get("probe_correction") is not None:
-            fm.probe_correction = np.array(c["probe_correction"], float)
-        try:
-            delta, r_of_x, arec = te_separatrix_shift(fm, kin, c["res"].lag, st.te_sep_eV)
-            kin_k = _kin.shifted_in_major_radius(kin, r_of_x, delta)
-        except Exception as exc:  # noqa: BLE001 -- the previous fit stays the result, and the record says why
-            stop = f"alignment {k} could not be formed: {type(exc).__name__}: {exc}"[:300]
-            break
-        if delta_prev is not None and abs(delta - delta_prev) < float(st.te_sep_align_tol_m):
-            stop = f"settled: the move changed by {1e3 * abs(delta - delta_prev):.2f} mm at alignment {k}"
-            rec["final_check"] = arec
-            break
-        keep_state, keep_pc = fm.snapshot(), np.array(getattr(fm, "probe_correction", np.zeros(0)), float)
-        new = fit(kin_k, dict(fr.params), keep_state, None, f"{label}:tesep{k}", False)
-        steps.append(dict(arec, step=k, status=new.status, chi2_data=(new.chi2 or {}).get("data")))
-        if new.status not in CONVERGED_STATUSES:
-            fm.restore(keep_state)
-            fm.probe_correction = keep_pc
-            stop = f"alignment {k} not kept: refit {new.status}"
-            steps[-1]["kept"] = False
-            break
-        fr, kin_used, delta_prev = new, kin_k, delta
-        rec["applied"] = True
-    else:
-        stop = f"the cap of {int(st.te_sep_align_max_steps)} alignments (not settled)"
-    rec.update(stop=stop, delta_mm=(None if delta_prev is None else 1e3 * delta_prev), n_solves_total=fm.n_solves - n0,
-               wall_s_total=round(time.perf_counter() - t0, 2))
-    if isinstance(getattr(fr, "record", None), dict):
-        fr.record["te_sep_align"] = rec
-        with _speed.speed_scope(_speed.effective(speed)):      # the steady-state record, on the profiles in use
-            fr.record["steady_state_check"] = _fit_steady_state_check(fm, kin_used, src, cfg, fr, box0, check, label)
-    return fr
 
 
 def _follow_anchor(fm, kin, src, cfg, base, st, params0, start, initial_profiles, label, speed, check,

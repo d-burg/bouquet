@@ -349,57 +349,6 @@ class KineticInputs:
         return EC * (d["ne"] * d["te"] + (d["ni"] + d["nimp"]) * d["ti"])
 
 
-#: Profiles moved together by the separatrix-temperature alignment: the electron profiles and, with the electron
-#: density, the ion and impurity densities and Z_eff (so that quasi-neutrality and Z_eff hold as given at every
-#: point); T_i and the fast-ion density are not moved.
-ALIGNED_PROFILES = ("ne", "te", "ni", "nimp", "zeff")
-
-
-def te_position_in_table(kin, te_target):
-    """Where the kinetic inputs' T_e has the value ``te_target`` [eV] on their producing equilibrium's outboard
-    midplane: ``(r_m, te_used, reached)``.  The OUTERMOST crossing is taken.  Where T_e never falls to the target
-    inside the profile (its last point is hotter), the last point is used and ``te_used`` is its T_e (``reached``
-    False): nothing is extrapolated."""
-    tab = kin.midplane_radius
-    xt = np.asarray(tab["rho_tor_norm"] if kin.coordinate == "rho_tor_norm" else tab["psi_n"], float)
-    tr = np.asarray(tab["r_m"], float)
-    x = np.asarray(kin.x, float)
-    te = np.asarray(kin.te, float)
-    m = x <= min(float(xt[-1]), float(x[-1])) + 1e-12
-    x, te = x[m], te[m]
-    if te[-1] > te_target:
-        return float(np.interp(x[-1], xt, tr)), float(te[-1]), False
-    i = int(np.max(np.where(te > te_target)[0])) if np.any(te > te_target) else 0
-    x_t = x[i] + (te[i] - te_target) / (te[i] - te[i + 1]) * (x[i + 1] - x[i]) if i + 1 < len(x) and te[i] > te[i + 1] \
-        else x[i]
-    return float(np.interp(x_t, xt, tr)), float(te_target), True
-
-
-def shifted_in_major_radius(kin, r_of_x, delta_m, names=ALIGNED_PROFILES):
-    """Kinetic inputs with the profiles ``names`` moved rigidly in outboard-midplane major radius: at the
-    reconstruction's surface of coordinate ``kin.x[i]`` and midplane radius ``r_of_x[i]`` [m] the profile takes the
-    value the ORIGINAL has at the radius ``r_of_x[i] + delta_m`` of the producing equilibrium (through the midplane
-    table the kinetic inputs carry).  Radii beyond the table's ends take the end values (no extrapolation).  The
-    other profiles, the grid and the records are unchanged; ``record["separatrix_alignment"]`` states the move."""
-    tab = kin.midplane_radius
-    if tab is None:
-        raise ValueError("the kinetic inputs carry no midplane table")
-    xt = tab.get("rho_tor_norm") if kin.coordinate == "rho_tor_norm" else tab.get("psi_n")
-    if xt is None:
-        raise ValueError(f"the midplane table carries no {kin.coordinate}")
-    xt, tr = np.asarray(xt, float), np.asarray(tab["r_m"], float)
-    r_of_x = np.asarray(r_of_x, float)
-    if r_of_x.shape != np.shape(kin.x) or np.any(np.diff(r_of_x) < 0):
-        raise ValueError("r_of_x must give a non-decreasing major radius for every point of kin.x")
-    xs = np.clip(np.interp(r_of_x + float(delta_m), tr, xt), float(kin.x[0]), float(kin.x[-1]))
-    new = {n: np.asarray(kin._f(n)(xs), float) for n in names}
-    rec = dict(kin.record)
-    rec["separatrix_alignment"] = dict(delta_mm=1e3 * float(delta_m), profiles=list(names),
-                                       rule="f(x) = original f at the producing equilibrium's midplane radius "
-                                            "r_ours(x) + delta; end values beyond the table")
-    return replace(kin, record=rec, **new)
-
-
 def assemble_kinetic_inputs(x, ne, te, ti, *, zeff_candidates, zeff_source, z_imp, coordinate="rho_tor_norm",
                             n_fast=None, n_fast_source=None, psi_n_to_rho=None,
                             mapping_source=None, provenance=None, ni_reference=None, source="",

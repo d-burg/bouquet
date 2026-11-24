@@ -1463,24 +1463,6 @@ class ForwardModel:
                                           "none given: solved strike points listed without a displacement")
         return out
 
-    def midplane_profile(self):
-        """The solved equilibrium on the outboard midplane (the horizontal line through the magnetic axis): major
-        radius ``r_m`` against ``sqrt_psi_n``, from the axis to the last closed surface (0.25 mm scan, the edge by
-        the LCFS crossing), with ``z_m``.  Used by the opt-in separatrix-temperature alignment
-        (:func:`.fit.reconstruct`); raises ValueError where the crossing or a monotonic psi_N is not found."""
-        gs = self.gs
-        ra, za = (float(v) for v in gs.o_point)
-        psi_fn, _fe = self._psi_direct()
-        r_edge = self._lcfs_crossing(ra + 0.5, za, ra, psi_fn)
-        if not np.isfinite(r_edge):
-            raise ValueError("no outboard LCFS crossing on the axis line")
-        r = np.arange(ra + 1e-3, r_edge, 2.5e-4)
-        pn = np.asarray(gs.abspsi_to_normalized(psi_fn(np.column_stack((r, np.full_like(r, za))))), float)
-        r, s = np.concatenate(([ra], r, [r_edge])), np.sqrt(np.concatenate(([0.0], pn, [1.0])))
-        if not (np.all(np.isfinite(s)) and np.all(np.diff(s) > 0)):
-            raise ValueError("solved psi_N not strictly increasing on the midplane line")
-        return dict(r_m=r, sqrt_psi_n=s, z_m=za)
-
     def midplane_radius_record(self, table):
         """RECORD that steers nothing: how far the solved flux surfaces sit from those of the equilibrium that
         produced the kinetic profiles, in real space.  ``table``: that equilibrium's outboard-midplane major radius

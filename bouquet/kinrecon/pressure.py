@@ -214,20 +214,33 @@ def lcfs_kwargs(p_sep):
     return {} if p_sep == 0.0 else {"lcfs_pressure": p_sep}
 
 
-def save_full_pressure_eqdsk(eq, filename, p_sep, **kwargs):
+def save_full_pressure_eqdsk(eq, filename, p_sep, pressure_factor=None, **kwargs):
     """Write ``eq``'s equilibrium as a g-file carrying the FULL pressure: ``PRES`` = the
     solver's pressure + ``p_sep``; ``PPRIME`` unchanged.  Refuses an explicit
     ``lcfs_pressure`` (it would replace or double the offset).  Returns the record to keep
-    next to the file."""
+    next to the file.  ``pressure_factor``: the fit's pressure-factor record (or its value), kept in
+    the returned record because the g-file format has no field for it: at a value other than 1 the
+    written pressure is that factor times the pressure of the kinetic profiles."""
     if "lcfs_pressure" in kwargs:
         raise ValueError("pass the separatrix pressure as p_sep, not lcfs_pressure")
     eq.save_eqdsk(filename, **kwargs, **lcfs_kwargs(p_sep))
     return dict(file=str(filename), p_sep=float(p_sep), pressure_frame="full",
+                pressure_factor=_pressure_factor_value(pressure_factor),
                 note="PRES = solver pressure + p_sep (TokaMaker lcfs_pressure); PPRIME unchanged")
 
 
+def _pressure_factor_value(pressure_factor):
+    """The pressure factor to keep with a written pressure: the value of a record (``{"value": ...}``) or a plain
+    number; None (not stated by the caller) stays None, never an assumed 1."""
+    if pressure_factor is None:
+        return None
+    if isinstance(pressure_factor, dict):
+        pressure_factor = pressure_factor["value"]
+    return float(pressure_factor)
+
+
 def equilibrium_profiles_1d(psi_n, solver_pressure, dpressure_dpsi, p_sep, psi_axis, psi_boundary,
-                            dpsi_to_ids=None):
+                            dpsi_to_ids=None, pressure_factor=None):
     """IMAS ``equilibrium.time_slice[:].profiles_1d`` pressure block in the FULL frame.
 
     ``solver_pressure`` [Pa] and ``dpressure_dpsi`` (dp/dpsi in the caller's flux units,
@@ -245,6 +258,7 @@ def equilibrium_profiles_1d(psi_n, solver_pressure, dpressure_dpsi, p_sep, psi_a
     return dict(psi=psi, pressure=full_pressure(solver_pressure, p_sep),
                 dpressure_dpsi=np.asarray(dpressure_dpsi, dtype=float) / c,
                 meta=dict(p_sep=float(p_sep), pressure_frame="full", dpsi_to_ids=c,
+                          pressure_factor=_pressure_factor_value(pressure_factor),
                           note="pressure = solver pressure + p_sep; dpressure_dpsi unchanged except for the flux "
                                "unit; pressure(psi_N = 1) = p_sep"))
 

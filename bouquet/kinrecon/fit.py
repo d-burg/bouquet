@@ -36,6 +36,9 @@ name               meaning                                     default prior / b
 ``s_temp``         temperature factor: T_e and T_i both        N(1, 0.10); bounds 0.5..2.  Not free by
                    multiplied by it; thermal pressure,         default.  The fast-ion sources are the
                    bootstrap and conductivity follow           caller's and do not follow it.
+``s_press``        pressure factor: the pressure of the force  N(1, 0.10); bounds 0.5..2.  Not free by
+                   balance = s_press x the kinetic pressure;   default.  The kinetic profiles, bootstrap
+                   recorded with every result                  and conductivity do NOT follow it.
 ``s_bs``           bootstrap multiplier                        N(1, 0.5); bounds 0..3
 ``a_corr_k``       current-correction amplitude k (fraction    N(0, 0.02) (fraction of Ip); +-0.2
                    of Ip; Gaussians on rho_tor,norm,
@@ -227,6 +230,9 @@ JACOBIAN_STEP_KINDS = ("consistent", "lagged")
 #: Prior width of the temperature factor ``s_temp`` (relative; a stated value, of the size of the systematic
 #: uncertainty of the temperature profiles).
 TEMPERATURE_FACTOR_SIGMA = 0.10
+#: Prior width of the pressure factor ``s_press`` (relative; a stated value, of the size of the combined systematic
+#: uncertainty of the kinetic pressure: density and temperature calibration, dilution, fast ions).
+PRESSURE_FACTOR_SIGMA = 0.10
 
 
 #: Parameter specifications: prior (mean, sigma; sigma None = no prior row), bounds, initial step.
@@ -241,6 +247,11 @@ PARAMETERS = {
                    note="temperature factor on T_e and T_i (thermal pressure, bootstrap and conductivity follow; "
                         "the fast-ion sources do not); a measure of the mismatch between the kinetic profiles and "
                         "the magnetic measurements, to be reported with every result"),
+    "s_press": dict(prior=(1.0, PRESSURE_FACTOR_SIGMA), bounds=(0.5, 2.0), step0=0.02, unit="1",
+                    note="pressure factor: the pressure of the force balance = s_press x the kinetic pressure "
+                         "(thermal + scaled fast-ion); the kinetic profiles, the bootstrap current and the "
+                         "conductivity are NOT scaled, so the equilibrium pressure and the kinetic pressure differ "
+                         "by this factor; not free by default; recorded with every result (pressure_factor)"),
     "s_cd": dict(prior=(1.0, DRIVEN_CURRENT_SCALE_SIGMA), bounds=(0.0, 3.0), step0=0.05, unit="1",
                  note="driven-current scale (prior width: sources.priors)"),
     "s_bs": dict(prior=(1.0, 0.5), bounds=(0.0, 3.0), step0=0.05, unit="1", note="bootstrap multiplier"),
@@ -292,7 +303,7 @@ class FitSettings:
     # trust caps of one LM step (step 4 of the algorithm); a_corr: fraction of Ip per correction amplitude per step
     max_step: Dict[str, float] = field(default_factory=lambda: dict(log_strength=0.5, f=0.1, s_pfast=0.1, s_cd=0.1,
                                                                     s_bs=0.2, a_corr=0.04, ip_rel=0.02,
-                                                                    s_temp=0.05))
+                                                                    s_temp=0.05, s_press=0.05))
     fitted_coil_role: str = "fitted"
     column_retry_opposite: bool = True   # a failed column solve is retried once with the opposite step
     final_gn_step: bool = True           # take the undamped GN step of the converged test (accepted within noise)
@@ -1681,6 +1692,7 @@ def _final_extra(center, fm, ms, kin=None):
                 radial_coordinate=(_rc := _radial_coordinate(fm, kin)),
                 separatrix_te=separatrix_te_record(_rc, kin),
                 pressure_frames=pressure_frames_record(center["res"].solve, fm),
+                pressure_factor=asm.get("pressure_factor"),
                 excluded_channels={k: v for k, v in center["all_tab"].excluded.items()},
                 score_notes=list(center["all_tab"].notes))
 

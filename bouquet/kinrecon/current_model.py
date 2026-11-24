@@ -442,8 +442,29 @@ class CurrentModelSettings:
 
 
 #: Model parameters and their defaults (the fit decides which are free).
-DEFAULT_PARAMS = dict(log_strength=None, f=0.37, s_bs=1.0, s_cd=1.0, s_pfast=1.0, s_temp=1.0,
+DEFAULT_PARAMS = dict(log_strength=None, f=0.37, s_bs=1.0, s_cd=1.0, s_pfast=1.0, s_temp=1.0, s_press=1.0,
                       a_corr=(0.0, 0.0, 0.0), ip_rel=0.0)
+
+
+def pressure_factor_record(s_press):
+    """The record of the pressure factor ``s_press``, kept with every assembly, fit and written pressure.
+
+    ``value``: equilibrium pressure / kinetic pressure (thermal + scaled fast-ion), the same at every radius;
+    ``applied``: whether it differs from 1.  At a value other than 1 the equilibrium's pressure is NOT the pressure
+    of the kinetic profiles: the profiles (and the bootstrap current and conductivity computed from them) are as
+    given, and only the pressure of the force balance carries the factor."""
+    s = float(s_press)
+    if not (np.isfinite(s) and s > 0):
+        raise ModelFailure(f"the pressure factor s_press must be finite and > 0, got {s_press!r}")
+    return dict(value=s, applied=bool(s != 1.0),
+                definition="equilibrium pressure / kinetic pressure (thermal + scaled fast-ion), uniform in radius",
+                scaled=["pressure of the force balance", "pressure-gradient term of <j_phi>"],
+                not_scaled=["n_e", "T_e", "n_i", "T_i", "impurity density", "fast-ion pressure and density",
+                            "bootstrap current", "conductivity"],
+                note=("the equilibrium pressure equals the kinetic pressure" if s == 1.0 else
+                      "the equilibrium pressure differs from the pressure of the kinetic profiles by this factor; "
+                      "it measures the mismatch between the kinetic pressure and the magnetic measurements and "
+                      "names no species"))
 
 
 def kinetics_at(kin, params):
@@ -1004,7 +1025,11 @@ def assemble(lag, kin, src, params, cfg, ip, z0=None, state=None):
         jb[lay] = jlay_ohm + jb_ni[lay]
         kap = _interp(ge, kap_ge, xqc)
         rq = rmap.rho_of_psin(xq)
-        pq = kin.thermal_pressure_at(psi_n=xq, rho=rq) + p["s_pfast"] * src.p_fast_at(xq, rho=rq)
+        # the pressure of the force balance: the kinetic pressure (thermal + scaled fast-ion) times the pressure
+        # factor ``s_press`` (1 by default).  The kinetic profiles, and with them the bootstrap current and the
+        # conductivity, are NOT scaled: at s_press != 1 the equilibrium pressure and the pressure of the kinetic
+        # profiles differ by exactly this factor (record ``pressure_factor``).
+        pq = p["s_press"] * (kin.thermal_pressure_at(psi_n=xq, rho=rq) + p["s_pfast"] * src.p_fast_at(xq, rho=rq))
         return jb, jb_ni, kap, F_k, pq, xqc, None
 
     jb, jb_ni, kap, F_k, pk, xkc, _ = jphi_at(xk)
@@ -1048,7 +1073,8 @@ def assemble(lag, kin, src, params, cfg, ip, z0=None, state=None):
                params_not_used=None if saw_params_used else ["log_strength", "f"],
                correction_form=(corr_form if state is not None and corr_form is not None else
                                 ("source of the steady state / periodic orbit" if corr_shapes else None)),
-               p_sep=float(pk[-1]), pax=float(pk[0] - pk[-1]), wall_s=round(time.perf_counter() - t0, 4))
+               p_sep=float(pk[-1]), pax=float(pk[0] - pk[-1]), wall_s=round(time.perf_counter() - t0, 4),
+               p_kinetic=pk / float(p["s_press"]), pressure_factor=pressure_factor_record(p["s_press"]))
     try:                         # the floor's branch, to the open branch log: a record only
         _log_assembly(core)
     except Exception:  # noqa: BLE001 -- a record must never end a fit or a series

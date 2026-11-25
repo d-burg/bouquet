@@ -332,6 +332,14 @@ class Baseline:
     # Bouquet.prepare_baseline on every path; archived as the _baseline attr
     # solver_geometry_json (and in the engine record).
     solver_geometry: Optional[dict] = None
+    # The unified engine's stored-energy pressure scale record (bouquet.
+    # pressure_scale; owner decision 2026-11-24): s, s_W = W_input /
+    # W_kinetic, both W and the kinetic parts, the shape residual, the warn
+    # flag.  The engine's solve pressure (pres_tokamaker, the archived
+    # `pressure`) is s x the kinetic assembly; None off the engine.
+    # (Placed before p_fast_source, which tests/test_pfile_pfast_default.py
+    # keeps as the last field; every earlier positional slot is unchanged.)
+    pressure_scale: Optional[dict] = None
     # The g-file route's fast-ion pressure INPUT record (decision B,
     # 2026-10-17; resolve_p_fast_input): {"p_fast_source": "pfile_pb" |
     # "fixed_components" | "none", "pfile_has_pb", and for "pfile_pb" "coord",
@@ -340,12 +348,6 @@ class Baseline:
     # kept apart so a summary over mixed baselines never mixes them).
     # Archived as li_metrics["p_fast_source"].
     p_fast_source: Optional[dict] = None
-    # The unified engine's stored-energy pressure scale record (bouquet.
-    # pressure_scale; owner decision 2026-11-24): s, s_W = W_input /
-    # W_kinetic, both W and the kinetic parts, the shape residual, the warn
-    # flag.  The engine's solve pressure (pres_tokamaker, the archived
-    # `pressure`) is s x the kinetic assembly; None off the engine.
-    pressure_scale: Optional[dict] = None
 
     def __repr__(self):
         # concise summary -- the default dataclass repr dumps every numpy array,

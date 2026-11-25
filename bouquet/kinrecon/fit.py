@@ -21,8 +21,8 @@ the score, so the objective is the full chi^2 minimized over it, the same footin
 :func:`.score.chi2_report`).  Thomson is never a weight.  The objective is ``chi^2 = sum r^2`` (diagonal Gaussian
 likelihood + Gaussian priors); the MAP point is found by Levenberg-Marquardt with a forward-difference Jacobian.
 
-Parameters (:data:`PARAMETERS`; default free set: the ``a_corr`` current corrections; ``log_strength`` and ``f``
-are parameters of the opt-in sawtooth core treatments only, ``CurrentModelSettings.core_relaxation`` =
+Parameters (:data:`PARAMETERS`; default free set: the ``a_corr`` current corrections and the pressure factor
+``s_press``; ``log_strength`` and ``f`` are parameters of the opt-in sawtooth core treatments only, ``CurrentModelSettings.core_relaxation`` =
 ``"periodic_orbit"`` or ``"crash_times"``):
 
 =================  ==========================================  ======================================
@@ -36,9 +36,9 @@ name               meaning                                     default prior / b
 ``s_temp``         temperature factor: T_e and T_i both        N(1, 0.10); bounds 0.5..2.  Not free by
                    multiplied by it; thermal pressure,         default.  The fast-ion sources are the
                    bootstrap and conductivity follow           caller's and do not follow it.
-``s_press``        pressure factor: the pressure of the force  N(1, 0.10); bounds 0.5..2.  Not free by
-                   balance = s_press x the kinetic pressure;   default.  The kinetic profiles, bootstrap
-                   recorded with every result                  and conductivity do NOT follow it.
+``s_press``        pressure factor: the pressure of the force  N(1, 0.10); bounds 0.5..2.  FREE by default
+                   balance = s_press x the kinetic pressure;   in a single-slice fit.  The kinetic profiles,
+                   recorded with every result                  bootstrap and conductivity do NOT follow it.
 ``s_bs``           bootstrap multiplier                        N(1, 0.5); bounds 0..3
 ``a_corr_k``       current-correction amplitude k (fraction    N(0, 0.02) (fraction of Ip); +-0.2
                    of Ip; Gaussians on rho_tor,norm,
@@ -251,7 +251,8 @@ PARAMETERS = {
                     note="pressure factor: the pressure of the force balance = s_press x the kinetic pressure "
                          "(thermal + scaled fast-ion); the kinetic profiles, the bootstrap current and the "
                          "conductivity are NOT scaled, so the equilibrium pressure and the kinetic pressure differ "
-                         "by this factor; not free by default; recorded with every result (pressure_factor)"),
+                         "by this factor; free by default in a single-slice fit; recorded with every result "
+                         "(pressure_factor)"),
     "s_cd": dict(prior=(1.0, DRIVEN_CURRENT_SCALE_SIGMA), bounds=(0.0, 3.0), step0=0.05, unit="1",
                  note="driven-current scale (prior width: sources.priors)"),
     "s_bs": dict(prior=(1.0, 0.5), bounds=(0.0, 3.0), step0=0.05, unit="1", note="bootstrap multiplier"),
@@ -281,7 +282,8 @@ STEADY_STATE_CHECK_NOTE = ("a record for the reader: the slice's model steady st
 @dataclass
 class FitSettings:
     """Free parameters, priors and the algorithm's settings (all recorded; all decisions)."""
-    free: Sequence[str] = ("a_corr",)
+    # default: the current corrections and the pressure factor (the series' fits name their own free sets)
+    free: Sequence[str] = ("a_corr", "s_press")
     priors: Dict[str, Any] = field(default_factory=dict)        # overrides: name -> (mean, sigma)
     bounds: Dict[str, Any] = field(default_factory=dict)        # overrides: name -> (lo, hi)
     max_iter: int = 12

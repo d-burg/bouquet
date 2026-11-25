@@ -69,7 +69,7 @@ def _fixture_fit(mode):
 
         os.fork = fork_second_fails
         speed = SP.SpeedSettings.all_on(3)
-    fr = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=cfg.r0), FIT.FitSettings(), start=snap,
+    fr = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=cfg.r0), FIT.FitSettings(free=("a_corr",)), start=snap,
                          label="fx", speed=speed)
     rec = {k: v for k, v in fr.record.items() if k != "center"}
     out = dict(mode=mode, status=fr.status, theta=fr.theta, sigma=fr.sigma, covariance=fr.covariance, chi2=fr.chi2,

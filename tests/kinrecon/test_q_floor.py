@@ -296,7 +296,7 @@ def test_single_slice_default_floors_the_model_state_then_adds_the_corrections()
     lag, kin, src = LR._fixture_inputs()
     cfg = CM.CurrentModelSettings(r0=GEO.R0)
     assert cfg.core_relaxation == "q_floor" and cfg.q_floor == 1.0 and cfg.q_floor_form == "resistive"
-    assert FIT.FitSettings().free == ("a_corr",)
+    assert FIT.FitSettings().free == ("a_corr", "s_press")
     rf = CurrentState.uniform_faces(cfg.n_cells)
     # (1) the floor acts: the uncorrected state is the resistive floor of the model's steady state
     a0 = CM.assemble(lag, kin, src, {}, cfg, IP_LOW_Q)

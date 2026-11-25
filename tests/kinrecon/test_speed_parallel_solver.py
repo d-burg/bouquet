@@ -95,7 +95,7 @@ def _fixture_fit(workers, mode):
              SpeedSettings(column_workers=workers) if workers > 1 else None)
     out = dict(workers=workers, mode=mode)
     try:
-        fr = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=cfg.r0), FIT.FitSettings(), start=snap,
+        fr = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=cfg.r0), FIT.FitSettings(free=("a_corr",)), start=snap,
                              label="fx", speed=speed)
     except Exception as exc:  # noqa: BLE001 -- the exception is the result of mode "raise"
         out["exception"] = f"{type(exc).__name__}: {exc}"

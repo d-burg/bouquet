@@ -21,7 +21,10 @@ def test_default_and_parameter_specification():
     assert CM.DEFAULT_PARAMS["s_press"] == 1.0
     spec = FIT.PARAMETERS["s_press"]
     assert spec["prior"] == (1.0, FIT.PRESSURE_FACTOR_SIGMA) and spec["bounds"] == (0.5, 2.0)
-    assert "s_press" not in FIT.FitSettings().free               # not free by default
+    assert FIT.FitSettings().free == ("a_corr", "s_press")       # free by default in a single-slice fit
+    from bouquet.kinrecon import series as SE
+    st = SE.SeriesSettings()                                     # the series' fits name their own free sets
+    assert "s_press" not in st.initial_fit.free and "s_press" not in st.filter_fit.free
     assert FIT.FitSettings().max_step["s_press"] == 0.05
 
 

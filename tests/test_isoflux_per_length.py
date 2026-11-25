@@ -497,3 +497,16 @@ def test_an_override_on_the_standard_set_is_not_warned():
         geo = case_geometry(_gsrc(), sc)
     assert geo.record()["isoflux_balance"]["mode"] == "override"
     assert float(np.sum(geo.iso_w)) == pytest.approx(3e5, rel=0.05)
+
+
+def test_open_boundary_refused():
+    """An open trace (a separatrix traced strike point to strike point) is refused, not closed with a chord."""
+    from bouquet.solver_geometry import _open_ccw
+    src = _shape(200)
+    _open_ccw(src)                                          # closed: accepted
+    t = np.linspace(0.0, 1.0, 30)[:, None]
+    legs = np.vstack([src[0] + (1 - t) * [-0.25, -0.4], src, src[0] + t * [0.3, -0.5]])
+    with pytest.raises(ValueError, match="open curve"):
+        resample_boundary(legs)
+    with pytest.raises(ValueError, match="open curve"):
+        _open_ccw(src[:120])                                # a closed contour with an arc missing

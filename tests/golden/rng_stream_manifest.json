@@ -1,8 +1,8 @@
 {
   "channels": {
     "jphi": {
-      "max": 1531305.573542798,
-      "min": 100916.29325335337,
+      "max": 1530976.138706509,
+      "min": 101010.31831096417,
       "n": 257,
       "sample_indices": [
         0,
@@ -12,13 +12,13 @@
         256
       ],
       "sample_values": [
-        1508937.0981090846,
-        1151159.145802488,
-        676662.6791879561,
-        320403.3540964333,
-        100916.29325335337
+        1508604.3367891514,
+        1150911.4806544487,
+        676548.4424200123,
+        320397.2208179965,
+        101010.31831096417
       ],
-      "sha256": "fb993baac8b83644fb002d9eacfd734975bfcbd51d8d5d78b0a345ee7e4a9b26"
+      "sha256": "cdae2ce08de01e9ca232a3aa68b79adff434d9818cabc3871724722f3affe5bd"
     },
     "ne": {
       "max": 2.3134837289575244e+19,
@@ -114,11 +114,11 @@
   "seed": 20260804,
   "source_fixture": "D3Dlike_Hmode_golden_slim.h5",
   "source_provenance": {
-    "prov_bouquet_branch": "main",
-    "prov_bouquet_commit": "27979d1eff2c78a9e0871675202d8015c0c3842d",
+    "prov_bouquet_branch": "feat/pressure-scale",
+    "prov_bouquet_commit": "2b597ca57656d78306ad0102144850a0233266ec",
     "prov_bouquet_dirty": false,
-    "prov_bouquet_version": "1.3.1",
-    "prov_created": "2026-10-17T10:31:35",
+    "prov_bouquet_version": "1.4.1",
+    "prov_created": "2026-11-24T22:09:47",
     "prov_generator": "make_golden_fixture.py",
     "prov_generator_args_eqdsk": "all",
     "prov_generator_args_golden": "gfile",

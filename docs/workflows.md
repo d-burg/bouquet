@@ -221,6 +221,14 @@ stored config carrying it still loads.
 | `sigma_profiles` | `{}` | Explicit `{name: sigma(psi_N)}` envelopes on the kinetic run grid (`psi_N_kinetic`; Φ_N in a `"phi_n"` run), highest precedence |
 | `n_ls` / `t_ls` / `j_ls` | `0.5` / `0.4` / `0.25` | GPR correlation lengths for density / temperature / current, in units of the run coordinate (Φ_N lengths in a `"phi_n"` run; the defaults are not converted) |
 | `aux_sigmas`, `aux_baselines`, `aux_length_scales` | `{}` | The passive switchboard: any extra channel gets perturbed and archived alongside the physics. Arrays on the kinetic run grid; length scales in the run coordinate |
+| `length_scale_mode` | `"manual"` | **EXPERIMENTAL** ([`physics_profile_sampling`](#experimental-features-and-their-validation-status)): `"manual"` (user `n_ls`, `t_ls`, `j_ls`), `"tier1_analytical"` (ETG/TEM/ITG + `mtanh`/EPED1 critical-gradient $\ell(\hat{\psi})$), `"tier2_tglfnn"` (20-member `TGLF-NN` ONNX flux-curve inversion), or `"tier2_qlknn"` (`QLKNN-10D`). `Z_eff` (`aux_length_scales.get('zeff', 0.4)`) and inductive `j_ls` (`0.25` unless `current_evolution_time_s > 0`) remain explicit user priors — see [physics-profile-sampling.md](physics-profile-sampling.md) |
+| `gibbs_ls_form` | `"chilenski_tanh"` | How physics $\Delta(R_0/L_s)$ maps to $\ell(\hat{\psi})$ in `gibbs_level`: `"chilenski_tanh"` (Chilenski et al. 2015 Eq. 30 linear two-plateau `tanh` between core median and pedestal width, eliminating core $(\ell'/\ell)^2$ spikes) or `"pointwise"` (raw surface-by-surface curve) |
+| `sampling_mode` | `"gibbs_level"` | **EXPERIMENTAL**: `"gibbs_level"` (level-space GP, recommended for experimental diagnostic UQ) or `"stiff_inward"` ($C^1$ pedestal-pinned inward $R_0/L_s$ integration with exact variance partitioning, recommended for stiff burning plasmas) — see [physics-profile-sampling.md](physics-profile-sampling.md) |
+| `gradient_policy` | `"legacy"` | **EXPERIMENTAL**: `"legacy"` (global `_draw_monotonic_perturbation`), `"positivity_only"` ($f > 0$ only), or `"physics_bounds"` (outward decrease in steep H-mode thermal pedestal, antipodally symmetric baseline-normalized core bounds admitting pellet $n_e$ bumps and radiatively hollow $T_e$ cores with zero flat-core skew) |
+| `chi_consistency` / `alpha_heating_feedback` | `"passive_gp"` / `False` | **EXPERIMENTAL** ([`power_balance_chi`](#experimental-features-and-their-validation-status)): `"passive_gp"` (uncoupled GP), `"power_balance"` (steady-state $\chi_s \propto M_Q/(n_s\sqrt{(\partial_{\hat{\psi}}T_s)^2 + g_{\mathrm{reg}}^2})$, optionally with fuel-gated Bosch–Hale + Stix DT $\alpha$-power feedback), or `"surrogate"` (`TGLF-NN` flux ratio) — see [physics-profile-sampling.md](physics-profile-sampling.md) |
+| `tritium_fraction` | `None` (auto) | Hydrogenic tritium fuel fraction $f_T = n_T / (n_D + n_T) \in [0, 1]$ gating D–T Bosch–Hale $\alpha$ power and main-ion mass $A_{\mathrm{main}} = 2(1 - f_T) + 3 f_T$. `None` inspects `Baseline.tritium_fraction` then IMAS `core_profiles` $Z=1$ species ($A \approx 3$ vs. $A \le 2$), defaulting to **`0.0` (pure Deuterium, $P_\alpha \equiv 0$)** |
+| `flux_uncertainty_rel` / `stiff_gradient_ls` | `0.30` / `0.30` | Explicit priors: fractional surface-flux uncertainty $\Delta Q / Q$ (`0.0` isolates `TGLF-NN` committee epistemic spread) and minor-radius ($r/a$) correlation length of $\delta(R_0/L_s)$ in `"stiff_inward"` |
+| `tglfnn_model` / `current_evolution_time_s` | `"sat2_em_d3d_azf-1_withnegD"` / `None` | `TGLF-NN` ensemble spec or directory path (resolved in `with_absolute_paths`), and optional resistive-diffusion timescale $\Delta t$ [s] activating Spitzer skin-depth $\ell_{j_\phi}(\hat{\psi})$ |
 
 ### Radial coordinate (`b.source.coord`)
 
@@ -659,6 +667,28 @@ Validation to do:
 - the bootstrap-loop stage, where the validated bistable case's draws leave the reconstruction's branch (#87's next target): not watched by this guard
 - a case on which the guard holds a draw on its branch: none so far (held never occurred on the four validated cases)
 - the false-positive rate on more single-solution cases (5 of 62 draws flagged so far at the 1 % threshold, all left unchanged)
+
+#### `physics_profile_sampling` (experimental; introduced feat/physics-profile-sampling)
+
+Physics-informed non-stationary correlation length scales (Tier 1 analytical ETG/TEM/ITG/EPED critical gradients and Tier 2 standalone TGLF-NN / QLKNN stiffness Jacobians; bouquet.stiffness, bouquet.surrogates), regional positivity and gradient-band constraints replacing global _draw_monotonic_perturbation so pellet density inversions and radiatively hollow core temperatures are unbiasedly sampled (sampling.draw_bounded_perturbation), and the stiff-core inward gradient-integrating sampler (bouquet.stiff_sampler).
+
+Enabled by: `UncertaintyConfig.length_scale_mode!='manual'`; `UncertaintyConfig.sampling_mode!='gibbs_level'`; `UncertaintyConfig.gradient_policy!='legacy'`
+
+Validation to do:
+
+- 4-way ensemble comparison (legacy stationary vs Tier 1 Gibbs vs Tier 2 TGLF-NN Gibbs vs stiff_inward) across DIII-D, SPARC 8.7T, and ARC V3A kinetic equilibria
+- Python Miller + TGLF-NN flux parity against Julia TurbulentTransport.jl InputTGLF and TJLF across radial cores
+
+#### `power_balance_chi` (experimental; introduced feat/physics-profile-sampling)
+
+Power-balance- and surrogate-consistent thermal diffusivity updates for chi_e and chi_i (kinetic_sampler.compute_power_balance_chi), coupling each draw's chi_s(psi_N) inversely to n_s * sqrt((dT_s/dpsi_N)^2 + g_reg^2) with exact uniform-scaling axis regularity, smooth hollow-core positivity, and fuel-gated Bosch-Hale + Stix DT alpha-heating feedback (tritium_fraction).
+
+Enabled by: `UncertaintyConfig.chi_consistency!='passive_gp'`
+
+Validation to do:
+
+- OPEN INVESTIGATION (SLAYER tearing UQ): quantify sensitivity of SLAYER 4-field two-fluid drift-tearing thresholds (omega_{*e}, Spitzer eta_||, chi_e, D_perp, and mu_perp ~ chi_i at q=3/2, 2/1) under steady-state 'power_balance' vs instantaneous 'surrogate' TGLF-NN flux-ratio closures
+- power-balance vs TGLF-NN surrogate chi_s behaviour across radiatively hollow core draws and DT burning-plasma alpha-heating excursions
 
 <!-- experimental-registry:end -->
 

@@ -15,12 +15,33 @@ from . import filtering
 # Public API re-exports
 from .sampling import (
     GPRProfilePerturber,
+    draw_bounded_perturbation,
     generate_perturbed_GPR,
     make_rng,
     sigmoid_length_scale,
     verify_gpr_statistics,
     calc_cylindrical_li_proxy,
 )
+
+from .geometry import (
+    MillerGeometry,
+    build_tglf_inputs,
+    gyrobohm_flux_scales,
+    miller_from_baseline,
+    miller_from_geqdsk,
+    miller_from_imas_dd,
+)
+
+from .stiffness import (
+    PedestalWindow,
+    PhysicsStiffnessResult,
+    bosch_hale_dt_reactivity,
+    compute_physics_length_scales,
+    detect_pedestal_window,
+)
+
+from .stiff_sampler import sample_stiff_inward_channel
+from .kinetic_sampler import compute_power_balance_chi
 
 from .TokaMaker_interface import (
     classify_jphi_profile,
@@ -219,10 +240,18 @@ __all__ = [
     # ---- environment / path resolution ----
     "add_oft_to_path", "find_mesh", "find_ida",
     # ---- profile sampling / uncertainty ----
-    "GPRProfilePerturber", "generate_perturbed_GPR", "make_rng",
+    "GPRProfilePerturber", "draw_bounded_perturbation",
+    "generate_perturbed_GPR", "make_rng",
     "sigmoid_length_scale",
     "verify_gpr_statistics", "calc_cylindrical_li_proxy",
     "new_uncertainty_profiles", "sigma_template", "synthetic_ida_sigma",
+    # ---- Miller geometry, critical-gradient stiffness & transport chi ----
+    "MillerGeometry", "build_tglf_inputs", "gyrobohm_flux_scales",
+    "miller_from_baseline", "miller_from_geqdsk", "miller_from_imas_dd",
+    "PedestalWindow", "PhysicsStiffnessResult",
+    "bosch_hale_dt_reactivity", "compute_physics_length_scales",
+    "detect_pedestal_window",
+    "sample_stiff_inward_channel", "compute_power_balance_chi",
     # ---- advanced: functional (pre-class) API ----
     "generate_bouquet", "perturb_kinetic_equilibrium", "reconstruct_equilibrium",
     # ---- process-parallel: the draws of one bouquet, or many bouquets ----

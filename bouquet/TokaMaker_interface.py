@@ -3002,7 +3002,7 @@ def draw_kinetics(mygs, psi_N, pressure, ne, te, ni, ti,
                   zeff_includes_fast=False, Z_imp=None, p_diff=None,
                   aux_sigmas=None, aux_baselines=None, aux_length_scales=None,
                   ni_from_zeff=True, zeff_dne=None, thermal_charge=None,
-                  kinetic_clips=False):
+                  kinetic_clips=False, kinetic_sampling_opts=None):
     """One kinetic draw matched to the baseline <P>: the shared sampler
     (:mod:`bouquet.kinetic_sampler`, the one the legacy and engine draws use)
     on ``mygs``'s current equilibrium, for :func:`swb_draw`.  Returns a dict:
@@ -3014,6 +3014,7 @@ def draw_kinetics(mygs, psi_N, pressure, ne, te, ni, ti,
         thermal_charge = thermal_pressure_charge(None)   # the frozen legacy value
     _x = coords.psi_at(mygs, psi_N, coord)
     inp_avg = mygs.flux_integral(_x, pressure)
+    _kopts = dict(kinetic_sampling_opts or {})
     base = KineticBase(
         psi_kin=psi_kin, ne=ne, te=te, ni=ni, ti=ti,
         sigma_ne=sigma_ne, sigma_te=sigma_te, sigma_ni=sigma_ni,
@@ -3021,7 +3022,7 @@ def draw_kinetics(mygs, psi_N, pressure, ne, te, ni, ti,
         aux_baselines=aux_baselines, aux_length_scales=aux_length_scales,
         Z_imp=Z_imp, z_fast=z_fast, z2_fast=z2_fast,
         zeff_includes_fast=zeff_includes_fast, ni_from_zeff=ni_from_zeff,
-        zeff_dne=zeff_dne, clips=bool(kinetic_clips))
+        zeff_dne=zeff_dne, clips=bool(kinetic_clips), **_kopts)
 
     def _thermal(d):
         return mygs.flux_integral(_x, thermal_charge * (
@@ -3486,6 +3487,7 @@ def perturb_kinetic_equilibrium(
     # caller; a run passes UncertaintyConfig.kinetic_clips resolved
     # (bouquet.experimental.kinetic_clips_on: on by default on every route)
     kinetic_clips=False,
+    kinetic_sampling_opts=None,
     max_proxy_draws=500,
     bnd_diag_callback=None,
     # Differential bootstrap (DIFF_BS=1 mode):
@@ -3798,6 +3800,7 @@ def perturb_kinetic_equilibrium(
     inp_avg = mygs.flux_integral(coords.psi_at(mygs, psi_N, coord), pressure)
     # The draw itself (ne, Te, Z_eff -> ni | ni, Ti, then the aux channels) is
     # the shared sampler every solve path uses: bouquet.kinetic_sampler.
+    _kopts = dict(kinetic_sampling_opts or {})
     _kbase = KineticBase(
         psi_kin=psi_kin, ne=ne, te=te, ni=ni, ti=ti,
         sigma_ne=sigma_ne, sigma_te=sigma_te, sigma_ni=sigma_ni,
@@ -3805,7 +3808,7 @@ def perturb_kinetic_equilibrium(
         aux_baselines=aux_baselines, aux_length_scales=aux_length_scales,
         Z_imp=Z_imp, z_fast=z_fast, z2_fast=z2_fast,
         zeff_includes_fast=zeff_includes_fast, ni_from_zeff=ni_from_zeff,
-        zeff_dne=zeff_dne, clips=bool(kinetic_clips))
+        zeff_dne=zeff_dne, clips=bool(kinetic_clips), **_kopts)
     # eV -> J: the exact constant under the self-consistent loop (the
     # value the reconstruction / modelling-source forward solve uses), the
     # frozen legacy value otherwise (physics.thermal_pressure_charge)
@@ -5827,6 +5830,7 @@ def generate_bouquet(
     zeff_dne=None,
     kinetic_clips=False,         # PR #56 clips; a run passes the resolved
                                  # (default on) value; see perturb_kinetic_equilibrium
+    kinetic_sampling_opts=None,
     progress_callback=None,
     source_kind=None,
     capture_live_eq=True,
@@ -7949,6 +7953,7 @@ def generate_bouquet(
                     aux_length_scales=aux_length_scales,
                     ni_from_zeff=ni_from_zeff, zeff_dne=zeff_dne,
                     kinetic_clips=kinetic_clips,
+                    kinetic_sampling_opts=kinetic_sampling_opts,
                     isolate_edge_jBS=isolate_edge_jBS),
                 legacy=lambda: perturb_kinetic_equilibrium(
                     mygs,
@@ -7996,6 +8001,7 @@ def generate_bouquet(
                     ni_from_zeff=ni_from_zeff,
                     zeff_dne=zeff_dne,
                     kinetic_clips=kinetic_clips,
+                    kinetic_sampling_opts=kinetic_sampling_opts,
                     max_proxy_draws=max_proxy_draws,
                     p_thresh=p_thresh,
                     # the run's single Generator -- every GPR draw in this draw

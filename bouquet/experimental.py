@@ -199,6 +199,52 @@ REGISTRY = {
             "draws flagged so far at the 1 % threshold, all left unchanged)",
         ],
         status="experimental"),
+    "physics_profile_sampling": dict(
+        description=(
+            "Physics-informed non-stationary correlation length scales "
+            "(Tier 1 analytical ETG/TEM/ITG/EPED critical gradients and "
+            "Tier 2 standalone TGLF-NN / QLKNN stiffness Jacobians; "
+            "bouquet.stiffness, bouquet.surrogates), regional positivity and "
+            "gradient-band constraints replacing global "
+            "_draw_monotonic_perturbation so pellet density inversions and "
+            "radiatively hollow core temperatures are unbiasedly sampled "
+            "(sampling.draw_bounded_perturbation), and the stiff-core inward "
+            "gradient-integrating sampler (bouquet.stiff_sampler)."),
+        enabled_by=[
+            "UncertaintyConfig.length_scale_mode!='manual'",
+            "UncertaintyConfig.sampling_mode!='gibbs_level'",
+            "UncertaintyConfig.gradient_policy!='legacy'",
+        ],
+        introduced="feat/physics-profile-sampling",
+        validation_todo=[
+            "4-way ensemble comparison (legacy stationary vs Tier 1 Gibbs vs "
+            "Tier 2 TGLF-NN Gibbs vs stiff_inward) across DIII-D, SPARC 8.7T, "
+            "and ARC V3A kinetic equilibria",
+            "Python Miller + TGLF-NN flux parity against Julia "
+            "TurbulentTransport.jl InputTGLF and TJLF across radial cores",
+        ],
+        status="experimental"),
+    "power_balance_chi": dict(
+        description=(
+            "Power-balance- and surrogate-consistent thermal diffusivity "
+            "updates for chi_e and chi_i (kinetic_sampler."
+            "compute_power_balance_chi), coupling each draw's chi_s(psi_N) "
+            "inversely to n_s * sqrt((dT_s/dpsi_N)^2 + g_reg^2) with exact "
+            "uniform-scaling axis regularity, smooth hollow-core positivity, "
+            "and fuel-gated Bosch-Hale + Stix DT alpha-heating feedback "
+            "(tritium_fraction)."),
+        enabled_by=["UncertaintyConfig.chi_consistency!='passive_gp'"],
+        introduced="feat/physics-profile-sampling",
+        validation_todo=[
+            "OPEN INVESTIGATION (SLAYER tearing UQ): quantify sensitivity of "
+            "SLAYER 4-field two-fluid drift-tearing thresholds (omega_{*e}, "
+            "Spitzer eta_||, chi_e, D_perp, and mu_perp ~ chi_i at q=3/2, 2/1) "
+            "under steady-state 'power_balance' vs instantaneous 'surrogate' "
+            "TGLF-NN flux-ratio closures",
+            "power-balance vs TGLF-NN surrogate chi_s behaviour across radiatively "
+            "hollow core draws and DT burning-plasma alpha-heating excursions",
+        ],
+        status="experimental"),
 }
 
 
@@ -456,6 +502,14 @@ _PREDICATES = {
         getattr(c, "generation", None), "guard_bistability", False)),
     "ida_fuse_timing": lambda c: ida_fuse_timing_on(
         getattr(c, "source", None), getattr(c, "uncertainty", None)),
+    "physics_profile_sampling": lambda c: (
+        getattr(getattr(c, "uncertainty", None), "length_scale_mode", "manual") != "manual"
+        or getattr(getattr(c, "uncertainty", None), "sampling_mode", "gibbs_level") != "gibbs_level"
+        or getattr(getattr(c, "uncertainty", None), "gradient_policy", "legacy") != "legacy"
+    ),
+    "power_balance_chi": lambda c: (
+        getattr(getattr(c, "uncertainty", None), "chi_consistency", "passive_gp") != "passive_gp"
+    ),
 }
 assert set(_PREDICATES) == set(REGISTRY)
 assert not set(GRADUATED) & set(REGISTRY)

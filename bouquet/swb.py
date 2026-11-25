@@ -406,11 +406,26 @@ class SwbBaseline:
             got.update(res=recipe(kin, j_seed), j_seed=j_seed)
             return got["res"]
         m.recipe = _recipe
+        unc = self.config.uncertainty
+        _chi_mode = str(getattr(unc, "chi_consistency", "passive_gp"))
+        _kopts = {
+            "gradient_policy": str(getattr(unc, "gradient_policy", "legacy")),
+            "sampling_mode": str(getattr(unc, "sampling_mode", "gibbs_level")),
+            "chi_consistency": _chi_mode,
+            "alpha_heating_feedback": bool(getattr(unc, "alpha_heating_feedback", False)),
+            "tritium_fraction": float(getattr(unc, "tritium_fraction", None) or getattr(bl, "tritium_fraction", None) or 0.0),
+        }
+        _aux_base = (
+            dict(getattr(bl, "aux", None) or {})
+            if _chi_mode in ("power_balance", "surrogate")
+            else None
+        )
         m.draw(self.mygs, None, 1.0, 0, inputs=dict(
             dict.fromkeys(("pressure", "sigma_ne", "sigma_te", "sigma_ni",
                            "sigma_ti", "n_ls", "t_ls", "j_ls", "p_thresh",
-                           "aux_sigmas", "aux_baselines", "aux_length_scales",
+                           "aux_sigmas", "aux_length_scales",
                            "zeff_dne", "z2_fast")),
+            aux_baselines=_aux_base,
             psi_N=np.asarray(bl.psi_N, dtype=float),
             psi_N_kinetic=np.asarray(bl.psi_N_kinetic, dtype=float),
             ne=bl.ne, te=bl.te, ni=bl.ni, ti=bl.ti, Zeff=self._zeff_eq(),
@@ -418,6 +433,7 @@ class SwbBaseline:
             z_fast=getattr(bl, "z_fast", None), Z_imp=getattr(bl, "Z_imp", None),
             zeff_includes_fast=bool(getattr(bl, "zeff_includes_fast", False)),
             ni_from_zeff=True,
+            kinetic_sampling_opts=_kopts,
             isolate_edge_jBS=bool(self.config.generation.isolate_edge_jBS)))
         st = self._swb_state(got["res"], got["j_seed"])
         psi_N = np.asarray(bl.psi_N, dtype=float)

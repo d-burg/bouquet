@@ -7681,6 +7681,7 @@ class Bouquet(SwbBaseline):
                     ni_from_zeff=env.get("ni_from_zeff", True),
                     zeff_dne=env.get("zeff_dne"),
                     kinetic_clips=bool(env.get("kinetic_clips", False)),
+                    kinetic_sampling_opts=env.get("kinetic_sampling_opts"),
                     # generate_bouquet's own defaults for these two
                     max_proxy_draws=500, p_thresh=0.05,
                     rng=make_rng(gc.seed),
@@ -8260,6 +8261,7 @@ class Bouquet(SwbBaseline):
                 # the PR #56 sampler clips, resolved by resolve_uncertainty
                 # (on by default on every route; explicit False off)
                 kinetic_clips=bool(env.get("kinetic_clips", False)),
+                kinetic_sampling_opts=env.get("kinetic_sampling_opts"),
                 progress_callback=progress_callback,
                 # shared until-N hooks (bouquet.parallel); None on the serial path
                 on_inspec=on_inspec,

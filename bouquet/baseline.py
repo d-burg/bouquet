@@ -340,6 +340,9 @@ class Baseline:
     # kept apart so a summary over mixed baselines never mixes them).
     # Archived as li_metrics["p_fast_source"].
     p_fast_source: Optional[dict] = None
+    # Optional hydrogenic tritium fuel fraction n_T / (n_D + n_T) in [0, 1]
+    # (None -> auto-resolved from IMAS core_profiles or defaults to 0.0 pure D).
+    tritium_fraction: Optional[float] = None
 
     def __repr__(self):
         # concise summary -- the default dataclass repr dumps every numpy array,
@@ -1455,12 +1458,216 @@ def resolve_uncertainty(config, baseline) -> dict:
             continue
         resolved_sigma[name] = np.asarray(sig, dtype=float)
         resolved_base[name] = np.asarray(base, dtype=float)
+    # When chi_consistency is 'power_balance' or 'surrogate', preserve chi_e / chi_i
+    # baselines even if the user did not supply a dummy aux_sigmas['chi_*'] entry.
+    _chi_mode = str(getattr(unc, "chi_consistency", "passive_gp"))
+    if _chi_mode in ("power_balance", "surrogate"):
+        for _cn in ("chi_e", "chi_i"):
+            if _cn not in resolved_base:
+                _cb = man_base.get(_cn, src_aux.get(_cn))
+                if _cb is not None and np.any(np.asarray(_cb, dtype=float)):
+                    resolved_base[_cn] = np.asarray(_cb, dtype=float)
     out["aux_sigmas"] = resolved_sigma
     out["aux_baselines"] = resolved_base
     out["aux_length_scales"] = dict(unc.aux_length_scales or {})
+
+    # --- physics-informed stiffness, gradient policy & transport options ------
+    _ls_mode = str(getattr(unc, "length_scale_mode", "manual"))
+    _samp_mode = str(getattr(unc, "sampling_mode", "gibbs_level"))
+    _grad_pol = str(getattr(unc, "gradient_policy", "legacy"))
+    _alpha_fb = bool(getattr(unc, "alpha_heating_feedback", False))
+    _tglf_mdl = str(getattr(unc, "tglfnn_model", "sat2_em_d3d_azf-1_withnegD"))
+    _tau_evol = getattr(unc, "current_evolution_time_s", None)
+    _flux_unc = float(getattr(unc, "flux_uncertainty_rel", 0.30))
+    _stiff_gls = float(getattr(unc, "stiff_gradient_ls", 0.30))
+    _gibbs_form = str(getattr(unc, "gibbs_ls_form", "chilenski_tanh"))
+    _f_trit = _resolve_tritium_fraction(unc, baseline, src)
+    out["tritium_fraction"] = _f_trit
+
+    _need_stiff = (
+        _ls_mode != "manual"
+        or _samp_mode == "stiff_inward"
+        or _grad_pol == "physics_bounds"
+        or _chi_mode in ("power_balance", "surrogate")
+    )
+    if _need_stiff:
+        from .geometry.miller import miller_from_baseline
+        from .stiffness import compute_physics_length_scales
+        _eff_ls_mode = _ls_mode if _ls_mode != "manual" else "tier1_analytical"
+        _stiff = compute_physics_length_scales(
+            baseline, out, source=src, mode=_eff_ls_mode,
+            tglfnn_model=_tglf_mdl, current_evolution_time_s=_tau_evol,
+            flux_uncertainty_rel=_flux_unc, gibbs_ls_form=_gibbs_form,
+            tritium_fraction=_f_trit,
+        )
+        _run_coord = str(getattr(baseline, "coord", "psi_n") or "psi_n")
+        if _run_coord != "psi_n":
+            if callable(baseline.psi_map):
+                _psi_pol = np.asarray(baseline.psi_map(psi_kin), dtype=float)
+            elif baseline.psi_map is not None:
+                _psi_pol = np.interp(
+                    psi_kin,
+                    np.asarray(baseline.psi_map[1], dtype=float),
+                    np.asarray(baseline.psi_map[0], dtype=float),
+                )
+            else:
+                _mg_raw = miller_from_baseline(baseline, source=src)
+                _psi_pol = np.interp(
+                    psi_kin,
+                    np.asarray(_mg_raw.rho_tor_norm, dtype=float) ** 2,
+                    np.asarray(_mg_raw.psi_N, dtype=float),
+                )
+        else:
+            _psi_pol = psi_kin
+        _mg_kin = miller_from_baseline(baseline, source=src, psi_N_out=_psi_pol)
+        _has_ped = bool(_stiff.pedestal.has_pedestal)
+        if _ls_mode != "manual":
+            out["n_ls"] = _stiff.n_ls
+            out["t_ls"] = _stiff.t_ls
+            if _tau_evol is not None and float(_tau_evol) > 0.0:
+                out["j_ls"] = _stiff.j_ls
+            if bool(getattr(unc, "log_sigma_sources", True)):
+                _sm = _stiff.summary_dict()["core_median_ls"]
+                print(
+                    f"  [stiffness:{_ls_mode}] core median ls: "
+                    f"ne={_sm['ne']:.3f}, te={_sm['te']:.3f}, "
+                    f"ni={_sm['ni']:.3f}, ti={_sm['ti']:.3f}, jphi={_sm['jphi']:.3f} "
+                    f"(psi_ped_top={_stiff.pedestal.psi_ped_top:.3f}, "
+                    f"has_pedestal={_has_ped}, f_T={_f_trit:.2f})"
+                )
+        out["physics_stiffness"] = _stiff
+        out["kinetic_sampling_opts"] = {
+            "ne_ls": (_stiff.ne_ls if _ls_mode != "manual" else None),
+            "te_ls": (_stiff.te_ls if _ls_mode != "manual" else None),
+            "ni_ls": (_stiff.ni_ls if _ls_mode != "manual" else None),
+            "ti_ls": (_stiff.ti_ls if _ls_mode != "manual" else None),
+            "gradient_policy": _grad_pol,
+            "sampling_mode": _samp_mode,
+            "chi_consistency": _chi_mode,
+            "alpha_heating_feedback": _alpha_fb,
+            "psi_ped_top": float(_stiff.pedestal.psi_ped_top),
+            "has_pedestal": _has_ped,
+            "tritium_fraction": float(_f_trit),
+            "coord": _run_coord,
+            "r_norm_kin": (_mg_kin.r_min_m / max(_mg_kin.a_m, 1e-4)),
+            "a_over_R0": float(_mg_kin.a_m / max(_mg_kin.R0_m, 1e-3)),
+            "dkappa_allow": {
+                "ne": _stiff.dkappa_ne, "te": _stiff.dkappa_te,
+                "ni": _stiff.dkappa_ni, "ti": _stiff.dkappa_ti,
+            },
+            "kappa_bounds": _stiff.kappa_bounds,
+            "miller_kin": _mg_kin,
+            "omega_tor_rad_s": resolved_base.get("omega_tor"),
+            "tglfnn_model": _tglf_mdl,
+            "stiff_gradient_ls": _stiff_gls,
+        }
+        baseline.li_metrics = dict(
+            getattr(baseline, "li_metrics", None) or {},
+            physics_stiffness=_stiff.summary_dict(),
+        )
+    elif _grad_pol != "legacy":
+        out["kinetic_sampling_opts"] = {
+            "gradient_policy": _grad_pol,
+            "sampling_mode": _samp_mode,
+            "chi_consistency": _chi_mode,
+            "alpha_heating_feedback": _alpha_fb,
+            "has_pedestal": True,
+            "tritium_fraction": float(_f_trit),
+            "coord": str(getattr(baseline, "coord", "psi_n") or "psi_n"),
+        }
+    else:
+        out["kinetic_sampling_opts"] = None
+
     if _tpl_unread_ida:
         _warn_unread_ida_template(out, src, out_ni_source)
     return out
+
+
+def _resolve_tritium_fraction(unc, baseline, src) -> float:
+    """Resolve hydrogenic tritium fraction ``f_T = n_T / (n_D + n_T)`` in ``[0, 1]``.
+
+    Precedence:
+    1. Explicit ``unc.tritium_fraction`` when not ``None``;
+    2. ``baseline.tritium_fraction`` when not ``None``;
+    3. IMAS ``src.ids_path`` ``core_profiles.profiles_1d[*].ion[*]`` hydrogenic
+       species (``z_n == 1``): ``A ~ 3`` tritium vs ``A <= 2`` deuterium/protium
+       (or lumped ``2.05 < A < 2.95`` D-T fuel);
+    4. Default ``0.0`` (pure Deuterium, ``P_alpha == 0``).
+    """
+    import json
+    import os
+    import numpy as np
+
+    u_ft = getattr(unc, "tritium_fraction", None)
+    if u_ft is not None:
+        return float(np.clip(float(u_ft), 0.0, 1.0))
+    b_ft = getattr(baseline, "tritium_fraction", None)
+    if b_ft is not None:
+        return float(np.clip(float(b_ft), 0.0, 1.0))
+
+    ids_path = getattr(src, "ids_path", None)
+    if isinstance(ids_path, str) and ids_path and os.path.isfile(ids_path):
+        try:
+            with open(ids_path, "r", encoding="utf-8") as fh:
+                dd = json.load(fh)
+            cp_root = (dd or {}).get("core_profiles") or {}
+            p1d = cp_root.get("profiles_1d")
+            slices = []
+            if isinstance(p1d, list):
+                slices = [s for s in p1d if isinstance(s, dict)]
+            elif isinstance(p1d, dict):
+                slices = [
+                    p1d[k] for k in sorted(p1d.keys(), key=lambda x: int(x) if str(x).isdigit() else str(x))
+                    if isinstance(p1d[k], dict)
+                ]
+            if slices:
+                req_t = getattr(src, "time", None)
+                cp = slices[0]
+                if req_t is not None and len(slices) > 1:
+                    cp = min(
+                        slices,
+                        key=lambda s: abs(float(s.get("time", 0.0) or 0.0) - float(req_t)),
+                    )
+                n_trit = 0.0
+                n_hyd = 0.0
+                for ion in cp.get("ion") or ():
+                    if not isinstance(ion, dict):
+                        continue
+                    elems = ion.get("element") or ()
+                    if isinstance(elems, dict):
+                        elems = list(elems.values())
+                    if not elems:
+                        continue
+                    el0 = elems[0] if isinstance(elems[0], dict) else {}
+                    z_n = float(el0.get("z_n", 0.0) or 0.0)
+                    if abs(z_n - 1.0) > 0.05:
+                        continue
+                    dens = ion.get("density_thermal", ion.get("density"))
+                    if dens is None:
+                        continue
+                    dens_arr = np.maximum(np.asarray(dens, dtype=float), 0.0)
+                    n_mean = float(np.mean(dens_arr)) if dens_arr.size else 0.0
+                    if not (n_mean > 0.0):
+                        continue
+                    tot_w = 0.0
+                    a_sum = 0.0
+                    for el in elems:
+                        if isinstance(el, dict) and el.get("a") is not None:
+                            w = float(el.get("atoms_n", el.get("multiplicity", 1.0)) or 1.0)
+                            a_sum += w * float(el["a"])
+                            tot_w += w
+                    a_eff = (a_sum / tot_w) if tot_w > 0.0 else 2.0
+                    lbl = str(ion.get("label", "") or "").strip().upper()
+                    n_hyd += n_mean
+                    if a_eff >= 2.90 or lbl in ("T", "T+", "T1+", "TRITIUM"):
+                        n_trit += n_mean
+                    elif 2.05 < a_eff < 2.90 or lbl in ("DT", "D-T", "D+T"):
+                        n_trit += n_mean * float(np.clip(a_eff - 2.0, 0.0, 1.0))
+                if n_hyd > 0.0:
+                    return float(np.clip(n_trit / n_hyd, 0.0, 1.0))
+        except Exception:
+            pass
+    return 0.0
 
 
 #: The start of :func:`_warn_unread_ida_template`'s message: an internal

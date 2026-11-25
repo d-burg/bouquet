@@ -58,7 +58,8 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
              p_fast=None, z_fast=None, z2_fast=None, zeff_includes_fast=False,
              Z_imp=None, aux_sigmas=None, aux_baselines=None,
              aux_length_scales=None, ni_from_zeff=True, zeff_dne=None,
-             isolate_edge_jBS=False, kinetic_clips=False):
+             isolate_edge_jBS=False, kinetic_clips=False,
+             kinetic_sampling_opts=None):
     """One ``imas_baseline="swb"`` draw: the baseline's solve B with resampled
     inputs.
 
@@ -90,6 +91,11 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
         ne_eq, te_eq = _kin_to_eq(ne), _kin_to_eq(te)
         ni_eq, ti_eq = _kin_to_eq(ni), _kin_to_eq(ti)
         aux_out = {}
+        _chi_mode = str((kinetic_sampling_opts or {}).get("chi_consistency", "passive_gp"))
+        if _chi_mode in ("power_balance", "surrogate") and aux_baselines:
+            for _cn in ("chi_e", "chi_i"):
+                if aux_baselines.get(_cn) is not None:
+                    aux_out[_cn] = np.asarray(aux_baselines[_cn], dtype=float).copy()
         _ks = None          # nothing sampled
     else:
         _k = draw_kinetics(
@@ -101,7 +107,8 @@ def swb_draw(mygs, psi_N, pressure, ne, te, ni, ti,
             zeff_includes_fast=zeff_includes_fast, Z_imp=Z_imp,
             aux_sigmas=aux_sigmas, aux_baselines=aux_baselines,
             aux_length_scales=aux_length_scales, ni_from_zeff=ni_from_zeff,
-            zeff_dne=zeff_dne, kinetic_clips=kinetic_clips)
+            zeff_dne=zeff_dne, kinetic_clips=kinetic_clips,
+            kinetic_sampling_opts=kinetic_sampling_opts)
         ne_p, te_p, ni_p, ti_p = _k["ne"], _k["te"], _k["ni"], _k["ti"]
         ne_eq, te_eq, ni_eq, ti_eq = _k["ne_eq"], _k["te_eq"], _k["ni_eq"], _k["ti_eq"]
         Zeff, aux_out = _k["Zeff"], _k["aux"]
@@ -246,7 +253,8 @@ class SwbDraws(DrawMethod):
             aux_length_scales=i["aux_length_scales"],
             ni_from_zeff=i["ni_from_zeff"], zeff_dne=i["zeff_dne"],
             isolate_edge_jBS=i["isolate_edge_jBS"],
-            kinetic_clips=bool(i.get("kinetic_clips", False)))
+            kinetic_clips=bool(i.get("kinetic_clips", False)),
+            kinetic_sampling_opts=i.get("kinetic_sampling_opts"))
 
     def announce_coil_reg(self):
         print("  [swb] coil reg left to the per-draw recipe; drift "

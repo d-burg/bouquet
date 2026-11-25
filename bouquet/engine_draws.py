@@ -571,6 +571,7 @@ def sample_kinetics(ctx, rng, unc, flux_integral, *, p_thresh=0.05,
     aux_length_scales, ni_from_zeff, zeff_dne, kinetic_clips``."""
     from .kinetic_sampler import KineticBase, sample_kinetics as _sample
     nat = ctx.native
+    _kopts = dict(unc.get("kinetic_sampling_opts") or {})
     base = KineticBase(
         psi_kin=ctx.psi_kin, ne=nat["ne"], te=nat["te"], ni=nat["ni"],
         ti=nat["ti"], sigma_ne=unc["sigma_ne"], sigma_te=unc["sigma_te"],
@@ -583,7 +584,8 @@ def sample_kinetics(ctx, rng, unc, flux_integral, *, p_thresh=0.05,
         zeff_includes_fast=ctx.zeff_includes_fast,
         ni_from_zeff=bool(unc.get("ni_from_zeff", True)),
         zeff_dne=unc.get("zeff_dne"),
-        clips=bool(unc.get("kinetic_clips", False)))
+        clips=bool(unc.get("kinetic_clips", False)),
+        **_kopts)
     psi = ctx.psi
     inp = float(flux_integral(psi, ctx.pressure_thermal_base))
 

@@ -172,12 +172,29 @@ Details: [io-and-plotting.md](io-and-plotting.md).
 | `GPRProfilePerturber` | Gaussian process profile perturbation engine (Gibbs non-stationary kernels) |
 | `make_rng()` | The one place a seed becomes a `numpy.random.Generator`: `generate_bouquet` calls it once and passes the Generator to every draw site, so one seed fixes the whole ensemble. `None` gives an OS-entropy stream (not reproducible); an existing Generator is passed through |
 | `generate_perturbed_GPR()` | One-call wrapper for perturbing a 1-D profile |
+| `draw_bounded_perturbation()` | Regional positivity and baseline-normalized symmetric core inverse scale-length sampler (`gradient_policy="positivity_only"` or `"physics_bounds"`, L-mode/H-mode aware) |
+| `sample_stiff_inward_channel()` | $C^1$-slope-matched stiff-core inward gradient-integrating sampler (`sampling_mode="stiff_inward"`) with exact pedestal + core variance partitioning |
+| `compute_power_balance_chi()` | Power-balance- and surrogate-consistent thermal diffusivity $\chi_s(\psi_N)$ with smooth axis/hollow-core gradient regularization and fuel-gated DT $\alpha$-heating feedback |
 | `sigmoid_length_scale()` | Spatially varying correlation length for Gibbs kernels |
 | `verify_gpr_statistics()` | Monte Carlo validation of the GPR sampling statistics |
 | `calc_cylindrical_li_proxy()` | Fast cylindrical l_i proxy (no GS solve required) |
 | `new_uncertainty_profiles()` | Build 1-D uncertainty envelopes (power-law or flat+tail) |
 | `sigma_template()` | Relative 1-sigma radial templates (H-mode flat top / ramp / L-mode) of n_e, T_e, T_i, Z_eff, n_C, n_i; the assumed default envelope |
 | `synthetic_ida_sigma()` | The H-mode flat-top template as a fractional sigma envelope for synthetic studies |
+
+## Miller geometry and transport stiffness
+
+| Function / Class | Description |
+|------------------|-------------|
+| `MillerGeometry` | Flux-surface Miller shaping, $B_{\mathrm{unit}}$, enclosed volume/surface area, and signed orientation profiles |
+| `miller_from_geqdsk()` / `miller_from_imas_dd()` / `miller_from_baseline()` | Extract `MillerGeometry` from COCOS-aware GEQDSK files/bytes, IMAS/OMAS data dictionaries, or a resolved `Baseline` |
+| `gyrobohm_flux_scales()` | GACODE deuterium sound speed $c_s$, $\rho_s$, $\rho_*$, and $Q_{\mathrm{gB}}$ / $Q_{\mathrm{gB,imas}}$ flux normalizations |
+| `build_tglf_inputs()` | Assemble dimensionless `InputTGLF` feature profiles (with quasineutral thermal species and signed $E \times B$ / parallel shear) |
+| `PedestalWindow` / `detect_pedestal_window()` | Outer H-mode pressure-barrier HWHM + EPED1 width detector (`has_pedestal`, `psi_ped_top`, `width_psiN`) |
+| `PhysicsStiffnessResult` / `compute_physics_length_scales()` | Resolve Tier 1 analytical (ETG/TEM/ITG/EPED1) or Tier 2 (`TGLF-NN` / `QLKNN`) stiffness excursions $\Delta(R_0/L_s)$, core bounds, and Gibbs correlation lengths |
+| `bosch_hale_dt_reactivity()` | Bosch & Hale (1992) thermal D–T fusion reactivity $\langle\sigma v\rangle_{DT}(T_i)$ $[\mathrm{m^3/s}]$ |
+
+Details and mathematical derivations: [physics-profile-sampling.md](physics-profile-sampling.md).
 
 ## Plotting
 

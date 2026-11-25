@@ -317,7 +317,8 @@ def test_a_stored_unified_config_with_unread_homotopy_passes_loads():
 #: cannot carry, besides the engine_* fields: the engine field itself and
 #: check_bistability (2026-10-14; a unified-engine setting, stored by a
 #: config written since -- the golden fixture's, for one)
-_ENGINE_ERA_KEYS = ("reconstruction_engine", "check_bistability")
+_ENGINE_ERA_KEYS = ("reconstruction_engine", "check_bistability",
+                    "pressure_scale")
 
 
 def _predating_the_engine(gen):

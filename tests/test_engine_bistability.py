@@ -27,9 +27,11 @@ toy_bouquet_solver = TD.toy_bouquet_solver
 _quiet = TD._quiet
 
 
-def _prepared(tmp_path, monkeypatch, *, check, fake_cls=None):
+def _prepared(tmp_path, monkeypatch, *, check, fake_cls=None,
+              pressure_scale=None):
     """A toy Bouquet on the unified engine, prepared with
-    ``check_bistability=check``; ``fake_cls`` the stand-in solver class."""
+    ``check_bistability=check``; ``fake_cls`` the stand-in solver class;
+    ``pressure_scale`` set on the generation config when given."""
     import bouquet.run as br
     from _engine_fake_gs import FakeTokaMaker
     from bouquet.solver_state import enter_bounded_coil_mode
@@ -42,6 +44,8 @@ def _prepared(tmp_path, monkeypatch, *, check, fake_cls=None):
     monkeypatch.setattr(br.Bouquet, "setup_solver", _setup)
     b = TD._bq(tmp_path)
     b.config.generation.check_bistability = check
+    if pressure_scale is not None:
+        b.config.generation.pressure_scale = pressure_scale
     b.setup_solver()
     import contextlib
     import io
@@ -95,7 +99,13 @@ def test_an_explicit_false_is_kept_noted_and_runs_no_extra_solve(
 
 def test_a_single_branch_baseline_is_stamped_not_bistable(
         tmp_path, toy_bouquet_solver, monkeypatch):
-    b, rec = _prepared(tmp_path, monkeypatch, check=True)
+    # pressure_scale="none": this test is about the bistability stamp, and
+    # its deltas are asserted exactly 0.0.  With s != 1 the toy solver's
+    # cold re-solve can differ from the warm one in the last bit on some
+    # hosts (l_i delta 1.1e-16 seen on one Linux build); "none" keeps the
+    # exact bar instead of loosening it.  The scale has its own tests.
+    b, rec = _prepared(tmp_path, monkeypatch, check=True,
+                       pressure_scale="none")
     r = b.baseline.engine["bistability"]
     assert r["checked"] is True and r["bistable"] is False
     assert r["outcome"] == "single" and r["extra_solves"] == 1

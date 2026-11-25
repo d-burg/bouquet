@@ -446,17 +446,26 @@ DEFAULT_PARAMS = dict(log_strength=None, f=0.37, s_bs=1.0, s_cd=1.0, s_pfast=1.0
                       a_corr=(0.0, 0.0, 0.0), ip_rel=0.0)
 
 
+#: The range of the pressure factor ``s_press`` outside which a result is FLAGGED as a likely problem in its inputs
+#: (the kinetic profiles, the fast-ion pressure or the measurements): 1 +- 0.10.  PROVISIONAL, pending more data.
+PRESSURE_FACTOR_FLAG_RANGE = (0.90, 1.10)
+
+
 def pressure_factor_record(s_press):
     """The record of the pressure factor ``s_press``, kept with every assembly, fit and written pressure.
 
     ``value``: equilibrium pressure / kinetic pressure (thermal + scaled fast-ion), the same at every radius;
-    ``applied``: whether it differs from 1.  At a value other than 1 the equilibrium's pressure is NOT the pressure
+    ``applied``: whether it differs from 1; ``flagged``: whether it lies outside :data:`PRESSURE_FACTOR_FLAG_RANGE`
+    (a likely problem in the inputs; the range is provisional and the flag steers nothing).  At a value other than 1 the equilibrium's pressure is NOT the pressure
     of the kinetic profiles: the profiles (and the bootstrap current and conductivity computed from them) are as
     given, and only the pressure of the force balance carries the factor."""
     s = float(s_press)
     if not (np.isfinite(s) and s > 0):
         raise ModelFailure(f"the pressure factor s_press must be finite and > 0, got {s_press!r}")
-    return dict(value=s, applied=bool(s != 1.0),
+    lo, hi = PRESSURE_FACTOR_FLAG_RANGE
+    return dict(value=s, applied=bool(s != 1.0), flagged=bool(s < lo or s > hi), flag_range=[float(lo), float(hi)],
+                flag_note="outside the range: a likely problem in the inputs (kinetic profiles, fast-ion pressure or "
+                          "measurements); the range is PROVISIONAL, pending more data; the flag steers nothing",
                 definition="equilibrium pressure / kinetic pressure (thermal + scaled fast-ion), uniform in radius",
                 scaled=["pressure of the force balance", "pressure-gradient term of <j_phi>"],
                 not_scaled=["n_e", "T_e", "n_i", "T_i", "impurity density", "fast-ion pressure and density",

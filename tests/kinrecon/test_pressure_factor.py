@@ -36,6 +36,13 @@ def test_the_record_names_what_is_scaled_and_what_is_not():
     assert "bootstrap current" in r["not_scaled"] and "T_e" in r["not_scaled"] and "n_e" in r["not_scaled"]
     assert "pressure of the force balance" in r["scaled"]
     assert "differs from the pressure of the kinetic profiles" in r["note"]
+    # the flag: outside 1 +- 0.10 (provisional), a record that steers nothing
+    assert CM.PRESSURE_FACTOR_FLAG_RANGE == (0.90, 1.10)
+    assert r1["flagged"] is False and r["flagged"] is False and r["flag_range"] == [0.90, 1.10]
+    assert "PROVISIONAL" in r["flag_note"]
+    for v, flag in ((0.90, False), (1.10, False), (0.899, True), (1.101, True), (1.15, True), (0.85, True)):
+        assert CM.pressure_factor_record(v)["flagged"] is flag, v
+    assert "provisional" in FIT.PARAMETERS["s_press"]["note"]
     for bad in (0.0, -1.0, float("nan"), float("inf")):
         with pytest.raises(CM.ModelFailure, match="pressure factor"):
             CM.pressure_factor_record(bad)

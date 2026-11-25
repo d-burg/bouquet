@@ -232,6 +232,7 @@ JACOBIAN_STEP_KINDS = ("consistent", "lagged")
 TEMPERATURE_FACTOR_SIGMA = 0.10
 #: Prior width of the pressure factor ``s_press`` (relative; a stated value, of the size of the combined systematic
 #: uncertainty of the kinetic pressure: density and temperature calibration, dilution, fast ions).
+#: PROVISIONAL, pending more data (as is the flag range, :data:`.current_model.PRESSURE_FACTOR_FLAG_RANGE`).
 PRESSURE_FACTOR_SIGMA = 0.10
 
 
@@ -252,7 +253,7 @@ PARAMETERS = {
                          "(thermal + scaled fast-ion); the kinetic profiles, the bootstrap current and the "
                          "conductivity are NOT scaled, so the equilibrium pressure and the kinetic pressure differ "
                          "by this factor; free by default in a single-slice fit; recorded with every result "
-                         "(pressure_factor)"),
+                         "(pressure_factor); the prior width is provisional, pending more data"),
     "s_cd": dict(prior=(1.0, DRIVEN_CURRENT_SCALE_SIGMA), bounds=(0.0, 3.0), step0=0.05, unit="1",
                  note="driven-current scale (prior width: sources.priors)"),
     "s_bs": dict(prior=(1.0, 0.5), bounds=(0.0, 3.0), step0=0.05, unit="1", note="bootstrap multiplier"),

@@ -100,18 +100,44 @@ Comparing its band with the l_i(3) and β_p bands shows how far the selected
 draws trade one against the other; that comparison is a result of each
 ensemble, not a property bouquet imposes.
 
+<a id="the-0-consistency-guard"></a>
+
 ## The σ=0 consistency guard
 
-The pipeline is designed so that at σ=0 (no kinetic perturbation) the output
-reproduces the reconstructed equilibrium to within reconstruction's own
-residual: l_i within ~0.5% of target, X-point within ~2 mm, boundary RMS
-~3–4 mm against the input g-file. This requires the recon-anchor solve in
-`perturb_kinetic_equilibrium` (replacing the seed-based inductive with
-reconstruction's `j_inductive_fit`) and a post-anchor l_i tolerance gate; see
+At σ=0 (every perturbation zero, bootstrap scale 1.0) a draw must reproduce
+the reconstruction. `Bouquet.verify_sigma0_consistency()` is the runnable
+check; what it runs depends on the route.
+
+**Default route (unified engine).** The check is one draw through `generate()`
+itself (`n=1`, every perturbation zero), archived to a temporary file, with
+the per-draw wall budget off. It passes when the draw is not rejected and
+every stage holds at the run's own, unchanged tolerances:
+
+- the loop stage: the first request bit-identical to the reconstruction's
+  stored request, the loop converged, its bootstrap within `jbs_rtol_j` /
+  `jbs_rtol_Ip` of the reconstruction's, `|Δl_i| <= jbs_tol_li` and
+  `|Δq0| <= jbs_tol_q0`;
+- the archived state (after the coil homotopy and the post-homotopy passes):
+  the same four bounds;
+- the archived geometry: coil drift within the hard coil bound the route
+  rejects at, and the LCFS RMS deviation within the in-spec boundary cut.
+
+The result's `stages` and `gates` entries carry each gated quantity with its
+value and bound; `tol_frac` is unused. The check costs one full draw and puts
+the solver state back afterwards. See
+[architecture.md §3.1](../architecture.md#31-what-a-draw-is) and
+[engine.md](engine.md).
+
+**Legacy route (`reconstruction_engine="legacy"`, deprecated).** The pipeline
+is designed so that at σ=0 the output reproduces the reconstructed equilibrium
+to within reconstruction's own residual: l_i within ~0.5% of target, X-point
+within ~2 mm, boundary RMS ~3–4 mm against the input g-file. This requires the
+recon-anchor solve in `perturb_kinetic_equilibrium` (replacing the seed-based
+inductive with reconstruction's `j_inductive_fit`) and a post-anchor l_i
+tolerance gate; see
 [architecture.md §3.3](../architecture.md#33-li-matching-recon-anchor--adaptive-gate).
 
-`Bouquet.verify_sigma0_consistency()` turns that design intent into a runnable
-check. It replays the exact per-draw pre-bootstrap sequence — state-anchor solve
+On that route `Bouquet.verify_sigma0_consistency()` replays the exact per-draw pre-bootstrap sequence — state-anchor solve
 at the baseline j_phi/pressure, `solve_with_bootstrap` on the baseline
 kinetics, toroidal conversion, axis-transition smoothing — and compares the
 resulting spike to `baseline.j_BS`:
@@ -124,8 +150,8 @@ b.generate()
 ```
 
 It returns `spike0`, `max_dev`, `rms_dev`, `max_dev_frac`, `psi_worst`, and
-`passed`, and costs one bootstrap solve (~1 min). That is the **legacy**
-(`jbs_self_consistent=False`) check; by default (the self-consistent loop)
+`passed`, and costs one bootstrap solve (~1 min). That is the legacy route's
+`jbs_self_consistent=False` check; with the self-consistent loop on
 `passed` means that an unperturbed draw, on every route the configuration
 can use, reproduces the one reconstruction state at the loop's tolerances
 (the `draw_route` block, with q0, q95 and the total-current profile reported
@@ -146,6 +172,12 @@ The fix mirrors the smoothing into the draw path so both share it; this guard
 is what keeps it from silently regressing.
 
 ## Bootstrap current treatment
+
+This section and the next describe the deprecated legacy route
+(`reconstruction_engine="legacy"`). On the default route the bootstrap is the
+Redl model evaluated by `physics.evaluate_jBS` inside the engine's own loop:
+see [The unified reconstruction engine](#the-unified-reconstruction-engine-reconstruction_engine-the-default)
+and [engine.md](engine.md).
 
 The per-draw bootstrap comes from TokaMaker's Sauter/Redl
 `solve_with_bootstrap`, whose output is already TokaMaker `jphi` (field-aligned

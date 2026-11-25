@@ -9,8 +9,8 @@ configured coil test AND the boundary cut AND the opt-in bands) and
 `coil_drift_in_spec` with the class-specific drift tolerances below; out-of-
 spec draws are still archived.
 
-The full source-cited tolerance budget, bound construction, and homotopy
-failure/rollback semantics are in
+Bound construction, the homotopy's failure and rollback semantics, the χ²
+test and the boundary cut are specified in
 [architecture.md §15](../architecture.md#15-coil-constraint-handling-diii-d-reference).
 This page is the user-facing summary plus the VSC drift metric, which is
 specific enough to warrant its own writeup.
@@ -32,7 +32,7 @@ specific enough to warrant its own writeup.
 |---|---|---|---|
 | Non-VSC F-coils | F1A–F8A, F1B–F8B | 35–180 kA | Tight relative drift (`FilterConfig.inspec_F_max`, default `0.02`) |
 | VSC pair | F9A, F9B | 35–50 kA | Channel-decomposed drift (`FilterConfig.inspec_VSC_max`, default `0.02`) — see below |
-| E-coils | ECOILA, ECOILB | 0.5–1 kA | Bounded by an absolute floor (`coil_drift_floor_A`, default 50 A) — excluded from `in_spec` because their small baselines make relative bounds engineering-meaningless |
+| E-coils | ECOILA, ECOILB | 0.5–1 kA | Bounded by an absolute floor (`coil_drift_floor_A`, default 50 A). The default χ² coil test judges them with every other coil; the legacy drift band (`coil_drift_in_spec`, `coil_filter="legacy"`) leaves them out because their small baselines make relative bounds engineering-meaningless |
 
 The **50 A floor** is calibrated to a realistic current-control tolerance
 budget: ~30–50 A power-supply ripple + ~30–50 A Rogowski/integrator noise +
@@ -48,8 +48,8 @@ zero-crossing** (e.g. F9A ≈ −16 kA while F9B ≈ +93 kA). The naive per-coil
 metric `|ΔI| / |I_baseline|` then divides a *benign* common-mode current by
 F9A's near-zero baseline and reports a spurious large drift — a 400 A
 common-mode reads as 2.4% on F9A but only 0.4% on F9B, falsely rejecting the
-draw. This is the same small-baseline pathology that excludes the E-coils
-above, and it silently tanks the in-spec yield on any peaked or
+draw. This is the same small-baseline pathology that keeps the E-coils out of
+the drift band above, and it silently tanks the in-spec yield on any peaked or
 vertically-unstable baseline.
 
 Bouquet therefore scores the VSC **selection** metric by decomposing the pair
@@ -99,9 +99,8 @@ binding constraint is instead the VSC power-supply **control authority** rather
 than measurement uncertainty, gate `|ΔI_cm|` against that amp budget directly —
 same structure, different number.
 
-> Note: [architecture.md §15.6](../architecture.md#15-coil-constraint-handling-diii-d-reference)
-> still describes the older naive per-coil formula for the VSC pair. This page
-> is the current behaviour.
+> [architecture.md §15.8](../architecture.md#158-the-legacy-drift-verdict-and-per-draw-attributes)
+> states the same channel decomposition in formula form.
 
 ## Progressive homotopy
 

@@ -107,7 +107,7 @@ the toy and a TokaMaker stand-in over it), `tests/test_one_conversion.py`
 | item | g-file adapter | IDS adapter |
 |---|---|---|
 | kinetics n_e, T_e, n_i, T_i, Z_eff | p-file / IDA, PCHIP onto the g-file ψ_N (as the legacy reconstruction) | core_profiles (or the IDA hybrid), as `read_imas_baseline` resolves them |
-| pressure | thermal + impurity + fast (fixed) | thermal + impurity + fast, **no `p_diff`** |
+| pressure | thermal `e(n_e T_e + n_i T_i)` + fast (fixed); the impurity-pressure term is zero on this route (the adapter looks for the impurity charge on `fixed_components`, which has no such field) | thermal + impurity + fast, **no `p_diff`** |
 | inductive (parallel) | `<j.B>_in = F p' + F'<B^2>/mu0` on the g-file's own traced surfaces (identity I0), minus Redl `<j.B>` on the anchor, minus the fixed parts; smoothed with a verbatim copy of `fit_inductive_profile`'s basis (spline + PCHIP, zero edge anchor, ≥ 0), **no amplitude search** | **the parallel residual by definition** (owner decision, 2026-10-02): `|B0| (j_total − j_bootstrap − Σ driven)` (IMAS `<j.B>/B0`), every driven entry the one held fixed below. The source's `j_ohmic` is a **cross-check**, not a choice: it is compared with the residual and the net (fraction of the total current) and rms (fraction of rms `j_total`) differences are stamped in `provenance["inductive_consistency"]` (action `"residual_by_definition"`; `"unchecked"` when the source has no `j_ohmic`), with no threshold and no warning. A source without `j_total` or `j_bootstrap` is refused (`inductive="j_ohmic"` uses its `j_ohmic` explicitly; there is no silent fallback). Evidence: on self-consistent sources the residual and `j_ohmic` are indistinguishable (`|Δl_i| ≤ 1.8e-3`); on sources whose own split is locally inconsistent the residual is closer to the source's `<j_phi>`. Explicit options (`IdsAdapter(inductive=...)`, passed by the engine from `GenerationConfig.engine_ids_inductive`, default `"residual"`): `"j_ohmic"` takes the source's, warning when the net mismatch exceeds `IdsAdapter(inductive_tol=0.02)` (2 % of the total current, owner-set); `"auto"` takes `j_ohmic` unless it is absent or misses by more than that tolerance, then the residual with a warning. Nothing in the source is altered |
 | fixed driven (parallel) | user `j_NBI` / `j_RF` (toroidal inputs), converted with the anchor's `F<1/R>/<B^2>` | the **driven** core_sources entries by their IMAS identifier (the data dictionary's `core_sources.source[:].identifier` enumeration; `adapters.IDS_DRIVEN_SOURCE_PARTS`), × `|B0|`, held fixed, by part: nbi (2) → `nbi`; ec / lh / ic (3, 4, 5) → `rf`; fusion (6), runaways (501), a model's sawteeth entry (701) → `other`. **Never added**: ohmic (7) and bootstrap (13) (the core_profiles `j_ohmic` / `j_bootstrap` stand for them), AGGREGATES -- total (1), auxiliary (100), the combinations 101-107, radiation (200), 202, 203 -- which would double-count their constituents, and a bootstrap-like `neoclassical` (401); each such entry carrying a non-zero `j_parallel` is listed in `provenance["ignored_sources"]` with its reason and warned about. An unknown index carrying a non-zero `j_parallel` is held fixed under `other` WITH a warning (`unclassified` in its `driven_sources` entry). The core_sources slice is the one nearest the core_profiles slice read and must lie within half the local core_profiles time-step of it, else the read is refused naming both times (`io.imas.core_sources_slice`, shared with the legacy reader; owner decision 2026-10-06). An entry carrying its own per-slice `time` is read at the core_sources slice time (a model's entry may start later than the IDS time base), not at the list index: its nearest own slice, accepted within half its own local time-step AND within half the local core_profiles step of the core_profiles slice time -- never interpolated; when neither time base has a local step (single-time bases, for the core_sources slice and for an entry alike) the window is 10 us (`io.imas.IMAS_SINGLE_TIME_WINDOW_S`, owner-approved 2026-10-07: a rounding-level mismatch of millisecond-stored times is a match, its dt recorded, and the rules below apply only beyond it); outside that window a driven entry carrying current on its own slices bracketing the time is refused, one carrying none there is off at that time (zero, listed in `provenance["off_sources"]`), and one whose own record begins AFTER the slice time is off before its record (zero, listed with `reason="off_before_record"` and its `first_own_time`, announced once per source file and entry); past its last own time an entry carrying current there is refused; one with a different slice count and no times is refused. Every match (both slice times, dt, the windows, the bracketing own times, the status) is in `provenance["source_time_match"]`. `provenance["driven_sources"]` lists what was added; a user override is converted as on the left. The delivered split reports `other` inside `j_RF`. The legacy reader (`read_imas_baseline`, which the engine runs first) reads every driven entry through this same call with the same arguments, so its refusals, `off_sources` stamps and announcements are the engine's; it records `driven_sources` / `ignored_sources` / `off_sources` / `sawteeth_hold` in `Baseline.source_time_match`. `ImasSource.hold_sawteeth=False` (legacy reader only: the sawteeth entry left in the residual inductive) is refused here |
 | boundary | g-file LCFS | equilibrium boundary outline (or `LCFS_geqdsk`) -- both held as the standard per-unit-length isoflux set (#84, below) |
@@ -174,10 +174,12 @@ geometry of the latest solve:
 <j_phi> = <j.B> F<1/R>/<B^2>  +  p' (<R> - F^2 <1/R>/<B^2>)
 ```
 
-The first term is the field-aligned conversion (c) of the verification report
-(the legacy `evaluate_jBS` output uses (a), `<j.B>/(F<1/R>)`, about 6 % high
-at the bootstrap peak; the engine takes the Redl `<j.B>` from the evaluator's
-diagnostics and converts it itself). The second term is the pressure-driven
+The first term is the field-aligned conversion (c) of the verification report,
+`kappa = F<1/R>/<B^2>`. `evaluate_jBS` has applied the same factor to its own
+toroidal output since evaluator version `/2`; version `/1` used (a),
+`<j.B>/(F<1/R>)`, about 6 % high at the bootstrap peak. The engine takes the
+Redl `<j.B>` from the evaluator's diagnostics and converts it itself, on the
+geometry of the latest solve. The second term is the pressure-driven
 toroidal current (diamagnetic + Pfirsch–Schlüter, zero `<j.B>`), recomputed
 every pass from that equilibrium's own `p'` and geometry (13–22 % of `<j_phi>`
 at ψ_N 0.9–0.97 on the synthetic examples). `F`, `<B^2>` come from the
@@ -186,9 +188,15 @@ evaluator's surfaces (`sauter_fc`), `<R>`, `<1/R>`, `<1/R^2>`, `V'`, `p'` from
 innermost-surface repair (`smooth_jbs_transition`) every SWB-derived profile
 receives.
 
-**The archived split** puts the pressure-driven term
-`p'(<R> - F^2<1/R>/<B^2>)` on `j_BS`, as IMAS `j_bootstrap`, the IMAS reader
-and `evaluate_jBS` do; `j_inductive` is the residual.
+**The archived split** stores the pressure-driven term
+`p'(<R> - F^2<1/R>/<B^2>)` as its own dataset, `j_pressure`
+(`schema.SPLIT_PRESSURE_SEPARATE`, stamped on each group as the
+`current_split_convention` attribute): neither `j_BS` nor `j_inductive`
+carries it. `j_BS` is the field-aligned `s_bs kappa <j.B>_BS` alone, as
+`evaluate_jBS`'s toroidal output, and the five datasets `j_inductive`, `j_BS`,
+`j_NBI`, `j_RF`, `j_pressure` sum to the solver's request exactly. An archive
+without the attribute predates it and carries the term in `j_inductive`
+(`schema.read_current_split_convention`).
 
 **Toroidal-flux runs (`coord="phi_n"`).** The contract's grid is the run grid
 (Φ_N). The backend tags every solve with it and samples each measurement's

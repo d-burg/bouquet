@@ -13,7 +13,8 @@ install it, and a working quickstart. These pages carry the depth.
 | [coil-constraints.md](coil-constraints.md) | Coil classes, the VSC channel drift metric, progressive homotopy, the `in_spec` criterion and per-draw attributes |
 | [io-and-plotting.md](io-and-plotting.md) | GEQDSK / p-file / IDA / IMAS readers and writers, COCOS conversion, the plotting catalogue |
 | [api-reference.md](api-reference.md) | Every public name, grouped by role |
-| [archive-schema.md](archive-schema.md) | The HDF5 archive layout (schema v2) |
+| [draw-methods.md](draw-methods.md) | The three ways a draw is made (`solve_method`: `"engine"`, the default; `"swb"`, experimental; `"legacy"`, deprecated) and the strategy object they share |
+| [archive-schema.md](archive-schema.md) | The HDF5 archive layout (schema v3) |
 | [gui-display-guide.md](gui-display-guide.md) | In-notebook plotting vs. the `plot-family` CLI |
 
 ## Reference and process
@@ -21,11 +22,12 @@ install it, and a working quickstart. These pages carry the depth.
 | Page | Contents |
 |---|---|
 | [../architecture.md](../architecture.md) | Physics assumptions, numerical approximations, coordinate/sign conventions, tolerance budgets, known limitations |
-| [flowchart/](flowchart/) | The rendered physics workflow and the 550-node interactive logic map ([view](https://d-burg.github.io/bouquet/flowchart/)) |
+| [current-conventions.md](current-conventions.md) | Toroidal and parallel current densities in TokaMaker and IMAS: the definitions and the exact conversions between them |
+| [flowchart/](flowchart/) | The rendered physics workflow and the 550-node interactive logic map ([view](https://d-burg.github.io/bouquet/flowchart/)); the logic map predates 1.4.0 and is marked stale there |
 | [CI.md](CI.md) | Fast vs. solver test tiers, the manual pre-merge gate, branch protection |
 | [CHANGES_SUMMARY.md](CHANGES_SUMMARY.md) | Historical change summaries by development round |
-| [validation-provenance.md](validation-provenance.md) | What 1.4.0 was validated on: the acceptance ladder's rungs, bars and verdicts, the synthetic ensembles, the goldens, the misses |
-| [known-limitations.md](known-limitations.md) | The known limitations of 1.4.0, each with its consequence and tracking issue |
+| [validation-provenance.md](validation-provenance.md) | What 1.4.0 was validated on: the acceptance ladder's rungs, bars and verdicts, the synthetic ensembles, the goldens, the misses (1.4.1 moved no default and no golden number) |
+| [known-limitations.md](known-limitations.md) | The known limitations the 1.4 releases ship with, each with its consequence and tracking issue |
 | [proposals/](proposals/) | Design proposals |
 
 ## Examples

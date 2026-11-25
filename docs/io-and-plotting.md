@@ -173,6 +173,19 @@ written with zero thermal density (an impurity of another charge is
 relabelled to `Z_imp`); the fast population is the template's.  The record
 sits under `bouquet_species_model` in `core_profiles.code.parameters`.
 
+An exported equilibrium carries one 2-D field, `profiles_2d[0].psi`, on the
+rectangular grid `grid.dim1 = R`, `grid.dim2 = Z`, indexed dim1 first as the
+data dictionary defines it: `psi[i_R][i_Z]`, the transpose of the g-file's
+`PSIRZ` (`[i_Z][i_R]`). bouquet's reader applies the inverse transpose, so an
+export that is read back gives the g-file array, and it refuses a `psi` whose
+shape is not `(len(dim1), len(dim2))`. **Exports written before 1.4.1 hold
+the g-file orientation under that grid, i.e. `psi` transposed (#101)**: on a
+square grid no shape error shows it, and an external reader gets the R and Z
+indices swapped. A consumer that read `profiles_2d` from such an export has
+to re-export with 1.4.1 or later. The 1-D profiles, `global_quantities`, the
+boundary and the flux-surface averages (`gm1`, `gm5`, `gm8`, `gm9`) were not
+affected. The template's other `profiles_2d` fields are not carried.
+
 Current-convention conversions are in `bouquet.physics`
 ([current-conventions.md](current-conventions.md)):
 `jtor_imas_to_jphi_tokamaker()` / `jphi_tokamaker_to_jtor_imas()`,

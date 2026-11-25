@@ -22,7 +22,7 @@ thermal integral.
 
 ``GenerationConfig.pressure_scale``: ``"match_W"`` (``s = s_W``; the
 unified-engine default), ``"none"`` (``s = 1``, ``s_W`` still reported; the
-1.4.1 numbers) or a positive float (that ``s``, ``s_W`` still reported).
+1.4.1 pressure level) or a positive float (that ``s``, ``s_W`` still reported).
 Under the legacy route and the experimental swb solve method the feature is
 not applied (an explicit non-default value is refused;
 :data:`bouquet.engine.ENGINE_DEPENDENT_DEFAULTS`).

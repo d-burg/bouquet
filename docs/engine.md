@@ -1403,7 +1403,7 @@ used. An IDS with none of these gives `s_W` unavailable: `s = 1` under
 |---|---|---|
 | `None` (default) | resolved at `prepare_baseline()`: `"match_W"` under `"unified"`, `"none"` under `"legacy"` / swb | |
 | `"match_W"` | `s_W` | reported |
-| `"none"` | 1 (the 1.4.1 numbers; A/B) | reported |
+| `"none"` | 1 (the 1.4.1 pressure level; A/B; the g-file route now also carries the impurity term) | reported |
 | float > 0 | that value | reported |
 
 `s` multiplies the TOTAL pressure handed to Grad-Shafranov
@@ -1436,9 +1436,10 @@ only what a scalar cannot fix (the shape); its unscaled numbers are kept in
 
 **What changed (the default move).** Every unified-engine reconstruction's
 pressure level now follows the input's stored energy: β, W, `P'`,
-`j_pressure` and the coil currents move with `s`. `"none"` reproduces the
-1.4.1 numbers; a stored unified config written before the setting reloads
-with `"none"` and says so.
+`j_pressure` and the coil currents move with `s`. `"none"` restores the
+1.4.1 pressure level (on the g-file route the impurity term, added in the
+same release, still differs); a stored unified config written before the
+setting reloads with `"none"` and says so.
 
 ## The pressure handed to the solver (`edge_pprime_pin`, `separatrix_pressure`)
 

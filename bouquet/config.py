@@ -1896,7 +1896,7 @@ class GenerationConfig:
     # "match_W": the Grad-Shafranov pressure is s_W x the kinetic assembly
     # (thermal + impurity + fast), so P' and j_pressure follow; the
     # kinetics, the Redl bootstrap, Z_eff and n_i are not scaled, and every
-    # draw carries the same s fixed.  "none": s = 1 (the 1.4.1 numbers;
+    # draw carries the same s fixed.  "none": s = 1 (the 1.4.1 level;
     # A/B).  A float > 0: that s.  Outside [1/1.2, 1.2] s_W WARNS (never
     # refuses), naming the likely cause.  None (default): resolved per
     # engine at prepare_baseline() (bouquet.engine.ENGINE_DEPENDENT_DEFAULTS):

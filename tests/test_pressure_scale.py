@@ -413,15 +413,49 @@ def test_an_archive_without_the_record_reads_as_one(tmp_path):
     assert r == dict(s=1.0, mode=None, record=None, recorded=False)
 
 
-def test_the_golden_archive_reads_as_s_one():
+def _golden_scan(path):
     from bouquet.archive import BouquetArchive
-    gold = os.path.join(_HERE, "golden", "D3Dlike_Hmode_golden_slim.h5")
+    ar = BouquetArchive(path)
+    keys = ar.scan_keys if hasattr(ar, "scan_keys") else None
+    return ar.scan(keys[0]) if keys else ar[0]
+
+
+@pytest.mark.parametrize("name", ["D3Dlike_Hmode_golden_slim.h5",
+                                  "D3Dlike_ids_golden_slim.h5"])
+def test_the_golden_archive_carries_its_scale_and_reads_as_one_without_it(
+        name, tmp_path):
+    """The h5 goldens are runs of the default (regenerated under the
+    feature): the baseline records its match_W scale (s = s_W) and every
+    draw carries that same s.  The same archive with the pressure-scale
+    attrs stripped (an archive written before the feature) reads as
+    s = 1, unrecorded."""
+    import shutil
+
+    import h5py
+    from bouquet.schema import (PRESSURE_SCALE_ATTR, PRESSURE_SCALE_JSON_ATTR,
+                                PRESSURE_SCALE_MODE_ATTR)
+    gold = os.path.join(_HERE, "golden", name)
     if not os.path.isfile(gold):
         pytest.skip("no golden archive")
-    ar = BouquetArchive(gold)
-    keys = ar.scan_keys if hasattr(ar, "scan_keys") else None
-    sc = ar.scan(keys[0]) if keys else ar[0]
+    sc = _golden_scan(gold)
+    b = sc.baseline_pressure_scale
+    assert b["recorded"] and b["mode"] == "match_W"
+    assert b["s"] == b["record"]["s"] == b["record"]["s_W"]
+    for d in list(sc)[:2]:
+        assert d.pressure_scale["recorded"]
+        assert d.pressure_scale["s"] == b["s"]
+    old = tmp_path / name
+    shutil.copyfile(gold, old)
+    with h5py.File(old, "r+") as hf:
+        def _strip(_n, obj):
+            for k in (PRESSURE_SCALE_ATTR, PRESSURE_SCALE_MODE_ATTR,
+                      PRESSURE_SCALE_JSON_ATTR):
+                if k in obj.attrs:
+                    del obj.attrs[k]
+        hf.visititems(_strip)
+    sc = _golden_scan(str(old))
     assert sc.baseline_pressure_scale["s"] == 1.0
     assert not sc.baseline_pressure_scale["recorded"]
     for d in list(sc)[:2]:
         assert d.pressure_scale["s"] == 1.0
+        assert not d.pressure_scale["recorded"]

@@ -118,8 +118,21 @@ def test_every_orientation_reads_the_same_contract(mirrors, o):
     for k in ("F", "pprime", "ffprime"):
         assert _rel(parts[k], parts0[k]) <= tol, k
     assert parts["frame_identity_max_rel"] < 1e-9
-    # Ip-even inputs are exact in every orientation
-    np.testing.assert_array_equal(c.pressure, ref.pressure)
+    # Ip-even inputs are exact in every orientation: every pressure PART
+    for k in ("thermal", "impurity", "fast", "kinetic"):
+        np.testing.assert_array_equal(c.pressure_parts[k],
+                                      ref.pressure_parts[k], err_msg=k)
+    # the stored-energy pressure scale s_W = W_input / W_kinetic is formed
+    # with the reader's volume_integral on its TRACED surfaces; the
+    # Ip-reversed mirrors re-trace the negated psi_RZ (the _TRACE level
+    # above), so s -- and the scaled total s x kinetic -- is exact for the
+    # Ip-even orientations and within _TRACE for the Ip-reversed ones
+    s, s0 = c.pressure_parts["scale"], ref.pressure_parts["scale"]
+    assert abs(s - s0) <= tol * abs(s0)
+    if tol == 0.0:
+        np.testing.assert_array_equal(c.pressure, ref.pressure)
+    else:
+        assert _rel(c.pressure, ref.pressure) <= tol
     np.testing.assert_array_equal(c.boundary, ref.boundary)
     assert c.Ip == ref.Ip > 0.0
     assert c.rows["q0"]["target"] == ref.rows["q0"]["target"] > 0.0

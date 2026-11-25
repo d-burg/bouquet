@@ -1,5 +1,63 @@
 # Bouquet — change summaries
 
+## Unreleased (1.5) — the stored-energy pressure scale, on by default; the g-file impurity pressure
+
+**The default moves.** Every unified-engine reconstruction's numbers change:
+its Grad-Shafranov pressure is now scaled to the input's stored energy, so
+β, W, `P'`, `j_pressure` and the coil currents move with the scale `s`, and
+the draws move with it. The golden numbers will be regenerated in a later
+stage of this change; until then the golden tests that compare them are
+expected to fail. `pressure_scale="none"` reproduces the 1.4.1 numbers
+(apart from the g-file impurity term below).
+
+- **`GenerationConfig.pressure_scale` (owner decision 2026-11-24).**
+  `s_W = W_input / W_kinetic`, `W = 1.5 ∫ p dV` of the full pressure
+  (separatrix pressure included) on the input's own flux-surface volumes
+  (g-file `PRES` with the reader's `volume_integral`; IDS
+  `equilibrium.profiles_1d.pressure` with its own volume), is always
+  computed before the first solve (no extra solve) and reported. The
+  default (`None`, resolved at `prepare_baseline()`) is `"match_W"` under
+  the unified engine: the total Grad-Shafranov pressure is `s_W` x the
+  kinetic assembly; the kinetics, the Redl bootstrap, Z_eff and n_i are not
+  scaled. `"none"` gives `s = 1`; a float gives that `s`; `s_W` is reported
+  in every mode. Every draw carries the reconstruction's `s` fixed; the
+  draws' pressure match stays on the unscaled thermal integral and the σ=0
+  check passes unchanged (no gate or tolerance changed). Outside
+  `[1/1.2, 1.2]` one UserWarning names the likely cause (no fast-ion
+  pressure supplied; a missing component; or, low, kinetics above the
+  input); never a refusal. The legacy route and the swb solve method do not
+  apply it: their default is accepted and an explicit other value refused.
+  A stored unified config without the field reloads as `"none"`, with a
+  warning. Why: on 17 real cases (no solves) IDA-only runs without a
+  fast-ion pressure had `W_input / W_kinetic` = 1.18-1.72 (typically
+  1.24), i.e. the baseline and draws sat that much low in stored energy.
+- **A scalar fixes the level, not the shape.** The record carries the shape
+  residual after scaling, and the g-file route's report-only
+  pressure-fidelity check is now computed on the scaled pressure (its
+  10 % band and report-only status unchanged; the unscaled numbers are kept
+  in `pressure_fidelity["unscaled"]`) ([known-limitations.md](known-limitations.md)).
+- **g-file route: the thermal impurity pressure is now in the solve.** The
+  adapter looked for the impurity charge on `FixedComponentsConfig`, which
+  has no such field, so `e n_z T_i` was zero in the reconstruction and every
+  draw (about 2 % of the thermal pressure for carbon at Z_eff = 2). It now
+  uses `ReconstructionSource.impurity_Z`, the charge of the source's
+  Z_eff ↔ n_i mapping, in the reconstruction and every draw. A p-file whose
+  ion footer names another impurity charge is warned about. The legacy route
+  is unchanged.
+- **Archive (schema v3, additive).** `pressure_scale` on `_baseline` and on
+  every engine draw, `pressure_scale_mode` and `pressure_scale_json` (the
+  full record) on `_baseline`; an archive written before reads as `s = 1`
+  (`schema.read_pressure_scale`, `DrawView.pressure_scale`,
+  `ScanView.baseline_pressure_scale`). The `pressure` dataset is the solved
+  (scaled) pressure; `pressure_thermal` stays unscaled
+  ([archive-schema.md](archive-schema.md)).
+- **The IMAS reader's pressure backstop message** no longer says that
+  nothing absorbs the gap under the default: the message now describes both
+  engines (no threshold change).
+- **Summary.** The reconstruction summary prints `s_W`, both W, the shape
+  residual and the mode (the IDS route prints the same line at
+  `prepare_baseline()`).
+
 ## Unreleased — documentation brought to 1.4.1 (no code change)
 
 Documentation and example outputs only. No code, default, test or golden

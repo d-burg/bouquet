@@ -867,8 +867,9 @@ frozen-copy tests). Since 2026-10-02 the default of `separatrix_pressure` is
 | `separatrix_pressure` | `"offset"`: the axis target is `p_axis - p_sep`, and `p_sep` is added back wherever pressure, beta or stored energy is reported or delivered | `"legacy"` (pre-change): the axis target is the full axis pressure `p_axis` |
 
 `p_sep` is the pressure handed to the solver at its last node -- the TOTAL
-solve pressure (thermal + impurity + fast, and the pressure anchor where a
-path uses one), defined once in `edge_pressure.separatrix_pressure_of`. Each
+solve pressure (thermal + impurity + fast, times the unified engine's
+stored-energy pressure scale `s`, and the pressure anchor where a legacy path
+uses one), defined once in `edge_pressure.separatrix_pressure_of`. Each
 draw uses its own, from its own perturbed pressure.
 
 **What `"legacy"` does when `p_sep` is not zero.** The solver's pressure is

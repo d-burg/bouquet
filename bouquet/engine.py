@@ -594,9 +594,11 @@ ENGINE_UNREAD_LEGACY_FIELDS = {
     "structured_li_max_corrector_steps": "engine_li_row_relaxation (the "
                                          "engine iterates the l_i row inside "
                                          "the loop)",
-    "anchor_pressure_to_equilibrium": "nothing: the engine's pressure is "
-                                      "kinetic + impurity + fast, with no "
-                                      "p_diff",
+    "anchor_pressure_to_equilibrium": "pressure_scale: the engine's "
+                                      "pressure is s x (kinetic + impurity "
+                                      "+ fast), with no p_diff (s matches "
+                                      "the input's stored energy by "
+                                      "default)",
     "imas_corrective_jphi": "engine_delivery_correction (the engine's "
                             "remedy for the jphi-linterp delivery defect)",
     "jbs_loop_q0_corrector": "engine_rows with 'q0' (engine_draw_q0_row "

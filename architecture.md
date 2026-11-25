@@ -345,6 +345,7 @@ Default route:
 | n_e, T_e, T_i | yes | Gaussian-process draws, pressure-matched |
 | Z_eff | yes | on by default for every source; `zeff_scalar_sigma=0.0` turns it off |
 | n_i, n_z | derived | quasi-neutrality with the drawn Z_eff ([§4](#4-quasi-neutrality-and-impurity-handling)) |
+| pressure level `s` | fixed | the reconstruction's stored-energy scale, never resampled ([§7.1](#71-the-solve-pressure)) |
 | solve pressure | recomputed | from the drawn kinetics; fixed `p_fast` added |
 | bootstrap current | recomputed | Redl on each solved state, self-consistent ([§5.3](#53-the-bootstrap-model)) |
 | inductive current | yes | one Gaussian-process candidate; its amplitude closes I_p |
@@ -727,9 +728,30 @@ footer names an impurity of another charge is warned about. (The deprecated
 legacy g-file reconstruction, `baseline.py`, still omits the term: it reads
 Z_imp from `FixedComponentsConfig`, which has no such field.)
 
+**The pressure level: the stored-energy scale `s`** (`pressure_scale.py`,
+`GenerationConfig.pressure_scale`; owner decision 2026-11-24). The pressure
+handed to Grad-Shafranov is
+
+```
+p_GS = s (e (n_e T_e + n_i T_i) + p_imp + p_fast)
+s_W  = W_input / W_kinetic,   W = 1.5 ∫ p dV     (full pressure, the input's own volumes)
+```
+
+with `s = s_W` under the default `"match_W"`, 1 under `"none"`, or a fixed
+float. `W_input` is the g-file's `PRES` (reader `volume_integral`) or the
+IDS's `equilibrium.profiles_1d.pressure` (its own `volume`), `W_kinetic` the
+bracket above on the same nodes; both are computed before the first solve.
+`s` scales `P'`, β, W and `j_pressure`; the kinetics, the Redl bootstrap,
+Z_eff and n_i are not scaled. The legacy route and the swb solve method
+never apply it ([engine.md](docs/engine.md#the-stored-energy-pressure-scale-pressure_scale)).
+
 A draw's pressure is the contract's in increment form, `base + (drawn - base)`
-per part (`EngineDrawContext.pressures`). The archive stores the solve
-pressure as `pressure` and `e (n_e T_e + n_i T_i)` as `pressure_thermal`.
+per part, times the reconstruction's `s`, carried fixed:
+`s (p_kin* + Δp)` (`EngineDrawContext.pressures`); its pressure match is on
+the unscaled thermal pressure. The archive stores the solve pressure (scaled)
+as `pressure`, `e (n_e T_e + n_i T_i)` (unscaled) as `pressure_thermal`, and
+`s` as the group attr `pressure_scale` (`schema.read_pressure_scale`; absent
+reads as 1).
 
 ### 7.2 Separatrix pressure and the edge P' pin
 

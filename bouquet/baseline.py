@@ -124,6 +124,12 @@ class Baseline:
     p_equilibrium: Optional["np.ndarray"] = None
     p_diff: Optional["np.ndarray"] = None
     Z_imp: Optional[float] = None
+    # The unified engine's stored-energy pressure scale record (bouquet.
+    # pressure_scale; owner decision 2026-11-24): s, s_W = W_input /
+    # W_kinetic, both W and the kinetic parts, the shape residual, the warn
+    # flag.  The engine's solve pressure (pres_tokamaker, the archived
+    # `pressure`) is s x the kinetic assembly; None off the engine.
+    pressure_scale: Optional[dict] = None
     # Fast-ion charge density sum_s Z_s n_s^fast [m^-3] on the KINETIC grid
     # (IMAS path; None elsewhere).  Fixed across draws, like p_fast: the
     # thermal impurity math (Z_imp above, nz, p_imp, the Zeff-primary ni
@@ -2186,7 +2192,7 @@ def pressure_fidelity_record(psi_N, p_full, p_input, *,
 
 def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved,
                             l_i_realized_post_corrective=None,
-                            edge_pressure=None) -> dict:
+                            edge_pressure=None, pressure_scale=None) -> dict:
     """Curate a TokaMaker-vs-EFIT reconstruction-fidelity dict for the summary.
 
     Each global scalar that isn't ~0 by construction (Ip, l_i, q0/q95, beta,
@@ -2318,10 +2324,20 @@ def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved,
         _p_sep = float((_edge_rec or {}).get("p_sep_applied") or 0.0)
         # warned where the summary is printed (Bouquet.prepare_baseline),
         # outside the captured solver output
-        _pfid = pressure_fidelity_record(
-            _ps, _p_sol + _p_sep,
-            np.interp(_ps, _psiN_eq, np.asarray(eqdsk.pres, dtype=float)),
-            warn=False)
+        _p_in = np.interp(_ps, _psiN_eq, np.asarray(eqdsk.pres, dtype=float))
+        _pfid = pressure_fidelity_record(_ps, _p_sol + _p_sep, _p_in,
+                                         warn=False)
+        # under the unified engine's pressure scale s (bouquet.
+        # pressure_scale) the solved pressure is s x the kinetic one: the
+        # record above is on the SCALED pressure (what a scalar cannot fix:
+        # the shape), and the unscaled numbers are kept beside it
+        if pressure_scale is not None:
+            _s = float(pressure_scale)
+            _pfid["pressure_scale"] = _s
+            _pfid["frame"] = ("full (p_sep added back), the solved pressure "
+                              "= s x kinetic")
+            _pfid["unscaled"] = pressure_fidelity_record(
+                _ps, (_p_sol + _p_sep) / _s, _p_in, warn=False)
     except Exception as exc:     # report-only: recorded, never raised
         _pfid = dict(report_only=True,
                      error=f"{type(exc).__name__}: {exc}")

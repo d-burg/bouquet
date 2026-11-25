@@ -192,6 +192,13 @@ ENGINE_FIELD_DEFAULTS = {
     # the homotopy branch guard, a diagnostic for bistable equilibria (#87; opt-in,
     # bouquet.homotopy_guard): False = the guard does not exist
     "guard_bistability": False,
+    # the stored-energy pressure scale (bouquet.pressure_scale; owner
+    # decision 2026-11-24): None = resolved per engine at prepare_baseline()
+    # (ENGINE_DEPENDENT_DEFAULTS: "match_W" under "unified"); under
+    # "legacy" (and the swb solve method, which runs on it) its default is
+    # unset or "none" (the value it resolves to there), and anything else is
+    # refused: the feature is not applied there
+    "pressure_scale": None,
 }
 
 
@@ -358,12 +365,18 @@ def validate_engine_settings(gc) -> None:
                    and not (k in ENGINE_DEPENDENT_DEFAULTS and k in mine
                             and _same_value(v, mine[k][2]))]
         if changed:
+            extra = ""
+            if "pressure_scale" in changed:
+                extra = (f" (pressure_scale={vals['pressure_scale']!r}: the "
+                         "stored-energy pressure scale is applied by the "
+                         "unified engine only -- not on the legacy route nor "
+                         "the swb solve method; leave it unset, or 'none')")
             raise ValueError(
                 f"generation.{', '.join(changed)} set with "
                 "reconstruction_engine='legacy': these configure the unified "
                 "engine only and would have no effect; set "
                 "reconstruction_engine='unified' or leave them at their "
-                "defaults")
+                "defaults" + extra)
         return
     preset = vals["engine_preset"]
     if preset not in ENGINE_PRESETS:
@@ -415,6 +428,8 @@ def validate_engine_settings(gc) -> None:
         raise ValueError(f"generation.check_bistability must be a bool, or "
                          f"None (resolved per engine: True under 'unified'), "
                          f"got {_cb!r}")
+    from .pressure_scale import check_pressure_scale_setting
+    check_pressure_scale_setting(vals["pressure_scale"])
     _gb = vals["guard_bistability"]
     if not isinstance(_gb, (bool, np.bool_)):
         raise ValueError(f"generation.guard_bistability must be a bool, got "
@@ -654,7 +669,19 @@ ENGINE_DEPENDENT_DEFAULTS = {
     # "not applicable" (validate_engine_settings refuses only an explicit
     # True under "legacy")
     "check_bistability": {"unified": True, "legacy": False},
+    # the stored-energy pressure scale (bouquet.pressure_scale; owner
+    # decision 2026-11-24): on by default under "unified"; not applied under
+    # "legacy" (nor swb, which runs on it): "none" there, an explicit other
+    # value refused (validate_engine_settings)
+    "pressure_scale": {"unified": "match_W", "legacy": "none"},
 }
+
+#: :data:`ENGINE_DEPENDENT_DEFAULTS` fields whose explicit alternatives are
+#: supported OPTIONS of the unified engine (an A/B or a fixed value), not a
+#: configuration it was not validated with: an explicit value that differs
+#: from the resolved default is recorded (``engine_validated`` in the
+#: resolution record) and NOTED, not warned.
+ENGINE_DEPENDENT_OPTIONS = frozenset(("pressure_scale",))
 
 #: :data:`ENGINE_DEPENDENT_DEFAULTS` fields that switch a DIAGNOSTIC only:
 #: an explicit value that differs from the engine's resolved one changes no
@@ -742,7 +769,14 @@ def resolve_engine_defaults(config, *, stacklevel=2) -> dict:
             continue
         mine.pop(name, None)
         rec[name] = {"value": v, "origin": "explicit"}
-        if not _same_value(v, want) and name in ENGINE_DEPENDENT_DIAGNOSTICS:
+        if not _same_value(v, want) and name in ENGINE_DEPENDENT_OPTIONS:
+            # a supported option chosen explicitly (pressure_scale="none" or
+            # a fixed s under "unified"): kept and recorded
+            rec[name]["engine_validated"] = want
+            print(f"NOTE: generation.{name}={v!r} (explicit; "
+                  f"reconstruction_engine={eng!r} resolves it to {want!r}): "
+                  "kept -- a supported option", flush=True)
+        elif not _same_value(v, want) and name in ENGINE_DEPENDENT_DIAGNOSTICS:
             # a diagnostic switched explicitly (a stored config's value
             # included): kept and recorded, no result depends on it
             rec[name]["engine_validated"] = want
@@ -3095,7 +3129,10 @@ def _gfile_baseline(bq, eng, res, rec, ad, iso_pts, iso_w):
                                       l_i_realized_post_corrective=float(
                                           m["li"]),
                                       edge_pressure=eng.s.get(
-                                          "edge_pressure"))
+                                          "edge_pressure"),
+                                      pressure_scale=float(
+                                          c.pressure_parts.get("scale",
+                                                               1.0)))
     loop_rec = dict(delivered_loop_record(rec))
     loop_rec["converged"] = bool(res["converged"])
     if not res["converged"]:
@@ -3156,7 +3193,23 @@ def _gfile_baseline(bq, eng, res, rec, ad, iso_pts, iso_w):
     from .schema import SPLIT_PRESSURE_SEPARATE
     bl.j_pressure = P
     bl.current_split_convention = SPLIT_PRESSURE_SEPARATE
+    _stamp_pressure_scale(bl, c, rec)
     return bl
+
+
+def _stamp_pressure_scale(bl, c, rec):
+    """The contract's pressure-scale record (bouquet.pressure_scale) on the
+    baseline (``Baseline.pressure_scale``) and in its engine record."""
+    ps = (c.provenance or {}).get("pressure_scale")
+    if ps is None:
+        return
+    from .jbs_loop import jsonable
+    ps = jsonable(dict(ps))
+    bl.pressure_scale = ps
+    if isinstance(rec, dict):
+        rec["pressure_scale"] = ps
+    if isinstance(getattr(bl, "engine", None), dict):
+        bl.engine["pressure_scale"] = ps
 
 
 def _ids_baseline(bq, eng, res, rec, bl_src):
@@ -3211,6 +3264,7 @@ def _ids_baseline(bq, eng, res, rec, bl_src):
     bl.jphi_request_offset = offset
     bl.engine = rec
     bl.edge_pressure = rec.get("edge_pressure")
+    _stamp_pressure_scale(bl, c, rec)
     return bl
 
 
@@ -3888,7 +3942,16 @@ def prepare_engine_baseline(bq):
         if bl.reconstruction_metrics is not None:
             bq._flag_nonconverged_recon_loop()
             bq._print_reconstruction_summary()
-        elif not res["converged"]:
+        else:
+            # the IDS baseline prints no reconstruction summary: its pressure
+            # scale line and warning here (bouquet.pressure_scale)
+            from .pressure_scale import summary_line, warn_pressure_scale
+            _ps = getattr(bl, "pressure_scale", None)
+            if _ps is not None:
+                print(f"[engine] pressure scale: {summary_line(_ps)}",
+                      flush=True)
+                warn_pressure_scale(_ps)
+        if bl.reconstruction_metrics is None and not res["converged"]:
             # the IDS baseline records it on ip_closure / li_metrics (closure
             # health); warned here as loudly as _flag_nonconverged_recon_loop
             # does for a g-file baseline

@@ -99,8 +99,12 @@ def test_every_stored_unified_config_loads_with_what_it_ran_with(sha):
         # one-line note of the 2026-10-14 in-spec rule (its l_i_tolerance at
         # the old default 0.05 loads as None: the band off)
         _rule = [m for m in msgs if "2026-10-14 in-spec rule" in m]
+        # ... and generation.pressure_scale (2026-11-24): it replays with
+        # "none", the unscaled pressure it ran with, said exactly once
+        _psc = [m for m in msgs if "generation.pressure_scale" in m]
+        assert len(_psc) == 1 and g.pressure_scale == "none"
         assert [m for m in msgs if "eps_definition" not in m
-                and m not in _rule] == []
+                and m not in _rule and m not in _psc] == []
         assert len([m for m in msgs if "eps_definition" in m]) == 1
         assert g.eps_definition == "r_over_R_geo"
         assert len(_rule) == 1 and stored["l_i_tolerance"] == 0.05

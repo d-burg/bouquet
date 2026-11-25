@@ -191,6 +191,16 @@ class DrawView:
         a = self.attrs
         return bool(a[JBS_CONVERGED_ATTR]) if JBS_CONVERGED_ATTR in a else None
 
+    @property
+    def pressure_scale(self) -> dict:
+        """The group's stored-energy pressure scale
+        (:func:`bouquet.schema.read_pressure_scale`: ``s``, ``mode``,
+        ``record``, ``recorded``); ``s = 1.0`` for an archive written before
+        the feature.  The archived ``pressure`` is ``s`` times the kinetic
+        assembly."""
+        from .schema import read_pressure_scale
+        return read_pressure_scale(self.attrs)
+
     # ---- profiles / bytes --------------------------------------------------
     @property
     def profiles(self) -> dict:
@@ -448,6 +458,13 @@ class ScanView:
             raise KeyError(f"scan {self.scan_key!r} was refused before any "
                            f"baseline was stored: {why}")
         return load_baseline_profiles(self._ar.path, scan_key=self.scan_key)
+
+    @property
+    def baseline_pressure_scale(self) -> dict:
+        """The baseline's stored-energy pressure scale and its record
+        (:func:`bouquet.schema.read_pressure_scale`; ``s = 1.0`` for an
+        archive written before the feature)."""
+        return self.baseline_view().pressure_scale
 
     @property
     def baseline_jbs_loop(self) -> Optional[dict]:

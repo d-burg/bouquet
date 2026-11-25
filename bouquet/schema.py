@@ -450,3 +450,53 @@ def read_profile(grp, name):
     if name not in grp:
         return None
     return np.array(grp[name], dtype=float)
+
+
+# ---- the stored-energy pressure scale (additive within v3) -----------------
+#: Group attr (draw and ``_baseline``): the pressure scale ``s`` the group's
+#: Grad-Shafranov pressure carries (``bouquet.pressure_scale``; owner
+#: decision 2026-11-24).  The archived ``pressure`` dataset IS the solved
+#: pressure, ``s x (thermal + impurity + fast)``; ``pressure_thermal`` stays
+#: the UNSCALED ``e (n_e T_e + n_i T_i)``, and ``pressure / s`` is the
+#: kinetic assembly.  Absent (an archive written before the feature, or the
+#: legacy / swb routes): ``s = 1``.
+PRESSURE_SCALE_ATTR = "pressure_scale"
+#: ``_baseline`` attr: the mode it ran with (``"match_W"``, ``"none"`` or
+#: ``"fixed"``).
+PRESSURE_SCALE_MODE_ATTR = "pressure_scale_mode"
+#: ``_baseline`` attr: the full record as JSON (``s``, ``s_W``, ``W_input_J``,
+#: ``W_kinetic_J`` and its parts, the shape residuals, the warn flag and
+#: cause, the volume source; ``bouquet.pressure_scale.pressure_scale_record``).
+PRESSURE_SCALE_JSON_ATTR = "pressure_scale_json"
+
+
+def read_pressure_scale(attrs) -> dict:
+    """The pressure scale of a group's *attrs* (draw or ``_baseline``):
+    ``dict(s, mode, record, recorded)``.  A group written before the feature
+    (or by a route that never applies it) reads as ``s = 1.0``, ``mode =
+    None``, ``record = None``, ``recorded = False`` -- never an error."""
+    import json
+    a = dict(attrs)
+    rec = None
+    raw = a.get(PRESSURE_SCALE_JSON_ATTR)
+    if raw is not None:
+        try:
+            rec = json.loads(raw.decode() if isinstance(raw, bytes)
+                             else str(raw))
+        except (TypeError, ValueError):
+            rec = None
+    s = a.get(PRESSURE_SCALE_ATTR)
+    if s is None and isinstance(rec, dict):
+        s = rec.get("s")
+    recorded = s is not None
+    try:
+        s = 1.0 if s is None else float(s)
+    except (TypeError, ValueError):
+        s = 1.0
+    mode = a.get(PRESSURE_SCALE_MODE_ATTR)
+    if mode is None and isinstance(rec, dict):
+        mode = rec.get("mode")
+    if isinstance(mode, bytes):
+        mode = mode.decode()
+    return dict(s=s, mode=(None if mode is None else str(mode)),
+                record=rec, recorded=bool(recorded))

@@ -1888,6 +1888,22 @@ class GenerationConfig:
     # not exist there; an explicit True is refused).  An explicit value --
     # a stored config's included -- is kept.
     check_bistability: Optional[bool] = None
+    # The stored-energy pressure scale (unified engine only; bouquet.
+    # pressure_scale, owner decision 2026-11-24).  s_W = W_input / W_kinetic,
+    # W = 1.5 int p dV of the FULL pressure on the input's own flux-surface
+    # volumes (g-file PRES; IDS equilibrium.profiles_1d.pressure), is ALWAYS
+    # computed and reported (before the first solve; no extra solve).
+    # "match_W": the Grad-Shafranov pressure is s_W x the kinetic assembly
+    # (thermal + impurity + fast), so P' and j_pressure follow; the
+    # kinetics, the Redl bootstrap, Z_eff and n_i are not scaled, and every
+    # draw carries the same s fixed.  "none": s = 1 (the 1.4.1 numbers;
+    # A/B).  A float > 0: that s.  Outside [1/1.2, 1.2] s_W WARNS (never
+    # refuses), naming the likely cause.  None (default): resolved per
+    # engine at prepare_baseline() (bouquet.engine.ENGINE_DEPENDENT_DEFAULTS):
+    # "match_W" under "unified", "none" under "legacy" and the swb solve
+    # method, where the feature is not applied (an explicit other value is
+    # refused there).
+    pressure_scale: Union[str, float, None] = None
     # An opt-in EXPERIMENTAL DIAGNOSTIC for bistable equilibria (#87, still
     # open; unified engine draws only; default False).  It watches the coil-
     # homotopy stages ONLY: a stage whose solve moves the magnetic axis more
@@ -3200,6 +3216,11 @@ FIELD_PRE_INTRODUCTION = {
     # config without it was not written by to_dict()
     "engine_mse_jacobian": (None, "a unified config without it was not "
                                   "written by to_dict()"),
+    # introduced 2026-11-24 (bouquet 1.5) with "match_W" the unified
+    # default: a unified run before it solved the unscaled kinetic pressure
+    "pressure_scale": (
+        "none", "the unified engine solved the unscaled kinetic pressure "
+                "before the setting existed (bouquet <= 1.4.1)"),
     # the post-homotopy pass ceiling was the constant 2 before the field
     # (introduced 2026-09-27 at 4, then 6 on 2026-10-01)
     "jbs_max_passes_post_homotopy": (
@@ -3227,7 +3248,8 @@ FIELD_PRE_INTRODUCTION = {
 #: :data:`FIELD_PRE_INTRODUCTION` entries that only exist on the unified
 #: engine (a legacy config must keep them at their defaults --
 #: ``validate_engine_settings`` refuses otherwise).
-_ENGINE_ONLY_PRE_INTRODUCTION = ("engine_ids_inductive", "engine_mse_jacobian")
+_ENGINE_ONLY_PRE_INTRODUCTION = ("engine_ids_inductive", "engine_mse_jacobian",
+                                 "pressure_scale")
 
 #: :data:`FIELD_PRE_INTRODUCTION` entries of the self-consistent loop: back-
 #: filled only for a config that ran the loop (``jbs_self_consistent``); on

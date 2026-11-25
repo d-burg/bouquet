@@ -470,6 +470,10 @@ def pressure_factor_record(s_press):
                 scaled=["pressure of the force balance", "pressure-gradient term of <j_phi>"],
                 not_scaled=["n_e", "T_e", "n_i", "T_i", "impurity density", "fast-ion pressure and density",
                             "bootstrap current", "conductivity"],
+                pedestal_note="the factor is uniform in radius: the pedestal pressure and its gradient carry it, while "
+                              "the edge bootstrap current is computed from the unscaled profiles; a pedestal "
+                              "stability analysis should be made with and without the factor, and a flagged result "
+                              "should not be used for one before its inputs are checked",
                 note=("the equilibrium pressure equals the kinetic pressure" if s == 1.0 else
                       "the equilibrium pressure differs from the pressure of the kinetic profiles by this factor; "
                       "it measures the mismatch between the kinetic pressure and the magnetic measurements and "

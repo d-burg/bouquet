@@ -36,6 +36,8 @@ def test_the_record_names_what_is_scaled_and_what_is_not():
     assert "bootstrap current" in r["not_scaled"] and "T_e" in r["not_scaled"] and "n_e" in r["not_scaled"]
     assert "pressure of the force balance" in r["scaled"]
     assert "differs from the pressure of the kinetic profiles" in r["note"]
+    assert "uniform in radius" in r["pedestal_note"] and "edge bootstrap current" in r["pedestal_note"]
+    assert r1["pedestal_note"] == r["pedestal_note"]
     # the flag: outside 1 +- 0.10 (provisional), a record that steers nothing
     assert CM.PRESSURE_FACTOR_FLAG_RANGE == (0.90, 1.10)
     assert r1["flagged"] is False and r["flagged"] is False and r["flag_range"] == [0.90, 1.10]

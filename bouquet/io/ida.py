@@ -229,6 +229,7 @@ def read_ida(
     zeff_substitute=None,
     impurity_Z: float = 6.0,
     sigma_ni_from_ne: Optional[bool] = None,
+    route_disagreement_psi_max: Optional[float] = None,
 ) -> IDAProfiles:
     """Read an IDA ``.cdf`` and return profiles + sigmas at ``time``.
 
@@ -279,6 +280,19 @@ def read_ida(
         (``sigma_ni`` has always been propagated, never chosen by this
         flag).  Passing it emits a ``DeprecationWarning``; it will be
         removed in a future release.
+    route_disagreement_psi_max : float, optional
+        With both measured routes live (``ni_source="all"``), fold the
+        VB-vs-CER disagreement term into ``sigma_ni`` / ``sigma_Zeff`` only
+        at ``psi_N <= route_disagreement_psi_max``; outside it the two
+        envelopes are the routes' own propagated widths.  ``None``
+        (default) folds it everywhere, as before.  Use it where one route
+        is known to be unreliable over a radial range (DIII-D edge CER
+        carbon, 2026-10: the implied Z_eff reaches 5-6 at psi_N > 0.85
+        while VB reads 2-3, so the mean's width there was 30-40 % of Z_eff
+        and the draws' pedestal n_i swung by +-0.4 n_e).  The tension
+        itself (``ni_route_chi`` / ``zeff_route_chi``) is still reported at
+        every radius, and ``zeff_provenance`` records the limit and the
+        number of nodes it excluded.  Must be positive and finite.
 
     Notes
     -----
@@ -293,6 +307,12 @@ def read_ida(
     """
     import h5py
 
+    if route_disagreement_psi_max is not None:
+        _rdm = float(route_disagreement_psi_max)
+        if not (np.isfinite(_rdm) and _rdm > 0.0):
+            raise ValueError(
+                f"read_ida(route_disagreement_psi_max={route_disagreement_psi_max!r}): "
+                "must be None or a positive finite psi_N")
     if sigma_ni_from_ne is not None:
         import warnings
         warnings.warn(
@@ -688,10 +708,16 @@ def read_ida(
         # displaces it by delta/2 -> variance excess /4.  ne cancels partly in
         # ni and not at all in Z_eff, so each delta gets its own Jacobian.
         ni_route_chi = zeff_route_chi = None
+        # radial extent of the fold: everywhere, or psi_N <= the limit
+        # (route_disagreement_psi_max); the chi below stays full-range
+        _fold = (np.ones(np.shape(ne), dtype=bool)
+                 if route_disagreement_psi_max is None else
+                 np.asarray(psi_N, dtype=float) <= float(route_disagreement_psi_max))
         if use_vb and use_cer:
             d_z = zeff_vb - zeff_cer
             var_dz = sigma_Zeff ** 2 + sigma_Zeff_carbon ** 2
-            var_zeff = var_zeff + np.maximum(d_z ** 2 - var_dz, 0.0) / 4.0
+            var_zeff = var_zeff + np.where(
+                _fold, np.maximum(d_z ** 2 - var_dz, 0.0) / 4.0, 0.0)
             zeff_route_chi = _chi(d_z, var_dz)
 
             ni_vb = main_ion_density_from_zeff(
@@ -702,8 +728,14 @@ def read_ida(
                        * _inv - 1.0) * sigma_ne) ** 2 \
                 + (ne * _inv * sigma_Zeff) ** 2 \
                 + (impurity_Z * sigma_n_carbon) ** 2
-            var_ni = var_ni + np.maximum(d_n ** 2 - var_dn, 0.0) / 4.0
+            var_ni = var_ni + np.where(
+                _fold, np.maximum(d_n ** 2 - var_dn, 0.0) / 4.0, 0.0)
             ni_route_chi = _chi(d_n, var_dn)
+            zeff_provenance["route_disagreement_psi_max"] = (
+                None if route_disagreement_psi_max is None
+                else float(route_disagreement_psi_max))
+            zeff_provenance["n_nodes_disagreement_dropped"] = int(
+                np.count_nonzero(~_fold))
 
         zeff_dne = (-w_c * (zeff_cer - 1.0) / np.clip(ne, 1e10, None)
                     if w_c else np.zeros_like(ne))

@@ -20,6 +20,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["jupyter", "pytest"]
+surrogates = ["onnxruntime>=1.16"]
 
 [project.scripts]
 plot-family = "bouquet.gui:main"

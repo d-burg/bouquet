@@ -124,12 +124,6 @@ class Baseline:
     p_equilibrium: Optional["np.ndarray"] = None
     p_diff: Optional["np.ndarray"] = None
     Z_imp: Optional[float] = None
-    # The unified engine's stored-energy pressure scale record (bouquet.
-    # pressure_scale; owner decision 2026-11-24): s, s_W = W_input /
-    # W_kinetic, both W and the kinetic parts, the shape residual, the warn
-    # flag.  The engine's solve pressure (pres_tokamaker, the archived
-    # `pressure`) is s x the kinetic assembly; None off the engine.
-    pressure_scale: Optional[dict] = None
     # Fast-ion charge density sum_s Z_s n_s^fast [m^-3] on the KINETIC grid
     # (IMAS path; None elsewhere).  Fixed across draws, like p_fast: the
     # thermal impurity math (Z_imp above, nz, p_imp, the Zeff-primary ni
@@ -346,6 +340,12 @@ class Baseline:
     # kept apart so a summary over mixed baselines never mixes them).
     # Archived as li_metrics["p_fast_source"].
     p_fast_source: Optional[dict] = None
+    # The unified engine's stored-energy pressure scale record (bouquet.
+    # pressure_scale; owner decision 2026-11-24): s, s_W = W_input /
+    # W_kinetic, both W and the kinetic parts, the shape residual, the warn
+    # flag.  The engine's solve pressure (pres_tokamaker, the archived
+    # `pressure`) is s x the kinetic assembly; None off the engine.
+    pressure_scale: Optional[dict] = None
 
     def __repr__(self):
         # concise summary -- the default dataclass repr dumps every numpy array,

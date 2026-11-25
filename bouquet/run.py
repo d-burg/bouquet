@@ -1495,7 +1495,8 @@ class Bouquet(SwbBaseline):
             from .baseline import warn_pressure_fidelity
             warn_pressure_fidelity(_pfid)
             _unsc = _pfid.get("unscaled") or {}
-            if _unsc.get("rel_rms") is not None:
+            if (_unsc.get("rel_rms") is not None
+                    and _pfid.get("pressure_scale", 1.0) != 1.0):
                 print(f"  {'':<12} unscaled (s = 1): rel RMS "
                       f"{_unsc['rel_rms']:.3f}, on axis "
                       f"{_unsc['axis_rel_err_pct']:+.1f}%")

@@ -82,7 +82,9 @@ impurity term below).
   beta_N median 0.798 -> 0.793, 26 attempts (was 25); L-mode `s_W = 0.998`
   (the impurity term now in), W_MHD -1.07 % -> -0.17 %, beta_N median
   0.800 -> 0.808; IMAS `s_W = 0.993`, beta_N median 1.653 -> 1.642, Lambda
-  1.341 -> 1.335; l_i(3) medians within 0.005.
+  1.341 -> 1.335; parallel IMAS sweep: every case 24 in spec in the same
+  number of attempts as before, beta_N medians down 0.4-1.5 %; l_i(3)
+  medians within 0.005 everywhere.
 
 ## Unreleased — documentation brought to 1.4.1 (no code change)
 

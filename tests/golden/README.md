@@ -14,6 +14,12 @@ the Z_eff definition stamps (`zeff_definition`: total, from the IDA file).
 The g-file golden (thermal g-file + IDA `.cdf`, no p-file) is not affected by
 B's p-file `pb` default and was not regenerated. The legacy JSON golden was
 regenerated at `35c75f0` with the per-draw wall budget off (decision C, below).
+**Status (2026-11-24, 1.5 unreleased):** the g-file and IDS h5 goldens were
+regenerated under the stored-energy pressure scale (`pressure_scale =
+"match_W"`, the new unified-engine default) and the g-file route's impurity
+pressure; the same recipe on the 1.4.1 code reproduced the previous h5
+goldens' numbers exactly, so every shift is that change (see "The current
+goldens"). The legacy JSON golden is unaffected and was not regenerated.
 
 | golden | source | engine | files | read by |
 |--------|--------|--------|-------|---------|
@@ -182,7 +188,22 @@ set" above (`tests/_harness.py` prints them in a mismatch message), with
 `BOUQUET_OFT_BUILD_ID` naming the installed build; review the git diff of
 the manifests / JSON before committing.
 
-## The current goldens (2026-10-17)
+## The current goldens (2026-11-24)
+
+**Regenerated under the pressure scale (1.5, unreleased).** The g-file and
+IDS h5 goldens are the recipe's runs on branch `feat/pressure-scale` (a clean
+tree), same OFT build and thread count as below. What moved: every
+unified-engine reconstruction's Grad-Shafranov pressure is `s_W` x the kinetic
+assembly (`s_W = W_input / W_kinetic`, recorded on `_baseline` and every draw
+as `pressure_scale`), and the g-file route's kinetics now carry the thermal
+impurity pressure. Both synthetic goldens scale slightly down: g-file
+`s_W = 0.983` (the impurity term puts the kinetics 1.7 % above the g-file's
+stored energy), IDS `s_W = 0.993`. The same recipe on the 1.4.1 code
+reproduced the previous goldens' every manifest number, so the shifts below
+are that change alone; no tolerance or comparison rule changed. The
+draw-stream manifests move in the `j_phi` channel only (the baseline current
+follows `P'`). The text below describes the 2026-10-17 regeneration, whose
+defaults these runs still embody; the table gives the current runs.
 
 **The g-file h5 golden and the IDS golden** are the recipe's runs at bouquet
 main `27979d1` (a clean tree), OFT `fix/jphi-update-ravgs-and-nonfinite-abort`
@@ -207,13 +228,13 @@ either golden). Their draws, counts and manifests' numbers are those of the
 configured coil test, chi2 by default, AND the boundary cut, AND an engine
 draw's band flag; `in_spec_source = "inspec_rule"`). The old +/-2 % coil-drift
 verdict is kept beside it as `coil_drift_in_spec`; it is not the rule, and on
-these goldens it differs (the g-file golden: 9 of its 18 in-spec draws pass
-the drift test; the IDS golden: 18 of 20).
+these goldens it differs (the g-file golden: 8 of its 16 in-spec draws pass
+the drift test; the IDS golden: 19 of 20).
 
 | golden | attempts | archived | in spec (`coil_drift_in_spec`) | reconstruction | draws | bistability | sigma=0 probe |
 |--------|----------|----------|-------------------------------|----------------|-------|-------------|---------------|
-| g-file, unified | 20 | 18 (2 homotopy_saturated) | 18 (9) | 76 s | 32 min | single | PASS (archived dl_i -1.5e-5, dq0 +4.1e-5, r_j 5.6e-5, r_I 7.8e-6) |
-| IDS, unified | 20 | 20 | 20 (18) | 73 s | 31 min | single | PASS (archived dl_i -9.6e-6, dq0 -4.7e-5, r_j 1.4e-4, r_I 1.4e-5) |
+| g-file, unified (`s_W` 0.983) | 20 | 16 (4 homotopy_saturated; was 18, 2) | 16 (8) | 77 s | 31 min | single | PASS (archived dl_i -4.5e-6, dq0 +3.4e-5, r_j 4.7e-5, r_I 6.7e-6) |
+| IDS, unified (`s_W` 0.993) | 20 | 20 | 20 (19) | 75 s | 31 min | single | PASS (archived dl_i -2.6e-5, dq0 -2.9e-5, r_j 1.4e-4, r_I 1.4e-5) |
 
 * The IDS route archives no schema `jbs_loop` block on its `_baseline` (the
   g-file route does); its reconstruction's loop verdict is in the baseline's

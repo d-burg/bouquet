@@ -5,10 +5,10 @@
 **The default moves.** Every unified-engine reconstruction's numbers change:
 its Grad-Shafranov pressure is now scaled to the input's stored energy, so
 β, W, `P'`, `j_pressure` and the coil currents move with the scale `s`, and
-the draws move with it. The golden numbers will be regenerated in a later
-stage of this change; until then the golden tests that compare them are
-expected to fail. `pressure_scale="none"` reproduces the 1.4.1 numbers
-(apart from the g-file impurity term below).
+the draws move with it. The g-file and IDS h5 goldens and the four example
+notebooks have been regenerated under the new default (below).
+`pressure_scale="none"` reproduces the 1.4.1 numbers (apart from the g-file
+impurity term below).
 
 - **`GenerationConfig.pressure_scale` (owner decision 2026-11-24).**
   `s_W = W_input / W_kinetic`, `W = 1.5 ∫ p dV` of the full pressure
@@ -57,6 +57,32 @@ expected to fail. `pressure_scale="none"` reproduces the 1.4.1 numbers
 - **Summary.** The reconstruction summary prints `s_W`, both W, the shape
   residual and the mode (the IDS route prints the same line at
   `prepare_baseline()`).
+- **`Baseline.pressure_scale`** sits just before `p_fast_source`, which
+  stays the dataclass's last field; every earlier positional slot is
+  unchanged.
+- **Goldens regenerated** (the recipe of `tests/golden/README.md`: 20
+  attempts, seed 12345, one thread, every default, OFT build
+  `20260929_7da4f18`). The same recipe on the 1.4.1 code reproduces the
+  previous goldens exactly, so every shift is this change. No tolerance or
+  comparison rule changed. Both synthetic goldens scale slightly DOWN: the
+  g-file golden `s_W = 0.983` (its kinetics now include the impurity term,
+  1.7 % above the g-file's stored energy), the IDS golden `s_W = 0.993`.
+  g-file: 16 of 20 attempts archived (4 `homotopy_saturated`, was 2), all
+  16 in spec (was 18 of 18); per-draw l_i(3) moves by at most 1.6e-4,
+  boundary RMS by at most 0.06 mm, coil currents by at most 1.7 kA.
+  IDS: 20 of 20 archived and in spec (unchanged); baseline beta_p
+  0.917 -> 0.911, Lambda 1.345 -> 1.339; l_i(3) by at most 1.3e-4,
+  boundary RMS by at most 0.1 mm, coils by at most 1.3 kA. The draw-stream manifests move in the `j_phi` channel
+  only (the baseline current follows `P'`); the kinetic channels are
+  unchanged. The legacy JSON golden is unaffected (the legacy route does
+  not apply the scale).
+- **Example notebooks re-executed.** Every in-spec count is unchanged
+  (24 of 24 in every case); the attempts and the bands move slightly:
+  g-file H-mode `s_W = 0.983`, W_MHD +0.42 % -> +0.03 % of the input,
+  beta_N median 0.798 -> 0.793, 26 attempts (was 25); L-mode `s_W = 0.998`
+  (the impurity term now in), W_MHD -1.07 % -> -0.17 %, beta_N median
+  0.800 -> 0.808; IMAS `s_W = 0.993`, beta_N median 1.653 -> 1.642, Lambda
+  1.341 -> 1.335; l_i(3) medians within 0.005.
 
 ## Unreleased — documentation brought to 1.4.1 (no code change)
 

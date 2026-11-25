@@ -684,3 +684,83 @@ def test_pure_numpy_tglfnn_matches_julia_turbulent_transport_to_1e6():
         assert np.isclose(float(pred[key][0]), ref_val, atol=2e-6), (
             f"{key}: got {pred[key][0]} vs Julia {ref_val}"
         )
+
+
+@pytest.mark.skipif(not _has_local_tglfnn(), reason="Local TGLF-NN ONNX models not present")
+def test_clean_room_tglfnn_excursions_and_explicit_zeff_prior():
+    """Verify parameter-free Gauss-Hermite axis regularity, unclamped ell > 1 in
+    stiff burning cores, flux_uncertainty_rel=0.0 committee-only mode, and
+    preservation of explicit Zeff scalar prior."""
+    from bouquet.stiffness import _exact_ell_psi_from_ell_r, compute_physics_length_scales
+
+    psi = np.linspace(0.0, 1.0, 65)
+    r_m = 0.57 * np.sqrt(psi)
+    # At r=0, psi(r) = (r/a)^2 -> exact E[psi(|ell_r Z|)^2]^(1/2) = sqrt(3) * (ell_r/a)^2 > 0
+    ell_ax = _exact_ell_psi_from_ell_r(psi, r_m, 0.57, np.full_like(psi, 0.57))
+    assert ell_ax[0] > 1.0, f"Unclamped stiff core ell_psi(0) should exceed 1.0, got {ell_ax[0]}"
+
+    from tests.test_stiffness_and_hollow import _hmode_profile
+
+    ne_d = _hmode_profile(psi, 4.5e19, 3.2e19, 0.8e19, psi_ped=0.93)
+    te_d = _hmode_profile(psi, 2.8e3, 0.8e3, 80.0, psi_ped=0.93)
+    j_d = (1.1e6 / (np.pi * 0.60 ** 2 * 1.80)) * (1.0 - psi)
+    bl_d3d = Baseline(
+        psi_N=psi, j_phi=j_d, j_inductive=0.8 * j_d, j_BS=0.2 * j_d,
+        psi_N_kinetic=psi, ne=ne_d, te=te_d, ni=0.85 * ne_d, ti=1.15 * te_d,
+        Zeff=np.full_like(psi, 2.0), Ip_target=1.1e6, l_i_target=0.9, provenance="imas",
+    )
+    mg_d = miller_from_baseline(
+        bl_d3d, R0_fallback=1.67, a_fallback=0.60, B0_fallback=2.0,
+        kappa_edge_fallback=1.80, delta_edge_fallback=0.45,
+    )
+    chi_d = (5.0e6 * (1.0 - np.exp(-((mg_d.rho_tor_norm / 0.35) ** 2))) / np.maximum(mg_d.surface_m2, 1.0)) / (
+        ne_d * 1.602176634e-19 * np.maximum(np.abs(np.gradient(te_d, mg_d.r_min_m)), 50.0)
+    )
+    bl_d3d.aux = {"miller_geometry": mg_d, "chi_e": chi_d, "chi_i": chi_d, "omega_tor": 8.0e4 * (1.0 - 0.8 * psi)}
+    u_d3d = {
+        "sigma_ne": 0.10 * ne_d, "sigma_te": 0.15 * te_d,
+        "sigma_ni": 0.10 * 0.85 * ne_d, "sigma_ti": 0.15 * 1.15 * te_d,
+        "sigma_jphi": 0.10 * j_d,
+    }
+
+    ne_s = _hmode_profile(psi, 3.2e20, 2.4e20, 0.5e20, psi_ped=0.93)
+    te_s = _hmode_profile(psi, 20.0e3, 4.4e3, 100.0, psi_ped=0.93)
+    j_s = (8.7e6 / (np.pi * 0.57 ** 2 * 1.97)) * (1.0 - psi)
+    bl_sparc = Baseline(
+        psi_N=psi, j_phi=j_s, j_inductive=0.8 * j_s, j_BS=0.2 * j_s,
+        psi_N_kinetic=psi, ne=ne_s, te=te_s, ni=0.9 * ne_s, ti=0.95 * te_s,
+        Zeff=np.full_like(psi, 1.5), Ip_target=8.7e6, l_i_target=0.9, provenance="imas",
+    )
+    mg_s = miller_from_baseline(
+        bl_sparc, R0_fallback=1.85, a_fallback=0.57, B0_fallback=12.2,
+        kappa_edge_fallback=1.97, delta_edge_fallback=0.54,
+    )
+    bl_sparc.aux = {"miller_geometry": mg_s}
+    u_sparc = {
+        "sigma_ne": 0.10 * ne_s, "sigma_te": 0.15 * te_s,
+        "sigma_ni": 0.10 * 0.9 * ne_s, "sigma_ti": 0.15 * 0.95 * te_s,
+        "sigma_jphi": 0.10 * j_s,
+        "j_ls": 0.29,
+        "aux_length_scales": {"zeff": 0.37},
+    }
+
+    s_d3d = compute_physics_length_scales(
+        bl_d3d, u_d3d, mode="tier2_tglfnn", tritium_fraction=0.0
+    )
+    s_sparc = compute_physics_length_scales(
+        bl_sparc, u_sparc, mode="tier2_tglfnn", tritium_fraction=0.5
+    )
+    s_epistemic = compute_physics_length_scales(
+        bl_sparc, u_sparc, mode="tier2_tglfnn", flux_uncertainty_rel=0.0, tritium_fraction=0.5
+    )
+    s_skin = compute_physics_length_scales(
+        bl_sparc, u_sparc, mode="tier2_tglfnn", current_evolution_time_s=0.5, tritium_fraction=0.5
+    )
+
+    core = (s_d3d.rho_kin >= 0.30) & (s_d3d.rho_kin <= 0.75)
+    assert np.median(s_sparc.ti_ls[core]) > np.median(s_d3d.ti_ls[core])
+    assert np.all(np.isfinite(s_epistemic.ti_ls)) and np.all(s_epistemic.ti_ls > 0.0)
+    # Explicit user Zeff and j_phi length-scale priors are preserved verbatim unless skin time set
+    np.testing.assert_allclose(s_sparc.zeff_ls, 0.37)
+    np.testing.assert_allclose(s_sparc.j_ls, 0.29)
+    assert not np.allclose(s_skin.j_ls, 0.29)

@@ -1698,6 +1698,13 @@ def _load_kinetic_profiles(source) -> dict:
         Zeff=np.clip(np.asarray(Zeff, dtype=float), 1.0, None),
         raw_bytes=raw,
     )
+    # the footer's impurity charge (compute_quasineutrality needed it), for
+    # the engine g-file route's impurity-pressure consistency check
+    # (adapters.gfile_impurity_charge); informational elsewhere
+    try:
+        out["Z_imp_file"] = float(pf.ion_roles(need=("impurity",))["Z_imp"])
+    except Exception:
+        pass
     # the fast-ion pressure block (kPa, on its own psinorm): the default
     # p_fast of the g-file route (decision B; resolve_p_fast_input)
     if pf.pb is not None:
@@ -1801,6 +1808,8 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
         None if coord == coords.PSI else (psi_N, x_run))
     p_fast_kin = _resolve_fixed(_pf_in, _pf_x, x_kin)
     p_fast_eq = to_eq(p_fast_kin) if _pf_in is not None else None
+    # (LEGACY route; the unified engine's g-file adapter uses the source's
+    # impurity_Z, adapters.gfile_impurity_charge.)
     # Z_imp is plumbed for symmetry with the draw path, but is INERT here today:
     # FixedComponentsConfig (config.py) carries no Z_imp field at all -- Z_imp is
     # an *output* field of the Baseline dataclass, populated only on the IMAS

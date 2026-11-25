@@ -352,6 +352,32 @@ def mse_rows(gc, signs=None):
                 required=bool(getattr(gc, "structured_mse_required", False)))
 
 
+def gfile_impurity_charge(source, kin=None):
+    """The impurity charge of the g-file route's pressure: the source's own
+    ``ReconstructionSource.impurity_Z`` (the charge of its Z_eff <-> n_i
+    mapping; owner decision 2026-11-24), or ``None`` when it is unset or
+    zero.  A p-file whose ``N Z A`` footer names an impurity of another
+    charge (``kin["Z_imp_file"]``, read by
+    :func:`bouquet.baseline._load_kinetic_profiles`) is warned about, never
+    refused: its n_i was built with the footer's charge, so the impurity
+    density ``(n_e - n_i)/Z_imp`` is then inconsistent with it."""
+    z = getattr(source, "impurity_Z", None)
+    if not z:
+        return None
+    z = float(z)
+    zf = (kin or {}).get("Z_imp_file")
+    if zf is not None and np.isfinite(float(zf)) and float(zf) != z:
+        import warnings
+        warnings.warn(
+            f"g-file route: the impurity pressure uses ReconstructionSource."
+            f"impurity_Z={z:g}, but the p-file's ion-species footer names an "
+            f"impurity of charge {float(zf):g}; its n_i was built with the "
+            "footer's charge, so n_z = (n_e - n_i)/Z_imp is inconsistent -- "
+            "set impurity_Z to the footer's charge", UserWarning,
+            stacklevel=3)
+    return z
+
+
 def _q0_psi(psi_N, psi_pad):
     """The radius the q0 row is measured at: the psi_pad-clipped axis sample
     (the closure's axis-row radius, :func:`bouquet.utils.fsa_current_geometry`)."""
@@ -412,7 +438,12 @@ class GFileAdapter:
         p_fast_kin = _resolve_fixed(_pf_in, _pf_x, psi_kin)
         p_fast = (to_eq(p_fast_kin) if _pf_in is not None
                   else np.zeros_like(psi_N))
-        Z_imp = getattr(fc, "Z_imp", None)
+        # the thermal impurity term, at the SOURCE's impurity charge: the
+        # charge of the Z_eff <-> n_i mapping (ReconstructionSource.
+        # impurity_Z; owner decision 2026-11-24), in the reconstruction and
+        # -- through pressure_parts["Z_imp"] and Baseline.Z_imp -- in every
+        # draw (EngineDrawContext.pressures).  The legacy route is unchanged.
+        Z_imp = gfile_impurity_charge(src, kin)
         p_th = _EC * (ne * te + ni * ti)
         p_imp = (impurity_pressure(ne, ni, ti, Z_imp) if Z_imp
                  else np.zeros_like(psi_N))
@@ -498,6 +529,10 @@ class GFileAdapter:
                 frame_identity_max_rel=parts["frame_identity_max_rel"],
                 kinetics="p-file / IDA profiles PCHIP-regridded onto the "
                          "g-file psi_N (as the legacy reconstruction)",
+                impurity=("e n_z T_i, n_z = max((n_e - n_i)/Z_imp, 0) at "
+                          "ReconstructionSource.impurity_Z (the Z_eff <-> "
+                          "n_i charge; owner decision 2026-11-24)"
+                          if Z_imp else "none: impurity_Z unset"),
                 kinetics_sigma=("resolved from the Baseline by "
                                 "baseline.resolve_uncertainty (unchanged)"),
                 electron_charge="physics.ELEMENTARY_CHARGE",

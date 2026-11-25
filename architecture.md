@@ -387,7 +387,8 @@ overrides either. Which Z_eff definition feeds what on each route:
 ### 4.2 The impurity charge
 
 Z_imp is the declared value where the baseline carries one (`Baseline.Z_imp`,
-set on the IMAS routes); otherwise the sampler inverts it from the baseline as
+set on the IMAS routes and, under the unified engine, on the g-file route from
+`ReconstructionSource.impurity_Z`); otherwise the sampler inverts it from the baseline as
 the median, over surfaces with `(n_e - n_i)/n_e > 1e-3` and `Z_eff > 1`, of
 
 ```
@@ -715,12 +716,16 @@ the impurity is assumed thermalized at T_i. `p_fast` is fixed:
 `FixedComponentsConfig.p_fast`, else a p-file's `pb` (g-file route), else the
 isotropized IMAS fast pressure ([§7.5](#75-fast-pressure-from-imas-sources)).
 
-**The impurity term is evaluated only where Z_imp is declared.** On the IMAS
-routes it is (`Baseline.Z_imp`, with `n_e,th = n_e - z_fast`). On the g-file
-route the adapter reads Z_imp from `FixedComponentsConfig`, which has no such
-field, so `p_imp = 0` and the solve pressure is
-`e (n_e T_e + n_i T_i) + p_fast` (`adapters.GFileAdapter.read`; the same holds
-for the legacy g-file reconstruction, `baseline.py`).
+**The impurity term is evaluated on both input types.** On the IMAS routes
+Z_imp is `Baseline.Z_imp`, with `n_e,th = n_e - z_fast`. On the g-file route
+it is the source's own `ReconstructionSource.impurity_Z` (default 6.0, carbon;
+the charge of its Z_eff <-> n_i mapping), with `n_e,th = n_e`
+(`adapters.gfile_impurity_charge`; owner decision 2026-11-24). The adapter
+stamps it in `pressure_parts["Z_imp"]` and on the baseline (`Baseline.Z_imp`),
+so the reconstruction and every draw add the same term; a p-file whose ion
+footer names an impurity of another charge is warned about. (The deprecated
+legacy g-file reconstruction, `baseline.py`, still omits the term: it reads
+Z_imp from `FixedComponentsConfig`, which has no such field.)
 
 A draw's pressure is the contract's in increment form, `base + (drawn - base)`
 per part (`EngineDrawContext.pressures`). The archive stores the solve
@@ -1215,8 +1220,7 @@ section keeps only limitations that follow from architectural assumptions.
 - **One effective impurity, one ion temperature.** Quasi-neutrality uses one
   effective impurity charge and main-ion charge 1; the impurity pressure and
   the p-file diamagnetic rotation take the impurity at T_i. Multiple
-  impurities and a decoupled impurity temperature are not modeled. On the
-  g-file route the impurity pressure term is zero ([§7.1](#71-the-solve-pressure)).
+  impurities and a decoupled impurity temperature are not modeled.
 - **Fixed components are not perturbed.** `p_fast`, the driven currents and
   the fast-ion charge moments are held fixed (the beam fraction's own
   uncertainty is not sampled); rotation and transport channels are perturbed

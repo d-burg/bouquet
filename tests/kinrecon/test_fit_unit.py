@@ -866,3 +866,20 @@ def test_boundary_crossings_all_points_at_once_equal_one_ray_at_a_time(monkeypat
     assert np.isfinite(want[:37, 0]).all() and np.isnan(want[-3:-1, 0]).all()
     assert np.array_equal(got, want, equal_nan=True)
     assert fm.boundary_crossings(np.zeros((0, 2))).shape == (0, 2)
+
+
+def _fit_with_failed_trials(monkeypatch, fail_trials, **kw):
+    fm = FakeFM()
+    _install(monkeypatch, fm, fail_trials=fail_trials)
+    kin, src = _kin()
+    return FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=1.0, core_relaxation="periodic_orbit"),
+                           FIT.FitSettings(free=SAW_FREE, **kw), params0=dict(log_strength=0.5))
+
+
+def test_failed_trials_counted_over_the_fit_by_default(monkeypatch):
+    # three failed trials in the first iteration, one in the second: the default budget (4 over the fit) ends the fit
+    out = _fit_with_failed_trials(monkeypatch, (1, 2, 3, 5))
+    assert out.status == "failed_trials"
+    ft = out.record["failed_trials"]
+    assert ft["counting"] == "over_fit" and ft["max_failed_trials"] == 4
+    assert ft["per_iteration"][:2] == [3, 1] and sum(ft["per_iteration"]) == 4

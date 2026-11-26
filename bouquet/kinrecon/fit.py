@@ -968,6 +968,12 @@ def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, ini
             (n_d, _i_d, t_d), (n_c, _i_c, t_c) = segments
             rec["n_solves"] = (n_d - n0) + (fm.n_solves - n_c)
             rec["wall_s"] = round((t_d - t_all) + (time.perf_counter() - t_c), 2)
+        # the failed-trial stopping budget (counted over the whole fit) and the failed trial steps of every iteration:
+        # a record only, nothing reads it
+        rec["failed_trials"] = dict(
+            counting="over_fit",
+            max_failed_trials=int(settings.max_failed_trials),
+            per_iteration=[sum(1 for t in e.get("trials", []) if t.get("status") != "consistent") for e in log])
         rec["forward"] = fm.settings_record()
         get_its = getattr(fm, "iteration_record", None)
         if get_its is not None:

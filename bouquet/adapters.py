@@ -547,7 +547,13 @@ class GFileAdapter:
         # draw (EngineDrawContext.pressures).  The legacy route is unchanged.
         Z_imp = gfile_impurity_charge(src, kin)
         p_th = _EC * (ne * te + ni * ti)
-        p_imp = (impurity_pressure(ne, ni, ti, Z_imp) if Z_imp
+        # a p-file's beam ions (its nb block, as z_fast) are not impurity:
+        # n_z = (n_e - z_fast - n_i)/Z_imp, as the IMAS route and the
+        # p-file's own quasineutrality take it
+        z_fast = (None if kin.get("z_fast") is None
+                  else to_eq(np.asarray(kin["z_fast"], dtype=float)))
+        ne_th = ne if z_fast is None else np.maximum(ne - z_fast, 0.0)
+        p_imp = (impurity_pressure(ne_th, ni, ti, Z_imp) if Z_imp
                  else np.zeros_like(psi_N))
         # the stored-energy pressure scale (bouquet.pressure_scale): W of the
         # g-file's PRES and of the kinetic parts with the reader's own
@@ -629,7 +635,11 @@ class GFileAdapter:
                                  raw_bytes=kin.get("raw_bytes"),
                                  p_fast=p_fast_kin,
                                  p_fast_source=p_fast_stamp,
-                                 zeff_provenance=kin.get("zeff_provenance")),
+                                 zeff_provenance=kin.get("zeff_provenance"),
+                                 z_fast=kin.get("z_fast"),
+                                 z2_fast=kin.get("z2_fast"),
+                                 zeff_includes_fast=bool(
+                                     kin.get("zeff_includes_fast", False))),
             pressure=pressure, pressure_parts=pressure_parts,
             jB_ind=None, jB_fix=np.zeros_like(psi_N),
             jB_fix_parts=dict(nbi=np.zeros_like(psi_N),

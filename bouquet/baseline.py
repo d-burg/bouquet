@@ -1713,6 +1713,22 @@ def _load_kinetic_profiles(source) -> dict:
         out["Z_imp_file"] = float(pf.ion_roles(need=("impurity",))["Z_imp"])
     except Exception:
         pass
+    # the beam (fast-ion) density block nb: its charge moments on the
+    # kinetic grid.  The p-file's n_i and Z_eff count the beam ions apart
+    # (compute_quasineutrality: n_z = (n_e - n_i - Z_beam n_b)/Z_imp;
+    # compute_zeff: Z_beam^2 n_b in the numerator), so the engine g-file
+    # route runs its thermal impurity math on n_e - z_fast and its draws'
+    # Z_eff <-> n_i mapping with zeff_includes_fast, as the IMAS route does
+    # with its fast-ion moments (Baseline.z_fast / z2_fast)
+    nb = pf.nb
+    if nb is not None and bool(np.any(np.asarray(nb, dtype=float) != 0.0)):
+        Z_beam = float(pf.ion_roles(need=())["Z_beam"])
+        nb_si = np.interp(np.asarray(psi_pf, dtype=float),
+                          np.asarray(pf["nb"]["psinorm"], dtype=float),
+                          np.asarray(nb, dtype=float)) * 1e20
+        out["z_fast"] = Z_beam * nb_si
+        out["z2_fast"] = Z_beam ** 2 * nb_si
+        out["zeff_includes_fast"] = True
     # the fast-ion pressure block (kPa, on its own psinorm): the default
     # p_fast of the g-file route (decision B; resolve_p_fast_input)
     if pf.pb is not None:

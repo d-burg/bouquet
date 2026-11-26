@@ -29,6 +29,7 @@ import pytest
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 import test_engine_draws as TD  # noqa: E402
+import test_engine_adapters as TA  # noqa: E402
 
 from bouquet.adapters import (GFileAdapter, gfile_impurity_charge,  # noqa: E402
                               ids_input_volume)
@@ -39,6 +40,7 @@ from bouquet.pressure_scale import (CAUSE_HIGH, CAUSE_LOW,  # noqa: E402
                                     stored_energy, warn_pressure_scale)
 
 toy_bouquet_solver = TD.toy_bouquet_solver
+ids = TA.ids
 _quiet = TD._quiet
 
 _EX = os.path.join(_HERE, os.pardir, "examples", "D3D-like")
@@ -251,6 +253,94 @@ def test_the_impurity_charge_is_the_sources():
                               {"Z_imp_file": 10.0})
 
 
+def _pfile_with_beam(tmp_path, frac=0.1):
+    """A copy of the fixture p-file with a beam density block nb =
+    ``frac`` x (n_e - n_i) on the n_e grid; its N Z A block [C, D, D] then
+    reads the last D as the beam ion (pfile.ion_roles)."""
+    from bouquet.io.pfile import read_pfile
+    pf = read_pfile(_PF)
+    psi = np.asarray(pf["ne"]["psinorm"], dtype=float)
+    nb = frac * (np.asarray(pf.ne, float) - np.asarray(pf.ni, float))
+    pf.set_profile("nb", psi, nb)
+    path = str(tmp_path / "beam.peqdsk")
+    pf.save(path)
+    return path, psi, nb
+
+
+def _cfg_pf(pf_path, **gen):
+    cfg = _cfg(**gen)
+    cfg.source.profiles_path = pf_path
+    return cfg
+
+
+def test_the_gfile_route_takes_a_pfile_beam_density_out_of_the_impurity(
+        tmp_path):
+    from bouquet.baseline import _load_kinetic_profiles
+    from bouquet.io.pfile import read_pfile
+    from bouquet.physics import impurity_pressure
+    from bouquet.utils import pchip_interp
+    path, _, _ = _pfile_with_beam(tmp_path)
+    cfg = _cfg_pf(path)
+    kin = _load_kinetic_profiles(cfg.source)
+    assert kin["zeff_includes_fast"] is True
+    # Z_beam = 1: both charge moments are the beam density itself, as the
+    # file holds it (the writer rounds each value to its text format)
+    pf = read_pfile(path)
+    np.testing.assert_allclose(
+        kin["z_fast"], np.interp(kin["psi_N"], pf["nb"]["psinorm"],
+                                 pf.nb) * 1e20, rtol=1e-12, atol=0.0)
+    np.testing.assert_array_equal(kin["z2_fast"], kin["z_fast"])
+    # the implied impurity density is the p-file's own quasineutrality
+    pf.compute_quasineutrality()
+    nz_file = np.interp(kin["psi_N"], pf["nz1"]["psinorm"],
+                       pf["nz1"]["data"]) * 1e20
+    np.testing.assert_allclose(
+        (kin["ne"] - kin["z_fast"] - kin["ni"]) / 6.0, nz_file,
+        rtol=1e-9, atol=1e-9 * float(np.max(nz_file)))
+    # the adapter's impurity term runs on n_e - z_fast ...
+    ad = GFileAdapter(cfg.source, cfg)
+    c = ad.read()
+    k = c.kinetics
+    zf = pchip_interp(c.kinetics_native["psi_N"],
+                      c.kinetics_native["z_fast"], c.psi_N)
+    np.testing.assert_array_equal(
+        c.pressure_parts["impurity"],
+        impurity_pressure(np.maximum(k["ne"] - zf, 0.0), k["ni"], k["ti"],
+                          6.0))
+    assert c.kinetics_native["zeff_includes_fast"] is True
+    # ... so it is below the beam-free file's (whose n_e, n_i are the same)
+    _, c0 = _read()
+    assert "z_fast" not in _load_kinetic_profiles(_cfg().source)
+    assert c0.kinetics_native["z_fast"] is None
+    assert np.all(c.pressure_parts["impurity"]
+                  <= c0.pressure_parts["impurity"])
+    assert c.pressure_parts["impurity"][0] \
+        < c0.pressure_parts["impurity"][0]
+
+
+def test_a_beam_pfile_reaches_the_baseline_and_the_draws(
+        tmp_path, toy_bouquet_solver):
+    from bouquet.engine_draws import context_from_run
+    path, _, _ = _pfile_with_beam(tmp_path)
+    b = TD._bq(tmp_path, n=2)
+    b.config.source.profiles_path = path
+    b.setup_solver()
+    _quiet(b.prepare_baseline)
+    bl = b.baseline
+    assert bl.z_fast is not None and bl.z2_fast is not None
+    assert bl.zeff_includes_fast is True
+    ctx = context_from_run(b._engine_run, b.config.generation, bl)
+    assert ctx.z_fast_eq is not None and ctx.zeff_includes_fast
+    k0 = {kk: np.asarray(v, dtype=float).copy()
+          for kk, v in ctx.c.kinetics.items()}
+    p0, _ = ctx.pressures(k0)
+    np.testing.assert_array_equal(p0, ctx.c.pressure)
+    v = _quiet(b.verify_sigma0_consistency)
+    assert v["passed"] and v["request_bit_identical"]
+    diags = _quiet(b.generate)
+    assert len(diags) == 2
+
+
 def test_ids_volume_ladder():
     psi = np.linspace(0.0, -1.0, 9)
     q = np.linspace(1.0, 4.0, 9)
@@ -270,6 +360,119 @@ def test_ids_volume_ladder():
                                                 * 1.0 / 8.0)))
     x, pp, vv, src, why = ids_input_volume(dict(psi=psi, pressure=p))
     assert vv is None and why is not None
+
+
+def _ids_with(tmp_path, ids, name, edit):
+    """The IDS adapter's pressure-scale record on a copy of the example IDS
+    with ``edit(profiles_1d)`` applied to every equilibrium time slice."""
+    dd = TA._example_dd()
+    for ts in dd["equilibrium"]["time_slice"]:
+        edit(ts["profiles_1d"])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        c = TA._adapter_on_full_baseline(ids, tmp_path, dd, name).read()
+    return c.provenance["pressure_scale"], c
+
+
+def _qfg_dvdpsi(p1):
+    """dV/dpsi = 2 pi |q| / (|f| gm1) on one profiles_1d's own nodes."""
+    return (2.0 * np.pi * np.abs(np.asarray(p1["q"], float))
+            / (np.abs(np.asarray(p1["f"], float))
+               * np.asarray(p1["gm1"], float)))
+
+
+def test_the_ids_scale_follows_its_equilibrium_pressure(tmp_path, ids):
+    """W_input is the IDS's equilibrium.profiles_1d.pressure: scaling it by
+    1.15 scales s_W by exactly 1.15 (the volume and kinetic parts are the
+    same), and the Grad-Shafranov pressure follows."""
+    _, c0, _ = ids
+    r0 = c0.provenance["pressure_scale"]
+    assert r0["status"] == "computed" and "q, f, gm1" in r0["volume_source"]
+
+    def _scale(p1):
+        p1["pressure"] = [1.15 * v for v in p1["pressure"]]
+    r1, c1 = _ids_with(tmp_path, ids, "p115.json", _scale)
+    assert r1["s_W"] == pytest.approx(1.15 * r0["s_W"], rel=1e-12)
+    assert r1["W_kinetic_J"] == pytest.approx(r0["W_kinetic_J"], rel=1e-14)
+    np.testing.assert_allclose(c1.pressure,
+                               r1["s"] * c1.pressure_parts["kinetic"],
+                               rtol=1e-14, atol=0.0)
+
+
+@pytest.mark.parametrize("key", ["volume", "dvolume_dpsi"])
+def test_each_ids_volume_source_gives_the_same_scale(tmp_path, ids, key):
+    """The IDS volume ladder's three rungs give one s_W when they describe
+    one volume: a ``volume`` / ``dvolume_dpsi`` written from the example's
+    own q, f, gm1 (by the same trapezoid rule) reproduces the q/f/gm1 s_W."""
+    from scipy.integrate import cumulative_trapezoid
+    _, c0, _ = ids
+    r0 = c0.provenance["pressure_scale"]
+
+    def _add(p1):
+        vp = _qfg_dvdpsi(p1)
+        if key == "dvolume_dpsi":
+            p1[key] = list(vp)
+            return
+        psi = np.asarray(p1["psi"], float)
+        p1[key] = list(cumulative_trapezoid(vp, np.abs(psi - psi[0]),
+                                            initial=0.0))
+    r1, _ = _ids_with(tmp_path, ids, f"{key}.json", _add)
+    assert r1["volume_source"].startswith(
+        "equilibrium.profiles_1d.volume" if key == "volume"
+        else "integral of equilibrium.profiles_1d.dvolume_dpsi")
+    assert r1["s_W"] == pytest.approx(r0["s_W"], rel=1e-12)
+
+
+def test_an_unusable_ids_volume_falls_to_the_next_rung():
+    """A ``volume`` with a non-finite entry, or one that is not monotone,
+    is passed over for ``dvolume_dpsi``; without either, q/f/gm1; with none,
+    no volume and the reason."""
+    psi = np.linspace(0.0, -1.0, 9)
+    p = np.linspace(5e4, 1e3, 9)
+    V = 20.0 * np.linspace(0.0, 1.0, 9) ** 2
+    dv = 40.0 * np.linspace(0.0, 1.0, 9)          # dV/d|psi| of V above
+    q = np.linspace(1.0, 4.0, 9)
+    base = dict(psi=psi, pressure=p, dvolume_dpsi=dv)
+    for bad in (np.where(np.arange(9) == 4, np.nan, V),
+                np.where(np.arange(9) == 4, V[2], V)):
+        x, pp, vv, src, why = ids_input_volume(dict(base, volume=bad))
+        assert why is None and "dvolume_dpsi" in src
+        # a linear dV/dpsi: the trapezoid rule is exact
+        np.testing.assert_allclose(vv, V, rtol=1e-12, atol=1e-12)
+    x, pp, vv, src, why = ids_input_volume(dict(
+        psi=psi, pressure=p, volume=np.where(np.arange(9) == 4, np.nan, V),
+        q=q, f=np.full(9, 3.0), gm1=np.full(9, 0.4)))
+    assert why is None and "q, f, gm1" in src
+    x, pp, vv, src, why = ids_input_volume(dict(
+        psi=psi, pressure=p, dvolume_dpsi=np.zeros(9), q=q,
+        f=np.zeros(9), gm1=np.full(9, 0.4)))
+    assert vv is None and why is not None
+
+
+def test_the_ids_record_regrids_the_kinetic_parts_onto_its_nodes():
+    """The kinetic parts on the core_profiles nodes (here a finer grid
+    holding every equilibrium node, so PCHIP returns them exactly) against
+    an IDS pressure 1.25 x their sum on its own descending-psi nodes give
+    s_W = 1.25; with an uneven split between the parts."""
+    from bouquet.adapters import ids_pressure_scale_record
+    x_kin = np.linspace(0.0, 1.0, 33)
+    x_eq = x_kin[::4]                                # 9 nodes, a subset
+    th = 4e4 * (1.0 - x_kin ** 2) ** 1.5 + 1e3
+    imp = 0.05 * th
+    fa = 1e4 * (1.0 - x_kin) ** 3
+    psi = 0.3 - 0.8 * x_eq                           # descending, offset
+    eqp1 = dict(psi=psi, pressure=1.25 * (th + imp + fa)[::4],
+                volume=20.0 * x_eq ** 1.2)
+    r = ids_pressure_scale_record(eqp1, x_kin, th, imp, fa, "match_W",
+                                  p_fast_supplied=True)
+    assert r["s_W"] == pytest.approx(1.25, rel=1e-12) and r["s"] == r["s_W"]
+    assert r["shape_residual"] == pytest.approx(0.0, abs=1e-12)
+    # the parts' energies add to the kinetic one, and the fast part is its
+    # own volume integral
+    assert sum(r["W_kinetic_parts_J"].values()) == pytest.approx(
+        r["W_kinetic_J"], rel=1e-14)
+    assert r["W_kinetic_parts_J"]["fast"] == pytest.approx(
+        stored_energy(fa[::4], 20.0 * x_eq ** 1.2), rel=1e-14)
 
 
 # ---------------------------------------------------------------------------

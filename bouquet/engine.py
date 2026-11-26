@@ -3176,6 +3176,9 @@ def _gfile_baseline(bq, eng, res, rec, ad, iso_pts, iso_w):
         Ip_target=float(c.Ip), l_i_target=float(m["li"]),
         provenance="reconstruction", j_NBI=j_NBI, j_RF=j_RF,
         p_fast=kn.get("p_fast"), Z_imp=c.pressure_parts.get("Z_imp"),
+        # a p-file's beam density (its charge moments; None without nb)
+        z_fast=kn.get("z_fast"), z2_fast=kn.get("z2_fast"),
+        zeff_includes_fast=bool(kn.get("zeff_includes_fast", False)),
         eqdsk_bytes=eqdsk_bytes, pfile_bytes=kn.get("raw_bytes"),
         aux={"zeff": np.asarray(kn["Zeff"], dtype=float)}, recon=recon,
         reconstruction_metrics=metrics, jphi_request_offset=offset,

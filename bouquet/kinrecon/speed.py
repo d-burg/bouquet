@@ -297,8 +297,9 @@ def speed_scope(speed):
     """Set the process-wide options of ``speed`` (``memo``, ``mesh_index``, ``reuse_stats``, each on or off as given)
     for the duration of the block and restore the previous values afterwards; ``None`` leaves them as they are.
     :func:`.fit.reconstruct` and :func:`.series.run_series` do this themselves with their settings (the default
-    ``SpeedSettings()`` when none is given).  Outside them the switches are off unless a scope sets them: wrap the
-    forward model's construction too, so that its row set-up uses ``mesh_index``."""
+    ``SpeedSettings()`` when none is given; the moving anchor target's moves included), and so does the forward
+    model's construction for its row set-up (:class:`.forward.ForwardModel`, its ``speed`` argument).  Outside them
+    the switches are off unless a scope sets them."""
     if speed is None:
         yield
         return

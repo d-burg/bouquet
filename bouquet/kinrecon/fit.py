@@ -323,6 +323,9 @@ class FitSettings:
     #                                      refit, while the fitted groups' chi^2 falls (the weight never changes)
     anchor_follow_fraction: float = 0.5  # fraction of the way to the solved boundary per move
     anchor_follow_max_steps: int = 8     # cost bound: at most this many moves
+    # NON-DEFAULT run-time option of the moving anchor target (:func:`reconstruct`, "Final Jacobian of the returned
+    # fit only"); recorded in ``as_dict`` only when set
+    anchor_follow_defer_final_jacobian: bool = False
 
     def __post_init__(self):
         if self.jacobian_steps not in JACOBIAN_STEP_KINDS:
@@ -343,9 +346,14 @@ class FitSettings:
             raise ValueError("anchor_follow_max_steps must be a whole number >= 1")
         if self.ip_target == "measured" and "ip_rel" in self.free:
             raise ValueError("ip_rel is free but ip_target='measured' holds the Ip target: choose one")
+        if not isinstance(self.anchor_follow_defer_final_jacobian, bool):
+            raise ValueError("anchor_follow_defer_final_jacobian must be True or False")
 
     def as_dict(self):
-        return asdict(self)
+        d = asdict(self)
+        if not d["anchor_follow_defer_final_jacobian"]:
+            del d["anchor_follow_defer_final_jacobian"]      # the default record is as before the option existed
+        return d
 
 
 def _expand(free, cfg):
@@ -636,16 +644,37 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
     and the last kept fit is the result.  The reference boundary then acts as a starting guess and an implicit prior
     whose strength is the number of moves; every step is in ``record["anchor_follow"]``.  With ``state_fn`` (a filter
     fit of a series slice) the same rule applies to the filter fit; the series driver carries the moved target to the
-    next slice (:mod:`.series`, "Moving anchor target").
+    next slice (:mod:`.series`, "Moving anchor target").  The moves run under the fit's speed options, as the fits do.
+
+    Final Jacobian of the returned fit only (``settings.anchor_follow_defer_final_jacobian``, NON-DEFAULT run-time
+    option; single-slice fits only).  By default every fit of the moving target ends with its covariance Jacobian
+    (a fresh one where the final Gauss-Newton step moved the center), also the fits that are not returned.  With the
+    option, a converged fit whose covariance needs a fresh Jacobian is first returned without it; that Jacobian is
+    computed only for the fit that is returned, at its own center, anchor target and branch log, with the same
+    columns and the same measured noise, after the last move.  When it fails, the default would not have kept that
+    fit's move (its status ends in ``_no_final_jacobian``): the fit before it is then completed and returned in its
+    place, its later steps are dropped and the stop is stated as the default states it.  Identical to the default in
+    the returned fit (status, parameters, sigma, covariance, chi^2, state) except when a final Jacobian of an
+    EARLIER kept fit would fail while a later one succeeds: the default then stops at that earlier move, this option
+    does not (``record["anchor_follow"]["final_jacobian_deferred"]`` states the rule).  The edge-taper case cannot be
+    decided by a skipped Jacobian: a fit is only deferred once the case is locked.  Counters and records that sum over
+    the forward model (its total solve count, the anchor-follow totals, the edge-taper case history) differ; the
+    returned fit's own ``n_solves`` and ``solver_iterations`` count its solves and its final Jacobian's.
     """
     st = settings or FitSettings()
+    if st.anchor_follow_defer_final_jacobian and state_fn is not None:
+        raise ValueError("anchor_follow_defer_final_jacobian is an option of single-slice fits (no state_fn)")
     kw = dict(label=label, state_fn=state_fn, speed=speed)
     if not st.anchor_follow:
         return _reconstruct_checked(fm, kin, src, cfg, settings=settings, params0=params0, start=start,
                                     initial_profiles=initial_profiles, steady_state_check=steady_state_check, **kw)
-    base = replace(st, anchor_follow=False)
-    return _follow_anchor(fm, kin, src, cfg, base, st, params0, start, initial_profiles, label, speed,
-                          steady_state_check, state_fn)
+    base = replace(st, anchor_follow=False, anchor_follow_defer_final_jacobian=False)
+    # the moves of the anchor target and everything else between the fits run under the fit's own speed options (the
+    # default SpeedSettings() when none is given), as the fits do: the same values bit for bit, the indexed
+    # point location instead of the plain scan in the boundary crossings
+    with _speed.speed_scope(_speed.effective(speed)):
+        return _follow_anchor(fm, kin, src, cfg, base, st, params0, start, initial_profiles, label, speed,
+                              steady_state_check, state_fn)
 
 
 #: Fit statuses that count as converged for the moving anchor target.
@@ -654,12 +683,16 @@ CONVERGED_STATUSES = ("converged", "converged_within_noise")
 
 def _follow_anchor(fm, kin, src, cfg, base, st, params0, start, initial_profiles, label, speed, check,
                    state_fn=None):
-    """The moving anchor target of :func:`reconstruct` (``FitSettings.anchor_follow``)."""
+    """The moving anchor target of :func:`reconstruct` (``FitSettings.anchor_follow``; with
+    ``anchor_follow_defer_final_jacobian``, the final Jacobian of the returned fit only)."""
     t0, n0 = time.perf_counter(), fm.n_solves
+    defer = bool(st.anchor_follow_defer_final_jacobian)
     box = {}
+    dbox = {} if defer else None
+    target0 = fm.anchor_target() if defer else None
     fr = _reconstruct_checked(fm, kin, src, cfg, settings=base, params0=params0, start=start,
                               initial_profiles=initial_profiles, label=label, speed=speed, steady_state_check=False,
-                              start_box_out=box, state_fn=state_fn)
+                              start_box_out=box, state_fn=state_fn, defer_box=dbox)
 
     def data_chi2(r):
         try:
@@ -672,6 +705,8 @@ def _follow_anchor(fm, kin, src, cfg, base, st, params0, start, initial_profiles
                rule="a move is kept only if the refit converges and the fitted groups' chi^2 (chi2['data']) is lower "
                     "than before; the anchor weight never changes; the reference boundary is the first target",
                steps=steps)
+    # the kept fits in order (deferred final Jacobians only): (step, result, deferral box, anchor target, start box)
+    chain = [(0, fr, dbox, target0, box)] if defer else None
     stop = None
     for k in range(1, int(st.anchor_follow_max_steps) + 1):
         if fr.status not in CONVERGED_STATUSES:
@@ -688,9 +723,11 @@ def _follow_anchor(fm, kin, src, cfg, base, st, params0, start, initial_profiles
         keep_pc = np.array(getattr(fm, "probe_correction", np.zeros(0)), float)
         move = fm.move_anchor_target(st.anchor_follow_fraction)
         nbox = {}
+        ndbox = {} if defer else None
+        ntarget = fm.anchor_target() if defer else None
         new = _reconstruct_checked(fm, kin, src, cfg, settings=base, params0=dict(fr.params), start=keep_state,
                                    label=f"{label}:anchor{k}", speed=speed, steady_state_check=False,
-                                   start_box_out=nbox, state_fn=state_fn)
+                                   start_box_out=nbox, state_fn=state_fn, defer_box=ndbox)
         c_old, c_new = data_chi2(fr), data_chi2(new)
         kept = bool(new.status in CONVERGED_STATUSES and c_new < c_old)
         steps.append(dict(step=k, status=new.status, chi2_data=c_new, kept=kept, move=move))
@@ -702,8 +739,13 @@ def _follow_anchor(fm, kin, src, cfg, base, st, params0, start, initial_profiles
                     f"move {k} not kept: chi^2 of the fitted groups did not fall ({c_old:.6g} -> {c_new:.6g})")
             break
         fr, box = new, nbox
+        if defer:
+            chain.append((k, new, ndbox, ntarget, nbox))
     else:
         stop = f"the cap of {int(st.anchor_follow_max_steps)} moves"
+    if defer:
+        fr, box, stop, drec = _complete_deferred(fm, chain, steps, stop)
+        rec["final_jacobian_deferred"] = drec
     rec.update(stop=stop, n_moves_kept=sum(1 for x in steps[1:] if x["kept"]), n_solves_total=fm.n_solves - n0,
                wall_s_total=round(time.perf_counter() - t0, 2))
     if isinstance(getattr(fr, "record", None), dict):
@@ -714,10 +756,54 @@ def _follow_anchor(fm, kin, src, cfg, base, st, params0, start, initial_profiles
     return fr
 
 
+def _complete_deferred(fm, chain, steps, stop):
+    """The final Jacobian of the returned fit (``FitSettings.anchor_follow_defer_final_jacobian``): the last kept fit
+    of ``chain`` is completed at its own anchor target (its deferral box's ``complete``); when its final Jacobian
+    fails and an earlier kept fit exists, that move is marked not kept (as the default would have marked it), the
+    later steps are dropped and the fit before it is completed in its place.  Returns ``(result, start box, stop,
+    record)``; ``steps`` is edited in place."""
+    drec = dict(on=True, completed=[], backtracked=[],
+                rule="the final Jacobian is computed only for the returned fit, at its own center, anchor target and "
+                     "branch log; a fit whose final Jacobian fails is not kept (as by default) and the fit before it "
+                     "is completed in its place; identical to the default unless a final Jacobian of an earlier kept "
+                     "fit would have failed")
+    while True:
+        k, fr, dbox, target, box = chain[-1]
+        if dbox is not None and "complete" in dbox:
+            if target is not None:
+                fm.set_anchor_target(target)
+            fr = dbox.pop("complete")()
+            drec["completed"].append(dict(step=k, status=fr.status))
+        else:
+            drec["completed"].append(dict(step=k, status=fr.status, note="final Jacobian not deferred (reused from "
+                                                                         "the stopping test, or not a converged fit)"))
+            c = fr.record.get("center") if isinstance(getattr(fr, "record", None), dict) else None
+            if drec["backtracked"] and isinstance(c, dict) and c.get("snap") is not None:
+                fm.restore(c["snap"])                  # the state the default leaves: this fit's center
+                fm.probe_correction = np.array(c["probe_correction"], float)
+        if fr.status in CONVERGED_STATUSES or len(chain) == 1:
+            break
+        # the default computes this Jacobian with the refit: a failure there makes the move not kept
+        drec["backtracked"].append(dict(step=k, status=fr.status))
+        del steps[k + 1:]
+        steps[k] = dict(steps[k], status=fr.status, kept=False)
+        stop = f"move {k} not kept: refit {fr.status}"
+        chain.pop()
+        fm.set_anchor_target(chain[-1][3] if chain[-1][3] is not None else target)
+    if len(chain) == 1 and fr.status not in CONVERGED_STATUSES:
+        # the first fit itself: by default no move is made after it
+        del steps[1:]
+        steps[0] = dict(steps[0], status=fr.status)
+        stop = f"the fit before move 1 is not converged ({fr.status})"
+    return fr, box, stop, drec
+
+
 def _reconstruct_checked(fm, kin, src, cfg, settings=None, params0=None, start=None, initial_profiles=None,
-                         label="fit", state_fn=None, speed=None, steady_state_check=True, start_box_out=None):
+                         label="fit", state_fn=None, speed=None, steady_state_check=True, start_box_out=None,
+                         defer_box=None):
     """One fit of :func:`reconstruct` with its branch log and steady-state record (``start_box_out`` receives the
-    starting parameters)."""
+    starting parameters; ``defer_box``: :func:`_follow_anchor` with ``anchor_follow_defer_final_jacobian``, receives
+    ``complete`` when the fit was returned without its final Jacobian)."""
     token = blog = parent = None
     start_box = {} if start_box_out is None else start_box_out
     try:                          # the branch log: a record only, never raises
@@ -727,13 +813,16 @@ def _reconstruct_checked(fm, kin, src, cfg, settings=None, params0=None, start=N
         pass
     # the frozen-branch diagnostic (option, off by default): the first assembly's branch for the whole fit
     ftok = _cm.open_branch_freeze()[1] if getattr(cfg, "q_floor_branch_freeze", "off") != "off" else None
+    if ftok is not None:
+        defer_box = None             # the frozen branch lives only as long as this call: the fit is completed here
     try:
         eff = _speed.effective(speed)                 # the default SpeedSettings() when none is given
         _speed.validate(eff, fm)
+        dkw = {} if defer_box is None else dict(defer_box=defer_box)      # without it, the call as before
         with _speed.speed_scope(eff):                 # each in-process option set as in eff, also when off
             out = _reconstruct(fm, kin, src, cfg, settings=settings, params0=params0, start=start,
                                initial_profiles=initial_profiles, label=label, state_fn=state_fn, speed=speed,
-                               start_box=start_box)
+                               start_box=start_box, **dkw)
     finally:
         if ftok is not None:
             _cm.close_branch_freeze(ftok)
@@ -750,6 +839,37 @@ def _reconstruct_checked(fm, kin, src, cfg, settings=None, params0=None, start=N
         with _speed.speed_scope(eff):
             out.record["steady_state_check"] = _fit_steady_state_check(fm, kin, src, cfg, out, start_box,
                                                                        steady_state_check, label)
+    if defer_box is not None and "complete" in defer_box:
+        # the fit was returned without its final Jacobian (:func:`_follow_anchor`): completing it later runs in this
+        # fit's speed options and branch log, as the fit itself did
+        inner = defer_box["complete"]
+
+        def complete():
+            tok = None
+            n_log = len(blog) if blog is not None else 0
+            try:
+                if blog is not None:
+                    tok = _cm.reopen_branch_log(blog)
+            except Exception:  # noqa: BLE001 -- a record must never end a fit
+                tok = None
+            try:
+                with _speed.speed_scope(eff):
+                    done = inner()
+            finally:
+                if tok is not None:
+                    try:
+                        _cm.close_branch_log(tok)
+                        if parent is not None:
+                            parent.extend(dict(e, nested_fit=str(label)) for e in blog[n_log:] if isinstance(e, dict))
+                    except Exception:  # noqa: BLE001 -- a record must never end a fit
+                        pass
+            if state_fn is None and isinstance(getattr(done, "record", None), dict):
+                with _speed.speed_scope(eff):
+                    done.record["steady_state_check"] = _fit_steady_state_check(fm, kin, src, cfg, done, start_box,
+                                                                                steady_state_check, label)
+            return done
+
+        defer_box["complete"] = complete
     return out
 
 
@@ -779,8 +899,9 @@ def _note_jacobian(jacobians, log, i0, c, lab):
 
 
 def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, initial_profiles=None, label="fit",
-                 state_fn=None, speed=None, start_box=None):
-    """:func:`reconstruct` with its branch log open (``start_box`` receives the starting parameters)."""
+                 state_fn=None, speed=None, start_box=None, defer_box=None):
+    """:func:`reconstruct` with its branch log open (``start_box`` receives the starting parameters; ``defer_box``:
+    see :func:`_reconstruct_checked`)."""
     t_all = time.perf_counter()
     speed_given = speed
     speed = _speed.check_speed(speed, fm)
@@ -833,17 +954,26 @@ def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, ini
         # Jacobian's ``parallel`` record holds them)
         rec["speed"] = dict(settings=speed_given.as_dict())
 
-    def finish(status, center, J=None, extra=None, jinfo=None):
+    def finish(status, center, J=None, extra=None, jinfo=None, segments=None):
+        # ``segments`` (a deferred final Jacobian, :func:`_follow_anchor`): ((n_solves, iteration-log index, wall
+        # clock) at the fit's start and at its deferral, the same at the start of the final Jacobian): the fit's own
+        # solves, iterations and wall time, without those of the fits made in between
         rec["status"] = status
         rec["stopping_summary"] = stopping_summary(status, rec.get("final_stopping_tests") or (extra or {}).get(
             "final_stopping_tests") or (log[-1].get("stopping_tests") if log else None), log)
-        rec["n_solves"] = fm.n_solves - n0
-        rec["wall_s"] = round(time.perf_counter() - t_all, 2)
+        if segments is None:
+            rec["n_solves"] = fm.n_solves - n0
+            rec["wall_s"] = round(time.perf_counter() - t_all, 2)
+        else:
+            (n_d, _i_d, t_d), (n_c, _i_c, t_c) = segments
+            rec["n_solves"] = (n_d - n0) + (fm.n_solves - n_c)
+            rec["wall_s"] = round((t_d - t_all) + (time.perf_counter() - t_c), 2)
         rec["forward"] = fm.settings_record()
         get_its = getattr(fm, "iteration_record", None)
         if get_its is not None:
             try:      # every solve's iteration count and the limit in effect: a record only, nothing reads it
-                rec["solver_iterations"] = get_its(start=i0)
+                rec["solver_iterations"] = (get_its(start=i0) if segments is None else
+                                            get_its(segments=((i0, segments[0][1]), (segments[1][1], None))))
             except Exception as exc:  # noqa: BLE001 -- a record must never end a fit
                 rec["solver_iterations"] = dict(computed=False, reason=f"{type(exc).__name__}: {exc}"[:300])
         if extra:
@@ -913,15 +1043,20 @@ def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, ini
                         if col.get("noise_limited"):
                             info_flags[col["name"]] = "no information: column at the noise floor after the step growths"
                     rec["covariance_column_flags"] = info_flags
+        par = result_params(center)
+        if state_fn is not None or cfg.core_relaxation not in _cm.SAWTOOTH_RELAXATIONS:
+            rec["params_not_used"] = ["log_strength", "f"]
+        return FitResult(status=status, params=par,
+                         free=names, theta=(center["theta"] if center is not None else th).copy(), sigma=sig,
+                         covariance=cov, chi2=chi, record=rec)
+
+    def result_params(center):
         par = _to_params(center["theta"] if center is not None else th, names, base)
         if state_fn is not None or cfg.core_relaxation not in _cm.SAWTOOTH_RELAXATIONS:
             # the sawtooth parameters are not read on this path (the default core treatment or a supplied state):
             # recorded as not used rather than as their opt-in defaults
             par.update(log_strength=None, f=None)
-            rec["params_not_used"] = ["log_strength", "f"]
-        return FitResult(status=status, params=par,
-                         free=names, theta=(center["theta"] if center is not None else th).copy(), sigma=sig,
-                         covariance=cov, chi2=chi, record=rec)
+        return par
 
     def evaluate(theta, start_state, z0, lab, init_prof=None, ref_index=None):
         p = _to_params(theta, names, base)
@@ -1515,6 +1650,34 @@ def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, ini
             and log[-1].get("stopping_tests") is not None \
             and log[-1]["theta"] == center["theta"].tolist():
         Jf, jf_info = J, dict(jinfo, reused="Jacobian computed at the final center for the stopping test")
+    elif (defer_box is not None and status in CONVERGED_STATUSES
+          and getattr(getattr(fm, "case", None), "locked", None) is not None):
+        # FitSettings.anchor_follow_defer_final_jacobian (:func:`_follow_anchor`): the fresh final Jacobian is made
+        # only if this fit is the one returned; until then the fit is returned with its center and chi^2 and without
+        # a covariance.  Only once the edge-taper case is locked (a skipped Jacobian can then not decide it).
+        mark = (fm.n_solves, len(getattr(fm, "iteration_log", None) or []), time.perf_counter())
+        stop_final = stop
+
+        def complete():
+            here = (fm.n_solves, len(getattr(fm, "iteration_log", None) or []), time.perf_counter())
+            restore_center(center)
+            Jf, jf_info = jacobian(center, f"{label}:final")
+            restore_center(center)
+            extra = _final_extra(center, fm, ms, kin)
+            extra["final_jacobian"] = jf_info
+            extra["final_stopping_tests"] = stop_final
+            done = finish(status if Jf is not None else status + "_no_final_jacobian", center, Jf, extra,
+                          jinfo=jf_info, segments=(mark, here))
+            done.record["center"] = center
+            return done
+
+        defer_box["complete"] = complete
+        nan_cov = np.full((len(names), len(names)), np.nan)
+        return FitResult(status=status, params=result_params(center), free=names, theta=center["theta"].copy(),
+                         sigma=np.full(len(names), np.nan), covariance=nan_cov, chi2=center["chi2"],
+                         record=dict(center=center, label=label, status=status,
+                                     final_jacobian=dict(deferred=True, note="computed only if this fit is returned "
+                                                                             "(anchor_follow_defer_final_jacobian)")))
     else:
         Jf, jf_info = jacobian(center, f"{label}:final")
     restore_center(center)

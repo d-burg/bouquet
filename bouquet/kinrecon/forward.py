@@ -582,6 +582,9 @@ class ForwardModel:
         zero with the raw OFT weight ``generation_coil_reg`` (the closure tests use 1e-2);
         isoflux rows on ``reference_boundary`` with weight 1.  Never used for a
         reconstruction.
+    speed : SpeedSettings, optional
+        The in-process speed options of the row set-up at construction (:mod:`.speed`; none changes a value; not
+        given: ``SpeedSettings()``, as :func:`.fit.reconstruct`; ``SpeedSettings.all_off()`` for the plain scan).
     reference_points : dict, optional
         Points of the reference equilibrium that its boundary polygon does not carry, used only to
         RECORD the displacement of the achieved boundary (:meth:`boundary_distance`), never as rows:
@@ -594,7 +597,7 @@ class ForwardModel:
     """
 
     def __init__(self, mesh, F0, measurements, reference_boundary, coil_roles=None, settings=None,
-                 oft_env=None, case_id="case", ip=None, generation_coil_reg=None, reference_points=None):
+                 oft_env=None, case_id="case", ip=None, generation_coil_reg=None, reference_points=None, speed=None):
         from OpenFUSIONToolkit import OFT_env
         from OpenFUSIONToolkit.TokaMaker import TokaMaker
         import OpenFUSIONToolkit
@@ -628,8 +631,13 @@ class ForwardModel:
         self.iteration_log = []
         self.history = []
         self.taper_restarts = []
-        self.reconfigure(measurements, reference_boundary, coil_roles, case_id=case_id, ip=ip,
-                         generation_coil_reg=generation_coil_reg, reference_points=reference_points)
+        # the row set-up runs under the in-process speed options (``speed``; not given: the default SpeedSettings(),
+        # as the fit and series entry points): the same rows bit for bit, the indexed point location instead of the
+        # plain scan (:mod:`.speed`)
+        from . import speed as _speed
+        with _speed.speed_scope(_speed.effective(speed)):
+            self.reconfigure(measurements, reference_boundary, coil_roles, case_id=case_id, ip=ip,
+                             generation_coil_reg=generation_coil_reg, reference_points=reference_points)
 
     def reconfigure(self, measurements, reference_boundary, coil_roles=None, case_id="case", ip=None,
                     generation_coil_reg=None, reference_points=None):
@@ -700,7 +708,7 @@ class ForwardModel:
         self.iteration_log.append(dict(label=str(label), its=None if its is None else int(its), kind=kind,
                                        stopped_at_limit=bool(at_limit)))
 
-    def iteration_record(self, start=0):
+    def iteration_record(self, start=0, segments=None):
         """Iteration counts of the solves logged since index ``start`` of :attr:`iteration_log` (a fit or a series
         passes its own start; one entry per solver call counted in :attr:`n_solves`, warm verification re-solves
         included).  ``its``: the counts in call order (None where the solver output could not be read);
@@ -708,8 +716,13 @@ class ForwardModel:
         than OFT's own limit (this instance's default at construction; possible only with
         :attr:`ForwardSettings.solver_maxits` above it); ``n_stopped_at_limit``: solves that ended with the solver's
         iteration-limit error (its output parsed; not a read of the solver's setting); ``over_oft_default``: label,
-        count and kind of each solve above OFT's limit or stopped at the limit.  A record only."""
-        log = self.iteration_log[int(start):]
+        count and kind of each solve above OFT's limit or stopped at the limit.  ``segments`` (in place of
+        ``start``): ``(begin, end)`` index pairs (``end`` None: to the end), the solves of those stretches of the log
+        in order (a fit completed after other fits, :func:`.fit.reconstruct`).  A record only."""
+        if segments is None:
+            log = self.iteration_log[int(start):]
+        else:
+            log = [e for a, b in segments for e in self.iteration_log[int(a):(None if b is None else int(b))]]
         oft = int(self.iteration_limit["oft_default"])
         its = [e["its"] for e in log]
         known = [i for i in its if i is not None]
@@ -1199,26 +1212,37 @@ class ForwardModel:
     def boundary_crossings(self, points, span=(0.6, 1.4), n_scan=161, n_bisect=40):
         """Where the solved boundary (psi_N = 1) crosses the ray from the solved magnetic axis through each point:
         the first crossing outward, by a scan of the ray over ``span`` (in units of the point's distance from the
-        axis) and bisection.  NaN where no crossing is found on the span."""
+        axis) and bisection.  NaN where no crossing is found on the span.  All points are evaluated together (one
+        field evaluation for the scan and one per bisection step), with the same arithmetic per point as one ray at a
+        time."""
         gs = self.gs
         pts = np.asarray(points, float)
         ax = np.array([float(v) for v in gs.o_point])
         d = pts - ax
         sg = np.linspace(span[0], span[1], int(n_scan))
         out = np.full_like(pts, np.nan)
+        if not len(pts):
+            return out
+        scan = (ax[None, None, :] + sg[None, :, None] * d[:, None, :]).reshape(-1, 2)
+        pn = np.asarray(_diag.psi_n_at(gs, scan)[0], float).reshape(len(pts), len(sg))
+        lo = np.zeros(len(pts))
+        hi = np.zeros(len(pts))
+        ok = np.zeros(len(pts), bool)
         for i in range(len(pts)):
-            pn = np.asarray(_diag.psi_n_at(gs, ax + sg[:, None] * d[i])[0], float)
-            k = np.where(pn >= 1.0)[0]
+            k = np.where(pn[i] >= 1.0)[0]
             if not len(k) or k[0] == 0:
                 continue
-            lo, hi = sg[k[0] - 1], sg[k[0]]
-            for _ in range(int(n_bisect)):
-                mid = 0.5 * (lo + hi)
-                if float(np.asarray(_diag.psi_n_at(gs, (ax + mid * d[i])[None, :])[0])[0]) >= 1.0:
-                    hi = mid
-                else:
-                    lo = mid
-            out[i] = ax + 0.5 * (lo + hi) * d[i]
+            ok[i] = True
+            lo[i], hi[i] = sg[k[0] - 1], sg[k[0]]
+        idx = np.where(ok)[0]
+        if not len(idx):
+            return out
+        for _ in range(int(n_bisect)):
+            mid = 0.5 * (lo[idx] + hi[idx])
+            inside = np.asarray(_diag.psi_n_at(gs, ax[None, :] + mid[:, None] * d[idx])[0], float) >= 1.0
+            hi[idx] = np.where(inside, mid, hi[idx])
+            lo[idx] = np.where(inside, lo[idx], mid)
+        out[idx] = ax[None, :] + (0.5 * (lo[idx] + hi[idx]))[:, None] * d[idx]
         return out
 
     def move_anchor_target(self, fraction):

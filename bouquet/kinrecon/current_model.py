@@ -1295,6 +1295,12 @@ def open_branch_log():
     return log, _ASSEMBLY_LOG.set(log)
 
 
+def reopen_branch_log(log):
+    """Open an existing branch log again (a fit completed after its log was closed, :func:`.fit.reconstruct`);
+    returns the token for :func:`close_branch_log`."""
+    return _ASSEMBLY_LOG.set(log)
+
+
 def close_branch_log(token):
     """Close the branch log opened with ``token`` (the log open before it is open again)."""
     _ASSEMBLY_LOG.reset(token)

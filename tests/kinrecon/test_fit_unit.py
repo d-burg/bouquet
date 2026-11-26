@@ -699,3 +699,170 @@ def test_anchor_offset_is_carried_onto_another_polygon_by_angle():
     assert rec["carried"] and rec["mean_mm"] == pytest.approx(-20.0, abs=0.5)
     with pytest.raises(ValueError):
         fm2.set_anchor_target(ref)                          # another polygon's shape is refused
+
+
+# ------------------------------------------------------------------ final Jacobian of the returned fit only (option)
+class FakeFMAnchorCase(FakeFMAnchor):
+    """:class:`FakeFMAnchor` with an edge-taper case (``locked``: as the forward model's case after its first solve)."""
+
+    def __init__(self, scale, locked=False):
+        super().__init__(scale)
+        self.case = SimpleNamespace(locked=locked)
+
+
+def _install_final_fail(monkeypatch, fm, final_fail_targets=()):
+    """:func:`_install_anchor` with every column solve of a final Jacobian failing at the given targets."""
+    calls = _install_anchor(monkeypatch, fm)
+    consistent = FIT._consistent
+
+    def consistent_f(fm_, kin, src, params, cfg, start, z0, label, initial_profiles=None, state_fn=None):
+        out = consistent(fm_, kin, src, params, cfg, start, z0, label, initial_profiles=initial_profiles,
+                         state_fn=state_fn)
+        if ":final:col" in label and fm_.target in final_fail_targets:
+            return CM.ConsistentResult(False, "solve_failed", 3, None, {"lag": True}, out.solve,
+                                       {"passes": [], "reason": "injected"}, 0.01)
+        return out
+
+    monkeypatch.setattr(FIT, "_consistent", consistent_f)
+    return calls
+
+
+def _pair(monkeypatch, scale, locked=False, final_fail_targets=(), **kw):
+    """The same moving-target fit with the option off and on: (result, model) for each."""
+    out = []
+    for on in (False, True):
+        fm = FakeFMAnchorCase(scale, locked=locked)
+        _install_final_fail(monkeypatch, fm, final_fail_targets)
+        out.append((_anchor_fit(fm, anchor_follow=True, anchor_follow_defer_final_jacobian=on, **kw), fm))
+    return out
+
+
+def _same_returned_fit(a, b):
+    (ra, fa), (rb, fb) = a, b
+    assert ra.status == rb.status
+    assert ra.params == rb.params and ra.free == rb.free
+    assert np.array_equal(ra.theta, rb.theta)
+    assert np.array_equal(ra.sigma, rb.sigma, equal_nan=True)
+    assert np.array_equal(ra.covariance, rb.covariance, equal_nan=True)
+    assert repr(ra.chi2) == repr(rb.chi2)                          # repr: NaN entries compare equal
+    assert fa.target == fb.target and fa.theta_state == fb.theta_state
+    ka, kb = ra.record["anchor_follow"], rb.record["anchor_follow"]
+    assert repr(ka["steps"]) == repr(kb["steps"]) and ka["stop"] == kb["stop"] and ka["n_moves_kept"] == kb["n_moves_kept"]
+    assert repr(ra.record["final_jacobian"]) == repr(rb.record["final_jacobian"])
+    assert ra.record["n_solves"] == rb.record["n_solves"]          # the returned fit's own solves
+    for key in ("stopping_summary", "final_stopping_tests", "iterations", "settings", "covariance_column_flags"):
+        assert repr(ra.record.get(key)) == repr(rb.record.get(key)), key
+
+
+def test_deferred_final_jacobian_is_off_by_default_checked_and_not_recorded_when_off():
+    s = FIT.FitSettings()
+    assert s.anchor_follow_defer_final_jacobian is False
+    assert "anchor_follow_defer_final_jacobian" not in s.as_dict()          # the default record as before
+    assert FIT.FitSettings(anchor_follow_defer_final_jacobian=True).as_dict()["anchor_follow_defer_final_jacobian"]
+    with pytest.raises(ValueError):
+        FIT.FitSettings(anchor_follow_defer_final_jacobian=1)
+
+
+@pytest.mark.parametrize("scale,kw", [([1.0, 0.5, 0.25, 0.6, 0.1], {}),            # a move not kept
+                                      ([1.0, 0.8, 0.6, 0.4, 0.2], dict(anchor_follow_max_steps=2)),   # the cap
+                                      ([1.0, 1.5], {})])                             # the first move not kept
+def test_deferred_final_jacobian_returns_the_same_fit_with_fewer_solves(monkeypatch, scale, kw):
+    off, on = _pair(monkeypatch, scale, **kw)
+    _same_returned_fit(off, on)
+    d = on[0].record["anchor_follow"]["final_jacobian_deferred"]
+    assert d["on"] and not d["backtracked"] and "final_jacobian_deferred" not in off[0].record["anchor_follow"]
+    n_kept = off[0].record["anchor_follow"]["n_moves_kept"]
+    assert on[1].n_solves < off[1].n_solves if n_kept else on[1].n_solves <= off[1].n_solves
+
+
+def test_deferred_final_jacobian_failing_for_the_returned_fit_gives_the_default_answer(monkeypatch):
+    """The returned fit's final Jacobian fails: by default that move is not kept, and so it is with the option (the
+    fit before it is completed and returned in its place)."""
+    off, on = _pair(monkeypatch, [1.0, 0.5, 0.25, 0.6], final_fail_targets=(2,))
+    assert off[0].record["anchor_follow"]["n_moves_kept"] == 1 and off[1].target == 1
+    assert "converged_no_final_jacobian" in off[0].record["anchor_follow"]["stop"]
+    _same_returned_fit(off, on)
+    assert on[0].record["anchor_follow"]["final_jacobian_deferred"]["backtracked"][0]["step"] == 2
+
+
+def test_deferred_final_jacobian_failing_for_the_returned_first_fit_gives_the_default_answer(monkeypatch):
+    """The first fit is returned (its first move is not kept) and its final Jacobian fails: the default makes no move
+    after it; the option made one, and gives the default's answer and steps."""
+    off, on = _pair(monkeypatch, [1.0, 1.5], final_fail_targets=(0,))
+    assert off[0].status == "converged_no_final_jacobian" and off[1].moves == 0 and on[1].moves == 1
+    _same_returned_fit(off, on)
+    assert on[1].target == 0
+
+
+@pytest.mark.parametrize("fail_at", [0, 1])
+def test_deferred_final_jacobian_states_where_it_can_differ(monkeypatch, fail_at):
+    """The one stated difference: a final Jacobian of an EARLIER kept fit fails while the returned one's succeeds.
+    The default stops at that move; the option never computes that Jacobian and goes on."""
+    off, on = _pair(monkeypatch, [1.0, 0.5, 0.25, 0.6], final_fail_targets=(fail_at,))
+    assert off[1].target == max(fail_at - 1, 0) and on[1].target == 2
+    assert "earlier kept fit" in on[0].record["anchor_follow"]["final_jacobian_deferred"]["rule"]
+
+
+def test_deferred_final_jacobian_waits_for_the_edge_taper_case_lock(monkeypatch):
+    """An undecided edge-taper case (``locked`` None): no fit is deferred, so a skipped Jacobian can never decide the
+    case; the solves are those of the default."""
+    off, on = _pair(monkeypatch, [1.0, 0.5, 0.25, 0.6], locked=None)
+    _same_returned_fit(off, on)
+    assert on[1].n_solves == off[1].n_solves
+    assert all("note" in c for c in on[0].record["anchor_follow"]["final_jacobian_deferred"]["completed"])
+
+
+def test_deferred_final_jacobian_is_refused_with_a_supplied_state(monkeypatch):
+    fm = FakeFMAnchorCase([1.0, 0.5])
+    _install_anchor(monkeypatch, fm)
+    kin, src = _kin()
+    cfg = CM.CurrentModelSettings(r0=1.0, core_relaxation="periodic_orbit")
+    with pytest.raises(ValueError):
+        FIT.reconstruct(fm, kin, src, cfg, FIT.FitSettings(free=SAW_FREE, anchor_follow=True,
+                                                           anchor_follow_defer_final_jacobian=True),
+                        params0=dict(log_strength=0.5, f=0.37), state_fn=lambda lag, params=None: None)
+
+
+def test_boundary_crossings_all_points_at_once_equal_one_ray_at_a_time(monkeypatch):
+    """``ForwardModel.boundary_crossings`` (no solver; an analytic psi_N): bit for bit the per-ray scan and bisection."""
+    from bouquet.kinrecon import forward as FW
+    ax = np.array([1.70, 0.03])
+
+    def psi_n_at(gs, pts):
+        p = np.asarray(pts, float).reshape(-1, 2)
+        x, z = (p[:, 0] - ax[0]) / 0.62, (p[:, 1] - ax[1]) / 1.05
+        v = x * x + z * z + 0.07 * x ** 3
+        v[(p[:, 0] < 1.0) & (p[:, 1] > 0.9)] = np.nan               # a patch off the mesh
+        return v, None
+
+    monkeypatch.setattr(FW._diag, "psi_n_at", psi_n_at)
+    fm = FW.ForwardModel.__new__(FW.ForwardModel)
+    fm.gs = SimpleNamespace(o_point=tuple(ax))
+    th = np.linspace(0, 2 * np.pi, 37, endpoint=False)
+    pts = np.c_[ax[0] + 0.6 * np.cos(th), ax[1] + 1.0 * np.sin(th)]
+    pts = np.vstack((pts, [ax[0] + 0.01, ax[1]], [ax[0] + 5.0, ax[1]], [0.95, 1.2]))   # inside, far outside, near the off-mesh patch
+
+    def one_ray(points, span=(0.6, 1.4), n_scan=161, n_bisect=40):
+        p = np.asarray(points, float)
+        d = p - ax
+        sg = np.linspace(span[0], span[1], int(n_scan))
+        out = np.full_like(p, np.nan)
+        for i in range(len(p)):
+            pn = np.asarray(psi_n_at(None, ax + sg[:, None] * d[i])[0], float)
+            k = np.where(pn >= 1.0)[0]
+            if not len(k) or k[0] == 0:
+                continue
+            lo, hi = sg[k[0] - 1], sg[k[0]]
+            for _ in range(int(n_bisect)):
+                mid = 0.5 * (lo + hi)
+                if float(np.asarray(psi_n_at(None, (ax + mid * d[i])[None, :])[0])[0]) >= 1.0:
+                    hi = mid
+                else:
+                    lo = mid
+            out[i] = ax + 0.5 * (lo + hi) * d[i]
+        return out
+
+    got, want = fm.boundary_crossings(pts), one_ray(pts)
+    assert np.isfinite(want[:37, 0]).all() and np.isnan(want[-3:-1, 0]).all()
+    assert np.array_equal(got, want, equal_nan=True)
+    assert fm.boundary_crossings(np.zeros((0, 2))).shape == (0, 2)

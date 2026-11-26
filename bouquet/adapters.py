@@ -54,6 +54,7 @@ from typing import Optional
 import numpy as np
 
 from . import coords
+from .pressure_scale import pressure_scale_record
 
 #: Version stamp of the contract (recorded with every engine run).
 CONTRACT_VERSION = "engine-contract/1"
@@ -352,6 +353,133 @@ def mse_rows(gc, signs=None):
                 required=bool(getattr(gc, "structured_mse_required", False)))
 
 
+def scaled_pressure(record, p_th, p_imp, p_fast, Z_imp):
+    """``(pressure, pressure_parts)`` of a contract under the pressure-scale
+    *record* (:func:`bouquet.pressure_scale.pressure_scale_record`): the
+    Grad-Shafranov pressure ``s (p_th + p_imp + p_fast)`` -- exactly the
+    unscaled sum at ``s = 1`` -- and its parts, UNSCALED, with ``scale``
+    (``s``) and ``kinetic`` (the unscaled sum) beside them."""
+    p_kin = p_th + p_imp + p_fast
+    s = float(record["s"])
+    pressure = p_kin if s == 1.0 else s * p_kin
+    return pressure, dict(thermal=p_th, impurity=p_imp, fast=p_fast,
+                          Z_imp=Z_imp, scale=s, kinetic=p_kin)
+
+
+def ids_input_volume(eqp1):
+    """``(psi_N, pressure, volume, volume_source, reason)`` of one IDS
+    ``equilibrium.profiles_1d`` *eqp1*, axis first: its own nodes' psi_N,
+    its ``pressure`` [Pa] and its cumulative volume [m^3] from, in order,
+    ``volume``; the integral of ``dvolume_dpsi`` over psi; the COCOS-11
+    identity ``dV/dpsi = 2 pi |q| / (|f| gm1)`` (``gm1 = <1/R^2>``) of its
+    own ``q``, ``f`` and ``gm1``.  ``reason`` is ``None``, or why no volume
+    could be formed (the arrays are then ``None``)."""
+    from scipy.integrate import cumulative_trapezoid
+
+    def _arr(name, n=None):
+        v = eqp1.get(name)
+        if v is None:
+            return None
+        a = np.asarray(v, dtype=float)
+        if a.ndim != 1 or (n is not None and a.size != n) \
+                or not np.all(np.isfinite(a)):
+            return None
+        return a
+    psi = _arr("psi")
+    p = None if psi is None else _arr("pressure", psi.size)
+    if psi is None or p is None or psi.size < 3 or psi[-1] == psi[0]:
+        return (None, None, None, None,
+                "equilibrium.profiles_1d carries no usable psi / pressure")
+    o = np.argsort((psi - psi[0]) / (psi[-1] - psi[0]))
+    psiN = ((psi - psi[0]) / (psi[-1] - psi[0]))[o]
+    apsi = np.abs(psi[o] - psi[o][0])
+    p = p[o]
+    V = _arr("volume", psi.size)
+    if V is not None:
+        V = V[o]
+        if np.all(np.diff(V) >= 0.0) and V[-1] > V[0]:
+            return (psiN, p, V - V[0], "equilibrium.profiles_1d.volume",
+                    None)
+    dv = _arr("dvolume_dpsi", psi.size)
+    if dv is not None:
+        V = cumulative_trapezoid(np.abs(dv[o]), apsi, initial=0.0)
+        if V[-1] > 0.0:
+            return (psiN, p, V, "integral of equilibrium.profiles_1d."
+                    "dvolume_dpsi over psi", None)
+    q, f, gm1 = (_arr(k, psi.size) for k in ("q", "f", "gm1"))
+    if q is not None and f is not None and gm1 is not None \
+            and np.all(np.abs(f) > 0.0) and np.all(gm1 > 0.0):
+        vp = 2.0 * np.pi * np.abs(q[o]) / (np.abs(f[o]) * gm1[o])
+        if np.all(np.isfinite(vp)) and np.all(vp > 0.0):
+            V = cumulative_trapezoid(vp, apsi, initial=0.0)
+            return (psiN, p, V, "derived from equilibrium.profiles_1d q, f, "
+                    "gm1: dV/dpsi = 2 pi |q| / (|f| <1/R^2>) (COCOS 11), "
+                    "integrated over psi", None)
+    return (psiN, p, None, None,
+            "equilibrium.profiles_1d carries no volume, no dvolume_dpsi and "
+            "no usable q / f / gm1")
+
+
+def ids_pressure_scale_record(eqp1, psi_kin, p_th, p_imp, p_fast, setting,
+                              *, p_fast_supplied, p_fast_source=None):
+    """The pressure-scale record of an IDS source: ``W_input`` from its
+    ``equilibrium.profiles_1d.pressure`` and the kinetic parts (on the
+    core_profiles nodes, psi_N *psi_kin*; PCHIP onto the equilibrium nodes)
+    with the IDS's own volume (:func:`ids_input_volume`).  An IDS without a
+    volume gives an ``unavailable`` record (``s = 1`` under
+    ``"match_W"``)."""
+    from .pressure_scale import stored_energy
+    from .utils import pchip_interp
+    psiN, p_in, V, vsrc, why = ids_input_volume(eqp1)
+    parts = dict(thermal=p_th, impurity=p_imp, fast=p_fast)
+    if why is not None:
+        return pressure_scale_record(
+            setting, W_input=float("nan"), W_parts={}, p_kin_on_input=None,
+            p_input=None, p_fast_supplied=p_fast_supplied,
+            p_fast_source=p_fast_source,
+            input_basis="IDS equilibrium.profiles_1d.pressure",
+            volume_source="none", unavailable=why)
+    x = np.asarray(psi_kin, dtype=float)
+    xq = np.clip(psiN, x[0], x[-1])
+    on = {k: pchip_interp(x, np.asarray(v, dtype=float), xq)
+          for k, v in parts.items()}
+    p_kin = on["thermal"] + on["impurity"] + on["fast"]
+    return pressure_scale_record(
+        setting, W_input=stored_energy(p_in, V),
+        W_parts={k: stored_energy(v, V) for k, v in on.items()},
+        p_kin_on_input=p_kin, p_input=p_in, p_fast_supplied=p_fast_supplied,
+        p_fast_source=p_fast_source,
+        input_basis=("IDS equilibrium.profiles_1d.pressure on its own nodes "
+                     "(the kinetic parts PCHIP-regridded onto them)"),
+        volume_source=vsrc)
+
+
+def gfile_impurity_charge(source, kin=None):
+    """The impurity charge of the g-file route's pressure: the source's own
+    ``ReconstructionSource.impurity_Z`` (the charge of its Z_eff <-> n_i
+    mapping; owner decision 2026-11-24), or ``None`` when it is unset or
+    zero.  A p-file whose ``N Z A`` footer names an impurity of another
+    charge (``kin["Z_imp_file"]``, read by
+    :func:`bouquet.baseline._load_kinetic_profiles`) is warned about, never
+    refused: its n_i was built with the footer's charge, so the impurity
+    density ``(n_e - n_i)/Z_imp`` is then inconsistent with it."""
+    z = getattr(source, "impurity_Z", None)
+    if not z:
+        return None
+    z = float(z)
+    zf = (kin or {}).get("Z_imp_file")
+    if zf is not None and np.isfinite(float(zf)) and float(zf) != z:
+        import warnings
+        warnings.warn(
+            f"g-file route: the impurity pressure uses ReconstructionSource."
+            f"impurity_Z={z:g}, but the p-file's ion-species footer names an "
+            f"impurity of charge {float(zf):g}; its n_i was built with the "
+            "footer's charge, so n_z = (n_e - n_i)/Z_imp is inconsistent -- "
+            "set impurity_Z to the footer's charge", UserWarning,
+            stacklevel=3)
+    return z
+
+
 def _q0_psi(psi_N, psi_pad):
     """The radius the q0 row is measured at: the psi_pad-clipped axis sample
     (the closure's axis-row radius, :func:`bouquet.utils.fsa_current_geometry`)."""
@@ -412,10 +540,45 @@ class GFileAdapter:
         p_fast_kin = _resolve_fixed(_pf_in, _pf_x, psi_kin)
         p_fast = (to_eq(p_fast_kin) if _pf_in is not None
                   else np.zeros_like(psi_N))
-        Z_imp = getattr(fc, "Z_imp", None)
+        # the thermal impurity term, at the SOURCE's impurity charge: the
+        # charge of the Z_eff <-> n_i mapping (ReconstructionSource.
+        # impurity_Z; owner decision 2026-11-24), in the reconstruction and
+        # -- through pressure_parts["Z_imp"] and Baseline.Z_imp -- in every
+        # draw (EngineDrawContext.pressures).  The legacy route is unchanged.
+        Z_imp = gfile_impurity_charge(src, kin)
         p_th = _EC * (ne * te + ni * ti)
-        p_imp = (impurity_pressure(ne, ni, ti, Z_imp) if Z_imp
+        # a p-file's beam ions (its nb block, as z_fast) are not impurity:
+        # n_z = (n_e - z_fast - n_i)/Z_imp, as the IMAS route and the
+        # p-file's own quasineutrality take it
+        z_fast = (None if kin.get("z_fast") is None
+                  else to_eq(np.asarray(kin["z_fast"], dtype=float)))
+        ne_th = ne if z_fast is None else np.maximum(ne - z_fast, 0.0)
+        p_imp = (impurity_pressure(ne_th, ni, ti, Z_imp) if Z_imp
                  else np.zeros_like(psi_N))
+        # the stored-energy pressure scale (bouquet.pressure_scale): W of the
+        # g-file's PRES and of the kinetic parts with the reader's own
+        # volume_integral on the g-file's nodes (x_run is node-for-node the
+        # g-file's psi_N), before any solve
+        def _W(p):
+            return 1.5 * float(eqdsk.volume_integral(
+                np.asarray(p, dtype=float))[-1])
+        p_kin = p_th + p_imp + p_fast
+        p_in = np.asarray(eqdsk.pres, dtype=float)
+        ps_rec = pressure_scale_record(
+            getattr(cfg.generation, "pressure_scale", None),
+            W_input=_W(p_in),
+            W_parts=dict(thermal=_W(p_th), impurity=_W(p_imp),
+                         fast=_W(p_fast)),
+            p_kin_on_input=p_kin, p_input=p_in,
+            p_fast_supplied=bool(
+                (p_fast_stamp or {}).get("p_fast_source", "none") != "none"
+                and np.any(p_fast > 0.0)),
+            p_fast_source=(p_fast_stamp or {}).get("p_fast_source"),
+            input_basis="g-file PRES on its own psi_N",
+            volume_source=("g-file reader GEQDSKEquilibrium.volume_integral "
+                           "(its traced surfaces)"))
+        pressure, pressure_parts = scaled_pressure(
+            ps_rec, p_th, p_imp, p_fast, Z_imp)
         jB_in, parts = gfile_parallel_current(eqdsk)
         # the discharge's orientation in the right-handed (R, phi, Z) frame
         # of the MSE A-coefficients: the file's Ip and B_t signs, carried by
@@ -472,10 +635,12 @@ class GFileAdapter:
                                  raw_bytes=kin.get("raw_bytes"),
                                  p_fast=p_fast_kin,
                                  p_fast_source=p_fast_stamp,
-                                 zeff_provenance=kin.get("zeff_provenance")),
-            pressure=p_th + p_imp + p_fast,
-            pressure_parts=dict(thermal=p_th, impurity=p_imp, fast=p_fast,
-                                Z_imp=Z_imp),
+                                 zeff_provenance=kin.get("zeff_provenance"),
+                                 z_fast=kin.get("z_fast"),
+                                 z2_fast=kin.get("z2_fast"),
+                                 zeff_includes_fast=bool(
+                                     kin.get("zeff_includes_fast", False))),
+            pressure=pressure, pressure_parts=pressure_parts,
             jB_ind=None, jB_fix=np.zeros_like(psi_N),
             jB_fix_parts=dict(nbi=np.zeros_like(psi_N),
                               rf=np.zeros_like(psi_N),
@@ -498,6 +663,11 @@ class GFileAdapter:
                 frame_identity_max_rel=parts["frame_identity_max_rel"],
                 kinetics="p-file / IDA profiles PCHIP-regridded onto the "
                          "g-file psi_N (as the legacy reconstruction)",
+                pressure_scale=ps_rec,
+                impurity=("e n_z T_i, n_z = max((n_e - n_i)/Z_imp, 0) at "
+                          "ReconstructionSource.impurity_Z (the Z_eff <-> "
+                          "n_i charge; owner decision 2026-11-24)"
+                          if Z_imp else "none: impurity_Z unset"),
                 kinetics_sigma=("resolved from the Baseline by "
                                 "baseline.resolve_uncertainty (unchanged)"),
                 electron_charge="physics.ELEMENTARY_CHARGE",
@@ -1279,6 +1449,19 @@ class IdsAdapter:
         psi_eq = np.asarray(eqp1["psi"], dtype=float)
         psiN_eq = (psi_eq - psi_eq[0]) / (psi_eq[-1] - psi_eq[0])
         o = np.argsort(psiN_eq)
+        # the stored-energy pressure scale (bouquet.pressure_scale): W of the
+        # IDS's own equilibrium.profiles_1d.pressure and of the kinetic parts
+        # (PCHIP from the core_profiles nodes' psi_N onto the equilibrium
+        # nodes) with the IDS's own volume profile, before any solve
+        ps_rec = ids_pressure_scale_record(
+            eqp1, psi_cp, p_th, p_imp, p_fast,
+            getattr(gc, "pressure_scale", None),
+            p_fast_supplied=bool(bl.p_fast is not None
+                                 and np.any(np.asarray(p_fast) > 0.0)),
+            p_fast_source=("ImasSource / FixedComponentsConfig p_fast"
+                           if bl.p_fast is not None else "none"))
+        pressure, pressure_parts = scaled_pressure(
+            ps_rec, p_th, p_imp, p_fast, getattr(bl, "Z_imp", None))
         q_psi = _q0_psi(psi_cp, self.psi_pad)
         q_t = None
         if "q" in eqp1:
@@ -1320,9 +1503,7 @@ class IdsAdapter:
             kinetics_native=dict(psi_N=np.asarray(bl.psi_N_kinetic, float),
                                  ne=bl.ne, te=bl.te, ni=bl.ni, ti=bl.ti,
                                  Zeff=bl.Zeff, p_fast=bl.p_fast),
-            pressure=p_th + p_imp + p_fast,
-            pressure_parts=dict(thermal=p_th, impurity=p_imp, fast=p_fast,
-                                Z_imp=getattr(bl, "Z_imp", None)),
+            pressure=pressure, pressure_parts=pressure_parts,
             jB_ind=B0 * ind, jB_fix=B0 * driven,
             jB_fix_parts={k: B0 * v for k, v in fix_parts.items()},
             boundary=np.asarray(boundary, dtype=float),
@@ -1355,7 +1536,9 @@ class IdsAdapter:
                 off_sources=list(driven_off),
                 source_time_match=dict(core_sources=slice_rec,
                                        entries=entry_matches),
-                pressure=("e (ne Te + ni Ti) + impurity + fast (no p_diff)"),
+                pressure=("s x (e (ne Te + ni Ti) + impurity + fast), s "
+                          "the stored-energy pressure scale (no p_diff)"),
+                pressure_scale=ps_rec,
                 electron_charge="physics.ELEMENTARY_CHARGE",
                 kinetics_sigma=("resolved from the Baseline by "
                                 "baseline.resolve_uncertainty (unchanged)"),

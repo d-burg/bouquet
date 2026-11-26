@@ -1494,6 +1494,20 @@ class Bouquet(SwbBaseline):
                                or _pfid.get("axis_excess_flag")) else ""))
             from .baseline import warn_pressure_fidelity
             warn_pressure_fidelity(_pfid)
+            _unsc = _pfid.get("unscaled") or {}
+            if (_unsc.get("rel_rms") is not None
+                    and _pfid.get("pressure_scale", 1.0) != 1.0):
+                print(f"  {'':<12} unscaled (s = 1): rel RMS "
+                      f"{_unsc['rel_rms']:.3f}, on axis "
+                      f"{_unsc['axis_rel_err_pct']:+.1f}%")
+        # the stored-energy pressure scale (bouquet.pressure_scale; owner
+        # decision 2026-11-24): s_W, both W, the shape residual, the mode,
+        # and its warning outside the band (never a refusal)
+        _psr = getattr(self.baseline, "pressure_scale", None)
+        if _psr is not None:
+            from .pressure_scale import summary_line, warn_pressure_scale
+            print(f"  {'p scale':<12} {summary_line(_psr)}")
+            warn_pressure_scale(_psr)
         print(f"  {'boundary':<12} RMS {m['boundary_rms_mm']:.2f} mm   "
               f"max {m['boundary_max_mm']:.2f} mm   axis off {m['axis_offset_mm']:.2f} mm")
         print(f"  {'jphi resid':<12} core RMS {m['jphi_core_rms_MA']:.3f}   "

@@ -96,9 +96,12 @@ def test_the_gfile_adapter_reads_the_contract(gfile):
     for k in ("ne", "te", "ni", "ti", "zeff"):
         assert c.kinetics[k].shape == (n,) and np.all(c.kinetics[k] > 0)
     assert np.all(c.pressure >= 0) and c.pressure[0] > c.pressure[-1]
+    # the Grad-Shafranov pressure is the stored-energy scale s times the
+    # kinetic assembly (bouquet.pressure_scale), the parts unscaled
+    kin = sum(c.pressure_parts[k] for k in ("thermal", "impurity", "fast"))
+    np.testing.assert_array_equal(c.pressure_parts["kinetic"], kin)
     np.testing.assert_allclose(
-        c.pressure, sum(c.pressure_parts[k] for k in
-                        ("thermal", "impurity", "fast")), rtol=0, atol=0)
+        c.pressure, c.pressure_parts["scale"] * kin, rtol=0, atol=0)
     assert c.Ip == pytest.approx(abs(float(ad.eqdsk.Ip)))
     li = c.rows["l_i"]
     assert li["hard"] and li["kind"] == "li_3" and li["tol"] == 1e-3

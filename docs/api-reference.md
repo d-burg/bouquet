@@ -62,6 +62,18 @@ Docstrings in the source are authoritative; this page is a map.
 Layout spec: [archive-schema.md](archive-schema.md). Code source of truth:
 [`bouquet/schema.py`](../bouquet/schema.py).
 
+## Added or changed in 1.5 (unreleased)
+
+| Name | Default / signature | What it does |
+|---|---|---|
+| `GenerationConfig.pressure_scale` | `None` (resolved: `"match_W"` under the unified engine, `"none"` under legacy / swb) | The stored-energy pressure scale: `"match_W"` (s = s_W = W_input / W_kinetic), `"none"` (s = 1; s_W still reported) or a float > 0 (that s). Multiplies the total Grad-Shafranov pressure; every draw carries it fixed; warns outside [1/1.2, 1.2]. An explicit non-default value is refused on the legacy route and swb. See [engine.md](engine.md#the-stored-energy-pressure-scale-pressure_scale) |
+| `bouquet.pressure_scale` | module | `pressure_scale_record(setting, *, W_input, W_parts, p_kin_on_input, p_input, p_fast_supplied, ...)` (the record and its `s`), `warn_pressure_scale(record)`, `summary_line(record)`, `stored_energy(p, volume)`, `shape_residual(s, p_kin, p_in)`, `check_pressure_scale_setting(value)`, `resolve_pressure_scale_setting(value)`, `scale_of(record)`; constants `PRESSURE_SCALE_MODES`, `PRESSURE_SCALE_WARN_BAND` (1.2, owner decision 2026-11-24), `PRESSURE_SCALE_VERSION` |
+| `Baseline.pressure_scale` | `None` off the engine | The reconstruction's pressure-scale record (s, s_W, both W and the kinetic parts, the shape residual, the warn flag) |
+| `schema.read_pressure_scale(attrs) -> dict` | | `dict(s, mode, record, recorded)` of a draw or `_baseline` group; an archive written before the feature reads as `s = 1.0`, `recorded=False` (attrs `schema.PRESSURE_SCALE_ATTR`, `PRESSURE_SCALE_MODE_ATTR`, `PRESSURE_SCALE_JSON_ATTR`) |
+| `DrawView.pressure_scale` / `ScanView.baseline_pressure_scale` | | The same, from the archive views |
+| `adapters.gfile_impurity_charge(source, kin=None)` | | The g-file route's impurity charge: `ReconstructionSource.impurity_Z` (warns when a p-file footer names another charge) |
+| `adapters.ids_input_volume(eqp1)` / `adapters.ids_pressure_scale_record(...)` | | The IDS's own pressure and volume ladder (`volume`, else `dvolume_dpsi`, else `2π\|q\|/(\|f\| gm1)`) and its pressure-scale record |
+
 ## Added or changed in 1.4.0
 
 The fields, functions and records 1.4.0 added or whose default it changed.

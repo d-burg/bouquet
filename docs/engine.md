@@ -107,7 +107,7 @@ the toy and a TokaMaker stand-in over it), `tests/test_one_conversion.py`
 | item | g-file adapter | IDS adapter |
 |---|---|---|
 | kinetics n_e, T_e, n_i, T_i, Z_eff | p-file / IDA, PCHIP onto the g-file ψ_N (as the legacy reconstruction) | core_profiles (or the IDA hybrid), as `read_imas_baseline` resolves them |
-| pressure | thermal `e(n_e T_e + n_i T_i)` + fast (fixed); the impurity-pressure term is zero on this route (the adapter looks for the impurity charge on `fixed_components`, which has no such field) | thermal + impurity + fast, **no `p_diff`** |
+| pressure | `s` x (thermal `e(n_e T_e + n_i T_i)` + impurity `e n_z T_i` at `ReconstructionSource.impurity_Z`, n_z = (n_e − z_fast − n_i)/Z with z_fast a p-file's beam density `nb` + fast (fixed)); `s` from the g-file's `PRES` ([pressure scale](#the-stored-energy-pressure-scale-pressure_scale)) | `s` x (thermal + impurity + fast), **no `p_diff`**; `s` from `equilibrium.profiles_1d.pressure` |
 | inductive (parallel) | `<j.B>_in = F p' + F'<B^2>/mu0` on the g-file's own traced surfaces (identity I0), minus Redl `<j.B>` on the anchor, minus the fixed parts; smoothed with a verbatim copy of `fit_inductive_profile`'s basis (spline + PCHIP, zero edge anchor, ≥ 0), **no amplitude search** | **the parallel residual by definition** (owner decision, 2026-10-02): `|B0| (j_total − j_bootstrap − Σ driven)` (IMAS `<j.B>/B0`), every driven entry the one held fixed below. The source's `j_ohmic` is a **cross-check**, not a choice: it is compared with the residual and the net (fraction of the total current) and rms (fraction of rms `j_total`) differences are stamped in `provenance["inductive_consistency"]` (action `"residual_by_definition"`; `"unchecked"` when the source has no `j_ohmic`), with no threshold and no warning. A source without `j_total` or `j_bootstrap` is refused (`inductive="j_ohmic"` uses its `j_ohmic` explicitly; there is no silent fallback). Evidence: on self-consistent sources the residual and `j_ohmic` are indistinguishable (`|Δl_i| ≤ 1.8e-3`); on sources whose own split is locally inconsistent the residual is closer to the source's `<j_phi>`. Explicit options (`IdsAdapter(inductive=...)`, passed by the engine from `GenerationConfig.engine_ids_inductive`, default `"residual"`): `"j_ohmic"` takes the source's, warning when the net mismatch exceeds `IdsAdapter(inductive_tol=0.02)` (2 % of the total current, owner-set); `"auto"` takes `j_ohmic` unless it is absent or misses by more than that tolerance, then the residual with a warning. Nothing in the source is altered |
 | fixed driven (parallel) | user `j_NBI` / `j_RF` (toroidal inputs), converted with the anchor's `F<1/R>/<B^2>` | the **driven** core_sources entries by their IMAS identifier (the data dictionary's `core_sources.source[:].identifier` enumeration; `adapters.IDS_DRIVEN_SOURCE_PARTS`), × `|B0|`, held fixed, by part: nbi (2) → `nbi`; ec / lh / ic (3, 4, 5) → `rf`; fusion (6), runaways (501), a model's sawteeth entry (701) → `other`. **Never added**: ohmic (7) and bootstrap (13) (the core_profiles `j_ohmic` / `j_bootstrap` stand for them), AGGREGATES -- total (1), auxiliary (100), the combinations 101-107, radiation (200), 202, 203 -- which would double-count their constituents, and a bootstrap-like `neoclassical` (401); each such entry carrying a non-zero `j_parallel` is listed in `provenance["ignored_sources"]` with its reason and warned about. An unknown index carrying a non-zero `j_parallel` is held fixed under `other` WITH a warning (`unclassified` in its `driven_sources` entry). The core_sources slice is the one nearest the core_profiles slice read and must lie within half the local core_profiles time-step of it, else the read is refused naming both times (`io.imas.core_sources_slice`, shared with the legacy reader; owner decision 2026-10-06). An entry carrying its own per-slice `time` is read at the core_sources slice time (a model's entry may start later than the IDS time base), not at the list index: its nearest own slice, accepted within half its own local time-step AND within half the local core_profiles step of the core_profiles slice time -- never interpolated; when neither time base has a local step (single-time bases, for the core_sources slice and for an entry alike) the window is 10 us (`io.imas.IMAS_SINGLE_TIME_WINDOW_S`, owner-approved 2026-10-07: a rounding-level mismatch of millisecond-stored times is a match, its dt recorded, and the rules below apply only beyond it); outside that window a driven entry carrying current on its own slices bracketing the time is refused, one carrying none there is off at that time (zero, listed in `provenance["off_sources"]`), and one whose own record begins AFTER the slice time is off before its record (zero, listed with `reason="off_before_record"` and its `first_own_time`, announced once per source file and entry); past its last own time an entry carrying current there is refused; one with a different slice count and no times is refused. Every match (both slice times, dt, the windows, the bracketing own times, the status) is in `provenance["source_time_match"]`. `provenance["driven_sources"]` lists what was added; a user override is converted as on the left. The delivered split reports `other` inside `j_RF`. The legacy reader (`read_imas_baseline`, which the engine runs first) reads every driven entry through this same call with the same arguments, so its refusals, `off_sources` stamps and announcements are the engine's; it records `driven_sources` / `ignored_sources` / `off_sources` / `sawteeth_hold` in `Baseline.source_time_match`. `ImasSource.hold_sawteeth=False` (legacy reader only: the sawteeth entry left in the residual inductive) is refused here |
 | boundary | g-file LCFS | equilibrium boundary outline (or `LCFS_geqdsk`) -- both held as the standard per-unit-length isoflux set (#84, below) |
@@ -482,7 +482,7 @@ instruction, because the frozen bootstrap exists on the legacy paths only.
 | `structured_li_kind` | nothing: the l_i row is li_3 |
 | `structured_soft` | nothing: hard rows for a g-file, soft for an IDS source |
 | `structured_li_max_corrector_steps` | `engine_li_row_relaxation` |
-| `anchor_pressure_to_equilibrium` | nothing: no `p_diff` in the engine's pressure |
+| `anchor_pressure_to_equilibrium` | nothing: no `p_diff` in the engine's pressure (its level is set by `pressure_scale`) |
 | `imas_corrective_jphi` | `engine_delivery_correction` |
 | `jbs_loop_q0_corrector` | `engine_rows` with `"q0"` (`engine_draw_q0_row` for the draws) |
 | `floor_j_BS`, `accept_anchor_inband`, `diagnostic_plots` | nothing: legacy draw / SWB mechanics |
@@ -649,7 +649,9 @@ historical list, and its record says so.
 
 **Inputs.** Every perturbed quantity is formed as `base + (drawn - base)`:
 the kinetics on the kinetic grid (then PCHIP'd as the adapter does), the
-solve pressure from the adapter's own assembly (thermal + impurity + fast),
+solve pressure from the adapter's own assembly (thermal + impurity + fast)
+times the reconstruction's pressure scale `s`, carried fixed
+(`s (p_kin* + Δp)`, exactly the contract's pressure at zero perturbation),
 the auxiliary channels, the parallel inductive. The random stream is the
 legacy one through the first inductive candidate (`engine_draws.RNG_STREAM`):
 the kinetic channels `ne, Te, (Zeff -> ni | ni), Ti` redrawn together until
@@ -1370,6 +1372,74 @@ of a, the threshold) and `label` (`"vertical_runaway"` when the channel is at
 its bound and `|dZ|` is more than `VERTICAL_RUNAWAY_AXIS_FRAC` = 0.1 a, else
 `None`; "The boundary
 constraint" above) -- a label, never a gate.
+
+## The stored-energy pressure scale (`pressure_scale`)
+
+The engine's Grad-Shafranov pressure is assembled from the kinetics; the
+input's own pressure never enters the solve. When a component is missing
+from the kinetics -- typically the fast-ion pressure of an IDA-only run
+(measured on 17 real cases without solves: `W_input / W_kinetic` = 1.18-1.72,
+typically 1.24) -- the reconstruction and every draw sit that much low in
+stored energy. `GenerationConfig.pressure_scale` (owner decision 2026-11-24;
+`bouquet/pressure_scale.py`) measures the gap and, by default, closes its
+level:
+
+```
+s_W = W_input / W_kinetic,      W = 1.5 ∫ p dV
+```
+
+both of the FULL pressure (separatrix pressure included) on the INPUT's own
+flux-surface volumes and nodes, computed in the adapter before the first
+solve (no extra solve): g-file `PRES` and the kinetic parts with the
+reader's `GEQDSKEquilibrium.volume_integral`; IDS
+`equilibrium.profiles_1d.pressure` with its own `volume` (else the integral
+of `dvolume_dpsi`, else `dV/dψ = 2π|q|/(|f| gm1)`, the COCOS-11 identity of
+its own `q`, `f`, `gm1`; the record names which), the kinetic parts PCHIP'd
+from the core_profiles nodes onto the equilibrium nodes. `energy_mhd` is not
+used. An IDS with none of these gives `s_W` unavailable: `s = 1` under
+`"match_W"`, with a warning.
+
+| `pressure_scale` | `s` | `s_W` |
+|---|---|---|
+| `None` (default) | resolved at `prepare_baseline()`: `"match_W"` under `"unified"`, `"none"` under `"legacy"` / swb | |
+| `"match_W"` | `s_W` | reported |
+| `"none"` | 1 (the 1.4.1 pressure level; A/B; the g-file route now also carries the impurity term) | reported |
+| float > 0 | that value | reported |
+
+`s` multiplies the TOTAL pressure handed to Grad-Shafranov
+(`EngineContract.pressure = s (thermal + impurity + fast)`), so `P'`, β, W
+and the archived `j_pressure` follow. The kinetic profiles, the Redl
+bootstrap (`evaluate_jBS` on the kinetics), Z_eff and n_i are NOT scaled; the
+unscaled parts stay in `pressure_parts` (`thermal`, `impurity`, `fast`,
+`kinetic`, `scale`). Every draw carries the reconstruction's `s` fixed,
+never resampled; the draws' pressure match stays on the unscaled thermal
+integral, exactly as before. The σ=0 draw uses the same `s`, so the
+zero-perturbation identity is unchanged (the first request is still
+bit-identical; no gate or tolerance changed).
+
+**Reported, never refused.** The record (`Baseline.pressure_scale`, the
+engine record's `pressure_scale`, the contract's `provenance`) carries `s`,
+`s_W`, `W_input_J`, `W_kinetic_J` and its parts, the shape residual after
+scaling (relative RMS of `s p_kin − p_in` on the input's nodes; also
+unscaled and at `s_W`), the volume source and the warn flag. A one-line
+summary is printed with the reconstruction summary. Outside
+`[1/1.2, 1.2]` (`PRESSURE_SCALE_WARN_BAND`) one UserWarning names the likely
+cause: with no fast-ion pressure supplied, that `s` is standing in for it as
+a uniform scale while the fast-ion pressure is core-peaked (supply
+`fixed_components.p_fast`); otherwise a missing component or an input that
+disagrees with the kinetics; below the band, kinetics above the input (a
+doubled `pb`, a units error, a wrong fast-ion reduction convention). The
+warning judges `s_W`, whatever the mode. The g-file route's report-only
+pressure-fidelity check is computed on the SCALED pressure, so it reports
+only what a scalar cannot fix (the shape); its unscaled numbers are kept in
+`pressure_fidelity["unscaled"]`.
+
+**What changed (the default move).** Every unified-engine reconstruction's
+pressure level now follows the input's stored energy: β, W, `P'`,
+`j_pressure` and the coil currents move with `s`. `"none"` restores the
+1.4.1 pressure level (on the g-file route the impurity term, added in the
+same release, still differs); a stored unified config written before the
+setting reloads with `"none"` and says so.
 
 ## The pressure handed to the solver (`edge_pprime_pin`, `separatrix_pressure`)
 

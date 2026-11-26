@@ -55,18 +55,23 @@ closed by loosening a bar. The measurements behind them are in
   the release tree (3.34 at `27979d1`) and the library warns; its draws do not suffer (24 in spec in 24–25
   attempts). The warning is informative there, not a failure; it stays as
   evidence for the 1.5 rule.
-- **g-file route: no impurity pressure in the solve (no tracking issue
-  yet).** The solve pressure of a g-file run is
-  `e (n_e T_e + n_i T_i) + p_fast`. The thermal impurity term `e n_z T_i`
-  that the IMAS routes add is zero there, for the reconstruction and for
-  every draw alike: the adapter looks for the impurity charge on
-  `FixedComponentsConfig`, which has no such field
-  (`ReconstructionSource.impurity_Z` sets the quasi-neutrality only). For a
-  carbon plasma at Z_eff = 2 with T_i = T_e the missing term is about 2 % of
-  the thermal pressure, so the solve pressure, the betas and the
-  pressure-driven current are low by about that share. The reconstruction
-  and its draws are consistent with each other
-  ([architecture.md §7.1](../architecture.md#71-the-solve-pressure)).
+- **The pressure scale fixes the level, not the shape (no issue; 1.5).**
+  Under the default `pressure_scale="match_W"` the solve pressure is the
+  kinetic pressure times one number, `s_W = W_input / W_kinetic`, so the
+  stored energy matches the input's while the profile shape stays the
+  kinetics'. A missing fast-ion pressure is core-peaked, so a uniform scale
+  puts too much of it at the edge and too little on axis: the pressure-driven
+  current and the local `P'` keep that shape error. The shape residual after
+  scaling (relative RMS of `s p_kin − p_in`) is reported with `s_W`, and the
+  g-file route's pressure-fidelity check is computed on the scaled pressure,
+  so both show what the scalar cannot fix. Supply
+  `fixed_components.p_fast` where a fast-ion profile is known; `s_W` outside
+  `[1/1.2, 1.2]` warns.
+- **An IDS without a volume profile gets `s = 1` (no issue).** The IDS's
+  stored energy uses its own `equilibrium.profiles_1d.volume`, else
+  `dvolume_dpsi`, else the COCOS-11 identity from `q`, `f` and `gm1` (the
+  shipped synthetic dd uses the last). With none of them `s_W` is
+  unavailable, `"match_W"` falls back to `s = 1`, and a warning says so.
 
 ## Draws and statistics
 

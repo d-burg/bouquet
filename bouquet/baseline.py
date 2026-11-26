@@ -332,6 +332,14 @@ class Baseline:
     # Bouquet.prepare_baseline on every path; archived as the _baseline attr
     # solver_geometry_json (and in the engine record).
     solver_geometry: Optional[dict] = None
+    # The unified engine's stored-energy pressure scale record (bouquet.
+    # pressure_scale; owner decision 2026-11-24): s, s_W = W_input /
+    # W_kinetic, both W and the kinetic parts, the shape residual, the warn
+    # flag.  The engine's solve pressure (pres_tokamaker, the archived
+    # `pressure`) is s x the kinetic assembly; None off the engine.
+    # (Placed before p_fast_source, which tests/test_pfile_pfast_default.py
+    # keeps as the last field; every earlier positional slot is unchanged.)
+    pressure_scale: Optional[dict] = None
     # The g-file route's fast-ion pressure INPUT record (decision B,
     # 2026-10-17; resolve_p_fast_input): {"p_fast_source": "pfile_pb" |
     # "fixed_components" | "none", "pfile_has_pb", and for "pfile_pb" "coord",
@@ -1698,6 +1706,29 @@ def _load_kinetic_profiles(source) -> dict:
         Zeff=np.clip(np.asarray(Zeff, dtype=float), 1.0, None),
         raw_bytes=raw,
     )
+    # the footer's impurity charge (compute_quasineutrality needed it), for
+    # the engine g-file route's impurity-pressure consistency check
+    # (adapters.gfile_impurity_charge); informational elsewhere
+    try:
+        out["Z_imp_file"] = float(pf.ion_roles(need=("impurity",))["Z_imp"])
+    except Exception:
+        pass
+    # the beam (fast-ion) density block nb: its charge moments on the
+    # kinetic grid.  The p-file's n_i and Z_eff count the beam ions apart
+    # (compute_quasineutrality: n_z = (n_e - n_i - Z_beam n_b)/Z_imp;
+    # compute_zeff: Z_beam^2 n_b in the numerator), so the engine g-file
+    # route runs its thermal impurity math on n_e - z_fast and its draws'
+    # Z_eff <-> n_i mapping with zeff_includes_fast, as the IMAS route does
+    # with its fast-ion moments (Baseline.z_fast / z2_fast)
+    nb = pf.nb
+    if nb is not None and bool(np.any(np.asarray(nb, dtype=float) != 0.0)):
+        Z_beam = float(pf.ion_roles(need=())["Z_beam"])
+        nb_si = np.interp(np.asarray(psi_pf, dtype=float),
+                          np.asarray(pf["nb"]["psinorm"], dtype=float),
+                          np.asarray(nb, dtype=float)) * 1e20
+        out["z_fast"] = Z_beam * nb_si
+        out["z2_fast"] = Z_beam ** 2 * nb_si
+        out["zeff_includes_fast"] = True
     # the fast-ion pressure block (kPa, on its own psinorm): the default
     # p_fast of the g-file route (decision B; resolve_p_fast_input)
     if pf.pb is not None:
@@ -1801,6 +1832,8 @@ def _resolve_reconstruction(source, config, mygs) -> Baseline:
         None if coord == coords.PSI else (psi_N, x_run))
     p_fast_kin = _resolve_fixed(_pf_in, _pf_x, x_kin)
     p_fast_eq = to_eq(p_fast_kin) if _pf_in is not None else None
+    # (LEGACY route; the unified engine's g-file adapter uses the source's
+    # impurity_Z, adapters.gfile_impurity_charge.)
     # Z_imp is plumbed for symmetry with the draw path, but is INERT here today:
     # FixedComponentsConfig (config.py) carries no Z_imp field at all -- Z_imp is
     # an *output* field of the Baseline dataclass, populated only on the IMAS
@@ -2177,7 +2210,7 @@ def pressure_fidelity_record(psi_N, p_full, p_input, *,
 
 def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved,
                             l_i_realized_post_corrective=None,
-                            edge_pressure=None) -> dict:
+                            edge_pressure=None, pressure_scale=None) -> dict:
     """Curate a TokaMaker-vs-EFIT reconstruction-fidelity dict for the summary.
 
     Each global scalar that isn't ~0 by construction (Ip, l_i, q0/q95, beta,
@@ -2309,10 +2342,20 @@ def _reconstruction_metrics(mygs, eqdsk, result, source, l_i_achieved,
         _p_sep = float((_edge_rec or {}).get("p_sep_applied") or 0.0)
         # warned where the summary is printed (Bouquet.prepare_baseline),
         # outside the captured solver output
-        _pfid = pressure_fidelity_record(
-            _ps, _p_sol + _p_sep,
-            np.interp(_ps, _psiN_eq, np.asarray(eqdsk.pres, dtype=float)),
-            warn=False)
+        _p_in = np.interp(_ps, _psiN_eq, np.asarray(eqdsk.pres, dtype=float))
+        _pfid = pressure_fidelity_record(_ps, _p_sol + _p_sep, _p_in,
+                                         warn=False)
+        # under the unified engine's pressure scale s (bouquet.
+        # pressure_scale) the solved pressure is s x the kinetic one: the
+        # record above is on the SCALED pressure (what a scalar cannot fix:
+        # the shape), and the unscaled numbers are kept beside it
+        if pressure_scale is not None:
+            _s = float(pressure_scale)
+            _pfid["pressure_scale"] = _s
+            _pfid["frame"] = ("full (p_sep added back), the solved pressure "
+                              "= s x kinetic")
+            _pfid["unscaled"] = pressure_fidelity_record(
+                _ps, (_p_sol + _p_sep) / _s, _p_in, warn=False)
     except Exception as exc:     # report-only: recorded, never raised
         _pfid = dict(report_only=True,
                      error=f"{type(exc).__name__}: {exc}")

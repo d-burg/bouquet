@@ -85,7 +85,8 @@ def test_every_engine_dependent_field_defaults_to_none():
     assert set(ENGINE_DEPENDENT_DEFAULTS) == {"isolate_edge_jBS",
                                               "perturb_jind_in_anchor",
                                               "draw_solve_maxits",
-                                              "check_bistability"}
+                                              "check_bistability",
+                                              "pressure_scale"}
     assert ENGINE_DEPENDENT_UNSET == {"draw_solve_maxits": "auto"}
     for name in ENGINE_DEPENDENT_DEFAULTS:
         assert engine_dependent_unset(name, getattr(g, name)), name
@@ -269,7 +270,10 @@ def test_the_archive_records_the_resolution(tmp_path, toy_bouquet_solver):
                 "value": None, "origin": "resolved from engine=unified"},
             # owner decision 2026-10-15: the bistability check on
             "check_bistability": {
-                "value": True, "origin": "resolved from engine=unified"}}
+                "value": True, "origin": "resolved from engine=unified"},
+            # owner decision 2026-11-24: the stored-energy pressure scale on
+            "pressure_scale": {
+                "value": "match_W", "origin": "resolved from engine=unified"}}
     assert b.baseline.engine_resolved_defaults == want
     assert b.baseline.engine["engine_resolved_defaults"] == want
     _quiet(b.generate)

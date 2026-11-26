@@ -121,6 +121,10 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
     │              convention was decided), imas_current_conversion,
     │              ida_time_match (ida_hybrid)
     │              [current_split_convention]  where p'G sits (below)
+    │              [pressure_scale, pressure_scale_mode, pressure_scale_json]
+    │                                  engine: the stored-energy pressure scale s
+    │                                  and its record ("Records added in 1.5");
+    │                                  absent = s 1; `pressure` is s x kinetic
     │              [imas_baseline="swb", swb_ip_tol, swb_ip_rel_err,
     │               swb_ip_rel_err_solve_A, swb_edge_taper_psi0,
     │               swb_jbs_convention, swb_jbs_conversion, swb_alpha*,
@@ -188,6 +192,9 @@ the functional readers (`load_equilibrium`, `load_baseline_profiles`,
                    [beta_p, Lambda]    ← beta_p (full-pressure frame) and
                                          Lambda = beta_p + l_i(3)/2; reported,
                                          never a filter (2026-10-14)
+                   [pressure_scale]    ← engine draws: the reconstruction's
+                                         pressure scale s, carried fixed
+                                         (absent = 1; 1.5)
                    [current_split_convention]  where p'G sits (below)
                    [kinetic_sampler_json]  legacy / swb draws: the shared
                                        kinetic sampler's record (version
@@ -645,6 +652,38 @@ archive predates it (not counted then).
 
 Absent: the archive predates the stamp; `load_baseline_profiles` returns
 only what is there.
+
+## Records added in 1.5 (unreleased): the pressure scale
+
+Additive within schema v3 (no name changes type or meaning; an archive
+written before the record lacks it and reads as `s = 1` silently, with
+`recorded=False`, never an error or a warning;
+`schema.read_pressure_scale`, `DrawView.pressure_scale`,
+`ScanView.baseline_pressure_scale`). Owner decision 2026-11-24
+([engine.md](engine.md#the-stored-energy-pressure-scale-pressure_scale)).
+
+| Where | Attr | Type | Meaning |
+|---|---|---|---|
+| `_baseline`, every engine draw | `pressure_scale` | float | The scale `s` the group's Grad-Shafranov pressure carries. Every draw carries the reconstruction's `s` |
+| `_baseline` | `pressure_scale_mode` | str | `"match_W"`, `"none"` or `"fixed"` |
+| `_baseline` | `pressure_scale_json` | JSON str | The full record: `s`, `s_W`, `W_input_J`, `W_kinetic_J`, `W_kinetic_parts_J` (`thermal`, `impurity`, `fast`), `W_scaled_J`, `shape_residual` (at `s`), `shape_residual_unscaled`, `shape_residual_at_s_W`, `warn_band`, `warn_flag`, `cause`, `p_fast_supplied`, `p_fast_source`, `input_pressure`, `volume_source`, `status` (`"computed"` / `"unavailable"`), `unavailable_reason`, `setting`, `version` (`pressure_scale/1`) and the definitions |
+
+**What the pressure datasets mean.** The `pressure` dataset of `_baseline`
+and of every engine draw IS the solved pressure, `s x (thermal + impurity +
+fast)`; `pressure_thermal` stays the UNSCALED `e (n_e T_e + n_i T_i)`. The
+kinetic assembly is `pressure / s`. In an archive without the attr (or from
+the legacy / swb routes) `s = 1` and the meaning is as before. The stored
+g-files' `PRES` is the solved pressure (scaled), with `p_sep` under
+`separatrix_pressure="offset"`. The engine records (`engine_json` of
+`_baseline`; each draw's `inputs.pressure_scale`) carry the same numbers.
+
+**Why no version bump.** The repository's rule for v3 (this page, "Records
+added in 1.4.0" and "v2 → v3") is that a record which adds names and
+renames or retypes none stays within the version, and that the version does
+not encode changes of meaning on the default path: the engine record says
+which applies. Here the `pressure` dataset keeps its name, unit and
+definition ("the pressure the solve used"); the attr says how it relates to
+the kinetics.
 
 ### Not archived in 1.4.0
 

@@ -1,8 +1,8 @@
 {
   "channels": {
     "jphi": {
-      "max": 1589865.1300318616,
-      "min": 81452.89088872711,
+      "max": 1589278.0507433892,
+      "min": 81404.23786268441,
       "n": 257,
       "sample_indices": [
         0,
@@ -12,13 +12,13 @@
         256
       ],
       "sample_values": [
-        1527410.3159860026,
-        1558047.803775971,
-        945269.3170997491,
-        324042.84102135914,
-        81452.89088872711
+        1526811.4085013028,
+        1557457.6378601661,
+        944957.56583346,
+        324000.2103644957,
+        81404.23786268441
       ],
-      "sha256": "a044553227f86286c02ff7422247938e95f6fb29eddbb748d10ef79c5de27fe0"
+      "sha256": "792c1091b7959c63e53e7114d23c77448c115fdf476bb8cc344a7e0d8c3377af"
     },
     "ne": {
       "max": 2.536102116686272e+19,
@@ -114,11 +114,11 @@
   "seed": 20260804,
   "source_fixture": "D3Dlike_ids_golden_slim.h5",
   "source_provenance": {
-    "prov_bouquet_branch": "a1ref_35c75f0d692cdf10482a2fe8354950fc60e561d1",
-    "prov_bouquet_commit": "35c75f0d692cdf10482a2fe8354950fc60e561d1",
+    "prov_bouquet_branch": "feat/pressure-scale",
+    "prov_bouquet_commit": "2b597ca57656d78306ad0102144850a0233266ec",
     "prov_bouquet_dirty": false,
-    "prov_bouquet_version": "1.3.1",
-    "prov_created": "2026-10-17T23:52:01",
+    "prov_bouquet_version": "1.4.1",
+    "prov_created": "2026-11-24T22:09:39",
     "prov_generator": "make_golden_fixture.py",
     "prov_generator_args_eqdsk": "subset",
     "prov_generator_args_golden": "ids",

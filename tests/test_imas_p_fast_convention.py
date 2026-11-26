@@ -478,8 +478,12 @@ class TestCompletenessMessage:
                                p_fast_reduction="trace",
                                anchor_pressure_to_equilibrium=False)
         msg = " ".join(str(w.message) for w in rec)
-        assert "NOTHING absorbs this" in msg
-        assert "anchor_pressure_to_equilibrium=True" in msg
+        # true on both engines (2026-11-24): the unified engine's pressure
+        # scale absorbs the level (not the shape), nothing does with
+        # pressure_scale='none' or on the legacy route with the anchor off
+        assert "anchor_pressure_to_equilibrium is OFF" in msg
+        assert "nothing absorbs it there" in msg
+        assert "pressure_scale" in msg and "SHAPE" in msg
 
     def test_claims_the_anchor_only_when_it_is_on(self, tmp_path):
         path = _write(tmp_path, self._dd_with_pressure_gap(2.0), "anchor.json")
@@ -489,7 +493,7 @@ class TestCompletenessMessage:
                                anchor_pressure_to_equilibrium=True)
         msg = " ".join(str(w.message) for w in rec)
         assert "anchor_pressure_to_equilibrium is ON" in msg
-        assert "NOTHING absorbs" not in msg
+        assert "nothing absorbs it there" not in msg
 
     def test_names_the_reduction_rule_in_force(self, tmp_path):
         path = _write(tmp_path, self._dd_with_pressure_gap(2.0), "rule.json")

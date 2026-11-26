@@ -1,5 +1,115 @@
 # Bouquet — change summaries
 
+## Unreleased (1.5) — the stored-energy pressure scale, on by default; the g-file impurity pressure
+
+**The default moves.** Every unified-engine reconstruction's numbers change:
+its Grad-Shafranov pressure is now scaled to the input's stored energy, so
+β, W, `P'`, `j_pressure` and the coil currents move with the scale `s`, and
+the draws move with it. The g-file and IDS h5 goldens and the four example
+notebooks have been regenerated under the new default (below).
+`pressure_scale="none"` reproduces the 1.4.1 numbers (apart from the g-file
+impurity term below).
+
+- **`GenerationConfig.pressure_scale` (owner decision 2026-11-24).**
+  `s_W = W_input / W_kinetic`, `W = 1.5 ∫ p dV` of the full pressure
+  (separatrix pressure included) on the input's own flux-surface volumes
+  (g-file `PRES` with the reader's `volume_integral`; IDS
+  `equilibrium.profiles_1d.pressure` with its own volume), is always
+  computed before the first solve (no extra solve) and reported. The
+  default (`None`, resolved at `prepare_baseline()`) is `"match_W"` under
+  the unified engine: the total Grad-Shafranov pressure is `s_W` x the
+  kinetic assembly; the kinetics, the Redl bootstrap, Z_eff and n_i are not
+  scaled. `"none"` gives `s = 1`; a float gives that `s`; `s_W` is reported
+  in every mode. Every draw carries the reconstruction's `s` fixed; the
+  draws' pressure match stays on the unscaled thermal integral and the σ=0
+  check passes unchanged (no gate or tolerance changed). Outside
+  `[1/1.2, 1.2]` one UserWarning names the likely cause (no fast-ion
+  pressure supplied; a missing component; or, low, kinetics above the
+  input); never a refusal. The legacy route and the swb solve method do not
+  apply it: their default is accepted and an explicit other value refused.
+  A stored unified config without the field reloads as `"none"`, with a
+  warning. Why: on 17 real cases (no solves) IDA-only runs without a
+  fast-ion pressure had `W_input / W_kinetic` = 1.18-1.72 (typically
+  1.24), i.e. the baseline and draws sat that much low in stored energy.
+- **A scalar fixes the level, not the shape.** The record carries the shape
+  residual after scaling, and the g-file route's report-only
+  pressure-fidelity check is now computed on the scaled pressure (its
+  10 % band and report-only status unchanged; the unscaled numbers are kept
+  in `pressure_fidelity["unscaled"]`) ([known-limitations.md](known-limitations.md)).
+- **g-file route: the thermal impurity pressure is now in the solve.** The
+  adapter looked for the impurity charge on `FixedComponentsConfig`, which
+  has no such field, so `e n_z T_i` was zero in the reconstruction and every
+  draw (about 2 % of the thermal pressure for carbon at Z_eff = 2). It now
+  uses `ReconstructionSource.impurity_Z`, the charge of the source's
+  Z_eff ↔ n_i mapping, in the reconstruction and every draw. A p-file whose
+  ion footer names another impurity charge is warned about. The legacy route
+  is unchanged.
+- **g-file engine draws: the kinetic sampler now gets the declared impurity
+  charge.** The same `Baseline.Z_imp` reaches the sampler, which until now
+  inverted the charge from the baseline's (n_e, n_i, Z_eff). The declared
+  charge now sets the Z_eff → n_i derivation and the Z_eff window, the
+  `ni_ceiling` clip applies on the independent-n_i branch, and each draw
+  records `Z_imp_origin = "declared"` (was `"inverted"`). On the shipped
+  fixtures the inversion gave exactly 6, so the goldens' kinetic channels do
+  not move; on a p-file whose (n_e, n_i, Z_eff) do not invert to
+  `impurity_Z`, the drawn n_i change at a fixed seed.
+- **g-file engine route: a p-file's beam ions are no longer counted as
+  impurity.** A p-file's `nb` block (the beam density, at the beam charge of
+  its ion footer) is now carried as the fast-ion charge moments
+  `Baseline.z_fast` / `z2_fast`, as the IMAS route carries its fast ions:
+  the impurity density is n_z = (n_e − z_fast − n_i)/Z_imp (the p-file's own
+  quasineutrality) in the reconstruction and every draw, n_i is capped at
+  n_e − z_fast, and the draws' Z_eff ↔ n_i mapping counts the beam ions in
+  Z_eff (`zeff_includes_fast`), as the p-file's Z_eff does. Before, the beam
+  density was read as impurity at T_i, on top of the beam pressure already
+  taken from `pb` (0.04-0.17 % of the kinetic stored energy on three real
+  beam p-files, whose `s_W` moves from 1.000 to 1.001-1.002). Files without
+  `nb` (IDA files, every shipped fixture) are unchanged; so is the legacy
+  route.
+- **Archive (schema v3, additive).** `pressure_scale` on `_baseline` and on
+  every engine draw, `pressure_scale_mode` and `pressure_scale_json` (the
+  full record) on `_baseline`; an archive written before reads as `s = 1`
+  silently, with `recorded=False` (no warning: it would fire on every read
+  of every earlier archive; a stored config without the field does warn)
+  (`schema.read_pressure_scale`, `DrawView.pressure_scale`,
+  `ScanView.baseline_pressure_scale`). The `pressure` dataset is the solved
+  (scaled) pressure; `pressure_thermal` stays unscaled
+  ([archive-schema.md](archive-schema.md)).
+- **The IMAS reader's pressure backstop message** no longer says that
+  nothing absorbs the gap under the default: the message now describes both
+  engines (no threshold change).
+- **Summary.** The reconstruction summary prints `s_W`, both W, the shape
+  residual and the mode (the IDS route prints the same line at
+  `prepare_baseline()`).
+- **`Baseline.pressure_scale`** sits just before `p_fast_source`, which
+  stays the dataclass's last field and so moves one positional slot later;
+  every slot before them is unchanged.
+- **Goldens regenerated** (the recipe of `tests/golden/README.md`: 20
+  attempts, seed 12345, one thread, every default, OFT build
+  `20260929_7da4f18`). The same recipe on the 1.4.1 code reproduces the
+  previous goldens exactly, so every shift is this change. No tolerance or
+  comparison rule changed. Both synthetic goldens scale slightly DOWN: the
+  g-file golden `s_W = 0.983` (its kinetics now include the impurity term,
+  1.7 % above the g-file's stored energy), the IDS golden `s_W = 0.993`.
+  g-file: 16 of 20 attempts archived (4 `homotopy_saturated`, was 2), all
+  16 in spec (was 18 of 18); per-draw l_i(3) moves by at most 1.6e-4,
+  boundary RMS by at most 0.06 mm, coil currents by at most 1.7 kA.
+  IDS: 20 of 20 archived and in spec (unchanged); baseline beta_p
+  0.917 -> 0.911, Lambda 1.345 -> 1.339; l_i(3) by at most 1.3e-4,
+  boundary RMS by at most 0.1 mm, coils by at most 1.3 kA. The draw-stream manifests move in the `j_phi` channel
+  only (the baseline current follows `P'`); the kinetic channels are
+  unchanged. The legacy JSON golden is unaffected (the legacy route does
+  not apply the scale).
+- **Example notebooks re-executed.** Every in-spec count is unchanged
+  (24 of 24 in every case); the attempts and the bands move slightly:
+  g-file H-mode `s_W = 0.983`, W_MHD +0.42 % -> +0.03 % of the input,
+  beta_N median 0.798 -> 0.793, 26 attempts (was 25); L-mode `s_W = 0.998`
+  (the impurity term now in), W_MHD -1.07 % -> -0.17 %, beta_N median
+  0.800 -> 0.808; IMAS `s_W = 0.993`, beta_N median 1.653 -> 1.642, Lambda
+  1.341 -> 1.335; parallel IMAS sweep: every case 24 in spec in the same
+  number of attempts as before, beta_N medians down 0.4-1.5 %; l_i(3)
+  medians within 0.005 everywhere.
+
 ## Unreleased — documentation brought to 1.4.1 (no code change)
 
 Documentation and example outputs only. No code, default, test or golden

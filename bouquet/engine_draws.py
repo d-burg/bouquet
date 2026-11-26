@@ -373,6 +373,10 @@ class EngineDrawContext:
                                  self.psi))
         self.pressure_thermal_base = np.asarray(
             self.c.pressure_parts["thermal"], dtype=float)
+        #: the reconstruction's stored-energy pressure scale (bouquet.
+        #: pressure_scale): every draw carries it FIXED (never resampled);
+        #: 1.0 for a contract without one
+        self.pressure_scale = float(self.c.pressure_parts.get("scale", 1.0))
         # ---- the q0 row (engine_draw_q0_row)
         self.q0_row = bool(q0_row)
         if self.q0_row:
@@ -446,14 +450,20 @@ class EngineDrawContext:
         """``(total, thermal)`` solve pressure of a draw's kinetics: the
         adapter's own assembly (thermal + impurity + fast) in increment
         form, ``base + (drawn - base)`` per part (exactly the contract's
-        pressure at zero perturbation)."""
+        pressure at zero perturbation).  The total carries the
+        reconstruction's pressure scale ``s`` (bouquet.pressure_scale):
+        ``s (p_kin* + dp)`` = the contract's (scaled) pressure ``+ s dp``;
+        the thermal (the sampler's pressure match) is unscaled."""
         k0 = self.c.kinetics
         dth = self._thermal(kin_eq) - self._thermal(k0)
         th = self.pressure_thermal_base + dth
-        p = np.asarray(self.c.pressure, dtype=float) + dth
+        dp = dth
         i1, i0 = self._impurity(kin_eq), self._impurity(k0)
         if i1 is not None:
-            p = p + (i1 - i0)
+            dp = dp + (i1 - i0)
+        s = self.pressure_scale
+        p = np.asarray(self.c.pressure, dtype=float) + (
+            dp if s == 1.0 else s * dp)
         return p, th
 
     def zero_inputs(self, scale=1.0):
@@ -465,7 +475,9 @@ class EngineDrawContext:
             kinetics=kin, kinetics_native=nat, pressure=p,
             pressure_thermal=th,
             jB_ind=np.asarray(self.c.jB_ind, dtype=float).copy(),
-            scale=float(scale), sampler=dict(zero_perturbation=True))
+            scale=float(scale), sampler=dict(
+                zero_perturbation=True,
+                pressure_scale=float(self.pressure_scale)))
 
 
 def sigma0_clip_finding(record):
@@ -636,6 +648,10 @@ def sample_kinetics(ctx, rng, unc, flux_integral, *, p_thresh=0.05,
         sampler=dict(pressure_match_iterations=kd.iterations,
                      pressure_match_err_pct=kd.p_err_pct,
                      p_thresh=float(p_thresh),
+                     # the reconstruction's pressure scale, carried fixed
+                     # (bouquet.pressure_scale; the match above is on the
+                     # unscaled thermal integral)
+                     pressure_scale=float(ctx.pressure_scale),
                      zeff_primary=kd.zeff_primary,
                      # the sampler version (kinetic_sampler/3) and its
                      # per-draw clip counters (PR #56 B3/B4/B7), archived in
@@ -1973,6 +1989,11 @@ class GenerateEngineDraws(DrawMethod):
         # each band's own verdict (only those on) and the two stored
         # scalars, written onto the archived group with the band flag
         _fl = bands.flags(v)
+        # the pressure scale this draw carried (the reconstruction's, fixed;
+        # schema.PRESSURE_SCALE_ATTR): its archived `pressure` is s x the
+        # kinetic assembly
+        from .schema import PRESSURE_SCALE_ATTR
+        _fl[PRESSURE_SCALE_ATTR] = float(self.ctx.pressure_scale)
         _fl.pop(DRAW_BAND_FLAG, None)
         from .filtering import BETA_P_ATTR, LAMBDA_ATTR
         for _k, _x in ((BETA_P_ATTR, v["beta_p"]), (LAMBDA_ATTR, v["Lambda"])):
@@ -2202,6 +2223,21 @@ class GenerateEngineDraws(DrawMethod):
                 threshold_frac_a=float(GUARD_AXIS_FRAC),
                 min_step=float(GUARD_MIN_STEP))
         store_baseline_engine(header, rec, scan_key=scan_key)
+        # the stored-energy pressure scale (bouquet.pressure_scale) on
+        # _baseline: s, its mode and the full record (schema.
+        # read_pressure_scale; an archive without them reads as s = 1)
+        _ps = getattr(baseline, "pressure_scale", None) or (
+            self.ctx.c.provenance or {}).get("pressure_scale")
+        if isinstance(_ps, dict):
+            import json
+            from .jbs_loop import jsonable
+            from .schema import (PRESSURE_SCALE_ATTR, PRESSURE_SCALE_JSON_ATTR,
+                                 PRESSURE_SCALE_MODE_ATTR)
+            from .utils import stamp_group_attrs as _stamp
+            _stamp(header, scan_key, None, {
+                PRESSURE_SCALE_ATTR: float(self.ctx.pressure_scale),
+                PRESSURE_SCALE_MODE_ATTR: str(_ps.get("mode")),
+                PRESSURE_SCALE_JSON_ATTR: json.dumps(jsonable(_ps))})
         # the reconstruction's beta_p and Lambda (filtering.
         # LAMBDA_DEFINITION): its delivered full-pressure frame and l_i
         from .filtering import BETA_P_ATTR, LAMBDA_ATTR, shafranov_lambda

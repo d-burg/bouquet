@@ -867,8 +867,9 @@ frozen-copy tests). Since 2026-10-02 the default of `separatrix_pressure` is
 | `separatrix_pressure` | `"offset"`: the axis target is `p_axis - p_sep`, and `p_sep` is added back wherever pressure, beta or stored energy is reported or delivered | `"legacy"` (pre-change): the axis target is the full axis pressure `p_axis` |
 
 `p_sep` is the pressure handed to the solver at its last node -- the TOTAL
-solve pressure (thermal + impurity + fast, and the pressure anchor where a
-path uses one), defined once in `edge_pressure.separatrix_pressure_of`. Each
+solve pressure (thermal + impurity + fast, times the unified engine's
+stored-energy pressure scale `s`, and the pressure anchor where a legacy path
+uses one), defined once in `edge_pressure.separatrix_pressure_of`. Each
 draw uses its own, from its own perturbed pressure.
 
 **What `"legacy"` does when `p_sep` is not zero.** The solver's pressure is
@@ -1356,7 +1357,7 @@ measured absolute σ wherever a measurement exists (owner decision 2026-10-18).
 | `ida_hybrid`, measured routes (`ni_source` "Zeff" / "CER" / "all"; "all" is the default) | IDA's measured Z_eff (total: VB, CER, or their mean); with `zeff_from_fuse=True` the dd's total Z_eff, as on the plain dd route (2026-10-18; below the table) | IDA's total Z_eff with the dd's beam density subtracted from n_i (equivalent to its thermal numerator); Z_imp = `impurity_Z` | the base | the IDA-resolved envelope (VB+CER > CER > VB), else the assumed template | 1 | the beam fraction (the dd's z_fast, z2_fast, p_fast); `impurity_Z` |
 | `ida_hybrid`, `ni_source="standard"` | the dd's total Z_eff, as on the plain dd route (2026-10-18; before it, the thermal numerator) | the dd's thermal numerator on the IDA n_e, with the beam's charge in quasineutrality: n_i = [n_e (Z − Z_eff,th) − Z z_fast]/(Z − 1), held to 0 ≤ n_i ≤ n_e − z_fast and counted (2026-10-18; before it the no-beam form, which overstated n_i by Z z_fast/(Z − 1)) | the base | the IDA file's Z_eff envelope (carbon-propagated > VB-measured), labelled "... on a dd-derived total-Z_eff baseline"; else the assumed template, warned | 1 | the beam fraction (the dd's z_fast, z2_fast, p_fast); Z_imp as inferred at the baseline |
 | g-file + IDA `.cdf` | the file's Z_eff (VB on `ni_source="standard"`, the default; the route ladder on a measured `ni_source`) | the file's (ne, Z_eff) under single-impurity quasineutrality, `impurity_Z` | the base | the file's envelope (carbon-propagated > VB-measured; IDA-resolved on a measured `ni_source`), else the assumed template | 1 | `impurity_Z`; p_fast (no fast-ion density channel) |
-| g-file + p-file | the p-file's ion mix, Σ n_s Z_s²/n_e including its beam density `nb` | the p-file's own n_i (its quasineutrality) | the base | the assumed template (a p-file carries no Z_eff σ; an IDA envelope is refused) | 1 | the p-file's species charges; p_fast = its `pb` (no fast-ion density channel) |
+| g-file + p-file | the p-file's ion mix, Σ n_s Z_s²/n_e including its beam density `nb` | the p-file's own n_i (its quasineutrality) | the base | the assumed template (a p-file carries no Z_eff σ; an IDA envelope is refused) | 1 | the p-file's species charges; p_fast = its `pb`; on the unified engine its beam density `nb` as the fast-ion charge moments z_fast, z2_fast (n_z = (n_e − z_fast − n_i)/Z, n_i ≤ n_e − z_fast; the legacy route has no fast-ion density channel) |
 
 The draw perturbs the total Z_eff with the beam fraction held at its baseline
 value, because the beam's charge moments come from the dd (or the p-file) and

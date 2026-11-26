@@ -70,7 +70,9 @@ an example of the repository: a constant fast pressure of that many pascals
 is added on the whole profile (``fixed_components.p_fast``), which leaves
 the kinetics and the bootstrap untouched and gives the solve pressure a
 separatrix value of that size; the input reference of the full frame is
-then the g-file's pressure plus the same constant.
+then the g-file's pressure plus the same constant.  The constructed test
+runs with ``pressure_scale="none"`` (the constant is not in the g-file's
+``PRES``, so the stored-energy scale would remove it).
 """
 from __future__ import annotations
 
@@ -805,6 +807,12 @@ def child(part, outdir, draws=None, seed=None):
             fc = b.config.fixed_components
             fc.psi_N = np.linspace(0.0, 1.0, 129)
             fc.p_fast = np.full(129, _psep_add())
+            # the constant is deliberately ABSENT from the g-file's PRES, so
+            # the stored-energy pressure scale ("match_W", the unified
+            # default) would scale the total back down to the g-file's W and
+            # undo the separatrix pressure this test constructs: the scale is
+            # switched off ("none", also the legacy route's only value)
+            g.pressure_scale = "none"
         b.setup_solver()
         # opt-in (BQ_ENGINE_PROBE_SOLVELOG=1): off, the solver is untouched
         slog = _SolveLog(b.mygs, enabled=(

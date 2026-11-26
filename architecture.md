@@ -345,6 +345,7 @@ Default route:
 | n_e, T_e, T_i | yes | Gaussian-process draws, pressure-matched |
 | Z_eff | yes | on by default for every source; `zeff_scalar_sigma=0.0` turns it off |
 | n_i, n_z | derived | quasi-neutrality with the drawn Z_eff ([§4](#4-quasi-neutrality-and-impurity-handling)) |
+| pressure level `s` | fixed | the reconstruction's stored-energy scale, never resampled ([§7.1](#71-the-solve-pressure)) |
 | solve pressure | recomputed | from the drawn kinetics; fixed `p_fast` added |
 | bootstrap current | recomputed | Redl on each solved state, self-consistent ([§5.3](#53-the-bootstrap-model)) |
 | inductive current | yes | one Gaussian-process candidate; its amplitude closes I_p |
@@ -387,7 +388,8 @@ overrides either. Which Z_eff definition feeds what on each route:
 ### 4.2 The impurity charge
 
 Z_imp is the declared value where the baseline carries one (`Baseline.Z_imp`,
-set on the IMAS routes); otherwise the sampler inverts it from the baseline as
+set on the IMAS routes and, under the unified engine, on the g-file route from
+`ReconstructionSource.impurity_Z`); otherwise the sampler inverts it from the baseline as
 the median, over surfaces with `(n_e - n_i)/n_e > 1e-3` and `Z_eff > 1`, of
 
 ```
@@ -715,16 +717,41 @@ the impurity is assumed thermalized at T_i. `p_fast` is fixed:
 `FixedComponentsConfig.p_fast`, else a p-file's `pb` (g-file route), else the
 isotropized IMAS fast pressure ([§7.5](#75-fast-pressure-from-imas-sources)).
 
-**The impurity term is evaluated only where Z_imp is declared.** On the IMAS
-routes it is (`Baseline.Z_imp`, with `n_e,th = n_e - z_fast`). On the g-file
-route the adapter reads Z_imp from `FixedComponentsConfig`, which has no such
-field, so `p_imp = 0` and the solve pressure is
-`e (n_e T_e + n_i T_i) + p_fast` (`adapters.GFileAdapter.read`; the same holds
-for the legacy g-file reconstruction, `baseline.py`).
+**The impurity term is evaluated on both input types.** On the IMAS routes
+Z_imp is `Baseline.Z_imp`, with `n_e,th = n_e - z_fast`. On the g-file route
+it is the source's own `ReconstructionSource.impurity_Z` (default 6.0, carbon;
+the charge of its Z_eff <-> n_i mapping), with `n_e,th = n_e`
+(`adapters.gfile_impurity_charge`; owner decision 2026-11-24). The adapter
+stamps it in `pressure_parts["Z_imp"]` and on the baseline (`Baseline.Z_imp`),
+so the reconstruction and every draw add the same term; a p-file whose ion
+footer names an impurity of another charge is warned about. (The deprecated
+legacy g-file reconstruction, `baseline.py`, still omits the term: it reads
+Z_imp from `FixedComponentsConfig`, which has no such field.)
+
+**The pressure level: the stored-energy scale `s`** (`pressure_scale.py`,
+`GenerationConfig.pressure_scale`; owner decision 2026-11-24). The pressure
+handed to Grad-Shafranov is
+
+```
+p_GS = s (e (n_e T_e + n_i T_i) + p_imp + p_fast)
+s_W  = W_input / W_kinetic,   W = 1.5 ∫ p dV     (full pressure, the input's own volumes)
+```
+
+with `s = s_W` under the default `"match_W"`, 1 under `"none"`, or a fixed
+float. `W_input` is the g-file's `PRES` (reader `volume_integral`) or the
+IDS's `equilibrium.profiles_1d.pressure` (its own `volume`), `W_kinetic` the
+bracket above on the same nodes; both are computed before the first solve.
+`s` scales `P'`, β, W and `j_pressure`; the kinetics, the Redl bootstrap,
+Z_eff and n_i are not scaled. The legacy route and the swb solve method
+never apply it ([engine.md](docs/engine.md#the-stored-energy-pressure-scale-pressure_scale)).
 
 A draw's pressure is the contract's in increment form, `base + (drawn - base)`
-per part (`EngineDrawContext.pressures`). The archive stores the solve
-pressure as `pressure` and `e (n_e T_e + n_i T_i)` as `pressure_thermal`.
+per part, times the reconstruction's `s`, carried fixed:
+`s (p_kin* + Δp)` (`EngineDrawContext.pressures`); its pressure match is on
+the unscaled thermal pressure. The archive stores the solve pressure (scaled)
+as `pressure`, `e (n_e T_e + n_i T_i)` (unscaled) as `pressure_thermal`, and
+`s` as the group attr `pressure_scale` (`schema.read_pressure_scale`; absent
+reads as 1).
 
 ### 7.2 Separatrix pressure and the edge P' pin
 
@@ -1215,8 +1242,7 @@ section keeps only limitations that follow from architectural assumptions.
 - **One effective impurity, one ion temperature.** Quasi-neutrality uses one
   effective impurity charge and main-ion charge 1; the impurity pressure and
   the p-file diamagnetic rotation take the impurity at T_i. Multiple
-  impurities and a decoupled impurity temperature are not modeled. On the
-  g-file route the impurity pressure term is zero ([§7.1](#71-the-solve-pressure)).
+  impurities and a decoupled impurity temperature are not modeled.
 - **Fixed components are not perturbed.** `p_fast`, the driven currents and
   the fast-ion charge moments are held fixed (the beam fraction's own
   uncertainty is not sampled); rotation and transport channels are perturbed

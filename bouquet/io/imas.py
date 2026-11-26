@@ -1474,11 +1474,15 @@ def _validate_pressure_completeness(cp, ne, te, ni, ti, p_fast, p_imp,
     #    core_profiles thermal+fast reconstruction (anisotropic/beam pressure that
     #    is large early in a beam-heavy discharge, plus the
     #    equilibrium-vs-transport inconsistency -- the pressure analogue of the
-    #    j_tor gap). When anchor_pressure_to_equilibrium is ON, p_diff absorbs the
-    #    residual exactly and it rides fixed; when it is OFF (the default) nothing
-    #    absorbs it and the gap propagates straight into the baseline pressure, so
-    #    the message must not promise otherwise. Dropped *reconstructable*
-    #    thermal/fast components are the hard fails (#1/#2 above).
+    #    j_tor gap). What absorbs it depends on the route, and the message must
+    #    be true on both: under the unified engine (the default) the stored-
+    #    energy pressure scale (GenerationConfig.pressure_scale, default
+    #    "match_W"; bouquet.pressure_scale) multiplies the total GS pressure so
+    #    its stored energy matches the equilibrium's -- the LEVEL, not the
+    #    shape -- and with pressure_scale="none" nothing does; on the legacy
+    #    route p_diff absorbs it exactly when anchor_pressure_to_equilibrium is
+    #    ON, and nothing does when it is OFF (its default). Dropped
+    #    *reconstructable* thermal/fast components are the hard fails (#1/#2).
     #
     #    This is also the one guard that can catch a wrong fast-pressure
     #    convention, whose signature is a ~3x (or ~1/3x) p_fast -- so report the
@@ -1490,18 +1494,27 @@ def _validate_pressure_completeness(cp, ne, te, ni, ti, p_fast, p_imp,
     if bk > 0.05:
         import warnings
         direction = "above" if signed > 0 else "below"
+        engine_remedy = (
+            "Under the unified engine (the default) the stored-energy pressure "
+            "scale (GenerationConfig.pressure_scale, default 'match_W') "
+            "multiplies the total Grad-Shafranov pressure by s_W = W_input / "
+            "W_kinetic, so the stored energy matches this file's "
+            "equilibrium.pressure: the LEVEL of the gap is absorbed, its SHAPE "
+            "is not (the shape residual is reported with s_W); with "
+            "pressure_scale='none' nothing absorbs it.")
         if anchor_pressure:
-            remedy = ("anchor_pressure_to_equilibrium is ON, so the p_diff anchor "
-                      "absorbs this exactly (the baseline still matches the dd "
-                      "equilibrium.pressure) and the residual rides fixed -- it is "
-                      "not perturbed in the UQ.")
+            remedy = ("On the legacy route anchor_pressure_to_equilibrium is ON, "
+                      "so the p_diff anchor absorbs this exactly (the baseline "
+                      "still matches the dd equilibrium.pressure) and the "
+                      "residual rides fixed -- it is not perturbed in the UQ; "
+                      "the unified engine refuses that setting. "
+                      + engine_remedy)
         else:
-            remedy = ("anchor_pressure_to_equilibrium is OFF (the default), so "
-                      "p_diff is None and NOTHING absorbs this -- the gap "
-                      "propagates into the baseline pressure and every downstream "
-                      "beta_N / W_MHD / p'. Set "
-                      "GenerationConfig.anchor_pressure_to_equilibrium=True to "
-                      "anchor it.")
+            remedy = (engine_remedy + " On the legacy route "
+                      "anchor_pressure_to_equilibrium is OFF (its default), so "
+                      "p_diff is None and nothing absorbs it there -- the gap "
+                      "propagates into the baseline pressure and every "
+                      "downstream beta_N / W_MHD / p'.")
         meta = p_fast_meta or {}
         conv = ""
         if meta.get("rule") is not None:

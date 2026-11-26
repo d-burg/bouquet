@@ -656,7 +656,8 @@ only what is there.
 ## Records added in 1.5 (unreleased): the pressure scale
 
 Additive within schema v3 (no name changes type or meaning; an archive
-written before the record lacks it and reads as `s = 1`, never an error;
+written before the record lacks it and reads as `s = 1` silently, with
+`recorded=False`, never an error or a warning;
 `schema.read_pressure_scale`, `DrawView.pressure_scale`,
 `ScanView.baseline_pressure_scale`). Owner decision 2026-11-24
 ([engine.md](engine.md#the-stored-energy-pressure-scale-pressure_scale)).

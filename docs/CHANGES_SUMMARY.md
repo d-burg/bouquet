@@ -44,9 +44,33 @@ impurity term below).
   Z_eff ↔ n_i mapping, in the reconstruction and every draw. A p-file whose
   ion footer names another impurity charge is warned about. The legacy route
   is unchanged.
+- **g-file engine draws: the kinetic sampler now gets the declared impurity
+  charge.** The same `Baseline.Z_imp` reaches the sampler, which until now
+  inverted the charge from the baseline's (n_e, n_i, Z_eff). The declared
+  charge now sets the Z_eff → n_i derivation and the Z_eff window, the
+  `ni_ceiling` clip applies on the independent-n_i branch, and each draw
+  records `Z_imp_origin = "declared"` (was `"inverted"`). On the shipped
+  fixtures the inversion gave exactly 6, so the goldens' kinetic channels do
+  not move; on a p-file whose (n_e, n_i, Z_eff) do not invert to
+  `impurity_Z`, the drawn n_i change at a fixed seed.
+- **g-file engine route: a p-file's beam ions are no longer counted as
+  impurity.** A p-file's `nb` block (the beam density, at the beam charge of
+  its ion footer) is now carried as the fast-ion charge moments
+  `Baseline.z_fast` / `z2_fast`, as the IMAS route carries its fast ions:
+  the impurity density is n_z = (n_e − z_fast − n_i)/Z_imp (the p-file's own
+  quasineutrality) in the reconstruction and every draw, n_i is capped at
+  n_e − z_fast, and the draws' Z_eff ↔ n_i mapping counts the beam ions in
+  Z_eff (`zeff_includes_fast`), as the p-file's Z_eff does. Before, the beam
+  density was read as impurity at T_i, on top of the beam pressure already
+  taken from `pb` (0.04-0.17 % of the kinetic stored energy on three real
+  beam p-files, whose `s_W` moves from 1.000 to 1.001-1.002). Files without
+  `nb` (IDA files, every shipped fixture) are unchanged; so is the legacy
+  route.
 - **Archive (schema v3, additive).** `pressure_scale` on `_baseline` and on
   every engine draw, `pressure_scale_mode` and `pressure_scale_json` (the
   full record) on `_baseline`; an archive written before reads as `s = 1`
+  silently, with `recorded=False` (no warning: it would fire on every read
+  of every earlier archive; a stored config without the field does warn)
   (`schema.read_pressure_scale`, `DrawView.pressure_scale`,
   `ScanView.baseline_pressure_scale`). The `pressure` dataset is the solved
   (scaled) pressure; `pressure_thermal` stays unscaled
@@ -58,8 +82,8 @@ impurity term below).
   residual and the mode (the IDS route prints the same line at
   `prepare_baseline()`).
 - **`Baseline.pressure_scale`** sits just before `p_fast_source`, which
-  stays the dataclass's last field; every earlier positional slot is
-  unchanged.
+  stays the dataclass's last field and so moves one positional slot later;
+  every slot before them is unchanged.
 - **Goldens regenerated** (the recipe of `tests/golden/README.md`: 20
   attempts, seed 12345, one thread, every default, OFT build
   `20260929_7da4f18`). The same recipe on the 1.4.1 code reproduces the

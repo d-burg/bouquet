@@ -499,9 +499,11 @@ class FitResult:
     record: Dict[str, Any]
 
 
-def _consistent(fm, kin, src, params, cfg, start, z0, label, initial_profiles=None, state_fn=None):
+def _consistent(fm, kin, src, params, cfg, start, z0, label, initial_profiles=None, state_fn=None,
+                start_geometry=None):
+    kw = {} if start_geometry is None else dict(start_geometry=start_geometry)
     return _cm.consistent_solve(fm, kin, src, params, cfg, start=start, z0=z0, label=label,
-                                initial_profiles=initial_profiles, state_fn=state_fn)
+                                initial_profiles=initial_profiles, state_fn=state_fn, **kw)
 
 
 def _same_index(a, b):
@@ -1064,10 +1066,11 @@ def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, ini
             par.update(log_strength=None, f=None)
         return par
 
-    def evaluate(theta, start_state, z0, lab, init_prof=None, ref_index=None):
+    def evaluate(theta, start_state, z0, lab, init_prof=None, ref_index=None, start_geometry=None):
         p = _to_params(theta, names, base)
+        kw = {} if start_geometry is None else dict(start_geometry=start_geometry)
         res = _consistent(fm, kin, src, p, cfg, start_state, z0, lab, init_prof,
-                          _scaled_state_fn(state_fn, p, getattr(fm, "ip_measured", None)))
+                          _scaled_state_fn(state_fn, p, getattr(fm, "ip_measured", None)), **kw)
         if speed is not None and speed.parallel:
             _speed.note_solve_wall(getattr(res, "wall_s", None))       # the time bound's scale (no value read)
         if not res.converged:
@@ -1113,6 +1116,9 @@ def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, ini
                            flux_offset=summ_offset),
                  tab=tab, all_tab=all_tab, snap=fm.snapshot(), probe_correction=fm.probe_correction.copy(),
                  z0=res.assembly["orbit_z"] if res.assembly else None)
+        # the geometry hand-off of a solve that starts from this snapshot (current_model.consistent_solve; used only
+        # with the memo on and only when such a solve starts from exactly c["snap"]; not part of any record)
+        c["geometry"] = _cm.final_geometry_of(res, c["snap"])
         return c, res
 
     if isinstance(start, np.ndarray):
@@ -1158,7 +1164,7 @@ def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, ini
     def column_solve(c, theta, lab):
         """Consistent solve at theta warm from the center; returns the data residuals or None."""
         restore_center(c)
-        trial, tres = evaluate(theta, c["snap"], c["z0"], lab, ref_index=ref_index)
+        trial, tres = evaluate(theta, c["snap"], c["z0"], lab, ref_index=ref_index, start_geometry=c.get("geometry"))
         state_after = fm.snapshot()
         restore_center(c)
         if trial is None:
@@ -1565,7 +1571,7 @@ def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, ini
                 last_delta = step
                 pred = float(-(g @ step) * 2.0 - step @ A @ step)       # predicted chi^2 decrease (quadratic model)
                 trial, tres = evaluate(tt, center["snap"], center["z0"], f"{label}:it{it}:trial",
-                                       ref_index=ref_index)
+                                       ref_index=ref_index, start_geometry=center.get("geometry"))
                 tr = dict(lam=lam, delta=step.tolist(), capped=bool(capped), predicted_dchi2=pred,
                           status=(tres.status if trial is None else "consistent"), passes=tres.passes,
                           chi2=(None if trial is None else trial["chi2"]["objective"]), wall_s=tres.wall_s,
@@ -1625,7 +1631,7 @@ def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, ini
             tt = np.clip(center["theta"] + dgn, lo, hi)
             if settings.final_gn_step and np.any(tt != center["theta"]):
                 trial, tres = evaluate(tt, center["snap"], center["z0"], f"{label}:it{it}:final_gn",
-                                       ref_index=ref_index)
+                                       ref_index=ref_index, start_geometry=center.get("geometry"))
                 fin = dict(delta=(tt - center["theta"]).tolist(), status=(tres.status if trial is None else "consistent"),
                            chi2=None if trial is None else trial["chi2"]["objective"],
                            chi2_center=center["chi2"]["objective"],

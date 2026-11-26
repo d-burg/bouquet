@@ -107,10 +107,13 @@ class SpeedSettings:
     default).  Choose at most the number of cores available to the run.  Linux only.  A latency tool: it
     shortens one fit's wall time and costs more core-seconds than the serial fit (module docstring).
     ``memo`` (default on): the memo of pure evaluations in the current model
-    (:func:`.current.diffusion.set_speed_memo`).
+    (:func:`.current.diffusion.set_speed_memo`), and the geometry hand-off of the pass-consistency loop (a solve that
+    starts from a fit center's snapshot uses the geometry that center's final pass evaluated on the same state;
+    :func:`.current_model.consistent_solve`).
     ``mesh_index`` (default on): the bucket-indexed exact point-in-triangle test (:func:`.diagnostics.on_mesh`).
     ``reuse_stats`` (default on): a forward solve reuses the equilibrium statistics of its latest attempt instead of
-    evaluating them again on the same state (:meth:`.forward.ForwardModel.solve`).
+    evaluating them again on the same state (:meth:`.forward.ForwardModel.solve`), and one ``get_globals`` of the solver
+    per statistics evaluation instead of two on the same state (``forward._stats``).
     ``column_time_factor`` and ``column_time_floor_s``: the time bound of a worker column (used only with
     ``column_workers > 1``; :func:`column_time_bound`).  A worker column that has sent no result after
     ``max(column_time_floor_s, column_time_factor * n_col * t_solve)`` seconds is killed and re-run in this process

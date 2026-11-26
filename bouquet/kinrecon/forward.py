@@ -396,7 +396,55 @@ def parse_history(text):
 
 
 # ============================================================== forward model
+class _GlobalsOnce:
+    """Within one :func:`_stats` call (``reuse_stats`` on): the solver equilibrium's ``get_globals`` evaluated once.
+    TokaMaker's ``get_stats`` calls ``get_globals`` of the equilibrium object itself, and :func:`_stats` calls it
+    again for the ``'iter'`` l_i, on the same state with nothing changed in between (``get_stats`` only reads it), so
+    the second call repeats the same evaluation of the same state; here it returns the first call's values instead.
+    The memo lives on the equilibrium object as an instance attribute only for the duration of the call (removed on
+    exit, also on an exception) and starts empty on every call, so it never outlives the state it was evaluated on.
+    Without such an object (a stand-in, another build) nothing is changed."""
+
+    def __init__(self, gs):
+        self.eq = getattr(gs, "_tMaker_equil", None)
+        self.installed = False
+
+    def __enter__(self):
+        eq = self.eq
+        if eq is None or not SPEED_OPTIONS["reuse_stats"] or "get_globals" in getattr(eq, "__dict__", {}):
+            return self
+        orig = getattr(eq, "get_globals", None)
+        if not callable(orig):
+            return self
+        memo = []
+
+        def once():
+            if not memo:
+                memo.append(orig())
+            v = memo[0]
+            return tuple(np.array(x, copy=True) if isinstance(x, np.ndarray) else x for x in v)
+        try:
+            eq.get_globals = once
+            self.installed = True
+        except (AttributeError, TypeError):
+            pass
+        return self
+
+    def __exit__(self, *exc):
+        if self.installed:
+            try:
+                del self.eq.get_globals
+            except AttributeError:
+                pass
+        return False
+
+
 def _stats(gs):
+    with _GlobalsOnce(gs):
+        return _stats_inner(gs)
+
+
+def _stats_inner(gs):
     out = {}
     try:
         st = gs.get_stats()

@@ -270,6 +270,12 @@ def _calls():
     return _CALLS[0]
 
 
+def _fs(**kw):
+    """Fit settings for these robustness tests: the moving anchor target (``FitSettings.anchor_follow``, on by default)
+    is named off, since these tests are not about it."""
+    return FIT.FitSettings(anchor_follow=False, **kw)
+
+
 def _fit(fm, fs, theta0):
     kin, src = SimpleNamespace(source="toy"), SimpleNamespace(source="toy", convention={})
     cfg = CM.CurrentModelSettings(r0=1.0, core_relaxation="periodic_orbit")
@@ -281,13 +287,13 @@ def test_noise_retry_from_the_stated_state(monkeypatch):
     first = lambda lab: lab.endswith(":noise")  # noqa: E731 -- only the first noise re-solve fails
     fm = FitFM()
     _install_fit(monkeypatch, fm, lin, fail=first)
-    out = _fit(fm, FIT.FitSettings(free=("log_strength", "a_corr")), 0.5)
+    out = _fit(fm, _fs(free=("log_strength", "a_corr")), 0.5)
     assert out.status == "jacobian_failed"
     assert out.record["noise"]["status"] == "solve_failed" and "retries" not in out.record["noise"]
     assert "robustness" not in out.record
     fm = FitFM()
     labels = _install_fit(monkeypatch, fm, lin, fail=first)
-    out = _fit(fm, FIT.FitSettings(free=("log_strength", "a_corr"), noise_retries=1), 0.5)
+    out = _fit(fm, _fs(free=("log_strength", "a_corr"), noise_retries=1), 0.5)
     assert out.status in ("converged", "converged_within_noise"), out.status
     rt = out.record["noise"]["retries"]
     assert rt["first_status"] == "solve_failed" and rt["setting"] == 1
@@ -319,7 +325,7 @@ def test_no_retry_when_the_first_measurement_succeeds(monkeypatch):
     for n in (0, 1):
         fm = FitFM()
         labels = _install_fit(monkeypatch, fm, lin)
-        out[n] = (_fit(fm, FIT.FitSettings(free=("log_strength", "a_corr"), noise_retries=n), 0.5), labels)
+        out[n] = (_fit(fm, _fs(free=("log_strength", "a_corr"), noise_retries=n), 0.5), labels)
     (o0, l0), (o1, l1) = out[0], out[1]
     assert not any("retry" in lab for lab in l1) and l1 == l0
     assert "retries" not in o1.record["noise"] and o1.record["noise"] == o0.record["noise"]
@@ -333,7 +339,7 @@ def test_retry_outside_the_bounds_is_skipped(monkeypatch):
     h = FIT.PARAMETERS["log_strength"]["step0"]
     fm = FitFM()
     labels = _install_fit(monkeypatch, fm, lin, fail=first)
-    out = _fit(fm, FIT.FitSettings(free=("log_strength", "a_corr"), noise_retries=1), lo + 0.5 * h)
+    out = _fit(fm, _fs(free=("log_strength", "a_corr"), noise_retries=1), lo + 0.5 * h)
     assert out.status == "jacobian_failed"
     att = out.record["noise"]["retries"]["attempts"]
     assert len(att) == 1 and att[0]["status"].startswith("starting state outside the parameter bounds")
@@ -372,7 +378,7 @@ def test_stall_diagnostics_record_and_never_steer(monkeypatch):
     for opt in (False, True):
         fm = FitFM()
         labels[opt] = _install_fit(monkeypatch, fm, _quadratic, reject_trials=True)
-        out[opt] = _fit(fm, FIT.FitSettings(free=("log_strength",), stall_diagnostics=opt), th0)
+        out[opt] = _fit(fm, _fs(free=("log_strength",), stall_diagnostics=opt), th0)
     d, c = out[False], out[True]
     assert d.status == c.status == "stalled_no_significant_descent"
     assert np.array_equal(d.theta, c.theta) and d.chi2["objective"] == c.chi2["objective"]
@@ -396,7 +402,7 @@ def test_stall_diagnostics_on_a_linear_model(monkeypatch):
     lin = lambda th: A * (th - TRUE) + B  # noqa: E731
     fm = FitFM()
     _install_fit(monkeypatch, fm, lin, reject_trials=True)
-    c = _fit(fm, FIT.FitSettings(free=("log_strength",), stall_diagnostics=True), 0.5)
+    c = _fit(fm, _fs(free=("log_strength",), stall_diagnostics=True), 0.5)
     assert c.status == "stalled_no_significant_descent"
     sd = c.record["iterations"][0]["stall_diagnostics"]
     # forward differences of a linear model are exact: the central columns equal them

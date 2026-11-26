@@ -91,7 +91,8 @@ def test_parallel_columns_are_refused_off_linux(monkeypatch):
     with pytest.raises(RuntimeError, match="Linux"):
         SP.validate(par, _fm())
     with pytest.raises(RuntimeError, match="Linux"):
-        FIT.reconstruct(_fm(), None, None, None, speed=par)           # refused before anything is solved
+        FIT.reconstruct(_fm(), None, None, None, FIT.FitSettings(anchor_follow=False),
+                        speed=par)                                    # refused before anything is solved
     with pytest.raises(RuntimeError, match="Linux"):
         SE.run_series(_fm(), [], None, speed=par)
     # the in-process options stay available on every platform

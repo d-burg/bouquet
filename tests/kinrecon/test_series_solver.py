@@ -120,14 +120,14 @@ def child(out, parts="abc"):
     if "c" in parts:
         fm.restore(snap0)
         fm.reconfigure(meas_clean[0], refs[0], roles, case_id="msefit")
-        fr = FIT.reconstruct(fm, kin, src, cfg, FIT.FitSettings(free=("a_corr",)), params0=dict(log_strength=None),
+        fr = FIT.reconstruct(fm, kin, src, cfg, FIT.FitSettings(anchor_follow=False, free=("a_corr",)), params0=dict(log_strength=None),
                              initial_profiles=init, label="msefit")
         rec["mse_fit"] = dict(status=fr.status, theta=fr.theta, sigma=fr.sigma, chi2=fr.chi2,
                               n_solves=fr.record["n_solves"], wall_s=fr.record["wall_s"],
                               stopping=fr.record.get("final_stopping_tests"), center0=fr.record.get("center0"))
         fm.restore(snap0)
         fm.reconfigure(meas_noisy[0], refs[0], roles, case_id="msefit_noisy")
-        fn = FIT.reconstruct(fm, kin, src, cfg, FIT.FitSettings(free=("a_corr",)), params0=dict(log_strength=None),
+        fn = FIT.reconstruct(fm, kin, src, cfg, FIT.FitSettings(anchor_follow=False, free=("a_corr",)), params0=dict(log_strength=None),
                              initial_profiles=init, label="msefit_noisy")
         rec["mse_fit_noisy"] = dict(status=fn.status, theta=fn.theta, sigma=fn.sigma, chi2=fn.chi2,
                                     n_solves=fn.record["n_solves"], wall_s=fn.record["wall_s"],

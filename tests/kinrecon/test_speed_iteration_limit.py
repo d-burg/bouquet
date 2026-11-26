@@ -64,7 +64,7 @@ def _fit(workers, out):
     ms = base._measurements(gs, geo, roles, ip, np.random.default_rng(base._SEED))
     fm.reconfigure(ms, np.asarray(gs.trace_surf(0.999), float), roles, case_id="fit")
     speed = SP.SpeedSettings(column_workers=workers) if workers > 1 else None
-    fr = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=cfg.r0), FIT.FitSettings(), start=snap,
+    fr = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=cfg.r0), FIT.FitSettings(anchor_follow=False), start=snap,
                          label="fx", speed=speed)
     rec = {k: v for k, v in fr.record.items() if k != "center"}
     res = dict(workers=workers, status=fr.status, theta=fr.theta, sigma=fr.sigma, covariance=fr.covariance,

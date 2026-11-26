@@ -187,7 +187,8 @@ def test_entry_points_run_with_the_default_and_a_given_setting_replaces_it(entry
 
     def call(**kw):
         if entry == "fit":
-            FIT.reconstruct(fm, None, None, None, **kw)
+            # the stand-in fit body is about the speed settings: the moving anchor target is named off
+            FIT.reconstruct(fm, None, None, None, FIT.FitSettings(anchor_follow=False), **kw)
         else:
             SE.run_series(fm, [], None, **kw)
         return seen[-1]

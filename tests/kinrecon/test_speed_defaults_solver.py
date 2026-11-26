@@ -66,7 +66,7 @@ def _fixture_fit(mode):
             return real(*a, **k)
 
         CM.consistent_solve = failing_center
-    fr = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=cfg.r0), FIT.FitSettings(), start=snap,
+    fr = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=cfg.r0), FIT.FitSettings(anchor_follow=False), start=snap,
                          label="fx", **kw)
     rec = {k: v for k, v in fr.record.items() if k != "center"}
     return dict(mode=mode, status=fr.status, theta=fr.theta, sigma=fr.sigma, covariance=fr.covariance, chi2=fr.chi2,

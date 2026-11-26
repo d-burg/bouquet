@@ -22,6 +22,12 @@ B = np.array([0.3, -0.2, 0.1, 0.05])
 TRUE = 2.0
 
 
+def _fs(**kw):
+    """Fit settings for the tests of the fit machinery: the moving anchor target (``FitSettings.anchor_follow``, on by
+    default) is named off, since these tests are not about it.  The anchor-target tests below name their own."""
+    return FIT.FitSettings(anchor_follow=False, **kw)
+
+
 class FakeFM:
     def __init__(self):
         self.theta_state = None
@@ -101,7 +107,7 @@ def test_lm_reaches_the_linear_map_point_and_laplace_covariance(monkeypatch):
     _install(monkeypatch, fm)
     kin, src = _kin()
     cfg = CM.CurrentModelSettings(r0=1.0, core_relaxation="periodic_orbit")
-    out = FIT.reconstruct(fm, kin, src, cfg, FIT.FitSettings(free=SAW_FREE), params0=dict(log_strength=0.5, f=0.37))
+    out = FIT.reconstruct(fm, kin, src, cfg, _fs(free=SAW_FREE), params0=dict(log_strength=0.5, f=0.37))
     th, cov = _expected(FIT.PARAMETERS["log_strength"]["prior"][1])
     assert out.status == "converged", out.status
     # forward differences of a linear model are exact, and the stopping tests are made on the
@@ -117,7 +123,7 @@ def test_failed_trial_is_a_rejected_step(monkeypatch):
     calls = _install(monkeypatch, fm, fail_trials=(1,))      # the first LM trial fails
     kin, src = _kin()
     out = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=1.0, core_relaxation="periodic_orbit"),
-                          FIT.FitSettings(free=SAW_FREE),
+                          _fs(free=SAW_FREE),
                           params0=dict(log_strength=0.5, f=0.37))
     trials = out.record["iterations"][0]["trials"]
     assert trials[0]["status"] == "solve_failed" and trials[0]["chi2"] is None
@@ -136,13 +142,13 @@ def test_failed_center_and_too_many_failures(monkeypatch):
     _install(monkeypatch, fm, fail_calls=(1,))
     kin, src = _kin()
     out = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=1.0, core_relaxation="periodic_orbit"),
-                          FIT.FitSettings(free=SAW_FREE),
+                          _fs(free=SAW_FREE),
                           params0=dict(log_strength=0.5))
     assert out.status == "failed_initial_consistency" and np.all(np.isnan(out.sigma))
     fm = FakeFM()
     _install(monkeypatch, fm, fail_trials=(1, 2, 3, 4))
     out = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=1.0, core_relaxation="periodic_orbit"),
-                          FIT.FitSettings(free=SAW_FREE),
+                          _fs(free=SAW_FREE),
                           params0=dict(log_strength=0.5))
     assert out.status == "failed_trials"
     assert out.theta[0] == 0.5            # never moved: no failed trial was accepted
@@ -153,7 +159,7 @@ def test_settings_record_is_complete(monkeypatch):
     _install(monkeypatch, fm)
     kin, src = _kin()
     out = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=1.0, core_relaxation="periodic_orbit"),
-                          FIT.FitSettings(free=SAW_FREE),
+                          _fs(free=SAW_FREE),
                           params0=dict(log_strength=0.5))
     rec = out.record
     for key in ("free", "specs", "settings", "model_settings", "fit_groups", "excluded_groups", "iterations",
@@ -180,7 +186,7 @@ def test_stopping_summary_records_which_test_fired(monkeypatch):
     _install(monkeypatch, fm)
     kin, src = _kin()
     out = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=1.0, core_relaxation="periodic_orbit"),
-                          FIT.FitSettings(free=SAW_FREE),
+                          _fs(free=SAW_FREE),
                           params0=dict(log_strength=0.5, f=0.37))
     sm = out.record["stopping_summary"]
     assert out.status == "converged" and sm["test"] == "a"
@@ -286,10 +292,10 @@ def test_lagged_step_columns_keep_the_convergence_definition(monkeypatch, scale)
     cfg = CM.CurrentModelSettings(r0=1.0, core_relaxation="periodic_orbit")
     fm0 = FakeFM()
     _install(monkeypatch, fm0)
-    ref = FIT.reconstruct(fm0, kin, src, cfg, FIT.FitSettings(free=SAW_FREE), params0=dict(log_strength=0.5, f=0.37))
+    ref = FIT.reconstruct(fm0, kin, src, cfg, _fs(free=SAW_FREE), params0=dict(log_strength=0.5, f=0.37))
     fm = FakeFM()
     _install_lagged_bias(monkeypatch, fm, scale)
-    out = FIT.reconstruct(fm, kin, src, cfg, FIT.FitSettings(free=SAW_FREE, jacobian_steps="lagged"),
+    out = FIT.reconstruct(fm, kin, src, cfg, _fs(free=SAW_FREE, jacobian_steps="lagged"),
                           params0=dict(log_strength=0.5, f=0.37))
     th, cov = _expected(FIT.PARAMETERS["log_strength"]["prior"][1])
     assert out.status == ref.status == "converged"
@@ -349,7 +355,7 @@ def test_ip_target_is_a_fit_parameter_with_its_measurement_row(monkeypatch):
     cfg = CM.CurrentModelSettings(r0=1.0, core_relaxation="periodic_orbit")
     fm = FakeFMIp()
     _install_ip(monkeypatch, fm)
-    out = FIT.reconstruct(fm, kin, src, cfg, FIT.FitSettings(free=("log_strength",)), params0=dict(log_strength=0.5))
+    out = FIT.reconstruct(fm, kin, src, cfg, _fs(free=("log_strength",)), params0=dict(log_strength=0.5))
     assert out.free == ["log_strength", "ip_rel"] and out.record["ip_target"]["mode"] == "fitted"
     assert out.status == "converged" and out.record["specs"]["ip_rel"]["prior"] == (None, None)
     mu, sp = FIT.PARAMETERS["log_strength"]["prior"]
@@ -362,7 +368,7 @@ def test_ip_target_is_a_fit_parameter_with_its_measurement_row(monkeypatch):
     assert out.chi2["n_params"] == 2
     fm2 = FakeFMIp()
     _install_ip(monkeypatch, fm2)
-    pinned = FIT.reconstruct(fm2, kin, src, cfg, FIT.FitSettings(free=("log_strength",), ip_target="measured"),
+    pinned = FIT.reconstruct(fm2, kin, src, cfg, _fs(free=("log_strength",), ip_target="measured"),
                              params0=dict(log_strength=0.5))
     assert pinned.free == ["log_strength"] and pinned.record["ip_target"]["mode"] == "measured"
     with pytest.raises(ValueError, match="ip_target"):
@@ -433,7 +439,7 @@ def test_noise_is_the_same_measurement_with_lagged_columns(monkeypatch):
         fm.snapshot = (lambda f=fm: dict(theta=f.theta_state, kind=f.kind))
         monkeypatch.setattr(FIT, "_consistent", consistent)
         monkeypatch.setattr(FIT._cm, "lagged_solve", lagged)
-        res = FIT.reconstruct(fm, kin, src, cfg, FIT.FitSettings(free=SAW_FREE, jacobian_steps=mode),
+        res = FIT.reconstruct(fm, kin, src, cfg, _fs(free=SAW_FREE, jacobian_steps=mode),
                               params0=dict(log_strength=0.5))
         out[mode] = res.record["noise"]
     assert out["consistent"]["status"] == out["lagged"]["status"] == "ok"
@@ -468,7 +474,7 @@ def test_core_vs_floor_is_a_record_that_cannot_change_a_result(monkeypatch):
         _install(monkeypatch, fm)
         monkeypatch.setattr(CM, "core_vs_floor_record", fn)
         n0 = len(calls)
-        outs[name] = FIT.reconstruct(fm, kin, src, cfg, FIT.FitSettings(free=SAW_FREE),
+        outs[name] = FIT.reconstruct(fm, kin, src, cfg, _fs(free=SAW_FREE),
                                      params0=dict(log_strength=0.5, f=0.37))
         assert len(calls) == n0 + 1                       # made once, at the end
     ref = outs["real"]
@@ -500,11 +506,11 @@ def test_default_fit_records_the_sawtooth_parameters_as_not_used(monkeypatch):
     fm = FakeFM()
     _install(monkeypatch, fm)
     out = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=1.0, core_relaxation="periodic_orbit"),
-                          FIT.FitSettings(free=SAW_FREE), params0=dict(log_strength=0.5, f=0.37))
+                          _fs(free=SAW_FREE), params0=dict(log_strength=0.5, f=0.37))
     assert out.params["f"] == 0.37 and "params_not_used" not in out.record
     # the default treatment (q floor; the sawtooth parameters cannot be freed there): recorded as None
     with pytest.raises(ValueError, match="opt-in sawtooth"):
-        FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=1.0), FIT.FitSettings(free=SAW_FREE))
+        FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=1.0), _fs(free=SAW_FREE))
     fm = FakeFM()
     _install(monkeypatch, fm)
 
@@ -517,7 +523,7 @@ def test_default_fit_records_the_sawtooth_parameters_as_not_used(monkeypatch):
                                    {"passes": [], "reason": None}, 0.01)
 
     monkeypatch.setattr(FIT, "_consistent", consistent)
-    out = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=1.0), FIT.FitSettings())
+    out = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=1.0), _fs())
     assert out.params["f"] is None and out.params["log_strength"] is None
     assert out.record["params_not_used"] == ["log_strength", "f"]
 
@@ -574,21 +580,34 @@ def _anchor_fit(fm, **kw):
                            params0=dict(log_strength=0.5, f=0.37))
 
 
-def test_anchor_follow_is_off_by_default_and_checked():
+def test_anchor_follow_is_on_by_default_and_checked():
     s = FIT.FitSettings()
-    assert s.anchor_follow is False and s.anchor_follow_fraction == 0.5 and s.anchor_follow_max_steps == 8
+    assert s.anchor_follow is True and s.anchor_follow_fraction == 0.5 and s.anchor_follow_max_steps == 8
+    assert s.as_dict()["anchor_follow"] is True
     for bad in (dict(anchor_follow=1), dict(anchor_follow_fraction=0.0), dict(anchor_follow_fraction=1.5),
                 dict(anchor_follow_max_steps=0), dict(anchor_follow_max_steps=2.5)):
         with pytest.raises(ValueError):
             FIT.FitSettings(**bad)
 
 
-def test_default_fit_never_moves_the_anchor_target(monkeypatch):
+def test_fit_with_anchor_follow_off_never_moves_the_anchor_target(monkeypatch):
     fm = FakeFMAnchor([1.0, 0.5])
     _install_anchor(monkeypatch, fm)
-    out = _anchor_fit(fm)
+    out = _anchor_fit(fm, anchor_follow=False)
     assert out.status == "converged" and fm.moves == 0 and fm.target == 0
     assert "anchor_follow" not in out.record
+
+
+def test_default_fit_moves_the_anchor_target(monkeypatch):
+    """With the default settings the fit follows: the first move lowers the fitted chi^2 and is kept, the second
+    raises it and is not kept."""
+    fm = FakeFMAnchor([1.0, 0.5, 0.7])
+    _install_anchor(monkeypatch, fm)
+    out = _anchor_fit(fm)
+    rec = out.record["anchor_follow"]
+    assert rec["applied"] and rec["max_steps"] == 8 and rec["fraction"] == 0.5
+    assert rec["n_moves_kept"] == 1 and fm.moves == 2 and fm.target == 1
+    assert [s["kept"] for s in rec["steps"]] == [True, True, False] and "did not fall" in rec["stop"]
 
 
 def test_anchor_follow_keeps_moves_while_the_fitted_chi2_falls(monkeypatch):
@@ -596,7 +615,7 @@ def test_anchor_follow_keeps_moves_while_the_fitted_chi2_falls(monkeypatch):
     _install_anchor(monkeypatch, fm)
     ref = FakeFMAnchor([0.25])
     _install_anchor(monkeypatch, ref)
-    want = _anchor_fit(ref)
+    want = _anchor_fit(ref, anchor_follow=False)
     _install_anchor(monkeypatch, fm)
     out = _anchor_fit(fm, anchor_follow=True)
     rec = out.record["anchor_follow"]

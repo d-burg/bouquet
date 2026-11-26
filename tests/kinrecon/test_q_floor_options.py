@@ -443,7 +443,7 @@ def test_series_slice_records_count_the_filter_fits_jacobians(monkeypatch):
     monkeypatch.setattr(SE, "_filter_slice", fake_filter)
     cfg = CM.CurrentModelSettings(r0=SD.GEO.R0, q_floor=1.0)
     out = SE.run_series(SD.FakeFM(dict(pred=lag)), SD._slices(np.arange(2) * 0.02, np.full(2, ip)), cfg,
-                        SE.SeriesSettings(initial="relaxed", filter=True))
+                        SD.no_follow_series(initial="relaxed", filter=True))
     r = out["slices"][1]["floor_branch_record"]
     assert r["n_jacobians"] == 3 and r["n_jacobians_mixed_branches"] == 1 and r["jacobians_from"].startswith("the slice")
     assert r["jacobians_mixed_branches"] == fit_rec["jacobians_mixed_branches"]

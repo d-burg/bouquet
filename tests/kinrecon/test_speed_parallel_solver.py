@@ -95,7 +95,7 @@ def _fixture_fit(workers, mode):
              SpeedSettings(column_workers=workers) if workers > 1 else None)
     out = dict(workers=workers, mode=mode)
     try:
-        fr = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=cfg.r0), FIT.FitSettings(free=("a_corr",)), start=snap,
+        fr = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=cfg.r0), FIT.FitSettings(anchor_follow=False, free=("a_corr",)), start=snap,
                              label="fx", speed=speed)
     except Exception as exc:  # noqa: BLE001 -- the exception is the result of mode "raise"
         out["exception"] = f"{type(exc).__name__}: {exc}"
@@ -110,6 +110,7 @@ def _fixture_fit(workers, mode):
 def _series(workers):
     import dataclasses
     from bouquet.kinrecon import current_model as CM
+    from bouquet.kinrecon import fit as FIT
     from bouquet.kinrecon import series as SE
     from bouquet.kinrecon.speed import SpeedSettings
     import test_series_solver as TS
@@ -142,7 +143,8 @@ def _series(workers):
     fm.reconfigure(meas[0], refs[0], roles, case_id="filtered")
     sl = [SE.SliceData(time=t, measurements=meas[k], reference_boundary=refs[k], kinetics=kin, sources=src,
                        label=f"f{k}") for k, t in enumerate(times)]
-    st = SE.SeriesSettings(initial="from_profile", initial_profile=j_true, sawtooth="off", filter=True)
+    st = SE.SeriesSettings(initial="from_profile", initial_profile=j_true, sawtooth="off", filter=True,
+                           filter_fit=FIT.FitSettings(anchor_follow=False, free=("a_corr",)), anchor_follow_total=None)
     r = SE.run_series(fm, sl, cfg, st, speed=SpeedSettings.all_on(workers) if workers > 1 else None)
     return dict(workers=workers, series=r, psi=np.asarray(fm.gs.get_psi(False)), n_solves=fm.n_solves,
                 history=fm.history)

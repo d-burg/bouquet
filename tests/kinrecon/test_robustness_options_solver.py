@@ -68,7 +68,7 @@ def child(out):
                                 if r.converged else None))
     fm.restore(snap)
     fm.probe_correction = pc0.copy()
-    fs = FIT.FitSettings(noise_retries=1, stall_diagnostics=True)
+    fs = FIT.FitSettings(anchor_follow=False, noise_retries=1, stall_diagnostics=True)
     fr = FIT.reconstruct(fm, kin, src, dataclasses.replace(base, pass_relaxation=0.5), fs, start=snap,
                          label="options_fit")
     rec["fit"] = dict(status=fr.status, stopping_summary=fr.record.get("stopping_summary"),

@@ -115,7 +115,7 @@ def test_fit_record_carries_the_fits_own_solves(monkeypatch, with_log):
     monkeypatch.setattr(FIT._cm, "lagged_solve", logged(FIT._cm.lagged_solve))
     kin, src = U._kin()
     out = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=1.0, core_relaxation="periodic_orbit"),
-                          FIT.FitSettings(free=U.SAW_FREE), params0=dict(log_strength=0.5))
+                          U._fs(free=U.SAW_FREE), params0=dict(log_strength=0.5))
     rec = out.record
     if not with_log:
         assert "solver_iterations" not in rec

@@ -318,8 +318,8 @@ class FitSettings:
     # NON-DEFAULT robustness options (module docstring, "Robustness options"):
     noise_retries: int = 0               # 1: a failed noise re-solve is repeated once from a stated other state
     stall_diagnostics: bool = False      # True: at a stall, RECORD central-column tests and the noise at the center
-    # NON-DEFAULT moving anchor target (:func:`reconstruct`, "anchor_follow"; single-slice fits only):
-    anchor_follow: bool = False          # True: after the fit, move the anchor target toward the solved boundary and
+    # Moving anchor target (:func:`reconstruct`, "anchor_follow"), ON by default:
+    anchor_follow: bool = True           # True (default): after the fit, move the anchor target toward the solved boundary and
     #                                      refit, while the fitted groups' chi^2 falls (the weight never changes)
     anchor_follow_fraction: float = 0.5  # fraction of the way to the solved boundary per move
     anchor_follow_max_steps: int = 8     # cost bound: at most this many moves
@@ -627,7 +627,7 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
     ``record["steady_state_check"]`` (module docstring, :func:`steady_state_check`), made after the fit and its branch
     log are complete; it steers nothing.
 
-    ``settings.anchor_follow`` (NON-DEFAULT; single-slice fits only): the moving anchor target.  The fit above first,
+    ``settings.anchor_follow`` (on by default): the moving anchor target.  The fit above first,
     with the reference boundary as the anchor target.  Then, at most ``anchor_follow_max_steps`` times: every point of
     the anchor target moves ``anchor_follow_fraction`` of the way to the solved boundary
     (:meth:`.forward.ForwardModel.move_anchor_target`; the anchor weight never changes) and the fit is run again from

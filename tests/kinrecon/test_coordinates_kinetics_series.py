@@ -253,7 +253,7 @@ def test_one_damped_step_is_not_convergence(monkeypatch):
     fm = TU.FakeFM()
     TU._install(monkeypatch, fm)
     kin, src = TU._kin()
-    st = FIT.FitSettings(free=("log_strength",), lm_lambda0=1e4, max_iter=40)
+    st = FIT.FitSettings(free=("log_strength",), lm_lambda0=1e4, max_iter=40, anchor_follow=False)
     out = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=1.0, core_relaxation="periodic_orbit"), st,
                           params0=dict(log_strength=0.5))
     th, cov = TU._expected(FIT.PARAMETERS["log_strength"]["prior"][1])

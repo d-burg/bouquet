@@ -105,7 +105,7 @@ def _fixture_fit(mode):
         os.fork = fork_second_refused
         speed = SpeedSettings.all_on(WORKERS)
     out = dict(mode=mode)
-    fr = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=cfg.r0), FIT.FitSettings(free=("a_corr",)), start=snap,
+    fr = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=cfg.r0), FIT.FitSettings(anchor_follow=False, free=("a_corr",)), start=snap,
                          label="fx", speed=speed)
     rec = {k: v for k, v in fr.record.items() if k != "center"}
     out.update(status=fr.status, theta=fr.theta, sigma=fr.sigma, covariance=fr.covariance, chi2=fr.chi2,
@@ -139,7 +139,7 @@ def _threads(kind):
         n0 = fm.n_solves
         t0 = time.perf_counter()
         try:
-            FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=cfg.r0), FIT.FitSettings(free=("a_corr",)), label="fx",
+            FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=cfg.r0), FIT.FitSettings(anchor_follow=False, free=("a_corr",)), label="fx",
                             speed=par)
             out["refused"] = None
         except ValueError as exc:

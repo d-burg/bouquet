@@ -374,7 +374,7 @@ def test_opt_in_sawtooth_treatments_are_reachable_and_refused_elsewhere():
         CM.CurrentModelSettings(r0=GEO.R0, core_relaxation="sawtooth")
     with pytest.raises(ValueError, match="opt-in sawtooth core treatments"):
         FIT.reconstruct(SimpleNamespace(ms=None), kin, src, CM.CurrentModelSettings(r0=GEO.R0),
-                        FIT.FitSettings(free=("log_strength", "a_corr")))
+                        FIT.FitSettings(free=("log_strength", "a_corr"), anchor_follow=False))
 
 
 def test_series_default_floors_every_step_with_the_single_slice_treatment(monkeypatch):

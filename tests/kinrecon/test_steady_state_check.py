@@ -65,6 +65,11 @@ def _install(monkeypatch, ok=True, raises=False, n=4):
     return seen
 
 
+#: The single-slice fits below are about the steady-state record, not the moving anchor target
+#: (``FitSettings.anchor_follow``, on by default): they name it off.
+NO_FOLLOW = FIT.FitSettings(anchor_follow=False)
+
+
 def test_defaults_are_on():
     import inspect
     assert SE.SeriesSettings().steady_state_check is True
@@ -128,7 +133,7 @@ def test_single_slice_fit_records_the_check_after_the_fit(monkeypatch):
     seen = _install(monkeypatch)
     _fake_fit(monkeypatch)
     fm = FakeFM()
-    out = FIT.reconstruct(fm, None, None, CM.CurrentModelSettings(r0=1.0), label="fx")
+    out = FIT.reconstruct(fm, None, None, CM.CurrentModelSettings(r0=1.0), NO_FOLLOW, label="fx")
     chk = out.record["steady_state_check"]
     assert chk["computed"] is True and chk["n_solves"] == 4
     assert out.record["n_solves"] == 7                        # the fit's own count
@@ -146,7 +151,7 @@ def test_single_slice_cases_without_a_solve(monkeypatch, case):
     kw = dict(steady_state_check=False) if case == "off" else {}
     if case == "state_fn":
         kw["state_fn"] = lambda lag: None
-    out = FIT.reconstruct(fm, None, None, cfg, **kw)
+    out = FIT.reconstruct(fm, None, None, cfg, NO_FOLLOW, **kw)
     assert not seen and fm.n_solves == 7
     if case == "state_fn":
         assert "steady_state_check" not in out.record           # the series records it per slice

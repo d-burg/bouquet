@@ -339,7 +339,10 @@ class SeriesSettings:
     #                                                      sawteeth, ("a_corr",) otherwise
     initial_fit_nonconverged: str = "refuse"             # INITIAL_FIT_POLICIES
     filter: bool = False
-    filter_fit: _fit.FitSettings = field(default_factory=lambda: _fit.FitSettings(free=("a_corr",)))
+    # default: the moving anchor target on in the filter fit, at most 2 moves per slice (the capped form; the bound
+    # along a carried chain is anchor_follow_total)
+    filter_fit: _fit.FitSettings = field(default_factory=lambda: _fit.FitSettings(
+        free=("a_corr",), anchor_follow=True, anchor_follow_max_steps=2))
     filter_times: Optional[Sequence[float]] = None       # with filter=True: fit only at these slice times [s]
     filter_time_tol: float = 1.0e-6                      # [s] match tolerance of filter_times
     filter_correction: str = "in_window"                 # FILTER_CORRECTION_FORMS ("steady_response": comparison)
@@ -368,7 +371,7 @@ class SeriesSettings:
     # Moving anchor target in a series (only with FitSettings.anchor_follow on in the first-slice fit or the filter):
     anchor_carry_retest: bool = True         # a carried target is used on a slice only if its filter fit has a lower
     #                                          fitted chi^2 than the filter fit on the slice's own reference boundary
-    anchor_follow_total: Optional[int] = None   # at most this many kept moves along one carried chain (None: no bound)
+    anchor_follow_total: Optional[int] = 8      # at most this many kept moves along one carried chain (None: no bound)
 
     def __post_init__(self):
         if self.initial not in INITIAL_MODES:
@@ -816,7 +819,7 @@ def _carry_anchor(fm, offset):
     """Moving anchor target in a series: the previous slice's displacement of the anchor target from its reference
     boundary, as a function of the poloidal angle about the magnetic axis, is applied to this slice's reference
     boundary before its solves (:meth:`.forward.ForwardModel.apply_anchor_offset`).  ``None`` when nothing was moved
-    (the default: the target is the slice's reference boundary).  Returns the record for the slice."""
+    (the target is then the slice's reference boundary).  Returns the record for the slice."""
     if offset is None:
         return None
     try:

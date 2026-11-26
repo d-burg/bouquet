@@ -823,7 +823,7 @@ class ForwardModel:
         wiso = float(s.anchor_factor) * 2.0 * np.pi * med
         self._iso = dict(points=bi, weight=wiso)
         self.reference_boundary = b
-        self._anchor_polygon = b.copy()         # the anchor target now (moved only by move_anchor_target, opt-in)
+        self._anchor_polygon = b.copy()         # the anchor target now (moved only by move_anchor_target)
         rec["anchor"] = dict(n_points=int(len(bi)), stride=int(s.isoflux_stride), weight=wiso,
                              anchor_factor=float(s.anchor_factor),
                              rule="weight = factor * 2 pi median(1/sigma_loop) over the loop rows")
@@ -1181,10 +1181,10 @@ class ForwardModel:
         gmap = dict(flux_loop="flux_loop", bpol_probe="bpol_probe", fitted_coil="pf_current")
         return float(sum(v for k, v in d["by_kind"].items() if k in gmap and gmap[k] in set(groups)))
 
-    # ---------------------------------------------------------------- moving anchor target (opt-in)
+    # ---------------------------------------------------------------- moving anchor target (FitSettings.anchor_follow)
     def anchor_target(self):
         """A copy of the anchor target now: the full polygon whose strided points carry the isoflux rows.  It is the
-        reference boundary until :meth:`move_anchor_target` is called (opt-in, ``FitSettings.anchor_follow``);
+        reference boundary until :meth:`move_anchor_target` is called (``FitSettings.anchor_follow``, on by default);
         ``reference_boundary`` itself never moves, so every boundary record stays measured against the reference."""
         return np.array(getattr(self, "_anchor_polygon", self.reference_boundary), float)
 

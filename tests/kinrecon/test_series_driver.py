@@ -59,6 +59,14 @@ IP0 = GEO.IP
 SIGMA = 2.0e6          # uniform conductivity [S/m]: skin depth over 20 ms ~ 0.09 m (resolved by the grids used)
 
 
+def no_follow_series(**kw):
+    """Series settings with the moving anchor target named off in the filter fit and no bound on a carried chain (the
+    settings before the moving target became the default), for series tests about other machinery."""
+    from bouquet.kinrecon import fit as FIT
+    return SE.SeriesSettings(filter_fit=FIT.FitSettings(free=("a_corr",), anchor_follow=False),
+                             anchor_follow_total=None, **kw)
+
+
 # ============================================================== mocks
 class FakeFM:
     """Forward-model stand-in: its "equilibrium" is a key into ``lags``; ``gs`` is itself."""
@@ -1196,3 +1204,22 @@ def test_bound_on_kept_moves_along_a_carried_chain(monkeypatch):
     assert calls[1]["follow"] is True and calls[1]["cap"] == 1          # 3 kept so far, bound 4: one move left
     fm, calls, filt, res, holder, box = _retest(monkeypatch, chi_ref=100.0, chi_car=80.0, anchor_follow_total=3)
     assert calls[1]["follow"] is False                                   # nothing left: the carried target, no moves
+
+
+def test_series_defaults_are_the_capped_moving_anchor_target():
+    """The default series: the filter fit follows with at most 2 moves per slice, at most 8 kept moves along a carried
+    chain, and the first-slice fit follows with the single-slice cap of 8 moves (the default sawtooth treatment, off and periodic);
+    the old settings can still be named."""
+    from bouquet.kinrecon import fit as FIT
+    s = SE.SeriesSettings()
+    ff = s.filter_fit
+    assert ff.anchor_follow is True and ff.anchor_follow_max_steps == 2 and ff.anchor_follow_fraction == 0.5
+    assert ff.free == ("a_corr",)
+    assert s.anchor_follow_total == 8 and s.anchor_carry_retest is True
+    for saw in ("q_floor", "off", "periodic"):
+        init = SE.SeriesSettings(sawtooth=saw).initial_fit
+        assert init.anchor_follow is True and init.anchor_follow_max_steps == 8, saw
+    assert SE.SeriesSettings().filter_fit is not SE.SeriesSettings().filter_fit      # a fresh settings object each
+    old = no_follow_series()
+    assert old.filter_fit.anchor_follow is False and old.anchor_follow_total is None
+    assert old.filter_fit == FIT.FitSettings(free=("a_corr",), anchor_follow=False)

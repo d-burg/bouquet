@@ -1,6 +1,7 @@
 """Live-solver tests (``pytest -m solver``) of the steady-state input check (``steady_state_check``, ON by default; a
 record that steers nothing).  Public synthetic fixture only (as ``test_fit_solver.py``); each run is a separate
-process; package defaults otherwise (no ``speed`` argument).
+process; package defaults otherwise (no ``speed`` argument), except that the moving anchor target
+(``FitSettings.anchor_follow``) is named off in every fit, as these tests are about the check.
 
 Checked, every saved value compared bit for bit (wall times excepted), check ON against check OFF:
 (a) a single-slice fit (default free set, noisy data, default core): every fitted number, the fit's whole record but
@@ -54,7 +55,7 @@ def _fit(on):
     ms = _base._measurements(gs, geo, roles, ip, np.random.default_rng(_base._SEED))
     fm.reconfigure(ms, np.asarray(gs.trace_surf(0.999), float), roles, case_id="fit")
     n_before = fm.n_solves
-    fr = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=cfg.r0), FIT.FitSettings(), start=snap,
+    fr = FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=cfg.r0), FIT.FitSettings(anchor_follow=False), start=snap,
                          label="fx", steady_state_check=on)
     rec = {k: v for k, v in fr.record.items() if k != "center"}
     return dict(status=fr.status, theta=fr.theta, sigma=fr.sigma, covariance=fr.covariance, chi2=fr.chi2,
@@ -65,6 +66,7 @@ def _fit(on):
 def _series(on):
     import dataclasses
     from bouquet.kinrecon import current_model as CM
+    from bouquet.kinrecon import fit as FIT
     from bouquet.kinrecon import series as SE
     import test_series_solver as TS
     fm, kin, src, cfg, init, ip = _base._setup()
@@ -97,7 +99,9 @@ def _series(on):
     n_before = fm.n_solves
     sl = [SE.SliceData(time=t, measurements=meas[k], reference_boundary=refs[k], kinetics=kin, sources=src,
                        label=f"f{k}") for k, t in enumerate(times)]
-    st = SE.SeriesSettings(initial="mse_fit", sawtooth="off", filter=True, steady_state_check=on)
+    st = SE.SeriesSettings(initial="mse_fit", sawtooth="off", filter=True, steady_state_check=on,
+                           initial_fit=FIT.FitSettings(anchor_follow=False, free=("a_corr",)),
+                           filter_fit=FIT.FitSettings(anchor_follow=False, free=("a_corr",)), anchor_follow_total=None)
     r = SE.run_series(fm, sl, cfg, st, initial_profiles=init)
     return dict(series=r, psi=np.asarray(fm.gs.get_psi(False)), n_solves=fm.n_solves - n_before)
 

@@ -323,9 +323,9 @@ class FitSettings:
     #                                      refit, while the fitted groups' chi^2 falls (the weight never changes)
     anchor_follow_fraction: float = 0.5  # fraction of the way to the solved boundary per move
     anchor_follow_max_steps: int = 8     # cost bound: at most this many moves
-    # NON-DEFAULT run-time option of the moving anchor target (:func:`reconstruct`, "Final Jacobian of the returned
-    # fit only"); recorded in ``as_dict`` only when set
-    anchor_follow_defer_final_jacobian: bool = False
+    # run-time option of the moving anchor target, ON by default (:func:`reconstruct`, "Final Jacobian of the returned
+    # fit only"); single-slice fits only: a series filter fit (state_fn) uses the form without it
+    anchor_follow_defer_final_jacobian: bool = True
 
     def __post_init__(self):
         if self.jacobian_steps not in JACOBIAN_STEP_KINDS:
@@ -350,10 +350,7 @@ class FitSettings:
             raise ValueError("anchor_follow_defer_final_jacobian must be True or False")
 
     def as_dict(self):
-        d = asdict(self)
-        if not d["anchor_follow_defer_final_jacobian"]:
-            del d["anchor_follow_defer_final_jacobian"]      # the default record is as before the option existed
-        return d
+        return asdict(self)
 
 
 def _expand(free, cfg):
@@ -648,8 +645,9 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
     fit of a series slice) the same rule applies to the filter fit; the series driver carries the moved target to the
     next slice (:mod:`.series`, "Moving anchor target").  The moves run under the fit's speed options, as the fits do.
 
-    Final Jacobian of the returned fit only (``settings.anchor_follow_defer_final_jacobian``, NON-DEFAULT run-time
-    option; single-slice fits only).  By default every fit of the moving target ends with its covariance Jacobian
+    Final Jacobian of the returned fit only (``settings.anchor_follow_defer_final_jacobian``, a run-time option ON by
+    default; single-slice fits only: with ``state_fn``, a series filter fit, it does not apply and every fit of the
+    moving target ends with its own covariance Jacobian, as with the option off).  By default every fit of the moving target ends with its covariance Jacobian
     (a fresh one where the final Gauss-Newton step moved the center), also the fits that are not returned.  With the
     option, a converged fit whose covariance needs a fresh Jacobian is first returned without it; that Jacobian is
     computed only for the fit that is returned, at its own center, anchor target and branch log, with the same
@@ -665,7 +663,10 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
     """
     st = settings or FitSettings()
     if st.anchor_follow_defer_final_jacobian and state_fn is not None:
-        raise ValueError("anchor_follow_defer_final_jacobian is an option of single-slice fits (no state_fn)")
+        # single-slice fits only: a filter fit of a series slice uses the form without the option (stated in its
+        # settings record)
+        st = replace(st, anchor_follow_defer_final_jacobian=False)
+        settings = st
     kw = dict(label=label, state_fn=state_fn, speed=speed)
     if not st.anchor_follow:
         return _reconstruct_checked(fm, kin, src, cfg, settings=settings, params0=params0, start=start,

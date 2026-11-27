@@ -754,11 +754,12 @@ def _same_returned_fit(a, b):
         assert repr(ra.record.get(key)) == repr(rb.record.get(key)), key
 
 
-def test_deferred_final_jacobian_is_off_by_default_checked_and_not_recorded_when_off():
+def test_deferred_final_jacobian_is_on_by_default_checked_and_recorded():
     s = FIT.FitSettings()
-    assert s.anchor_follow_defer_final_jacobian is False
-    assert "anchor_follow_defer_final_jacobian" not in s.as_dict()          # the default record as before
-    assert FIT.FitSettings(anchor_follow_defer_final_jacobian=True).as_dict()["anchor_follow_defer_final_jacobian"]
+    assert s.anchor_follow_defer_final_jacobian is True
+    assert s.as_dict()["anchor_follow_defer_final_jacobian"] is True
+    assert FIT.FitSettings(anchor_follow_defer_final_jacobian=False).as_dict()["anchor_follow_defer_final_jacobian"] \
+        is False
     with pytest.raises(ValueError):
         FIT.FitSettings(anchor_follow_defer_final_jacobian=1)
 
@@ -812,15 +813,27 @@ def test_deferred_final_jacobian_waits_for_the_edge_taper_case_lock(monkeypatch)
     assert all("note" in c for c in on[0].record["anchor_follow"]["final_jacobian_deferred"]["completed"])
 
 
-def test_deferred_final_jacobian_is_refused_with_a_supplied_state(monkeypatch):
-    fm = FakeFMAnchorCase([1.0, 0.5])
-    _install_anchor(monkeypatch, fm)
-    kin, src = _kin()
-    cfg = CM.CurrentModelSettings(r0=1.0, core_relaxation="periodic_orbit")
-    with pytest.raises(ValueError):
-        FIT.reconstruct(fm, kin, src, cfg, FIT.FitSettings(free=SAW_FREE, anchor_follow=True,
-                                                           anchor_follow_defer_final_jacobian=True),
-                        params0=dict(log_strength=0.5, f=0.37), state_fn=lambda lag, params=None: None)
+def test_deferred_final_jacobian_does_not_apply_with_a_supplied_state(monkeypatch):
+    # single-slice fits only: with a supplied state (a series filter fit) the fit is made as with the option off
+    out = []
+    for on in (True, False):
+        fm = FakeFMAnchorCase([1.0, 0.5, 0.25, 0.6, 0.1])
+        _install_anchor(monkeypatch, fm)
+        kin, src = _kin()
+        cfg = CM.CurrentModelSettings(r0=1.0, core_relaxation="periodic_orbit")
+        try:
+            r = FIT.reconstruct(fm, kin, src, cfg, FIT.FitSettings(free=SAW_FREE, anchor_follow=True,
+                                                                   anchor_follow_defer_final_jacobian=on),
+                                params0=dict(log_strength=0.5, f=0.37), state_fn=lambda lag, params=None: None)
+        except ValueError as exc:
+            assert "anchor_follow_defer_final_jacobian" not in str(exc)
+            r = exc
+        out.append(r)
+    assert not isinstance(out[0], Exception) and not isinstance(out[1], Exception), out
+    assert type(out[0]) is type(out[1])
+    if not isinstance(out[0], Exception):
+        assert out[0].record["settings"]["anchor_follow_defer_final_jacobian"] is False
+        assert out[0].status == out[1].status
 
 
 def test_boundary_crossings_all_points_at_once_equal_one_ray_at_a_time(monkeypatch):
@@ -873,7 +886,7 @@ def _fit_with_failed_trials(monkeypatch, fail_trials, **kw):
     _install(monkeypatch, fm, fail_trials=fail_trials)
     kin, src = _kin()
     return FIT.reconstruct(fm, kin, src, CM.CurrentModelSettings(r0=1.0, core_relaxation="periodic_orbit"),
-                           FIT.FitSettings(free=SAW_FREE, **kw), params0=dict(log_strength=0.5))
+                           FIT.FitSettings(free=SAW_FREE, anchor_follow=False, **kw), params0=dict(log_strength=0.5))
 
 
 def test_failed_trials_counted_over_the_fit_by_default(monkeypatch):

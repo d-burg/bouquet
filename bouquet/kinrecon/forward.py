@@ -58,8 +58,15 @@ Grad-Shafranov equation with
   limit ``maxits``, and only as an explicit, recorded, non-default setting
   (:attr:`ForwardSettings.solver_maxits`, default None = OFT's own limit untouched): when given, it
   is set once in the wrapper's settings and sent to the solver, and ``G7`` compares with OFT's
-  defaults with that one value replaced; ``nl_tol`` and ``urf`` are never set.  Every solve's
-  iteration count is logged (:meth:`ForwardModel.iteration_record`);
+  defaults with that one value replaced; ``nl_tol`` is never set.  A second, independent exception is
+  the solver's under-relaxation factor ``urf`` (:attr:`ForwardSettings.solver_urf`, default None =
+  OFT's own value untouched), again only as an explicit, recorded, non-default setting: ``urf`` is
+  the weight of the PREVIOUS iterate in the solver's Picard update (``psi <- (1 - urf) psi_new +
+  urf psi_old``), so a larger value damps more.  The solver's convergence test is on the
+  Grad-Shafranov residual of the iterate, not on the change between iterates, and the warm
+  verification re-solve is unchanged, so the factor changes the path to a converged state, never
+  what "converged" means.  Every solve's iteration count is logged
+  (:meth:`ForwardModel.iteration_record`);
 * continuation: a solve starts from the current state of the solver (``init="keep"``), from a
   saved state (:meth:`ForwardModel.snapshot`), or -- first solve of a case only -- from a supplied
   reference ``psi`` on the mesh nodes;
@@ -165,6 +172,23 @@ SETTINGS_SOURCE_NOTE = ("the TokaMaker wrapper's Python-side settings (the value
                         "solver; the solver has no getter): in_effect / now = the wrapper's value, oft_default = "
                         "this instance's value at construction")
 _NOTICES = set()
+
+
+def check_solver_urf(value):
+    """:attr:`ForwardSettings.solver_urf` checked: None (OFT's own under-relaxation factor, never set) or a number
+    with 0 <= urf < 1 (the weight of the previous iterate in the solver's Picard update; a bool or a string is
+    refused).  Returns None or the float."""
+    if value is None:
+        return None
+    if isinstance(value, (bool, np.bool_, str, bytes)):
+        raise ValueError(f"solver_urf must be None or a number with 0 <= urf < 1, got {value!r}")
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"solver_urf must be None or a number with 0 <= urf < 1, got {value!r}") from None
+    if not np.isfinite(v) or not 0.0 <= v < 1.0:
+        raise ValueError(f"solver_urf must be None or a number with 0 <= urf < 1, got {value!r}")
+    return v
 
 
 def check_solver_maxits(value):
@@ -293,9 +317,17 @@ class ForwardSettings:
     #                                             a whole number >= 1: that limit, sent once to the solver and used by
     #                                             every solve of this forward model -- an explicit, recorded,
     #                                             non-default setting; nl_tol, urf and every criterion are untouched
+    solver_urf: Optional[float] = None          # None: OFT's own under-relaxation factor, never set (default); a
+    #                                             number 0 <= urf < 1: that factor (the weight of the previous
+    #                                             iterate; larger damps more), sent once to the solver and used by
+    #                                             every solve of this forward model -- an explicit, recorded,
+    #                                             non-default setting; nl_tol and every criterion are untouched (left
+    #                                             out of as_dict when None, so the default record is unchanged)
 
     def as_dict(self):
         d = asdict(self)
+        if d.get("solver_urf") is None:
+            d.pop("solver_urf", None)
         d["edge_taper"] = self.edge_taper.as_dict()
         d["verify_criterion"] = dict(axis_m=VERIFY_AXIS_M, q0_li_ip_rel=VERIFY_REL, li=VERIFY_LI,
                                      rule="warm re-solve reproduces axis, q0, l_i ('iter' normalization, "
@@ -661,6 +693,7 @@ class ForwardModel:
         if s.lcfs_cut_cells not in LCFS_CUT_CELL_OPTIONS:
             raise ValueError(f"lcfs_cut_cells must be one of {LCFS_CUT_CELL_OPTIONS}")
         maxits = check_solver_maxits(s.solver_maxits)
+        urf = check_solver_urf(s.solver_urf)
         self.solver_build = solver_build()
         if s.lcfs_cut_cells == "on" and not self.solver_build["provides_lcfs_cut_cells"]:
             raise RuntimeError(f"lcfs_cut_cells='on' but this OpenFUSIONToolkit build "
@@ -674,6 +707,7 @@ class ForwardModel:
         self.F0 = float(F0)
         self.defaults = self._read_settings()
         self.iteration_limit = self._configure_iteration_limit(maxits)
+        self.relaxation = self._configure_relaxation(urf)
         self.oft_path = os.path.dirname(os.path.abspath(OpenFUSIONToolkit.__file__))
         self.n_solves = 0
         self.iteration_log = []
@@ -750,6 +784,29 @@ class ForwardModel:
                     values_source=SETTINGS_SOURCE_NOTE,
                     rule="explicit non-default setting ForwardSettings.solver_maxits: the nonlinear iteration limit "
                          "sent to the solver for every solve of this forward model; nl_tol and urf are OFT's")
+
+    def _configure_relaxation(self, urf):
+        """Apply :attr:`ForwardSettings.solver_urf` (already checked) once, after the iteration limit.  None: nothing
+        is set.  A number: ``urf`` only is set in the TokaMaker wrapper's Python-side settings and sent to the solver
+        (``update_settings``), the wrapper's value is re-read, and ``G7`` compares with OFT's defaults with that value
+        (and the iteration limit, when set) replaced; ``nl_tol`` stays OFT's.  Returns the record: ``setting``,
+        ``in_effect``, ``oft_default`` (:data:`SETTINGS_SOURCE_NOTE`)."""
+        oft = float(self.defaults["urf"])
+        if urf is None:
+            return dict(setting=None, in_effect=oft, oft_default=oft, values_source=SETTINGS_SOURCE_NOTE,
+                        rule="OFT's own under-relaxation factor (never set)")
+        self.gs.settings.urf = float(urf)
+        self.gs.update_settings()
+        self.expected_settings = dict(self.expected_settings, urf=float(urf))
+        now = self._read_settings()
+        if now != self.expected_settings:
+            raise RuntimeError(f"solver settings after setting urf = {urf}: {now}; expected {self.expected_settings}")
+        return dict(setting=float(urf), in_effect=float(now["urf"]), oft_default=oft,
+                    values_source=SETTINGS_SOURCE_NOTE,
+                    rule="explicit non-default setting ForwardSettings.solver_urf: the weight of the previous iterate "
+                         "in the solver's Picard update (larger damps more), sent to the solver for every solve of "
+                         "this forward model; nl_tol and the convergence test (on the Grad-Shafranov residual) are "
+                         "OFT's; the warm verification re-solve is unchanged")
 
     def _log_iterations(self, label, its, kind, at_limit):
         """One entry of :attr:`iteration_log` per solver call counted in :attr:`n_solves`."""
@@ -912,7 +969,16 @@ class ForwardModel:
         return dict(build=_copy_build(self.solver_build),
                     lcfs_cut_cells=dict(self.cut_cells, now=read_cut_cells(self.gs)),
                     edge_taper=self.settings.edge_taper.as_dict(),
-                    iteration_limit=dict(self.iteration_limit, now=int(self.gs.settings.maxits)))
+                    iteration_limit=dict(self.iteration_limit, now=int(self.gs.settings.maxits)),
+                    **self._relaxation_record())
+
+    def _relaxation_record(self):
+        """``relaxation`` of :meth:`solver_record` only when :attr:`ForwardSettings.solver_urf` is set (the default
+        record is unchanged)."""
+        rel = getattr(self, "relaxation", None)
+        if not rel or rel.get("setting") is None:
+            return {}
+        return dict(relaxation=dict(rel, now=float(self.gs.settings.urf)))
 
     def coil_current_record(self, solve=None):
         """RECORD that steers nothing: the coil currents of the solver's present state and the vertical-stability

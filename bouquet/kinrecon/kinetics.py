@@ -61,7 +61,17 @@ Coordinate (the working coordinate is rho_tor,norm):
 * profiles that carry only psi_N of ANOTHER equilibrium are mapped through that equilibrium's own
   ``psi_N -> rho_tor,norm`` table when the caller supplies it (``psi_n_to_rho=(psi_n, rho)``,
   recorded), and kept on psi_N otherwise (``coordinate="psi_n"``: then they are evaluated at the
-  CURRENT equilibrium's psi_N in every pass, which is recorded as "mapped through ours").
+  CURRENT equilibrium's psi_N in every pass, which is recorded as "mapped through ours");
+* a flagged fallback, ON by default, for a supplied table whose rho_tor,norm does not increase strictly
+  (``rho_map_fallback="psi_n"``; None refuses such a table as before): the inputs are then
+  kept on psi_N and placed by the reconstruction's own psi_N, the second route above, for EVERY
+  point (one coordinate per input set: a mixed placement would put a jump in the placement where the
+  two routes meet).  The profile values are not changed.  ``record["mapping_fallback"]`` states the
+  setting, why it acted, the table points where rho_tor,norm does not increase (their psi_N and
+  rho), and how the input points were placed (all by the reconstruction's psi_N; the count of those
+  that the table would have placed by rho, i.e. inside the table's strictly increasing part, and of
+  those in or beyond its first non-increasing interval).  A table whose psi_N does not increase is
+  refused with or without the option.
 
 The result evaluates on any equilibrium through :meth:`KineticInputs.profiles_at` with that
 equilibrium's ``(psi_N, rho)`` pair; :mod:`.current_model` calls it on every pass.
@@ -85,6 +95,10 @@ __all__ = ["KineticInputs", "assemble_kinetic_inputs", "zeff_from_impurity_densi
            "TI_NOT_COVERED"]
 
 #: Coordinates a kinetic table can carry.
+#: :func:`assemble_kinetic_inputs` ``rho_map_fallback``: "psi_n" (default; flagged: where a supplied table's rho does
+#: not increase strictly, the inputs are placed by the reconstruction's own psi_N; module docstring) or None (such a
+#: table is refused).  It acts only on inputs on psi_N with a ``psi_n_to_rho`` table; otherwise it has no effect.
+RHO_MAP_FALLBACKS = (None, "psi_n")
 COORDINATES = ("rho_tor_norm", "psi_n")
 #: The ``zeff_source`` value that applies the checked-source rule (module docstring).
 CHECKED = "checked"
@@ -395,7 +409,8 @@ def shift_electrons_to_separatrix_te(x, ne, te, te_sep_eV=80.0, x_sep=1.0, searc
 def assemble_kinetic_inputs(x, ne, te, ti, *, zeff_candidates, zeff_source, z_imp, coordinate="rho_tor_norm",
                             n_fast=None, n_fast_source=None, psi_n_to_rho=None,
                             mapping_source=None, provenance=None, ni_reference=None, source="",
-                            disagreement_range=(0.0, 0.9), zeff_rule=None, midplane_radius=None, ti_coverage=None):
+                            disagreement_range=(0.0, 0.9), zeff_rule=None, midplane_radius=None, ti_coverage=None,
+                            rho_map_fallback="psi_n"):
     """Build :class:`KineticInputs` (module docstring).
 
     Parameters
@@ -435,6 +450,12 @@ def assemble_kinetic_inputs(x, ne, te, ti, *, zeff_candidates, zeff_source, z_im
         increasing, finite).  Kept on the result for the fit's radial-coordinate record (how far the fitted
         surfaces sit from the producer's in real space); it does not enter the model.  The record says
         "not supplied" without it.
+    rho_map_fallback : ``"psi_n"`` or None
+        Flagged fallback, ON by default (module docstring): with ``"psi_n"``, a ``psi_n_to_rho`` table whose rho does
+        not increase strictly is not refused; the inputs are placed by the reconstruction's own psi_N instead,
+        recorded in ``record["mapping_fallback"]``.  None: such a table is refused.  It acts only on inputs on psi_N
+        with a ``psi_n_to_rho`` table; otherwise it has no effect.  The Z_eff rule's point
+        positions still read the supplied table (a record of the rule's tests, not the placement).
     ti_coverage : dict
         Required (``None`` is refused): the ion-temperature coverage check of the slice (module docstring;
         :data:`TI_COVERAGE_KEYS`, :func:`ti_coverage_check`).  ``points``: the ion-temperature measurement points;
@@ -446,6 +467,8 @@ def assemble_kinetic_inputs(x, ne, te, ti, *, zeff_candidates, zeff_source, z_im
     """
     if coordinate not in COORDINATES:
         raise ValueError(f"coordinate must be one of {COORDINATES}")
+    if rho_map_fallback not in RHO_MAP_FALLBACKS:
+        raise ValueError(f"rho_map_fallback must be one of {RHO_MAP_FALLBACKS}")
     if not zeff_candidates:
         raise ValueError("give at least one Z_eff candidate")
     if CHECKED in zeff_candidates:
@@ -578,10 +601,15 @@ def assemble_kinetic_inputs(x, ne, te, ti, *, zeff_candidates, zeff_source, z_im
     prov["pressure"] = "(K5) e (n_e T_e + (n_i + n_imp) T_i), impurity at T_i"
     xs, coord = x, coordinate
     if coordinate == "psi_n":
-        if psi_n_to_rho is not None:
+        use_table = psi_n_to_rho is not None
+        if use_table:
             tp, tr = (np.asarray(v, dtype=float) for v in psi_n_to_rho)
-            if np.any(np.diff(tp) <= 0) or np.any(np.diff(tr) <= 0):
+            if np.any(np.diff(tp) <= 0) or (np.any(np.diff(tr) <= 0) and rho_map_fallback is None):
                 raise ValueError("psi_n_to_rho must increase strictly in both coordinates")
+            if np.any(np.diff(tr) <= 0):
+                rec["mapping_fallback"] = _rho_map_fallback_record(x, tp, tr, rho_map_fallback, mapping_source)
+                use_table = False
+        if use_table:
             if x[0] < tp[0] - 1e-12 or min(x[-1], 1.0) > tp[-1] + 1e-12:
                 raise ValueError("psi_n_to_rho does not cover the inputs' psi_N range inside the plasma")
             keep = x <= min(1.0, tp[-1])
@@ -595,6 +623,10 @@ def assemble_kinetic_inputs(x, ne, te, ti, *, zeff_candidates, zeff_source, z_im
             coord = "rho_tor_norm"
             rec["mapping"] = f"psi_N of {mapping_source or 'the producing equilibrium'} -> rho_tor,norm through " \
                              "that equilibrium's own table"
+        elif psi_n_to_rho is not None:
+            rec["mapping"] = ("psi_N kept: evaluated at the reconstruction's own psi_N in every pass (mapped through "
+                              "ours) -- FLAGGED FALLBACK (rho_map_fallback='psi_n'): the supplied table's rho_tor,norm "
+                              "does not increase strictly (record['mapping_fallback'])")
         else:
             rec["mapping"] = "psi_N kept: evaluated at the reconstruction's own psi_N in every pass (mapped through ours)"
     else:
@@ -630,6 +662,30 @@ def assemble_kinetic_inputs(x, ne, te, ti, *, zeff_candidates, zeff_source, z_im
     return KineticInputs(coordinate=coord, x=xs, ne=out["ne"], te=out["te"], ti=out["ti"], zeff=zeff, ni=ni,
                          nimp=nimp, n_fast=nf, z_imp=z, provenance=prov, record=rec, source=source,
                          midplane_radius=mid)
+
+
+def _rho_map_fallback_record(x, tp, tr, setting, mapping_source):
+    """``record["mapping_fallback"]`` of :func:`assemble_kinetic_inputs` (``rho_map_fallback``): where the table's
+    rho_tor,norm does not increase and how the input points ``x`` (psi_N) were placed."""
+    bad = np.flatnonzero(np.diff(tr) <= 0)          # interval i: table points i -> i+1
+    first = int(bad[0])
+    psi_first = float(tp[first])                    # the table is strictly increasing in rho below this psi_N
+    inside = np.asarray(x, dtype=float) <= 1.0
+    by_rho_would = int(np.sum(inside & (np.asarray(x, dtype=float) < psi_first)))
+    return dict(
+        setting=setting, applied=True, flagged=True,
+        reason=f"the psi_N -> rho_tor,norm table of {mapping_source or 'the producing equilibrium'} does not "
+               f"increase strictly in rho ({bad.size} of {tr.size - 1} intervals)",
+        non_increasing_intervals=dict(index=[int(i) for i in bad], psi_n_lo=[float(tp[i]) for i in bad],
+                                      psi_n_hi=[float(tp[i + 1]) for i in bad],
+                                      rho_lo=[float(tr[i]) for i in bad], rho_hi=[float(tr[i + 1]) for i in bad]),
+        first_non_increasing_psi_n=psi_first,
+        placement=dict(n_points=int(inside.sum()), by_reconstruction_psi_n=int(inside.sum()), by_table_rho=0,
+                       n_would_be_by_table_rho=by_rho_would, n_in_or_beyond_non_increasing=int(inside.sum()) - by_rho_would,
+                       rule="every input point inside psi_N <= 1 is placed by the reconstruction's own psi_N (one "
+                            "coordinate per input set); 'would_be_by_table_rho' counts the points below the table's "
+                            "first non-increasing interval"),
+        data="the profile values are not changed; only their radial placement")
 
 
 def _checked_source(x, coordinate, ne, n_fast, n_fast_none, z, specs, cand, psi_n_to_rho, opts, rec):

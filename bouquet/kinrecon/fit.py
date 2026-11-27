@@ -190,6 +190,24 @@ pass-loop option is :class:`.current_model.CurrentModelSettings`'s EXPERIMENTAL 
   here is read by the fit.  Cost: one consistent solve per parameter plus one noise re-solve, at a stall only.
 
 ``record["robustness"]`` (present only when an option is set) says which options were in effect and what they did.
+
+Starting-solve retry ladder (``start_retry``, ON by default; the owner's ruling on a failed starting solve): when the first consistent solve of a fit (its first center) fails, it is retried once from the
+anchor's pressure profile, then, if that fails too, once from a neighboring converged slice when one is supplied.
+The inputs come from the caller (``reconstruct(..., start_retry_inputs=...)``, :data:`START_RETRY_INPUT_KEYS`):
+``anchor_pressure`` = ``(x, p)``, the anchor equilibrium's pressure on its own psi_N (interpolated onto the first
+attempt's ``initial_profiles`` grid; the first attempt's ``<j_phi>`` is kept); ``neighbor`` = a dict with
+``params`` (the neighbor's fitted parameters: the free ones found there replace the starting values, clipped to the
+bounds; the others keep theirs), optionally ``initial_profiles`` = ``(x, jphi, p)`` (the neighbor's converged
+profiles for the first solve; else the first attempt's) and ``label`` (recorded).  Each rung starts from the solver
+state and probe correction found at the start of the fit.  A rung is skipped, with the reason recorded, when its
+input is absent or when it would repeat the first attempt (the first attempt already started from the anchor's
+pressure).  The convergence criterion, the pass budget and the solver settings are the same for every rung; the
+answer is still the model's consistent state, only its starting point differs.  ``record["start_retry"]`` (present
+only with the option on and a failed first attempt) holds the first attempt, every rung (tried or skipped, its status
+and reason) and ``recovered_by`` (the rung whose center was kept, or None).  The steady-state record keeps the
+slice's own starting parameters (not a neighbor's).  Only the first fit of a call receives the inputs: the refits of
+the moving anchor target start from a converged state without initial profiles, so a failed refit center records
+both rungs as skipped and fails as without the option.
 """
 
 import math
@@ -272,6 +290,12 @@ IP_TARGETS = ("fitted", "measured")
 #: own signed step (the first try used +1; -1 is the opposite step, as ``column_retry_opposite`` takes for a column).
 NOISE_RETRY_STEPS = (-1.0,)
 
+#: Inputs of the starting-solve retry ladder (:attr:`FitSettings.start_retry`, module docstring), in rung order.
+START_RETRY_INPUT_KEYS = ("anchor_pressure", "neighbor")
+START_RETRY_RULE = ("a failed starting solve is retried once from the anchor's pressure profile, then once from a "
+                    "neighboring converged slice if available; each labeled in the record; the convergence criterion "
+                    "unchanged")
+
 #: Radial classes of the MSE chords in the ``steady_state_check`` record: edges of ``|R_chord - R_axis|`` [m] (core
 #: below the first, mid between, outer above the second); a reporting convention of that record only.
 MSE_RADIAL_CLASSES_M = (0.15, 0.35)
@@ -326,6 +350,9 @@ class FitSettings:
     # run-time option of the moving anchor target, ON by default (:func:`reconstruct`, "Final Jacobian of the returned
     # fit only"); single-slice fits only: a series filter fit (state_fn) uses the form without it
     anchor_follow_defer_final_jacobian: bool = True
+    # starting-solve retry ladder, ON by default (module docstring, "Starting-solve retry ladder"); its rungs act only
+    # with the caller's start_retry_inputs (a rung without its input is skipped and recorded)
+    start_retry: bool = True
 
     def __post_init__(self):
         if self.jacobian_steps not in JACOBIAN_STEP_KINDS:
@@ -348,6 +375,8 @@ class FitSettings:
             raise ValueError("ip_rel is free but ip_target='measured' holds the Ip target: choose one")
         if not isinstance(self.anchor_follow_defer_final_jacobian, bool):
             raise ValueError("anchor_follow_defer_final_jacobian must be True or False")
+        if not isinstance(self.start_retry, bool):
+            raise ValueError("start_retry must be True or False")
 
     def as_dict(self):
         return asdict(self)
@@ -606,7 +635,7 @@ def convergence_label(stop, final_gn=None):
 
 @_rows.keep_constraints()        # the solver's constraint set kept between score calls (solver_rows; no value changes)
 def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, initial_profiles=None, label="fit",
-                state_fn=None, speed=None, steady_state_check=True):
+                state_fn=None, speed=None, steady_state_check=True, start_retry_inputs=None):
     """MAP reconstruction (module docstring).
 
     ``fm``: :class:`.forward.ForwardModel` in reconstruction mode (with the measurement set);
@@ -622,7 +651,8 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
     the duration of the fit; recorded as ``speed`` when given without workers -- with workers, every Jacobian's
     ``parallel`` record holds it).  The options in effect are
     recorded as ``record["speed_in_effect"]`` in every fit record, also when ``speed`` is not given and when a fit
-    ends before its first Jacobian (:func:`.speed.in_effect`).
+    ends before its first Jacobian (:func:`.speed.in_effect`).  ``start_retry_inputs``: the inputs of the
+    starting-solve retry ladder (module docstring; read only with ``settings.start_retry``; checked when given).
 
     A branch log (:func:`.current_model.open_branch_log`) is open while the fit runs: the q floor's branch at every
     assembly is recorded (``record["floor_branch_record"]``, :func:`.current_model.branch_flip_record`), a record
@@ -667,17 +697,19 @@ def reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, init
         # settings record)
         st = replace(st, anchor_follow_defer_final_jacobian=False)
         settings = st
+    sri = _check_start_retry_inputs(start_retry_inputs)
     kw = dict(label=label, state_fn=state_fn, speed=speed)
     if not st.anchor_follow:
         return _reconstruct_checked(fm, kin, src, cfg, settings=settings, params0=params0, start=start,
-                                    initial_profiles=initial_profiles, steady_state_check=steady_state_check, **kw)
+                                    initial_profiles=initial_profiles, steady_state_check=steady_state_check,
+                                    start_retry_inputs=sri, **kw)
     base = replace(st, anchor_follow=False, anchor_follow_defer_final_jacobian=False)
     # the moves of the anchor target and everything else between the fits run under the fit's own speed options (the
     # default SpeedSettings() when none is given), as the fits do: the same values bit for bit, the indexed
     # point location instead of the plain scan in the boundary crossings
     with _speed.speed_scope(_speed.effective(speed)):
         return _follow_anchor(fm, kin, src, cfg, base, st, params0, start, initial_profiles, label, speed,
-                              steady_state_check, state_fn)
+                              steady_state_check, state_fn, start_retry_inputs=sri)
 
 
 #: Fit statuses that count as converged for the moving anchor target.
@@ -685,7 +717,7 @@ CONVERGED_STATUSES = ("converged", "converged_within_noise")
 
 
 def _follow_anchor(fm, kin, src, cfg, base, st, params0, start, initial_profiles, label, speed, check,
-                   state_fn=None):
+                   state_fn=None, start_retry_inputs=None):
     """The moving anchor target of :func:`reconstruct` (``FitSettings.anchor_follow``; with
     ``anchor_follow_defer_final_jacobian``, the final Jacobian of the returned fit only)."""
     t0, n0 = time.perf_counter(), fm.n_solves
@@ -695,7 +727,8 @@ def _follow_anchor(fm, kin, src, cfg, base, st, params0, start, initial_profiles
     target0 = fm.anchor_target() if defer else None
     fr = _reconstruct_checked(fm, kin, src, cfg, settings=base, params0=params0, start=start,
                               initial_profiles=initial_profiles, label=label, speed=speed, steady_state_check=False,
-                              start_box_out=box, state_fn=state_fn, defer_box=dbox)
+                              start_box_out=box, state_fn=state_fn, defer_box=dbox,
+                              start_retry_inputs=start_retry_inputs)
 
     def data_chi2(r):
         try:
@@ -704,6 +737,9 @@ def _follow_anchor(fm, kin, src, cfg, base, st, params0, start, initial_profiles
             return float("nan")
 
     steps = [dict(step=0, status=fr.status, chi2_data=data_chi2(fr), kept=True)]
+    # the starting-solve retry ladder acts in the first fit only (FitSettings.start_retry): its record is carried to
+    # the returned fit when a later refit is returned
+    sr0 = fr.record.get("start_retry") if isinstance(getattr(fr, "record", None), dict) else None
     rec = dict(applied=True, fraction=float(st.anchor_follow_fraction), max_steps=int(st.anchor_follow_max_steps),
                rule="a move is kept only if the refit converges and the fitted groups' chi^2 (chi2['data']) is lower "
                     "than before; the anchor weight never changes; the reference boundary is the first target",
@@ -753,6 +789,8 @@ def _follow_anchor(fm, kin, src, cfg, base, st, params0, start, initial_profiles
                wall_s_total=round(time.perf_counter() - t0, 2))
     if isinstance(getattr(fr, "record", None), dict):
         fr.record["anchor_follow"] = rec
+        if sr0 is not None:
+            fr.record["start_retry"] = dict(sr0, carried_from="the first fit of the moving anchor target (step 0)")
         if state_fn is None:
             with _speed.speed_scope(_speed.effective(speed)):
                 fr.record["steady_state_check"] = _fit_steady_state_check(fm, kin, src, cfg, fr, box, check, label)
@@ -803,7 +841,7 @@ def _complete_deferred(fm, chain, steps, stop):
 
 def _reconstruct_checked(fm, kin, src, cfg, settings=None, params0=None, start=None, initial_profiles=None,
                          label="fit", state_fn=None, speed=None, steady_state_check=True, start_box_out=None,
-                         defer_box=None):
+                         defer_box=None, start_retry_inputs=None):
     """One fit of :func:`reconstruct` with its branch log and steady-state record (``start_box_out`` receives the
     starting parameters; ``defer_box``: :func:`_follow_anchor` with ``anchor_follow_defer_final_jacobian``, receives
     ``complete`` when the fit was returned without its final Jacobian)."""
@@ -822,6 +860,8 @@ def _reconstruct_checked(fm, kin, src, cfg, settings=None, params0=None, start=N
         eff = _speed.effective(speed)                 # the default SpeedSettings() when none is given
         _speed.validate(eff, fm)
         dkw = {} if defer_box is None else dict(defer_box=defer_box)      # without it, the call as before
+        if start_retry_inputs is not None:
+            dkw["start_retry_inputs"] = start_retry_inputs
         with _speed.speed_scope(eff):                 # each in-process option set as in eff, also when off
             out = _reconstruct(fm, kin, src, cfg, settings=settings, params0=params0, start=start,
                                initial_profiles=initial_profiles, label=label, state_fn=state_fn, speed=speed,
@@ -876,6 +916,45 @@ def _reconstruct_checked(fm, kin, src, cfg, settings=None, params0=None, start=N
     return out
 
 
+def _check_start_retry_inputs(inputs):
+    """The inputs of the starting-solve retry ladder (:attr:`FitSettings.start_retry`) checked: None, or a dict
+    with only the keys of :data:`START_RETRY_INPUT_KEYS`.  ``anchor_pressure``: ``(x, p)`` of equal length, finite,
+    x strictly increasing.  ``neighbor``: a dict with ``params`` (a dict), optionally ``initial_profiles``
+    (``(x, jphi, p)``) and ``label``.  Returns the dict with arrays (or None)."""
+    if inputs is None:
+        return None
+    if not isinstance(inputs, dict):
+        raise ValueError("start_retry_inputs must be None or a dict")
+    bad = sorted(set(inputs) - set(START_RETRY_INPUT_KEYS))
+    if bad:
+        raise ValueError(f"unknown start_retry_inputs keys {bad}; known: {START_RETRY_INPUT_KEYS}")
+    out = {}
+    ap = inputs.get("anchor_pressure")
+    if ap is not None:
+        x, p = (np.asarray(v, float) for v in ap)
+        if x.ndim != 1 or x.shape != p.shape or x.size < 2 or not (np.all(np.isfinite(x)) and np.all(np.isfinite(p))) \
+                or np.any(np.diff(x) <= 0):
+            raise ValueError("start_retry_inputs['anchor_pressure'] must be (x, p): finite, equal length, x strictly "
+                             "increasing")
+        out["anchor_pressure"] = (x, p)
+    nb = inputs.get("neighbor")
+    if nb is not None:
+        if not isinstance(nb, dict) or not isinstance(nb.get("params"), dict):
+            raise ValueError("start_retry_inputs['neighbor'] must be a dict with a 'params' dict")
+        bad = sorted(set(nb) - {"params", "initial_profiles", "label"})
+        if bad:
+            raise ValueError(f"unknown start_retry_inputs['neighbor'] keys {bad}")
+        nb = dict(nb)
+        if nb.get("initial_profiles") is not None:
+            prof = tuple(np.asarray(v, float) for v in nb["initial_profiles"])
+            if len(prof) != 3 or not all(v.shape == prof[0].shape for v in prof):
+                raise ValueError("start_retry_inputs['neighbor']['initial_profiles'] must be (x, jphi, p) of equal "
+                                 "length")
+            nb["initial_profiles"] = prof
+        out["neighbor"] = nb
+    return out
+
+
 def _fit_steady_state_check(fm, kin, src, cfg, fr, start_box, on, label):
     """``record["steady_state_check"]`` of a single-slice fit (:func:`steady_state_check`); never raises."""
     if not on:
@@ -902,7 +981,7 @@ def _note_jacobian(jacobians, log, i0, c, lab):
 
 
 def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, initial_profiles=None, label="fit",
-                 state_fn=None, speed=None, start_box=None, defer_box=None):
+                 state_fn=None, speed=None, start_box=None, defer_box=None, start_retry_inputs=None):
     """:func:`reconstruct` with its branch log open (``start_box`` receives the starting parameters; ``defer_box``:
     see :func:`_reconstruct_checked`)."""
     t_all = time.perf_counter()
@@ -1145,6 +1224,70 @@ def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, ini
         rec["center0_restart_tapered"] = dict(status=res0.status, passes=res0.passes, wall_s=res0.wall_s,
                                               passes_record=res0.record.get("passes"),
                                               reason=res0.record.get("reason"))
+    if center is None and settings.start_retry:
+        # NON-DEFAULT starting-solve retry ladder (module docstring): the anchor's pressure, then a neighbor
+        ladder = []
+        rec["start_retry"] = dict(setting=True, rule=START_RETRY_RULE, rungs=ladder, recovered_by=None,
+                                  first_attempt=dict(status=res0.status, passes=res0.passes,
+                                                     reason=res0.record.get("reason"),
+                                                     initial_profiles=initial_profiles is not None),
+                                  criterion="unchanged (the same consistent solve, pass budget and solver settings)")
+        sri = start_retry_inputs or {}
+        ap = sri.get("anchor_pressure")
+        row = dict(rung="anchor_pressure", label=f"{label}:center0:retry_anchor_pressure")
+        if initial_profiles is None:
+            row.update(tried=False, reason="the first attempt had no initial profiles (it started from a supplied "
+                                           "state): there is no first-solve pressure to replace")
+        elif ap is None:
+            row.update(tried=False, reason="no anchor pressure supplied (start_retry_inputs['anchor_pressure'])")
+        else:
+            x0, j0, p0 = (np.asarray(v, float) for v in initial_profiles)
+            pr = np.interp(x0, ap[0], ap[1])
+            if np.array_equal(pr, p0):
+                row.update(tried=False, reason="the first attempt already started from the anchor's pressure")
+            else:
+                fm.restore(snap_init)
+                fm.probe_correction = pc_init.copy()
+                center, res0 = evaluate(th, None, None, row["label"], (x0, j0, pr))
+                row.update(tried=True, status=res0.status, passes=res0.passes, wall_s=res0.wall_s,
+                           reason=res0.record.get("reason"), p_axis_first=float(p0[0]), p_axis_retry=float(pr[0]),
+                           p_edge_first=float(p0[-1]), p_edge_retry=float(pr[-1]))
+        ladder.append(row)
+        if center is not None:
+            rec["start_retry"]["recovered_by"] = "anchor_pressure"
+        else:
+            nb = sri.get("neighbor")
+            row = dict(rung="neighbor", label=f"{label}:center0:retry_neighbor")
+            if nb is None:
+                row.update(tried=False, reason="no neighboring converged slice supplied "
+                                               "(start_retry_inputs['neighbor'])")
+            else:
+                pn = nb.get("params") or {}
+                th_n, taken = th.copy(), {}
+                for j, n in enumerate(names):
+                    if n.startswith("a_corr_"):
+                        k = int(n.split("_")[-1])
+                        if pn.get("a_corr") is not None and k < len(pn["a_corr"]):
+                            th_n[j] = taken[n] = float(pn["a_corr"][k])
+                    elif pn.get(n) is not None:
+                        th_n[j] = taken[n] = float(pn[n])
+                th_n = np.clip(th_n, lo, hi)
+                prof = nb.get("initial_profiles")
+                prof_src = "the neighbor's" if prof is not None else "the first attempt's"
+                if prof is None:
+                    prof = initial_profiles
+                fm.restore(snap_init)
+                fm.probe_correction = pc_init.copy()
+                center, res0 = evaluate(th_n, None, None, row["label"], prof)
+                row.update(tried=True, status=res0.status, passes=res0.passes, wall_s=res0.wall_s,
+                           reason=res0.record.get("reason"), neighbor=str(nb.get("label", "not labeled")),
+                           params_taken=taken, start_theta=[float(v) for v in th_n],
+                           initial_profiles=f"{prof_src} ({'given' if prof is not None else 'none'})")
+                if center is not None:
+                    rec["start_retry"]["recovered_by"] = "neighbor"
+                    rec["start_retry"]["note"] = ("the fit starts from the neighbor's parameters (start_theta); the "
+                                                  "steady-state record keeps the slice's own starting parameters")
+            ladder.append(row)
     if center is None:
         return finish("failed_initial_consistency", None)
     ref_index = center["index"]
@@ -1690,7 +1833,9 @@ def _reconstruct(fm, kin, src, cfg, settings=None, params0=None, start=None, ini
                          sigma=np.full(len(names), np.nan), covariance=nan_cov, chi2=center["chi2"],
                          record=dict(center=center, label=label, status=status,
                                      final_jacobian=dict(deferred=True, note="computed only if this fit is returned "
-                                                                             "(anchor_follow_defer_final_jacobian)")))
+                                                                             "(anchor_follow_defer_final_jacobian)"),
+                                     # the starting-solve retry ladder's record (FitSettings.start_retry), when present
+                                     **({"start_retry": rec["start_retry"]} if "start_retry" in rec else {})))
     else:
         Jf, jf_info = jacobian(center, f"{label}:final")
     restore_center(center)

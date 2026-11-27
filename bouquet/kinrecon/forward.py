@@ -191,6 +191,29 @@ def check_solver_urf(value):
     return v
 
 
+#: Finite-element orders accepted by :attr:`ForwardSettings.fe_order` and the default.
+FE_ORDERS = (2, 3, 4)
+FE_ORDER_DEFAULT = 2
+FE_ORDER_NOTE = ("opt-in (default 2): with order 2 on the machine mesh the traced q of the solved equilibrium "
+                 "deviates from the current model's q by up to ~1-2 % at rho 0.05-0.1 (element-scale oscillation "
+                 "near the magnetic axis), which can decide the q-consistency check; order 3 / 4 on the same mesh "
+                 "reduces that deviation (a resolution study, not a change of the check)")
+
+
+def check_fe_order(value):
+    """:attr:`ForwardSettings.fe_order` checked: one of :data:`FE_ORDERS` (an int, or a float with an integral
+    value; a bool or a string is refused).  Returns the int."""
+    if isinstance(value, (bool, np.bool_, str, bytes)) or value is None:
+        raise ValueError(f"fe_order must be one of {FE_ORDERS}, got {value!r}")
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"fe_order must be one of {FE_ORDERS}, got {value!r}") from None
+    if not np.isfinite(v) or v != int(v) or int(v) not in FE_ORDERS:
+        raise ValueError(f"fe_order must be one of {FE_ORDERS}, got {value!r}")
+    return int(v)
+
+
 def check_solver_maxits(value):
     """:attr:`ForwardSettings.solver_maxits` checked: None (OFT's own iteration limit, never set) or a whole number
     >= 1 (an int, or a float with an integral value; a bool or a string is refused).  Returns None or the int."""
@@ -323,11 +346,17 @@ class ForwardSettings:
     #                                             every solve of this forward model -- an explicit, recorded,
     #                                             non-default setting; nl_tol and every criterion are untouched (left
     #                                             out of as_dict when None, so the default record is unchanged)
+    fe_order: int = FE_ORDER_DEFAULT            # Lagrange order of TokaMaker's finite elements (FE_ORDERS); 2 is the
+    #                                             default; 3 or 4 is an opt-in: a finer representation of psi on the
+    #                                             same mesh (about 1.8x / 2.8x the time of a consistent solve), see
+    #                                             FE_ORDER_NOTE.  Left out of as_dict at the default.
 
     def as_dict(self):
         d = asdict(self)
         if d.get("solver_urf") is None:
             d.pop("solver_urf", None)
+        if check_fe_order(d.get("fe_order")) == FE_ORDER_DEFAULT:
+            d.pop("fe_order", None)          # the default leaves records as they were before the setting existed
         d["edge_taper"] = self.edge_taper.as_dict()
         d["verify_criterion"] = dict(axis_m=VERIFY_AXIS_M, q0_li_ip_rel=VERIFY_REL, li=VERIFY_LI,
                                      rule="warm re-solve reproduces axis, q0, l_i ('iter' normalization, "
@@ -694,6 +723,7 @@ class ForwardModel:
             raise ValueError(f"lcfs_cut_cells must be one of {LCFS_CUT_CELL_OPTIONS}")
         maxits = check_solver_maxits(s.solver_maxits)
         urf = check_solver_urf(s.solver_urf)
+        fe_order = check_fe_order(s.fe_order)
         self.solver_build = solver_build()
         if s.lcfs_cut_cells == "on" and not self.solver_build["provides_lcfs_cut_cells"]:
             raise RuntimeError(f"lcfs_cut_cells='on' but this OpenFUSIONToolkit build "
@@ -701,7 +731,7 @@ class ForwardModel:
         self.env = oft_env if oft_env is not None else OFT_env(nthreads=s.nthreads)
         self.gs = TokaMaker(self.env)
         pts, lc, reg, coil_dict, cond_dict = mesh
-        self.gs.setup_model(pts, lc, reg, cond_dict=cond_dict, coil_dict=coil_dict, order=2, F0=float(F0))
+        self.gs.setup_model(pts, lc, reg, cond_dict=cond_dict, coil_dict=coil_dict, order=fe_order, F0=float(F0))
         self.gs.set_coil_vsc(dict(s.vsc))
         self.cut_cells = configure_cut_cells(self.gs, s.lcfs_cut_cells, self.solver_build)
         self.F0 = float(F0)
